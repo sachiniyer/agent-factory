@@ -25,11 +25,15 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 	}
 	var capture ConversationCaptureSnapshot
 	if tmux.DetectAgentFromCommand(program) == tmux.ProgramCodex {
+		launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
+		if err != nil {
+			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has an unresolvable Codex launch environment: %w", target, err)
+		}
 		codexHome, err := tmux.CodexHomeFromCommand(program, workDir)
 		if err != nil {
 			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has an unresolvable Codex conversation store: %w", target, err)
 		}
-		capture = BeginConversationCaptureAtCodexHome(codexHome)
+		capture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launch.WorkingDir)
 	}
 	return AgentSwapPlan{
 		target: target, program: program, conversation: conversation, conversationCapture: capture,

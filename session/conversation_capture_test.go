@@ -23,6 +23,19 @@ func writeCodexRolloutFile(t *testing.T, codexHome, name string) string {
 	return path
 }
 
+func writeCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) string {
+	t.Helper()
+	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	data, err := json.Marshal(map[string]any{
+		"type":    "session_meta",
+		"payload": map[string]any{"cwd": cwd},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0644))
+	return path
+}
+
 func TestCaptureAgentConversation_CodexRolloutFile(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -64,6 +77,57 @@ func TestCaptureAgentConversation_CodexAmbiguousConcurrentRollouts(t *testing.T)
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, time.Second)
 	require.Error(t, err)
 	require.False(t, conv.HasID(), "ambiguous capture must not guess a conversation id")
+}
+
+func TestCaptureAgentConversation_CodexConcurrentRolloutsCorrelateByCwd(t *testing.T) {
+	codexHome := t.TempDir()
+	workDirA := filepath.Join(t.TempDir(), "session-a")
+	workDirB := filepath.Join(t.TempDir(), "session-b")
+	snapA := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirA)
+	snapB := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirB)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDirA)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDirB)
+
+	convA, err := CaptureAgentConversation(tmux.ProgramCodex, snapA, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", convA.ID)
+
+	convB, err := CaptureAgentConversation(tmux.ProgramCodex, snapB, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-75b6-7f68-88e3-6d5e1f15bb6a", convB.ID)
+}
+
+func TestCaptureAgentConversation_CodexSameCwdRemainsAmbiguous(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.ErrorContains(t, err, "2 new rollout files matched launch working directory")
+	require.False(t, conv.HasID(), "same-cwd rollouts cannot be distinguished safely")
+}
+
+func TestCaptureAgentConversation_CodexUncorrelatableMetadataDoesNotGuess(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl")
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.ErrorContains(t, err, "1 had uncorrelatable session metadata")
+	require.False(t, conv.HasID(), "unknown metadata could still belong to the launch cwd")
 }
 
 func TestCaptureAgentConversation_UnsupportedAgentGracefullyNoID(t *testing.T) {

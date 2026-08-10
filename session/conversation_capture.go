@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -43,6 +44,7 @@ const promptReceiptPollInterval = 50 * time.Millisecond
 type ConversationCaptureSnapshot struct {
 	startedAt   time.Time
 	codexHome   string
+	workingDir  string
 	codexBefore map[string]struct{}
 }
 
@@ -59,9 +61,17 @@ func BeginConversationCapture() ConversationCaptureSnapshot {
 // inline environment assignment, so the process-specific path must be resolved
 // before launch and supplied here (#2228 review).
 func BeginConversationCaptureAtCodexHome(home string) ConversationCaptureSnapshot {
+	return beginConversationCaptureAtCodexHomeAndWorkingDir(home, "")
+}
+
+func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) ConversationCaptureSnapshot {
+	if workingDir != "" {
+		workingDir = pathutil.ResolveForCompare(workingDir)
+	}
 	return ConversationCaptureSnapshot{
 		startedAt:   time.Now(),
 		codexHome:   home,
+		workingDir:  workingDir,
 		codexBefore: codexRolloutFiles(home),
 	}
 }
@@ -157,7 +167,19 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 }
 
 func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConversationData, bool, error) {
-	candidates := newCodexRolloutFiles(snap)
+	observed := newCodexRolloutFiles(snap)
+	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
+	if uncorrelated > 0 {
+		if len(observed) > 1 {
+			return AgentConversationData{}, false, fmt.Errorf(
+				"codex conversation capture ambiguous: %d new rollout files appeared and %d had uncorrelatable session metadata",
+				len(observed), uncorrelated)
+		}
+		// Codex can create the file before its first JSONL record is visible.
+		// Retry a lone unknown instead of treating an incomplete session_meta as
+		// either a match or proof that the rollout belongs to another process.
+		return AgentConversationData{}, true, nil
+	}
 	switch len(candidates) {
 	case 0:
 		return AgentConversationData{}, true, nil
@@ -169,8 +191,51 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 			CaptureKind: ConversationCaptureCodexRollout,
 		}, false, nil
 	default:
-		return AgentConversationData{}, false, fmt.Errorf("codex conversation capture ambiguous: %d new rollout files appeared", len(candidates))
+		return AgentConversationData{}, false, fmt.Errorf(
+			"codex conversation capture ambiguous: %d new rollout files matched launch working directory",
+			len(candidates))
 	}
+}
+
+func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string, int) {
+	if workingDir == "" {
+		return paths, 0
+	}
+	if !filepath.IsAbs(workingDir) {
+		return nil, len(paths)
+	}
+	var matches []string
+	uncorrelated := 0
+	for _, path := range paths {
+		cwd, ok := codexRolloutWorkingDir(path)
+		if !ok {
+			uncorrelated++
+			continue
+		}
+		if pathutil.ResolveForCompare(cwd) == workingDir {
+			matches = append(matches, path)
+		}
+	}
+	return matches, uncorrelated
+}
+
+func codexRolloutWorkingDir(path string) (string, bool) {
+	data, err := readCodexRollout(path)
+	if err != nil {
+		return "", false
+	}
+	line, _, _ := bytes.Cut(data, []byte{'\n'})
+	var metadata struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Cwd string `json:"cwd"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(line, &metadata); err != nil ||
+		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
+		return "", false
+	}
+	return metadata.Payload.Cwd, true
 }
 
 func newCodexRolloutFiles(snap ConversationCaptureSnapshot) []string {

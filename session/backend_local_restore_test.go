@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -76,6 +77,8 @@ func TestLocalBackendPrepareAgentSwapSnapshotsCommandSpecificCodexHome(t *testin
 	require.NoError(t, err)
 	require.Equal(t, launchedHome, plan.conversationCapture.codexHome,
 		"handoff capture must watch the incoming command's store, not daemon CODEX_HOME")
+	require.Equal(t, pathutil.ResolveForCompare(gw.GetWorktreePath()), plan.conversationCapture.workingDir,
+		"handoff capture must correlate the incoming rollout to the pane's worktree")
 }
 
 func TestLocalBackendSwapAgentResetsBrokerCapture(t *testing.T) {
