@@ -476,7 +476,8 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 	if !unresolved {
 		return teardownKill{}, noop, nil
 	}
-	if recovery.State != git.RelocationRecoveryCleanupReady {
+	if recovery.State != git.RelocationRecoveryCleanupReady &&
+		recovery.State != git.RelocationRecoveryCleanupFinalizing {
 		return teardownKill{}, noop, fmt.Errorf(
 			"%w: kill cleanup has unresolved worktree recovery state %s",
 			ErrWorkspaceStateUnknown, recovery.State,

@@ -244,6 +244,19 @@ func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.Relocation
 	return gw.PrepareRelocationClaimForCleanup(claim)
 }
 
+// SetRepoGoneFinalizationCheckpoint installs the daemon's durable writer for
+// the post-content, pre-root cleanup boundary. Kill runs backend teardown outside
+// i.mu, so the callback may safely snapshot this instance for persistence.
+func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) func() {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return func() {}
+	}
+	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
+}
+
 // ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
 // backend separately consumes and revalidates the exact cleanup identity before
 // pane teardown; it must not repeat the origin-path admission after the durable
@@ -259,9 +272,10 @@ func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
 		return nil
 	}
-	if recovery.State == git.RelocationRecoveryCleanupReady {
+	if recovery.State == git.RelocationRecoveryCleanupReady ||
+		recovery.State == git.RelocationRecoveryCleanupFinalizing {
 		if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
-			return fmt.Errorf("cleanup-ready worktree at %s is not admissible for repo-gone destruction: %w", path, err)
+			return fmt.Errorf("cleanup worktree in state %s at %s is not admissible for repo-gone destruction: %w", recovery.State, path, err)
 		}
 		return nil
 	}

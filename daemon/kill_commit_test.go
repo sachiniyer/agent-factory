@@ -725,7 +725,7 @@ func stubGhostWorktree(t *testing.T, state git.CleanupState, err error) *int {
 	t.Helper()
 	calls := 0
 	prev := ghostCleanupWorktree
-	ghostCleanupWorktree = func(*session.InstanceData, string) (git.CleanupState, error, <-chan error) {
+	ghostCleanupWorktree = func(*session.InstanceData, string, func(*session.InstanceData) error) (git.CleanupState, error, <-chan error) {
 		calls++
 		return state, err, nil
 	}

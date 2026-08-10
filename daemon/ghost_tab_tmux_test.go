@@ -82,7 +82,7 @@ func TestGhostCleanup_KillsEveryTabTmux(t *testing.T) {
 		},
 	}
 
-	err, _ := ghostCleanup(data, "ghost2007")
+	err, _ := ghostCleanup(data, "ghost2007", nil)
 	require.NoError(t, err)
 
 	after := liveTmuxSessions(t)

@@ -94,6 +94,83 @@ func TestCleanupClaimedRepoGone_CommittedClaimSurvivesLateOriginReturn(t *testin
 	}
 }
 
+func TestCleanupClaimedRepoGone_CheckpointsEmptyRootBeforeUnlink(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	checkpointed := false
+	restoreCheckpoint := gw.SetRepoGoneFinalizationCheckpoint(func() error {
+		checkpointed = true
+		recovery, ok := gw.GetRelocationRecovery()
+		if !ok || recovery.State != RelocationRecoveryCleanupFinalizing {
+			t.Fatalf("checkpoint observed recovery=%+v present=%v, want cleanup_finalizing", recovery, ok)
+		}
+		entries, err := os.ReadDir(worktree)
+		if err != nil {
+			t.Fatalf("finalization checkpoint ran after root unlink: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("finalization checkpoint ran before descriptor cleanup emptied the root: %v", entries)
+		}
+		return errors.New("checkpoint unavailable")
+	})
+	t.Cleanup(restoreCheckpoint)
+
+	state, err := gw.CleanupClaimedRepoGone(claim)
+	if !checkpointed || state != CleanupStateUnknown || err == nil {
+		t.Fatalf("failed finalization checkpoint must retain an ordinary retry; checkpointed=%v state=%v err=%v", checkpointed, state, err)
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("failed checkpoint unlinked the only durable retry marker: %v", statErr)
+	}
+	recovery, ok := gw.GetRelocationRecovery()
+	if !ok || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("failed checkpoint did not restore cleanup_ready; present=%v recovery=%+v", ok, recovery)
+	}
+}
+
+func TestCleanupClaimedRepoGone_FinalizingRetryLeavesReplacement(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	if err := os.Remove(filepath.Join(worktree, "work.txt")); err != nil {
+		t.Fatalf("empty root before finalization checkpoint: %v", err)
+	}
+	finalizing, err := NewGitWorktreeFromStorage(
+		gw.GetRepoPath(), worktree, "repo-gone", "af/repo-gone", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("restore finalizing worktree: %v", err)
+	}
+	if err := finalizing.RestoreRelocationRecovery(RelocationRecovery{
+		State: RelocationRecoveryCleanupFinalizing, IdentityKnown: true,
+		Device: claim.identity.device, Inode: claim.identity.inode, FileType: claim.identity.fileType,
+	}); err != nil {
+		t.Fatalf("restore finalizing recovery: %v", err)
+	}
+	relocated := worktree + "-relocated"
+	if err := os.Rename(worktree, relocated); err != nil {
+		t.Fatalf("move empty finalization marker: %v", err)
+	}
+	if err := os.Mkdir(worktree, 0o755); err != nil {
+		t.Fatalf("create same-path replacement: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "replacement.txt"), []byte("not ours"), 0o644); err != nil {
+		t.Fatalf("write same-path replacement: %v", err)
+	}
+
+	if err := finalizing.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("durable finalization should admit without authorizing the replacement: %v", err)
+	}
+	finalizingClaim, err := finalizing.ClaimRelocationSource()
+	if err != nil {
+		t.Fatalf("claim finalization retry: %v", err)
+	}
+	state, err := finalizing.CleanupClaimedRepoGone(finalizingClaim)
+	if err != nil || state != CleanupSettled {
+		t.Fatalf("finalization retry did not settle: state=%v err=%v", state, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "replacement.txt")); err != nil {
+		t.Fatalf("finalization retry deleted the same-path replacement: %v", err)
+	}
+}
+
 func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 	retained := filepath.Join(filepath.Dir(worktree), ".af-source-0123456789abcdef0123456789abcdef")
@@ -135,7 +212,7 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	blocked := make(chan struct{})
 	workerFinished := make(chan struct{})
 	repoGoneCleanupTimeout = 25 * time.Millisecond
-	repoGoneRemoveDirectory = func(string, pathIdentity) error {
+	repoGoneRemoveDirectory = func(string, pathIdentity, func() error) error {
 		defer close(workerFinished)
 		<-blocked
 		return nil
@@ -336,7 +413,9 @@ func TestValidateRelocationCleanupAdmission_GitExecutionFailureFailsClosed(t *te
 func TestCleanupClaimedRepoGone_AnsweredErrorPreservesCleanupAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
-	repoGoneRemoveDirectory = func(string, pathIdentity) error { return errors.New("temporary I/O refusal") }
+	repoGoneRemoveDirectory = func(string, pathIdentity, func() error) error {
+		return errors.New("temporary I/O refusal")
+	}
 	t.Cleanup(func() { repoGoneRemoveDirectory = previousRemove })
 
 	state, err := gw.CleanupClaimedRepoGone(claim)

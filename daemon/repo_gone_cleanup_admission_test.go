@@ -165,7 +165,7 @@ func TestKillSession_GhostCleanupTimeoutPersistsStallAndBlocksSameProcessRetry(t
 	manager, repoID := newCleanupReadyGhost(t, "ghost-stall")
 	previousCleanup := ghostCleanupWorktree
 	cleanupCalls := 0
-	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error, <-chan error) {
+	ghostCleanupWorktree = func(data *session.InstanceData, _ string, _ func(*session.InstanceData) error) (sessiongit.CleanupState, error, <-chan error) {
 		cleanupCalls++
 		data.Worktree.RelocationRecovery.State = sessiongit.RelocationRecoveryCleanupStalled
 		return sessiongit.CleanupStateUnknown, context.DeadlineExceeded, nil
@@ -228,7 +228,7 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 
 	previousCleanup := ghostCleanupWorktree
 	var releaseLock func()
-	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error, <-chan error) {
+	ghostCleanupWorktree = func(data *session.InstanceData, _ string, _ func(*session.InstanceData) error) (sessiongit.CleanupState, error, <-chan error) {
 		// Mirror the real descriptor cleanup's definitive success: the archive is
 		// gone and the temporary in-memory recovery handle has been consumed.
 		data.Worktree.RelocationRecovery = nil
@@ -272,8 +272,8 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	// survive that boundary.
 	previousCleanup := ghostCleanupWorktree
 	var releaseLock func()
-	ghostCleanupWorktree = func(data *session.InstanceData, title string) (sessiongit.CleanupState, error, <-chan error) {
-		state, cleanupErr, lateResult := previousCleanup(data, title)
+	ghostCleanupWorktree = func(data *session.InstanceData, title string, checkpoint func(*session.InstanceData) error) (sessiongit.CleanupState, error, <-chan error) {
+		state, cleanupErr, lateResult := previousCleanup(data, title, checkpoint)
 		if state == sessiongit.CleanupSettled && cleanupErr == nil && lateResult == nil {
 			path, err := config.RepoInstancesPath(repoID)
 			require.NoError(t, err)

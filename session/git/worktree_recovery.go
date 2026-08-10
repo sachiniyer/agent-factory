@@ -15,11 +15,12 @@ import (
 type RelocationRecoveryState string
 
 const (
-	RelocationRecoveryMoveUnknown    RelocationRecoveryState = "move_unknown"
-	RelocationRecoveryStalled        RelocationRecoveryState = "relocation_stalled"
-	RelocationRecoveryClaimStale     RelocationRecoveryState = "claim_stale"
-	RelocationRecoveryCleanupStalled RelocationRecoveryState = "cleanup_stalled"
-	RelocationRecoveryCleanupReady   RelocationRecoveryState = "cleanup_ready"
+	RelocationRecoveryMoveUnknown       RelocationRecoveryState = "move_unknown"
+	RelocationRecoveryStalled           RelocationRecoveryState = "relocation_stalled"
+	RelocationRecoveryClaimStale        RelocationRecoveryState = "claim_stale"
+	RelocationRecoveryCleanupStalled    RelocationRecoveryState = "cleanup_stalled"
+	RelocationRecoveryCleanupReady      RelocationRecoveryState = "cleanup_ready"
+	RelocationRecoveryCleanupFinalizing RelocationRecoveryState = "cleanup_finalizing"
 )
 
 // RelocationClaim is a point-in-time assertion that Path named one exact
@@ -39,6 +40,12 @@ type RelocationClaim struct {
 	// answered transient error. Only an actual failed identity validation may
 	// downgrade it to claim_stale.
 	cleanupAuthorized bool
+	// cleanupFinalizing means the descriptor walk already removed every entry
+	// beneath the claimed root and durably checkpointed that fact. A retry may
+	// remove only that exact empty root; absence or replacement is completion,
+	// never authority to touch the pathname now there.
+	cleanupFinalizing bool
+	cleanupRootGone   bool
 	claimID           uint64
 }
 
@@ -157,6 +164,21 @@ func (g *GitWorktree) setArchiveReport(report ArchiveReport) {
 	g.relocationMu.Unlock()
 }
 
+// SetRepoGoneFinalizationCheckpoint installs the durable writer used by an
+// explicit kill while it owns this worktree's operation lock. The returned
+// restore function removes the process-local closure after teardown.
+func (g *GitWorktree) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) func() {
+	g.relocationMu.Lock()
+	previous := g.repoGoneFinalizationCheckpoint
+	g.repoGoneFinalizationCheckpoint = checkpoint
+	g.relocationMu.Unlock()
+	return func() {
+		g.relocationMu.Lock()
+		g.repoGoneFinalizationCheckpoint = previous
+		g.relocationMu.Unlock()
+	}
+}
+
 // RestoreRelocationRecovery reinstates a persisted lifecycle record without
 // touching either candidate. Legacy records without State remain readable as an
 // ambiguous move.
@@ -174,9 +196,9 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 		if !recovery.IdentityKnown {
 			return fmt.Errorf("stale relocation claim identity is missing")
 		}
-	case RelocationRecoveryCleanupReady:
+	case RelocationRecoveryCleanupReady, RelocationRecoveryCleanupFinalizing:
 		if !recovery.IdentityKnown {
-			return fmt.Errorf("cleanup-ready relocation identity is missing")
+			return fmt.Errorf("cleanup relocation identity is missing for state %s", recovery.State)
 		}
 	case RelocationRecoveryStalled:
 		// A read-only probe may time out before any identity can be captured.
@@ -321,6 +343,26 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	normalized := normalizeRecovery(*recovery)
 	g.relocationRecovery = &normalized
 	switch normalized.State {
+	case RelocationRecoveryCleanupFinalizing:
+		expected := normalized.identity()
+		identity, err := boundedRelocationPathIdentity(primary)
+		rootGone := false
+		switch {
+		case err == nil && expected.same(identity):
+		case err == nil:
+			rootGone = true
+		case errors.Is(err, os.ErrNotExist):
+			rootGone = true
+		default:
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cannot inspect finalizing cleanup root %s: %w", primary, err,
+			), ErrRelocateStateUnknown)
+		}
+		g.relocationRecovery = nil
+		return g.activateRelocationClaimLocked(RelocationClaim{
+			Path: primary, identity: expected,
+			cleanupAuthorized: true, cleanupFinalizing: true, cleanupRootGone: rootGone,
+		}), nil
 	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled, RelocationRecoveryCleanupReady:
 		if normalized.IdentityKnown && normalized.AlternatePath != "" {
 			// A stalled operation can retain the same two identity-qualified
@@ -424,7 +466,9 @@ func recoveryFromClaim(claim RelocationClaim) RelocationRecovery {
 		alternate = ""
 	}
 	state := RelocationRecoveryClaimStale
-	if claim.cleanupAuthorized {
+	if claim.cleanupFinalizing {
+		state = RelocationRecoveryCleanupFinalizing
+	} else if claim.cleanupAuthorized {
 		state = RelocationRecoveryCleanupReady
 	}
 	return RelocationRecovery{
@@ -487,6 +531,66 @@ func (g *GitWorktree) SettleRelocationClaim(claim RelocationClaim) error {
 	return g.revalidateRelocationClaimLocked(claim, true)
 }
 
+// checkpointRepoGoneFinalization publishes the only state in which pathname
+// absence can mean cleanup completion. The descriptor walk has already removed
+// every child and verified the root empty; the checkpoint lands while that exact
+// root still occupies its claimed name. A failed writer restores cleanup_ready,
+// leaving the empty root as an ordinary identity-qualified retry handle.
+func (g *GitWorktree) repoGoneFinalizationCheckpointSnapshot() func() error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	return g.repoGoneFinalizationCheckpoint
+}
+
+func (g *GitWorktree) checkpointRepoGoneFinalization(
+	claim RelocationClaim,
+	checkpoint func() error,
+) error {
+	g.relocationMu.Lock()
+	if !g.ownsRelocationClaimLocked(claim) || g.relocationRecovery != nil {
+		g.relocationMu.Unlock()
+		return errors.Join(fmt.Errorf(
+			"cannot checkpoint finalization for unowned cleanup claim %s", claim.Path,
+		), ErrRelocateStateUnknown)
+	}
+	recovery := recoveryFromClaim(claim)
+	recovery.State = RelocationRecoveryCleanupFinalizing
+	g.relocationRecovery = &recovery
+	g.relocationMu.Unlock()
+
+	if checkpoint == nil {
+		return nil
+	}
+	if err := checkpoint(); err != nil {
+		g.relocationMu.Lock()
+		if g.relocationRecovery != nil &&
+			g.relocationRecovery.State == RelocationRecoveryCleanupFinalizing &&
+			g.relocationRecovery.identity().same(claim.identity) {
+			recovery := recoveryFromClaim(claim)
+			recovery.State = RelocationRecoveryCleanupReady
+			g.relocationRecovery = &recovery
+			g.releaseRelocationClaimLocked(&claim)
+		}
+		g.relocationMu.Unlock()
+		return fmt.Errorf("persist repo-gone cleanup finalization fence: %w", err)
+	}
+	return nil
+}
+
+func (g *GitWorktree) completeRepoGoneFinalization(claim RelocationClaim) error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if !claim.cleanupFinalizing || g.worktreePath != claim.Path ||
+		g.relocationRecovery != nil || !g.ownsRelocationClaimLocked(claim) {
+		return errors.Join(fmt.Errorf(
+			"worktree finalization claim for %s is no longer applicable", claim.Path,
+		), ErrRelocateStateUnknown)
+	}
+	g.relocationRecovery = nil
+	g.releaseRelocationClaimLocked(&claim)
+	return nil
+}
+
 // completeRemovedRelocationClaim releases ownership after a descriptor-anchored
 // delete has removed the claimed directory. Revalidating the pathname here would
 // necessarily fail because successful deletion made it absent; ownership, not a
@@ -494,6 +598,13 @@ func (g *GitWorktree) SettleRelocationClaim(claim RelocationClaim) error {
 func (g *GitWorktree) completeRemovedRelocationClaim(claim RelocationClaim) error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
+	if g.worktreePath == claim.Path && g.relocationRecovery != nil &&
+		g.relocationRecovery.State == RelocationRecoveryCleanupFinalizing &&
+		g.relocationRecovery.IdentityKnown && g.relocationRecovery.identity().same(claim.identity) {
+		g.relocationRecovery = nil
+		g.releaseRelocationClaimLocked(&claim)
+		return nil
+	}
 	if g.worktreePath == claim.Path && g.ownsRelocationClaimLocked(claim) && g.relocationRecovery == nil {
 		g.releaseRelocationClaimLocked(&claim)
 		return nil
@@ -537,11 +648,26 @@ func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) er
 func (g *GitWorktree) ValidateRelocationCleanupAdmission() error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
-	if g.relocationRecovery == nil || g.relocationRecovery.State != RelocationRecoveryCleanupReady {
+	if g.relocationRecovery == nil ||
+		(g.relocationRecovery.State != RelocationRecoveryCleanupReady &&
+			g.relocationRecovery.State != RelocationRecoveryCleanupFinalizing) {
 		return errors.Join(fmt.Errorf("worktree has no cleanup-ready relocation identity"), ErrRelocateStateUnknown)
 	}
 	recovery := g.relocationRecovery
 	identity, err := boundedRelocationPathIdentity(g.worktreePath)
+	if recovery.State == RelocationRecoveryCleanupFinalizing {
+		// This state was persisted only after the descriptor walk verified the
+		// claimed root empty. Exact identity means the empty marker remains;
+		// absence or replacement means there is nothing left that this row owns.
+		// Operational non-answers still fail closed because they cannot distinguish
+		// those cases from an unreadable exact marker.
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.Join(fmt.Errorf(
+			"cannot inspect finalizing cleanup root %s: %w", g.worktreePath, err,
+		), ErrRelocateStateUnknown)
+	}
 	if err != nil {
 		// A failed read is not evidence of a changed identity. Keep the exact
 		// cleanup authorization retryable unless the path is conclusively absent.

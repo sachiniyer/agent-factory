@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // probeRepoGoneOrigin applies restore's repository-validity rule under the
@@ -89,7 +90,11 @@ func CheckRepoPresentForRelocation(repoPath string) error {
 // same-UID rename cannot redirect the walk to a replacement pathname. Every
 // descendant and the final root entry use the copy mover's claim-rename-verify-
 // unlink primitive; a changed entry is retained rather than reinterpreted.
-func removeClaimedRepoGoneDirectory(path string, expected pathIdentity) error {
+func removeClaimedRepoGoneDirectory(
+	path string,
+	expected pathIdentity,
+	beforeRootRemoval func() error,
+) error {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
 	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "repo-gone cleanup parent")
@@ -122,9 +127,165 @@ func removeClaimedRepoGoneDirectory(path string, expected pathIdentity) error {
 	if err := removeCopiedTree(directory, path, manifest, true); err != nil {
 		return recheckCleanupRoot(parent, name, path, expected, err)
 	}
+	if beforeRootRemoval != nil {
+		if err := beforeRootRemoval(); err != nil {
+			return err
+		}
+	}
 	return removeCopiedEntry(parent, parentPath, copiedEntry{
 		name: name, source: expected, directory: &copiedDirectory{},
 	}, true)
+}
+
+// removeFinalizingRepoGoneRoot consumes only the empty root marker described by
+// cleanup_finalizing. The descriptor walk had already removed and verified all
+// children before that state was persisted. If the name is now absent, replaced,
+// or newly populated, the original empty marker is no longer ours to remove and
+// finalization leaves the current pathname untouched.
+func removeFinalizingRepoGoneRoot(path string, expected pathIdentity) error {
+	parentPath := filepath.Dir(path)
+	name := filepath.Base(path)
+	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "repo-gone finalization parent")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer parent.Close()
+
+	identity, err := identityAt(parent, name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !expected.same(identity) {
+		return nil
+	}
+	directory, _, err := openDirectoryAt(parent, name, path, "repo-gone finalization root")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	names, err := directoryNames(directory, path)
+	_ = directory.Close()
+	if err != nil {
+		return err
+	}
+	if len(names) != 0 {
+		return nil
+	}
+	err = removeCopiedEntry(parent, parentPath, copiedEntry{
+		name: name, source: expected, directory: &copiedDirectory{},
+	}, true)
+	var changed *unverifiedCleanupPathError
+	if errors.As(err, &changed) {
+		return nil
+	}
+	return err
+}
+
+// CleanupClaimedRepoGone removes an archived worktree using the cleanup-only
+// claim authorized before the kill's durable commit. The claim is checked after
+// pane teardown, writers are reaped before deletion, and its identity stays
+// claimed through an identity-anchored recursive delete. The origin is
+// deliberately not probed again here: its absence was the pre-commit admission
+// condition, while a returned origin is a separate directory that must not be
+// able to strand an already committed kill.
+func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error) {
+	state, err, _ := g.cleanupClaimedRepoGone(claim)
+	return state, err
+}
+
+// CleanupClaimedRepoGoneWithLateResult is the ghost-cleanup form. On a caller
+// deadline, lateResult reports the descriptor worker's eventual result so the
+// daemon can reconcile the persisted row instead of leaving a completed delete
+// fenced forever. A nil channel means no worker outlived the call.
+func (g *GitWorktree) CleanupClaimedRepoGoneWithLateResult(claim RelocationClaim) (CleanupState, error, <-chan error) {
+	return g.cleanupClaimedRepoGone(claim)
+}
+
+func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error, <-chan error) {
+	completed := false
+	defer func() {
+		if !completed {
+			g.PreserveRelocationClaim(claim)
+		}
+	}()
+	if claim.cleanupFinalizing {
+		if !claim.cleanupRootGone {
+			if err := removeFinalizingRepoGoneRoot(claim.Path, claim.identity); err != nil {
+				return CleanupStateUnknown, fmt.Errorf(
+					"finish repo-gone cleanup root %s: %w", claim.Path, err,
+				), nil
+			}
+		}
+		if err := g.completeRepoGoneFinalization(claim); err != nil {
+			return CleanupStateUnknown, err, nil
+		}
+		completed = true
+		return CleanupSettled, nil, nil
+	}
+
+	if err := g.RevalidateRelocationClaim(claim); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err), nil
+	}
+	// Current archives may carry complete retained source trees for files the
+	// published copy could not read. Their report is the only durable ownership
+	// handle, so consume them before the primary archive and before the daemon can
+	// delete the session row. This is the same ordering as ordinary Cleanup; a
+	// refusal preserves the relocation claim and therefore the whole transaction.
+	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err), nil
+	}
+
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
+	if err := g.RevalidateRelocationClaim(claim); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err), nil
+	}
+
+	checkpoint := g.repoGoneFinalizationCheckpointSnapshot()
+	deleteDone := make(chan error, 1)
+	go func() {
+		err := repoGoneRemoveDirectory(claim.Path, claim.identity, func() error {
+			return g.checkpointRepoGoneFinalization(claim, checkpoint)
+		})
+		if err == nil {
+			err = g.completeRemovedRelocationClaim(claim)
+		}
+		deleteDone <- err
+	}()
+	timer := time.NewTimer(repoGoneCleanupTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			revalidationErr := g.RevalidateRelocationClaim(claim)
+			return CleanupStateUnknown, errors.Join(
+				fmt.Errorf("failed to remove repo-gone worktree %s: %w", claim.Path, err),
+				revalidationErr,
+			), nil
+		}
+	case <-timer.C:
+		// The worker may be stuck in an uninterruptible filesystem syscall and
+		// cannot safely be killed. Its opened handles identify only the claimed
+		// tree, so it may finish in the background; the caller still returns and
+		// the durable record remains the retry/manual-recovery handle.
+		g.markCleanupStalledWithClaim(&claim)
+		completed = true
+		return CleanupStateUnknown, fmt.Errorf(
+			"repo-gone recursive deletion of %s did not finish within %s: %w",
+			claim.Path, repoGoneCleanupTimeout, context.DeadlineExceeded,
+		), deleteDone
+	}
+	completed = true
+	return CleanupSettled, nil, nil
 }
 
 func reapClaimedWorktreeWriters(path string, expected pathIdentity) {

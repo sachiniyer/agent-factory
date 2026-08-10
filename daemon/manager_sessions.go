@@ -213,7 +213,12 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// instead of the old any-non-nil return reporting "its workspace was left
 		// intact … retried automatically" on a fully successful reap and flickering the
 		// row for one poll. Mirrors the create-cleanup gate in manager_create.go.
-		if teardownErr = instance.Kill(); session.TeardownStateUnknown(teardownErr) {
+		restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
+			return m.persistInstanceErr(repoID, instance)
+		})
+		teardownErr = instance.Kill()
+		restoreCheckpoint()
+		if session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
 			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
 		}
@@ -242,9 +247,12 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		recovery := data.Worktree.RelocationRecovery
 		descriptorCleanup := recovery != nil && recovery.IdentityKnown &&
 			(recovery.State == git.RelocationRecoveryCleanupReady ||
-				recovery.State == git.RelocationRecoveryCleanupStalled)
+				recovery.State == git.RelocationRecoveryCleanupStalled ||
+				recovery.State == git.RelocationRecoveryCleanupFinalizing)
 		var lateCleanup <-chan error
-		teardownErr, lateCleanup = ghostCleanup(data, req.Title)
+		teardownErr, lateCleanup = ghostCleanup(data, req.Title, func(data *session.InstanceData) error {
+			return m.persistGhostCleanupStall(repoID, data)
+		})
 		settledDescriptorGhostCleanup = descriptorCleanup && teardownErr == nil && lateCleanup == nil
 		if session.TeardownStateUnknown(teardownErr) {
 			recovery = data.Worktree.RelocationRecovery
