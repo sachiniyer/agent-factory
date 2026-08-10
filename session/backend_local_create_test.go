@@ -131,6 +131,33 @@ func TestPrepareCreateLaunchUsesProvisionedLinkedWorktreeCwd(t *testing.T) {
 	require.Equal(t, filepath.Join(plan.workDir, "relative-store"), plan.conversationCapture.codexHome)
 }
 
+func TestPrepareCreateLaunchDoesNotCorrelateUnmodeledShellCwd(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	repoRoot := initInPlaceRepo(t, "shell-cwd-create")
+	nested := filepath.Join(repoRoot, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramCodex: "cd " + nested + " && codex"}
+	require.NoError(t, config.SaveConfig(cfg))
+	inst, err := NewInstance(InstanceOptions{
+		Title: "shell-cwd-create", Path: repoRoot, Program: tmux.ProgramCodex, InPlace: true,
+	})
+	require.NoError(t, err)
+
+	plan, err := inst.PrepareCreateLaunch()
+	require.NoError(t, err)
+	require.Empty(t, plan.conversationCapture.workingDir,
+		"an unmodeled shell cd must retain exactly-one capture instead of filtering against a guessed cwd")
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", nested)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+}
+
 // #3108: account admission must judge the command the create will actually
 // launch, not the bare agent label the request carried. The old NewInstance
 // gate saw only Program="claude", while prepareCreateLaunch later applied this

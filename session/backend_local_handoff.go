@@ -33,7 +33,11 @@ func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPl
 		if err != nil {
 			return AgentSwapPlan{}, fmt.Errorf("handoff target %s has an unresolvable Codex conversation store: %w", target, err)
 		}
-		capture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launch.WorkingDir)
+		captureWorkingDir := ""
+		if launch.WorkingDirKnown() {
+			captureWorkingDir = launch.WorkingDir
+		}
+		capture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, captureWorkingDir)
 	}
 	return AgentSwapPlan{
 		target: target, program: program, conversation: conversation, conversationCapture: capture,

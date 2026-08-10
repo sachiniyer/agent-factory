@@ -71,7 +71,11 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	if strings.TrimSpace(codexHome) == "" {
 		return CreateLaunchPlan{}, fmt.Errorf("cannot prepare Codex conversation capture for session %q: resolved store is empty", i.Title)
 	}
-	plan.conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, launch.WorkingDir)
+	captureWorkingDir := ""
+	if launch.WorkingDirKnown() {
+		captureWorkingDir = launch.WorkingDir
+	}
+	plan.conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, captureWorkingDir)
 	return plan, nil
 }
 

@@ -32,10 +32,14 @@ type CommandEnvironment struct {
 	Executable string
 	// Agent is the canonical supported agent name when Executable was selected
 	// from positive agent-token detection, or empty for an opaque command.
-	Agent          string
-	WorkingDir     string
-	clearInherited bool
-	overrides      map[string]CommandEnvOverride
+	Agent string
+	// WorkingDir is the modeled cwd at Executable. Call WorkingDirKnown before
+	// using it as process identity: arbitrary prefixes are token-detectable but
+	// can change cwd through shell syntax or wrapper behavior af does not model.
+	WorkingDir      string
+	workingDirKnown bool
+	clearInherited  bool
+	overrides       map[string]CommandEnvOverride
 }
 
 // Override reports the final command-local state of name.
@@ -49,6 +53,14 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 	return CommandEnvOverride{}
 }
 
+// WorkingDirKnown reports whether the target cwd was established entirely
+// through the launch directory and modeled env -C options. An arbitrary prefix
+// can change cwd before exec (for example, `cd /tmp && codex` or a wrapper that
+// calls chdir), so its inherited directory is not evidence for receipt routing.
+func (e CommandEnvironment) WorkingDirKnown() bool {
+	return e.workingDirKnown
+}
+
 // CommandEnvironmentFromCommand resolves the environment and cwd inherited by
 // the first detected agent token. When there is no supported agent token, it
 // resolves only the first executable provable through shell assignments and env
@@ -59,14 +71,17 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 // and where its receipts land.
 //
 // Unknown options, split-string, dynamic values/chdirs, misplaced assignments,
-// and an agent token consumed as an env operand return an error. Receipt callers
-// must surface that error and abort rather than polling a guessed path.
+// and an agent token consumed as an env operand return an error. An arbitrary
+// prefix leaves the modeled directory in WorkingDir but makes WorkingDirKnown
+// false, so receipt callers can preserve their non-correlating fallback rather
+// than treating that inherited base as the agent process's proven cwd.
 func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironment, error) {
 	tokens, _ := splitShellTokens(command)
 	targetIdx, agent, findErr := findAgentTokenStrict(tokens)
 	result := CommandEnvironment{
-		WorkingDir: filepath.Clean(workingDir),
-		overrides:  make(map[string]CommandEnvOverride),
+		WorkingDir:      filepath.Clean(workingDir),
+		workingDirKnown: true,
+		overrides:       make(map[string]CommandEnvOverride),
 	}
 	if !filepath.IsAbs(workingDir) {
 		return result, fmt.Errorf("launch directory %q is not absolute; cannot resolve relative receipt paths", workingDir)
@@ -140,6 +155,7 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 		}
 
 		atShellPrefix = false
+		result.workingDirKnown = false
 		idx++
 	}
 	return result, nil
