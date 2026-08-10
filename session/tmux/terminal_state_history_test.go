@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // #3169: the scrollback size must be reported alongside the terminal state.
@@ -84,6 +85,12 @@ func fakeTerminalStateTmux(t *testing.T, fields string) *TmuxSession {
 // Real tmux rather than a fake, because the property under test is that tmux runs
 // both commands in ONE command queue. A fake would only be asserting my own split.
 func TestCaptureVisibleWithScrollback_CountAndContentFromOneInvocation(t *testing.T) {
+	// Both halves matter, and the second is the one I had missed. IsolateTmux SKIPS
+	// when tmux is absent — the package convention, so the suite runs without the
+	// external binary — and it also points TMUX_TMPDIR at a private socket dir. My
+	// first version used the DEFAULT server, which on a developer box is the one
+	// holding their live sessions (#3169 review).
+	testguard.IsolateTmux(t)
 	session := NewTmuxSession("af-atomic-"+t.Name()[:8], "sh -c 'i=1; while [ $i -le 200 ]; do echo atomic-$i; i=$((i+1)); done; exec sleep 60'")
 	require.NoError(t, session.Start(t.TempDir()))
 	t.Cleanup(func() { _, _ = session.Close() })
