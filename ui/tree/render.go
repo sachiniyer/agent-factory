@@ -175,6 +175,11 @@ var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
 // treatment the task/prompt forms give their placeholders.
 var placeholderTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
 
+// archiveWarningColor makes an incomplete archive visible independently of its
+// ordinary liveness glyph. The warning prose itself remains the daemon's bounded
+// projection and includes the retained source location.
+var archiveWarningColor lipgloss.TerminalColor = lipgloss.Color("#F0DFAF")
+
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
 	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
@@ -207,6 +212,7 @@ func ApplyTheme(t Theme) {
 		Foreground(t.SelectionForeground)
 	deletingTitleColor = t.ForegroundMuted
 	placeholderTitleColor = t.ForegroundMuted
+	archiveWarningColor = t.Warning
 }
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
@@ -275,10 +281,27 @@ func instancePrefix(arrow string, width int) string {
 	return fmt.Sprintf(" %s ", arrow)
 }
 
+func retainedArchiveLocation(warning string) string {
+	const marker = "retained at "
+	start := strings.Index(warning, marker)
+	if start < 0 {
+		return ""
+	}
+	rest := warning[start:]
+	end := len(rest)
+	for _, delimiter := range []string{"; skipped paths", "; af skipped"} {
+		if index := strings.Index(rest, delimiter); index >= 0 && index < end {
+			end = index
+		}
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
 // Render renders an instance row. expanded selects the ▾/▸ tree arrow; a
 // non-expandable instance (see Expandable) renders a blank arrow cell so its
 // title stays aligned with its siblings.
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
+	archiveWarning := i.ArchiveWarning()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -403,6 +426,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if note := i.RootRecreateContext().Note(); note != "" {
 		titleText = "[" + note + "] " + titleText
 	}
+	// An incomplete archive stays exceptional after automatic Lost recovery.
+	// Unlike an operation toast, this prefix and the retained-source line below
+	// are derived on every render from the live snapshot, so they cannot expire.
+	if archiveWarning != "" {
+		titleText = "[archive incomplete] " + titleText
+	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is
 	// the outermost prefix; narrow rails retain the reason before lower-priority
@@ -493,8 +522,42 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, branch, spaces)
 
+	lines := []string{title}
+	if archiveWarning == "" {
+		lines = append(lines, descS.Render(branchLine))
+	} else {
+		// Move the ordinary description's bottom padding to the warning so the
+		// notice is part of the same row block rather than separated by whitespace.
+		lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
+		warningTexts := []string{archiveWarning}
+		if location := retainedArchiveLocation(archiveWarning); location != "" {
+			// Put the recovery location before the prose-heavy warning. A typical
+			// sidebar cannot fit the full bounded report on one line, but it must
+			// still show where the complete bytes remain.
+			warningTexts = append([]string{location}, warningTexts...)
+		}
+		for index, warningText := range warningTexts {
+			glyph := "  "
+			if index == 0 {
+				glyph = "⚠ "
+			}
+			warningPrefix := strings.Repeat(" ", prefixWidth) + glyph
+			warningWidth := r.width - runewidth.StringWidth(warningPrefix)
+			if warningWidth <= 0 {
+				warningText = ""
+			} else if runewidth.StringWidth(warningText) > warningWidth {
+				warningText = runewidth.Truncate(warningText, warningWidth, "…")
+			}
+			warningStyle := descS.Foreground(archiveWarningColor)
+			if index < len(warningTexts)-1 {
+				warningStyle = warningStyle.PaddingBottom(0)
+			}
+			lines = append(lines, warningStyle.Render(warningPrefix+warningText))
+		}
+	}
+
 	// join title and subtitle
-	text := lipgloss.JoinVertical(lipgloss.Left, title, descS.Render(branchLine))
+	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return text
 }

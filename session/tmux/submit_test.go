@@ -699,11 +699,45 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
 
-	require.NoError(t, session.SendKeysCommand("a prompt to a pane that does not echo"),
+	status, err := session.SendKeysCommandObserved("a prompt to a pane that does not echo")
+	require.NoError(t, err,
 		"a non-echoing pane must NOT be reported as a failed delivery — the bytes still arrive")
-	require.True(t, enterSent, "could-not-observe must retain the best-effort Enter")
+	require.Equal(t, PromptSentUnverified, status,
+		"a readable pane without prompt-specific proof must report the send without claiming delivery")
+	require.True(t, enterSent, "sent-unverified must retain the best-effort Enter")
 	require.Empty(t, errors.String(),
 		"a successful delivery to a non-echoing agent must not manufacture an ERROR")
+}
+
+func TestSubmitWithoutDistinctiveTextStillObservesReadablePane(t *testing.T) {
+	savedDrain := emptyPromptDrain
+	emptyPromptDrain = time.Millisecond
+	defer func() { emptyPromptDrain = savedDrain }()
+
+	pasted := false
+	postPasteCaptures := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				postPasteCaptures++
+			}
+			return []byte("readable composer"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	status, err := session.SendKeysCommandObserved(" \n\t ")
+	require.NoError(t, err)
+	require.Equal(t, PromptSentUnverified, status,
+		"a readable observer must stay distinct from an observer failure even when the prompt has no matchable text")
+	require.Positive(t, postPasteCaptures,
+		"the no-fragment path must inspect the pane after the paste before classifying the observer")
 }
 
 // TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable is the polarity
@@ -724,8 +758,11 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 	}
 	session := newTmuxSession("af_proj", "claude", NewMockPtyFactory(t), cmdExec)
 
-	require.NoError(t, session.SendKeysCommand("a prompt to an unreadable pane"),
+	status, err := session.SendKeysCommandObserved("a prompt to an unreadable pane")
+	require.NoError(t, err,
 		"an unreadable pane is NOT evidence of a failed delivery; it must stay best-effort")
+	require.Equal(t, PromptCouldNotConfirm, status,
+		"a failed observer must stay distinct from a readable but unverified send")
 	require.Empty(t, errors.String(),
 		"a failed observation probe must not manufacture an ERROR")
 }
@@ -735,7 +772,8 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 // rendered THIS payload: long pastes are deliberately collapsed, while a
 // capture that contains only the composer's frame says nothing about the
 // payload at all. These are separate mechanisms seen in the live log and both
-// must stay could-not-observe rather than manufacturing a terminal negative.
+// must report a sent-but-unverified transport rather than manufacturing either
+// a delivered result or a terminal negative.
 func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -788,8 +826,8 @@ func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T)
 
 			status, err := session.SendKeysCommandObserved(prompt)
 			require.NoError(t, err)
-			require.Equal(t, PromptCouldNotConfirm, status)
-			require.True(t, enterSent, "could-not-observe must retain the best-effort Enter")
+			require.Equal(t, PromptSentUnverified, status)
+			require.True(t, enterSent, "sent-unverified must retain the best-effort Enter")
 			require.NotContains(t, errors.String(), "prompt delivery observed absent",
 				"a pane that did not render prompt-specific text cannot prove the prompt absent")
 		})
@@ -980,8 +1018,8 @@ func TestUncapturedBaselineCannotConfirmOldCompletionTail(t *testing.T) {
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
 
 	got := session.waitForPasteDelivered(newDeliveryProbe(prompt))
-	require.Equal(t, deliveryCouldNotObserve, got.outcome,
-		"without a measured baseline, retained completion text cannot prove this paste landed")
+	require.Equal(t, deliveryObservedUnverified, got.outcome,
+		"a readable frame without a measured baseline must stay unverified, never prove this paste landed")
 }
 
 func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {

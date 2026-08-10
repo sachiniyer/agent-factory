@@ -215,9 +215,8 @@ var (
 
 // MoveWorktree relocates this worktree's directory to dest and keeps git's
 // two-way worktree link consistent (the worktree's `.git` file and the repo's
-// `.git/worktrees/<name>/gitdir`). It is the archive-side primitive (#1028):
-// the caller has already torn down every tmux session over the worktree, so the
-// directory is free to move.
+// `.git/worktrees/<name>/gitdir`). It is the strict general move: unlike
+// ArchiveWorktree, it never permits a known-absent destination entry.
 //
 // Uncommitted changes and the branch are preserved by construction — the
 // working directory is moved verbatim, never re-checked-out. On success
@@ -226,11 +225,23 @@ func (g *GitWorktree) MoveWorktree(dest string) error {
 	return g.relocateWorktreeTo(dest, "move", nil)
 }
 
-// MoveWorktreeWithClaim is the archive-teardown entrypoint. The daemon resolved
-// the source before tearing panes down; the git layer revalidates that exact
-// point-in-time claim before it consumes the pathname.
+// MoveWorktreeWithClaim carries a previously resolved source identity through a
+// strict move.
 func (g *GitWorktree) MoveWorktreeWithClaim(dest string, claim RelocationClaim) error {
 	return g.relocateWorktreeTo(dest, "move", &claim)
+}
+
+// ArchiveWorktree is the one relocation role allowed to publish an incomplete
+// copy. It retains the complete original tree and records every known-absent
+// destination entry; MoveWorktree and restore keep the zero-value refusal.
+func (g *GitWorktree) ArchiveWorktree(dest string) error {
+	return g.relocateWorktreeTo(dest, "archive", nil)
+}
+
+// ArchiveWorktreeWithClaim is ArchiveWorktree with the teardown caller's
+// point-in-time ownership carried through the pane-exit window.
+func (g *GitWorktree) ArchiveWorktreeWithClaim(dest string, claim RelocationClaim) error {
+	return g.relocateWorktreeTo(dest, "archive", &claim)
 }
 
 // RestoreWorktreeTo moves this (archived) worktree back to dest and re-registers
@@ -259,8 +270,8 @@ func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationCl
 	return g.relocateWorktreeTo(dest, "restore", &claim)
 }
 
-// relocateWorktreeTo is the shared move engine behind MoveWorktree and
-// RestoreWorktreeTo. Fast path: `git worktree move`. Git explicitly refuses
+// relocateWorktreeTo is the shared move engine behind archive, move, and
+// restore. Fast path: `git worktree move`. Git explicitly refuses
 // linked worktrees containing submodules, so that known shape goes directly to
 // the manual move + repair path. Because the archive root ($AF_HOME) is
 // frequently on a different filesystem than the repo, the fast path can also
@@ -280,12 +291,19 @@ func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationCl
 // second must not finalize. A deadline that trips and is then RECOVERED (the
 // fallback moves the bytes and the repair succeeds) establishes the end state
 // and returns nil, so the marker never rides on a success.
-// operation names what the CALLER is doing, because this engine cannot tell:
-// MoveWorktree and RestoreWorktreeTo both arrive here, and an unreadable file
-// means something different in each — a move can be retried after a chmod, a
-// restore is reporting that the ARCHIVE holds a file af cannot read. The string
-// travels only into error messages (#3066).
+// operation names what the CALLER is doing, because this engine cannot infer
+// the stakes: archive explicitly permits a known absence and retains its source;
+// move and restore refuse. Unknown future operations inherit refusal (#3066).
 func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *RelocationClaim) error {
+	// A non-nil report marks an archive operation. Start with every prior retained
+	// tree: restoring an incomplete archive cannot recreate omitted bytes, so a
+	// later complete copy is not evidence that the old omissions were recovered.
+	// Only an explicit destructive cleanup may retire that ownership record.
+	var completedArchiveReport *ArchiveReport
+	if operation == "archive" {
+		report := g.GetArchiveReport()
+		completedArchiveReport = &report
+	}
 	var sourceClaim RelocationClaim
 	var claimErr error
 	if requiredClaim == nil {
@@ -304,7 +322,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		}
 	}()
 	finishRelocation := func() {
-		g.finishRelocationClaim(sourceClaim, dest)
+		g.finishRelocationClaim(sourceClaim, dest, completedArchiveReport)
 		claimSettled = true
 	}
 	src := sourceClaim.Path
@@ -356,6 +374,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				dest, repairErr,
 			))
 		}
+		// Registration repair is one pathname use; submodule repair is another.
+		// A same-uid process can replace dest while the first command runs, so its
+		// earlier identity proof cannot authorize this second command.
+		if err := g.RevalidateRelocationClaim(sourceClaim); err != nil {
+			return err
+		}
 		if submoduleErr := noteDeadline(worktreeRepairSubmodules(g, dest)); submoduleErr != nil {
 			if deadlineTripped {
 				return unknownIfCutOff(fmt.Errorf(
@@ -374,6 +398,14 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				submoduleErr,
 			)
 		}
+		// Settlement is the final identity boundary. Revalidate and release the
+		// consumed recovery claim together so a replacement installed during the
+		// submodule command remains unresolved rather than becoming the recorded
+		// worktree.
+		if err := g.SettleRelocationClaim(sourceClaim); err != nil {
+			return err
+		}
+		claimSettled = true
 		return nil
 	}
 
@@ -381,7 +413,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		finishRelocation()
 		return nil
 	}
 	if pathExists(dest) {
@@ -463,7 +494,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		finishRelocation()
 		return nil
 	}
 	if useFallback {
@@ -480,8 +510,30 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		var sourceCleanupPath string
 		var sourceCleanupPathVerified bool
 		movedIdentity := sourceClaim.identity
+		publicationCheckpointed := false
+		checkpointPublication := func(
+			report ArchiveReport, identity pathIdentity, publish func() error,
+		) error {
+			var committedReport *ArchiveReport
+			if completedArchiveReport != nil {
+				combined := completedArchiveReport.append(report)
+				committedReport = &combined
+			}
+			if err := g.checkpointRelocationPublication(
+				sourceClaim, dest, src, identity, committedReport, publish,
+			); err != nil {
+				return err
+			}
+			completedArchiveReport = committedReport
+			publicationCheckpointed = true
+			return nil
+		}
 		if src != dest {
-			if mErr := moveDirCrossDeviceRecordingIdentity(src, dest, operation, &movedIdentity); mErr != nil {
+			var report ArchiveReport
+			if mErr := moveDirCrossDeviceRecordingIdentity(
+				src, dest, operation, unreadablePolicyForOperation(operation), &movedIdentity, &report,
+				checkpointPublication,
+			); mErr != nil {
 				var copiedErr *copiedWorktreeSourceCleanupError
 				if !errors.As(mErr, &copiedErr) {
 					return unknownIfCutOff(fmt.Errorf("failed to move worktree %s -> %s: %w", src, dest, mErr))
@@ -490,12 +542,23 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				sourceCleanupPath = copiedErr.src
 				sourceCleanupPathVerified = copiedErr.cleanupPathVerified
 			}
+			if !report.Empty() {
+				// The publication callback installed this report together with the
+				// destination path and unresolved ownership before it released the
+				// persistence lock. Seeing it here therefore means the durable state is
+				// already safe for registration repair or a process exit.
+				if completedArchiveReport == nil {
+					return fmt.Errorf("archive publication returned a report without committing it")
+				}
+			}
 		}
 		// The bytes are now at dest but registration repair is still outstanding.
 		// Materialize that exact destination identity before repair, then consume it
 		// into a new active claim. A checkpoint or error at every point therefore
 		// retains the only pathname which owns the user's files.
-		g.beginRelocationRecovery(dest, src, movedIdentity)
+		if !publicationCheckpointed {
+			g.beginRelocationRecovery(dest, src, movedIdentity)
+		}
 		committedClaim, committedErr := g.ClaimRelocationSource()
 		if committedErr != nil {
 			return errors.Join(fmt.Errorf(
@@ -543,7 +606,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
-		finishRelocation()
 		return nil
 	}
 
@@ -579,17 +641,32 @@ func (g *GitWorktree) ensureRepoPresent() error {
 // CACHES the inner error's text at construction, so stamping after the wrap
 // changes the struct and not the message the user sees (#3087 review).
 func moveDirCrossDevice(src, dest, operation string) error {
-	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, nil)
+	return moveDirCrossDeviceRecordingIdentity(src, dest, operation, refuseUnreadable, nil, nil, nil)
 }
+
+type relocationPublicationCheckpoint func(ArchiveReport, pathIdentity, func() error) error
 
 // moveDirCrossDeviceRecordingIdentity is the relocation path's variant. The
 // caller initializes committedIdentity with the claimed source identity. A
 // same-filesystem rename preserves it; a verified cross-device publication
 // replaces it with the copied root identity at the exact no-replace commit.
 func moveDirCrossDeviceRecordingIdentity(
-	src, dest, operation string, committedIdentity *pathIdentity,
+	src, dest, operation string,
+	policy unreadablePolicy,
+	committedIdentity *pathIdentity,
+	archiveReport *ArchiveReport,
+	checkpoint relocationPublicationCheckpoint,
 ) (returnErr error) {
-	renameErr := renamePath(src, dest)
+	renamePublish := func() error { return renamePath(src, dest) }
+	var renameErr error
+	if checkpoint != nil {
+		if committedIdentity == nil {
+			return fmt.Errorf("relocation publication checkpoint requires a committed identity")
+		}
+		renameErr = checkpoint(ArchiveReport{}, *committedIdentity, renamePublish)
+	} else {
+		renameErr = renamePublish()
+	}
 	if renameErr == nil {
 		return nil
 	} else if !errors.Is(renameErr, syscall.EXDEV) {
@@ -603,7 +680,7 @@ func moveDirCrossDeviceRecordingIdentity(
 	if err != nil {
 		return err
 	}
-	copied, err := copyTreeWithIdentities(src, stagingPath)
+	copied, err := copyTreeWithPolicy(src, stagingPath, policy)
 	if err != nil {
 		// Stamp first, wrap second. The order is the whole point.
 		var unreadable *unreadableSourceError
@@ -716,26 +793,54 @@ func moveDirCrossDeviceRecordingIdentity(
 	if err := copied.validateDestination(stagingPath); err != nil {
 		return restoreSource(fmt.Errorf("destination tree changed after copy: %w", err))
 	}
-	if err := renameAtNoReplace(
-		int(copied.destinationParent.Fd()), stagingName,
-		int(copied.destinationParent.Fd()), filepath.Base(dest),
-	); err != nil {
-		return restoreSource(fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err))
+	var report ArchiveReport
+	if len(copied.skipped) > 0 {
+		if archiveReport == nil {
+			return restoreSource(fmt.Errorf("copier skipped unreadable files without an archive report channel"))
+		}
+		report = ArchiveReport{RetainedTrees: []ArchiveRetainedTree{
+			newArchiveRetainedTree(quarantinePath, quarantinedIdentity, copied.skipped),
+		}}
 	}
-	published = true
-	commitErr := errors.Join(moveDirAfterDestCommit(dest), validatePublishedDestination(dest, copied))
+	publishDestination := func() error {
+		if err := renameAtNoReplace(
+			int(copied.destinationParent.Fd()), stagingName,
+			int(copied.destinationParent.Fd()), filepath.Base(dest),
+		); err != nil {
+			return fmt.Errorf("failed to atomically commit copied worktree at %s without replacement: %w", dest, err)
+		}
+		published = true
+		return errors.Join(moveDirAfterDestCommit(dest), validatePublishedDestination(dest, copied))
+	}
+	var commitErr error
+	if checkpoint != nil {
+		commitErr = checkpoint(report, copied.destinationIdentity, publishDestination)
+	} else {
+		commitErr = publishDestination()
+	}
 	if commitErr != nil {
-		destinationManifest := destinationCleanupManifest(copied.root)
-		cleanupErr := removeDirectoryTree(
-			copied.destinationParent, filepath.Base(dest), dest, copied.destination, &destinationManifest,
-		)
-		if cleanupErr != nil {
-			commitErr = errors.Join(commitErr, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
+		if published {
+			destinationManifest := destinationCleanupManifest(copied.root)
+			cleanupErr := removeDirectoryTree(
+				copied.destinationParent, filepath.Base(dest), dest, copied.destination, &destinationManifest,
+			)
+			if cleanupErr != nil {
+				commitErr = errors.Join(commitErr, fmt.Errorf("failed to remove unverified destination %s: %w", dest, cleanupErr))
+			}
 		}
 		return restoreSource(commitErr)
 	}
 	if committedIdentity != nil {
 		*committedIdentity = copied.destinationIdentity
+	}
+	if !report.Empty() {
+		// Keep the COMPLETE secured source rather than deleting bytes the archive
+		// never copied. This is intentionally archive-only: the report pointer is
+		// supplied only by relocateWorktreeTo's explicit archive role. The hidden
+		// source is inert (git registration now points at dest) but recoverable, and
+		// its exact location travels in the durable session report.
+		*archiveReport = report
+		return nil
 	}
 
 	if err := removeDirectoryTree(sourceParent, quarantineName, quarantinePath, copied.source, &copied.root); err != nil {

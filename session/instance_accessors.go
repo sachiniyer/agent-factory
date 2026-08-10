@@ -81,6 +81,15 @@ func (i *Instance) GetBranch() string {
 	return i.Branch
 }
 
+// ArchiveWarning returns the bounded live notice for an incomplete archive.
+// It is projection-only: the complete durable ownership report stays on the
+// GitWorktree and storage projections scrub this string before writing disk.
+func (i *Instance) ArchiveWarning() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.archiveWarning
+}
+
 // SetRuntimeTeardownForTest installs the physical reap a sandbox runtime would
 // normally supply through ProvisionResult.Teardown.
 //

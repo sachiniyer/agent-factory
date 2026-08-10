@@ -31,6 +31,14 @@ var killSessionForLifecycle = func(m *Manager, req KillSessionRequest) error {
 	return err
 }
 
+// archiveSessionForLifecycle is the archive twin of killSessionForLifecycle.
+// Keeping the whole result behind one seam lets tests prove a committed warning
+// is classified as a successful reap without performing a real archive.
+var archiveSessionForLifecycle = func(m *Manager, req ArchiveSessionRequest) error {
+	_, _, err := m.ArchiveSession(req)
+	return err
+}
+
 // taskLifecycleHookWait bounds how long a declared teardown waits for a session's
 // post_worktree_commands to finish before giving up and leaving it in place. Long
 // enough for an ordinary build/install hook, short enough that a hung one leaks a
@@ -260,7 +268,7 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 	var err error
 	switch verb {
 	case task.OnCompleteArchive:
-		_, _, err = m.ArchiveSession(ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
+		err = archiveSessionForLifecycle(m, ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 	case task.OnCompleteKill:
 		err = killSessionForLifecycle(m, KillSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 	default:
@@ -268,6 +276,11 @@ func (m *Manager) runTaskSessionLifecycle(repoID, sessionID, title, taskID, verb
 		// SessionLifecycle canonicalizes. Log rather than guess — picking a verb
 		// here would be inventing destructive intent from a value nothing accepted.
 		log.WarningLog.Printf("task %s declares an unknown on_complete %q; leaving session %q in place", taskID, verb, title)
+		return
+	}
+	if isMutationCommitted(err) {
+		log.WarningLog.Printf("task %s: applied on_complete=%s to session %q with a committed warning: %v",
+			taskID, verb, title, err)
 		return
 	}
 	if err != nil {

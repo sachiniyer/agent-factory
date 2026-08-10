@@ -69,6 +69,29 @@ type SSHRuntimeCleanupData struct {
 	// the current mechanism. An empty value — a record written before #3090, or
 	// between #3100 and this change, or one whose provision could not settle on an
 	// address — dials the name, exactly as it always did.
+	// DialAddress is the machine this session was provisioned on, and the ONE field
+	// that carries the pin. Two spellings, both of which every release reads or
+	// round-trips safely:
+	//
+	//	"198.51.100.8"    an ADDRESS pin (#3086/#3118), reached on the configured port
+	//	"198.51.100.8:22" a MACHINE pin (#3122), carrying the port that machine serves
+	//
+	// The second spelling exists because behind an L4 balancer the backend listens on
+	// a different port than its VIP is reached on, so the port has to travel with the
+	// address. It is deliberately NOT a separate field: a daemon rolled back to a
+	// release without it would DROP that field on its next checkpoint — the pin and
+	// the machine gone for good — while still honouring a bare DialAddress and
+	// reaping some other backend. One field it already knows round-trips intact.
+	//
+	// And it fails closed there: that release appends the configured port itself, so
+	// "198.51.100.8:22" becomes an unresolvable "[198.51.100.8:22]:2200", the relay
+	// cannot dial, ssh exits 255, and the record is RETAINED and retried rather than
+	// reaping the wrong machine. Measured. Retained-and-retried beats
+	// silently-wrong-and-retired.
+	//
+	// A bare address is written whenever the machine's port IS the configured one, so
+	// an older release keeps a pin it reads correctly. See sshRecordPinnedMachine and
+	// sshPinnedCleanupTarget.
 	DialAddress         string `json:"dial_address,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
@@ -230,7 +253,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// on. Reach THAT machine rather than re-resolving the name — see DialAddress.
 		// An empty one composes the ordinary name-based command, so a record from
 		// before any of this reaps exactly as it always did.
-		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress)
+		pinAddr, pinPort := sshPinnedCleanupTarget(data.SSH)
+		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, pinAddr, pinPort)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}

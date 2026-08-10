@@ -110,8 +110,10 @@ If the session does not exist, use --create to automatically create it first,
 or use 'af sessions create --name <title> --prompt <prompt>' instead.
 
 For one target, the JSON acknowledgement includes status: delivered,
-not-delivered, or could-not-confirm. This is the observation made by the
-existing bounded submit; the command adds no second confirmation wait.
+not-delivered, sent-unverified, or could-not-confirm. sent-unverified means tmux
+accepted the paste and Enter while a readable pane did not render exact content
+proof; could-not-confirm means the pane observer itself was unavailable. Neither
+status claims delivery, and the command adds no second confirmation wait.
 
 With --all, broadcast a single prompt to every live session in scope:
 
@@ -122,9 +124,9 @@ to broadcast across every repo. The reserved root session is excluded unless
 --include-root is given. Delivery is best-effort per session: unreachable (Lost,
 Dead) and Archived sessions are skipped and reported, and one failure never
 aborts the rest. The command prints a JSON summary whose delivery observations
-are delivered / not-delivered / could-not-confirm, alongside failed and skipped
-targets. It exits 0 even when some sessions fail, so scripts can inspect
-per-session results.`,
+are delivered / not-delivered / sent-unverified / could-not-confirm, alongside
+failed and skipped targets. It exits 0 even when some sessions fail, so scripts
+can inspect per-session results.`,
 	// Validate flag combinations before arity (cobra runs Args before RunE):
 	// a broadcast-implying flag without --all must surface its actionable
 	// message here, not cobra's generic "accepts 2 arg(s)" (#658/#734: public
@@ -246,6 +248,7 @@ type broadcastResult struct {
 	Scope           string            `json:"scope"`
 	Delivered       int               `json:"delivered"`
 	NotDelivered    int               `json:"not_delivered"`
+	SentUnverified  int               `json:"sent_unverified"`
 	CouldNotConfirm int               `json:"could_not_confirm"`
 	Failed          int               `json:"failed"`
 	Skipped         int               `json:"skipped"`
@@ -253,9 +256,9 @@ type broadcastResult struct {
 }
 
 // broadcastTarget is one session's outcome in a broadcast. Status is one of
-// "delivered", "not-delivered", "could-not-confirm", "failed", or "skipped";
-// Error carries the daemon's reason on a failure and Reason explains an
-// intentional skip (root excluded, session lost).
+// "delivered", "not-delivered", "sent-unverified", "could-not-confirm",
+// "failed", or "skipped"; Error carries the daemon's reason on a failure and
+// Reason explains an intentional skip (root excluded, session lost).
 type broadcastTarget struct {
 	Title  string `json:"title"`
 	RepoID string `json:"repo_id"`
@@ -406,6 +409,8 @@ func runBroadcast(prompt string) error {
 			result.Delivered++
 		case session.PromptNotDelivered:
 			result.NotDelivered++
+		case session.PromptSentUnverified:
+			result.SentUnverified++
 		default:
 			status = session.PromptCouldNotConfirm
 			result.CouldNotConfirm++

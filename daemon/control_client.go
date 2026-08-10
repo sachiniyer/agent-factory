@@ -462,11 +462,25 @@ var ErrDaemonUnavailable = errors.New("daemon not available")
 // read: it ensures the daemon is running and waits through daemon warm-up, just
 // like the other session control calls.
 func PreviewSession(req PreviewRequest) (content string, gone, tabGone bool, err error) {
-	var resp PreviewResponse
-	if err := callDaemon("Preview", req, &resp); err != nil {
+	resp, err := PreviewSessionSnapshot(req)
+	if err != nil {
 		return "", false, false, err
 	}
 	return resp.Content, resp.Gone, resp.TabGone, nil
+}
+
+// PreviewSessionSnapshot is PreviewSession returning the WHOLE response, mirroring
+// apiclient.PreviewSnapshot on the remote side.
+//
+// It exists because both transports already decode every field and only these
+// wrappers narrowed them away — so a caller that needs to know a capture was
+// partial (#3169) had no way to ask, on either path.
+func PreviewSessionSnapshot(req PreviewRequest) (PreviewResponse, error) {
+	var resp PreviewResponse
+	if err := callDaemon("Preview", req, &resp); err != nil {
+		return PreviewResponse{}, err
+	}
+	return resp, nil
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -521,10 +535,11 @@ func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func RestoreSession(req RestoreSessionRequest) (string, error) {
 	var resp RestoreSessionResponse
-	if err := callDaemon("RestoreSession", req, &resp); err != nil {
+	err := callDaemon("RestoreSession", req, &resp)
+	if err != nil && !isMutationCommitted(err) {
 		return "", err
 	}
-	return resp.WorktreePath, nil
+	return resp.WorktreePath, err
 }
 
 // DeleteProject asks the daemon to delete a project (#1735): archive its live

@@ -117,7 +117,7 @@ const sshNoConfigFile = "none"
 // ("do not identify the host by address") is satisfied by construction rather than
 // by correction. See internal/sshrelay for the measurement against a real
 // certified sshd, and sshPinnedProxyCommand for what the option carries.
-func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string, error) {
+func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string, dialPort int) (string, error) {
 	host, port, err := resolveSSHHostPort(cfg.Host, cfg.Port)
 	if err != nil {
 		return "", err
@@ -217,7 +217,16 @@ func sshCommandPinnedTo(cfg config.SSHConfig, posture, dialAddr string) (string,
 	// bar (present at V_7_6_P1) but is reached only INSIDE the branch where
 	// proxy_command is set, and the disable above keys on precisely that.
 	if pinned := strings.TrimSpace(dialAddr); pinned != "" {
-		proxy, proxyErr := sshPinnedProxyCommand(pinned, port)
+		// The pinned MACHINE may listen on a different port than the name does — a
+		// load balancer forwards its VIP port to whatever the backend listens on, so
+		// pinning the machine without its own port would dial the wrong socket
+		// (#3122). Zero means "the port ssh.* already resolved", which is every pin
+		// written before machine-pinning existed.
+		pinnedPort := port
+		if dialPort != 0 {
+			pinnedPort = dialPort
+		}
+		proxy, proxyErr := sshPinnedProxyCommand(pinned, pinnedPort)
 		if proxyErr != nil {
 			return "", proxyErr
 		}

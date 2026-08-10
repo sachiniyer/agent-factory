@@ -1305,6 +1305,27 @@ body {
   text-overflow: ellipsis;
 }
 
+/* A durable incomplete-archive notice, sourced from the daemon snapshot rather
+ * than from the restore call that may have happened before this client existed.
+ * Keep the complete bounded text scrollable so retained source paths remain
+ * available without letting a many-entry report consume the terminal pane. */
+.af-archive-warning {
+  flex: 0 0 auto;
+  max-height: 6rem;
+  overflow: auto;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-inset);
+  color: var(--af-term-amber);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.af-archive-warning[hidden] {
+  display: none;
+}
+
 /* Tab bar (#1592 Phase 5 PR7, #2224): the flexible middle of the pane's single
  * header row, mirroring the TUI's tab row (ui/tabbed_window.go). The title keeps a
  * useful minimum, Retry never shrinks, and this bar consumes the remainder and

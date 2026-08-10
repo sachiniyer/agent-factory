@@ -36,11 +36,13 @@ var (
 // early and let Enter race the paste after all.
 const minDistinctiveFragment = 8
 
-// deliveryOutcome is deliberately THREE-valued. "The pane did not show the
-// prompt" is an observed absence only when the terminal capture proves THIS
-// payload began rendering but its completion tail did not. A collapsed paste,
-// a composer frame, and a failed capture all mean delivery could not be
-// observed; agent-wide rendering habits may never manufacture a negative.
+// deliveryOutcome keeps two different kinds of uncertainty separate. "The pane
+// did not show the prompt" is an observed absence only when the terminal capture
+// proves THIS payload began rendering but its completion tail did not. A
+// readable collapsed/composer frame means the paste command completed but its
+// content was unverified; a failed capture means confirmation itself was
+// unavailable.
+// Neither may manufacture a negative or a delivered result.
 type deliveryOutcome int
 
 const (
@@ -50,9 +52,12 @@ const (
 	// from this exact prompt was rendered, and its completion tail was not. This
 	// is the genuine #1982 signal and must stay loud.
 	deliveryObservedAbsent
-	// deliveryCouldNotObserve: capture failed, the prompt had no distinctive
-	// text, or the pane never rendered prompt-specific evidence. Nothing may be
-	// concluded about delivery.
+	// deliveryObservedUnverified: the terminal capture succeeded but never
+	// rendered enough prompt-specific evidence to verify the paste. If the later
+	// Enter command also succeeds, only those transport facts may be reported.
+	deliveryObservedUnverified
+	// deliveryCouldNotObserve: the terminal capture failed, so confirmation
+	// itself was unavailable.
 	deliveryCouldNotObserve
 )
 
@@ -667,8 +672,16 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 	if probe.completion == "" {
 		// Nothing distinctive to confirm (empty/all-whitespace prompt). There is
 		// no positive check to make, so keep the ORIGINAL 500ms drain rather than
-		// quietly shortening it.
+		// quietly shortening it. Still inspect the pane afterward: a successful
+		// capture distinguishes a readable-but-unverified send from an observer
+		// failure even though neither can prove delivery.
+		deadline := time.Now().Add(pasteDeliveryMaxWait)
 		time.Sleep(emptyPromptDrain)
+		if remaining := time.Until(deadline); remaining > 0 {
+			if content, ok := t.capturePaneForDeliveryWithin(remaining); ok {
+				return deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
+			}
+		}
 		return deliveryObservation{outcome: deliveryCouldNotObserve}
 	}
 	deadline := time.Now().Add(pasteDeliveryMaxWait)
@@ -700,7 +713,7 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 				}
 				// One weak short-tail sighting is neither confirmed delivery nor
 				// absence. A later failure must not combine with it.
-				lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve, pane: content}
+				lastObservation = deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
 			} else if probe.baselineCaptured && probe.renderWitness != "" &&
 				strings.Count(normalized, probe.renderWitness) > probe.renderWitnessBaseline {
 				streak = 0
@@ -709,9 +722,9 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 				// A successful capture is not automatically a negative. Unless it
 				// newly renders this prompt's prefix, it says only that the pane was
 				// readable — a collapsed placeholder and an empty composer are both
-				// deliberate examples of could-not-observe (#2266).
+				// deliberate examples of sent-but-unverified (#2266/#3162).
 				streak = 0
-				lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve, pane: content}
+				lastObservation = deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
 			}
 		} else {
 			// Observation continuity is load-bearing. The paste can land after an

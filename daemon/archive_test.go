@@ -480,6 +480,52 @@ func TestArchiveSession_PersistFailureRollsBack(t *testing.T) {
 	assert.Contains(t, string(list), srcPath, "git must register the worktree back at the original path")
 }
 
+// TestArchiveSession_PersistFailureKeepsIncompleteArchiveCommitted covers the
+// rollback asymmetry introduced by permissive archive copies. A prior omission
+// means the live/restored tree is incomplete; moving that copy home on a later
+// archive failure would silently resume without bytes that exist only in the
+// retained tree. The safe fallback is to keep the session archived and report a
+// committed warning, never to run the ordinary complete-copy rollback above.
+func TestArchiveSession_PersistFailureKeepsIncompleteArchiveCommitted(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	gw.RestoreArchiveReport(sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+		Device: 1, Inode: 2, FileType: 0o040000,
+		Skipped: []sessiongit.ArchiveSkippedEntry{{
+			Path: "private/credential", Reason: sessiongit.ArchiveSkipPermissionDenied,
+		}},
+	}}})
+
+	prev := archivePersist
+	archivePersist = func(*Manager, string, *session.Instance) error {
+		return errors.New("forced persist failure")
+	}
+	t.Cleanup(func() { archivePersist = prev })
+
+	dest, derr := archivedWorktreePath(repoID, "worker")
+	require.NoError(t, derr)
+	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	require.True(t, isMutationCommitted(err), "the physical archive landed and must not be retried: %v", err)
+	assert.Contains(t, err.Error(), "rolling its incomplete copy back would omit retained files")
+	assert.Equal(t, dest, archivedPath)
+	assert.Equal(t, session.Archived, archived.Status)
+	assert.Equal(t, session.Archived, inst.GetStatus())
+	assert.Equal(t, dest, inst.GetWorktreePath())
+	assert.False(t, exists(srcPath), "the incomplete copy must not be restored as though it were complete")
+	assert.True(t, exists(dest))
+
+	record := recordFor(t, repoID, "worker")
+	require.NotNil(t, record)
+	assert.Equal(t, session.Archived, record.Status)
+	assert.Equal(t, dest, record.Worktree.WorktreePath)
+	require.NotNil(t, record.ArchiveReport)
+	assert.False(t, record.ArchiveReport.Empty(), "the retained bytes must stay durably discoverable")
+}
+
 // TestArchiveSession_RejectsReservedRoot: the always-ensured root session cannot
 // be archived.
 func TestArchiveSession_RejectsReservedRoot(t *testing.T) {

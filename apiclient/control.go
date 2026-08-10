@@ -56,10 +56,11 @@ func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.
 func (c *Client) RestoreSession(req daemon.RestoreSessionRequest) (string, error) {
 	var resp daemon.RestoreSessionResponse
-	if err := c.call("RestoreSession", req, &resp); err != nil {
+	err := c.call("RestoreSession", req, &resp)
+	if err != nil && !IsMutationCommitted(err) {
 		return "", err
 	}
-	return resp.WorktreePath, nil
+	return resp.WorktreePath, err
 }
 
 // DeleteProject asks the daemon to delete a project (#1735): archive its live

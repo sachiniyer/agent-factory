@@ -24,7 +24,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
 		if strings.Contains(cmd.String(), "display-message") {
-			return []byte("7 11 1 1 0 1 0 0 1"), nil
+			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
 		}
 		for i, arg := range cmd.Args {
 			if arg == "-t" && i+1 < len(cmd.Args) {
@@ -170,4 +170,31 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	require.Equal(t, "remote-b", content)
 	require.NoError(t, <-closeDone)
 	requireIndex(t, inst, b.ID, 1)
+}
+
+// #3169 review: a producer that does not answer the combined capture shape must
+// still get its CONTENT, with the count simply unknown.
+//
+// This is the regression my first attempt caused. Making the combined shape mandatory
+// failed the capture outright, and this path is shared with the TUI's tab panes and
+// ordinal preview resolution — they lost scroll mode, the session-gone fallback and
+// ordinal resolution. A marker is an enhancement to what preview REPORTS; it must
+// never become a new requirement on what preview can CAPTURE.
+//
+// This fixture's fake tmux deliberately answers only the plain shapes, so it
+// exercises the fallback rather than the atomic path (real tmux covers that, in
+// session/tmux). Content must be unchanged and the count must read UNKNOWN — never
+// zero, which would fabricate completeness.
+func TestPreviewSnapshot_DegradesToContentWhenTheCountIsUnavailable(t *testing.T) {
+	inst := previewIdentityInstance(t, "af_preview_snapshot_degrade")
+	tabID, ok := inst.TabIDAt(0)
+	require.True(t, ok)
+
+	snapshot, err := inst.AgentServer().PreviewByID(tabID, false)
+	require.NoError(t, err, "an unavailable count must not fail the capture")
+	require.NotEmpty(t, snapshot.Content, "the content must still arrive")
+	require.False(t, snapshot.LinesAboveKnown,
+		"the count is unavailable here, and unknown must NOT be reported as zero — that would present "+
+			"a possibly-partial capture as complete")
+	require.Equal(t, 0, snapshot.LinesAbove)
 }

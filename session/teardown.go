@@ -613,9 +613,9 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 	// finalize to have run) fires as before.
 	var moveErr error
 	if m.claim != nil {
-		moveErr = gw.MoveWorktreeWithClaim(m.dest, *m.claim)
+		moveErr = gw.ArchiveWorktreeWithClaim(m.dest, *m.claim)
 	} else {
-		moveErr = gw.MoveWorktree(m.dest)
+		moveErr = gw.ArchiveWorktree(m.dest)
 	}
 	if err := moveErr; err != nil {
 		if errors.Is(err, git.ErrRelocateStateUnknown) {

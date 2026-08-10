@@ -473,6 +473,9 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	if perr := m.persistSettlement(repoID, key, inst); perr != nil {
 		log.WarningLog.Printf("restored lost session %q: %v", inst.Title, perr)
 	}
+	if report := inst.GetArchiveReport(); !report.Empty() {
+		log.WarningLog.Printf("restored lost session %q: %s", inst.Title, report.Warning("restore"))
+	}
 	log.InfoLog.Printf("restored lost session %q (repo %s): agent re-spawned in its workspace", inst.Title, repoID)
 	// The spawn succeeded — but that is NOT recovery (#1910). Arm the confirmation
 	// window rather than clearing the retry state; see armRestoreConfirmation.
