@@ -739,10 +739,10 @@ func TestRestoreArchived_RejectsPendingKill(t *testing.T) {
 	assert.True(t, exists(archivedPath), "the archived worktree must stay intact for the pending kill retry")
 }
 
-// TestRestoreArchived_RepoGoneLeavesArchiveIntact: when the origin repo has been
-// deleted, restore fails with an actionable message and leaves the archived
-// worktree and the Archived status untouched.
-func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
+// TestRestoreArchived_RepoGoneKeepsIdentityUntilKill: when the origin repo has
+// been deleted, restore leaves an identity-qualified cleanup obligation rather
+// than converting one successful probe into timeless deletion authority.
+func TestRestoreArchived_RepoGoneKeepsIdentityUntilKill(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
@@ -773,10 +773,65 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	assert.Contains(t, err.Error(), "gone")
 	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
 	assert.Equal(t, session.Archived, inst.GetStatus(), "a failed restore must leave the session Archived")
-	assert.Nil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
-		"bounded identity resolution must clear the recovery guard so repo-gone archives remain disposable")
+	recovery := recordFor(t, repoID, "worker").Worktree.RelocationRecovery
+	require.NotNil(t, recovery,
+		"repo-gone resolution must persist the selected identity until cleanup consumes it")
+	assert.Equal(t, sessiongit.RelocationRecoveryState("cleanup_ready"), recovery.State)
+	assert.True(t, recovery.IdentityKnown)
 	assert.NoError(t, inst.ValidateWorktreeDestructionAdmission(),
-		"the user must still be able to kill a repo-gone archive after its path identity is established")
+		"an unchanged identity-qualified repo-gone archive must remain disposable")
+
+	// recoverFakeBackend is intentionally a no-op on Kill. Switch only the
+	// teardown half of this fixture to the real local backend so the assertion
+	// below exercises the cleanup-ready claim through the production kill path.
+	inst.SetBackend(&session.LocalBackend{})
+	_, killErr := manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, killErr)
+	assert.False(t, exists(archivedPath), "kill must consume the qualified claim and remove the archive")
+}
+
+func TestRestoreArchived_RepoGoneReplacementRefusesKill(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, getErr := inst.GetGitWorktree()
+	require.NoError(t, getErr)
+
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	info, statErr := os.Stat(archivedPath)
+	require.NoError(t, statErr)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	require.NotNil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
+		"precondition: repo-gone restore must retain deletion identity")
+
+	originalPath := archivedPath + "-original"
+	require.NoError(t, os.Rename(archivedPath, originalPath))
+	require.NoError(t, os.Mkdir(archivedPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(archivedPath, "replacement.txt"), []byte("not ours"), 0644))
+
+	_, killErr := manager.KillSession(KillSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, killErr, "a same-path replacement must invalidate cleanup authority")
+	assert.False(t, inst.UserKilled(), "the identity guard must run before the kill tombstone")
+	assert.True(t, exists(originalPath), "the actual archived worktree must remain reachable")
+	assert.True(t, exists(filepath.Join(archivedPath, "replacement.txt")),
+		"kill must not delete a directory that replaced the claimed archive")
+	assert.NotNil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
+		"the stale claim must remain durable for operator recovery")
 }
 
 // TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location
