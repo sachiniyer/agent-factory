@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -229,6 +230,25 @@ func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testi
 
 	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
 		t.Fatalf("a non-Git origin is still conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
+func TestValidateRelocationCleanupAdmission_GitExecutionFailureFailsClosed(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("create valid returned origin: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	err := gw.ValidateRelocationCleanupAdmission()
+	if err == nil || !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("an unexecutable Git probe must fail closed, got: %v", err)
+	}
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("an operational probe failure lost cleanup authorization; retained=%v recovery=%+v", retained, recovery)
 	}
 }
 

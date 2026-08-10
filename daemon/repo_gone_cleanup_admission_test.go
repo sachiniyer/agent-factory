@@ -102,6 +102,22 @@ func TestRestoreArchived_RepoDisappearsAfterGuardKeepsCleanupIdentity(t *testing
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_NonGitOriginCreatesCleanupIdentityBeforePathResolution(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "non-git-origin")
+	require.NoError(t, os.RemoveAll(filepath.Join(repoPath, ".git")),
+		"make the still-present origin pathname conclusively non-Git")
+
+	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "non-git-origin", RepoID: repoID})
+	require.ErrorIs(t, err, sessiongit.ErrRepoGone)
+	assert.True(t, exists(archivedPath), "failed restore must leave the archive intact")
+	assert.Equal(t, session.Archived, inst.GetStatus())
+	recovery := recordFor(t, repoID, "non-git-origin").Worktree.RelocationRecovery
+	require.NotNil(t, recovery,
+		"the pre-path guard must create cleanup authorization for a non-Git origin")
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))
