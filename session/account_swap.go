@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -14,7 +15,43 @@ import (
 // commits the new account only after this returns, so an unanswered teardown can
 // never leave a live old identity recorded as the new one.
 type accountSwapStopper interface {
-	stopForAccountSwap(*Instance) error
+	stopForAccountSwap(*Instance, bool) error
+}
+
+type accountSwapLaunchPlan struct {
+	account      string
+	base         string
+	program      string
+	proof        sessionenv.AccountLaunchProof
+	conversation AgentConversationData
+}
+
+func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchPlan {
+	if plan == nil {
+		return nil
+	}
+	copy := *plan
+	copy.proof.GeneratedArgs = append([]string(nil), plan.proof.GeneratedArgs...)
+	return &copy
+}
+
+func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
+	trustBase, resume bool, prepared *accountSwapLaunchPlan,
+) (string, sessionenv.AccountLaunchProof) {
+	if prepared != nil {
+		if prepared.conversation.HasID() {
+			i.SetAgentConversation(prepared.conversation)
+		}
+		return prepared.program, prepared.proof
+	}
+	program := resolvedProgram
+	if resume {
+		program = prepareResumeConversation(i, program)
+	} else {
+		program = prepareLaunchConversation(i, program)
+	}
+	program = injectSystemPrompt(program)
+	return program, accountLaunchProof(declarationBase, program, trustBase)
 }
 
 // AccountSelection reports the current account and whether af selected it. A
@@ -63,6 +100,7 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	i.mu.RLock()
 	program := i.Program
 	path := i.Path
+	instanceID := i.ID
 	current := i.Account
 	auto := i.accountAutoSelected
 	op := i.inFlightOp
@@ -84,11 +122,42 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if pendingCleanup > 0 {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
-	resolvedProgram := resolveLaunchProgramForInstance(i).command
+	resolution := resolveLaunchProgramForInstance(i)
+	resolvedProgram := resolution.command
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
 	}
-	accountScope := sessionenv.Account{Agent: sessionenv.AgentForCommand(resolvedProgram), Name: name}
+	launchProgram := resolvedProgram
+	var conversation AgentConversationData
+	proof := accountLaunchProof(resolvedProgram, resolvedProgram, resolution.trustBase)
+	if backend.Type() == "local" {
+		launchProgram, conversation = planLaunchConversation(instanceID, resolvedProgram)
+		launchProgram = injectSystemPrompt(launchProgram)
+		proof = accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase)
+		if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
+			return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
+		}
+	}
+	accountScope, err := resolveAccountForProvision(path, program, name)
+	if err != nil {
+		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
+	}
+	if err := refuseAccountAgentDrift(name, accountScope.Agent, launchProgram); err != nil {
+		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
+	}
+	accountScope.TrustedExecutable = proof.TrustedExecutable
+	accountScope.GeneratedArgs = proof.GeneratedArgs
+	if backend.Type() == "docker" {
+		// The Docker launch cannot inherit executable identity proved only in the
+		// host namespace. Match backend_docker's boundary before any old sandbox is
+		// reaped, so a host-qualified override refuses while the old work stays live.
+		accountScope.TrustedExecutable = ""
+	}
+	filtered := sessionenv.FilterForCommand(
+		os.Environ(), accountScope.Agent, launchProgram, sessionEnvPassthroughForInstance(i))
+	if _, err := sessionenv.ApplyAccount(filtered, launchProgram, accountScope); err != nil {
+		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
+	}
 	for idx, tab := range tabs {
 		if idx == 0 {
 			continue
@@ -96,14 +165,36 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
 			continue
 		}
+		if args := tmux.ConversationSelectorArgs(tab.tmux.Program()); len(args) > 0 {
+			return fmt.Errorf("cannot switch session %q to account %q because tab %q pins an existing conversation with arguments %s; an account swap restarts that tab under a separate conversation store", i.Title, name, tab.Name, strings.Join(args, " "))
+		}
 		if err := sessionenv.ValidateAccountEnvironmentCommand(tab.tmux.Program(), accountScope); err != nil {
 			return fmt.Errorf("cannot switch session %q to account %q while tab %q pins another identity: %w", i.Title, name, tab.Name, err)
 		}
 	}
-	if _, err := resolveAccountForProvision(path, program, name); err != nil {
-		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
+		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
+	}
+	if backend.Type() == "local" {
+		i.accountSwapLaunch = &accountSwapLaunchPlan{
+			account: name, base: resolvedProgram, program: launchProgram,
+			proof: proof, conversation: conversation,
+		}
+	} else {
+		i.accountSwapLaunch = nil
 	}
 	return nil
+}
+
+func (i *Instance) accountSwapLaunchForRespawn() (*accountSwapLaunchPlan, error) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.accountSwapLaunch == nil || i.accountSwapLaunch.account != i.Account {
+		return nil, fmt.Errorf("account swap for %q has no launch plan preflighted for account %q", i.Title, i.Account)
+	}
+	return cloneAccountSwapLaunchPlan(i.accountSwapLaunch), nil
 }
 
 // StopForAccountSwap conclusively stops the old runtime. It does not change the
@@ -123,7 +214,28 @@ func (i *Instance) StopForAccountSwap() error {
 	if !ok {
 		return fmt.Errorf("account swapping is not supported by the %s backend", backend.Type())
 	}
-	return stopper.stopForAccountSwap(i)
+	return stopper.stopForAccountSwap(i, false)
+}
+
+// StopRemainingPanesForAccountSwap rechecks every local sibling when the agent
+// probe already established that tab zero is absent. A retry must not promote
+// that one absence into proof that every credential-bearing pane is gone.
+func (i *Instance) StopRemainingPanesForAccountSwap() error {
+	backend := i.currentBackend()
+	i.mu.RLock()
+	op := i.inFlightOp
+	i.mu.RUnlock()
+	if op != OpRespawning {
+		return fmt.Errorf("account swap for %q requires the limit-resume fence", i.Title)
+	}
+	if backend == nil || backend.Type() != "local" {
+		return nil
+	}
+	stopper, ok := backend.(accountSwapStopper)
+	if !ok {
+		return fmt.Errorf("account swapping is not supported by the %s backend", backend.Type())
+	}
+	return stopper.stopForAccountSwap(i, true)
 }
 
 // SelectAccountAutomatically commits the scheduler's replacement identity in
@@ -161,6 +273,7 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	i.Account = name
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
 	i.setAgentConversationLocked(conversation)
 	return nil
 }
@@ -174,6 +287,7 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 		return false
 	}
 	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
 	return true
 }
 
@@ -185,7 +299,7 @@ func (i *Instance) AccountSwapReprovisionsSandbox() bool {
 	return backend != nil && backend.Type() == "docker"
 }
 
-func (b *LocalBackend) stopForAccountSwap(i *Instance) error {
+func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) error {
 	i.mu.RLock()
 	gw := i.gitWorktree
 	tabs := append([]*Tab(nil), i.Tabs...)
@@ -194,8 +308,14 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance) error {
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
 	var failures []error
-	for _, tab := range tabs {
+	for idx, tab := range tabs {
+		if agentAlreadyAbsent && idx == 0 {
+			continue
+		}
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+			continue
+		}
+		if tab.tmux.ProvenNoPane() {
 			continue
 		}
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
@@ -215,7 +335,43 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance) error {
 }
 
 func (b *LocalBackend) respawnFresh(i *Instance) error {
-	return b.respawnWithConversation(i, false)
+	plan, err := i.accountSwapLaunchForRespawn()
+	if err != nil {
+		return err
+	}
+	if err := b.respawnWithConversation(i, false, plan); err != nil {
+		return err
+	}
+	if err := validateAccountSwapSiblingTabs(i); err != nil {
+		stopErr := b.stopForAccountSwap(i, false)
+		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",
+			i.Title, errors.Join(err, stopErr))
+	}
+	return nil
+}
+
+func validateAccountSwapSiblingTabs(i *Instance) error {
+	i.mu.RLock()
+	tabs := append([]*Tab(nil), i.Tabs...)
+	i.mu.RUnlock()
+	var failures []error
+	for idx, tab := range tabs {
+		if idx == 0 || tab == nil || !tab.Kind.HasTmux() {
+			continue
+		}
+		if tab.tmux == nil {
+			failures = append(failures, fmt.Errorf("tab %q has no tmux binding", tab.Name))
+			continue
+		}
+		exists, known := tab.tmux.ProbeSession()
+		switch {
+		case !known:
+			failures = append(failures, fmt.Errorf("tab %q did not answer its restart probe", tab.Name))
+		case !exists:
+			failures = append(failures, fmt.Errorf("tab %q did not restart", tab.Name))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
@@ -227,6 +383,6 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	return nil
 }
 
-func (b *remoteAgentBackend) stopForAccountSwap(i *Instance) error {
+func (b *remoteAgentBackend) stopForAccountSwap(i *Instance, _ bool) error {
 	return i.reapRemoteRuntimeForReplacement()
 }

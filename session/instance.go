@@ -202,6 +202,8 @@ type Instance struct {
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.
 	pendingAccountSwap *AccountSwapData
+	// accountSwapLaunch is the admitted command, rebuilt before a post-restart retry.
+	accountSwapLaunch *accountSwapLaunchPlan
 	// Height is the height of the instance.
 	Height int
 	// Width is the width of the instance.

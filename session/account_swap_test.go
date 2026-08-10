@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -8,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
@@ -24,6 +28,20 @@ func accountSwapTestInstance(program string) *Instance {
 		inFlightOp: OpRespawning,
 		Tabs:       []*Tab{newAgentTab(tmux.NewTmuxSession("swap", program))},
 	}
+}
+
+func registeredAccountSwapTestInstance(t *testing.T, program, resolved string) *Instance {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{program: resolved}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, program, "work")
+	require.NoError(t, err)
+	inst := accountSwapTestInstance(program)
+	inst.Path = initTempGitRepo(t)
+	return inst
 }
 
 func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
@@ -62,7 +80,7 @@ func TestSelectAccountAutomaticallyClearsPriorConversationAndCapture(t *testing.
 }
 
 func TestValidateAccountSwapRefusesSiblingIdentityOverride(t *testing.T) {
-	inst := accountSwapTestInstance("codex")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramCodex, "codex")
 	inst.Tabs = append(inst.Tabs, &Tab{
 		ID: "build", Name: "build", Kind: TabKindProcess,
 		tmux: tmux.NewTmuxSession("build", "CODEX_HOME=/other make"),
@@ -71,6 +89,117 @@ func TestValidateAccountSwapRefusesSiblingIdentityOverride(t *testing.T) {
 	err := inst.ValidateAccountSwap("work")
 	require.ErrorContains(t, err, `tab "build"`)
 	require.ErrorContains(t, err, "overrides the account directory")
+}
+
+func TestValidateAccountSwapPreflightsResolvedScopedLaunch(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude --model sonnet")
+
+	err := inst.ValidateAccountSwap("work")
+	require.Error(t, err, "the scoped command must be validated before any old pane is stopped")
+	require.ErrorContains(t, err, "--model")
+	require.ErrorContains(t, err, "sonnet")
+}
+
+func TestValidateAccountSwapPreflightsCloudAuthenticationMode(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	t.Setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+
+	err := inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, "cloud mode")
+	require.ErrorContains(t, err, "CLAUDE_CODE_USE_BEDROCK")
+}
+
+func TestValidateAccountSwapRefusesSiblingConversationSelector(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "worker", Name: "worker", Kind: TabKindProcess,
+		tmux: tmux.NewTmuxSession("worker", "claude --resume sibling-chat"),
+	})
+
+	err := inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, `tab "worker"`)
+	require.ErrorContains(t, err, "--resume sibling-chat")
+}
+
+type failAccountSwapProcessPty struct {
+	t       *testing.T
+	cmdExec cmd_test.MockCmdExec
+	name    string
+}
+
+func (p failAccountSwapProcessPty) Start(cmd *exec.Cmd) (*os.File, error) {
+	if strings.Contains(cmd.String(), "new-session") && strings.Contains(cmd.String(), p.name) {
+		return nil, fmt.Errorf("process restart refused")
+	}
+	f, err := os.CreateTemp(p.t.TempDir(), "pty-")
+	if err == nil {
+		_ = p.cmdExec.Run(cmd)
+	}
+	return f, err
+}
+
+func (p failAccountSwapProcessPty) Close() {}
+
+func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+	const agentName = "af_swap_restart"
+	const processName = agentName + "__build"
+	var newSessions int
+	executor := countingExec(map[string]bool{}, &newSessions)
+	inst := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix, executor)
+	inst.mu.Lock()
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "build", Name: "build", Kind: TabKindProcess, Command: "make",
+		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "make",
+			failAccountSwapProcessPty{t: t, cmdExec: executor, name: processName}, executor),
+	})
+	inst.mu.Unlock()
+	inst.Path = initTempGitRepo(t)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+
+	err = inst.RespawnForAccountSwap()
+	require.ErrorContains(t, err, `tab "build"`)
+	require.False(t, inst.TabAlive(0),
+		"a partially restored account boundary must not leave its new agent running")
+}
+
+func TestRespawnForAccountSwapUsesThePreflightedProgramSnapshot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	const agentName = "af_swap_frozen_launch"
+	var newSessions int
+	var spawns []string
+	inst := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	inst.Path = initTempGitRepo(t)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "claude --model changed-after-preflight"
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	require.NoError(t, inst.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+	require.NotContains(t, spawns[0], "changed-after-preflight",
+		"the stopped runtime must be replaced with the exact command admitted by preflight")
 }
 
 func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {

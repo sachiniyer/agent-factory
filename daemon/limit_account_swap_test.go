@@ -10,7 +10,10 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func configureLimitAccountCandidate(t *testing.T, manager *Manager, name string) {
@@ -209,6 +212,57 @@ func TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows(t *testin
 	manager.RefreshStatuses()
 	if got := inst.GetLiveness(); got != session.LiveLost {
 		t.Fatalf("non-limit row with stale pending marker after status poll = %v, want Lost", got)
+	}
+}
+
+func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	repoPath := setupControlRepo(t)
+	worktreePath := filepath.Join(t.TempDir(), "worktree")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, worktreePath, "retry", "retry-branch", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const agentName = "af_swap_retry"
+	executor := tabNameKeyedExec(map[string]bool{agentName: true})
+	pty := tabPtyFactory{t: t, cmdExec: executor}
+	agent := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, executor)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "retry", Path: repoPath, Program: "claude",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(&session.LocalBackend{})
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetTmuxSession(agent)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	if _, err := inst.AddProcessTab("make", "build"); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := agent.Close(); state != tmux.PaneStateKnown || err != nil {
+		t.Fatalf("make agent absent: state=%v err=%v", state, err)
+	}
+	if inst.TabAlive(0) || !inst.TabAlive(1) {
+		t.Fatal("fixture must have an absent agent and a live sibling")
+	}
+	inst.SetLimitReached(time.Time{})
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &Manager{}
+	if err := manager.prepareRuntimeForAccountSwap("repo", "key", inst); err != nil {
+		t.Fatal(err)
+	}
+	if inst.TabAlive(1) {
+		t.Fatal("an absent agent pane must not let a still-live sibling bypass account-swap teardown")
 	}
 }
 

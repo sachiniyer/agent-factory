@@ -155,6 +155,22 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 		sessionenv.ImportNamesForCommand(source, filterAgent, program, extra), nil
 }
 
+// ValidateAccountLaunchSupport checks the host-only prerequisites that must be
+// known before an account swap stops the old panes. Command and environment
+// validation live in sessionenv; this keeps the tmux capability probe shared
+// with the actual launch instead of re-deriving its version rule in session.
+func ValidateAccountLaunchSupport(account string) error {
+	if !newSessionEnvSupportedForAccounts() {
+		return fmt.Errorf(
+			"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
+				"and af refuses rather than starting the session on the ambient account", account)
+	}
+	if _, err := sessionEnvExecutable(); err != nil {
+		return fmt.Errorf("locate af's account environment shim: %w", err)
+	}
+	return nil
+}
+
 // importClientEnvironmentArgs makes an existing tmux server copy the approved
 // client variables into only the new session. update-environment is temporarily
 // expanded and restored in the same tmux command queue, so values stay in

@@ -576,6 +576,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		fallthrough
 	case probeAbsent:
+		if accountSwap != nil && !forceRespawn {
+			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
+				return resumeNotPerformed, err
+			}
+		}
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the
@@ -593,6 +598,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			})
 		}
 		if rerr != nil {
+			if accountSwap != nil {
+				if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+					rerr = errors.Join(rerr, perr)
+				}
+			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh

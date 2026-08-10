@@ -155,7 +155,7 @@ func (m *Manager) prepareRuntimeForAccountSwap(repoID, key string, instance *ses
 		}
 		return instance.StopForAccountSwap()
 	case probeAbsent:
-		return nil
+		return instance.StopRemainingPanesForAccountSwap()
 	default:
 		return fmt.Errorf("cannot switch accounts for %q: unrecognized runtime state", instance.Title)
 	}

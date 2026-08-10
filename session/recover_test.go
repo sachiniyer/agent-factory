@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -89,16 +91,24 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
-	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
 
 	const agentName = "af_account_swap_agent"
 	var newSessions int
 	var spawns []string
 	restored := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	restored.Path = initTempGitRepo(t)
 	restored.SetLimitReached(time.Time{})
 	require.NoError(t, restored.BeginLimitResume())
-	_, err := restored.SelectAccountAutomatically("", "work")
+	require.NoError(t, restored.ValidateAccountSwap("work"))
+	_, err = restored.SelectAccountAutomatically("", "work")
 	require.NoError(t, err)
 
 	require.NoError(t, restored.RespawnForAccountSwap())

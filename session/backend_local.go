@@ -538,10 +538,10 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 // PTY yet on this path) and the tmux refs are kept, so the next tick's retry
 // reconnects each tab by its exact persisted name.
 func (b *LocalBackend) respawn(i *Instance) error {
-	return b.respawnWithConversation(i, true)
+	return b.respawnWithConversation(i, true, nil)
 }
 
-func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool) error {
+func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepared *accountSwapLaunchPlan) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -573,6 +573,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool) error {
 	}
 	resolution := resolveLaunchProgramForInstance(i)
 	resolvedProgram := resolution.command
+	if prepared != nil {
+		resolvedProgram = prepared.base
+	}
 	// The base for the generated-args declaration, pinned BEFORE any af rewrite.
 	// resolvedProgram is reassigned below when a fresh worktree rebuild forces the
 	// exact-resume command, and that rewrite is af's own — so declaring against the
@@ -625,15 +628,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool) error {
 		}
 	}
 
-	program := resolvedProgram
-	if resume {
-		program = prepareResumeConversation(i, program)
-	} else {
-		program = prepareLaunchConversation(i, program)
-	}
-	program = injectSystemPrompt(program)
-	setLaunchProgram(ts, program,
-		accountLaunchProof(declarationBase, program, resolution.trustBase))
+	program, proof := respawnLaunchProgram(
+		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
+	setLaunchProgram(ts, program, proof)
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
