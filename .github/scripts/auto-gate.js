@@ -368,6 +368,23 @@ async function processAggregateHead({
       };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
+      let invalidated;
+      try {
+        invalidated = await beginAggregateDecision({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+        });
+        if (invalidated.writeState === "read-only") {
+          throw new Error(`Could not invalidate aggregate ${pending.headSha}`);
+        }
+      } catch (invalidationError) {
+        throw new AggregateError(
+          [error, invalidationError],
+          `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
+        );
+      }
       if (!message.startsWith(`Refusing to merge PR #${prNumber};`)) {
         throw error;
       }
@@ -375,6 +392,7 @@ async function processAggregateHead({
       // the red enforcement record; infrastructure and merge API errors remain
       // fatal to the workflow job.
       core.notice(message);
+      return { state: "waiting", pending, aggregate, invalidated };
     }
   }
   return { state: "pass", pending, aggregate };

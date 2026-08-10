@@ -404,6 +404,26 @@ test("one shared-head transaction merges at most one PR before master changes", 
   assert.match(github.updatedChecks.at(-1).output.title, /WAITING: refreshing/);
 });
 
+test("a merge API error makes the published aggregate non-green before propagating", async () => {
+  const github = fakeGateGithub({ mergeError: new Error("merge API unavailable") });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /merge API unavailable/,
+  );
+
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "failure");
+  assert.match(github.updatedChecks.at(-1).output.title, /WAITING: refreshing/);
+});
+
 test("a stale aggregate PASS is made non-green before decisions refresh", async () => {
   const github = fakeGateGithub({
     checkRuns: [
@@ -1109,6 +1129,7 @@ function fakeGateGithub({
   ],
   pullRequestsByNumber = {},
   graphqlErrorsByNumber = {},
+  mergeError = null,
   checkWriteError = null,
 } = {}) {
   const listFiles = function listFiles() {};
@@ -1119,6 +1140,9 @@ function fakeGateGithub({
   const listReviewComments = function listReviewComments() {};
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
+    if (mergeError) {
+      throw mergeError;
+    }
     github.operations.push("merge");
     github.mergedWith = options;
     return { data: { sha: "merge-sha" } };
