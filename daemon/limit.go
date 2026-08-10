@@ -400,7 +400,7 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 		return resumeNotPerformed, nil
 	}
 
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title)
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
 }
 
 // resumeFromLimitLocked performs the shared limit-resume action. The caller must
@@ -411,7 +411,12 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 // points (resumeFromLimit and the auto-resume scheduler) take the two locks before
 // calling in, so this body never touches the lock helpers itself.
 func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle)
+	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, nil)
+	return err
+}
+
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) error {
+	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
 	return err
 }
 
@@ -439,7 +444,7 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 }
 
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (resumeFromLimitOutcome, error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
@@ -514,8 +519,35 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 	}()
 
+	forceRespawn := false
+	if accountSwap != nil {
+		if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+			return resumeNotPerformed, err
+		}
+		if !accountSwap.alreadySet {
+			if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
+				return resumeNotPerformed, err
+			}
+			if err := instance.SelectAccountAutomatically(accountSwap.to); err != nil {
+				return resumeNotPerformed, err
+			}
+			// The old runtime is conclusively stopped. Make the new identity durable
+			// BEFORE starting it, so a crash can never relaunch on the old account
+			// while the session reports the replacement.
+			if err := m.persistSettlement(repoID, key, instance); err != nil {
+				_ = instance.RestoreAccountSelectionUnderResumeFence(accountSwap.previousAccount, accountSwap.previousAuto)
+				return resumeNotPerformed, err
+			}
+			forceRespawn = true
+		}
+	}
+
 	as := instance.AgentServer()
-	switch probe := probeLiveness(instance, as); probe {
+	probe := probeAbsent
+	if !forceRespawn {
+		probe = probeLiveness(instance, as)
+	}
+	switch probe {
 	case probeAlive:
 		// A live stall — the common claude/codex case. No re-spawn; the un-stall
 		// prompt below is all it needs.
@@ -620,7 +652,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 
 	prompt := strings.TrimSpace(instance.GetPrompt())
-	if prompt == "" {
+	if accountSwap != nil {
+		prompt = accountSwapPrompt(accountSwap, prompt)
+	} else if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"

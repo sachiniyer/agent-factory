@@ -83,6 +83,7 @@ reset-less banner — including every `devin` limit — resumes on the
 
 ```toml
 limit_auto_resume = true
+limit_account_candidates = ["work", "personal"] # optional account-switch order
 limit_retry_interval = "30m"   # fallback cadence when a banner states no reset time
 ```
 
@@ -96,10 +97,34 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   the daemon backs off exponentially (settling at one attempt every 5 minutes)
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
-- **Global-only.** `limit_auto_resume` and `limit_retry_interval` are rejected
+- **Optional account switch** → before waiting for the old identity's reset, an
+  unpinned local or Docker session may restart on the first registered account
+  in `limit_account_candidates` that has no current limit observation. The
+  ordered list is the opt-in; af never chooses from every registered account.
+  If every listed account is limited or absent, the existing wait remains.
+- **An explicit `--account` is immutable.** It is a pin, so automatic switching
+  never overrides it. Accounts selected by the scheduler may move again after
+  they later hit their own limit.
+- **No invented quota claim.** Providers expose no quota API af can read. The
+  scheduler uses the same honest evidence as `af quota`: a candidate is rejected
+  when af currently observes one of its sessions at a limit; absence of that
+  observation is not presented as a provider guarantee.
+- **Visible in the session.** The first prompt after replacement names the old
+  and new identities before repeating the stored task prompt.
+- **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
+  `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running
-  daemon at once — no restart; a raw hand-edit of `config.toml` takes effect on
-  the next daemon start.
+  daemon at once — no restart. The candidate list may also be replaced in a
+  machine-local personal-project config, so one project can use a narrower set
+  without trusting checked-in repository config with identity policy.
+
+Set the global ordered list with:
+
+```sh
+af config set limit_account_candidates work,personal
+```
+
+Or add `--project <id-or-path>` for a personal per-project override.
 
 Full config reference: [configuration.md](configuration.md#usage-limit-auto-resume).
 

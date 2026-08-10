@@ -116,6 +116,7 @@ func (b *FakeBackend) CheckAndHandleTrustPrompt(*Instance) bool     { return fal
 func (b *FakeBackend) AgentModelChange(*Instance) *AgentModelChange { return nil }
 func (b *FakeBackend) Recover(*Instance) error                      { return nil }
 func (b *FakeBackend) Respawn(*Instance) error                      { return nil }
+func (b *FakeBackend) stopForAccountSwap(*Instance) error           { return nil }
 func (b *FakeBackend) PrepareAgentSwap(_ *Instance, target string) (AgentSwapPlan, error) {
 	plan := AgentSwapPlan{target: target, program: target}
 	if target == tmux.ProgramCodex {

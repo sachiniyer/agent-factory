@@ -59,6 +59,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		UpdatedAt:                time.Now(),
 		Program:                  i.Program,
 		Account:                  i.Account,
+		AccountAutoSelected:      i.accountAutoSelected,
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
 		UserKilled:               i.userKilled,
@@ -96,6 +97,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitAccount = i.limitAccount
 	}
 
 	// Unlike the reset time above, this is NOT gated on a liveness: whether the run
@@ -323,6 +325,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
+		limitAccount:             data.LimitAccount,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
@@ -335,6 +338,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		UpdatedAt:                data.UpdatedAt,
 		Program:                  data.Program,
 		Account:                  data.Account,
+		accountAutoSelected:      data.AccountAutoSelected,
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
 		userKilled:               data.UserKilled,
@@ -344,6 +348,11 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// outage. An unrecognized value from a newer binary loads as-is and
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
+	}
+	if liveness == LiveLimitReached && instance.limitAccount == "" && data.Account != "" && !data.AccountAutoSelected {
+		// Records from before limit_account existed can only have an explicitly
+		// pinned Account, so that is the identity that produced the persisted wall.
+		instance.limitAccount = data.Account
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false

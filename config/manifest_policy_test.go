@@ -224,7 +224,7 @@ func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 		return precedenceLegacyRepo
 	case "default_program", "program_overrides":
 		return precedenceGlobalRepoPersonal
-	case "branch_prefix", "on_archive_command", "root_agent":
+	case "branch_prefix", "on_archive_command", "root_agent", "limit_account_candidates":
 		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {
@@ -240,7 +240,7 @@ func expectedMerge(entry ManifestEntry) MergePolicy {
 		return MergeMapByKey
 	case "theme", "docker", "ssh", "root_agent":
 		return MergeTableByField
-	case "network.cors_allowed_origins", "post_worktree_commands":
+	case "network.cors_allowed_origins", "post_worktree_commands", "limit_account_candidates":
 		return MergeListReplace
 	default:
 		return MergeReplace

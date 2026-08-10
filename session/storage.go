@@ -130,6 +130,9 @@ type InstanceData struct {
 	// drops it for every normal session; additive + rollforward, mirroring the
 	// Liveness precedent.
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
+	// LimitAccount is the identity that produced this limit observation. It may
+	// differ from Account while a durably selected replacement is still starting.
+	LimitAccount string    `json:"limit_account,omitempty"`
 	Height       int       `json:"height"`
 	Width        int       `json:"width"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -148,6 +151,9 @@ type InstanceData struct {
 	// ambient account would spend the wrong quota while still displaying the
 	// account it was created with.
 	Account string `json:"account,omitempty"`
+	// AccountAutoSelected is true only when af's opt-in limit scheduler chose the
+	// account. Missing/false preserves every pre-#3127 account as an explicit pin.
+	AccountAutoSelected bool `json:"account_auto_selected,omitempty"`
 	// UserKilled is the kill-intent tombstone (#1108): persisted by
 	// Manager.KillSession before teardown begins. Present only in the crash
 	// window between tombstone write and record deletion — a surviving

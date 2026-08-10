@@ -169,13 +169,17 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// which is what a resume episode is about (#2876).
 	now := nowFunc()
 	stateKey := stableSessionKey(repoID, inst)
+	accountSwap, swapErr := m.accountSwapForLimit(inst)
+	if swapErr != nil {
+		log.WarningLog.Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
+	}
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
 		return
 	}
 	resetAt, hasReset := inst.LimitResetAt()
-	if !hasReset && retryInterval <= 0 {
+	if !hasReset && retryInterval <= 0 && accountSwap == nil {
 		// No parseable reset time and no fallback interval: the session is
 		// surface-only. Return WITHOUT creating retry state so unschedulable
 		// parks never accumulate a map entry.
@@ -194,6 +198,9 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	due := st.parkedAt.Add(retryInterval)
 	if hasReset {
 		due = resetAt.Add(limitResumeGrace)
+	}
+	if accountSwap != nil {
+		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
 	// first fire lands at due and repeats are throttled.
@@ -232,6 +239,20 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || inst.GetLiveness() != session.LiveLimitReached {
 		return
 	}
+	// Re-evaluate at the operation boundary. A candidate can become limited, be
+	// unregistered, or be removed from project config after the point-in-time
+	// scan above; none of those may be carried into a credential replacement.
+	if accountSwap != nil {
+		var err error
+		accountSwap, err = m.accountSwapForLimit(inst)
+		if err != nil {
+			log.WarningLog.Printf("account-swap recheck for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, err)
+			return
+		}
+		if accountSwap == nil {
+			return
+		}
+	}
 
 	// Whether this episode carried a parseable reset time, captured BEFORE the
 	// resume: resumeFromLimit clears the limit (and the reset time) on success,
@@ -241,21 +262,24 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// Record the attempt and set the backoff/interval gate BEFORE firing, so a
 	// resume that re-hits the wall on the very next tick is already throttled —
 	// never a hot re-limit loop.
-	attempts, wait := m.limitResumeAttempted(st, now, hadReset, retryInterval)
+	attempts, wait := m.limitResumeAttempted(st, now, hadReset || accountSwap != nil, retryInterval)
 
-	if err := m.resumeFromLimitLocked(repoID, key, inst, inst.Title); err != nil {
+	if err := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap); err != nil {
 		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
 		return
 	}
-	// State the trigger that was actually observed (#3240): with a parsed reset
-	// time the daemon scheduled against it and that time passing is known; with
-	// none, only the fallback interval fired — a success there says nothing about
-	// when or why any provider usage window changed.
-	trigger := "after the limit_retry_interval fallback elapsed (no reset time was parsed)"
-	if hadReset {
-		trigger = "after its parsed usage-limit reset time passed"
+	if accountSwap != nil {
+		log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) on %s account %q (attempt %d)", inst.Title, repoID, accountSwap.agent, accountSwap.to, attempts)
+	} else {
+		// State the trigger that was actually observed (#3240): with a parsed
+		// reset time the daemon scheduled against it; otherwise only the fallback
+		// interval firing is known.
+		trigger := "after the limit_retry_interval fallback elapsed (no reset time was parsed)"
+		if hadReset {
+			trigger = "after its parsed usage-limit reset time passed"
+		}
+		log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
 	}
-	log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
 }
 
 // limitResumeAttempted records one auto-resume attempt and sets the gate for the

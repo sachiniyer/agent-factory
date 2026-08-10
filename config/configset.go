@@ -115,6 +115,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// where the binary is actually run, and already lives there.
 	"vscode_server_binary":           {kind: cfgString},
 	"limit_auto_resume":              {kind: cfgBool},
+	"limit_account_candidates":       {kind: cfgStringList, validate: validateLimitAccountCandidatesValue},
 	"global_agent_skills":            {kind: cfgBool},
 	"docker.mount_agent_credentials": {kind: cfgBool, section: "docker"},
 	"ssh.host_key_verification": {kind: cfgString, section: "ssh", validate: func(_, v string) error {

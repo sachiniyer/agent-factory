@@ -531,6 +531,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveLimitReached
 	i.limitResetAt = resetAt
+	i.limitAccount = i.Account
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }
@@ -593,6 +594,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.liveness = LiveRunning
 	i.limitResetAt = time.Time{}
+	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
 	// it is stale by definition and must not land (#2135).
@@ -619,6 +621,17 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return i.limitResetAt, true
+}
+
+// LimitAccount returns the account whose runtime produced the current limit
+// observation. Empty is the ambient identity; ok is false off the limit wall.
+func (i *Instance) LimitAccount() (account string, ok bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return "", false
+	}
+	return i.limitAccount, true
 }
 
 // livenessFromData resolves the liveness a persisted or snapshot record should

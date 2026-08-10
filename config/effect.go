@@ -69,6 +69,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"log_max_size_mb":                EffectAppliedLive,
 	"log_max_backups":                EffectAppliedLive,
 	"limit_auto_resume":              EffectAppliedLive,
+	"limit_account_candidates":       EffectAppliedLive,
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,

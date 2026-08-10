@@ -62,6 +62,31 @@ func TestInstanceAccount_EmptyStaysEmpty(t *testing.T) {
 		"an unscoped session must not persist an account key at all")
 }
 
+func TestInstanceAccount_ExplicitPinAndAutomaticSelectionStayDistinctOnDisk(t *testing.T) {
+	explicit := (&Instance{Title: "explicit", Account: "work"}).ToInstanceData()
+	require.False(t, explicit.AccountAutoSelected,
+		"the zero value must preserve legacy non-empty accounts as explicit pins")
+
+	automatic := &Instance{Title: "automatic", Account: "personal", accountAutoSelected: true}
+	stored := automatic.ToInstanceData().ForStorage()
+	require.True(t, stored.AccountAutoSelected)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"account_auto_selected":true`)
+
+	restored, err := FromInstanceData(InstanceData{
+		Title:               "automatic",
+		Account:             "personal",
+		AccountAutoSelected: true,
+		BackendType:         "docker",
+		Liveness:            LiveArchived,
+	})
+	require.NoError(t, err)
+	account, restoredAutomatic := restored.AccountSelection()
+	require.Equal(t, "personal", account)
+	require.True(t, restoredAutomatic, "a daemon restart must not turn an automatic selection into an explicit pin")
+}
+
 // Unsupported combinations must REFUSE at create time with an actionable error,
 // not start a session that dies in the pane or silently uses another identity
 // (#3051 review).

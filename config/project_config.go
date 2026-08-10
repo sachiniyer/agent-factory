@@ -41,6 +41,9 @@ type ProjectConfig struct {
 	// OnArchiveCommand overrides the operator-authored archive hook for this
 	// project. This file is machine-local under the AF home, never checked in.
 	OnArchiveCommand string `toml:"on_archive_command,omitempty"`
+	// LimitAccountCandidates replaces the global account-swap candidate list for
+	// this project. It is machine-local identity policy, never checked in.
+	LimitAccountCandidates []string `toml:"limit_account_candidates,omitempty"`
 	// RootAgent is the personal per-project root-agent profile (#2216 Phase 6):
 	// whether THIS project keeps an always-ensured root session on this machine,
 	// and the command it runs. It is the highest-precedence root-agent layer, so
@@ -185,6 +188,11 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 			return nil, err
 		}
 	}
+	normalizedCandidates, err := normalizeLimitAccountCandidates(cfg.LimitAccountCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
+	}
+	cfg.LimitAccountCandidates = normalizedCandidates
 	return &cfg, nil
 }
 

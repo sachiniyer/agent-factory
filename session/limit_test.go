@@ -25,6 +25,21 @@ func TestSetLimitReached(t *testing.T) {
 	require.True(t, got.Equal(reset))
 }
 
+func TestSetLimitReachedAttributesWallToAccountThatProducedIt(t *testing.T) {
+	i := &Instance{Account: "work", accountAutoSelected: true}
+	i.SetLimitReached(time.Time{})
+
+	account, ok := i.LimitAccount()
+	require.True(t, ok)
+	require.Equal(t, "work", account)
+
+	data := i.ToInstanceData()
+	require.Equal(t, "work", data.LimitAccount)
+	i.Account = "personal"
+	account, _ = i.LimitAccount()
+	require.Equal(t, "work", account)
+}
+
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still
 // blocks the session, but LimitResetAt reports no known time.
 func TestSetLimitReached_NoResetTime(t *testing.T) {
@@ -74,6 +89,8 @@ func TestClearLimitReached(t *testing.T) {
 	require.False(t, i.LimitReached())
 	require.Equal(t, LiveRunning, i.GetLiveness())
 	_, ok := i.LimitResetAt()
+	require.False(t, ok)
+	_, ok = i.LimitAccount()
 	require.False(t, ok)
 
 	// No-op on a Ready instance.
