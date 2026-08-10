@@ -188,6 +188,21 @@ func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Respawn(i) })
 }
 
+// RespawnForAccountSwap starts the replacement identity in a fresh provider
+// conversation. Local recovery normally resumes the prior conversation, which
+// belongs to the previous account's separate home; Docker already provisions a
+// fresh sandbox and launch through its ordinary Respawn implementation.
+func (i *Instance) RespawnForAccountSwap() error {
+	if op := i.GetInFlightOp(); op != OpRespawning {
+		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
+	}
+	backend := i.currentBackend()
+	if local, ok := backend.(*LocalBackend); ok {
+		return local.respawnFresh(i)
+	}
+	return backend.Respawn(i)
+}
+
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing
 // agent is still untouched. The returned immutable plan is the only value
 // SwapAgent accepts, so the checked command and the launched command cannot drift.

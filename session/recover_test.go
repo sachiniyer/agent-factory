@@ -86,6 +86,29 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
 }
 
+func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_account_swap_agent"
+	var newSessions int
+	var spawns []string
+	restored := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	restored.SetLimitReached(time.Time{})
+	require.NoError(t, restored.BeginLimitResume())
+	require.NoError(t, restored.SelectAccountAutomatically("", "work"))
+
+	require.NoError(t, restored.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+	agentSpawn := spawns[0]
+	require.NotContains(t, agentSpawn, "--continue",
+		"the previous account's conversation store must never be resumed under the replacement account")
+	require.Contains(t, agentSpawn, "--session-id",
+		"the replacement claude identity must receive an explicit fresh conversation")
+}
+
 // A relocation probe that reaches its deadline latches the worktree as stalled
 // even though it has not yet created two pathname candidates. The Lost loop must
 // honor that latch before os.Stat or rebuild touches the same filesystem: those

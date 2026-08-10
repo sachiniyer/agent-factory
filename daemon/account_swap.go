@@ -28,17 +28,17 @@ type autoAccountSwap struct {
 // of current config: disabling future choices cannot make a completed move
 // silent, and a manual retry must finish the same notice as the scheduler.
 func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
-	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
+	if instance == nil || !instance.SupportsAutomaticAccountSwap() {
 		return nil
 	}
+	from, to, pending := instance.PendingAccountSwap()
 	current, currentAuto := instance.AccountSelection()
-	limitedAccount, _ := instance.LimitAccount()
-	if !currentAuto || strings.TrimSpace(current) == "" || current == limitedAccount {
+	if !pending || !currentAuto || strings.TrimSpace(to) == "" || current != to {
 		return nil
 	}
 	return &autoAccountSwap{
-		from:       limitedAccount,
-		to:         current,
+		from:       from,
+		to:         to,
 		agent:      sessionenv.AgentForCommand(instance.AgentProgram()),
 		alreadySet: true,
 	}
@@ -47,7 +47,7 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 // accountSwapForLimit answers only from facts af actually has. "Unblocked"
 // means no live session currently records a limit observation for that
 // agent/account; it is never promoted into a provider quota claim.
-func (m *Manager) accountSwapForLimit(instance *session.Instance) (*autoAccountSwap, error) {
+func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
 	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
@@ -64,7 +64,7 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance) (*autoAccountS
 	if root == "" {
 		root = instance.Path
 	}
-	resolved, err := config.ResolveConfigForInspection(root)
+	resolved, err := config.ResolveConfigForInspectionFromGlobal(root, global)
 	if err != nil {
 		return nil, fmt.Errorf("resolve limit account candidates for %q: %w", instance.Title, err)
 	}

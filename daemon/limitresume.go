@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -17,8 +18,9 @@ import (
 // resume mechanics (re-spawn if the agent exited, re-deliver the stored prompt,
 // clear the limit) live in one place.
 //
-// Gated by config.LimitAutoResume (default OFF): when off, ResumeLimitedSessions
-// returns immediately and a limit stays surface-only (badge + manual retry).
+// Gated by config.LimitAutoResume (default OFF): when off, ordinary limits stay
+// surface-only (badge + manual retry). A previously committed account move is a
+// delivery obligation, not a new choice, and is completed even after opt-out.
 // When on, a LiveLimitReached row is resumed at limitResumeAt = its parsed reset
 // time + limitResumeGrace; a row whose banner carried NO parseable reset time is
 // retried on the fixed config.LimitRetryInterval fallback, or left surface-only
@@ -70,9 +72,9 @@ type limitResumeState struct {
 }
 
 // ResumeLimitedSessions runs one auto-resume pass over every LiveLimitReached
-// session the manager owns (#1146 PR3). A no-op when limit_auto_resume is off or
-// the manager is still warming up — the whole feature is opt-in and does zero
-// scheduling otherwise. Called from the daemon poll loop after
+// session the manager owns (#1146 PR3). A no-op while the manager is warming up;
+// with limit_auto_resume off it schedules only a durable account swap already
+// committed under an earlier opt-in. Called from the daemon poll loop after
 // RestoreLostSessions. Mirrors RestoreLostSessions: snapshot under m.mu, prune
 // dead/resolved retry state, then attempt each session in a stable order so the
 // logs read coherently.
@@ -81,7 +83,7 @@ func (m *Manager) ResumeLimitedSessions() {
 	// interval read the same generation, so a save mid-pass cannot toggle the
 	// feature between the guard and the interval read.
 	cfg := m.Config()
-	if !cfg.LimitAutoResume || !m.Ready() {
+	if !m.Ready() {
 		return
 	}
 	retryInterval := cfg.LimitRetryIntervalDuration()
@@ -143,7 +145,7 @@ func (m *Manager) ResumeLimitedSessions() {
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
 	for _, e := range entries {
-		m.resumeLimitedSession(e.key, e.repoID, e.instance, retryInterval)
+		m.resumeLimitedSession(e.key, e.repoID, e.instance, cfg, retryInterval)
 	}
 }
 
@@ -155,9 +157,14 @@ func (m *Manager) ResumeLimitedSessions() {
 // shared resumeFromLimitLocked body; the op lock is only TryLock'd so the poll
 // goroutine never stalls behind a kill teardown, and everything is re-verified
 // under the locks because the checks above are point-in-time.
-func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instance, retryInterval time.Duration) {
+func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instance, cfg *config.Config, retryInterval time.Duration) {
 	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
 		return
+	}
+	if !cfg.LimitAutoResume {
+		if _, _, pending := inst.PendingAccountSwap(); !pending {
+			return
+		}
 	}
 	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
 		return
@@ -169,7 +176,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// which is what a resume episode is about (#2876).
 	now := nowFunc()
 	stateKey := stableSessionKey(repoID, inst)
-	accountSwap, swapErr := m.accountSwapForLimit(inst)
+	accountSwap, swapErr := m.accountSwapForLimit(inst, cfg)
 	if swapErr != nil {
 		log.WarningLog.Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
 	}
@@ -244,7 +251,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// scan above; none of those may be carried into a credential replacement.
 	if accountSwap != nil {
 		var err error
-		accountSwap, err = m.accountSwapForLimit(inst)
+		accountSwap, err = m.accountSwapForLimit(inst, cfg)
 		if err != nil {
 			log.WarningLog.Printf("account-swap recheck for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, err)
 			return

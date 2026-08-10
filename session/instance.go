@@ -200,6 +200,8 @@ type Instance struct {
 	Account string `json:"account,omitempty"`
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool
+	// pendingAccountSwap survives until the replacement notice and task land.
+	pendingAccountSwap *AccountSwapData
 	// Height is the height of the instance.
 	Height int
 	// Width is the width of the instance.
@@ -210,11 +212,7 @@ type Instance struct {
 	UpdatedAt time.Time
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
-	// pendingHandoffMission is a rendered takeover brief whose delivery has not
-	// been durably confirmed. It is separate from Prompt: Prompt is the user's
-	// durable goal, while this value includes one handoff's generated context and
-	// must be cleared once that exact delivery lands. Persisting it closes the
-	// daemon-crash window between a runtime swap and readiness.
+	// pendingHandoffMission is the rendered brief awaiting confirmed delivery.
 	pendingHandoffMission string
 	// inPlace is true when the instance was created with `--here`: on first
 	// start it attaches to the repo's existing working tree at its current

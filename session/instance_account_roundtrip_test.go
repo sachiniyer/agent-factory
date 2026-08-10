@@ -87,6 +87,39 @@ func TestInstanceAccount_ExplicitPinAndAutomaticSelectionStayDistinctOnDisk(t *t
 	require.True(t, restoredAutomatic, "a daemon restart must not turn an automatic selection into an explicit pin")
 }
 
+func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) {
+	original := &Instance{
+		Title:    "pending-swap",
+		Path:     t.TempDir(),
+		Program:  "claude",
+		liveness: LiveLimitReached,
+		started:  true,
+		backend:  NewFakeBackend(),
+		Prompt:   "finish the migration",
+	}
+	require.NoError(t, original.BeginLimitResume())
+	require.NoError(t, original.SelectAccountAutomatically("", "work"))
+	original.EndLimitResume()
+
+	stored := original.ToInstanceData().ForStorage()
+	stored.BackendType = "docker"
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"pending_account_swap":{"to":"work"}`)
+
+	var decoded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	restored, err := FromInstanceData(decoded)
+	require.NoError(t, err)
+	from, to, pending := restored.PendingAccountSwap()
+	require.True(t, pending)
+	require.Empty(t, from)
+	require.Equal(t, "work", to)
+	require.True(t, restored.Started(), "the inert row must remain eligible for the limit scheduler")
+	require.Equal(t, LiveLimitReached, restored.GetLiveness(),
+		"ordinary status/lost recovery must not consume the pending swap")
+}
+
 // Unsupported combinations must REFUSE at create time with an actionable error,
 // not start a session that dies in the pane or silently uses another identity
 // (#3051 review).

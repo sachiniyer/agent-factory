@@ -60,6 +60,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		Program:                  i.Program,
 		Account:                  i.Account,
 		AccountAutoSelected:      i.accountAutoSelected,
+		PendingAccountSwap:       cloneAccountSwapData(i.pendingAccountSwap),
 		Prompt:                   i.Prompt,
 		PendingHandoffMission:    i.pendingHandoffMission,
 		UserKilled:               i.userKilled,
@@ -339,6 +340,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		Program:                  data.Program,
 		Account:                  data.Account,
 		accountAutoSelected:      data.AccountAutoSelected,
+		pendingAccountSwap:       cloneAccountSwapData(data.PendingAccountSwap),
 		Prompt:                   data.Prompt,
 		pendingHandoffMission:    data.PendingHandoffMission,
 		userKilled:               data.UserKilled,
@@ -516,6 +518,15 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// worktree and exact tmux binding above remain available for inspection and an
 	// explicit user kill, while the daemon status loop leaves the record alone.
 	if data.StartupStateUnknown {
+		return instance, nil
+	}
+
+	// An automatic account choice is durable before its replacement starts. Keep
+	// that crash-restored row inert but scheduler-eligible: status reconciliation
+	// must not turn an absent replacement into Lost and route it through ordinary
+	// conversation resume before the pending notice and task are delivered.
+	if data.PendingAccountSwap != nil {
+		instance.started = true
 		return instance, nil
 	}
 

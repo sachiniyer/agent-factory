@@ -143,6 +143,9 @@ type InstanceData struct {
 	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
 	// the exact mission lands (or is transferred to the usage-limit retry path).
 	PendingHandoffMission string `json:"pending_handoff_mission,omitempty"`
+	// PendingAccountSwap is the committed identity change whose replacement
+	// runtime still needs the in-session notice and stored task delivered.
+	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
 
 	Program string `json:"program"`
 	// Account is the credential account this session runs its agent as (#3051).
@@ -266,6 +269,14 @@ type InstanceData struct {
 	// durable write is actually requested; ordinary JSON projections ignore it.
 	archiveReportSource  *git.GitWorktree
 	archiveReportPending bool
+}
+
+// AccountSwapData is the durable identity boundary for an automatic swap.
+// From may be empty for the ambient identity; the pointer's presence, rather
+// than either string, is the recovery obligation.
+type AccountSwapData struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to"`
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,

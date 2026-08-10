@@ -528,7 +528,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
 				return resumeNotPerformed, err
 			}
-			if err := instance.SelectAccountAutomatically(accountSwap.to); err != nil {
+			if err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to); err != nil {
 				return resumeNotPerformed, err
 			}
 			// The old runtime is conclusively stopped. Make the new identity durable
@@ -579,11 +579,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// block below has to restore THIS episode's window, not a zeroed one — the
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
-		if rerr := instance.RespawnWithLiveBoundary(func() {
-			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
-			}
-		}); rerr != nil {
+		var rerr error
+		if accountSwap != nil {
+			rerr = instance.RespawnForAccountSwap()
+		} else {
+			rerr = instance.RespawnWithLiveBoundary(func() {
+				if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+					log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+				}
+			})
+		}
+		if rerr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
@@ -681,6 +687,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			return resumeNotPerformed, errors.Join(resumeErr, settleErr)
 		}
 		return resumeNotPerformed, resumeErr
+	}
+	if accountSwap != nil && !instance.ClearPendingAccountSwap(accountSwap.from, accountSwap.to) {
+		return resumeNotPerformed, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.

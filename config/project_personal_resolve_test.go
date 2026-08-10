@@ -73,6 +73,19 @@ func TestResolveConfigPersonalLimitAccountCandidatesReplaceGlobal(t *testing.T) 
 	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer)
 }
 
+func TestResolveConfigForInspectionFromGlobalKeepsOneGlobalGeneration(t *testing.T) {
+	home, repoRoot, _ := registeredTestProject(t)
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"first\"]\n")
+	frozen, err := LoadConfig()
+	require.NoError(t, err)
+
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"second\"]\n")
+	resolved, err := ResolveConfigForInspectionFromGlobal(repoRoot, frozen)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first"}, resolved.LimitAccountCandidates,
+		"a project overlay must resolve against the daemon operation's frozen global snapshot")
+}
+
 func TestResolveConfigPersonalEmptyValueStillOverrides(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
 	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")

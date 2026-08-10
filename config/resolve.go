@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -99,6 +101,26 @@ func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
 }
 
+// ResolveConfigForInspectionFromGlobal resolves repoRoot's repo and personal
+// layers over one already-loaded global snapshot. Long-running operations use
+// this form so a global config save cannot split one decision across two
+// generations; like ResolveConfigForInspection, it records no load observation.
+func ResolveConfigForInspectionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	if global != nil && global.source.builtIn == nil {
+		data, err := toml.Marshal(global)
+		if err != nil {
+			return nil, fmt.Errorf("encode global config snapshot: %w", err)
+		}
+		snapshot := snapshotConfig(global)
+		snapshot.source.builtIn = snapshotConfig(global)
+		if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
+			return nil, fmt.Errorf("describe global config snapshot: %w", err)
+		}
+		global = snapshot
+	}
+	return resolveConfigFromGlobal(repoRoot, global, suppressInRepoLoadObservation)
+}
+
 type inRepoLoadObservation uint8
 
 const (
@@ -116,6 +138,10 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	if err != nil {
 		return nil, err
 	}
+	return resolveConfigFromGlobal(repoRoot, global, observation)
+}
+
+func resolveConfigFromGlobal(repoRoot string, global *Config, observation inRepoLoadObservation) (*ResolvedConfig, error) {
 	documents, err := globalResolutionDocuments(global)
 	if err != nil {
 		return nil, err

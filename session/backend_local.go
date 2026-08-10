@@ -525,9 +525,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	return nil
 }
 
-// respawn holds the shared re-spawn mechanics for Recover and Respawn: re-spawn
-// the agent program in its worktree with the same resolved-program flag injection
-// as a first-time launch (#1132 choke-point — never hand-rolled flag logic) and
+// respawn uses first-launch flag injection (#1132; never hand-rolled) and
 // the resume-path rewrite Restore applies (resumeProgram: claude --continue,
 // codex resume --last), then bring the other tabs back through the same setupTabs
 // path a restore uses. No liveness guard — the exported wrappers own that.
@@ -539,6 +537,14 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 // PTY yet on this path) and the tmux refs are kept, so the next tick's retry
 // reconnects each tab by its exact persisted name.
 func (b *LocalBackend) respawn(i *Instance) error {
+	return b.respawnWithConversation(i, true)
+}
+
+func (b *LocalBackend) respawnFresh(i *Instance) error {
+	return b.respawnWithConversation(i, false)
+}
+
+func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -589,6 +595,9 @@ func (b *LocalBackend) respawn(i *Instance) error {
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
 		if rebuildErr := gw.RebuildFromExistingBranch(); rebuildErr != nil {
+			if !resume {
+				return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: fmt.Errorf("%w (rebuild from existing branch failed: %v)", err, rebuildErr)}
+			}
 			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
 			if !ok {
 				return &WorktreeUnavailableError{
@@ -619,13 +628,25 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 	}
 
-	program := injectSystemPrompt(prepareResumeConversation(i, resolvedProgram))
+	program := resolvedProgram
+	if resume {
+		program = prepareResumeConversation(i, program)
+	} else {
+		program = prepareLaunchConversation(i, program)
+	}
+	program = injectSystemPrompt(program)
 	setLaunchProgram(ts, program,
 		accountLaunchProof(declarationBase, program, resolution.trustBase))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
-	if err := ts.Restore(workDir); err != nil {
+	var err error
+	if resume {
+		err = ts.Restore(workDir)
+	} else {
+		err = ts.Start(workDir)
+	}
+	if err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}

@@ -23,6 +23,25 @@ func (i *Instance) AccountSelection() (account string, auto bool) {
 	return i.Account, i.accountAutoSelected
 }
 
+func cloneAccountSwapData(data *AccountSwapData) *AccountSwapData {
+	if data == nil {
+		return nil
+	}
+	copy := *data
+	return &copy
+}
+
+// PendingAccountSwap reports the committed move whose replacement notice and
+// task have not yet been confirmed delivered.
+func (i *Instance) PendingAccountSwap() (from, to string, pending bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.pendingAccountSwap == nil {
+		return "", "", false
+	}
+	return i.pendingAccountSwap.From, i.pendingAccountSwap.To, true
+}
+
 // SupportsAutomaticAccountSwap reports whether this runtime can replace its
 // credential boundary without changing backend kind.
 func (i *Instance) SupportsAutomaticAccountSwap() bool {
@@ -86,7 +105,7 @@ func (i *Instance) StopForAccountSwap() error {
 
 // SelectAccountAutomatically commits the scheduler's replacement identity in
 // memory. The caller must persist it before starting the replacement runtime.
-func (i *Instance) SelectAccountAutomatically(name string) error {
+func (i *Instance) SelectAccountAutomatically(from, name string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
@@ -94,6 +113,7 @@ func (i *Instance) SelectAccountAutomatically(name string) error {
 	}
 	i.Account = name
 	i.accountAutoSelected = true
+	i.pendingAccountSwap = &AccountSwapData{From: from, To: name}
 	return nil
 }
 
@@ -108,7 +128,20 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	}
 	i.Account = name
 	i.accountAutoSelected = auto
+	i.pendingAccountSwap = nil
 	return nil
+}
+
+// ClearPendingAccountSwap retires exactly the delivery obligation the caller
+// completed, without allowing a stale attempt to erase a later swap.
+func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap == nil || i.pendingAccountSwap.From != from || i.pendingAccountSwap.To != to {
+		return false
+	}
+	i.pendingAccountSwap = nil
+	return true
 }
 
 // AccountSwapReprovisionsSandbox reports whether the current account swap must

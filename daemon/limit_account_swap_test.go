@@ -13,7 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-func configureLimitAccountCandidate(t *testing.T, name string) {
+func configureLimitAccountCandidate(t *testing.T, manager *Manager, name string) {
 	t.Helper()
 	home, err := config.GetConfigDir()
 	if err != nil {
@@ -27,6 +27,7 @@ func configureLimitAccountCandidate(t *testing.T, name string) {
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	manager.Config().LimitAccountCandidates = []string{name}
 }
 
 func writeLimitAccountCandidates(t *testing.T, contents string) {
@@ -44,7 +45,7 @@ func TestResumeLimitedSessions_SwapsAmbientSessionToConfiguredUnblockedAccount(t
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
-	configureLimitAccountCandidate(t, "work")
+	configureLimitAccountCandidate(t, manager, "work")
 
 	// The account choice is immediate; it must not wait for the old identity's
 	// future reset window.
@@ -72,7 +73,7 @@ func TestResumeLimitedSessions_AllConfiguredAccountsLimitedKeepsWaiting(t *testi
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "wait", base.Add(time.Hour))
-	configureLimitAccountCandidate(t, "work")
+	configureLimitAccountCandidate(t, manager, "work")
 
 	otherBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
 	other := registerStarted(t, manager, repoID, inst.Path, "work-limited", otherBackend, true, session.Running)
@@ -93,7 +94,7 @@ func TestResumeLimitedSessions_ExplicitAccountPinIsNeverOverridden(t *testing.T)
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, _, inst, backend := newAutoResumeManager(t, "", true, "stay pinned", base.Add(time.Hour))
-	configureLimitAccountCandidate(t, "personal")
+	configureLimitAccountCandidate(t, manager, "personal")
 	inst.Account = "work"
 	inst.SetLimitReached(base.Add(time.Hour))
 
@@ -112,7 +113,7 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
-	configureLimitAccountCandidate(t, "work")
+	configureLimitAccountCandidate(t, manager, "work")
 	backend.sendPromptErr = errors.New("prompt transport failed")
 
 	advance(time.Second)
@@ -138,5 +139,79 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	}
 	if len(prompts) != 1 || !strings.Contains(prompts[0], `claude account "work"`) {
 		t.Fatalf("committed identity change lost its in-session notice after opt-out: %q", prompts)
+	}
+}
+
+func TestResumeLimitedSessions_CommittedSwapFinishesAfterAutoResumeOptOut(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	backend.sendPromptErr = errors.New("prompt transport failed")
+
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+	if _, _, pending := inst.PendingAccountSwap(); !pending {
+		t.Fatal("failed delivery lost the committed account swap")
+	}
+	manager.Config().LimitAutoResume = false
+	backend.mu.Lock()
+	backend.sendPromptErr = nil
+	backend.mu.Unlock()
+	advance(limitResumeBackoffBase)
+	manager.ResumeLimitedSessions()
+
+	_, _, prompts := backend.snapshot()
+	if len(prompts) != 1 || !strings.Contains(prompts[0], `claude account "work"`) {
+		t.Fatalf("committed swap did not finish after opt-out: %q", prompts)
+	}
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		t.Fatal("successful delivery retained the pending swap")
+	}
+}
+
+func TestRefreshStatuses_PendingAccountSwapKeepsLimitStateForDelivery(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &deadTmuxBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "pending-swap", backend, true, session.Running)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.SelectAccountAutomatically("", "work"); err != nil {
+		t.Fatal(err)
+	}
+	inst.EndLimitResume()
+
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLimitReached {
+		t.Fatalf("pending swap liveness after status poll = %v, want LimitReached", got)
+	}
+	if _, to, pending := inst.PendingAccountSwap(); !pending || to != "work" {
+		t.Fatalf("status poll consumed pending swap = (%q, %v)", to, pending)
+	}
+}
+
+func TestAccountSwapForLimit_UsesThePollsFrozenGlobalConfig(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first", "second"} {
+		if _, err := agentaccount.Register(home, "claude", name); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	frozen := manager.Config()
+	frozen.LimitAccountCandidates = []string{"first"}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"second\"]\n")
+
+	swap, err := manager.accountSwapForLimit(inst, frozen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap == nil || swap.to != "first" {
+		t.Fatalf("swap from frozen config = %#v, want first", swap)
 	}
 }
