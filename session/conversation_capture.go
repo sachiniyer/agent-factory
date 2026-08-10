@@ -159,7 +159,9 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	deadline := time.Now().Add(timeout)
 	for {
 		conv, retry, err := captureCodexConversationOnce(snap)
-		if err != nil || conv.HasID() || !retry || timeout <= 0 || time.Now().After(deadline) {
+		// An unclassifiable session_meta is retryable even though err records why
+		// capture must refuse if the deadline expires before the header settles.
+		if conv.HasID() || !retry || timeout <= 0 || time.Now().After(deadline) {
 			return conv, err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -170,15 +172,13 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 	observed := newCodexRolloutFiles(snap)
 	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
 	if uncorrelated > 0 {
-		if len(observed) > 1 {
-			return AgentConversationData{}, false, fmt.Errorf(
-				"codex conversation capture ambiguous: %d new rollout files appeared and %d had uncorrelatable session metadata",
-				len(observed), uncorrelated)
-		}
-		// Codex can create the file before its first JSONL record is visible.
-		// Retry a lone unknown instead of treating an incomplete session_meta as
-		// either a match or proof that the rollout belongs to another process.
-		return AgentConversationData{}, true, nil
+		// Codex can create each file before its first JSONL record is visible.
+		// Retry unknowns instead of treating an incomplete session_meta as either
+		// a match or proof that the rollout belongs to another process. The error
+		// is returned only if the caller's bounded retry window expires.
+		return AgentConversationData{}, true, fmt.Errorf(
+			"codex conversation capture undecided: %d new rollout files appeared and %d had uncorrelatable session metadata",
+			len(observed), uncorrelated)
 	}
 	switch len(candidates) {
 	case 0:

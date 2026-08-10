@@ -130,6 +130,30 @@ func TestCaptureAgentConversation_CodexUncorrelatableMetadataDoesNotGuess(t *tes
 	require.False(t, conv.HasID(), "unknown metadata could still belong to the launch cwd")
 }
 
+func TestCaptureAgentConversation_CodexRetriesIncompleteConcurrentMetadata(t *testing.T) {
+	codexHome := t.TempDir()
+	workDirA := filepath.Join(t.TempDir(), "session-a")
+	workDirB := filepath.Join(t.TempDir(), "session-b")
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirA)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDirA)
+	incomplete := writeCodexRolloutFile(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl")
+	require.NoError(t, os.WriteFile(incomplete, []byte(`{"type":"session_meta","payload":`), 0644))
+
+	conv, retry, err := captureCodexConversationOnce(snap)
+	require.ErrorContains(t, err, "capture undecided")
+	require.True(t, retry, "a partial concurrent header can become classifiable on the next poll")
+	require.False(t, conv.HasID())
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDirB)
+	conv, err = CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+}
+
 func TestCaptureAgentConversation_UnsupportedAgentGracefullyNoID(t *testing.T) {
 	snap := BeginConversationCapture()
 	for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramAmp} {
