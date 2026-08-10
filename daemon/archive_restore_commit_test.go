@@ -106,10 +106,10 @@ func TestRestoreArchived_PersistFailuresPreserveIncompleteArchiveReport(t *testi
 			manager, repoID, repoPath := newStatusTestManager(t)
 			inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 			inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
-
-			_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
-			require.NoError(t, err)
 			worktree, err := inst.GetGitWorktree()
+			require.NoError(t, err)
+
+			_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 			require.NoError(t, err)
 			worktree.RestoreArchiveReport(sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 				Path: "/repos/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
