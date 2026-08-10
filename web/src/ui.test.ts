@@ -42,7 +42,11 @@ function state(over: Partial<AppState> = {}): AppState {
 
 test("relative idle ages refresh without a session event", () => {
   const row = {
-    dataset: { idleTitleBase: "worker — Ready", idleTitleModel: "" },
+    dataset: {
+      idleTitleBase: "worker — Ready",
+      idleTitleModel: "",
+      idleTitleArchive: "; archive incomplete",
+    },
     title: "",
     setAttribute(name: string, value: string) {
       if (name === "title") this.title = value;
@@ -60,7 +64,7 @@ test("relative idle ages refresh without a session event", () => {
 
   refreshIdleReasonAges(root as unknown as ParentNode, new Date("2026-08-10T15:00:00Z"));
   assert.equal(idle.textContent, "pane changed · 2h ago · ");
-  assert.equal(row.title, "worker — Ready; pane changed · 2h ago");
+  assert.equal(row.title, "worker — Ready; pane changed · 2h ago; archive incomplete");
 });
 
 test("rail actionability is granted only by the daemon projection (#2234)", () => {
