@@ -10062,10 +10062,16 @@ function rowTitle(s) {
   if (recreate) {
     title = `[${recreate}] ` + title;
   }
+  if (archiveWarningText(s) !== "") {
+    title = "[archive incomplete] " + title;
+  }
   if (s.model_change) {
     title = "[model changed] " + title;
   }
   return title;
+}
+function archiveWarningText(s) {
+  return s.archive_warning?.trim() ?? "";
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -13124,6 +13130,10 @@ var AppShell = class {
   lastRailToken = null;
   // Header text nodes for the selected pane, (re)created per selection.
   headTitle = null;
+  // The full bounded archive-loss notice for the selected session. It stays
+  // mounted above the terminal and is patched on every same-selection snapshot,
+  // so automatic Lost recovery cannot turn it into a one-shot toast.
+  archiveWarning = null;
   // The selected visible rail row's archive/restore control and daemon-owned verb it
   // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
   // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
@@ -13763,6 +13773,7 @@ var AppShell = class {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
@@ -13806,8 +13817,12 @@ var AppShell = class {
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
     const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const warningText = archiveWarningText(selected);
+    const archiveWarning = h2("div", { class: "af-archive-warning", role: "status" }, warningText);
+    archiveWarning.hidden = warningText === "";
+    this.archiveWarning = archiveWarning;
     this.main.className = "af-main af-main-term";
-    this.main.replaceChildren(head, this.termHost);
+    this.main.replaceChildren(head, archiveWarning, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -14183,6 +14198,13 @@ var AppShell = class {
       return;
     }
     this.headTitle.textContent = selected.title;
+    const warningText = archiveWarningText(selected);
+    if (this.archiveWarning) {
+      if (this.archiveWarning.textContent !== warningText) {
+        this.archiveWarning.textContent = warningText;
+      }
+      this.archiveWarning.hidden = warningText === "";
+    }
     this.main.dataset.termStatus = state.termStatus;
     this.patchHeadActions(state, selected);
     const nowAction = selected.lifecycle_action ?? null;
@@ -14372,7 +14394,11 @@ function sessionRow(s, selected, openSession, buildActions) {
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
-  row.setAttribute("title", `${s.title} \u2014 ${status.label}${modelChange}`);
+  const archiveWarning = archiveWarningText(s);
+  row.setAttribute(
+    "title",
+    `${s.title} \u2014 ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`
+  );
   if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");
   } else if (actionable) {

@@ -8,7 +8,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { IconName } from "./icon.js";
-import { canHandoff, type DotKind, isArchived, isCreating, isLimitReached, isWorking, rowStatus, rowTitle } from "./status.js";
+import {
+  archiveWarningText,
+  canHandoff,
+  type DotKind,
+  isArchived,
+  isCreating,
+  isLimitReached,
+  isWorking,
+  rowStatus,
+  rowTitle,
+} from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
@@ -82,6 +92,11 @@ test("title prefixes match render.go precedence", () => {
   assert.equal(rowTitle(sess({ title: "w", in_flight_op: InFlightOp.Archiving })), "[deleting] w");
   // Archived carries NO word prefix (render.go:326-338) — the icon + dimming say it.
   assert.equal(rowTitle(sess({ title: "w", liveness: Liveness.Archived })), "w");
+  assert.equal(
+    rowTitle(sess({ title: "w", archive_warning: "complete original tree retained at /retained/source" })),
+    "[archive incomplete] w",
+    "a recovered incomplete session must remain visibly exceptional in the web rail",
+  );
   // [remote] is outermost.
   assert.equal(
     rowTitle(sess({ title: "w", liveness: Liveness.Lost, backend_type: "remote" })),
@@ -109,6 +124,12 @@ test("title prefixes match render.go precedence", () => {
     "[model changed] [remote] [lost] w",
     "the diagnostic remains outermost when state and backend prefixes coexist",
   );
+});
+
+test("archive warning retains the daemon's source location for the persistent banner", () => {
+  const warning = "restore completed with an incomplete archive: complete original tree retained at /retained/source";
+  assert.equal(archiveWarningText(sess({ archive_warning: warning })), warning);
+  assert.equal(archiveWarningText(sess({ archive_warning: "   " })), "");
 });
 
 test("[fresh context] note mirrors session.RootRecreateContext.Note (#2629)", () => {

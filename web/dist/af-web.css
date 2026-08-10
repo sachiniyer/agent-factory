@@ -1009,6 +1009,21 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.af-archive-warning {
+  flex: 0 0 auto;
+  max-height: 6rem;
+  overflow: auto;
+  padding: 0.45rem 0.9rem;
+  border-bottom: 1px solid var(--af-border);
+  background: var(--af-bg-inset);
+  color: var(--af-term-amber);
+  font-size: var(--af-fs-xs);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.af-archive-warning[hidden] {
+  display: none;
+}
 .af-tabbar {
   display: flex;
   align-items: stretch;

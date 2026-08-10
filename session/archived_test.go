@@ -2,6 +2,9 @@ package session
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -66,6 +69,16 @@ func TestFromInstanceData_ArchiveReportSurvivesReload(t *testing.T) {
 	require.NotNil(t, stored.ArchiveReport)
 	require.Equal(t, data.ArchiveReport.RetainedTrees, stored.ArchiveReport.RetainedTrees,
 		"the complete report must remain durable after load and the next storage projection")
+}
+
+func TestFromInstanceData_PreservesSnapshotArchiveWarning(t *testing.T) {
+	data := deadInstanceData(t, Archived, "af_snapshot_warning_agent", "af_snapshot_warning_shell")
+	data.ArchiveWarning = "restore completed with an incomplete archive: complete original tree retained at /retained/source"
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	assert.Equal(t, data.ArchiveWarning, restored.ToInstanceData().ArchiveWarning,
+		"a thin client rebuilding a live snapshot must not discard its only archive-loss notice")
 }
 
 func TestArchiveReportStorageProjectionFencesOlderReaders(t *testing.T) {
@@ -135,13 +148,25 @@ type v10235InstanceData struct {
 }
 
 func TestArchiveReportStorageProjectionMakesV10235KillRefuse(t *testing.T) {
+	root := t.TempDir()
+	currentPath := filepath.Join(root, "published-archive")
+	retainedPath := filepath.Join(root, "stale-retained-source")
+	require.NoError(t, os.Mkdir(currentPath, 0o755))
+	require.NoError(t, os.Mkdir(retainedPath, 0o755))
+	retainedInfo, err := os.Stat(retainedPath)
+	require.NoError(t, err)
+	retainedStat, ok := retainedInfo.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
 	branchCreatedByUs := true
 	data := deadInstanceData(t, Archived, "af_report_kill_fence_agent", "af_report_kill_fence_shell")
+	data.Worktree.WorktreePath = currentPath
 	data.Worktree.ExternalWorktree = false
 	data.Worktree.BranchCreatedByUs = &branchCreatedByUs
 	data.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
-		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
-		Device: 1, Inode: 2, FileType: 0o040000,
+		Path: retainedPath, IdentityKnown: true,
+		Device: uint64(retainedStat.Dev), Inode: uint64(retainedStat.Ino),
+		FileType: uint32(retainedStat.Mode & syscall.S_IFMT),
 		Skipped: []git.ArchiveSkippedEntry{{
 			Path: "private/credential", Reason: git.ArchiveSkipPermissionDenied,
 		}},
@@ -168,6 +193,10 @@ func TestArchiveReportStorageProjectionMakesV10235KillRefuse(t *testing.T) {
 	err = legacy.Kill()
 	require.ErrorContains(t, err, "worktree recovery state",
 		"v1.0.235 explicit kill must retain the row instead of no-oping external cleanup and deleting it")
+	claim, err := legacy.gitWorktree.ClaimRelocationSource()
+	require.ErrorIs(t, err, git.ErrRelocateStateUnknown,
+		"the compatibility kill fence must not let v1.0.235 restore from an older retained snapshot")
+	assert.Empty(t, claim.Path)
 
 	current, err := FromInstanceData(stored)
 	require.NoError(t, err)

@@ -421,9 +421,16 @@ func archiveReportKillFence(report git.ArchiveReport) *GitWorktreeRelocationReco
 	originalBranch := cloneBoolPointer(fence.OriginalBranchCreatedByUs)
 	originalStartup := fence.OriginalStartupStateUnknown
 	return &GitWorktreeRelocationRecoveryData{
-		State:                       git.RelocationRecoveryStalled,
-		AlternatePath:               tree.Path,
-		IdentityKnown:               tree.IdentityKnown,
+		// A previous reader refuses explicit kill while any recovery record is
+		// unresolved, but its restore path consumes an identity-qualified
+		// AlternatePath as a worktree candidate. Retained trees can be snapshots
+		// from an older archive cycle, so never publish their pathname here. A
+		// claim-stale record with no alternate and the retained source's identity
+		// cannot match the cross-filesystem published archive and therefore makes
+		// both kill and restore fail closed. Current readers remove this synthetic
+		// record through RollbackFence before reconstructing the worktree.
+		State:                       git.RelocationRecoveryClaimStale,
+		IdentityKnown:               true,
 		Device:                      tree.Device,
 		Inode:                       tree.Inode,
 		FileType:                    tree.FileType,

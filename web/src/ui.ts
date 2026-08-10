@@ -34,6 +34,7 @@ import {
 } from "./filter.js";
 import { projectMeta, projectName, type ProjectSummary, projectSummaries, scopeToProject } from "./project.js";
 import {
+  archiveWarningText,
   canHandoff,
   compareSessionsForRail,
   isArchived,
@@ -783,6 +784,10 @@ export class AppShell {
 
   // Header text nodes for the selected pane, (re)created per selection.
   private headTitle: HTMLElement | null = null;
+  // The full bounded archive-loss notice for the selected session. It stays
+  // mounted above the terminal and is patched on every same-selection snapshot,
+  // so automatic Lost recovery cannot turn it into a one-shot toast.
+  private archiveWarning: HTMLElement | null = null;
   // The selected visible rail row's archive/restore control and daemon-owned verb it
   // currently shows (#1932, #2186, #2234). Every actionable row owns controls now
   // (#2223), but a session can flip archive⇄restore WITHOUT a selection change, so
@@ -1866,6 +1871,7 @@ export class AppShell {
     const selected = selectedSession(state);
     if (!selected) {
       this.headTitle = null;
+      this.archiveWarning = null;
       this.headActions = null;
       this.headActionSig = "";
       this.retryBtn = null;
@@ -1963,11 +1969,15 @@ export class AppShell {
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
     const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const warningText = archiveWarningText(selected);
+    const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
+    archiveWarning.hidden = warningText === "";
+    this.archiveWarning = archiveWarning;
 
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
-    this.main.replaceChildren(head, this.termHost);
+    this.main.replaceChildren(head, archiveWarning, this.termHost);
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -2479,6 +2489,13 @@ export class AppShell {
       return;
     }
     this.headTitle.textContent = selected.title;
+    const warningText = archiveWarningText(selected);
+    if (this.archiveWarning) {
+      if (this.archiveWarning.textContent !== warningText) {
+        this.archiveWarning.textContent = warningText;
+      }
+      this.archiveWarning.hidden = warningText === "";
+    }
     // The terminal's connection state is published without being drawn, for the same
     // reason as the event stream above (#2458): the pane header no longer shows
     // "Live · master", but the status still has to be observable for the selftests
@@ -2911,7 +2928,11 @@ function sessionRow(
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
-  row.setAttribute("title", `${s.title} — ${status.label}${modelChange}`);
+  const archiveWarning = archiveWarningText(s);
+  row.setAttribute(
+    "title",
+    `${s.title} — ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`,
+  );
   if (!actionable && !managed) {
     // The server withheld both capabilities: a creating row has no session yet,
     // while an id-less row has no unambiguous mutation target.

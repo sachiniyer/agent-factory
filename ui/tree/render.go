@@ -175,6 +175,11 @@ var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
 // treatment the task/prompt forms give their placeholders.
 var placeholderTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
 
+// archiveWarningColor makes an incomplete archive visible independently of its
+// ordinary liveness glyph. The warning prose itself remains the daemon's bounded
+// projection and includes the retained source location.
+var archiveWarningColor lipgloss.TerminalColor = lipgloss.Color("#F0DFAF")
+
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
 	readyStyle = lipgloss.NewStyle().Foreground(t.Success)
@@ -207,6 +212,7 @@ func ApplyTheme(t Theme) {
 		Foreground(t.SelectionForeground)
 	deletingTitleColor = t.ForegroundMuted
 	placeholderTitleColor = t.ForegroundMuted
+	archiveWarningColor = t.Warning
 }
 
 // InstanceRenderer renders the tree's rows: session.Instance rows (absorbed
@@ -279,6 +285,7 @@ func instancePrefix(arrow string, width int) string {
 // non-expandable instance (see Expandable) renders a blank arrow cell so its
 // title stays aligned with its siblings.
 func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, hasMultipleRepos bool, expanded bool) string {
+	archiveWarning := i.ArchiveWarning()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -403,6 +410,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if note := i.RootRecreateContext().Note(); note != "" {
 		titleText = "[" + note + "] " + titleText
 	}
+	// An incomplete archive stays exceptional after automatic Lost recovery.
+	// Unlike an operation toast, this prefix and the retained-source line below
+	// are derived on every render from the live snapshot, so they cannot expire.
+	if archiveWarning != "" {
+		titleText = "[archive incomplete] " + titleText
+	}
 	// A verified post-safety-dialog model change is orthogonal to liveness: the
 	// session can keep working and otherwise look healthy. Add it LAST so it is
 	// the outermost prefix; narrow rails retain the reason before lower-priority
@@ -493,8 +506,27 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 
 	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, branch, spaces)
 
+	lines := []string{title}
+	if archiveWarning == "" {
+		lines = append(lines, descS.Render(branchLine))
+	} else {
+		// Move the ordinary description's bottom padding to the warning so the
+		// notice is part of the same row block rather than separated by whitespace.
+		lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
+		warningPrefix := strings.Repeat(" ", prefixWidth) + "⚠ "
+		warningWidth := r.width - runewidth.StringWidth(warningPrefix)
+		warningText := archiveWarning
+		if warningWidth <= 0 {
+			warningText = ""
+		} else if runewidth.StringWidth(warningText) > warningWidth {
+			warningText = runewidth.Truncate(warningText, warningWidth, "…")
+		}
+		warningLine := warningPrefix + warningText
+		lines = append(lines, descS.Foreground(archiveWarningColor).Render(warningLine))
+	}
+
 	// join title and subtitle
-	text := lipgloss.JoinVertical(lipgloss.Left, title, descS.Render(branchLine))
+	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return text
 }
