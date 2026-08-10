@@ -93,12 +93,27 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 	m.mu.Unlock()
 	limitedSet := make(map[string]struct{})
 	now := nowFunc()
-	for _, other := range instances {
-		if other == nil || sessionenv.AgentForCommand(other.AgentProgram()) != agent {
+	retained, err := loadAccountLimitLedger()
+	if err != nil {
+		return nil, fmt.Errorf("load retained account-limit evidence for %q: %w", instance.Title, err)
+	}
+	for _, observation := range retained {
+		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
 			continue
 		}
-		if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
-			limitedSet[account] = struct{}{}
+		if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+			continue
+		}
+		limitedSet[observation.Account] = struct{}{}
+	}
+	for _, other := range instances {
+		if other == nil {
+			continue
+		}
+		if sessionenv.AgentForCommand(other.AgentProgram()) == agent {
+			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
+				limitedSet[account] = struct{}{}
+			}
 		}
 		for _, observation := range other.AccountLimitObservations() {
 			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
