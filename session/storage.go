@@ -148,7 +148,7 @@ type InstanceData struct {
 	PendingAccountSwap *AccountSwapData `json:"pending_account_swap,omitempty"`
 
 	Program string `json:"program"`
-	// Account is the credential account this session runs its agent as (#3051).
+	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the
 	// ambient account would spend the wrong quota while still displaying the

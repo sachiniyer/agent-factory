@@ -98,7 +98,8 @@ func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) 
 		Prompt:   "finish the migration",
 	}
 	require.NoError(t, original.BeginLimitResume())
-	require.NoError(t, original.SelectAccountAutomatically("", "work"))
+	_, err := original.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
 	original.EndLimitResume()
 
 	stored := original.ToInstanceData().ForStorage()

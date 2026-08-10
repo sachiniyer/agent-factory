@@ -528,14 +528,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
 				return resumeNotPerformed, err
 			}
-			if err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to); err != nil {
+			previousConversation, err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to)
+			if err != nil {
 				return resumeNotPerformed, err
 			}
+			accountSwap.previousConversation = previousConversation
 			// The old runtime is conclusively stopped. Make the new identity durable
 			// BEFORE starting it, so a crash can never relaunch on the old account
 			// while the session reports the replacement.
 			if err := m.persistSettlement(repoID, key, instance); err != nil {
-				_ = instance.RestoreAccountSelectionUnderResumeFence(accountSwap.previousAccount, accountSwap.previousAuto)
+				_ = instance.RestoreAccountSelectionUnderResumeFence(
+					accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
 				return resumeNotPerformed, err
 			}
 			forceRespawn = true

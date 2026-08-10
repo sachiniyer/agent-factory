@@ -270,9 +270,9 @@ type SetResult struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
 	Path  string `json:"path"`
-	// RequiresRestart is always true: config.toml is read at startup, so a
-	// change applies to af and the daemon on their next start, exactly like a
-	// hand-edit.
+	// RequiresRestart reports whether this write needs a daemon restart. Global
+	// writes retain true here and use ApplyConfig; project writes derive it from
+	// the key's effect class because those layers are reread on relevant work.
 	RequiresRestart bool `json:"requires_restart"`
 	// Warnings are non-fatal notes about what the write actually means, printed
 	// after the echo. The write SUCCEEDED — a warning never blocks or changes the
@@ -663,7 +663,7 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
 		return nil, err
 	}
-	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: true}, nil
+	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: ProjectConfigRequiresRestart(w.key)}, nil
 }
 
 // setTOMLScalar returns content with [section] leaf set to encoded, changing only

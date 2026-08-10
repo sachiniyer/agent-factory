@@ -15,12 +15,13 @@ import (
 // limit-resume transaction. from is the account that produced the wall (empty
 // means ambient); to is an explicit configured, registered, unblocked candidate.
 type autoAccountSwap struct {
-	from            string
-	previousAccount string
-	previousAuto    bool
-	to              string
-	agent           string
-	alreadySet      bool
+	from                 string
+	previousAccount      string
+	previousAuto         bool
+	previousConversation session.AgentConversationData
+	to                   string
+	agent                string
+	alreadySet           bool
 }
 
 // committedAccountSwap recognizes a replacement whose identity checkpoint

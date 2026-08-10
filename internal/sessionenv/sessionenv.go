@@ -33,6 +33,13 @@ const ExecMarker = "__af-session-env-exec"
 // Refusing loudly is the direction this can afford to be wrong in.
 const AccountExecMarker = "__af-session-env-exec-account"
 
+// AccountEnvironmentExecMarker scopes a non-agent sibling pane (shell/process)
+// to the session's selected identity without claiming that the pane command is
+// itself the agent executable. The daemon still resolves the account name in
+// the child immediately before exec, and every identity-bearing ambient value
+// is removed before its credential root is injected.
+const AccountEnvironmentExecMarker = "__af-session-env-exec-account-environment"
+
 var commonNames = nameSet(
 	// Process and terminal basics.
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",

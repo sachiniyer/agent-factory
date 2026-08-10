@@ -98,7 +98,8 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	restored.SetLimitReached(time.Time{})
 	require.NoError(t, restored.BeginLimitResume())
-	require.NoError(t, restored.SelectAccountAutomatically("", "work"))
+	_, err := restored.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
 
 	require.NoError(t, restored.RespawnForAccountSwap())
 	require.NotEmpty(t, spawns)
@@ -107,6 +108,8 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 		"the previous account's conversation store must never be resumed under the replacement account")
 	require.Contains(t, agentSpawn, "--session-id",
 		"the replacement claude identity must receive an explicit fresh conversation")
+	require.Contains(t, strings.Join(spawns, "\n"), "__af-session-env-exec-account-environment",
+		"restored shell/process panes must launch inside the replacement account environment")
 }
 
 // A relocation probe that reaches its deadline latches the worktree as stalled

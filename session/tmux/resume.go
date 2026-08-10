@@ -236,13 +236,8 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 
 	switch agent {
 	case ProgramClaude:
-		for _, tok := range tokens[agentIdx+1:] {
-			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
-				isShortResumeWithAttachedValue(tok) ||
-				tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
-				return program, false
-			}
+		if len(claudeConversationSelectorArgs(tokens[agentIdx+1:])) > 0 {
+			return program, false
 		}
 		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
@@ -279,15 +274,56 @@ func ClaudeProgramWithSessionID(program, sessionID string) (string, bool) {
 	if agent != ProgramClaude {
 		return program, false
 	}
-	for _, tok := range tokens[agentIdx+1:] {
-		if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-			strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
-			isShortResumeWithAttachedValue(tok) ||
-			tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
-			return program, false
-		}
+	if len(claudeConversationSelectorArgs(tokens[agentIdx+1:])) > 0 {
+		return program, false
 	}
 	return program + " --session-id " + sessionID, true
+}
+
+// ConversationSelectorArgs returns the user-authored arguments that force a
+// Claude or Codex launch into an existing conversation. A credential-account
+// replacement must start fresh: provider conversation stores are account-local,
+// so carrying one of these selectors across the boundary can fail or address an
+// unrelated conversation. The returned words are suitable for a refusal that
+// names exactly what the operator must remove.
+func ConversationSelectorArgs(program string) []string {
+	tokens, _ := splitShellTokens(program)
+	agentIdx, agent := findAgentToken(tokens)
+	if agentIdx < 0 {
+		return nil
+	}
+	switch agent {
+	case ProgramClaude:
+		return claudeConversationSelectorArgs(tokens[agentIdx+1:])
+	case ProgramCodex:
+		idx := agentIdx + 1
+		if idx < len(tokens) && tokens[idx] == "exec" {
+			idx++
+		}
+		if idx < len(tokens) && tokens[idx] == "resume" {
+			end := min(idx+2, len(tokens))
+			return append([]string(nil), tokens[idx:end]...)
+		}
+	}
+	return nil
+}
+
+func claudeConversationSelectorArgs(args []string) []string {
+	for idx, arg := range args {
+		switch {
+		case arg == "-c" || arg == "--continue":
+			return []string{arg}
+		case arg == "-r" || arg == "--resume" || arg == "--session-id":
+			if idx+1 < len(args) {
+				return append([]string(nil), args[idx:idx+2]...)
+			}
+			return []string{arg}
+		case strings.HasPrefix(arg, "--resume=") || strings.HasPrefix(arg, "-r=") ||
+			isShortResumeWithAttachedValue(arg) || strings.HasPrefix(arg, "--session-id="):
+			return []string{arg}
+		}
+	}
+	return nil
 }
 
 // DetectAgentFromCommand returns the canonical agent name (one of

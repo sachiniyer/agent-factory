@@ -110,6 +110,20 @@ func ValidateAccountCommand(command string, account Account) error {
 		account.Name, account.Agent, account.Agent)
 }
 
+// ValidateAccountEnvironmentCommand rejects a shell/process pane that pins an
+// identity in its command. Unlike ValidateAccountCommand it does not require the
+// command to be the agent itself; it protects the selected environment that the
+// sibling pane receives.
+func ValidateAccountEnvironmentCommand(command string, account Account) error {
+	proof := commandProof{agent: account.Agent}
+	if overrides, _ := commandOverridesName(command, proof); overrides {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command sets an identity variable itself, which overrides the account directory",
+			account.Name, account.Agent)
+	}
+	return nil
+}
+
 func undeclaredAccountArguments(command string, proof commandProof) ([]string, bool) {
 	call, ok := singleSimpleCall(command)
 	if !ok || len(call.Assigns) > 0 || !callIsLiteral(call) {

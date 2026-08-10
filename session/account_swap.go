@@ -1,9 +1,11 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -64,6 +66,8 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	current := i.Account
 	auto := i.accountAutoSelected
 	op := i.inFlightOp
+	pendingCleanup := len(i.pendingTabCleanup)
+	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.RUnlock()
 	if op != OpRespawning {
 		return fmt.Errorf("account swap for %q requires the limit-resume fence", i.Title)
@@ -76,6 +80,25 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	}
 	if typ := backend.Type(); typ != "local" && typ != "docker" {
 		return fmt.Errorf("account swapping is not supported by the %s backend", typ)
+	}
+	if pendingCleanup > 0 {
+		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
+	}
+	resolvedProgram := resolveLaunchProgramForInstance(i).command
+	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
+		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
+	}
+	accountScope := sessionenv.Account{Agent: sessionenv.AgentForCommand(resolvedProgram), Name: name}
+	for idx, tab := range tabs {
+		if idx == 0 {
+			continue
+		}
+		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+			continue
+		}
+		if err := sessionenv.ValidateAccountEnvironmentCommand(tab.tmux.Program(), accountScope); err != nil {
+			return fmt.Errorf("cannot switch session %q to account %q while tab %q pins another identity: %w", i.Title, name, tab.Name, err)
+		}
 	}
 	if _, err := resolveAccountForProvision(path, program, name); err != nil {
 		return fmt.Errorf("cannot select account %q for session %q: %w", name, i.Title, err)
@@ -105,22 +128,31 @@ func (i *Instance) StopForAccountSwap() error {
 
 // SelectAccountAutomatically commits the scheduler's replacement identity in
 // memory. The caller must persist it before starting the replacement runtime.
-func (i *Instance) SelectAccountAutomatically(from, name string) error {
+func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversationData, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
-		return fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
+		return AgentConversationData{}, fmt.Errorf("selecting account for %q requires the limit-resume fence", i.Title)
 	}
+	var previous AgentConversationData
+	if len(i.Tabs) > 0 {
+		previous = i.Tabs[0].Conversation
+		i.setAgentConversationLocked(AgentConversationData{})
+	}
+	// Invalidate asynchronous discovery attached to the stopped process before it
+	// can put that process's account-local conversation back into the live slot.
+	i.agentRuntimeGeneration++
+	i.clearAgentModelChangeLocked()
 	i.Account = name
 	i.accountAutoSelected = true
 	i.pendingAccountSwap = &AccountSwapData{From: from, To: name}
-	return nil
+	return previous, nil
 }
 
 // RestoreAccountSelectionUnderResumeFence rolls back an in-memory selection
 // whose durable checkpoint failed. The stopped old runtime is not restarted;
 // the next scheduler pass retries from the still-durable previous identity.
-func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto bool) error {
+func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto bool, conversation AgentConversationData) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
@@ -129,6 +161,7 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name string, auto boo
 	i.Account = name
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = nil
+	i.setAgentConversationLocked(conversation)
 	return nil
 }
 
@@ -154,22 +187,43 @@ func (i *Instance) AccountSwapReprovisionsSandbox() bool {
 
 func (b *LocalBackend) stopForAccountSwap(i *Instance) error {
 	i.mu.RLock()
-	ts := i.tmuxLocked()
 	gw := i.gitWorktree
+	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.RUnlock()
-	if ts == nil || gw == nil || gw.GetWorktreePath() == "" {
+	if len(tabs) == 0 || tabs[0].tmux == nil || gw == nil || gw.GetWorktreePath() == "" {
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
-	state, blind, err := ts.CloseAndWaitForPaneExitReportingBlindness()
-	if state == tmux.PaneStateKnown && blind {
-		return fmt.Errorf("account swap: %q vanished without its pane being observed; not starting another identity while a detached child may still be writing the worktree", i.Title)
+	var failures []error
+	for _, tab := range tabs {
+		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+			continue
+		}
+		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
+		switch {
+		case state == tmux.PaneStateKnown && blind:
+			failures = append(failures, fmt.Errorf("tab %q vanished without its pane being observed; a detached child may still be writing the worktree", tab.Name))
+		case state == tmux.PaneStateUnknown:
+			failures = append(failures, fmt.Errorf("cannot confirm tab %q stopped: %w", tab.Name, err))
+		case err != nil:
+			failures = append(failures, fmt.Errorf("failed to stop tab %q: %w", tab.Name, err))
+		}
 	}
-	if state == tmux.PaneStateUnknown {
-		return fmt.Errorf("account swap: cannot confirm %q's current agent stopped: %w", i.Title, err)
+	if err := errors.Join(failures...); err != nil {
+		return fmt.Errorf("account swap: cannot stop every credential-bearing pane for %q: %w", i.Title, err)
 	}
-	if err != nil {
-		return fmt.Errorf("account swap: failed to stop the current agent for %q: %w", i.Title, err)
+	return nil
+}
+
+func (b *LocalBackend) respawnFresh(i *Instance) error {
+	return b.respawnWithConversation(i, false)
+}
+
+func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
+	if err := tab.tmux.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
+		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
+	account, _ := i.AccountSelection()
+	tab.tmux.SetAccountEnvironmentForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
 	return nil
 }
 

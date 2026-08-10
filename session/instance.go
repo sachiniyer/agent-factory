@@ -189,7 +189,7 @@ type Instance struct {
 	agentRuntimeGeneration uint64
 	// Program is the program to run in the instance.
 	Program string
-	// Account is the credential account this instance's agent runs as, or empty
+	// Account is the credential account this instance's provider panes use, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.
 	//

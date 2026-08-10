@@ -178,7 +178,7 @@ func TestRefreshStatuses_PendingAccountSwapKeepsLimitStateForDelivery(t *testing
 	if err := inst.BeginLimitResume(); err != nil {
 		t.Fatal(err)
 	}
-	if err := inst.SelectAccountAutomatically("", "work"); err != nil {
+	if _, err := inst.SelectAccountAutomatically("", "work"); err != nil {
 		t.Fatal(err)
 	}
 	inst.EndLimitResume()
@@ -189,6 +189,26 @@ func TestRefreshStatuses_PendingAccountSwapKeepsLimitStateForDelivery(t *testing
 	}
 	if _, to, pending := inst.PendingAccountSwap(); !pending || to != "work" {
 		t.Fatalf("status poll consumed pending swap = (%q, %v)", to, pending)
+	}
+}
+
+func TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &deadTmuxBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "stale-pending-swap", backend, true, session.Running)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.SelectAccountAutomatically("", "work"); err != nil {
+		t.Fatal(err)
+	}
+	inst.EndLimitResume()
+	inst.ClearLimitReached()
+
+	manager.RefreshStatuses()
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("non-limit row with stale pending marker after status poll = %v, want Lost", got)
 	}
 }
 

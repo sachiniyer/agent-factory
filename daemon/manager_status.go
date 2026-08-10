@@ -460,7 +460,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		m.clearRemoteLoss(key)
 		return
 	}
-	if _, _, pending := instance.PendingAccountSwap(); pending {
+	if _, _, pending := instance.PendingAccountSwap(); pending && instance.GetLiveness() == session.LiveLimitReached {
 		// The selected identity is durable but its replacement launch/notice is not
 		// complete. ResumeLimitedSessions owns this row later in the same tick; a
 		// normal status probe must not rewrite the retained LimitReached state into

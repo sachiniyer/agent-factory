@@ -41,7 +41,8 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
 	// re-provisioned session carries the account it was created with rather than
 	// quietly reverting to the ambient identity (#3051).
-	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), i.Account)
+	account, _ := i.AccountSelection()
+	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
 	return nil
 }
 
@@ -540,10 +541,6 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	return b.respawnWithConversation(i, true)
 }
 
-func (b *LocalBackend) respawnFresh(i *Instance) error {
-	return b.respawnWithConversation(i, false)
-}
-
 func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool) error {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
@@ -718,6 +715,10 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 			continue
 		}
 		if tab.tmux != nil {
+			if err := refreshTabSessionEnvironment(i, tab); err != nil {
+				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
+				continue
+			}
 			if err := tab.tmux.Restore(worktreePath); err != nil {
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			}

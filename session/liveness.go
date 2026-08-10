@@ -143,9 +143,9 @@ func opIsTeardown(op InFlightOp) bool {
 // other settled row archives. Kill addressability is intentionally independent
 // (CanKill): a retained tombstone or startup-unknown row must remain removable
 // without becoming attachable, archivable, or restorable.
-func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled bool) LifecycleAction {
+func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStateUnknown, userKilled, pendingAccountSwap bool) LifecycleAction {
 	if id == "" || op == OpCreating || op == OpReplacing || op == OpRespawning ||
-		opIsTeardown(op) || startupStateUnknown || userKilled {
+		opIsTeardown(op) || startupStateUnknown || userKilled || pendingAccountSwap {
 		return LifecycleActionNone
 	}
 	switch liveness {
@@ -188,7 +188,7 @@ func canKillFor(id string, op InFlightOp) bool {
 func (i *Instance) LifecycleAction() LifecycleAction {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled)
+	return lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled, i.pendingAccountSwap != nil)
 }
 
 // CanKill reports whether interactive clients may offer explicit teardown for

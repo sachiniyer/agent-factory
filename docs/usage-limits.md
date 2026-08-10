@@ -111,6 +111,12 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   observation is not presented as a provider guarantee.
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
+- **One credential boundary.** A local swap stops every agent, shell, and process
+  pane before committing the new identity, then restores them with the selected
+  account environment; the agent starts a fresh provider conversation. A
+  resolved command that explicitly pins `--continue`, `--resume`, `--session-id`,
+  or `codex resume` is not safe to carry across accounts, so af names those
+  arguments and keeps the existing wait instead.
 - **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and
   `limit_account_candidates` are rejected
   in in-repo configs. A save through `af config set` applies them to the running

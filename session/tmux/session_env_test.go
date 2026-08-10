@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/stretchr/testify/require"
 )
 
 type captureLaunchEnvPty struct {
@@ -151,6 +152,20 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	if !strings.Contains(err.Error(), "selected for claude") || !strings.Contains(err.Error(), "resolves to codex") {
 		t.Fatalf("cross-agent refusal did not name both namespaces: %v", err)
 	}
+}
+
+func TestSiblingSessionInheritsAccountEnvironment(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+
+	agent := NewTmuxSession("account-parent", "claude")
+	agent.SetAccountForAgent("claude", "work")
+	shell := agent.NewSiblingSession("account-shell", "/bin/sh")
+
+	wrapped, _, _, err := shell.launchEnvironment()
+	require.NoError(t, err)
+	require.Contains(t, wrapped, "__af-session-env-exec-account-environment")
+	require.Contains(t, wrapped, "work")
 }
 
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {

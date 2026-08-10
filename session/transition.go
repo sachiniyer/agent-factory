@@ -547,6 +547,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// mis-ordered edge (#2135). The observer re-decides on its next tick.
 		return nil
 	}
+	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
+	}
 	from := stateAxes{i.liveness, i.inFlightOp}
 	spec, ok := transitionTable[ev.kind]
 	if !ok {

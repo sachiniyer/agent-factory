@@ -119,6 +119,13 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
+// ProjectConfigRequiresRestart reports whether a personal-project edit needs a
+// daemon restart. Applied-live project keys are resolved from disk at their next
+// relevant daemon operation; the remaining classes retain the startup boundary.
+func ProjectConfigRequiresRestart(key string) bool {
+	return KeyEffectClass(key) != EffectAppliedLive
+}
+
 // EffectNotice is the one sentence a save surface shows after writing key, stating
 // WHEN the change takes effect. daemonApplied reports whether a running daemon just
 // applied the on-disk config (Manager.ApplyConfig succeeded); it only changes the
