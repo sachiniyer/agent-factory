@@ -420,9 +420,10 @@ func TestFactoryReset_ResumeFailureIsLoudAndFails(t *testing.T) {
 	autostartUnitServesHomeFn = func(string) (bool, bool, error) { return true, true, nil }
 	pauseAutostartUnitFn = func() error { return nil }
 	attempts := 0
+	resumeErr := errors.New("systemctl --user start failed: unit not found")
 	resumeAutostartUnitFn = func() error {
 		attempts++
-		return errors.New("systemctl --user start failed: unit not found")
+		return resumeErr
 	}
 
 	out, err := runResetCapture(t)
@@ -432,8 +433,8 @@ func TestFactoryReset_ResumeFailureIsLoudAndFails(t *testing.T) {
 	if !strings.Contains(out, "ACTION REQUIRED") || !strings.Contains(out, "STOPPED") {
 		t.Errorf("a failed resume did not shout about the stopped daemon:\n%s", out)
 	}
-	if err == nil {
-		t.Error("runReset returned nil after leaving the daemon stopped; a scripted caller would never notice")
+	if !errors.Is(err, resumeErr) {
+		t.Errorf("runReset error = %v, want the resume failure reachable", err)
 	}
 }
 
