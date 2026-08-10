@@ -29,6 +29,13 @@ number:
 The manual workflow uses the base repository's built-in Actions token. It does
 not require a PAT, custom GitHub App, or ruleset bypass.
 
+Auto Gate does not pass fork heads. GitHub deliberately makes review and review
+comment workflows read-only for fork pull requests, so those events cannot
+reliably invalidate a previously green aggregate. Move an authorized change to
+a branch in this repository before asking Auto Gate to merge it. The
+`pull_request_target` lifecycle trigger only executes the default-branch helper;
+it never checks out or executes pull-request code.
+
 ## Ruleset
 
 The `master` ruleset requires the fixed `Auto Gate decision` check from the
@@ -39,13 +46,19 @@ bypass because that non-session path updates the release commit directly.
 
 ## Event and merge ordering
 
-Each subscribed input event makes the affected aggregate non-green before
-refreshing the PR/head decisions. After all decisions settle, Auto Gate
-republishes the aggregate and attempts a merge only after a fresh aggregate
-evaluation. A head synchronization reevaluates both the new head and the
-previous head because the set of associated PRs changed for both commits.
+Each subscribed input event serializes one complete transaction for the
+affected commit: make the aggregate non-green, refresh every associated PR/head
+decision, republish the aggregate, then consider a merge. Keeping all four
+phases in one head-scoped concurrency lane prevents an older run from
+republishing stale PASS while a newer run is still evaluating. A head
+synchronization reevaluates both the new head and the previous head because the
+set of associated PRs changed for both commits. After a successful merge, the
+same transaction explicitly makes the old-head aggregate non-green; it does not
+depend on a `closed` event that GitHub may suppress for token-authenticated
+writes.
 
 Repository-ruleset changes and mergeability changes caused only by `master`
 advancing have no GitHub event here. Use the same manual PR-number dispatch to
 refresh that observational state. The destructive merge path still reevaluates
-the target PR immediately before its write.
+the target PR, every other associated PR, and the association set immediately
+before its write.
