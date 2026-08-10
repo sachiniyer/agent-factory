@@ -725,6 +725,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	if err != nil {
 		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
 	}
+	beforeRestoreWorktreeUse()
 
 	// Move the worktree back next to the repo. A repo-gone failure leaves the
 	// archive intact (the git layer guarantees this) and surfaces an actionable

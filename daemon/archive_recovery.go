@@ -9,6 +9,11 @@ import (
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
+// Test seam at the boundary between the daemon's early repo-gone guard and the
+// git layer's authoritative pre-move check. A repository can disappear in this
+// interval in production; tests use the seam to make that race deterministic.
+var beforeRestoreWorktreeUse = func() {}
+
 func (m *Manager) guardRepoGoneRestore(
 	repoID, title, repoPath string,
 	instance *session.Instance,
