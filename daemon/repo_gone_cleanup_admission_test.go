@@ -262,6 +262,76 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 		"definitive synchronous cleanup must keep retrying its editor/record tail")
 }
 
+func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-crash-window")
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+
+	// Drive the real descriptor cleanup, then hold the instances lock before the
+	// ordinary row-delete tail. This models a daemon dying after the archive root
+	// has been removed: only state persisted from inside the descriptor fence can
+	// survive that boundary.
+	previousCleanup := ghostCleanupWorktree
+	var releaseLock func()
+	ghostCleanupWorktree = func(data *session.InstanceData, title string) (sessiongit.CleanupState, error, <-chan error) {
+		state, cleanupErr, lateResult := previousCleanup(data, title)
+		if state == sessiongit.CleanupSettled && cleanupErr == nil && lateResult == nil {
+			path, err := config.RepoInstancesPath(repoID)
+			require.NoError(t, err)
+			releaseLock = holdFileLock(t, path)
+		}
+		return state, cleanupErr, lateResult
+	}
+	t.Cleanup(func() {
+		ghostCleanupWorktree = previousCleanup
+		if releaseLock != nil {
+			releaseLock()
+		}
+	})
+
+	// Keep the first manager's process-local finalizer from masking what a real
+	// restart would read from disk.
+	previousLateDelete := lateGhostDeleteSessionRecord
+	releaseOldFinalizer := make(chan struct{})
+	oldFinalizerReleased := false
+	lateGhostDeleteSessionRecord = func(m *Manager, repoID, title, stableID string, teardownErr error) (bool, error) {
+		<-releaseOldFinalizer
+		return previousLateDelete(m, repoID, title, stableID, teardownErr)
+	}
+	t.Cleanup(func() {
+		lateGhostDeleteSessionRecord = previousLateDelete
+		if !oldFinalizerReleased {
+			close(releaseOldFinalizer)
+		}
+	})
+
+	previousDeleteTimeout := session.InstanceDeleteLockTimeout
+	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
+	require.ErrorIs(t, err, config.ErrLockTimeout)
+	require.NotNil(t, releaseLock, "the tail failure must happen after descriptor cleanup succeeded")
+	record := recordFor(t, repoID, "ghost-crash-window")
+	require.NotNil(t, record)
+	require.NotNil(t, record.Worktree.RelocationRecovery)
+	assert.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
+		"the durable row must record that descriptor cleanup entered its finalization fence")
+
+	// A new daemon must finish the tombstone from the durable fence alone; it
+	// cannot depend on the first process's goroutine or reinterpret pathname
+	// absence as completion of an ordinary cleanup-ready claim.
+	releaseLock()
+	releaseLock = nil
+	restarted, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	_, err = restarted.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
+	require.NoError(t, err)
+	assert.Nil(t, recordFor(t, repoID, "ghost-crash-window"))
+
+	close(releaseOldFinalizer)
+	oldFinalizerReleased = true
+}
+
 func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "live-tail")
 	require.NoError(t, os.RemoveAll(repoPath))
