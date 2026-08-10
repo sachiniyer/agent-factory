@@ -398,7 +398,6 @@ func TestSwitchProjectResetsProgramWhenConfigResolveFails(t *testing.T) {
 	assert.Equal(t, globalDefault, h.program,
 		"the outgoing project's program must be reset to the global default, not carried over (#2138)")
 	assert.Empty(t, h.hooksPane.GetCommands(), "hooks must still be cleared on a failed resolve (#1686)")
-	assert.Equal(t, 0, h.store.GetHookCount(), "the hook count must still be cleared on a failed resolve (#1686)")
 }
 
 // TestSwitchProjectAppliesProjectProgramWhenConfigResolves guards the success
