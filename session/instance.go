@@ -163,6 +163,8 @@ type Instance struct {
 	limitResetAt time.Time
 	// limitAccount attributes the current limit after Account changes; empty means ambient.
 	limitAccount string
+	// accountLimitObservations keep named identity walls after liveness clears.
+	accountLimitObservations []AccountLimitObservationData
 	// agentModelChange is a live, projection-only diagnostic supplied by the
 	// running agent-server. It is mutex-protected and deliberately omitted from
 	// durable restore state; see AgentModelChange and InstanceData.ForStorage.
@@ -189,14 +191,11 @@ type Instance struct {
 	agentRuntimeGeneration uint64
 	// Program is the program to run in the instance.
 	Program string
-	// Account is the credential account this instance's provider panes use, or empty
-	// for the ambient identity — which is the behaviour every session had before
-	// #3051 and remains the default.
+	// Account is the provider-pane credential account, or empty for the ambient
+	// identity — the pre-#3051 behavior, which remains the default.
 	//
-	// Persisted, because the identity a session runs as must survive a restart:
-	// a restored session that silently reverted to the ambient account would
-	// spend the wrong quota while still displaying the account it was created
-	// with.
+	// Persisted because a restored session that silently reverted to ambient
+	// credentials would spend the wrong quota while displaying its saved account.
 	Account string `json:"account,omitempty"`
 	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
 	accountAutoSelected bool

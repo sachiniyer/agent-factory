@@ -132,12 +132,17 @@ type InstanceData struct {
 	LimitResetAt time.Time `json:"limit_reset_at,omitempty"`
 	// LimitAccount is the identity that produced this limit observation. It may
 	// differ from Account while a durably selected replacement is still starting.
-	LimitAccount string    `json:"limit_account,omitempty"`
-	Height       int       `json:"height"`
-	Width        int       `json:"width"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Prompt       string    `json:"prompt,omitempty"`
+	LimitAccount string `json:"limit_account,omitempty"`
+	// AccountLimitObservations retain quota walls after a successful identity
+	// replacement clears the session's current limit liveness. Candidate
+	// selection uses these per agent/account observations until a known reset
+	// window expires; an unknown reset stays conservatively active.
+	AccountLimitObservations []AccountLimitObservationData `json:"account_limit_observations,omitempty"`
+	Height                   int                           `json:"height"`
+	Width                    int                           `json:"width"`
+	CreatedAt                time.Time                     `json:"created_at"`
+	UpdatedAt                time.Time                     `json:"updated_at"`
+	Prompt                   string                        `json:"prompt,omitempty"`
 	// PendingHandoffMission is a rendered takeover brief whose incoming runtime
 	// has been established but whose delivery has not been durably confirmed.
 	// Unlike Prompt, it is an at-least-once recovery marker and is cleared after
@@ -278,6 +283,15 @@ type AccountSwapData struct {
 	From           string `json:"from,omitempty"`
 	To             string `json:"to"`
 	ConversationID string `json:"conversation_id,omitempty"`
+}
+
+// AccountLimitObservationData is durable evidence that one named identity hit
+// a provider quota wall. Agent is part of the key because equal account labels
+// name unrelated credential stores for different providers.
+type AccountLimitObservationData struct {
+	Agent   string    `json:"agent"`
+	Account string    `json:"account"`
+	ResetAt time.Time `json:"reset_at,omitempty"`
 }
 
 // IsRemoteHook reports whether this serialized record is a remote hook session,

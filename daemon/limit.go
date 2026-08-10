@@ -608,8 +608,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
+		var accountConversationCapture session.ConversationCaptureSnapshot
 		if accountSwap != nil {
-			rerr = instance.RespawnForAccountSwap()
+			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
+			if rerr == nil {
+				rerr = instance.RespawnForAccountSwap()
+			}
 		} else {
 			rerr = instance.RespawnWithLiveBoundary(func() {
 				if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
@@ -628,6 +632,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
+		if accountSwap != nil {
+			// Account-swap preflight captured the selected account's provider store
+			// before launch. Bind discovery to this freshly replaced runtime now;
+			// otherwise Codex swaps permanently lose the new conversation id.
+			m.captureAgentConversationAsync(repoID, key, instance, accountConversationCapture)
+		}
 		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
 		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
@@ -697,7 +707,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			return resumeNotPerformed, boundaryErr
 		}
-		if err := instance.SynchronizeAccountSwapPaneMetadata(); err != nil {
+		if err := instance.SynchronizeAccountSwapRuntimeMetadata(); err != nil {
 			return resumeNotPerformed, err
 		}
 	}

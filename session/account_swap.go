@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -19,11 +20,12 @@ type accountSwapStopper interface {
 }
 
 type accountSwapLaunchPlan struct {
-	account      string
-	base         string
-	program      string
-	proof        sessionenv.AccountLaunchProof
-	conversation AgentConversationData
+	account             string
+	base                string
+	program             string
+	proof               sessionenv.AccountLaunchProof
+	conversation        AgentConversationData
+	conversationCapture ConversationCaptureSnapshot
 }
 
 func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchPlan {
@@ -32,6 +34,7 @@ func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchP
 	}
 	copy := *plan
 	copy.proof.GeneratedArgs = append([]string(nil), plan.proof.GeneratedArgs...)
+	copy.conversationCapture = cloneConversationCaptureSnapshot(plan.conversationCapture)
 	return &copy
 }
 
@@ -162,6 +165,23 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 			return fmt.Errorf("cannot switch session %q to account %q while tab %q pins another identity: %w", i.Title, name, tab.Name, err)
 		}
 	}
+	var conversationCapture ConversationCaptureSnapshot
+	if accountScope.Agent == tmux.ProgramCodex {
+		workDir := i.GetWorktreePath()
+		if strings.TrimSpace(workDir) == "" {
+			return fmt.Errorf("cannot switch session %q to account %q: local worktree has no launch directory for Codex conversation capture", i.Title, name)
+		}
+		launch, err := tmux.CommandEnvironmentFromCommand(launchProgram, workDir)
+		if err != nil {
+			return fmt.Errorf("cannot prepare Codex conversation capture while switching session %q to account %q: %w", i.Title, name, err)
+		}
+		captureWorkingDir := ""
+		if launch.WorkingDirKnown() {
+			captureWorkingDir = launch.WorkingDir
+		}
+		conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(
+			accountScope.Dir, captureWorkingDir)
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
@@ -169,9 +189,20 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	}
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
 		account: name, base: resolvedProgram, program: launchProgram,
-		proof: proof, conversation: conversation,
+		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 	}
 	return nil
+}
+
+// AccountSwapConversationCapture returns the provider-store before-image
+// frozen by account-swap preflight. The caller starts discovery only after the
+// same plan has launched, preserving the before/after boundary.
+func (i *Instance) AccountSwapConversationCapture() (ConversationCaptureSnapshot, error) {
+	plan, err := i.accountSwapLaunchForRespawn()
+	if err != nil {
+		return ConversationCaptureSnapshot{}, err
+	}
+	return cloneConversationCaptureSnapshot(plan.conversationCapture), nil
 }
 
 func (i *Instance) accountSwapLaunchForRespawn() (*accountSwapLaunchPlan, error) {
@@ -371,20 +402,45 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 	return nil
 }
 
-// SynchronizeAccountSwapPaneMetadata repairs the process-local tmux launch
-// metadata after a daemon restart. The running panes already have the selected
-// environment; this makes any later sibling spawn inherit that same durable
-// account after the pending marker is cleared.
-func (i *Instance) SynchronizeAccountSwapPaneMetadata() error {
-	account, _ := i.AccountSelection()
-	_, target, pending := i.PendingAccountSwap()
-	if !pending || account != target {
+// SynchronizeAccountSwapRuntimeMetadata repairs the process-local launch state
+// after a daemon restart. The running panes already have the selected account;
+// this restores tmux's launch metadata and promotes a durable injected Claude
+// id before the pending marker can be cleared.
+func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
+	i.mu.Lock()
+	account := i.Account
+	pending := cloneAccountSwapData(i.pendingAccountSwap)
+	if pending == nil || account != pending.To {
+		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
 	}
-	agent := sessionenv.AgentForCommand(i.AgentProgram())
-	i.mu.RLock()
+	agent := i.currentAgentNameLocked()
+	if pending.ConversationID != "" {
+		if agent != tmux.ProgramClaude {
+			i.mu.Unlock()
+			return fmt.Errorf("account swap for %q has a Claude conversation id but its replacement agent is %q", i.Title, agent)
+		}
+		if len(i.Tabs) == 0 {
+			i.mu.Unlock()
+			return fmt.Errorf("account swap for %q has no agent tab to receive its replacement conversation", i.Title)
+		}
+		current := i.Tabs[0].Conversation
+		if current.HasID() && (current.Agent != tmux.ProgramClaude || current.ID != pending.ConversationID) {
+			i.mu.Unlock()
+			return fmt.Errorf("account swap for %q has replacement conversation %q but the live agent records %s conversation %q",
+				i.Title, pending.ConversationID, current.Agent, current.ID)
+		}
+		if !current.HasID() {
+			i.setAgentConversationLocked(AgentConversationData{
+				Agent:       tmux.ProgramClaude,
+				ID:          pending.ConversationID,
+				CapturedAt:  time.Now(),
+				CaptureKind: ConversationCaptureInjected,
+			})
+		}
+	}
 	tabs := append([]*Tab(nil), i.Tabs...)
-	i.mu.RUnlock()
+	i.mu.Unlock()
 	for idx, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue

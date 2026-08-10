@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,6 +39,28 @@ func TestSetLimitReachedAttributesWallToAccountThatProducedIt(t *testing.T) {
 	i.Account = "personal"
 	account, _ = i.LimitAccount()
 	require.Equal(t, "work", account)
+}
+
+func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
+	reset := time.Date(2026, 8, 10, 17, 0, 0, 0, time.UTC)
+	i := &Instance{
+		Program: tmux.ProgramClaude, Account: "work", accountAutoSelected: true,
+	}
+	i.SetLimitReached(reset)
+	i.ClearLimitReached()
+
+	want := []AccountLimitObservationData{{
+		Agent: tmux.ProgramClaude, Account: "work", ResetAt: reset,
+	}}
+	require.Equal(t, want, i.AccountLimitObservations(),
+		"clearing current liveness must not make an exhausted identity eligible")
+
+	raw, err := json.Marshal(i.ToInstanceData().ForStorage())
+	require.NoError(t, err)
+	var stored InstanceData
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Equal(t, want, stored.AccountLimitObservations,
+		"account limit evidence must survive the daemon restart boundary")
 }
 
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still

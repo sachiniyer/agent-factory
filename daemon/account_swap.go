@@ -46,8 +46,8 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 }
 
 // accountSwapForLimit answers only from facts af actually has. "Unblocked"
-// means no live session currently records a limit observation for that
-// agent/account; it is never promoted into a provider quota claim.
+// means no live wall or retained, unexpired observation records a limit for
+// that agent/account; it is never promoted into a provider quota claim.
 func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
 	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
@@ -87,14 +87,28 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 		instances = append(instances, other)
 	}
 	m.mu.Unlock()
-	limited := make([]string, 0)
+	limitedSet := make(map[string]struct{})
+	now := nowFunc()
 	for _, other := range instances {
 		if other == nil || sessionenv.AgentForCommand(other.AgentProgram()) != agent {
 			continue
 		}
 		if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
-			limited = append(limited, account)
+			limitedSet[account] = struct{}{}
 		}
+		for _, observation := range other.AccountLimitObservations() {
+			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
+				continue
+			}
+			if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+				continue
+			}
+			limitedSet[observation.Account] = struct{}{}
+		}
+	}
+	limited := make([]string, 0, len(limitedSet))
+	for account := range limitedSet {
+		limited = append(limited, account)
 	}
 	target, ok := quota.SelectAccountCandidate(quota.AccountSelection{
 		CurrentAccount:      current,

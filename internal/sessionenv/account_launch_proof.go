@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/sachiniyer/agent-factory/internal/envcommand"
 )
 
 // AccountLaunchProof carries the facts only af's launcher can know about a
@@ -116,12 +118,60 @@ func ValidateAccountCommand(command string, account Account) error {
 // sibling pane receives.
 func ValidateAccountEnvironmentCommand(command string, account Account) error {
 	proof := commandProof{agent: account.Agent}
-	if overrides, _ := commandOverridesName(command, proof); overrides {
+	overrides, provable := commandOverridesName(command, proof)
+	if overrides {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity variable itself, which overrides the account directory",
 			account.Name, account.Agent)
 	}
+	if !provable && accountEnvironmentCommandNeedsProof(command) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: af cannot prove this interpreter or shell wrapper preserves the selected account identity",
+			account.Name, account.Agent)
+	}
 	return nil
+}
+
+// accountEnvironmentCommandNeedsProof identifies shell syntax that constructs
+// another command rather than merely consuming the selected environment. Plain
+// literal process commands remain valid sibling panes: af does not claim to
+// prove arbitrary application behavior. Shell programs, expansions, pipelines,
+// and compound commands are different because the command string itself is a
+// second launch mechanism where an identity assignment can be hidden.
+func accountEnvironmentCommandNeedsProof(command string) bool {
+	call, ok := singleSimpleCall(command)
+	if !ok || !callIsLiteral(call) {
+		return true
+	}
+	words, ok := literalCommandArgs(call.Args)
+	if !ok {
+		return true
+	}
+	if len(words) > 0 && words[0] == "exec" {
+		words = words[1:]
+		if len(words) > 0 && words[0] == "--" {
+			words = words[1:]
+		}
+	}
+	if len(words) == 0 {
+		return false
+	}
+	if filepath.Base(words[0]) == "env" {
+		invocation, err := envcommand.Parse(words[1:], envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 {
+			return err != nil
+		}
+		words = words[1+invocation.CommandIndex:]
+	}
+	if len(words) <= 1 {
+		return false
+	}
+	switch filepath.Base(words[0]) {
+	case "sh", "bash", "dash", "ksh", "mksh", "zsh":
+		return true
+	default:
+		return false
+	}
 }
 
 func undeclaredAccountArguments(command string, proof commandProof) ([]string, bool) {
