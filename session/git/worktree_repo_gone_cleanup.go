@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -26,9 +28,27 @@ func probeRepoGoneOrigin(worktree *GitWorktree) error {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
+		if definitiveNonGitRepository(worktree.repoPath, err) {
+			return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
+		}
+		return err
 	}
 	return nil
+}
+
+// definitiveNonGitRepository accepts only Git's stable outside-repository
+// answer with no repository metadata at the recorded root. Command-start,
+// permission, corrupt-metadata, safe-directory, and other execution failures
+// remain unknown and therefore cannot authorize deletion.
+func definitiveNonGitRepository(repoPath string, probeErr error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(probeErr, &exitErr) ||
+		!strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
+		os.Getenv("GIT_DIR") != "" {
+		return false
+	}
+	_, metadataErr := os.Lstat(filepath.Join(repoPath, ".git"))
+	return errors.Is(metadataErr, os.ErrNotExist)
 }
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
@@ -45,6 +65,14 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
 		)
 	}
+}
+
+// CheckRepoPresentForRelocation applies the same bounded, fail-closed
+// repository-validity rule used by cleanup admission. Nil means a valid origin,
+// ErrRepoGone means missing or conclusively non-Git, and every other error is an
+// unknown operational result which must retain the archive.
+func CheckRepoPresentForRelocation(repoPath string) error {
+	return boundedRepoGoneOriginProbe(&GitWorktree{repoPath: repoPath})
 }
 
 // removeClaimedRepoGoneDirectory removes only the directory identified by the

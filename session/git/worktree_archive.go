@@ -582,16 +582,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 // the repo-gone case distinctly (leave the archive intact) rather than as a
 // generic move failure.
 func (g *GitWorktree) ensureRepoPresent() error {
-	if g.repoPath == "" {
-		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
-	}
-	if _, err := os.Stat(g.repoPath); err != nil {
-		return fmt.Errorf("%w: %s: %v", ErrRepoGone, g.repoPath, err)
-	}
-	if _, err := g.runGitCommand(g.repoPath, "rev-parse", "--git-dir"); err != nil {
-		return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, g.repoPath, err)
-	}
-	return nil
+	return boundedRepoGoneOriginProbe(g)
 }
 
 // moveDirCrossDevice moves src to dest, falling back to a copy+remove when the

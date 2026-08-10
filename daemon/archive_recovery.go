@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -19,10 +18,10 @@ func (m *Manager) guardRepoGoneRestore(
 	instance *session.Instance,
 	claim sessiongit.RelocationClaim,
 ) (bool, error) {
-	if _, err := os.Stat(repoPath); err == nil {
+	if err := sessiongit.CheckRepoPresentForRelocation(repoPath); err == nil {
 		return false, nil
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("cannot inspect origin repo %s for session %q: %w", repoPath, title, err)
+	} else if !errors.Is(err, sessiongit.ErrRepoGone) {
+		return false, fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, title, err)
 	}
 	if err := m.prepareRepoGoneCleanup(repoID, title, repoPath, instance, claim); err != nil {
 		return false, err
