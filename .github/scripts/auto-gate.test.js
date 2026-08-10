@@ -17,7 +17,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
   assert.match(
     workflow,
-    /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
+    /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
   );
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
@@ -164,6 +164,72 @@ test("a read-only fork token leaves the decision unreported without failing the 
     }),
     /Resource not accessible by integration/,
   );
+});
+
+test("a non-allowed author gets a passing manual decision without an automatic merge", async () => {
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    files: ["app/termpane.go"],
+    issueComments: [],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.equal(transaction.aggregate.ok, true);
+  assert.equal(github.mergedWith, null);
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "success");
+  assert.match(
+    exactDecision.output.summary,
+    /Auto Gate does not auto-merge PRs from this author; a maintainer must review and merge manually\./,
+  );
+  assert.match(exactDecision.output.summary, /missing the play-tested label/);
+  assert.match(exactDecision.output.summary, /Codex has not reviewed head/);
+  assert.doesNotMatch(exactDecision.output.summary, /not an allowed maintainer/);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  assert.deepEqual(github.operations.slice(0, 4), [
+    "check:create",
+    "auto-merge:disable",
+    "check:create",
+    "check:update",
+  ]);
+});
+
+test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
+  const github = fakeGateGithub({
+    author: "outside-contributor",
+    nativeAutoMergeEnabled: true,
+    nativeAutoMergeDisableError: new Error("cannot disable native auto-merge"),
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /cannot disable native auto-merge/,
+  );
+
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].name, "Auto Gate decision");
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.equal(github.updatedChecks.length, 0);
 });
 
 test("a PR cannot read another PR's decision when both share one head", async () => {
@@ -1153,11 +1219,13 @@ test("draft and closed pull requests cannot merge", async () => {
   assert.match(closed.reasons.join("\n"), /PR is closed, not open/);
 });
 
-test("fork heads stay blocked because their review events cannot invalidate checks", async () => {
+test("fork heads from non-allowed authors pass for manual merge but cannot auto-merge", async () => {
+  const github = fakeGateGithub({
+    author: "outside-contributor",
+    pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } },
+  });
   const result = await autoGate.evaluate({
-    github: fakeGateGithub({
-      pullRequestsByNumber: { 1465: { headRepository: "outside/fork" } },
-    }),
+    github,
     context: fakeContext({ pull_request: { head: { repo: { fork: true } } } }),
     core: fakeCore(),
     prNumber: 1465,
@@ -1165,7 +1233,9 @@ test("fork heads stay blocked because their review events cannot invalidate chec
   });
 
   assert.equal(result.shouldMerge, false);
+  assert.equal(result.manualMergeRequired, true);
   assert.match(result.reasons.join("\n"), /head repository outside\/fork.*base-repository branch/);
+  assert.match(result.summary, /maintainer must review and merge manually/);
 });
 
 test("Codex verdict parsing requires a real verdict and matches its short SHA", () => {
@@ -1264,6 +1334,8 @@ async function evaluateGate(options = {}) {
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
+  author = "sachiniyer",
+  nativeAutoMergeEnabled = false,
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -1287,6 +1359,7 @@ function fakeGateGithub({
   graphqlErrorsByNumber = {},
   mergeError = null,
   checkWriteError = null,
+  nativeAutoMergeDisableError = null,
   associationError = null,
   associationErrorAtRead = 1,
 } = {}) {
@@ -1333,6 +1406,7 @@ function fakeGateGithub({
 
   const github = {
     associationReads: 0,
+    disabledAutoMergePullRequestIds: [],
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -1351,6 +1425,14 @@ function fakeGateGithub({
       pulls: { listFiles, listReviews, listReviewComments, merge },
     },
     graphql: async (_query, variables) => {
+      if (_query.includes("mutation DisablePullRequestAutoMerge")) {
+        if (nativeAutoMergeDisableError) {
+          throw nativeAutoMergeDisableError;
+        }
+        github.operations.push("auto-merge:disable");
+        github.disabledAutoMergePullRequestIds.push(variables.pullRequestId);
+        return { disablePullRequestAutoMerge: { pullRequest: { number: 1465 } } };
+      }
       if (graphqlErrorsByNumber[variables.number]) {
         throw graphqlErrorsByNumber[variables.number];
       }
@@ -1358,6 +1440,7 @@ function fakeGateGithub({
       return {
         repository: {
           pullRequest: {
+            id: pullRequestOverride.id || "PR_node_1465",
             number: variables.number,
             title: "Gate test",
             url: "https://example.invalid/pr/1465",
@@ -1372,7 +1455,11 @@ function fakeGateGithub({
             merged: pullRequestOverride.merged ?? merged,
             mergeable: pullRequestOverride.mergeable || mergeable,
             mergeStateStatus: pullRequestOverride.mergeStateStatus || mergeStateStatus,
-            author: { login: "sachiniyer" },
+            author: { login: author },
+            autoMergeRequest:
+              (pullRequestOverride.nativeAutoMergeEnabled ?? nativeAutoMergeEnabled)
+                ? { enabledAt: "2026-07-09T01:05:00Z" }
+                : null,
             labels: { nodes: [] },
             commits: {
               nodes: [{ commit: { committedDate: headCommittedDate } }],

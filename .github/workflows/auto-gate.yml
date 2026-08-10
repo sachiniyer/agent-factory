@@ -2,11 +2,11 @@ name: Auto Gate
 
 on:
   # These events cover every input read by evaluate(): required checks,
-  # reviews/findings, labels, base, draft/state, and head. Repository-ruleset
-  # changes and mergeability changes caused only by master advancing are not
-  # evented here. workflow_dispatch repairs stale observational state, and this
-  # is safe for Auto Gate because merge() always performs a fresh full
-  # evaluation immediately before its destructive write.
+  # reviews/findings, labels, base, draft/state, head, and native auto-merge.
+  # Repository-ruleset changes and mergeability changes caused only by master
+  # advancing are not evented here. workflow_dispatch repairs stale
+  # observational state, and this is safe for Auto Gate because merge() always
+  # performs a fresh full evaluation immediately before its destructive write.
   check_suite:
     types: [completed]
   issue_comment:
@@ -18,7 +18,7 @@ on:
   # aggregate when a fork PR appears. Every checkout below is pinned to the
   # default branch; this workflow never checks out or executes pull-request code.
   pull_request_target:
-    types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled]
+    types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled]
   status:
   # GitHub suppresses check_suite recursion for Actions-owned suites. The
   # required Lint and Build checks both belong to PR Validation, so its terminal
