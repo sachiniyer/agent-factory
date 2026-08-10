@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -28,16 +29,41 @@ type PreviewSnapshot struct {
 	LinesAboveKnown bool
 }
 
-// captureVisibleWithCount captures the visible screen and the lines above it in ONE
-// tmux command, so a completeness claim is bound to the bytes it describes (#3169
-// review). ts == nil (a remote sandbox) leaves the count unknown, which renders as
-// "not measured" rather than as "nothing above".
+// captureVisibleWithCount captures the visible screen and, when it can, the lines
+// above it in ONE tmux command, so a completeness claim is bound to the bytes it
+// describes (#3169 review).
+//
+// ADDITIVE, with a fallback, and that is the correction to my first attempt: making
+// the combined command shape MANDATORY broke every caller whose producer answers the
+// plain capture shape — the TUI's tab panes and ordinal preview resolution share this
+// path, and they lost scroll mode, the session-gone fallback and ordinal resolution
+// because an unparseable answer failed the capture outright instead of degrading. A
+// marker is an enhancement to what preview REPORTS; it must never become a new
+// requirement on what preview can CAPTURE.
+//
+// The distinction that makes the fallback safe: only ErrScrollbackCaptureUnparseable
+// degrades. A vanished session or a wedged server still propagates, because those are
+// exactly the failures callers act on — the session-gone fallback depends on seeing
+// them, and swallowing one to obtain a count would trade a real signal for a nicety.
+//
+// A degraded capture reports the count as UNKNOWN, which renders "not measured"
+// rather than "nothing above" — so losing the count never fabricates completeness.
 func captureVisibleWithCount(ts *tmux.TmuxSession) (string, int, bool, error) {
 	content, size, err := ts.CaptureVisibleWithScrollback()
-	if err != nil {
+	switch {
+	case err == nil:
+		return content, size, true, nil
+	case !errors.Is(err, tmux.ErrScrollbackCaptureUnparseable):
+		// A real failure: gone, wedged, or otherwise. Surface it unchanged.
 		return "", 0, false, err
 	}
-	return content, size, true, nil
+	// This producer does not answer the combined shape. Capture exactly as before and
+	// leave the count unknown.
+	plain, plainErr := ts.CapturePaneContent()
+	if plainErr != nil {
+		return "", 0, false, plainErr
+	}
+	return plain, 0, false, nil
 }
 
 func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {

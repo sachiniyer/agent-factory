@@ -114,3 +114,32 @@ func TestCaptureVisibleWithScrollback_CountAndContentFromOneInvocation(t *testin
 	require.Contains(t, content, "atomic-200", "the visible screen holds the tail")
 	require.NotContains(t, content, "atomic-1\n", "and not the head, which is what the marker is for")
 }
+
+// The combined capture must never become a REQUIREMENT (#3169 review).
+//
+// My first version failed the whole capture when an answer could not be split, and
+// this path is shared with the TUI's tab panes and ordinal preview resolution — they
+// lost scroll mode, the session-gone fallback and ordinal resolution because a
+// marker feature turned into a new demand on what preview can CAPTURE. A marker is
+// an enhancement to what preview REPORTS.
+//
+// So an unsplittable answer must be reported as ErrScrollbackCaptureUnparseable
+// specifically, and NOT as a session-gone or timeout error: callers degrade on the
+// first and act on the other two, so conflating them would trade a real signal for
+// a count.
+func TestCaptureVisibleWithScrollback_UnparseableAnswerIsItsOwnClass(t *testing.T) {
+	dir := t.TempDir()
+	// A producer that answers the plain capture shape — one line, no count.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tmux"),
+		[]byte("#!/bin/sh\nprintf 'just pane content'\n"), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ts := NewTmuxSessionWithDeps("unparseable", "sh", MakePtyFactory(), cmd.MakeExecutor())
+
+	_, _, err := ts.CaptureVisibleWithScrollback()
+	require.ErrorIs(t, err, ErrScrollbackCaptureUnparseable,
+		"an answer with no count line must be its own class so callers can degrade to a plain capture")
+	require.NotErrorIs(t, err, ErrSessionGone,
+		"and must NOT read as a vanished session — the session-gone fallback acts on that")
+	require.NotErrorIs(t, err, ErrTmuxTimeout,
+		"nor as a wedged server, which callers treat as unknown state")
+}

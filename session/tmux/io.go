@@ -375,6 +375,13 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 //
 // The capture flags match CapturePaneContent exactly (-p -e -J), so the content is
 // byte-identical to what the non-atomic path returned.
+// ErrScrollbackCaptureUnparseable marks an answer this cannot split — a producer
+// that does not implement the combined command shape. It is deliberately NOT the
+// same class as ErrSessionGone or ErrTmuxTimeout: those are real failures a caller
+// must surface, while this one means "no count available here", which a caller may
+// degrade to a plain capture with an unknown count (#3169 review).
+var ErrScrollbackCaptureUnparseable = errors.New("tmux answer carries no capture after the history size")
+
 func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -395,11 +402,11 @@ func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
 	// this can split — reported rather than guessed at.
 	head, content, found := strings.Cut(string(output), "\n")
 	if !found {
-		return "", 0, fmt.Errorf("failed to parse tmux capture with scrollback %q: no capture after the history size", string(output))
+		return "", 0, fmt.Errorf("%w: %q", ErrScrollbackCaptureUnparseable, string(output))
 	}
 	size, convErr := strconv.Atoi(strings.TrimSpace(head))
 	if convErr != nil {
-		return "", 0, fmt.Errorf("failed to parse tmux history size %q: %v", head, convErr)
+		return "", 0, fmt.Errorf("%w: history size %q: %v", ErrScrollbackCaptureUnparseable, head, convErr)
 	}
 	return content, size, nil
 }

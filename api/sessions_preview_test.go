@@ -43,7 +43,7 @@ func TestSessionsPreviewUsesDaemonCapturePath(t *testing.T) {
 		t.Fatalf("Preview request = %+v, want title/repo and every selector forwarded unchanged", got)
 	}
 
-	var payload map[string]any
+	var payload map[string]string
 	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("preview output is not JSON (%q): %v", out, err)
 	}

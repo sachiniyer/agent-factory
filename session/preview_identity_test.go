@@ -23,20 +23,6 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
-		// The ATOMIC visible capture is one invocation carrying BOTH commands
-		// (#3169), and it answers "<history_size>\n<content>". Modelled here because
-		// a fake that returned only the terminal-state fields would make the real
-		// parser fail on a shape tmux never produces.
-		if strings.Contains(cmd.String(), "display-message") && strings.Contains(cmd.String(), "capture-pane") {
-			target := agentName
-			for i, arg := range cmd.Args {
-				if arg == "-t" && i+1 < len(cmd.Args) {
-					target = strings.TrimSuffix(strings.TrimPrefix(cmd.Args[i+1], "="), ":")
-					break
-				}
-			}
-			return []byte("0\n" + target), nil
-		}
 		if strings.Contains(cmd.String(), "display-message") {
 			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
 		}
@@ -186,28 +172,29 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	requireIndex(t, inst, b.ID, 1)
 }
 
-// #3169 review: the completeness claim must be BOUND to the capture, not inferred
-// from separate observations.
+// #3169 review: a producer that does not answer the combined capture shape must
+// still get its CONTENT, with the count simply unknown.
 //
-// A pre-read/post-read bracket around the capture is still check-then-act: zero at
-// the pre-read, history gained through output or a shorter resize before
-// capture-pane, then lost through clear-history or a taller resize before the
-// post-read — both endpoints read zero while the returned content really did omit
-// lines, and the marker is suppressed on an incomplete capture. Narrowing that window
-// is not closing it, so the count now comes from the SAME tmux command as the
-// content (CaptureVisibleWithScrollback).
+// This is the regression my first attempt caused. Making the combined shape mandatory
+// failed the capture outright, and this path is shared with the TUI's tab panes and
+// ordinal preview resolution — they lost scroll mode, the session-gone fallback and
+// ordinal resolution. A marker is an enhancement to what preview REPORTS; it must
+// never become a new requirement on what preview can CAPTURE.
 //
-// This asserts the property that makes the atomicity observable here: the separate
-// modes read must NOT contribute a count, because that read cannot describe the bytes.
-func TestPreviewSnapshotWithModes_DoesNotInferACountFromTheSeparateModesRead(t *testing.T) {
-	inst := previewIdentityInstance(t, "af_preview_snapshot_count")
+// This fixture's fake tmux deliberately answers only the plain shapes, so it
+// exercises the fallback rather than the atomic path (real tmux covers that, in
+// session/tmux). Content must be unchanged and the count must read UNKNOWN — never
+// zero, which would fabricate completeness.
+func TestPreviewSnapshot_DegradesToContentWhenTheCountIsUnavailable(t *testing.T) {
+	inst := previewIdentityInstance(t, "af_preview_snapshot_degrade")
 	tabID, ok := inst.TabIDAt(0)
 	require.True(t, ok)
 
 	snapshot, err := inst.AgentServer().PreviewByID(tabID, false)
-	require.NoError(t, err)
-	// The fake tmux in this fixture answers display-message with a 10th field, so a
-	// count IS available to the modes read — and must still not be used as the
-	// completeness claim unless it came from the atomic capture.
-	require.True(t, snapshot.HasModes, "precondition: the modes read succeeded")
+	require.NoError(t, err, "an unavailable count must not fail the capture")
+	require.NotEmpty(t, snapshot.Content, "the content must still arrive")
+	require.False(t, snapshot.LinesAboveKnown,
+		"the count is unavailable here, and unknown must NOT be reported as zero — that would present "+
+			"a possibly-partial capture as complete")
+	require.Equal(t, 0, snapshot.LinesAbove)
 }
