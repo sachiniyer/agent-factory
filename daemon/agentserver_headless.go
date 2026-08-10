@@ -384,6 +384,7 @@ func (hs *headlessServer) Expose(_ struct{}, resp *agentExposeResponse) error {
 // the daemon reads each tick.
 type agentSnapshotResponse struct {
 	Updated     bool                      `json:"updated"`
+	Baseline    bool                      `json:"baseline"`
 	HasPrompt   bool                      `json:"has_prompt"`
 	Content     string                    `json:"content"`
 	ModelChange *session.AgentModelChange `json:"model_change,omitempty"`
@@ -395,6 +396,7 @@ func (hs *headlessServer) Snapshot(_ struct{}, resp *agentSnapshotResponse) erro
 		return err
 	}
 	resp.Updated = obs.Updated
+	resp.Baseline = obs.Baseline
 	resp.HasPrompt = obs.HasPrompt
 	resp.Content = obs.Content
 	resp.ModelChange = obs.ModelChange

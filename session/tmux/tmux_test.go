@@ -516,8 +516,12 @@ func TestHasUpdatedReattachResetsDeadAndBaselinesCapture(t *testing.T) {
 
 	// Polling resumes, but the first successful capture only establishes the
 	// replacement monitor's baseline. It is not evidence that the pane changed.
-	updated, _, _ := session.HasUpdated()
+	updated, _, _, baseline := session.HasUpdatedWithBaseline()
 	require.False(t, updated, "first capture after reattach must only establish a baseline")
+	require.True(t, baseline, "the caller must distinguish a baseline from observed idleness")
+	updated, _, _, baseline = session.HasUpdatedWithBaseline()
+	require.False(t, updated, "unchanged second capture must remain unchanged")
+	require.False(t, baseline, "the reattach baseline must be reported exactly once")
 }
 
 // TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:

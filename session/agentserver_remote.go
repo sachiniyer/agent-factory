@@ -134,6 +134,7 @@ func (s *remoteAgentServer) Snapshot() (Observation, error) {
 	}
 	return Observation{
 		Updated:     resp.Updated,
+		Baseline:    resp.Baseline,
 		HasPrompt:   resp.HasPrompt,
 		Content:     resp.Content,
 		ModelChange: cloneAgentModelChange(resp.ModelChange),
@@ -736,6 +737,7 @@ type agentLifecycleReq struct {
 
 type agentSnapshotResp struct {
 	Updated     bool              `json:"updated"`
+	Baseline    bool              `json:"baseline"`
 	HasPrompt   bool              `json:"has_prompt"`
 	Content     string            `json:"content"`
 	ModelChange *AgentModelChange `json:"model_change,omitempty"`

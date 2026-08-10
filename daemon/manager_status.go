@@ -339,9 +339,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if obs.Updated {
 		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	}
-	if obs.Updated || obs.HasPrompt {
-		// Still working or waiting on the user: either way the run has not
-		// finished, so there is nothing for the cap to learn this tick.
+	if obs.Baseline || obs.Updated || obs.HasPrompt {
+		// Updated/prompt proves the run remains active; a baseline cannot establish
+		// that it finished. Either way, the cap has no completion to learn this tick.
 		m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 		return
 	}
@@ -593,11 +593,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// #1910's hot loop, rebuilt out of an absent error. Absence of an error is not
 	// evidence; only something that can say YES is.
 	//
-	// The three yeses below are exactly the branches that carry one, and the comment
+	// The four yeses below are exactly the branches that carry one, and the comment
 	// on the idle branch names the reason the fourth cannot: (false,false) "a healthy
 	// idle session and a dead one both produce — indistinguishable on their own".
 	observedAlive := false
 	switch {
+	case obs.Baseline:
+		// The first successful capture after a reattach establishes the pane hash.
+		// It proves the runtime answered, but says neither "changed" nor "idle":
+		// preserve the last-known liveness and task-run state for the next tick.
+		observedAlive = true
 	case updated:
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.

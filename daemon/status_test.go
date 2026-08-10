@@ -64,6 +64,12 @@ func (b *updatedOnlyBackend) HasUpdated(*session.Instance) (bool, bool, string) 
 }
 func (b *updatedOnlyBackend) TapEnter(*session.Instance) { b.tapped++ }
 
+type reattachBaselineBackend struct{ *session.FakeBackend }
+
+func (b *reattachBaselineBackend) HasUpdatedWithBaseline(*session.Instance) (bool, bool, string, bool) {
+	return false, false, "active pane", true
+}
+
 // registerStarted seeds a single on-disk record and registers a live in-memory
 // instance with the supplied backend and starting status under the daemon's key.
 // One instance per repo: seedDiskInstance overwrites the repo file, so callers
@@ -175,6 +181,35 @@ func TestRefreshStatuses_LiveIdleSessionBecomesReady(t *testing.T) {
 	}
 	if got := persistedStatus(t, repoID, "idle"); got != session.Ready {
 		t.Fatalf("persisted status = %v, want Ready (daemon must persist the transition)", got)
+	}
+}
+
+func TestRefreshStatuses_ReattachBaselineDoesNotSettleActiveTaskRun(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "reattached", Path: repoPath, Program: "claude", TaskID: "task-reattached",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(&reattachBaselineBackend{FakeBackend: session.NewFakeBackend()})
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, repoID, inst.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	manager.RefreshStatuses()
+
+	if got := inst.GetStatus(); got != session.Running {
+		t.Fatalf("baseline capture changed status to %v; want Running", got)
+	}
+	if !inst.TaskRunActive() {
+		t.Fatal("baseline capture ended the active task run")
+	}
+	if churnAt := inst.ToInstanceData().LastPaneChurnAt; !churnAt.IsZero() {
+		t.Fatalf("baseline capture recorded pane churn at %v", churnAt)
 	}
 }
 
