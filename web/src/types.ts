@@ -58,6 +58,16 @@ export const InFlightOp = {
  *  torn down but must not reuse their unconfirmed runtime binding. */
 export type LifecycleAction = "archive" | "restore";
 
+/** session.IdleReason: mechanically established only; no pane-text inference. */
+export type IdleReason =
+  | "usage-limit"
+  | "process-exited"
+  | "recreate-pending"
+  | "prompt-not-delivered"
+  | "delivery-unconfirmed"
+  | "no-pane-change-since-delivery"
+  | "settled-after-pane-change";
+
 /** A verified model transition observed after af handled an agent safety dialog. */
 export interface AgentModelChange {
   before: string;
@@ -124,6 +134,15 @@ export interface SessionData {
    *  It remains on restored rows so an automatic Lost recovery cannot make the
    *  omitted files disappear from subsequent snapshots. */
   archive_warning?: string;
+  /** Daemon-derived explanation for a non-working row. Every value is established
+   *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
+  idle_reason?: IdleReason;
+  /** RFC3339 time of the most recent actual prompt send attempt. */
+  last_prompt_attempt_at?: string;
+  /** Closed delivery observation. could-not-confirm is uncertainty, not failure. */
+  last_prompt_delivery_status?: "delivered" | "not-delivered" | "could-not-confirm";
+  /** RFC3339 time when the daemon most recently observed pane bytes change. */
+  last_pane_churn_at?: string;
   /** One-shot note on a re-created root agent that did not demonstrably come back
    *  on its prior conversation (#2629): "fresh" when its context is provably gone,
    *  "unknown" when the resolved command selects its own conversation so af cannot

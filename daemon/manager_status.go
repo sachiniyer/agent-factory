@@ -335,6 +335,9 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		return
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
+	if obs.Updated {
+		instance.RecordPaneChurnAtEpoch(nowFunc(), epoch)
+	}
 	if obs.Updated || obs.HasPrompt {
 		// Still working or waiting on the user: either way the run has not
 		// finished, so there is nothing for the cap to learn this tick.
@@ -566,6 +569,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
+	if updated {
+		// Observation.Updated proves only that captured pane bytes changed. Record
+		// that timestamp without interpreting the bytes as an answer or completion.
+		// The liveness edge below persists/publishes it when the row settles; a
+		// continuously-running spinner does not create an event/write storm.
+		instance.RecordPaneChurnAtEpoch(nowFunc(), epoch)
+	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.

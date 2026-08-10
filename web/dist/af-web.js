@@ -9951,6 +9951,42 @@ var ROW_KIND_LABELS = {
   limit: "Limit reached",
   archived: "Archived"
 };
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unconfirmed",
+  "no-pane-change-since-delivery": "no pane change since delivery",
+  "settled-after-pane-change": "settled after pane change"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = `idle: ${label}`;
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      detail += ` \xB7 pane changed ${formatPaneChurnAge(churn, now)} ago`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function formatPaneChurnAge(churn, now) {
+  const ageMs = Math.max(0, now.getTime() - churn.getTime());
+  const minute = 6e4;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (ageMs < minute) return "<1m";
+  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
+  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
+  return `${Math.floor(ageMs / day)}d`;
+}
 var READY_ICON = "circle";
 var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
@@ -14382,10 +14418,12 @@ function sessionRow(s, selected, openSession, buildActions) {
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
+  const idleDetail = idleReasonDetail(s);
   const branch = h2(
     "div",
     { class: "af-row-branch" },
     icon("git-branch", "af-branch-icon"),
+    idleDetail ? `${idleDetail} \xB7 ` : "",
     s.branch || "\u2014"
   );
   const main = h2("div", { class: "af-row-main" }, title, branch);
@@ -14403,10 +14441,11 @@ function sessionRow(s, selected, openSession, buildActions) {
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
+  const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   row.setAttribute(
     "title",
-    `${s.title} \u2014 ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`
+    `${s.title} \u2014 ${status.label}${idleReason}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`
   );
   if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");

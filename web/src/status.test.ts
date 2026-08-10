@@ -12,6 +12,7 @@ import {
   archiveWarningText,
   canHandoff,
   type DotKind,
+  idleReasonDetail,
   isArchived,
   isCreating,
   isLimitReached,
@@ -24,6 +25,24 @@ import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { title: "s", branch: "b", ...over };
 }
+
+test("idle detail renders only mechanical reason values and observed churn age", () => {
+  const now = new Date("2026-08-10T15:00:00Z");
+  assert.equal(
+    idleReasonDetail(
+      sess({
+        idle_reason: "settled-after-pane-change",
+        last_pane_churn_at: "2026-08-10T12:50:00Z",
+      }),
+      now,
+    ),
+    "idle: settled after pane change · pane changed 2h ago",
+  );
+  assert.equal(
+    idleReasonDetail(sess({ idle_reason: "something-later" as never, last_pane_churn_at: "bad" }), now),
+    "",
+  );
+});
 
 test("liveness → dot kind mirrors render.go's TOTAL switch", () => {
   // Working (LiveRunning / the Unset sentinel) shows NO dot (#1766): null kind and

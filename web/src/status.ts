@@ -12,7 +12,7 @@
 // and a filled diamond for LimitReached. Colors (the `kind`) map to the exact hexes
 // render.go paints (see styles.css .af-dot-*).
 
-import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
+import { InFlightOp, Liveness, Status, type IdleReason, type SessionData } from "./types.js";
 import type { IconName } from "./icon.js";
 
 /** The visual kind of a status dot, one per color bucket the TUI paints. Drives
@@ -48,6 +48,48 @@ export interface RowStatus {
   kind: DotKind | null;
   /** Accessible one-word state label, e.g. "Ready", "Working", "Lost". */
   label: string;
+}
+
+const IDLE_REASON_LABELS: Record<IdleReason, string> = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unconfirmed",
+  "no-pane-change-since-delivery": "no pane change since delivery",
+  "settled-after-pane-change": "settled after pane change",
+};
+
+/** Human row detail for the daemon's mechanical idle reason and last observed
+ * pane churn. Unknown future values render nothing instead of being interpreted. */
+export function idleReasonDetail(s: SessionData, now: Date = new Date()): string {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = `idle: ${label}`;
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      detail += ` · pane changed ${formatPaneChurnAge(churn, now)} ago`;
+    }
+  }
+  return detail;
+}
+
+function idleReasonLabel(reason: IdleReason | undefined): string {
+  return reason ? (IDLE_REASON_LABELS as Partial<Record<string, string>>)[reason] ?? "" : "";
+}
+
+function formatPaneChurnAge(churn: Date, now: Date): string {
+  const ageMs = Math.max(0, now.getTime() - churn.getTime());
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (ageMs < minute) return "<1m";
+  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
+  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
+  return `${Math.floor(ageMs / day)}d`;
 }
 
 const READY_ICON: IconName = "circle";

@@ -140,7 +140,8 @@ func TestStartAndSendPrompt_EmptyPromptStillHandlesTrust(t *testing.T) {
 
 func TestStartAndSendPrompt_NonEmptyPromptSends(t *testing.T) {
 	backend := &startBackend{}
-	if err := StartAndSendPrompt(context.Background(), newStartTestInstance(t, backend), "do work"); err != nil {
+	inst := newStartTestInstance(t, backend)
+	if err := StartAndSendPrompt(context.Background(), inst, "do work"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if backend.trustChecks == 0 {
@@ -148,6 +149,11 @@ func TestStartAndSendPrompt_NonEmptyPromptSends(t *testing.T) {
 	}
 	if backend.sentPrompt != "do work" {
 		t.Fatalf("expected prompt to be sent, got %q", backend.sentPrompt)
+	}
+	data := inst.ToInstanceData()
+	if data.LastPromptAttemptAt.IsZero() || data.LastPromptDeliveryStatus != session.PromptCouldNotConfirm {
+		t.Fatalf("prompt evidence = (%v, %q), want a timestamp and honest uncertainty for a legacy backend",
+			data.LastPromptAttemptAt, data.LastPromptDeliveryStatus)
 	}
 }
 

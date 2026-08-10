@@ -729,6 +729,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
+	// Mirror the daemon's durable mechanical evidence independently of liveness.
+	// An interactive send can change delivery status while the row remains Ready,
+	// and pane churn can race the next Running transition (#3168).
+	if inst.ReconcileIdleEvidence(d.LastPromptAttemptAt, d.LastPromptDeliveryStatus, d.LastPaneChurnAt) {
+		changed = true
+	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
 	// daemon heals a root and clears when any client opens that session's pane,
 	// both while the liveness sits at Ready. Reconciling it here is what makes an

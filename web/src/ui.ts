@@ -39,6 +39,7 @@ import {
   compareSessionsForRail,
   isArchived,
   isCreating,
+  idleReasonDetail,
   isLimitReached,
   isRootSession,
   type RowKind,
@@ -2908,10 +2909,12 @@ function sessionRow(
   const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
+  const idleDetail = idleReasonDetail(s);
   const branch = h(
     "div",
     { class: "af-row-branch" },
     icon("git-branch", "af-branch-icon"),
+    idleDetail ? `${idleDetail} · ` : "",
     s.branch || "—",
   );
   const main = h("div", { class: "af-row-main" }, title, branch);
@@ -2937,10 +2940,11 @@ function sessionRow(
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
+  const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
   row.setAttribute(
     "title",
-    `${s.title} — ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`,
+    `${s.title} — ${status.label}${idleReason}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`,
   );
   if (!actionable && !managed) {
     // The server withheld both capabilities: a creating row has no session yet,

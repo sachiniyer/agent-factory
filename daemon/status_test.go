@@ -303,6 +303,13 @@ func TestRefreshStatuses_UpdatedWithoutPromptDoesNotTap(t *testing.T) {
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running (updated output drives Running)", got)
 	}
+	data := inst.ToInstanceData()
+	if data.LastPaneChurnAt.IsZero() {
+		t.Fatal("updated pane did not record its mechanical churn timestamp")
+	}
+	if data.IdleReason != session.IdleReasonNone {
+		t.Fatalf("running row received idle reason %q", data.IdleReason)
+	}
 }
 
 // TestRefreshStatuses_NoTransitionDoesNotRepersist proves the disk-churn guard:

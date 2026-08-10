@@ -39,6 +39,25 @@ func TestSnapshotReconcilesArchiveWarningWithoutLivenessChange(t *testing.T) {
 	require.Empty(t, inst.ArchiveWarning())
 }
 
+func TestSnapshotReconcilesIdleEvidenceWithoutLivenessChange(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "idle-evidence")
+	inst.SetStatusForTest(session.Ready)
+	data := inst.ToInstanceData()
+	data.LastPromptAttemptAt = time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	data.LastPromptDeliveryStatus = session.PromptDelivered
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	reason, _ := inst.IdleReasonSnapshot()
+	require.Equal(t, session.IdleReasonNoPaneChangeSinceDelivery, reason)
+
+	data.LastPromptAttemptAt = time.Time{}
+	data.LastPromptDeliveryStatus = ""
+	require.True(t, h.updateInstanceFromSnapshot(inst, data), "clearing daemon evidence is itself a row change")
+	reason, _ = inst.IdleReasonSnapshot()
+	require.Equal(t, session.IdleReasonNone, reason)
+}
+
 // TestSnapshotReconcilesUserKilledTombstone pins the same-session half of the
 // durable precedence rule. Cold materialization already goes through
 // FromInstanceData; an open TUI instead mutates its existing row in place and

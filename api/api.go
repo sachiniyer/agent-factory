@@ -330,7 +330,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 			return nil, fmt.Errorf("failed to parse sessions: %w", err)
 		}
 		for i := range data {
-			data[i] = data[i].ForClientRead()
+			data[i] = data[i].ForClientRead().ProjectIdleReason()
 		}
 		// Single repo: the (repoID, title) key reduces to title order.
 		sort.Slice(data, func(i, j int) bool { return data[i].Title < data[j].Title })
@@ -363,7 +363,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 			// repoID + NUL + title (daemonInstanceKey). NUL sorts before any
 			// printable byte, so this is exactly the daemon's (repoID, title)
 			// order.
-			rows = append(rows, keyedInstance{key: rid + "\x00" + inst.Title, data: inst})
+			rows = append(rows, keyedInstance{key: rid + "\x00" + inst.Title, data: inst.ProjectIdleReason()})
 		}
 	}
 	if len(corrupted) > 0 {

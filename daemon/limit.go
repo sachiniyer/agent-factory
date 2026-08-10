@@ -596,7 +596,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	if serr := as.SendPrompt(prompt); serr != nil {
+	attemptedAt := nowFunc()
+	deliveryStatus, serr := session.SendPromptWithStatus(as, prompt)
+	instance.RecordPromptAttempt(deliveryStatus, attemptedAt)
+	if serr != nil {
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {
 			// This return skips the whole-row checkpoint below, so unlike the success
