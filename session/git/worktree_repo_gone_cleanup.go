@@ -2,15 +2,38 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 )
 
-func boundedRepoGoneOriginProbe(path string) error {
+// probeRepoGoneOrigin applies restore's repository-validity rule under a
+// teardown-safe Git deadline. A missing or answered non-Git directory is gone;
+// an unreadable path or timed-out Git process is unknown and must fail closed.
+func probeRepoGoneOrigin(worktree *GitWorktree) error {
+	if worktree.repoPath == "" {
+		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
+	}
+	if _, err := os.Stat(worktree.repoPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
+		}
+		return err
+	}
+	if _, err := worktree.runGitLocalCommand(worktree.repoPath, "rev-parse", "--git-dir"); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
+		return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
+	}
+	return nil
+}
+
+func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 	result := make(chan error, 1)
-	go func() { result <- repoGoneOriginProbe(path) }()
+	go func() { result <- repoGoneOriginProbe(worktree) }()
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
@@ -19,7 +42,7 @@ func boundedRepoGoneOriginProbe(path string) error {
 	case <-timer.C:
 		return fmt.Errorf(
 			"timed out after %s while checking origin repository %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
+			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
 		)
 	}
 }

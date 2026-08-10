@@ -82,9 +82,6 @@ func TestCleanupClaimedRepoGone_RefusesSamePathReplacementAtRecursiveDelete(t *t
 
 func TestCleanupClaimedRepoGone_CommittedClaimSurvivesLateOriginReturn(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
-	previousProbe := repoGoneOriginProbe
-	repoGoneOriginProbe = func(string) error { return nil }
-	t.Cleanup(func() { repoGoneOriginProbe = previousProbe })
 
 	state, err := gw.CleanupClaimedRepoGone(claim)
 	if err != nil || state != CleanupSettled {
@@ -189,10 +186,10 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	blocked := make(chan struct{})
 	probeFinished := make(chan struct{})
 	relocationIdentityTimeout = 25 * time.Millisecond
-	repoGoneOriginProbe = func(string) error {
+	repoGoneOriginProbe = func(*GitWorktree) error {
 		defer close(probeFinished)
 		<-blocked
-		return os.ErrNotExist
+		return ErrRepoGone
 	}
 	t.Cleanup(func() {
 		repoGoneOriginProbe = previousProbe

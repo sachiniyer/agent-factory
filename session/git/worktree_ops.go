@@ -620,7 +620,7 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 // Test seams for the repo-gone cleanup's final destructive boundary.
 var (
 	repoGoneCleanupTimeout        = localGitTimeout
-	repoGoneOriginProbe           = func(path string) error { _, err := os.Stat(path); return err }
+	repoGoneOriginProbe           = probeRepoGoneOrigin
 	repoGoneBeforeWriterReap      = func(string) {}
 	repoGoneBeforeRecursiveDelete = func(string) {}
 	repoGoneRemoveDirectory       = removeClaimedRepoGoneDirectory

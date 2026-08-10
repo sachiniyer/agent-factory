@@ -497,12 +497,12 @@ func (g *GitWorktree) ValidateRelocationCleanupAdmission() error {
 	if g.repoPath == "" {
 		return errors.Join(fmt.Errorf("origin repo path is empty"), ErrRelocateStateUnknown)
 	}
-	if err := boundedRepoGoneOriginProbe(g.repoPath); err == nil {
+	if err := boundedRepoGoneOriginProbe(g); err == nil {
 		return fmt.Errorf(
 			"origin repo %s exists again; restore the archived session before retrying kill",
 			g.repoPath,
 		)
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, ErrRepoGone) && !os.IsNotExist(err) {
 		return errors.Join(fmt.Errorf(
 			"cannot establish that origin repo %s is still gone: %w",
 			g.repoPath, err,

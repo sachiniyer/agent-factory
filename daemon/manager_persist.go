@@ -530,18 +530,24 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
 			return
 		}
-		if err := m.stopVSCodeForInstance(key, stableID); err != nil {
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but its editor teardown is unconfirmed; retaining its stalled record: %v", title, err)
-			return
-		}
-		deleted, err := lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
-		if err != nil {
-			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but its durable row could not be deleted: %v", title, err)
-			return
-		}
-		if deleted {
-			m.clearGhostCleanupStall(key, stableID)
-			log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
+		for {
+			err := m.stopVSCodeForInstance(key, stableID)
+			if err == nil {
+				var deleted bool
+				deleted, err = lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
+				if err == nil {
+					m.clearGhostCleanupStall(key, stableID)
+					if deleted {
+						log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
+					} else {
+						log.InfoLog.Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
+					}
+					return
+				}
+			}
+			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
+			timer := time.NewTimer(lateGhostCleanupRetryInterval)
+			<-timer.C
 		}
 	}()
 }

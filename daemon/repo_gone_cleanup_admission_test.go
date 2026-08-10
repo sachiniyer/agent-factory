@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -159,15 +160,14 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 
 	previousDelete := lateGhostDeleteSessionRecord
 	previousInterval := lateGhostCleanupRetryInterval
-	attempts := 0
+	var attempts atomic.Int32
 	retried := make(chan struct{})
 	lateGhostCleanupRetryInterval = 5 * time.Millisecond
 	lateGhostDeleteSessionRecord = func(_ *Manager, _, _, _ string, _ error) (bool, error) {
-		attempts++
-		if attempts == 1 {
+		if attempts.Add(1) == 1 {
 			return false, errors.New("transient instances lock failure")
 		}
-		close(retried)
+		retried <- struct{}{}
 		return true, nil
 	}
 	t.Cleanup(func() {
@@ -182,8 +182,9 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	select {
 	case <-retried:
 	case <-time.After(250 * time.Millisecond):
-		t.Fatalf("late cleanup completion was discarded after one delete failure; attempts=%d", attempts)
+		t.Fatalf("late cleanup completion was discarded after one delete failure; attempts=%d", attempts.Load())
 	}
-	assert.False(t, manager.ghostCleanupStallActive(key, stableID),
-		"a successful retry must release the process-epoch fence")
+	require.Eventually(t, func() bool {
+		return !manager.ghostCleanupStallActive(key, stableID)
+	}, 250*time.Millisecond, time.Millisecond, "a successful retry must release the process-epoch fence")
 }
