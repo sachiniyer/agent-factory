@@ -675,25 +675,28 @@ function evaluationFailed(result) {
 }
 
 function formatAggregateSummary(pullNumbers, blockers, pending) {
-  const association =
-    pullNumbers.length === 0
-      ? "No open master PR currently points at this commit."
-      : pullNumbers.length === 1
-        ? `This commit currently belongs to open master PR #${pullNumbers[0]}.`
-        : `This commit is shared by open master PRs ${joinPullNumbers(pullNumbers)}.`;
+  const shared = pullNumbers.length > 1;
   const coupling =
     "This fixed-name check is commit-scoped and passes only when every open master PR " +
     "sharing the commit has a passing exact (PR, head) Auto Gate decision.";
+  const context =
+    pullNumbers.length === 0
+      ? "No open master PR currently points at this commit.\n\n"
+      : shared
+        ? `This commit is shared by open master PRs ${joinPullNumbers(pullNumbers)}. ` +
+          `${coupling}\n\n`
+        : "";
   if (pending) {
-    return `${association} ${coupling}\n\nAuto Gate is refreshing those decisions now.`;
+    return `${context}Auto Gate is refreshing the associated decisions now.`;
   }
   if (blockers.length === 0) {
-    return `${association} ${coupling}\n\nEvery associated decision passes.`;
+    return `${context}Every associated decision passes.`;
   }
   const recovery =
     "To decouple without merging another PR, push either branch to a distinct commit, close " +
     "the other PR, or retarget it away from master; then run Auto Gate manually by PR number.";
-  return `${association} ${coupling}\n\nWaiting on:\n- ${blockers.join("\n- ")}\n\n${recovery}`;
+  const recoveryHint = shared ? `\n\n${recovery}` : "";
+  return `${context}Waiting on:\n- ${blockers.join("\n- ")}${recoveryHint}`;
 }
 
 function joinPullNumbers(numbers) {

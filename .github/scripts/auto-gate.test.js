@@ -223,7 +223,39 @@ test("a PR cannot read another PR's decision when both share one head", async ()
   assert.equal(github.createdChecks[0].external_id, decisionExternalId(2048, HEAD_SHA));
 });
 
-test("the fixed aggregate names a blocked PR that shares the head", async () => {
+test("a single-PR aggregate reports only that PR's unmet requirements", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      {
+        ...checkRun({
+          id: 321,
+          name: decisionName(1465, HEAD_SHA),
+          externalId: decisionExternalId(1465, HEAD_SHA),
+          conclusion: "failure",
+        }),
+        output: { summary: "WAITING: required check Build is missing" },
+      },
+    ],
+  });
+
+  const aggregate = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(aggregate.ok, false);
+  assert.equal(
+    github.createdChecks[0].output.summary,
+    "Waiting on:\n- PR #1465 at this commit is waiting: required check Build is missing",
+  );
+  assert.doesNotMatch(github.createdChecks[0].output.summary, /currently belongs|shared by/);
+  assert.doesNotMatch(github.createdChecks[0].output.summary, /To decouple/);
+});
+
+test("the fixed aggregate names a blocked PR and recovery when the head is shared", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
       { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
@@ -274,6 +306,7 @@ test("the fixed aggregate names a blocked PR that shares the head", async () => 
     github.createdChecks[0].output.summary,
     /PR #2048.*1 unresolved live Codex inline finding/,
   );
+  assert.match(github.createdChecks[0].output.summary, /To decouple without merging another PR/);
 });
 
 test("the fixed aggregate passes only after every shared-head decision passes", async () => {
