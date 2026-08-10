@@ -186,7 +186,10 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	}
 
 	// Carried to the record delete below, which refuses on a non-nil teardown.
-	var teardownErr error
+	var (
+		teardownErr                   error
+		settledDescriptorGhostCleanup bool
+	)
 
 	if instance != nil {
 		stage.set("tearing down tmux + worktree")
@@ -223,10 +226,15 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// but sharing the predicate keeps this branch from re-introducing the #2017
 		// defect (a known-state error misreported as "workspace left intact"): any
 		// future known-state error would fall through to deleteSessionRecord instead.
+		recovery := data.Worktree.RelocationRecovery
+		descriptorCleanup := recovery != nil && recovery.IdentityKnown &&
+			(recovery.State == git.RelocationRecoveryCleanupReady ||
+				recovery.State == git.RelocationRecoveryCleanupStalled)
 		var lateCleanup <-chan error
 		teardownErr, lateCleanup = ghostCleanup(data, req.Title)
+		settledDescriptorGhostCleanup = descriptorCleanup && teardownErr == nil && lateCleanup == nil
 		if session.TeardownStateUnknown(teardownErr) {
-			recovery := data.Worktree.RelocationRecovery
+			recovery = data.Worktree.RelocationRecovery
 			descriptorStalled := lateCleanup != nil || recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled
 			if descriptorStalled {
 				m.markGhostCleanupStalled(key, targetID)
@@ -263,6 +271,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// so the poll finisher can retry by stable id.
 	stage.set("confirming vscode editor teardown")
 	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
+		if settledDescriptorGhostCleanup {
+			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)
+		}
 		return session.InstanceData{}, fmt.Errorf("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)
 	}
 
@@ -271,6 +282,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// is unknown, so this call site cannot be the one that forgets.
 	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr)
 	if err != nil {
+		if settledDescriptorGhostCleanup {
+			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)
+		}
 		// A contended instances flock is retryable and must SAY so (#1917): the
 		// tombstone is already durable, so the kill is committed and will be
 		// finished either by the user's retry or — with no further input — by

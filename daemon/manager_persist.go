@@ -552,6 +552,18 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 	}()
 }
 
+// reconcileSettledGhostCleanup preserves the same process-epoch ownership as a
+// late descriptor success when the descriptor deletion completed synchronously
+// but a fallible editor or record tail step did not. The archive is already
+// gone, so retrying admission would misread its absence; only the stable-id
+// finalizer may consume the surviving tombstoned row.
+func (m *Manager) reconcileSettledGhostCleanup(repoID, title, key, stableID string) {
+	m.markGhostCleanupStalled(key, stableID)
+	settled := make(chan error, 1)
+	settled <- nil
+	m.reconcileLateGhostCleanup(repoID, title, key, stableID, settled)
+}
+
 func ghostRestoredWorktreeRemovable(data *session.InstanceData) bool {
 	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
 }
