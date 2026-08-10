@@ -16,7 +16,7 @@ var (
 	// stable releases also commit the new number here so dev builds report
 	// the latest stable base. Preview releases (vX.Y.Z-preview-N, #1041)
 	// never rewrite this value.
-	version     = "1.0.233"
+	version     = "1.0.234"
 	rootCommand = commands.NewRootCommand
 )
 
