@@ -56,7 +56,8 @@ func (e CommandEnvironment) Override(name string) CommandEnvOverride {
 // WorkingDirKnown reports whether the target cwd was established entirely
 // through the launch directory and modeled env -C options. An arbitrary prefix
 // can change cwd before exec (for example, `cd /tmp && codex` or a wrapper that
-// calls chdir), so its inherited directory is not evidence for receipt routing.
+// calls chdir), and Codex's own -C/--cd option changes the working root after
+// exec, so the inherited directory is not evidence for receipt routing.
 func (e CommandEnvironment) WorkingDirKnown() bool {
 	return e.workingDirKnown
 }
@@ -158,7 +159,26 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 		result.workingDirKnown = false
 		idx++
 	}
+	if result.Agent == ProgramCodex && codexWorkingDirOptionPresent(tokens[targetIdx+1:]) {
+		// Do not duplicate Codex's evolving argument parser here. Its own cwd
+		// option is enough to disprove the inherited launch directory; dropping
+		// correlation preserves exactly-one capture and keeps concurrent starts
+		// fail-closed until the rollout header itself can identify them safely.
+		result.workingDirKnown = false
+	}
 	return result, nil
+}
+
+func codexWorkingDirOptionPresent(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		if arg == "-C" || arg == "--cd" || strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "--cd=") {
+			return true
+		}
+	}
+	return false
 }
 
 // firstCommandTokenStrict returns the first executable that can be established
