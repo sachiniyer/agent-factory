@@ -182,7 +182,10 @@ so they are documented here. `CreateSession` returns `{ "instance": <session> }`
 `Snapshot` and `ImportRemoteHookSessions` return `{ "instances": [<session>…] }`;
 `ArchiveSession` returns `{ "ok": true, "archived_path": "…" }`;
 `RestoreArchived` returns `{ "ok": true, "worktree_path": "…" }`;
-`SendPrompt` returns `{ "ok": true, "status": "delivered" | "not-delivered" | "could-not-confirm" }`;
+`SendPrompt` returns `{ "ok": true, "status": "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm" }`;
+`sent-unverified` means the paste and Enter were accepted while a readable pane
+did not render exact prompt content; `could-not-confirm` means the pane observer
+itself was unavailable. Neither status claims delivery.
 `DeliverPrompt` returns `{ "status": "started" | "sent" }`; `CreateTab`
 returns `{ "id"?: "<stable-tab-id>", "name": "<resolved-tab-name>", "tmux_name"?: "<tmux-session>" }`
 (`id` is the stable tab id minted by the daemon, which an older daemon may omit; `tmux_name` is the tmux session the tab was spawned under, omitted for a

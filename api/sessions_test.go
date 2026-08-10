@@ -860,6 +860,7 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 		{Title: "a1", Status: session.Running},
 		{Title: "a2", Status: session.Ready},
 		{Title: "a3", Status: session.Running},
+		{Title: "a4", Status: session.Ready},
 	})
 	if err != nil {
 		t.Fatalf("marshal repo A: %v", err)
@@ -887,6 +888,8 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 			return session.PromptDelivered, nil
 		case "a2":
 			return session.PromptNotDelivered, nil
+		case "a3":
+			return session.PromptSentUnverified, nil
 		default:
 			return session.PromptCouldNotConfirm, nil
 		}
@@ -897,9 +900,9 @@ func TestSessionsSendPrompt_BroadcastHonorsRepoScoping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("broadcast returned error: %v", err)
 	}
-	if res.Delivered != 1 || res.NotDelivered != 1 || res.CouldNotConfirm != 1 || res.Failed != 0 || res.Skipped != 0 {
-		t.Fatalf("counts = delivered %d / not-delivered %d / could-not-confirm %d / failed %d / skipped %d, want 1/1/1/0/0",
-			res.Delivered, res.NotDelivered, res.CouldNotConfirm, res.Failed, res.Skipped)
+	if res.Delivered != 1 || res.NotDelivered != 1 || res.SentUnverified != 1 || res.CouldNotConfirm != 1 || res.Failed != 0 || res.Skipped != 0 {
+		t.Fatalf("counts = delivered %d / not-delivered %d / sent-unverified %d / could-not-confirm %d / failed %d / skipped %d, want 1/1/1/1/0/0",
+			res.Delivered, res.NotDelivered, res.SentUnverified, res.CouldNotConfirm, res.Failed, res.Skipped)
 	}
 	for _, id := range gotRepoIDs {
 		if id != repoA.ID {

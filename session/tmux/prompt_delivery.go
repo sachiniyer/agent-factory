@@ -2,21 +2,27 @@ package tmux
 
 // PromptDeliveryStatus is the closed set of outcomes a caller may learn from
 // the pane observation performed during prompt submission. It reports only
-// what the daemon observed; PromptCouldNotConfirm deliberately does not guess
-// whether an unobservable paste ultimately landed.
+// what the daemon observed; neither unverified status guesses whether the
+// agent ultimately received the prompt.
 type PromptDeliveryStatus string
 
 const (
-	PromptDelivered       PromptDeliveryStatus = "delivered"
-	PromptNotDelivered    PromptDeliveryStatus = "not-delivered"
+	PromptDelivered    PromptDeliveryStatus = "delivered"
+	PromptNotDelivered PromptDeliveryStatus = "not-delivered"
+	// PromptSentUnverified means tmux accepted both the paste and Enter while a
+	// readable pane never rendered prompt-specific proof. Real Claude and Codex
+	// panes collapse long pastes into placeholders, so this is deliberately not
+	// promoted to PromptDelivered.
+	PromptSentUnverified  PromptDeliveryStatus = "sent-unverified"
 	PromptCouldNotConfirm PromptDeliveryStatus = "could-not-confirm"
 )
 
-// Valid reports whether the status is one of the three wire-supported
+// Valid reports whether the status is one of the four wire-supported
 // outcomes. An empty or future value from an older/newer peer is not evidence
 // of delivery and must be normalized to PromptCouldNotConfirm by callers.
 func (s PromptDeliveryStatus) Valid() bool {
-	return s == PromptDelivered || s == PromptNotDelivered || s == PromptCouldNotConfirm
+	return s == PromptDelivered || s == PromptNotDelivered ||
+		s == PromptSentUnverified || s == PromptCouldNotConfirm
 }
 
 func (o deliveryOutcome) promptDeliveryStatus() PromptDeliveryStatus {
@@ -25,6 +31,8 @@ func (o deliveryOutcome) promptDeliveryStatus() PromptDeliveryStatus {
 		return PromptDelivered
 	case deliveryObservedAbsent:
 		return PromptNotDelivered
+	case deliveryObservedUnverified:
+		return PromptSentUnverified
 	default:
 		return PromptCouldNotConfirm
 	}
