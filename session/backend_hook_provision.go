@@ -260,6 +260,19 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
 	}
+	// No failed provision returns a teardown closure to own this directory, so
+	// establish its fallback owner before the call that creates it. Keeping one
+	// guard around the rest of the function means a new error return below cannot
+	// silently add another leak. The guard stays armed through
+	// reapProvisionFailure: that reap stops the transport first, but may still need
+	// this pin while it does so. It is disarmed only at the successful handoff to
+	// the teardown closure below.
+	removeKnownHostsOnFailure := true
+	defer func() {
+		if removeKnownHostsOnFailure {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	knownHosts, err := hookProvisionKnownHosts(dir, host, port, record.HostKey)
 	if err != nil {
 		return ProvisionResult{}, fmt.Errorf("backend=hook: %w", err)
@@ -311,6 +324,7 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 	}
 	res.Teardown = teardown
 	res.Backend = p.provisionedBackend(teardown)
+	removeKnownHostsOnFailure = false
 	return res, nil
 }
 
