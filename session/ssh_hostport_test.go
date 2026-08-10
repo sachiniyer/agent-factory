@@ -51,7 +51,7 @@ func TestSSHAndHookResolveTheSameAddressIdentically(t *testing.T) {
 			// asserted where it now lives — which is itself the convergence: there is
 			// no second resolver left to disagree.
 			t.Setenv("HOME", t.TempDir())
-			sshCmd, sshErr := sshCommandPinnedTo(config.SSHConfig{Host: tc.address, Port: tc.port}, config.SSHHostKeyInsecure, "")
+			sshCmd, sshErr := sshCommandPinnedTo(config.SSHConfig{Host: tc.address, Port: tc.port}, config.SSHHostKeyInsecure, "", 0)
 			require.NoError(t, sshErr)
 			sshHost := tc.wantHost
 
@@ -85,7 +85,7 @@ func TestConflictingPortsAreRefusedByBothBackends(t *testing.T) {
 	assert.Contains(t, hookErr.Error(), "3333", "the error must name BOTH values so it is obvious which to delete")
 
 	t.Setenv("HOME", t.TempDir())
-	_, sshErr := sshCommandPinnedTo(config.SSHConfig{Host: address, Port: port}, config.SSHHostKeyInsecure, "")
+	_, sshErr := sshCommandPinnedTo(config.SSHConfig{Host: address, Port: port}, config.SSHHostKeyInsecure, "", 0)
 	require.Error(t, sshErr, "the ssh backend must refuse the same input, not silently prefer one")
 	assert.Contains(t, sshErr.Error(), "2222")
 	assert.Contains(t, sshErr.Error(), "3333")
@@ -137,7 +137,7 @@ func TestLegacyConflictingCleanupHandleCanStillReap(t *testing.T) {
 // filesystem or the network.
 func TestSSHAddressConflictIsDiagnosedBeforeAnythingLocal(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // no keys, no known_hosts: a local check would fail too
-	_, err := sshCommandPinnedTo(config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333}, config.SSHHostKeyStrict, "")
+	_, err := sshCommandPinnedTo(config.SSHConfig{Host: "10.0.0.7:2222", Port: 3333}, config.SSHHostKeyStrict, "", 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "2222", "the ADDRESS conflict must win over any local prerequisite failure")
 	assert.Contains(t, err.Error(), "3333")

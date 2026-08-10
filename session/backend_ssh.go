@@ -175,7 +175,8 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		pinPort = sshDefaultPort
 	}
 	dialAddr := pinForProvision(sshCfg, pinHost, pinPort, cfg.SSHHostKeyVerification)
-	sshCmd, err := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr)
+	dialPort := 0
+	sshCmd, err := sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr, dialPort)
 	if err != nil {
 		return ProvisionResult{}, err
 	}
@@ -183,6 +184,23 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// before the command that appends to it runs. See prepareSSHHostKeyStore.
 	if err := prepareSSHHostKeyStore(sshCfg, cfg.SSHHostKeyVerification); err != nil {
 		return ProvisionResult{}, err
+	}
+	// AND ONE ADDRESS IS NOT ONE MACHINE. Behind an L4 load balancer the pin above
+	// is satisfied by every backend, so the steps can still split (#3122). Ask the
+	// machine which address it is and re-pin to that, BEFORE anything creates remote
+	// state — so the workspace, the tunnel and the reap all ride the same host.
+	//
+	// Only when af is already pinning: an empty dialAddr means the posture cannot
+	// refuse a wrong pin (#3086), and that reasoning applies to a machine address
+	// exactly as it does to a resolved one.
+	if dialAddr != "" {
+		if machineAddr, machinePort := learnPinnedMachine(sshCmd, dialAddr, pinPort); machineAddr != "" {
+			dialAddr, dialPort = machineAddr, machinePort
+			sshCmd, err = sshCommandPinnedTo(sshCfg, cfg.SSHHostKeyVerification, dialAddr, dialPort)
+			if err != nil {
+				return ProvisionResult{}, err
+			}
+		}
 	}
 	program := config.ResolveProgram(&cfg.Config, spec.Program)
 	p := newSSHSandboxProvisioner(spec, sshCmd, afBin, program)
@@ -204,10 +222,12 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			// session's workspace is actually on. A reap after a daemon restart
 			// composes its command from this, in a fresh process, which is the
 			// constraint that ruled out a ControlMaster multiplex (#3086).
-			DialAddress:         dialAddr,
 			HostKeyVerification: cfg.SSHHostKeyVerification,
 		},
 	}
+	// The pin fields are written together, because which of them is safe to write
+	// depends on whether a rolled-back daemon could read it correctly (#3122).
+	sshRecordPinnedMachine(res.Backend.(*sshBackend).cleanup, dialAddr, dialPort, pinPort)
 	return res, nil
 }
 

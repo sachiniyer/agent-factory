@@ -57,7 +57,7 @@ func TestSSHCommandEmitsOnlyLongEstablishedOptions(t *testing.T) {
 		// checking only the unpinned command would leave the allowlist blind at
 		// exactly the place the newest option lives.
 		for _, dialAddr := range []string{"", "198.51.100.8"} {
-			cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com", Port: 2222}, posture, dialAddr)
+			cmd, err := sshCommandPinnedTo(config.SSHConfig{Host: "h.example.com", Port: 2222}, posture, dialAddr, 0)
 			require.NoError(t, err)
 			fields := strings.Fields(cmd)
 			for i, f := range fields {
@@ -187,7 +187,7 @@ func TestSSHCommandCompositionIgnoresAnUnreadableIdentity(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone_id_ed25519")
 
 	cmd, err := sshCommandPinnedTo(
-		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict, "")
+		config.SSHConfig{Host: "h.example.com", IdentityFile: missing}, config.SSHHostKeyStrict, "", 0)
 
 	require.NoError(t, err,
 		"restoreRuntimeCleanup composes while loading persisted handles; refusing here would capture a "+

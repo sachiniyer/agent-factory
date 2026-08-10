@@ -370,20 +370,29 @@ back (see [Archive & restore](#archive-restore)).
 > **This fixes DNS multiplicity, and only DNS multiplicity.** Read the next
 > paragraph before assuming it covers you.
 
-> **Still a known limitation: a load-balancer VIP is not pinned, and can still
-> split a session.** If `ssh.host` resolves to an address that is a **virtual IP in
-> front of several machines** — an L4/TCP load balancer, an AWS NLB, a
-> keepalived/IPVS pair, a Kubernetes service — then pinning the address changes
-> nothing, because *the address is not a machine identity*. The balancer picks a
-> backend **per TCP connection**, and af opens a separate connection for every
-> provision command, for the tunnel, and for the cleanup. Those can still land on
-> different machines, and the failure is the same one described above: the cleanup
-> removes the wrong machine's directory, reports success, and the real workspace
-> leaks.
+> **A load-balancer VIP is pinned to one machine too.** If `ssh.host` reaches a
+> **virtual IP in front of several machines** — an L4/TCP load balancer, an AWS
+> NLB, a keepalived/IPVS pair, a Kubernetes service — then pinning the *address*
+> would not have been enough, because the address is not a machine identity: the
+> balancer picks a backend **per TCP connection**, and af opens one for every
+> provision command, for the tunnel, and for the cleanup.
 >
-> af cannot detect this — a VIP looks exactly like an ordinary address — so there is
-> no warning to go on. The workaround is the same as before: **point `ssh.host` at
-> one machine**, not at the balancer. Tracked in #3086, which stays open for it.
+> So af asks the machine who it is. On the first connection it reads
+> `SSH_CONNECTION`, which tells it the address that backend accepted the connection
+> on, and pins every later step to that. The address is recorded with the session,
+> so the cleanup reaches the same machine even after the daemon restarts.
+>
+> Two cases where af leaves the pin alone, both logged:
+>
+> - **The backend's own address is not reachable from the daemon** — a private
+>   address in another VPC, or across a NAT boundary. Pinning it would turn a
+>   working host into one where every step fails, so af checks first and keeps the
+>   address pin instead.
+> - **The balancer preserves the destination address** (direct server return), so
+>   the backend reports the VIP itself. There is nothing to re-pin to.
+>
+> In both cases the session behaves as it did before, and a multi-machine target
+> can still split it — **point `ssh.host` at one machine** if that matters.
 
 > **Your host key configuration is unaffected**, which is the part worth knowing:
 > `ssh` is still given the **name** as its destination, so `known_hosts` is matched
