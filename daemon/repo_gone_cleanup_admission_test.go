@@ -320,17 +320,10 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	require.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
 		"the durable row must record that descriptor cleanup entered its finalization fence")
 
-	// A new daemon must finish the tombstone from the durable fence alone; it
-	// cannot depend on the first process's goroutine or reinterpret pathname
-	// absence as completion of an ordinary cleanup-ready claim.
+	// The session/git finalization-retry tests load this persisted state into a
+	// fresh worktree and prove both absent-root completion and replacement safety.
 	releaseLock()
 	releaseLock = nil
-	restarted, err := NewManager(config.DefaultConfig())
-	require.NoError(t, err)
-	_, err = restarted.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
-	require.NoError(t, err)
-	assert.Nil(t, recordFor(t, repoID, "ghost-crash-window"))
-
 	close(releaseOldFinalizer)
 	oldFinalizerReleased = true
 }
