@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -348,4 +349,64 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
 	}
 	return string(output), nil
+}
+
+// CaptureVisibleWithScrollback captures the visible screen AND the scrollback size
+// in ONE tmux invocation, so the two describe the same instant (#3169).
+//
+// Atomicity is the whole point, and two separate commands could not provide it.
+// A pre-read/post-read bracket around the capture still reports an incomplete
+// capture as complete: zero at the pre-read, history gained through output or a
+// shorter resize before capture-pane, then lost through clear-history or a taller
+// resize before the post-read — both endpoints read zero while the returned content
+// really did omit lines. Narrowing a check-then-act window is not closing it, and
+// this is the one place where a wrong answer means an operator trusts a partial
+// capture (#3169 review).
+//
+// tmux runs both commands in ONE command queue, so no client can interleave a
+// clear-history between them. The count is asked for FIRST and is a single line of
+// digits, so the split is unambiguous even though pane content is arbitrary — a
+// delimiter after arbitrary content would not be.
+//
+// Verified against real tmux while designing this: a 10-row pane holding 61 lines
+// answered "51" followed by the visible screen, and a separate full capture returned
+// 61 lines — 51 + 10 = 61, so history_size is exactly the lines above the region
+// this returns.
+//
+// The capture flags match CapturePaneContent exactly (-p -e -J), so the content is
+// byte-identical to what the non-atomic path returned.
+// ErrScrollbackCaptureUnparseable marks an answer this cannot split — a producer
+// that does not implement the combined command shape. It is deliberately NOT the
+// same class as ErrSessionGone or ErrTmuxTimeout: those are real failures a caller
+// must surface, while this one means "no count available here", which a caller may
+// degrade to a plain capture with an unknown count (#3169 review).
+var ErrScrollbackCaptureUnparseable = errors.New("tmux answer carries no capture after the history size")
+
+func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
+	ctx, cancel := tmuxTimeoutContext()
+	defer cancel()
+	target := exactTarget(t.sanitizedName)
+	output, err := t.outputTmuxBounded(ctx, "display-message", "-p", "-t", target, "#{history_size}",
+		";", "capture-pane", "-p", "-e", "-J", "-t", target)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", 0, fmt.Errorf("%w: capture-pane with scrollback after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+		}
+		if !t.ExistsOrUnknown() {
+			return "", 0, fmt.Errorf("%w: capture-pane with scrollback: %v", ErrSessionGone, err)
+		}
+		return "", 0, fmt.Errorf("failed to capture tmux pane with scrollback: %v", err)
+	}
+	// The first line is the count; everything after it is the capture. A missing
+	// newline means tmux answered the count and nothing else, which is not a capture
+	// this can split — reported rather than guessed at.
+	head, content, found := strings.Cut(string(output), "\n")
+	if !found {
+		return "", 0, fmt.Errorf("%w: %q", ErrScrollbackCaptureUnparseable, string(output))
+	}
+	size, convErr := strconv.Atoi(strings.TrimSpace(head))
+	if convErr != nil {
+		return "", 0, fmt.Errorf("%w: history size %q: %v", ErrScrollbackCaptureUnparseable, head, convErr)
+	}
+	return content, size, nil
 }
