@@ -466,8 +466,9 @@ func (i *Instance) SetInFlightOpForTest(op InFlightOp) {
 // tabSpawnBlockedLocked reports the error, if any, forbidding a new tab spawn.
 // Caller holds i.mu. It reads the two axes directly (the #1195 structural fold of
 // the #1196 archive-orphan guard): a tab may not spawn into an archived session
-// (its worktree was moved away) or one with a teardown op in flight — an archive
-// (OpArchiving) or kill (OpKilling). The archive case is the load-bearing one:
+// (its worktree was moved away), one with a teardown op in flight — an archive
+// (OpArchiving) or kill (OpKilling) — or one whose durable account replacement
+// has not completed. The archive case is the load-bearing one:
 // ArchiveTeardown keeps started=true, so the #990 started-flag guard never fires
 // during archive; OpArchiving is the fence that started=true cannot provide.
 func (i *Instance) tabSpawnBlockedLocked() error {
@@ -476,6 +477,9 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	}
 	if i.inFlightOp == OpArchiving || i.inFlightOp == OpKilling {
 		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
+	}
+	if i.pendingAccountSwap != nil {
+		return fmt.Errorf("cannot add a tab while session %q has a committed account swap awaiting replacement completion", i.Title)
 	}
 	return nil
 }

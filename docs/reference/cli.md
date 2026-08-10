@@ -162,11 +162,13 @@ ssh, sandbox and hook refuse by design, not because the work is pending. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
-an explicit limit_account_candidates list may opt an unpinned local or docker
+an explicit limit_account_candidates list may opt an unpinned local
 session into switching after a usage limit. af skips registered candidates with
 a current limit observation, says which identity changed in the session, and
-waits normally when none is usable. An explicit --account is a permanent pin and
-is never overridden.
+waits normally when none is usable. Docker account-scoped creates remain
+supported, but automatic Docker replacement is disabled until af can durably
+identify and reap a crash-surviving container and freeze its complete provision
+plan. An explicit --account is a permanent pin and is never overridden.
 
 ```
 af accounts

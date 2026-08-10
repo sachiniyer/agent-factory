@@ -135,24 +135,15 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 	return notice + "\n\n" + strings.TrimSpace(prompt)
 }
 
-// prepareRuntimeForAccountSwap establishes that the old identity is gone before
-// the replacement is recorded. A reachable Docker sandbox is pushed first; an
-// unanswered probe refuses, while af's typed not-provisioned result makes a
-// retry after an already-completed stop idempotent.
+// prepareRuntimeForAccountSwap establishes that every old local pane is gone
+// before the replacement is recorded. An unanswered probe refuses, while an
+// absent agent still triggers a sibling-pane recheck for retry safety.
 func (m *Manager) prepareRuntimeForAccountSwap(repoID, key string, instance *session.Instance) error {
 	probe := probeLiveness(instance, instance.AgentServer())
 	switch probe {
 	case probeUnknown:
 		return fmt.Errorf("cannot switch accounts for %q: its current runtime did not answer the liveness probe; not starting another identity while the old one may still be running", instance.Title)
 	case probeAlive, probeAnsweredDead:
-		if instance.AccountSwapReprovisionsSandbox() {
-			if err := m.preserveSandboxBeforeReap(repoID, key, instance, killSuggestionFor(instance)); err != nil {
-				return err
-			}
-			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
-				return err
-			}
-		}
 		return instance.StopForAccountSwap()
 	case probeAbsent:
 		return instance.StopRemainingPanesForAccountSwap()

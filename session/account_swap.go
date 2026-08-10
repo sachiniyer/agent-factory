@@ -85,24 +85,21 @@ func (i *Instance) PendingAccountSwap() (from, to string, pending bool) {
 // credential boundary without changing backend kind.
 func (i *Instance) SupportsAutomaticAccountSwap() bool {
 	backend := i.currentBackend()
-	if backend == nil {
-		return false
-	}
-	typ := backend.Type()
-	return typ == "local" || typ == "docker"
+	return backend != nil && backend.Type() == "local"
 }
 
 // ValidateAccountSwap checks the complete identity boundary before the current
-// runtime is touched. Only local and Docker sessions can carry registered
-// accounts; other off-box runtimes retain their existing refusal.
+// runtime is touched. Automatic replacement is deliberately local-only: Docker
+// account creation remains supported, but a crash-safe automatic reprovision
+// needs a durable container identity and immutable provision plan of its own.
 func (i *Instance) ValidateAccountSwap(name string) error {
 	backend := i.currentBackend()
 	i.mu.RLock()
 	program := i.Program
 	path := i.Path
-	instanceID := i.ID
 	current := i.Account
 	auto := i.accountAutoSelected
+	pending := cloneAccountSwapData(i.pendingAccountSwap)
 	op := i.inFlightOp
 	pendingCleanup := len(i.pendingTabCleanup)
 	tabs := append([]*Tab(nil), i.Tabs...)
@@ -116,8 +113,8 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if backend == nil {
 		return fmt.Errorf("session %q has no backend on record", i.Title)
 	}
-	if typ := backend.Type(); typ != "local" && typ != "docker" {
-		return fmt.Errorf("account swapping is not supported by the %s backend", typ)
+	if typ := backend.Type(); typ != "local" {
+		return fmt.Errorf("automatic account swapping is supported only by the local backend, not %s", typ)
 	}
 	if pendingCleanup > 0 {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
@@ -127,16 +124,15 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if args := tmux.ConversationSelectorArgs(resolvedProgram); len(args) > 0 {
 		return fmt.Errorf("cannot switch session %q to account %q because its resolved program pins an existing conversation with arguments %s; an account swap requires a fresh conversation, so remove those arguments and retry", i.Title, name, strings.Join(args, " "))
 	}
-	launchProgram := resolvedProgram
-	var conversation AgentConversationData
-	proof := accountLaunchProof(resolvedProgram, resolvedProgram, resolution.trustBase)
-	if backend.Type() == "local" {
-		launchProgram, conversation = planLaunchConversation(instanceID, resolvedProgram)
-		launchProgram = injectSystemPrompt(launchProgram)
-		proof = accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase)
-		if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
-			return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
-		}
+	conversationID := newSessionID()
+	if pending != nil && pending.To == name && pending.ConversationID != "" {
+		conversationID = pending.ConversationID
+	}
+	launchProgram, conversation := planLaunchConversation(conversationID, resolvedProgram)
+	launchProgram = injectSystemPrompt(launchProgram)
+	proof := accountLaunchProof(resolvedProgram, launchProgram, resolution.trustBase)
+	if err := tmux.ValidateAccountLaunchSupport(name); err != nil {
+		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
 	accountScope, err := resolveAccountForProvision(path, program, name)
 	if err != nil {
@@ -147,12 +143,6 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	}
 	accountScope.TrustedExecutable = proof.TrustedExecutable
 	accountScope.GeneratedArgs = proof.GeneratedArgs
-	if backend.Type() == "docker" {
-		// The Docker launch cannot inherit executable identity proved only in the
-		// host namespace. Match backend_docker's boundary before any old sandbox is
-		// reaped, so a host-qualified override refuses while the old work stays live.
-		accountScope.TrustedExecutable = ""
-	}
 	filtered := sessionenv.FilterForCommand(
 		os.Environ(), accountScope.Agent, launchProgram, sessionEnvPassthroughForInstance(i))
 	if _, err := sessionenv.ApplyAccount(filtered, launchProgram, accountScope); err != nil {
@@ -177,13 +167,9 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	if i.inFlightOp != OpRespawning {
 		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
 	}
-	if backend.Type() == "local" {
-		i.accountSwapLaunch = &accountSwapLaunchPlan{
-			account: name, base: resolvedProgram, program: launchProgram,
-			proof: proof, conversation: conversation,
-		}
-	} else {
-		i.accountSwapLaunch = nil
+	i.accountSwapLaunch = &accountSwapLaunchPlan{
+		account: name, base: resolvedProgram, program: launchProgram,
+		proof: proof, conversation: conversation,
 	}
 	return nil
 }
@@ -257,7 +243,11 @@ func (i *Instance) SelectAccountAutomatically(from, name string) (AgentConversat
 	i.clearAgentModelChangeLocked()
 	i.Account = name
 	i.accountAutoSelected = true
-	i.pendingAccountSwap = &AccountSwapData{From: from, To: name}
+	pending := &AccountSwapData{From: from, To: name}
+	if plan := i.accountSwapLaunch; plan != nil && plan.account == name && plan.conversation.HasID() {
+		pending.ConversationID = plan.conversation.ID
+	}
+	i.pendingAccountSwap = pending
 	return previous, nil
 }
 
@@ -289,14 +279,6 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 	i.pendingAccountSwap = nil
 	i.accountSwapLaunch = nil
 	return true
-}
-
-// AccountSwapReprovisionsSandbox reports whether the current account swap must
-// push the sandbox branch before stopping it. Docker is the only off-box runtime
-// that can carry an account today.
-func (i *Instance) AccountSwapReprovisionsSandbox() bool {
-	backend := i.currentBackend()
-	return backend != nil && backend.Type() == "docker"
 }
 
 func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) error {
@@ -374,6 +356,48 @@ func validateAccountSwapSiblingTabs(i *Instance) error {
 	return errors.Join(failures...)
 }
 
+// ValidateAccountSwapReplacementPanes proves that every persisted sibling in a
+// committed local replacement is live before its notice marker can be cleared.
+// Agent liveness is established separately by the daemon's authoritative probe.
+func (i *Instance) ValidateAccountSwapReplacementPanes() error {
+	account, _ := i.AccountSelection()
+	_, target, pending := i.PendingAccountSwap()
+	if !pending || account != target {
+		return fmt.Errorf("account swap for %q has no committed replacement to validate", i.Title)
+	}
+	if err := validateAccountSwapSiblingTabs(i); err != nil {
+		return fmt.Errorf("account swap replacement for %q is missing expected panes: %w", i.Title, err)
+	}
+	return nil
+}
+
+// SynchronizeAccountSwapPaneMetadata repairs the process-local tmux launch
+// metadata after a daemon restart. The running panes already have the selected
+// environment; this makes any later sibling spawn inherit that same durable
+// account after the pending marker is cleared.
+func (i *Instance) SynchronizeAccountSwapPaneMetadata() error {
+	account, _ := i.AccountSelection()
+	_, target, pending := i.PendingAccountSwap()
+	if !pending || account != target {
+		return fmt.Errorf("account swap for %q has no committed replacement to synchronize", i.Title)
+	}
+	agent := sessionenv.AgentForCommand(i.AgentProgram())
+	i.mu.RLock()
+	tabs := append([]*Tab(nil), i.Tabs...)
+	i.mu.RUnlock()
+	for idx, tab := range tabs {
+		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
+			continue
+		}
+		if idx == 0 {
+			tab.tmux.SetAccountForAgent(agent, account)
+			continue
+		}
+		tab.tmux.SetAccountEnvironmentForAgent(agent, account)
+	}
+	return nil
+}
+
 func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	if err := tab.tmux.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
@@ -381,8 +405,4 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	account, _ := i.AccountSelection()
 	tab.tmux.SetAccountEnvironmentForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
 	return nil
-}
-
-func (b *remoteAgentBackend) stopForAccountSwap(i *Instance, _ bool) error {
-	return i.reapRemoteRuntimeForReplacement()
 }

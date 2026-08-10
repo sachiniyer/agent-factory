@@ -101,11 +101,13 @@ bind-MOUNTS the directory, so account writes land in your real account. ` +
 		session.AccountWriteBackRationale + `
 
 By default af never switches accounts on its own. With limit_auto_resume enabled,
-an explicit limit_account_candidates list may opt an unpinned local or docker
+an explicit limit_account_candidates list may opt an unpinned local
 session into switching after a usage limit. af skips registered candidates with
 a current limit observation, says which identity changed in the session, and
-waits normally when none is usable. An explicit --account is a permanent pin and
-is never overridden.`,
+waits normally when none is usable. Docker account-scoped creates remain
+supported, but automatic Docker replacement is disabled until af can durably
+identify and reap a crash-surviving container and freeze its complete provision
+plan. An explicit --account is a permanent pin and is never overridden.`,
 }
 
 var accountsAddCmd = &cobra.Command{

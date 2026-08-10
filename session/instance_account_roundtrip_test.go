@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,25 +89,24 @@ func TestInstanceAccount_ExplicitPinAndAutomaticSelectionStayDistinctOnDisk(t *t
 }
 
 func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) {
-	original := &Instance{
-		Title:    "pending-swap",
-		Path:     t.TempDir(),
-		Program:  "claude",
-		liveness: LiveLimitReached,
-		started:  true,
-		backend:  NewFakeBackend(),
-		Prompt:   "finish the migration",
-	}
-	require.NoError(t, original.BeginLimitResume())
+	original := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	original.Title = "pending-swap"
+	original.Prompt = "finish the migration"
+	require.NoError(t, original.ValidateAccountSwap("work"))
 	_, err := original.SelectAccountAutomatically("", "work")
 	require.NoError(t, err)
 	original.EndLimitResume()
 
 	stored := original.ToInstanceData().ForStorage()
-	stored.BackendType = "docker"
+	stored.Worktree = GitWorktreeData{
+		RepoPath: original.Path, WorktreePath: original.Path,
+		SessionName: original.Title, BranchName: "main", ExternalWorktree: true,
+	}
+	require.NotNil(t, stored.PendingAccountSwap)
+	require.NotEmpty(t, stored.PendingAccountSwap.ConversationID)
 	raw, err := json.Marshal(stored)
 	require.NoError(t, err)
-	require.Contains(t, string(raw), `"pending_account_swap":{"to":"work"}`)
+	require.Contains(t, string(raw), `"conversation_id"`)
 
 	var decoded InstanceData
 	require.NoError(t, json.Unmarshal(raw, &decoded))
@@ -116,6 +116,8 @@ func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) 
 	require.True(t, pending)
 	require.Empty(t, from)
 	require.Equal(t, "work", to)
+	require.Equal(t, stored.PendingAccountSwap.ConversationID,
+		restored.ToInstanceData().PendingAccountSwap.ConversationID)
 	require.True(t, restored.Started(), "the inert row must remain eligible for the limit scheduler")
 	require.Equal(t, LiveLimitReached, restored.GetLiveness(),
 		"ordinary status/lost recovery must not consume the pending swap")

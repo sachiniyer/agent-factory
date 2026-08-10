@@ -98,10 +98,13 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   rather than hammering an exhausted plan. Killing the session is always the
   off-ramp.
 - **Optional account switch** → before waiting for the old identity's reset, an
-  unpinned local or Docker session may restart on the first registered account
+  unpinned local session may restart on the first registered account
   in `limit_account_candidates` that has no current limit observation. The
   ordered list is the opt-in; af never chooses from every registered account.
   If every listed account is limited or absent, the existing wait remains.
+  Docker account-scoped creates remain supported, but automatic Docker
+  replacement stays disabled until its complete provision plan and container
+  cleanup identity can survive a daemon crash.
 - **An explicit `--account` is immutable.** It is a pin, so automatic switching
   never overrides it. Accounts selected by the scheduler may move again after
   they later hit their own limit.

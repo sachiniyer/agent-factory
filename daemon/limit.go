@@ -520,29 +520,27 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}()
 
 	forceRespawn := false
-	if accountSwap != nil {
+	if accountSwap != nil && !accountSwap.alreadySet {
 		if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
 			return resumeNotPerformed, err
 		}
-		if !accountSwap.alreadySet {
-			if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
-				return resumeNotPerformed, err
-			}
-			previousConversation, err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to)
-			if err != nil {
-				return resumeNotPerformed, err
-			}
-			accountSwap.previousConversation = previousConversation
-			// The old runtime is conclusively stopped. Make the new identity durable
-			// BEFORE starting it, so a crash can never relaunch on the old account
-			// while the session reports the replacement.
-			if err := m.persistSettlement(repoID, key, instance); err != nil {
-				_ = instance.RestoreAccountSelectionUnderResumeFence(
-					accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
-				return resumeNotPerformed, err
-			}
-			forceRespawn = true
+		if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
+			return resumeNotPerformed, err
 		}
+		previousConversation, err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to)
+		if err != nil {
+			return resumeNotPerformed, err
+		}
+		accountSwap.previousConversation = previousConversation
+		// The old runtime is conclusively stopped. Make the new identity durable
+		// BEFORE starting it, so a crash can never relaunch on the old account
+		// while the session reports the replacement.
+		if err := m.persistSettlement(repoID, key, instance); err != nil {
+			_ = instance.RestoreAccountSelectionUnderResumeFence(
+				accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
+			return resumeNotPerformed, err
+		}
+		forceRespawn = true
 	}
 
 	as := instance.AgentServer()
@@ -550,10 +548,24 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if !forceRespawn {
 		probe = probeLiveness(instance, as)
 	}
+	shouldRespawn := forceRespawn
 	switch probe {
 	case probeAlive:
-		// A live stall — the common claude/codex case. No re-spawn; the un-stall
-		// prompt below is all it needs.
+		// A live ordinary stall needs only the un-stall prompt. A committed account
+		// replacement is stronger: every persisted sibling must also be present.
+		// A daemon can crash after the agent starts but before setupTabs completes,
+		// so repair an incomplete pane set as one fresh credential boundary.
+		if accountSwap != nil && accountSwap.alreadySet {
+			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
+				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+				}
+				if err := instance.StopForAccountSwap(); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+				}
+				shouldRespawn = true
+			}
+		}
 	case probeUnknown:
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeAnsweredDead:
@@ -577,10 +589,18 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		fallthrough
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
+			if accountSwap.alreadySet {
+				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+					return resumeNotPerformed, err
+				}
+			}
 			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
 				return resumeNotPerformed, err
 			}
 		}
+		shouldRespawn = true
+	}
+	if shouldRespawn {
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the
@@ -667,6 +687,18 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		settleErr = m.persistSettlement(repoID, key, instance)
 		if settleErr != nil {
 			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
+		}
+	}
+	if accountSwap != nil {
+		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
+			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(boundaryErr, settleErr)
+			}
+			return resumeNotPerformed, boundaryErr
+		}
+		if err := instance.SynchronizeAccountSwapPaneMetadata(); err != nil {
+			return resumeNotPerformed, err
 		}
 	}
 
