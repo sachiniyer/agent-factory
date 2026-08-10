@@ -101,18 +101,29 @@ func retainAccountLimitObservations(observations []session.AccountLimitObservati
 }
 
 func mergeAccountLimitObservations(current, added []session.AccountLimitObservationData) ([]session.AccountLimitObservationData, error) {
-	merged := make(map[string]session.AccountLimitObservationData, len(current)+len(added))
-	for _, observation := range append(append([]session.AccountLimitObservationData(nil), current...), added...) {
+	merged := make(map[string]session.AccountLimitObservationData)
+	merge := func(observation session.AccountLimitObservationData) error {
 		observation.Agent = strings.TrimSpace(observation.Agent)
 		observation.Account = strings.TrimSpace(observation.Account)
 		if observation.Agent == "" || observation.Account == "" {
-			return nil, fmt.Errorf("account-limit observation has an empty agent or account")
+			return fmt.Errorf("account-limit observation has an empty agent or account")
 		}
 		key := observation.Agent + "\x00" + observation.Account
 		prior, exists := merged[key]
 		if !exists || (!prior.ResetAt.IsZero() &&
 			(observation.ResetAt.IsZero() || observation.ResetAt.After(prior.ResetAt))) {
 			merged[key] = observation
+		}
+		return nil
+	}
+	for _, observation := range current {
+		if err := merge(observation); err != nil {
+			return nil, err
+		}
+	}
+	for _, observation := range added {
+		if err := merge(observation); err != nil {
+			return nil, err
 		}
 	}
 	result := make([]session.AccountLimitObservationData, 0, len(merged))
