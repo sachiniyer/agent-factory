@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -189,4 +190,44 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	require.Eventually(t, func() bool {
 		return !manager.ghostCleanupStallActive(key, stableID)
 	}, 250*time.Millisecond, time.Millisecond, "a successful retry must release the process-epoch fence")
+}
+
+func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-sync-success")
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+
+	previousCleanup := ghostCleanupWorktree
+	var releaseLock func()
+	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error, <-chan error) {
+		// Mirror the real descriptor cleanup's definitive success: the archive is
+		// gone and the temporary in-memory recovery handle has been consumed.
+		data.Worktree.RelocationRecovery = nil
+		path, err := config.RepoInstancesPath(repoID)
+		require.NoError(t, err)
+		releaseLock = holdFileLock(t, path)
+		return sessiongit.CleanupSettled, nil, nil
+	}
+	t.Cleanup(func() {
+		ghostCleanupWorktree = previousCleanup
+		if releaseLock != nil {
+			releaseLock()
+		}
+	})
+
+	previousDeleteTimeout := session.InstanceDeleteLockTimeout
+	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
+	previousRetryInterval := lateGhostCleanupRetryInterval
+	lateGhostCleanupRetryInterval = 5 * time.Millisecond
+	t.Cleanup(func() { lateGhostCleanupRetryInterval = previousRetryInterval })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-sync-success", RepoID: repoID})
+	require.ErrorIs(t, err, config.ErrLockTimeout)
+	require.NotNil(t, releaseLock, "the tail failure must happen after descriptor cleanup succeeded")
+	releaseLock()
+
+	require.Eventually(t, func() bool {
+		return recordFor(t, repoID, "ghost-sync-success") == nil
+	}, 500*time.Millisecond, 5*time.Millisecond,
+		"definitive synchronous cleanup must keep retrying its editor/record tail")
 }
