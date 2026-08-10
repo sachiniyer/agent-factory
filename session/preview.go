@@ -28,6 +28,43 @@ type PreviewSnapshot struct {
 	LinesAboveKnown bool
 }
 
+// previewSnapshotWithModes attaches the terminal observation to a capture.
+//
+// scrollbackFloor is a history_size read taken BEFORE the content was captured, or
+// -1 when none was. It exists because the count read here is a SEPARATE tmux
+// command from the capture, so it does not necessarily describe the bytes returned:
+// a clear-history or a taller resize in between can report 0 while the captured
+// visible screen really did omit lines, and reporting that as complete recreates
+// the failure this whole change exists to prevent (#3169 review).
+//
+// So completeness takes the MAXIMUM of the two observations. A pane can gain
+// history between them harmlessly; what must never happen is a partial capture
+// becoming a measured zero. The asymmetry is deliberate and matches the stakes the
+// issue records: a false "partial" costs the reader one --full, while a false
+// "complete" cost them archived working sessions.
+func previewSnapshotWithModesBracketed(content string, ts *tmux.TmuxSession, scrollbackFloor int) PreviewSnapshot {
+	snapshot := previewSnapshotWithModes(content, ts)
+	if scrollbackFloor > snapshot.LinesAbove {
+		snapshot.LinesAbove = scrollbackFloor
+		snapshot.LinesAboveKnown = true
+	}
+	return snapshot
+}
+
+// scrollbackFloorBefore reads the pane's history size before a capture, returning
+// -1 when it cannot be established. Only worth taking for a VISIBLE capture: a full
+// capture omits nothing, so it needs no floor and pays no extra tmux command.
+func scrollbackFloorBefore(ts *tmux.TmuxSession, full bool) int {
+	if ts == nil || full {
+		return -1
+	}
+	state, err := ts.ReadTerminalState()
+	if err != nil {
+		return -1
+	}
+	return state.HistorySize
+}
+
 func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {
 	snapshot := PreviewSnapshot{Content: content}
 	if ts == nil {
@@ -69,6 +106,7 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 		return PreviewSnapshot{}, nil
 	}
 
+	floor := scrollbackFloorBefore(ts, full)
 	var content string
 	var err error
 	if full {
@@ -79,7 +117,7 @@ func (i *Instance) PreviewTabSnapshot(idx int, full bool) (PreviewSnapshot, erro
 	if err != nil {
 		return PreviewSnapshot{}, err
 	}
-	return previewSnapshotWithModes(content, ts), nil
+	return previewSnapshotWithModesBracketed(content, ts, floor), nil
 }
 
 // PreviewTabFullHistory is PreviewTab's full-scrollback counterpart. It keeps
@@ -127,6 +165,9 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 		if ts == nil {
 			return PreviewSnapshot{}, nil
 		}
+		// Read the floor BEFORE the capture, so a clear-history afterwards cannot turn
+		// this partial capture into a measured zero (#3169 review).
+		floor := scrollbackFloorBefore(ts, full)
 		var (
 			content string
 			err     error
@@ -139,7 +180,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 		if err != nil {
 			return PreviewSnapshot{}, err
 		}
-		return previewSnapshotWithModes(content, ts), nil
+		return previewSnapshotWithModesBracketed(content, ts, floor), nil
 	}
 
 	// Backend preview methods re-enter i.mu, so the pinned agent target snapshots
@@ -150,6 +191,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 	if backend == nil {
 		return PreviewSnapshot{}, fmt.Errorf("session %q has no preview backend", i.Title)
 	}
+	floor := scrollbackFloorBefore(ts, full)
 	var (
 		content string
 		err     error
@@ -162,7 +204,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 	if err != nil {
 		return PreviewSnapshot{}, err
 	}
-	return previewSnapshotWithModes(content, ts), nil
+	return previewSnapshotWithModesBracketed(content, ts, floor), nil
 }
 
 // previewByIDAsOrdinal is the compatibility bridge for a remote agent-server

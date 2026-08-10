@@ -171,3 +171,36 @@ func TestPreviewByIDAsOrdinalHoldsRosterAcrossCapture(t *testing.T) {
 	require.NoError(t, <-closeDone)
 	requireIndex(t, inst, b.ID, 1)
 }
+
+// #3169 review: a post-capture measurement must not turn a PARTIAL capture into a
+// complete one.
+//
+// The count is a separate tmux command from the capture, so it does not necessarily
+// describe the bytes returned: a clear-history or a taller resize in between reports
+// 0 while the captured visible screen really did omit lines. Reporting that as
+// complete recreates the exact failure this change exists to prevent, so
+// completeness takes the MAXIMUM of a pre-capture floor and the post-capture read.
+//
+// Drives previewSnapshotWithModesBracketed itself rather than restating its
+// arithmetic — a test that recomputes max() passes even if the caller never applies
+// it. ts is nil so the post-capture read contributes nothing, which is precisely the
+// "measured zero" the floor has to survive.
+func TestPreviewSnapshotBracket_PostCaptureZeroCannotEraseAPreCaptureFloor(t *testing.T) {
+	// No floor: nothing to carry, and the snapshot reports what the post-read saw.
+	none := previewSnapshotWithModesBracketed("screen", nil, -1)
+	require.False(t, none.LinesAboveKnown, "no floor and no readable pane means unmeasured, not zero")
+	require.Equal(t, 0, none.LinesAbove)
+
+	// A floor observed BEFORE the capture must win over a post-capture zero.
+	bracketed := previewSnapshotWithModesBracketed("screen", nil, 379)
+	require.True(t, bracketed.LinesAboveKnown)
+	require.Equal(t, 379, bracketed.LinesAbove,
+		"the pre-capture floor must win, or a clear-history between capture and measure reports an "+
+			"incomplete capture as complete")
+
+	// A floor of zero is not a claim of completeness on its own; it simply adds nothing.
+	zero := previewSnapshotWithModesBracketed("screen", nil, 0)
+	require.Equal(t, 0, zero.LinesAbove)
+	require.False(t, zero.LinesAboveKnown,
+		"a zero floor must not upgrade an unmeasured capture to a measured-complete one")
+}

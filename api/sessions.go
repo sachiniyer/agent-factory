@@ -579,7 +579,13 @@ parse it rather than render it.`,
 				// off presence.
 				out["lines_above_known"] = false
 			}
-			fmt.Fprintln(os.Stderr, notice)
+			// NOT under --json: that flag promises stderr is the {data,error} envelope,
+			// so a free-form line here hands automation invalid JSON on a SUCCESSFUL
+			// command (#3169 review). The structured fields above carry the same facts,
+			// which is the whole reason they exist as fields.
+			if !envelopeOutput {
+				fmt.Fprintln(os.Stderr, notice)
+			}
 		}
 		return jsonOut(out)
 	},
