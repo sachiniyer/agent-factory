@@ -38,6 +38,7 @@ type PromptDeliveryStatus = tmux.PromptDeliveryStatus
 const (
 	PromptDelivered       = tmux.PromptDelivered
 	PromptNotDelivered    = tmux.PromptNotDelivered
+	PromptSentUnverified  = tmux.PromptSentUnverified
 	PromptCouldNotConfirm = tmux.PromptCouldNotConfirm
 )
 

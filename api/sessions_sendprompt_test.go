@@ -265,6 +265,7 @@ func TestSendPromptReportsClosedDeliveryOutcome(t *testing.T) {
 	for _, want := range []session.PromptDeliveryStatus{
 		session.PromptDelivered,
 		session.PromptNotDelivered,
+		session.PromptSentUnverified,
 		session.PromptCouldNotConfirm,
 	} {
 		t.Run(string(want), func(t *testing.T) {
