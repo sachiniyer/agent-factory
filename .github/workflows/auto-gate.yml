@@ -14,9 +14,18 @@ on:
   pull_request_review:
   pull_request_review_comment:
     types: [created, edited, deleted]
-  pull_request:
+  # A writable base-repository context is required to invalidate a stale
+  # aggregate when a fork PR appears. Every checkout below is pinned to the
+  # default branch; this workflow never checks out or executes pull-request code.
+  pull_request_target:
     types: [opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled]
   status:
+  # GitHub suppresses check_suite recursion for Actions-owned suites. The
+  # required Lint and Build checks both belong to PR Validation, so its terminal
+  # workflow_run is the non-recursive wakeup that republishes their final state.
+  workflow_run:
+    workflows: [PR Validation]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -38,9 +47,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
+      aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
     # One resolver handles every subscribed input change. It does not branch on
-    # activity type: PR/review/comment events identify a PR, while check/status
-    # events identify every exact (PR, head) pair associated with their SHA.
+    # activity type: PR/review/comment events identify a PR, while check/status/
+    # workflow-run events identify every exact (PR, head) pair at their SHA.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -53,7 +63,7 @@ jobs:
         env:
           PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
-          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
+          github-token: ${{ github.token }}
           script: |
             const fs = require("fs");
             const path = require("path");
@@ -63,11 +73,27 @@ jobs:
               const summary = "BLOCKED: auto-gate helper is not present on the default branch yet.";
               core.notice(summary);
               core.setOutput("targets", "[]");
+              core.setOutput("aggregate_heads", "[]");
               if (context.eventName === "workflow_dispatch") {
                 throw new Error(summary);
               }
               return;
             }
+
+            // Preserve heads carried by the webhook before any API-dependent
+            // resolution. If the resolver fails, apply-gate can still make a
+            // previously green aggregate non-green for every known head.
+            const payload = context.payload || {};
+            const knownEventHeads = [...new Set([
+              payload.pull_request?.head?.sha,
+              payload.check_suite?.head_sha,
+              payload.workflow_run?.head_sha,
+              payload.sha,
+              payload.before,
+              payload.after,
+            ]
+              .map((value) => String(value || "").toLowerCase())
+              .filter((value) => /^[0-9a-f]{40}$/.test(value)))].sort();
 
             try {
               const autoGate = require(helperPath);
@@ -122,6 +148,14 @@ jobs:
                   })),
                 ),
               );
+              const aggregateHeads =
+                typeof autoGate.resolveAggregateHeads === "function"
+                  ? autoGate.resolveAggregateHeads({ context, targets })
+                  : [...new Set(targets.map((target) => target.headSha))];
+              core.setOutput(
+                "aggregate_heads",
+                JSON.stringify(aggregateHeads.map((headSha) => ({ head_sha: headSha }))),
+              );
               if (context.eventName === "workflow_dispatch" && targets.length === 0) {
                 const failure = new Error("No pull-request head was resolved for manual recovery.");
                 failure.failWorkflow = true;
@@ -133,24 +167,74 @@ jobs:
               core.warning(error && error.stack ? error.stack : message);
               core.notice(summary);
               core.setOutput("targets", "[]");
+              core.setOutput(
+                "aggregate_heads",
+                JSON.stringify(knownEventHeads.map((headSha) => ({ head_sha: headSha }))),
+              );
               throw error;
             }
 
-  apply-gate:
-    name: Apply auto-merge gate
+  invalidate-gate:
+    name: Invalidate aggregate
     needs: auto-gate
     if: >-
-      needs.auto-gate.result == 'success' &&
-      needs.auto-gate.outputs.targets != '[]'
+      always() &&
+      needs.auto-gate.outputs.aggregate_heads != '' &&
+      needs.auto-gate.outputs.aggregate_heads != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(needs.auto-gate.outputs.targets) }}
-    # Decision identity is the pair, never the commit alone. Two PRs may point
-    # at the same commit without sharing a check or serialization lane.
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+    # This write deliberately happens before the serialized lane. A newer event
+    # must turn the required check red while an older transaction is still
+    # running; generation fencing prevents that older run from overwriting it.
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Make the aggregate non-green immediately
+        uses: actions/github-script@v8
+        env:
+          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            if (typeof autoGate.invalidateAggregateDecision !== "function") {
+              core.notice("Landing compatibility: fixed aggregate invalidation starts on master.");
+              return;
+            }
+            const invalidated = await autoGate.invalidateAggregateDecision({
+              github,
+              context,
+              core,
+              headSha: process.env.HEAD_SHA,
+            });
+            if (invalidated.writeState === "read-only") {
+              throw new Error(`Could not invalidate aggregate ${process.env.HEAD_SHA}.`);
+            }
+
+  apply-gate:
+    name: Apply aggregate gate
+    needs: [auto-gate, invalidate-gate]
+    if: >-
+      always() &&
+      needs.auto-gate.outputs.aggregate_heads != '' &&
+      needs.auto-gate.outputs.aggregate_heads != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+    # Refresh/report/merge owns one lane. The preceding unqueued invalidation is
+    # a distinct generation; an older transaction refuses to overwrite it.
     concurrency:
-      group: auto-gate-${{ matrix.target.decision_key }}
+      group: auto-gate-aggregate-${{ matrix.aggregate.head_sha }}
       cancel-in-progress: false
     steps:
       - name: Check out gate logic
@@ -158,84 +242,75 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Report gate decision
-        id: decision
+      - name: Evaluate, report, and merge the serialized head
         uses: actions/github-script@v8
         env:
-          PR_NUMBER: ${{ matrix.target.pr_number }}
-          EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
+          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+          TARGETS_JSON: ${{ needs.auto-gate.outputs.targets }}
+          MERGE_ENABLED: ${{ vars.AUTO_GATE_ENABLED }}
         with:
-          # Check runs require an App installation token. Keep this separate
-          # from the optional maintainer token used by the existing merge path.
+          # The built-in Actions identity owns both decision layers and has no
+          # ruleset bypass. The fixed aggregate is the enforcement boundary.
           github-token: ${{ github.token }}
           script: |
             const path = require("path");
             const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
             const autoGate = require(helperPath);
-            const result = await autoGate.evaluate({
-              github,
-              context,
-              core,
-              prNumber: Number(process.env.PR_NUMBER),
-              setOutputs: false,
-            });
-            if (!result.headSha) {
-              throw new Error(result.summary);
-            }
-            if (result.headSha !== process.env.EXPECTED_HEAD_SHA) {
-              core.notice(
-                `Skipping stale target for PR #${process.env.PR_NUMBER}: serialized head ` +
-                  `${process.env.EXPECTED_HEAD_SHA}, current head ${result.headSha}.`,
-              );
-              core.setOutput("should_merge", "false");
-              core.setOutput("docs_changed", "false");
-              core.setOutput("summary", "BLOCKED: pull-request head changed before serialized evaluation");
-              return;
-            }
-            core.setOutput("pr_number", result.prNumber);
-            core.setOutput("should_merge", result.shouldMerge ? "true" : "false");
-            core.setOutput("head_sha", result.headSha);
-            core.setOutput("docs_changed", result.docsChanged ? "true" : "false");
-            core.setOutput("summary", result.summary);
-            if (typeof autoGate.reportDecision === "function") {
-              await autoGate.reportDecision({
+            const targets = JSON.parse(process.env.TARGETS_JSON || "[]");
+            if (typeof autoGate.processAggregateHead === "function") {
+              await autoGate.processAggregateHead({
                 github,
                 context,
                 core,
-                result,
+                headSha: process.env.HEAD_SHA,
+                targets: targets.map((target) => ({
+                  prNumber: Number(target.pr_number),
+                  headSha: target.head_sha,
+                })),
+                mergeEnabled: process.env.MERGE_ENABLED === "true",
                 manual: context.eventName === "workflow_dispatch",
               });
-            } else {
-              core.notice("Decision reporting activates after this workflow lands on master.");
+              return;
             }
-
-      - name: Report disabled merge
-        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'
-        env:
-          PR_NUMBER: ${{ matrix.target.pr_number }}
-          DOCS_CHANGED: ${{ steps.decision.outputs.docs_changed }}
-          SUMMARY: ${{ steps.decision.outputs.summary }}
-        run: |
-          echo "::notice::AUTO_GATE_ENABLED is not true; would squash-merge PR #${PR_NUMBER}."
-          echo "::notice::Docs workflow dispatch after merge: ${DOCS_CHANGED}."
-          printf '%s\n' "$SUMMARY"
-
-      - name: Squash merge PR
-        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED == 'true'
-        uses: actions/github-script@v8
-        env:
-          PR_NUMBER: ${{ matrix.target.pr_number }}
-          EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
-        with:
-          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
-          script: |
-            const path = require("path");
-            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
-            const autoGate = require(helperPath);
-            await autoGate.merge({
-              github,
-              context,
-              core,
-              prNumber: Number(process.env.PR_NUMBER),
-              expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
-            });
+            // Landing compatibility: this workflow is visible before the new
+            // default-branch helper. Keep the prior one-target behavior for
+            // that single run; fixed aggregate enforcement starts on master.
+            for (const target of targets.filter((item) => item.head_sha === process.env.HEAD_SHA)) {
+              const result = await autoGate.evaluate({
+                github,
+                context,
+                core,
+                prNumber: Number(target.pr_number),
+                setOutputs: false,
+              });
+              if (result.reasons.some((reason) => reason.startsWith("auto-gate evaluation error:"))) {
+                throw new Error(result.summary);
+              }
+              if (result.headSha !== process.env.HEAD_SHA) {
+                core.notice(`Skipping stale landing target PR #${target.pr_number}.`);
+                continue;
+              }
+              if (typeof autoGate.reportDecision === "function") {
+                await autoGate.reportDecision({
+                  github,
+                  context,
+                  core,
+                  result,
+                  manual: context.eventName === "workflow_dispatch",
+                });
+              }
+              if (!result.shouldMerge) {
+                continue;
+              }
+              if (process.env.MERGE_ENABLED !== "true") {
+                core.notice(`AUTO_GATE_ENABLED is not true; would merge PR #${target.pr_number}.`);
+                continue;
+              }
+              await autoGate.merge({
+                github,
+                context,
+                core,
+                prNumber: Number(target.pr_number),
+                expectedHeadSha: process.env.HEAD_SHA,
+              });
+            }
