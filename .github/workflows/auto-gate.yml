@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       targets: ${{ steps.evaluate.outputs.targets }}
+      aggregate_heads: ${{ steps.evaluate.outputs.aggregate_heads }}
     # One resolver handles every subscribed input change. It does not branch on
     # activity type: PR/review/comment events identify a PR, while check/status
     # events identify every exact (PR, head) pair associated with their SHA.
@@ -53,7 +54,7 @@ jobs:
         env:
           PR_NUMBER: ${{ inputs.pr_number || '' }}
         with:
-          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
+          github-token: ${{ github.token }}
           script: |
             const fs = require("fs");
             const path = require("path");
@@ -63,6 +64,7 @@ jobs:
               const summary = "BLOCKED: auto-gate helper is not present on the default branch yet.";
               core.notice(summary);
               core.setOutput("targets", "[]");
+              core.setOutput("aggregate_heads", "[]");
               if (context.eventName === "workflow_dispatch") {
                 throw new Error(summary);
               }
@@ -122,6 +124,14 @@ jobs:
                   })),
                 ),
               );
+              const aggregateHeads =
+                typeof autoGate.resolveAggregateHeads === "function"
+                  ? autoGate.resolveAggregateHeads({ context, targets })
+                  : [...new Set(targets.map((target) => target.headSha))];
+              core.setOutput(
+                "aggregate_heads",
+                JSON.stringify(aggregateHeads.map((headSha) => ({ head_sha: headSha }))),
+              );
               if (context.eventName === "workflow_dispatch" && targets.length === 0) {
                 const failure = new Error("No pull-request head was resolved for manual recovery.");
                 failure.failWorkflow = true;
@@ -133,14 +143,59 @@ jobs:
               core.warning(error && error.stack ? error.stack : message);
               core.notice(summary);
               core.setOutput("targets", "[]");
+              core.setOutput("aggregate_heads", "[]");
               throw error;
             }
 
-  apply-gate:
-    name: Apply auto-merge gate
+  begin-aggregate:
+    name: Make aggregate decision non-green
     needs: auto-gate
     if: >-
       needs.auto-gate.result == 'success' &&
+      needs.auto-gate.outputs.aggregate_heads != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+    concurrency:
+      group: auto-gate-aggregate-${{ matrix.aggregate.head_sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Make fixed-name aggregate non-green
+        uses: actions/github-script@v8
+        env:
+          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+        with:
+          # The aggregate is intentionally owned by the built-in Actions app.
+          # No PAT or bypass-capable App identity is needed or accepted here.
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            if (typeof autoGate.beginAggregateDecision !== "function") {
+              core.notice("Fixed-name aggregate activation waits for this workflow to land on master.");
+              return;
+            }
+            await autoGate.beginAggregateDecision({
+              github,
+              context,
+              core,
+              headSha: process.env.HEAD_SHA,
+            });
+
+  apply-gate:
+    name: Apply auto-merge gate
+    needs: [auto-gate, begin-aggregate]
+    if: >-
+      needs.auto-gate.result == 'success' &&
+      needs.begin-aggregate.result == 'success' &&
       needs.auto-gate.outputs.targets != '[]'
     runs-on: ubuntu-latest
     strategy:
@@ -165,8 +220,8 @@ jobs:
           PR_NUMBER: ${{ matrix.target.pr_number }}
           EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
         with:
-          # Check runs require an App installation token. Keep this separate
-          # from the optional maintainer token used by the existing merge path.
+          # Check runs require an App installation token. The built-in Actions
+          # identity owns both the composite and the fixed aggregate.
           github-token: ${{ github.token }}
           script: |
             const path = require("path");
@@ -209,29 +264,97 @@ jobs:
               core.notice("Decision reporting activates after this workflow lands on master.");
             }
 
+  aggregate-gate:
+    name: Publish aggregate decision
+    needs: [auto-gate, begin-aggregate, apply-gate]
+    if: >-
+      always() &&
+      needs.auto-gate.result == 'success' &&
+      needs.begin-aggregate.result == 'success' &&
+      (needs.apply-gate.result == 'success' || needs.auto-gate.outputs.targets == '[]') &&
+      needs.auto-gate.outputs.aggregate_heads != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+    concurrency:
+      group: auto-gate-aggregate-${{ matrix.aggregate.head_sha }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Publish fixed-name aggregate
+        uses: actions/github-script@v8
+        env:
+          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const path = require("path");
+            const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
+            const autoGate = require(helperPath);
+            if (typeof autoGate.reportAggregateDecision !== "function") {
+              core.notice("Fixed-name aggregate activation waits for this workflow to land on master.");
+              return;
+            }
+            await autoGate.reportAggregateDecision({
+              github,
+              context,
+              core,
+              headSha: process.env.HEAD_SHA,
+            });
+
+  merge-gate:
+    name: Merge after aggregate gate
+    needs: [auto-gate, begin-aggregate, apply-gate, aggregate-gate]
+    if: >-
+      needs.auto-gate.result == 'success' &&
+      needs.begin-aggregate.result == 'success' &&
+      needs.apply-gate.result == 'success' &&
+      needs.aggregate-gate.result == 'success' &&
+      needs.auto-gate.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.auto-gate.outputs.targets) }}
+    concurrency:
+      group: auto-gate-${{ matrix.target.decision_key }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out gate logic
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
       - name: Report disabled merge
-        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED != 'true'
+        if: vars.AUTO_GATE_ENABLED != 'true'
         env:
           PR_NUMBER: ${{ matrix.target.pr_number }}
-          DOCS_CHANGED: ${{ steps.decision.outputs.docs_changed }}
-          SUMMARY: ${{ steps.decision.outputs.summary }}
         run: |
-          echo "::notice::AUTO_GATE_ENABLED is not true; would squash-merge PR #${PR_NUMBER}."
-          echo "::notice::Docs workflow dispatch after merge: ${DOCS_CHANGED}."
-          printf '%s\n' "$SUMMARY"
+          echo "::notice::AUTO_GATE_ENABLED is not true; would reevaluate and squash-merge PR #${PR_NUMBER}."
 
-      - name: Squash merge PR
-        if: steps.decision.outputs.should_merge == 'true' && vars.AUTO_GATE_ENABLED == 'true'
+      - name: Squash merge PR after fresh aggregate evaluation
+        if: vars.AUTO_GATE_ENABLED == 'true'
         uses: actions/github-script@v8
         env:
           PR_NUMBER: ${{ matrix.target.pr_number }}
           EXPECTED_HEAD_SHA: ${{ matrix.target.head_sha }}
         with:
-          github-token: ${{ secrets.AUTO_GATE_TOKEN || github.token }}
+          # No PAT or custom App: ordinary ruleset enforcement applies to this
+          # merge exactly as it does to a session's direct merge attempt.
+          github-token: ${{ github.token }}
           script: |
             const path = require("path");
             const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
             const autoGate = require(helperPath);
+            if (typeof autoGate.evaluateAggregateDecision !== "function") {
+              core.notice("Aggregate enforcement activates after this workflow lands on master.");
+            }
             await autoGate.merge({
               github,
               context,

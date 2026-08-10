@@ -1,11 +1,13 @@
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
-// GitHub check runs live on commits, but the gate evidence is PR-scoped. The
-// full (PR, head) pair is therefore part of every decision identifier. These
-// checks are observability records; a future required-check policy needs a
-// separate static aggregate because rulesets cannot require dynamic names.
+// GitHub check runs live on commits, but the underlying gate evidence is
+// PR-scoped. The full (PR, head) pair is therefore part of every composite
+// decision identifier. AUTO_GATE_DECISION_CHECK is the fixed-name aggregate
+// required by the master ruleset: it passes only when every open master PR at
+// the commit has its own passing composite decision.
 const AUTO_GATE_DECISION_CHECK = "Auto Gate decision";
+const AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX = "auto-gate:aggregate:head:";
 const GITHUB_ACTIONS_APP_ID = 15368;
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
@@ -225,6 +227,223 @@ async function reportDecision({ github, context, core, result, manual = false })
   return { state, priorDecision: Boolean(priorDecision) };
 }
 
+function resolveAggregateHeads({ context, targets = [] }) {
+  const payload = context.payload || {};
+  const candidates = [
+    ...targets.map((target) => target.headSha),
+    payload.pull_request?.head?.sha,
+    payload.check_suite?.head_sha,
+    payload.sha,
+    payload.before,
+    payload.after,
+  ];
+  return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))].sort();
+}
+
+async function beginAggregateDecision({ github, context, core, headSha }) {
+  const aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  const decision = {
+    // Check runs that already completed cannot be reliably reopened across all
+    // GitHub implementations. A completed failure is still non-green and can be
+    // updated in place after the refresh, so it closes the stale-PASS window
+    // without depending on that state transition.
+    status: "completed",
+    conclusion: "failure",
+    output: {
+      title: "WAITING: refreshing every PR/head decision at this commit",
+      summary: formatAggregateSummary(aggregate.pullNumbers, [], true),
+    },
+  };
+  const write = await upsertAggregateCheck({
+    github,
+    context,
+    core,
+    headSha: aggregate.headSha,
+    checkRuns: aggregate.checkRuns,
+    decision,
+  });
+  core.notice(`Marked the fixed Auto Gate aggregate non-green on ${aggregate.headSha}.`);
+  return { ...aggregate, ...write, state: "pending" };
+}
+
+async function reportAggregateDecision({ github, context, core, headSha }) {
+  const aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  const decision = {
+    status: "completed",
+    conclusion: aggregate.ok ? "success" : "failure",
+    output: {
+      title: aggregate.ok
+        ? "PASS: every open master PR at this commit passes Auto Gate"
+        : `BLOCKED: ${aggregate.blockers.length} associated PR decision(s) are not passing`,
+      summary: aggregate.summary,
+    },
+  };
+  const write = await upsertAggregateCheck({
+    github,
+    context,
+    core,
+    headSha: aggregate.headSha,
+    checkRuns: aggregate.checkRuns,
+    decision,
+  });
+  core.notice(`${aggregate.ok ? "PASS" : "BLOCKED"}: fixed Auto Gate aggregate on ${aggregate.headSha}.`);
+  return { ...aggregate, ...write, state: aggregate.ok ? "pass" : "waiting" };
+}
+
+async function evaluateAggregateDecision({ github, context, headSha }) {
+  const sha = normalizeHeadSha(headSha);
+  if (!sha) {
+    throw new Error(`Invalid head SHA for Auto Gate aggregate: ${headSha}`);
+  }
+  const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
+  const { owner, repo } = context.repo;
+  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+    owner,
+    repo,
+    ref: sha,
+    per_page: 100,
+  });
+  const blockers = [];
+  if (pulls.length === 0) {
+    // Never pre-authorize a commit before a PR exists. A vacuously successful
+    // aggregate could be inherited by a newly opened PR until its event run
+    // makes the check non-green.
+    blockers.push("No open pull request to master currently owns this commit");
+  }
+  for (const pull of pulls) {
+    const identity = decisionIdentity(pull.number, sha);
+    const decision = checkRuns
+      .filter(
+        (run) =>
+          run.name === identity.checkName &&
+          run.external_id === identity.externalId &&
+          run.app?.id === GITHUB_ACTIONS_APP_ID,
+      )
+      .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+    if (!decision) {
+      blockers.push(
+        `PR #${pull.number} at this commit has no exact PR/head Auto Gate decision; ` +
+          `run Auto Gate manually for PR #${pull.number}`,
+      );
+      continue;
+    }
+    if (decision.status !== "completed" || decision.conclusion !== "success") {
+      blockers.push(`PR #${pull.number} at this commit is waiting: ${decisionWaitingReason(decision)}`);
+    }
+  }
+  const pullNumbers = pulls.map((pull) => pull.number);
+  return {
+    ok: blockers.length === 0,
+    headSha: sha,
+    pullNumbers,
+    blockers,
+    checkRuns,
+    summary: formatAggregateSummary(pullNumbers, blockers, false),
+  };
+}
+
+async function upsertAggregateCheck({ github, context, core, headSha, checkRuns, decision }) {
+  const { owner, repo } = context.repo;
+  const identity = aggregateIdentity(headSha);
+  const prior = checkRuns
+    .filter(
+      (run) =>
+        run.name === identity.checkName &&
+        run.external_id === identity.externalId &&
+        run.app?.id === GITHUB_ACTIONS_APP_ID,
+    )
+    .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+  try {
+    if (prior) {
+      await github.rest.checks.update({
+        owner,
+        repo,
+        check_run_id: prior.id,
+        ...decision,
+      });
+    } else {
+      await github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: headSha,
+        name: identity.checkName,
+        external_id: identity.externalId,
+        ...decision,
+      });
+    }
+  } catch (error) {
+    if (!isReadOnlyForkCheckError(error, context)) {
+      throw error;
+    }
+    core.warning(
+      `Auto Gate could not publish the aggregate for fork head ${headSha} with its read-only ` +
+        "token; run workflow_dispatch from the base repository to recover it.",
+    );
+    return { writeState: "read-only", priorAggregate: Boolean(prior) };
+  }
+  return { writeState: prior ? "updated" : "created", priorAggregate: Boolean(prior) };
+}
+
+function aggregateIdentity(headSha) {
+  const sha = normalizeHeadSha(headSha);
+  if (!sha) {
+    throw new Error(`Invalid head SHA for Auto Gate aggregate: ${headSha}`);
+  }
+  return {
+    checkName: AUTO_GATE_DECISION_CHECK,
+    externalId: `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${sha}`,
+  };
+}
+
+function normalizeHeadSha(value) {
+  const sha = String(value || "").toLowerCase();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : "";
+}
+
+function decisionWaitingReason(decision) {
+  const detail = decision.output?.summary || decision.output?.title || "";
+  if (detail) {
+    return detail.replace(/^(?:BLOCKED|WAITING|NEVER_RAN):\s*/i, "");
+  }
+  if (decision.status !== "completed") {
+    return `its exact PR/head decision is ${decision.status}`;
+  }
+  return `its exact PR/head decision concluded ${decision.conclusion || "without a conclusion"}`;
+}
+
+function formatAggregateSummary(pullNumbers, blockers, pending) {
+  const association =
+    pullNumbers.length === 0
+      ? "No open master PR currently points at this commit."
+      : pullNumbers.length === 1
+        ? `This commit currently belongs to open master PR #${pullNumbers[0]}.`
+        : `This commit is shared by open master PRs ${joinPullNumbers(pullNumbers)}.`;
+  const coupling =
+    "This fixed-name check is commit-scoped and passes only when every open master PR " +
+    "sharing the commit has a passing exact (PR, head) Auto Gate decision.";
+  if (pending) {
+    return `${association} ${coupling}\n\nAuto Gate is refreshing those decisions now.`;
+  }
+  if (blockers.length === 0) {
+    return `${association} ${coupling}\n\nEvery associated decision passes.`;
+  }
+  const recovery =
+    "To decouple without merging another PR, push either branch to a distinct commit, close " +
+    "the other PR, or retarget it away from master; then run Auto Gate manually by PR number.";
+  return `${association} ${coupling}\n\nWaiting on:\n- ${blockers.join("\n- ")}\n\n${recovery}`;
+}
+
+function joinPullNumbers(numbers) {
+  const labels = numbers.map((number) => `#${number}`);
+  if (labels.length < 2) {
+    return labels[0] || "";
+  }
+  if (labels.length === 2) {
+    return `${labels[0]} and ${labels[1]}`;
+  }
+  return `${labels.slice(0, -1).join(", ")}, and ${labels.at(-1)}`;
+}
+
 function isReadOnlyForkCheckError(error, context) {
   return (
     error?.status === 403 &&
@@ -267,6 +486,16 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
         `does not match evaluated head ${gate.headSha}`,
     );
   }
+  const aggregate = await evaluateAggregateDecision({
+    github,
+    context,
+    headSha: gate.headSha,
+  });
+  if (!aggregate.ok) {
+    throw new Error(
+      `Refusing to merge PR #${prNumber}; fixed aggregate no longer passes: ${aggregate.summary}`,
+    );
+  }
 
   const { owner, repo } = context.repo;
   const response = await github.rest.pulls.merge({
@@ -306,26 +535,8 @@ async function resolveTargets({ github, context, core, prNumber }) {
   } else {
     const sha = payload.check_suite?.head_sha || payload.sha;
     if (sha) {
-      const { owner, repo } = context.repo;
-      const pulls = await github.paginate(
-        github.rest.repos.listPullRequestsAssociatedWithCommit,
-        {
-          owner,
-          repo,
-          commit_sha: sha,
-          per_page: 100,
-        },
-      );
-      numbers.push(
-        ...pulls
-          .filter(
-            (pull) =>
-              pull.state === "open" &&
-              pull.base?.ref === "master" &&
-              pull.head?.sha === sha,
-          )
-          .map((pull) => pull.number),
-      );
+      const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
+      numbers.push(...pulls.map((pull) => pull.number));
     } else {
       core.info(`Event ${context.eventName} did not identify a PR/head pair to evaluate.`);
     }
@@ -348,6 +559,27 @@ async function resolveTargets({ github, context, core, prNumber }) {
     });
   }
   return targets;
+}
+
+async function listOpenMasterPullRequestsForHead({ github, context, headSha }) {
+  const { owner, repo } = context.repo;
+  const pulls = await github.paginate(
+    github.rest.repos.listPullRequestsAssociatedWithCommit,
+    {
+      owner,
+      repo,
+      commit_sha: headSha,
+      per_page: 100,
+    },
+  );
+  return pulls
+    .filter(
+      (pull) =>
+        pull.state === "open" &&
+        pull.base?.ref === "master" &&
+        pull.head?.sha === headSha,
+    )
+    .sort((left, right) => left.number - right.number);
 }
 
 async function findPullRequestNumber({ github, context, core }) {
@@ -820,9 +1052,13 @@ function formatError(error) {
 }
 
 module.exports = {
+  beginAggregateDecision,
   evaluate,
+  evaluateAggregateDecision,
   merge,
+  reportAggregateDecision,
   reportDecision,
+  resolveAggregateHeads,
   resolveTargets,
   __test: {
     evaluateCodex,

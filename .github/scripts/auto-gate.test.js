@@ -46,7 +46,37 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /context\.eventName === "workflow_dispatch" && targets\.length === 0/);
   assert.match(workflow, /evaluationFailed = result\.reasons\.some/);
   assert.match(workflow, /core\.setOutput\("targets", "\[\]"\)/);
-  assert.match(workflow, /core\.setOutput\("targets", "\[\]"\);\s+throw error;/);
+  assert.match(
+    workflow,
+    /helper is not present[\s\S]*?core\.setOutput\("targets", "\[\]"\);\s+core\.setOutput\("aggregate_heads", "\[\]"\)/,
+  );
+  assert.match(
+    workflow,
+    /catch \(error\)[\s\S]*?core\.setOutput\("targets", "\[\]"\);\s+core\.setOutput\("aggregate_heads", "\[\]"\);\s+throw error;/,
+  );
+  assert.match(workflow, /aggregate_heads: \$\{\{ steps\.evaluate\.outputs\.aggregate_heads \}\}/);
+  assert.match(
+    workflow,
+    /- name: Make fixed-name aggregate non-green[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+  );
+  assert.match(
+    workflow,
+    /- name: Publish fixed-name aggregate[\s\S]*?github-token: \$\{\{ github\.token \}\}/,
+  );
+  assert.match(workflow, /apply-gate:\s+[\s\S]*?needs: \[auto-gate, begin-aggregate\]/);
+  assert.match(
+    workflow,
+    /aggregate-gate:\s+[\s\S]*?needs: \[auto-gate, begin-aggregate, apply-gate\]/,
+  );
+  assert.match(
+    workflow,
+    /merge-gate:\s+[\s\S]*?needs: \[auto-gate, begin-aggregate, apply-gate, aggregate-gate\]/,
+  );
+  assert.match(
+    workflow,
+    /Squash merge PR after fresh aggregate evaluation[\s\S]*?await autoGate\.merge\(/,
+  );
+  assert.doesNotMatch(workflow, /AUTO_GATE_TOKEN/);
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
 });
 
@@ -204,6 +234,185 @@ test("a PR cannot read another PR's decision when both share one head", async ()
     decisionName(2048, HEAD_SHA),
   );
   assert.equal(github.createdChecks[0].external_id, decisionExternalId(2048, HEAD_SHA));
+});
+
+test("the fixed aggregate names a blocked PR that shares the head", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    checkRuns: [
+      ...happyCheckRuns(),
+      {
+        ...checkRun({
+          id: 321,
+          name: decisionName(1465, HEAD_SHA),
+          externalId: decisionExternalId(1465, HEAD_SHA),
+          conclusion: "success",
+        }),
+        output: { summary: "PASS: PR #1465 requirements are satisfied" },
+      },
+      {
+        ...checkRun({
+          id: 654,
+          name: decisionName(2048, HEAD_SHA),
+          externalId: decisionExternalId(2048, HEAD_SHA),
+          conclusion: "failure",
+        }),
+        output: { summary: "BLOCKED: 1 unresolved live Codex inline finding" },
+      },
+    ],
+  });
+
+  assert.equal(
+    typeof autoGate.reportAggregateDecision,
+    "function",
+    "master has no fixed-name aggregate enforcement for shared heads",
+  );
+  const aggregate = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(aggregate.ok, false);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].name, "Auto Gate decision");
+  assert.equal(github.createdChecks[0].external_id, aggregateExternalId(HEAD_SHA));
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.summary, /shared by open master PRs #1465 and #2048/);
+  assert.match(
+    github.createdChecks[0].output.summary,
+    /PR #2048.*1 unresolved live Codex inline finding/,
+  );
+});
+
+test("the fixed aggregate passes only after every shared-head decision passes", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+      checkRun({
+        id: 654,
+        name: decisionName(2048, HEAD_SHA),
+        externalId: decisionExternalId(2048, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const aggregate = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(aggregate.ok, true);
+  assert.equal(github.createdChecks[0].conclusion, "success");
+  assert.match(github.createdChecks[0].output.summary, /Every associated decision passes/);
+});
+
+test("the fixed aggregate cannot pre-authorize a commit before its PR exists", async () => {
+  const github = fakeGateGithub({ associatedPullRequests: [] });
+
+  const aggregate = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(aggregate.ok, false);
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.match(github.createdChecks[0].output.summary, /No open master PR currently points/);
+  assert.match(github.createdChecks[0].output.summary, /No open pull request to master.*owns this commit/);
+});
+
+test("a missing shared-head decision names the PR and manual recovery", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  const aggregate = await autoGate.reportAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(aggregate.ok, false);
+  assert.match(github.createdChecks[0].output.summary, /PR #2048.*has no exact PR\/head/);
+  assert.match(github.createdChecks[0].output.summary, /run Auto Gate manually for PR #2048/);
+});
+
+test("a stale aggregate PASS is made non-green before decisions refresh", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+      checkRun({
+        id: 777,
+        name: "Auto Gate decision",
+        externalId: aggregateExternalId(HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
+
+  await autoGate.beginAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(github.createdChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].check_run_id, 777);
+  assert.equal(github.updatedChecks[0].status, "completed");
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(github.updatedChecks[0].output.summary, /refreshing those decisions now/);
+});
+
+test("aggregate resolution reevaluates the previous head after synchronization", () => {
+  const heads = autoGate.resolveAggregateHeads({
+    context: fakeContext({
+      before: HEAD_SHA,
+      after: OTHER_SHA,
+      pull_request: { head: { sha: OTHER_SHA } },
+    }),
+    targets: [{ prNumber: 1465, headSha: OTHER_SHA }],
+  });
+
+  assert.deepEqual(heads, [HEAD_SHA, OTHER_SHA]);
 });
 
 test("the queued legacy evaluator keeps resolved PR numbers numeric", async () => {
@@ -572,7 +781,16 @@ test("issue-comment events resolve their pull request number", async () => {
 });
 
 test("the happy path squash-merges the exact evaluated head", async () => {
-  const github = fakeGateGithub();
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+    ],
+  });
 
   await autoGate.merge({
     github,
@@ -583,6 +801,42 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
   assert.equal(github.mergedWith.merge_method, "squash");
+});
+
+test("merge freshly refuses a shared head whose other PR is waiting", async () => {
+  const github = fakeGateGithub({
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "success",
+      }),
+      {
+        ...checkRun({
+          name: decisionName(2048, HEAD_SHA),
+          externalId: decisionExternalId(2048, HEAD_SHA),
+          conclusion: "failure",
+        }),
+        output: { summary: "BLOCKED: 2 unresolved live Codex inline findings" },
+      },
+    ],
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    /fixed aggregate no longer passes[\s\S]*PR #2048[\s\S]*2 unresolved live Codex inline findings/,
+  );
+  assert.equal(github.mergedWith, null);
 });
 
 test("merge reevaluates fresh instead of trusting a stale PASS decision", async () => {
@@ -919,6 +1173,10 @@ function decisionName(prNumber, headSha) {
 
 function decisionExternalId(prNumber, headSha) {
   return `auto-gate:pr:${prNumber}:head:${headSha}`;
+}
+
+function aggregateExternalId(headSha) {
+  return `auto-gate:aggregate:head:${headSha}`;
 }
 
 function decisionKey(prNumber, headSha) {
