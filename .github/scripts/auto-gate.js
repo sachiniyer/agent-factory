@@ -136,8 +136,10 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
+    pullRequestId: pr.id,
     shouldMerge: !manualMergeRequired && reasons.length === 0,
     manualMergeRequired,
+    nativeAutoMergeEnabled: pr.nativeAutoMergeEnabled,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
@@ -400,6 +402,9 @@ async function processAggregateHead({
           `now evaluates at ${result.headSha || "no open master head"}.`,
       );
       return { state: "association-changed", pending };
+    }
+    if (result.manualMergeRequired && result.nativeAutoMergeEnabled) {
+      await disableNativeAutoMerge({ github, core, result });
     }
     manualMergeRequired ||= Boolean(result.manualMergeRequired);
     const write = await reportDecision({ github, context, core, result, manual });
@@ -911,6 +916,7 @@ async function getPullRequest({ github, context, number }) {
     query($owner: String!, $repo: String!, $number: Int!) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
+          id
           number
           title
           url
@@ -927,6 +933,9 @@ async function getPullRequest({ github, context, number }) {
           mergeStateStatus
           author {
             login
+          }
+          autoMergeRequest {
+            enabledAt
           }
           labels(first: 100) {
             nodes {
@@ -952,6 +961,7 @@ async function getPullRequest({ github, context, number }) {
   }
 
   return {
+    id: pr.id,
     number: pr.number,
     title: pr.title,
     url: pr.url,
@@ -964,9 +974,30 @@ async function getPullRequest({ github, context, number }) {
     mergeable: pr.mergeable,
     mergeStateStatus: pr.mergeStateStatus,
     author: pr.author?.login || "",
+    nativeAutoMergeEnabled: Boolean(pr.autoMergeRequest),
     labels: pr.labels.nodes.map((label) => label.name),
     lastCommitDate: pr.commits.nodes[0]?.commit?.committedDate,
   };
+}
+
+async function disableNativeAutoMerge({ github, core, result }) {
+  if (!result.pullRequestId) {
+    throw new Error(`Cannot disable native auto-merge for PR #${result.prNumber}: missing node ID`);
+  }
+  const mutation = `
+    mutation DisablePullRequestAutoMerge($pullRequestId: ID!) {
+      disablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId}) {
+        pullRequest {
+          number
+        }
+      }
+    }
+  `;
+  await github.graphql(mutation, { pullRequestId: result.pullRequestId });
+  core.notice(
+    `Disabled GitHub-native auto-merge for manual-only PR #${result.prNumber} before ` +
+      "publishing its passing decision.",
+  );
 }
 
 async function listPullRequestFiles({ github, context, number }) {

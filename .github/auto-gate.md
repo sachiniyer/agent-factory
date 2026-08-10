@@ -29,12 +29,15 @@ number:
 The manual workflow uses the base repository's built-in Actions token. It does
 not require a PAT, custom GitHub App, or ruleset bypass.
 
-Auto Gate does not pass fork heads. GitHub deliberately makes review and review
-comment workflows read-only for fork pull requests, so those events cannot
-reliably invalidate a previously green aggregate. Move an authorized change to
-a branch in this repository before asking Auto Gate to merge it. The
-`pull_request_target` lifecycle trigger only executes the default-branch helper;
-it never checks out or executes pull-request code.
+Auto Gate never auto-merges fork heads. For a non-allowlisted author, however,
+the required decision passes as manual-only and lists any unmet automatic-merge
+requirements in its summary, restoring the normal maintainer-review path for
+external contributions. Auto Gate disables any pending GitHub-native auto-merge
+request before publishing that pass. Review and review-comment workflows can be
+read-only for fork pull requests; if one cannot update the decision, run Auto
+Gate manually by PR number from the base repository. The `pull_request_target`
+lifecycle trigger only executes the default-branch helper; it never checks out
+or executes pull-request code.
 
 ## Ruleset
 
