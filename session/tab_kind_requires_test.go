@@ -71,23 +71,19 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 // daemon-host routing gap for an external URL states a requirement that tab does
 // not have — the same defect one level down. Both targets are refused, for
 // different and individually true reasons.
-func TestWebRefusalNamesOnlyTheBlockersThatApply(t *testing.T) {
+func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
 	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
 	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
-	require.Error(t, loopback)
-	require.Error(t, external, "an off-box web tab is still not restored across a restart, whatever it points at")
+
+	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
+	require.NoError(t, external,
+		"an external URL is iframed directly and now survives a restart, so neither blocker applies to it")
 
 	assert.Contains(t, strings.ToLower(loopback.Error()), "proxied",
-		"a loopback target IS reverse-proxied from the daemon host; the refusal must say so")
-	assert.NotContains(t, strings.ToLower(external.Error()), "proxied",
-		"an external URL is iframed directly and never proxied; claiming otherwise is the #3053 defect recreated")
-
-	// The blocker they DO share is the one that is unconditionally true.
-	for name, err := range map[string]error{"loopback": loopback, "external": external} {
-		assert.Contains(t, strings.ToLower(err.Error()), "restored",
-			"%s refusal must name the restore gap, which applies to every off-box web tab", name)
-		assert.Contains(t, err.Error(), "3062", "%s refusal must point at the work that lifts it", name)
-	}
+		"the surviving refusal must name the routing gap, which is what is actually true of it")
+	assert.Contains(t, loopback.Error(), "3062", "and point at the work that lifts it")
+	assert.NotContains(t, strings.ToLower(loopback.Error()), "restored",
+		"the restore gap is closed; citing it would state a requirement this tab no longer has")
 
 	// A local session takes neither branch.
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000"))

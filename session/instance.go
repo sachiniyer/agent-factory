@@ -226,6 +226,9 @@ type Instance struct {
 	// clears it under i.mu so a second launch of the same object cannot rebuild
 	// the same tabs twice.
 	carriedTabs []TabData
+	// pendingMetadataTabs stages tabs restored from a record whose workspace did not
+	// survive; see appendPendingMetadataTabsLocked for why they are staged (#3062).
+	pendingMetadataTabs []TabData
 
 	// carriedRecreateNotice is an UNACKNOWLEDGED re-create notice inherited from
 	// the record this create replaces (#2629). A root can lose its history and

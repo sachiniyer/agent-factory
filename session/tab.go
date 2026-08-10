@@ -548,3 +548,29 @@ func tabKindAllowances(c Capabilities) []TabKindAllowance {
 	}
 	return out
 }
+
+// appendPendingMetadataTabsLocked drains tabs staged by a sandbox restore onto the
+// roster, AFTER the backend has seeded the agent tab.
+//
+// The staging exists for that ordering. remoteAgentBackend.Launch seeds an agent
+// tab only when the roster is EMPTY, so writing restored tabs into Tabs at load
+// time stops it seeding and leaves a web tab at index 0 — the slot that is
+// unclosable and that the PTY stream targets, so every consumer would read it as
+// the agent. Restoring into a staging field and draining here keeps the agent
+// first without either side needing to know about the other's ordering (#3062).
+//
+// One-shot: a retried launch of the same object must not append twice.
+// Caller holds i.mu.
+func (i *Instance) appendPendingMetadataTabsLocked() {
+	pending := i.pendingMetadataTabs
+	i.pendingMetadataTabs = nil
+	for _, td := range pending {
+		id := td.ID
+		if id == "" {
+			// Rollforward, as restoreLocalTabs does: a row persisted before #1738 has
+			// no id and must be addressable by a stable one from this load forward.
+			id = newTabID()
+		}
+		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL})
+	}
+}

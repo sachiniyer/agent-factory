@@ -101,8 +101,10 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
 			require.NoError(t, webErr,
 				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
-			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, ""),
-				"the capability layer must still refuse a web tab off-box until #3062 lands")
+			require.NoError(t, b.Capabilities().RefuseTabKind(TabKindWeb, "https://example.com/app"),
+				"an external web tab is served off-box: nothing proxies it and it now survives a restart (#3062)")
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, "http://localhost:3000"),
+				"a loopback target still needs a relay through the agent-server (#3062)")
 			require.NotNil(t, webTab)
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")

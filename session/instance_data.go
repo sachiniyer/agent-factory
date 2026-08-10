@@ -278,6 +278,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
+		// A metadata-only tab needs nothing this branch cannot rebuild: a web tab is
+		// a name and a URL, binding no tmux and reading no worktree. Dropping it made
+		// off-box admission non-durable — the tab vanished at the next daemon restart
+		// with nothing erroring, which is the harder failure to notice (#3062).
+		//
+		// STAGED, not appended: see pendingMetadataTabs. Writing into Tabs here would
+		// stop Launch seeding the agent tab and leave a web tab in index 0.
+		instance.pendingMetadataTabs = metadataTabsFrom(data)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
@@ -506,4 +514,24 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 	if data.AgentConversation != nil {
 		instance.SetAgentConversation(*data.AgentConversation)
 	}
+}
+
+// metadataTabsFrom selects the persisted rows whose kind needs nothing from the
+// workspace, for a backend whose workspace did not survive the restart.
+//
+// The agent row is excluded: the backend seeds its own on Launch, bound to the
+// live runtime, and a copied record would be a second one with no runtime behind
+// it. Every other kind is dropped as before — they describe a worktree and a PTY
+// that no longer exist, so a row for them would be an entry every later operation
+// fails on.
+func metadataTabsFrom(data InstanceData) []TabData {
+	var out []TabData
+	for _, td := range data.Tabs {
+		kind := tabKindForData(td.Kind)
+		if kind == TabKindAgent || TabKindRequires(kind) != TabNeedsMetadataOnly {
+			continue
+		}
+		out = append(out, td)
+	}
+	return out
 }

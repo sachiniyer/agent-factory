@@ -86,16 +86,24 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		if c.Workspace == WorkspaceLocalWorktree {
 			return nil
 		}
-		// True of every off-box web tab: the sandbox branch of FromInstanceData
-		// rebuilds an inert backend with an empty roster, so the persisted row
-		// does not come back.
-		const notRestored = "a persisted web tab is not restored on the sandbox recovery path"
+		// Per-TARGET, because the two blockers were never one blocker (#3062).
+		//
+		// A LOOPBACK target is still refused. webtab_proxy.go returns a webTabTarget
+		// with no transport for TabKindWeb, so the daemon proxies it over its OWN TCP
+		// stack: `--port 3000` resolves on the daemon host rather than in the
+		// workspace, and can surface an unrelated daemon-local service inside the
+		// session's tab. Lifting this needs a relay through the agent-server — its
+		// own endpoint, not the per-tab PTY frame stream, whose lifetime is a
+		// terminal subscription and which a large web response would head-of-line
+		// block.
 		if IsLoopbackWebTarget(target) {
-			// Additionally true only here: loopback targets are the ones the
-			// daemon reverse-proxies, and it proxies them from its OWN host.
-			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, and %s — see #3062", target, notRestored)
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
 		}
-		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
+		// An EXTERNAL absolute URL is admitted. It is iframed directly and never
+		// touches the proxy, so the routing gap above is not a requirement it has;
+		// and FromInstanceData now stages metadata-only tabs across a sandbox
+		// restart, so it no longer disappears at the next daemon restart.
+		return nil
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {
 			// Names the missing EDITOR, not the missing worktree path. The path is

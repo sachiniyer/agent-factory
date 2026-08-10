@@ -447,3 +447,56 @@ func TestTabRosterMutable_FalseSurvivesSerialization(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(absent), "tab_roster_mutable")
 }
+
+// TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab is #3062's restore half,
+// and it pins BOTH halves of what went wrong the first time this was attempted.
+//
+//   - The web tab must come back at all: dropping it made off-box admission
+//     non-durable, since the tab vanished at the next daemon restart with nothing
+//     erroring.
+//   - It must come back BEHIND the agent tab. remoteAgentBackend.Launch seeds an
+//     agent tab only when the roster is empty, so restoring into Tabs at load time
+//     stopped it seeding and left a web tab at index 0 — the slot that is
+//     unclosable and that the PTY stream targets, so every consumer would read it
+//     as the agent.
+//
+// The drain is exercised directly rather than through Launch: a restored sandbox
+// row loads an INERT backend whose Launch refuses ("not provisioned"), because the
+// live runtime is re-provisioned on restore rather than reconstructed here. Launch
+// is the caller; this pins what it calls.
+func TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+			// A PTY tab's workspace did not survive; it stays dropped, or the roster
+			// gains an entry every later operation fails on.
+			{ID: "t2", Name: "shell", Kind: TabKindShell, TmuxName: "af_x__shell"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	// Staged, NOT written into Tabs: that is what preserves the agent's slot.
+	require.Empty(t, instance.Tabs, "restored metadata tabs must not occupy the roster before the agent tab exists")
+	require.Len(t, instance.pendingMetadataTabs, 1, "only the metadata-only tab is staged")
+	require.Equal(t, "docs", instance.pendingMetadataTabs[0].Name)
+
+	// What Launch does: seed the agent tab, then drain.
+	instance.Tabs = []*Tab{newRemoteAgentTab()}
+	instance.appendPendingMetadataTabsLocked()
+
+	require.Len(t, instance.Tabs, 2)
+	require.Equal(t, TabKindAgent, instance.Tabs[0].Kind,
+		"index 0 must be the AGENT tab — it is unclosable and the PTY stream targets it")
+	web := instance.Tabs[1]
+	require.Equal(t, TabKindWeb, web.Kind, "the web tab must survive the restart — it needs no worktree")
+	require.Equal(t, "https://example.com/app", web.URL, "and its target with it, or the tab is empty")
+	require.NotEmpty(t, web.ID, "restored tabs stay addressable by a stable id")
+
+	// One-shot: a retried launch must not append the same tab twice.
+	instance.appendPendingMetadataTabsLocked()
+	require.Len(t, instance.Tabs, 2, "a retried launch must not duplicate the restored tab")
+}

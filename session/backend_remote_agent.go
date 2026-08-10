@@ -65,6 +65,11 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	if len(i.Tabs) == 0 {
 		i.Tabs = []*Tab{newRemoteAgentTab()}
 	}
+	// AFTER the agent tab, never before: index 0 is the agent everywhere — it is
+	// unclosable and it is what the PTY stream targets — so a restored web tab that
+	// landed there would be read as the agent by every consumer (#3062). Draining
+	// here rather than at load is what keeps that ordering true.
+	i.appendPendingMetadataTabsLocked()
 	i.mu.Unlock()
 	return nil
 }
