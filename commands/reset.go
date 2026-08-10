@@ -437,8 +437,9 @@ func pauseAutostartForReset(out io.Writer, configDir string) (bool, func(*error)
 		fmt.Fprintf(out, "\nACTION REQUIRED: the daemon autostart unit was paused for the wipe and could NOT be "+
 			"resumed after %d attempts (%v).\nYour daemon is STOPPED. Run `systemctl --user start %s` "+
 			"(or `af daemon install`) to bring it back.\n", autostartResumeAttempts, lastErr, daemonUnitName)
-		if errp != nil && *errp == nil {
-			*errp = fmt.Errorf("the daemon autostart unit was paused but could not be resumed: %w", lastErr)
+		if errp != nil {
+			resumeErr := fmt.Errorf("the daemon autostart unit was paused but could not be resumed: %w", lastErr)
+			*errp = errors.Join(*errp, resumeErr)
 		}
 	}
 }
