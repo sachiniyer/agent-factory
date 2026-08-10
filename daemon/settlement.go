@@ -146,18 +146,3 @@ func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
 	}
 	return m.persistSettlement(entry.repoID, entry.key, entry.instance)
 }
-
-// clearOwedSettlement retires a row's owed retry because a LATER write already
-// made its state durable.
-//
-// A multi-step operation can persist the whole row again after a settlement
-// failed — ToInstanceData carries everything, so the later write subsumes the
-// earlier one. Leaving the entry enrolled would retry a write nothing needs, and
-// leaving its error to be reported would tell a caller that a fully durable
-// operation failed. Both are wrong in the same direction: describing a gap that
-// has since closed.
-func (m *Manager) clearOwedSettlement(repoID string, instance *session.Instance) {
-	m.mu.Lock()
-	delete(m.settleOwed, stableSessionKey(repoID, instance))
-	m.mu.Unlock()
-}

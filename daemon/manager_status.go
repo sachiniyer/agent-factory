@@ -323,14 +323,17 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// post-fence epoch. Its observation would then look current and be APPLIED — here
 	// that means settling LiveReady from the empty snapshot of a runtime being torn
 	// down, which ends the task run early and leaves a failed respawn unretryable.
-	op, epoch := instance.InFlightOpAndEpoch()
+	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
 		return
 	}
-	obs, _, err := instance.SnapshotAgent()
+	obs, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
+	if observedOp != session.OpNone {
+		return
+	}
 	if err != nil {
 		return
 	}
@@ -513,19 +516,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (#1592 Phase 2 PR4) — never the tmux-shaped Backend probes directly, so this
 	// poll makes no assumption that the session is local tmux. For the local
 	// runtime the agent-server drives tmux in-process.
-	// Captured BEFORE the observation below, so the idle resolve can tell whether
-	// the conclusion it draws from that capture is still about the state it
-	// observed — or whether a resume/kill/archive has moved the session on since
-	// (#2135). See resolveIdleLiveness and session/state_epoch.go.
-	//
-	// Read together with the op axis, and re-check it here (#2997). The skip above
+	// Read the op axis again here (#2997). The skip above
 	// ran earlier in this tick: a fence raised in between has already been passed,
-	// and the epoch captured after it would make this tick's observation look
-	// current and be APPLIED to a session an operation owns. Reading both at once
-	// makes the epoch necessarily older than any later fence, so the guard drops the
-	// observation instead. Clearing the episode matches every other skip above — a
-	// tick we did not observe cannot be part of a consecutive run (#1794).
-	op, epoch := instance.InFlightOpAndEpoch()
+	// so this early check only avoids unnecessary I/O. SnapshotAgent samples the
+	// authoritative op and epoch after it owns the observation fence; a delivery
+	// that won that fence cannot have its post-delivery capture applied with an
+	// older epoch. Clearing the episode matches every other skip above — a tick we
+	// did not observe cannot be part of a consecutive run (#1794).
+	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
 		return
@@ -541,10 +539,14 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
-	// SnapshotAgent binds the server to its runtime-scoped observation lock after
-	// the epoch capture. A swap can therefore retire blocked predecessor I/O while
-	// this epoch still rejects its eventual result.
-	obs, as, err := instance.SnapshotAgent()
+	// SnapshotAgent binds the server and epoch to its runtime-scoped observation
+	// lock. A swap can therefore retire blocked predecessor I/O while the returned
+	// epoch still rejects its eventual result.
+	obs, as, observedOp, epoch, err := instance.SnapshotAgent()
+	if observedOp != session.OpNone {
+		m.clearRemoteLoss(key)
+		return
+	}
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to

@@ -31,14 +31,32 @@ func (i *Instance) agentObservationTarget() agentObservationTarget {
 }
 
 // SnapshotAgent serializes pane observation with prompt delivery for one
-// concrete runtime. The returned server is the one that supplied the snapshot;
-// callers use it for any follow-up liveness probe governed by the same epoch.
-func (i *Instance) SnapshotAgent() (Observation, AgentServer, error) {
-	target := i.agentObservationTarget()
-	target.runtime.mu.Lock()
-	defer target.runtime.mu.Unlock()
-	obs, err := target.server.Snapshot()
-	return obs, target.server, err
+// concrete runtime. It samples the operation axis and state epoch only AFTER it
+// owns that runtime's observation lock, so a delivery that won the lock cannot
+// advance the epoch and then have its post-delivery snapshot rejected with the
+// older one. A target retired while this call waited is retried against its
+// successor; a replacement during Snapshot still advances the current instance
+// away from the returned epoch and makes the caller's apply fail closed.
+func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64, error) {
+	for {
+		target := i.agentObservationTarget()
+		target.runtime.mu.Lock()
+		i.mu.RLock()
+		current := i.agentObservation == target.runtime
+		op, epoch := i.inFlightOp, i.stateEpoch
+		i.mu.RUnlock()
+		if !current {
+			target.runtime.mu.Unlock()
+			continue
+		}
+		if op != OpNone {
+			target.runtime.mu.Unlock()
+			return Observation{}, target.server, op, epoch, nil
+		}
+		obs, err := target.server.Snapshot()
+		target.runtime.mu.Unlock()
+		return obs, target.server, op, epoch, err
+	}
 }
 
 // SendPromptWithEvidence starts the attempt timestamp only after any pane

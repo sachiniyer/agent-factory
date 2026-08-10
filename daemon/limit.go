@@ -666,11 +666,14 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Lock()
 	data := instance.ToInstanceData()
 	persistErr := persistInstanceData(repoID, data)
-	if persistErr == nil && settleErr != nil {
-		// This later whole-row write subsumes the earlier failed settlement. Retire
-		// it before releasing the same repo ordering lock, so no newer failed write
-		// can enroll and then be erased by this older success's bookkeeping.
-		m.clearOwedSettlement(repoID, instance)
+	// This final whole-row checkpoint is itself a settlement: on the live-stall
+	// arm it is the only write of the successful prompt evidence and cleared
+	// limit. Record either outcome before releasing the same repo ordering lock,
+	// so a failure is retried and an older success cannot erase a newer failure.
+	m.recordSettlementWrite(repoID, key, instance, persistErr)
+	if persistErr == nil {
+		// The later whole-row write also subsumes any earlier failed respawn
+		// settlement carried in settleErr.
 		settleErr = nil
 	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)

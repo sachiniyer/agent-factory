@@ -11,6 +11,71 @@ type observationFenceBackend struct {
 	releaseSnapshot chan struct{}
 }
 
+type deliveryWinsObservationBackend struct {
+	*FakeBackend
+	sendStarted chan struct{}
+	releaseSend chan struct{}
+}
+
+func (b *deliveryWinsObservationBackend) HasUpdated(*Instance) (bool, bool, string) {
+	return true, false, "post-delivery response"
+}
+
+func (b *deliveryWinsObservationBackend) SendPromptCommandWithStatus(*Instance, string) (PromptDeliveryStatus, error) {
+	close(b.sendStarted)
+	<-b.releaseSend
+	return PromptDelivered, nil
+}
+
+func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
+	backend := &deliveryWinsObservationBackend{
+		FakeBackend: NewFakeBackend(),
+		sendStarted: make(chan struct{}),
+		releaseSend: make(chan struct{}),
+	}
+	inst, err := NewInstance(InstanceOptions{Title: "delivery-wins", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(backend)
+	oldEpoch := inst.StateEpoch()
+
+	deliveryDone := make(chan error, 1)
+	go func() {
+		_, err := inst.SendPromptWithEvidence("ship it", time.Now)
+		deliveryDone <- err
+	}()
+	<-backend.sendStarted
+
+	type snapshotResult struct {
+		op    InFlightOp
+		epoch uint64
+		err   error
+	}
+	snapshotDone := make(chan snapshotResult, 1)
+	go func() {
+		_, _, op, epoch, err := inst.SnapshotAgent()
+		snapshotDone <- snapshotResult{op: op, epoch: epoch, err: err}
+	}()
+	close(backend.releaseSend)
+	if err := <-deliveryDone; err != nil {
+		t.Fatal(err)
+	}
+	got := <-snapshotDone
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.op != OpNone {
+		t.Fatalf("snapshot op = %v, want none", got.op)
+	}
+	if got.epoch == oldEpoch || got.epoch != inst.StateEpoch() {
+		t.Fatalf("snapshot epoch = %d, want post-delivery epoch %d (old %d)", got.epoch, inst.StateEpoch(), oldEpoch)
+	}
+	if !inst.RecordPaneChurnAtEpoch(time.Now(), got.epoch) {
+		t.Fatal("post-delivery snapshot was rejected after consuming its pane hash")
+	}
+}
+
 func (b *observationFenceBackend) HasUpdated(*Instance) (bool, bool, string) {
 	close(b.snapshotStarted)
 	<-b.releaseSnapshot
@@ -36,7 +101,7 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, _, err := inst.SnapshotAgent()
+		_, _, _, _, err := inst.SnapshotAgent()
 		snapshotDone <- err
 	}()
 	<-backend.snapshotStarted
@@ -90,7 +155,7 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, _, err := inst.SnapshotAgent()
+		_, _, _, _, err := inst.SnapshotAgent()
 		snapshotDone <- err
 	}()
 	<-backend.snapshotStarted

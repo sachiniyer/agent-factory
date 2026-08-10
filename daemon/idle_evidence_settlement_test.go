@@ -58,6 +58,34 @@ func TestPostPromptChurnPersistFailureIsRetried(t *testing.T) {
 		"retried churn %v must be after prompt %v", rec.LastPaneChurnAt, attemptedAt)
 }
 
+func TestSuccessfulLimitResumePersistFailureIsRetried(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	inst := registerStarted(t, manager, repoID, repoPath, "resume-settlement", backend, true, session.Running)
+	inst.SetLimitReached(time.Time{})
+	// Seed the blocked pre-resume row before failing the resume's final write. A
+	// restart from this record would otherwise lose both the successful prompt
+	// attempt and the fact that the limit was cleared.
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	failedWrites, seen, heal := fullDiskFor(t, inst.Title, errors.New("disk full"))
+
+	require.NoError(t, manager.resumeFromLimit(ResumeFromLimitRequest{
+		Title: inst.Title, RepoID: repoID,
+	}))
+	require.NotZero(t, failedWrites(), "test failed no write; saw %s", seen())
+	rec := recordFor(t, repoID, inst.Title)
+	require.True(t, rec.LastPromptAttemptAt.IsZero(),
+		"failed final checkpoint unexpectedly reached disk")
+	require.Equal(t, session.LiveLimitReached, rec.Liveness)
+
+	heal()
+	manager.FlushOwedSettlements()
+	rec = recordFor(t, repoID, inst.Title)
+	require.False(t, rec.LastPromptAttemptAt.IsZero())
+	require.Equal(t, session.PromptCouldNotConfirm, rec.LastPromptDeliveryStatus)
+	require.Equal(t, session.LiveRunning, rec.Liveness)
+}
+
 func TestPollSettlementBookkeepingIsOrderedWithItsWrite(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "ordered-settlement", session.NewFakeBackend(), true, session.Ready)
