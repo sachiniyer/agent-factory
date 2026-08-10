@@ -1977,7 +1977,11 @@ export class AppShell {
     this.main.className = "af-main af-main-term";
     // The persistent terminal host is (re)mounted here; renderMain runs only on a
     // selection change, so this reparent is rare and never happens mid-type.
-    this.main.replaceChildren(head, archiveWarning, this.termHost);
+    if (warningText === "") {
+      this.main.replaceChildren(head, this.termHost);
+    } else {
+      this.main.replaceChildren(head, archiveWarning, this.termHost);
+    }
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -2495,6 +2499,11 @@ export class AppShell {
         this.archiveWarning.textContent = warningText;
       }
       this.archiveWarning.hidden = warningText === "";
+      if (warningText === "") {
+        this.archiveWarning.remove();
+      } else if (!this.archiveWarning.isConnected) {
+        this.main.insertBefore(this.archiveWarning, this.termHost);
+      }
     }
     // The terminal's connection state is published without being drawn, for the same
     // reason as the event stream above (#2458): the pane header no longer shows

@@ -13822,7 +13822,11 @@ var AppShell = class {
     archiveWarning.hidden = warningText === "";
     this.archiveWarning = archiveWarning;
     this.main.className = "af-main af-main-term";
-    this.main.replaceChildren(head, archiveWarning, this.termHost);
+    if (warningText === "") {
+      this.main.replaceChildren(head, this.termHost);
+    } else {
+      this.main.replaceChildren(head, archiveWarning, this.termHost);
+    }
     this.renderTabBar(state);
     this.patchMainHead(state);
   }
@@ -14204,6 +14208,11 @@ var AppShell = class {
         this.archiveWarning.textContent = warningText;
       }
       this.archiveWarning.hidden = warningText === "";
+      if (warningText === "") {
+        this.archiveWarning.remove();
+      } else if (!this.archiveWarning.isConnected) {
+        this.main.insertBefore(this.archiveWarning, this.termHost);
+      }
     }
     this.main.dataset.termStatus = state.termStatus;
     this.patchHeadActions(state, selected);
