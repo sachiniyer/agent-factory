@@ -228,6 +228,39 @@ func TestListSessions_DiskFallbackProjectsIdleReason(t *testing.T) {
 	}
 }
 
+func TestDirectDiskFallbacksProjectIdleReason(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	stored := session.InstanceData{
+		Title:                    "worker",
+		TmuxName:                 "af_worker",
+		Status:                   session.Ready,
+		Liveness:                 session.LiveReady,
+		LastPromptAttemptAt:      attemptedAt,
+		LastPromptDeliveryStatus: session.PromptDelivered,
+	}.ForStorage()
+	raw, err := json.Marshal([]session.InstanceData{stored})
+	if err != nil {
+		t.Fatalf("marshal stored row: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-a", raw); err != nil {
+		t.Fatalf("save row: %v", err)
+	}
+
+	byTitle, _, err := findInstanceByTitle("worker")
+	if err != nil || byTitle.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("title fallback = (%+v, %v), want projected reason", byTitle, err)
+	}
+	byScopedTitle, _, err := findInstanceByTitleInScope("repo-a", "worker")
+	if err != nil || byScopedTitle.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("scoped title fallback = (%+v, %v), want projected reason", byScopedTitle, err)
+	}
+	byTmux, err := diskWhoami("af_worker")
+	if err != nil || byTmux.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("whoami fallback = (%+v, %v), want projected reason", byTmux, err)
+	}
+}
+
 // TestListSessions_DiskFallbackCorruptLoud verifies the loud corrupt-file
 // behavior (#730) is preserved on the disk fallback path.
 func TestListSessions_DiskFallbackCorruptLoud(t *testing.T) {

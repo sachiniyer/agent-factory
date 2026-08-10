@@ -108,11 +108,12 @@ func TestIdleReasonForUsesOnlyMechanicalFacts(t *testing.T) {
 			},
 		},
 		{
-			name: "unknown delivery value is not interpreted",
+			name: "unknown delivery value is not interpreted even after churn",
 			data: InstanceData{
 				Liveness:                 LiveReady,
 				LastPromptAttemptAt:      attemptedAt,
 				LastPromptDeliveryStatus: PromptDeliveryStatus("future-value"),
+				LastPaneChurnAt:          paneChangedAt,
 			},
 		},
 	}
@@ -124,6 +125,64 @@ func TestIdleReasonForUsesOnlyMechanicalFacts(t *testing.T) {
 				t.Fatalf("IdleReasonFor() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPromptAttemptFencesOverlappingPaneObservation(t *testing.T) {
+	t.Parallel()
+
+	inst := &Instance{liveness: LiveReady}
+	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	if !inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), 0) {
+		t.Fatal("setup pane churn was not recorded")
+	}
+	inst.RecordPromptAttempt(PromptDelivered, attemptedAt)
+
+	reason, churnAt := inst.IdleReasonSnapshot()
+	if reason != IdleReasonNoPaneChangeSinceDelivery || !churnAt.IsZero() {
+		t.Fatalf("post-attempt evidence = (%q, %v), want fenced no-change evidence", reason, churnAt)
+	}
+	if inst.RecordPaneChurnAtEpoch(attemptedAt.Add(2*time.Second), 0) {
+		t.Fatal("an observation from before prompt delivery crossed the evidence fence")
+	}
+}
+
+func TestPaneChurnRequestsOneCheckpointPerPrompt(t *testing.T) {
+	t.Parallel()
+
+	inst := &Instance{liveness: LiveRunning}
+	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	inst.RecordPromptAttempt(PromptDelivered, attemptedAt)
+	epoch := inst.StateEpoch()
+
+	recorded, checkpoint := inst.RecordPaneChurnCheckpointAtEpoch(attemptedAt.Add(time.Second), epoch)
+	if !recorded || !checkpoint {
+		t.Fatalf("first churn = (%v, %v), want recorded checkpoint", recorded, checkpoint)
+	}
+	recorded, checkpoint = inst.RecordPaneChurnCheckpointAtEpoch(attemptedAt.Add(2*time.Second), epoch)
+	if !recorded || checkpoint {
+		t.Fatalf("later churn = (%v, %v), want recorded without another checkpoint", recorded, checkpoint)
+	}
+}
+
+func TestClearIdleEvidenceRetiresPredecessorRuntimeFacts(t *testing.T) {
+	t.Parallel()
+
+	inst := &Instance{liveness: LiveReady}
+	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	inst.RecordPromptAttempt(PromptDelivered, attemptedAt)
+	epoch := inst.StateEpoch()
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch)
+
+	if !inst.ClearIdleEvidence() {
+		t.Fatal("runtime replacement did not clear predecessor evidence")
+	}
+	reason, churnAt := inst.IdleReasonSnapshot()
+	if reason != IdleReasonNone || !churnAt.IsZero() {
+		t.Fatalf("cleared evidence = (%q, %v), want empty", reason, churnAt)
+	}
+	if inst.RecordPaneChurnAtEpoch(attemptedAt.Add(2*time.Second), epoch) {
+		t.Fatal("predecessor observation crossed the runtime replacement fence")
 	}
 }
 
@@ -140,13 +199,14 @@ func TestIdleReasonEvidenceRecordsWithoutSemanticInference(t *testing.T) {
 	if got, _ := inst.IdleReasonSnapshot(); got != IdleReasonDeliveryUnconfirmed {
 		t.Fatalf("reason before churn = %q, want %q", got, IdleReasonDeliveryUnconfirmed)
 	}
-	if !inst.RecordPaneChurnAtEpoch(churnAt, 0) {
+	epoch := inst.StateEpoch()
+	if !inst.RecordPaneChurnAtEpoch(churnAt, epoch) {
 		t.Fatal("same-epoch pane churn was not recorded")
 	}
 	if got, gotChurn := inst.IdleReasonSnapshot(); got != IdleReasonSettledAfterPaneChange || !gotChurn.Equal(churnAt) {
 		t.Fatalf("reason after churn = (%q, %v), want (%q, %v)", got, gotChurn, IdleReasonSettledAfterPaneChange, churnAt)
 	}
-	if inst.RecordPaneChurnAtEpoch(churnAt.Add(time.Second), 1) {
+	if inst.RecordPaneChurnAtEpoch(churnAt.Add(time.Second), epoch-1) {
 		t.Fatal("stale-runtime pane churn must not be recorded")
 	}
 }

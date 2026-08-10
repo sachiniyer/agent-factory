@@ -171,13 +171,24 @@ func (m *Manager) persistPollChange(
 	beforeReset time.Time,
 	projectionChanged bool,
 ) {
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, false)
+}
+
+func (m *Manager) persistPollChangeWithIdleEvidence(
+	repoID string,
+	instance *session.Instance,
+	before session.Liveness,
+	beforeReset time.Time,
+	projectionChanged bool,
+	idleEvidenceCheckpoint bool,
+) {
 	if instance.GetInFlightOp() != session.OpNone {
 		return
 	}
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged
+	durableChanged := livenessChanged || resetChanged || idleEvidenceCheckpoint
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -523,13 +534,8 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
-		// Re-fetch: a REMOTE respawn re-provisions a FRESH sandbox and rebinds the
-		// instance to its endpoint (bindProvisionResult swaps remoteClient and clears
-		// the cached agent-server), so the `as` captured above is a client pinned to
-		// the sandbox Respawn just tore down — SendPrompt below would target a dead
-		// endpoint and the resume could never clear the limit (#1786). Inert for local
-		// sessions, whose localAgentServer resolves i.backend per call.
-		as = instance.AgentServer()
+		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
+		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
 		// agent is NOT a resumed one: this session stays parked at the wall until the
 		// SendPrompt below actually delivers its pending prompt, so LiveLimitReached
@@ -596,9 +602,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	attemptedAt := nowFunc()
-	deliveryStatus, serr := session.SendPromptWithStatus(as, prompt)
-	instance.RecordPromptAttempt(deliveryStatus, attemptedAt)
+	_, serr := instance.SendPromptWithEvidence(prompt, nowFunc)
 	if serr != nil {
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {

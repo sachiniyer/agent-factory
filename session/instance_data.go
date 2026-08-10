@@ -16,9 +16,9 @@ func (i *Instance) ToInstanceData() InstanceData {
 }
 
 // ToInstanceDataWithEpoch returns the serializable form together with the
-// lifecycle epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
+// observation epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
 // deliberately does not cover every field in InstanceData (tabs are the notable
-// example), so it may correlate lifecycle observations but must not be used as a
+// example), so it may correlate pane observations but must not be used as a
 // whole-projection freshness guard. Writers of the whole payload re-read it in
 // their ordering domain instead; see daemon.persistPollChange.
 func (i *Instance) ToInstanceDataWithEpoch() (InstanceData, uint64) {

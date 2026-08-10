@@ -247,7 +247,8 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
 	}
 	if len(matches) > 0 {
-		return &matches[0], matchRepoIDs[0], nil
+		projected := matches[0].ProjectIdleReason()
+		return &projected, matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
@@ -396,7 +397,7 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 		}
 		for i := range instances {
 			if instances[i].TmuxName == tmuxName {
-				view := instances[i].ForClientRead()
+				view := instances[i].ForClientRead().ProjectIdleReason()
 				return &view, nil
 			}
 		}
@@ -447,7 +448,8 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 	}
 	for i := range instances {
 		if instances[i].Title == title {
-			return &instances[i], repoID, nil
+			projected := instances[i].ProjectIdleReason()
+			return &projected, repoID, nil
 		}
 	}
 	// Wrap the sentinel so a scoped clean miss stays distinguishable from a

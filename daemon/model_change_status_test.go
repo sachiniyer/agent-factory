@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -69,10 +70,17 @@ func TestRuntimeReplacementClearsPriorModelChange(t *testing.T) {
 		session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low"),
 		inst.StateEpoch(),
 	))
+	attemptedAt := time.Now().Add(-time.Minute)
+	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), inst.StateEpoch()))
 
 	manager.noteRuntimeReplaced(repoID, inst)
 
 	require.Nil(t, inst.AgentModelChange(), "a replacement runtime must not inherit its predecessor's warning")
+	reason, churnAt := inst.IdleReasonSnapshot()
+	require.Equal(t, session.IdleReasonNone, reason,
+		"a replacement runtime must not inherit its predecessor's delivery result")
+	require.True(t, churnAt.IsZero(), "a replacement runtime must not inherit pane age")
 }
 
 func TestRefreshStatusDropsModelChangeFromReplacedRuntime(t *testing.T) {

@@ -168,9 +168,7 @@ func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, 
 	}
 
 	if prompt != "" {
-		attemptedAt := time.Now()
-		status, err := session.SendPromptWithStatus(instance.AgentServer(), prompt)
-		instance.RecordPromptAttempt(status, attemptedAt)
+		_, err := instance.SendPromptWithEvidence(prompt, time.Now)
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrPromptDelivery, err)
 		}

@@ -117,6 +117,47 @@ func persistedStatus(t *testing.T, repoID, title string) session.Status {
 	return session.Status(0)
 }
 
+func persistedInstance(t *testing.T, repoID, title string) session.InstanceData {
+	t.Helper()
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var data []session.InstanceData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
+	}
+	for _, d := range data {
+		if d.Title == title {
+			return d
+		}
+	}
+	t.Fatalf("instance %q not found in persisted store", title)
+	return session.InstanceData{}
+}
+
+// A prompt can arrive while an agent is already Running. Its first later pane
+// churn must survive a daemon restart even though the liveness never changes;
+// later spinner churn still must not write on every poll.
+func TestRefreshStatusesPersistsFirstPostPromptChurnWhileRunning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "prompt-churn", &updatedOnlyBackend{
+		FakeBackend: session.NewFakeBackend(),
+	}, true, session.Running)
+	attemptedAt := time.Now().Add(-time.Minute)
+	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist prompt attempt: %v", err)
+	}
+
+	manager.refreshInstanceStatus(repoID, inst)
+
+	stored := persistedInstance(t, repoID, "prompt-churn")
+	if !stored.LastPaneChurnAt.After(attemptedAt) {
+		t.Fatalf("persisted churn = %v, want after prompt %v", stored.LastPaneChurnAt, attemptedAt)
+	}
+}
+
 // TestRefreshStatuses_LiveIdleSessionBecomesReady is the control for #935 ported
 // daemon-side: a live, idle session (IsAlive true, HasUpdated false,false) must
 // be marked Ready, and the daemon — the sole writer now — must persist that

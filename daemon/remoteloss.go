@@ -231,10 +231,10 @@ func (m *Manager) remoteSandboxLiveness(instance *session.Instance) livenessProb
 func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance) {
 	// Model diagnostics are observations of one concrete agent process, just like
 	// the remote-loss episode is an observation of one concrete sandbox. Every
-	// recovery/re-provision/handoff already crosses this chokepoint, so retire both
-	// predecessor-owned facts together rather than making each caller remember a
-	// second reset site.
+	// recovery/re-provision/handoff already crosses this chokepoint, so retire all
+	// predecessor-owned facts together rather than multiplying reset sites.
 	instance.ClearAgentModelChange()
+	instance.ClearIdleEvidence()
 	m.clearRemoteLoss(stableSessionKey(repoID, instance))
 }
 

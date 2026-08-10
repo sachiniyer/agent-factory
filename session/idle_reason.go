@@ -73,13 +73,16 @@ func IdleReasonFor(data InstanceData) IdleReason {
 	if data.LastPromptDeliveryStatus == PromptNotDelivered {
 		return IdleReasonPromptNotDelivered
 	}
-	if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
-		return IdleReasonSettledAfterPaneChange
-	}
 	switch data.LastPromptDeliveryStatus {
 	case PromptCouldNotConfirm:
+		if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
+			return IdleReasonSettledAfterPaneChange
+		}
 		return IdleReasonDeliveryUnconfirmed
 	case PromptDelivered:
+		if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
+			return IdleReasonSettledAfterPaneChange
+		}
 		return IdleReasonNoPaneChangeSinceDelivery
 	default:
 		return IdleReasonNone
@@ -109,8 +112,16 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 	if i.lastPromptAttemptAt.Equal(attemptedAt) && i.lastPromptDeliveryStatus == status {
 		return false
 	}
+	// The attempt and pane snapshots share agentObservationMu, while stateEpoch
+	// fences the apply after Snapshot returns. Retire a churn timestamp applied by
+	// an observation that completed immediately before this attempt acquired that
+	// mutex: its capture predates delivery even if its apply timestamp does not.
+	if !i.lastPaneChurnAt.IsZero() && !i.lastPaneChurnAt.Before(attemptedAt) {
+		i.lastPaneChurnAt = time.Time{}
+	}
 	i.lastPromptAttemptAt = attemptedAt
 	i.lastPromptDeliveryStatus = status
+	i.stateEpoch++
 	return true
 }
 
@@ -118,15 +129,41 @@ func (i *Instance) RecordPromptAttempt(status PromptDeliveryStatus, attemptedAt 
 // same runtime generation the caller observed. A lifecycle fence raised during
 // capture invalidates the observation exactly as it invalidates liveness.
 func (i *Instance) RecordPaneChurnAtEpoch(churnAt time.Time, observedEpoch uint64) bool {
+	recorded, _ := i.RecordPaneChurnCheckpointAtEpoch(churnAt, observedEpoch)
+	return recorded
+}
+
+// RecordPaneChurnCheckpointAtEpoch additionally reports the first accepted pane
+// churn after the latest prompt. That edge must be persisted even while the row
+// remains Running; later spinner churn needs no write on every poll.
+func (i *Instance) RecordPaneChurnCheckpointAtEpoch(churnAt time.Time, observedEpoch uint64) (bool, bool) {
 	if churnAt.IsZero() {
-		return false
+		return false, false
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != observedEpoch || !churnAt.After(i.lastPaneChurnAt) {
+		return false, false
+	}
+	checkpoint := !i.lastPromptAttemptAt.IsZero() &&
+		churnAt.After(i.lastPromptAttemptAt) &&
+		!i.lastPaneChurnAt.After(i.lastPromptAttemptAt)
+	i.lastPaneChurnAt = churnAt
+	return true, checkpoint
+}
+
+// ClearIdleEvidence retires delivery and pane facts owned by a replaced runtime.
+// Its epoch bump also rejects a predecessor observation still applying.
+func (i *Instance) ClearIdleEvidence() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.lastPromptAttemptAt.IsZero() && i.lastPromptDeliveryStatus == "" && i.lastPaneChurnAt.IsZero() {
 		return false
 	}
-	i.lastPaneChurnAt = churnAt
+	i.lastPromptAttemptAt = time.Time{}
+	i.lastPromptDeliveryStatus = ""
+	i.lastPaneChurnAt = time.Time{}
+	i.stateEpoch++
 	return true
 }
 
