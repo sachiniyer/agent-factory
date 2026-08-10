@@ -20,6 +20,11 @@ import "fmt"
 // was unconditional and `relocateWorktreeTo` backs restore as well as archive.
 type unreadablePolicy int
 
+// copiedEntryState makes an incomplete archive a manifest state rather than a
+// missing manifest entry. Present is zero so every pre-existing constructor and
+// every future constructor that forgets the field keeps the strict behavior.
+type copiedEntryState uint8
+
 const (
 	// refuseUnreadable is the ZERO VALUE on purpose.
 	//
@@ -30,15 +35,34 @@ const (
 	// first attempt lacked.
 	refuseUnreadable unreadablePolicy = iota
 	// skipUnreadable records the path and continues. Only an ARCHIVE may use it,
-	// because only an archive leaves the original where it was.
+	// because only an archive retains the complete secured original tree.
 	skipUnreadable
 )
+
+const (
+	copiedEntryPresent copiedEntryState = iota
+	copiedEntryKnownAbsent
+)
+
+func (entry copiedEntry) knownAbsent() bool {
+	return entry.state == copiedEntryKnownAbsent
+}
 
 func (p unreadablePolicy) String() string {
 	if p == skipUnreadable {
 		return "skip"
 	}
 	return "refuse"
+}
+
+// unreadablePolicyForOperation is intentionally narrow: only the archive verb
+// opts into skipping. Unknown/future operation strings inherit REFUSE, as do the
+// direct copier and move helpers whose zero/default path never calls this.
+func unreadablePolicyForOperation(operation string) unreadablePolicy {
+	if operation == "archive" {
+		return skipUnreadable
+	}
+	return refuseUnreadable
 }
 
 // unreadableSourceError reports a source file the copier cannot read, under a

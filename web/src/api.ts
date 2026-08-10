@@ -440,7 +440,10 @@ export async function archiveSession(id: string, title: string, token: string): 
  *  id-first resolver supplies the canonical repo and title. The
  *  session.restored event triggers a rail resync. */
 export async function restoreSession(id: string, title: string, token: string): Promise<void> {
-  await af("RestoreSession", { id, title, repo_id: "" }, token);
+  const result = await af<{ warning?: string }>("RestoreSession", { id, title, repo_id: "" }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Resumes a session blocked at a usage-limit wall (#1934) — the web half of the

@@ -326,10 +326,13 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, erro
 // would never touch. Gating a record whose cleanup is a no-op can only retain it
 // forever (#2998 review).
 func ghostWorktreeRemovable(data *session.InstanceData) bool {
-	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
+	current := data.RestoreArchiveRollbackFence()
+	return current.Worktree.RepoPath != "" && current.Worktree.WorktreePath != "" && !current.Worktree.ExternalWorktree
 }
 
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
+	current := data.RestoreArchiveRollbackFence()
+	data = &current
 	if !ghostWorktreeRemovable(data) {
 		return git.CleanupSettled, nil
 	}
@@ -369,6 +372,9 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
 			return git.CleanupStateUnknown, recoveryErr
 		}
+	}
+	if data.ArchiveReport != nil {
+		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {

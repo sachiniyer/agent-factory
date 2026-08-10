@@ -93,6 +93,22 @@ func TestControlRoundTrips(t *testing.T) {
 		}
 	})
 
+	t.Run("RestoreSession preserves durable archive warning with path", func(t *testing.T) {
+		c := routeServer(t, "RestoreSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.RestoreSessionResponse{
+				OK: true, WorktreePath: "/worktrees/alpha",
+				MutationOutcome: daemon.MutationOutcome{
+					Code:    apiproto.ErrorCodeMutationCommitted,
+					Warning: `restore completed with an incomplete archive: skipped "locked\ncredential"`,
+				},
+			})
+		})
+		path, err := c.RestoreSession(daemon.RestoreSessionRequest{Title: "alpha"})
+		if path != "/worktrees/alpha" || !IsMutationCommitted(err) {
+			t.Fatalf("RestoreSession = %q, %T %v; want path plus committed report", path, err, err)
+		}
+	})
+
 	// Both names come back, and they DIFFER: the resolved tab name and the tmux
 	// session it was spawned under are independent namespaces post-#1957, so a
 	// client that dropped the second and re-derived it from the first would bind

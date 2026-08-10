@@ -540,11 +540,10 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 		// direct unconditional mirror rather than a fenced edge (#1195 Phase 2d).
 		inst.SetArchived()
 	}
-	refresh := m.selectionChanged()
 	if committedWarning {
-		return m, tea.Batch(refresh, m.handleError(msg.err))
+		return m, tea.Batch(m.selectionChanged(), m.handleError(msg.err))
 	}
-	return m, refresh
+	return m, m.selectionChanged()
 }
 
 // limitRetriedMsg reports completion of an async usage-limit manual retry
@@ -620,12 +619,11 @@ func (m *home) handleLimitRetried(msg limitRetriedMsg) (tea.Model, tea.Cmd) {
 // is eager, but the liveness transition — and thus the rebuild — stays owned by
 // the reconcile path.
 //
-// On FAILURE (e.g. the origin repo is gone) clear the OpRestoring overlay so the
-// row drops back into the Archived section — its worktree is still shelved — and
-// surface the error.
+// A failure clears the overlay; a committed warning keeps the live projection and shows its report.
 func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.Cmd) {
 	inst := m.resolveSessionActionTarget(msg.target)
-	if msg.err != nil {
+	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)
+	if msg.err != nil && !committedWarning {
 		if inst != nil && inst.GetInFlightOp() == session.OpRestoring {
 			_ = inst.Transition(session.ClearOp())
 		}
@@ -634,7 +632,11 @@ func (m *home) handleInstanceRestored(msg instanceRestoredMsg) (tea.Model, tea.C
 	if inst != nil && (inst.GetLiveness() == session.LiveLost || inst.GetLiveness() == session.LiveDead) {
 		_ = inst.Transition(session.ConfirmLive())
 	}
-	return m, m.selectionChanged()
+	refresh := m.selectionChanged()
+	if committedWarning {
+		return m, tea.Batch(refresh, m.handleError(msg.err))
+	}
+	return m, refresh
 }
 
 // handleEnter is the Enter verb (#1089 PR 2, RFC §2.3): enter INTERACTIVE

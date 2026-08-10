@@ -131,7 +131,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
-		return instance.GetWorktreePath(), nil
+		return restoredArchiveResult(instance, instance.GetWorktreePath())
 	case probeUnknown:
 		// Unreachable is not gone. Refuse, and NAME the release — a guard that blocks
 		// without saying how to get past it is #2917. Which means honoring that
@@ -217,9 +217,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// an immediate re-loss against the same episode.
 	m.armRestoreConfirmation(repoID, instance)
 	if settleErr != nil {
-		return instance.GetWorktreePath(), fmt.Errorf(
+		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",
 			title, settleErr)
+		if !instance.GetArchiveReport().Empty() {
+			return restoredArchiveResult(instance, instance.GetWorktreePath(), failure)
+		}
+		return instance.GetWorktreePath(), failure
 	}
-	return instance.GetWorktreePath(), nil
+	return restoredArchiveResult(instance, instance.GetWorktreePath())
 }
