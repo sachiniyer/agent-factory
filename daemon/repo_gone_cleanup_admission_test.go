@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -109,7 +110,8 @@ func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.
 	recovery := recordFor(t, repoID, "repo-returned").Worktree.RelocationRecovery
 	require.NotNil(t, recovery)
 	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
-	require.NoError(t, os.MkdirAll(repoPath, 0o755), "bring the origin pathname back before kill")
+	require.NoError(t, exec.Command("git", "init", repoPath).Run(),
+		"bring a valid origin repository back before kill")
 
 	_, err = manager.KillSession(KillSessionRequest{Title: "repo-returned", RepoID: repoID})
 	require.Error(t, err)
