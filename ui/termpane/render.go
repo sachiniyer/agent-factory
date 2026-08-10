@@ -7,14 +7,14 @@ import (
 	"github.com/charmbracelet/x/vt"
 )
 
-// renderGrid turns the emulator's visible cell grid into exactly height
+// renderGridWindow turns the emulator's visible cell grid into exactly height
 // ANSI-styled lines of exactly width cells, padding with blanks where the
 // grid is smaller and clipping where it is larger (the owner resizes the
 // emulator to the pane rect, so both are transient states around a resize).
 // The caller must hold the lock that guards the emulator against concurrent
 // writes (TermPane.gridMu): CellAt returns pointers into the live buffer.
 //
-// cursorAt marks the cell the terminal cursor occupies so renderGrid can
+// cursorAt marks the cell the terminal cursor occupies so renderGridWindow can
 // overlay it; cursorNone renders without an overlay.
 type cursorAt struct {
 	x, y int
@@ -31,10 +31,6 @@ var cursorNone = cursorAt{}
 // block cursor over any content and any color scheme. Each styled line ends
 // with a reset so the styles can never bleed into the host TUI's surrounding
 // chrome.
-func renderGrid(emu *vt.Emulator, width, height int, cursor cursorAt) string {
-	return renderGridWindow(emu, width, height, 0, cursor)
-}
-
 func renderGridWindow(emu *vt.Emulator, width, height, sourceY int, cursor cursorAt) string {
 	if width <= 0 || height <= 0 {
 		return ""
