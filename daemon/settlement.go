@@ -43,14 +43,7 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	// persistAndPublishInstanceErr goes through startLockForRepo, which takes m.mu
 	// — the #2106 lock contract, so the bookkeeping below happens after it returns.
 	err := m.persistAndPublishInstanceErr(repoID, instance)
-	owedKey := stableSessionKey(repoID, instance)
-	m.mu.Lock()
-	if err != nil {
-		m.settleOwed[owedKey] = settleOwedEntry{repoID: repoID, key: key, instance: instance}
-	} else {
-		delete(m.settleOwed, owedKey)
-	}
-	m.mu.Unlock()
+	m.recordSettlementWrite(repoID, key, instance, err)
 	if err != nil {
 		return fmt.Errorf(
 			"the settled state for %q could not be written to disk "+
@@ -58,6 +51,22 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 			instance.Title, err)
 	}
 	return nil
+}
+
+// recordSettlementWrite keeps a failed whole-row write eligible for poll retry,
+// or retires an older obligation when a later whole-row write subsumes it.
+func (m *Manager) recordSettlementWrite(repoID, key string, instance *session.Instance, err error) {
+	owedKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	if err != nil {
+		if m.settleOwed == nil {
+			m.settleOwed = make(map[string]settleOwedEntry)
+		}
+		m.settleOwed[owedKey] = settleOwedEntry{repoID: repoID, key: key, instance: instance}
+	} else {
+		delete(m.settleOwed, owedKey)
+	}
+	m.mu.Unlock()
 }
 
 // FlushOwedSettlements retries settlement writes that did not land, so a

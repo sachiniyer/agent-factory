@@ -524,6 +524,21 @@ func TestHasUpdatedReattachResetsDeadAndBaselinesCapture(t *testing.T) {
 	require.False(t, baseline, "the reattach baseline must be reported exactly once")
 }
 
+func TestFenceNextCaptureAsBaselineSuppressesDeliveryChurn(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	captureOK.Store(true)
+	sessionAlive.Store(true)
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	session.FenceNextCaptureAsBaseline()
+	updated, _, _, baseline := session.HasUpdatedWithBaseline()
+	require.False(t, updated, "delivery boundary must not become pane churn")
+	require.True(t, baseline, "delivery boundary must make the next capture a baseline")
+	updated, _, _, baseline = session.HasUpdatedWithBaseline()
+	require.False(t, updated, "unchanged post-delivery pane must remain unchanged")
+	require.False(t, baseline, "delivery fence must be consumed exactly once")
+}
+
 // TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:
 // if capture-pane fails but ExistsOrUnknown still reports the session is
 // alive (a rare transient error), the monitor must NOT latch dead and the

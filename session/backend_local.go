@@ -923,7 +923,12 @@ func (b *LocalBackend) SendPromptCommandWithStatus(i *Instance, prompt string) (
 	if ts == nil {
 		return PromptCouldNotConfirm, fmt.Errorf("tmux session not initialized")
 	}
-	return ts.SendKeysCommandObserved(prompt)
+	status, err := ts.SendKeysCommandObserved(prompt)
+	// Prompt rendering and composer clearing are consequences of delivery, not
+	// later agent output. Make the first serialized status capture establish the
+	// post-delivery pane boundary without reporting churn or idleness.
+	ts.FenceNextCaptureAsBaseline()
+	return status, err
 }
 
 func (b *LocalBackend) IsAlive(i *Instance) (bool, error) {

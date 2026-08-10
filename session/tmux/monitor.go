@@ -19,3 +19,14 @@ func (t *TmuxSession) setMonitor(m *statusMonitor) {
 	defer t.monitorMu.Unlock()
 	t.monitor = m
 }
+
+// FenceNextCaptureAsBaseline prevents delivery-driven redraw from being
+// attributed to agent output after that delivery. The next successful status
+// capture replaces the comparison hash without reporting churn or idleness.
+func (t *TmuxSession) FenceNextCaptureAsBaseline() {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if t.monitor != nil {
+		t.monitor.baselinePending = true
+	}
+}

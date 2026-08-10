@@ -358,7 +358,9 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// Delivery evidence changes the row even when liveness does not. Publish it
 	// immediately so list clients can distinguish a confirmed miss from #3162's
 	// honest could-not-confirm instead of waiting for the status poll.
-	m.persistAndPublishInstance(repoID, instance)
+	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+		log.WarningLog.Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
+	}
 	if err != nil {
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}

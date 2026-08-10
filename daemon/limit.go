@@ -222,6 +222,16 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	testHookPollBeforePublish()
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
+	key := daemonInstanceKey(repoID, instance.Title)
+	switch {
+	case err == nil && durableChanged:
+		// Any successful whole-row checkpoint subsumes an older evidence write.
+		m.recordSettlementWrite(repoID, key, instance, nil)
+	case err != nil && idleEvidenceCheckpoint:
+		// The first post-prompt churn edge is one-shot in memory. Preserve the
+		// obligation after a failed write so a later poll can make it durable.
+		m.recordSettlementWrite(repoID, key, instance, err)
+	}
 	if err != nil {
 		log.WarningLog.Printf("daemon failed to persist status for %q: %v", instance.Title, err)
 	}
@@ -608,7 +618,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// delivery fact: remote transport failure means could-not-confirm, not that
 		// the prompt missed. Persist it before this early return so a restart can
 		// still order later pane churn against the attempt (#3162/#3168).
-		m.persistAndPublishInstance(repoID, instance)
+		evidenceErr := m.persistSettlement(repoID, key, instance)
+		if evidenceErr != nil {
+			log.WarningLog.Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+		} else {
+			// The successful evidence checkpoint persisted the whole respawn row too.
+			settleErr = nil
+		}
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {
 			// This return skips the whole-row checkpoint below, so unlike the success
