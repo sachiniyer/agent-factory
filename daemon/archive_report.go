@@ -55,6 +55,23 @@ func failedRestoredArchiveResult(instance *session.Instance, worktreePath string
 	return restoredArchiveResult(instance, worktreePath, failure)
 }
 
+// failedArchiveError keeps a failed archive retryable while still surfacing any
+// files already omitted from the published copy. Registration repair can fail
+// after the archive copier retained the complete source and recorded its report;
+// dropping that report from this error would let automatic Lost recovery make
+// the incomplete copy live without the requesting client learning why.
+func failedArchiveError(instance *session.Instance, failure error) error {
+	report := instance.GetArchiveReport()
+	if report.Empty() {
+		return failure
+	}
+	return errors.Join(failure, errors.New(report.Warning("archive")))
+}
+
+func failedArchiveResult(instance *session.Instance, failure error) (string, session.InstanceData, error) {
+	return "", session.InstanceData{}, failedArchiveError(instance, failure)
+}
+
 // keepIncompleteArchiveCommitted is the no-data-loss alternative to archive's
 // ordinary rollback. The published copy omits files whose only complete copy is
 // in a retained tree, so restoring it home would start a Lost session without

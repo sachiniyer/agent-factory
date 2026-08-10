@@ -132,7 +132,11 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		return nil, err
 	}
 	got, _, err := findInstanceByTitle(title)
-	return got, err
+	if err != nil {
+		return nil, err
+	}
+	view := got.ForClientRead()
+	return &view, nil
 }
 
 // whoamiSession returns the session whose TmuxName matches tmuxName, preferring

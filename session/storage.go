@@ -261,6 +261,24 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 	return d
 }
 
+// ForClientRead converts a storage row into the same bounded shape emitted by a
+// live daemon snapshot. Disk fallback callers must not expose the complete
+// report or the compatibility-only ownership flags merely because the daemon is
+// unavailable.
+func (d InstanceData) ForClientRead() InstanceData {
+	d = d.RestoreArchiveRollbackFence()
+	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
+		operation := "restore"
+		if livenessFromData(d) == LiveArchived {
+			operation = "archive"
+		}
+		d.ArchiveWarning = d.ArchiveReport.Warning(operation)
+	}
+	d.ArchiveReport = nil
+	d.archiveReport = nil
+	return d
+}
+
 // ForStorage returns data suitable for instances.json. InstanceData is also the
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.

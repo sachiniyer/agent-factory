@@ -50,6 +50,14 @@ func TestFailedRestoredArchiveResultJoinsRespawnFailureAndReport(t *testing.T) {
 	require.Contains(t, err.Error(), "incomplete archive")
 }
 
+func TestFailedArchiveErrorJoinsRepairFailureAndReport(t *testing.T) {
+	repairErr := errors.New("registration repair failed")
+	err := failedArchiveError(archivedInstanceWithReport(t), repairErr)
+	require.False(t, isMutationCommitted(err), "the session is Lost, not durably Archived")
+	require.ErrorIs(t, err, repairErr, "the report must not hide the repair failure")
+	require.Contains(t, err.Error(), "incomplete archive")
+}
+
 func TestGhostCleanupReadsThroughArchiveRollbackFence(t *testing.T) {
 	stored := archivedInstanceWithReport(t).ToInstanceData().ForStorage()
 	require.True(t, stored.Worktree.ExternalWorktree, "precondition: storage projects the old-reader fence")
@@ -63,10 +71,10 @@ func TestRestoreArchivedRespawnFailurePreservesReportThroughLostRetry(t *testing
 	spawnErr := errors.New("agent spawn failed")
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: spawnErr}
 	instance.SetBackend(backend)
-
-	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
-	require.NoError(t, err)
 	worktree, err := instance.GetGitWorktree()
+	require.NoError(t, err)
+
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
 	worktree.RestoreArchiveReport(sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
 		Path: "/repos/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,

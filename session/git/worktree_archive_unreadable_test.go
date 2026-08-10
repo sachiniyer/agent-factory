@@ -64,3 +64,35 @@ func TestRelocateWorktreeTo_ArchiveAccountsForUnreadableSource(t *testing.T) {
 		"the retained original must keep its permission boundary rather than being replaced")
 	assert.Nil(t, contents)
 }
+
+func TestRelocateWorktreeTo_ArchiveRepairFailureRetainsUnreadableReport(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses mode bits; run this regression under a non-root uid")
+	}
+	previousFastMove := worktreeMoveFast
+	worktreeMoveFast = func(*GitWorktree, string, string) error { return errors.New("force manual relocation") }
+	t.Cleanup(func() { worktreeMoveFast = previousFastMove })
+	previousRename := renamePath
+	renamePath = func(_, _ string) error { return syscall.EXDEV }
+	t.Cleanup(func() { renamePath = previousRename })
+	repairErr := errors.New("registration repair failed")
+	previousRepair := worktreeRepair
+	worktreeRepair = func(*GitWorktree, string) error { return repairErr }
+	t.Cleanup(func() { worktreeRepair = previousRepair })
+
+	gw, _, source := archiveTestWorktree(t)
+	const relativeLocked = "private/locked\ncredential"
+	locked := filepath.Join(source, relativeLocked)
+	require.NoError(t, os.MkdirAll(filepath.Dir(locked), 0o755))
+	require.NoError(t, os.WriteFile(locked, []byte("not readable by af"), 0o600))
+	require.NoError(t, os.Chmod(locked, 0o000))
+
+	destination := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "repair-fails")
+	err := gw.relocateWorktreeTo(destination, "archive", nil)
+	require.ErrorIs(t, err, repairErr)
+	report := gw.GetArchiveReport()
+	require.Len(t, report.RetainedTrees, 1,
+		"the report must exist before registration repair so the daemon can persist and surface it")
+	require.Equal(t, relativeLocked, report.RetainedTrees[0].Skipped[0].Path)
+	require.Contains(t, report.Warning("archive"), `"private/locked\ncredential"`)
+}
