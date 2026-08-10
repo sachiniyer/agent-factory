@@ -305,3 +305,16 @@ func readWorkingDir(pid int) (string, bool) {
 	}
 	return dir, true
 }
+
+func openWorkingDir(pid int) (*os.File, string, bool) {
+	directory, err := os.Open(fmt.Sprintf("/proc/%d/cwd", pid))
+	if err != nil {
+		return nil, "", false
+	}
+	path, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", directory.Fd()))
+	if err != nil {
+		_ = directory.Close()
+		return nil, "", false
+	}
+	return directory, path, true
+}

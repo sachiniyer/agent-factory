@@ -3,10 +3,30 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
+
+func (m *Manager) guardRepoGoneRestore(
+	repoID, title, repoPath string,
+	instance *session.Instance,
+	claim sessiongit.RelocationClaim,
+) (bool, error) {
+	if _, err := os.Stat(repoPath); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("cannot inspect origin repo %s for session %q: %w", repoPath, title, err)
+	}
+	if err := m.prepareRepoGoneCleanup(repoID, title, repoPath, instance, claim); err != nil {
+		return false, err
+	}
+	return true, fmt.Errorf(
+		"cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git",
+		title, repoPath, instance.GetWorktreePath(),
+	)
+}
 
 // claimRestoreRelocation resolves the archived worktree and durably records any
 // failed bounded probe before the restore handler returns.
@@ -30,24 +50,24 @@ func (m *Manager) claimRestoreRelocation(
 	)
 }
 
-// settleRepoGoneRelocation is the non-moving completion path. Establish the
-// selected directory identity once more, clear its active ownership, and persist
-// both facts so a repo-gone archive remains eligible for an explicit kill.
-func (m *Manager) settleRepoGoneRelocation(
+// prepareRepoGoneCleanup is the non-moving completion path. Establish the
+// selected directory identity once more, replace its active ownership with a
+// cleanup-only durable record, and persist both facts so a later kill must
+// revalidate the same directory before deleting it.
+func (m *Manager) prepareRepoGoneCleanup(
 	repoID, title, repoPath string,
 	instance *session.Instance,
 	claim sessiongit.RelocationClaim,
 ) error {
-	if err := instance.SettleWorktreeRelocationClaimForRetry(claim); err != nil {
+	if err := instance.PrepareWorktreeRelocationClaimForCleanup(claim); err != nil {
 		return fmt.Errorf(
 			"cannot restore session %q because its origin repo is gone and the archived worktree identity could not be established: %w",
 			title, err,
 		)
 	}
 	if err := m.persistInstanceErr(repoID, instance); err != nil {
-		// Keep in-memory admission fail-closed if the resolved lifecycle could not
-		// be written. The previous on-disk record remains conservative.
-		instance.PreserveWorktreeRelocationClaimForRetry(claim)
+		// The in-memory cleanup-ready record remains fail-closed. The previous
+		// on-disk recovery record is conservative too.
 		return fmt.Errorf(
 			"cannot restore session %q because its origin repo %s is gone, and could not persist the resolved archived worktree identity: %w",
 			title, repoPath, err,

@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -714,12 +713,9 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
-	if _, statErr := os.Stat(repoPath); statErr != nil {
-		if settleErr := m.settleRepoGoneRelocation(repoID, req.Title, repoPath, instance, relocationClaim); settleErr != nil {
-			return "", settleErr
-		}
-		claimTransferred = true
-		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
+	if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
+		claimTransferred = repoGone
+		return "", err
 	}
 	// Honor the configured worktree_root placement, exactly as session creation
 	// does (#1540): a subdirectory user's worktree is restored under

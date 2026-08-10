@@ -180,8 +180,11 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	return data
 }
 
-// FromInstanceData creates a new Instance from serialized data
-func FromInstanceData(data InstanceData) (*Instance, error) {
+// RestoreRelocationRecoveryOriginals reverses the rollback-safe projection made
+// by ForStorage before a current reader interprets worktree ownership. It is
+// shared by normal instance restoration and daemon ghost cleanup so neither can
+// read the compatibility fence as the real lifecycle state.
+func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, error) {
 	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 		// ForStorage projects unresolved records through v1.0.228's existing
 		// fail-closed fields. A current reader must recover the exact original
@@ -190,12 +193,22 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		if recovery.OriginalExternalWorktree == nil ||
 			recovery.OriginalBranchCreatedByUs == nil ||
 			recovery.OriginalStartupStateUnknown == nil {
-			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
+			return InstanceData{}, fmt.Errorf("rollback safety metadata is missing")
 		}
 		data.Worktree.ExternalWorktree = *recovery.OriginalExternalWorktree
 		branchCreatedByUs := *recovery.OriginalBranchCreatedByUs
 		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
 		data.StartupStateUnknown = *recovery.OriginalStartupStateUnknown
+	}
+	return data, nil
+}
+
+// FromInstanceData creates a new Instance from serialized data
+func FromInstanceData(data InstanceData) (*Instance, error) {
+	var err error
+	data, err = data.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
 	id := data.ID
 	if id == "" {

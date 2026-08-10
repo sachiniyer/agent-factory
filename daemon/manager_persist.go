@@ -326,11 +326,17 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, erro
 // would never touch. Gating a record whose cleanup is a no-op can only retain it
 // forever (#2998 review).
 func ghostWorktreeRemovable(data *session.InstanceData) bool {
-	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
+	restored, err := data.RestoreRelocationRecoveryOriginals()
+	return err == nil && ghostRestoredWorktreeRemovable(&restored)
 }
 
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
-	if !ghostWorktreeRemovable(data) {
+	restored, restoreErr := data.RestoreRelocationRecoveryOriginals()
+	if restoreErr != nil {
+		return git.CleanupStateUnknown, fmt.Errorf("ghost recovery ownership is invalid: %w", restoreErr)
+	}
+	data = &restored
+	if !ghostRestoredWorktreeRemovable(data) {
 		return git.CleanupSettled, nil
 	}
 	// Unknown provenance means KEEP (#1953): a nil flag predates 2026-04-17 and
@@ -357,7 +363,8 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 		log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
 		return git.CleanupSettled, nil
 	}
-	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+	recovery := data.Worktree.RelocationRecovery
+	if recovery != nil {
 		if recoveryErr := gw.RestoreRelocationRecovery(git.RelocationRecovery{
 			State:         recovery.State,
 			AlternatePath: recovery.AlternatePath,
@@ -370,11 +377,23 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 			return git.CleanupStateUnknown, recoveryErr
 		}
 	}
+	_, normalized, unresolved := gw.RelocationSnapshot()
+	if unresolved && normalized.State == git.RelocationRecoveryCleanupReady {
+		claim, claimErr := gw.ClaimRelocationSource()
+		if claimErr != nil {
+			return git.CleanupStateUnknown, claimErr
+		}
+		return gw.CleanupClaimedRepoGone(claim)
+	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
 	}
 	return state, cleanupErr
+}
+
+func ghostRestoredWorktreeRemovable(data *session.InstanceData) bool {
+	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
 }
 
 // ghostTmuxNames returns the deduped, ordered set of tmux session names a ghost

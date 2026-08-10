@@ -811,21 +811,23 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 // See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
 	if err := i.ValidateWorktreeDestructionAdmission(); err != nil {
-		return fmt.Errorf("kill refused before pane teardown: %w", err)
+		return errors.Join(
+			fmt.Errorf("kill refused before pane teardown: %w", err),
+			ErrWorkspaceStateUnknown,
+		)
 	}
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw != nil && gw.CleanupRetryPending() {
-		return fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
+	mode, preserveClaim, err := i.prepareKillTeardown()
+	if err != nil {
+		return err
 	}
+	defer preserveClaim()
 	// PR 2 of #930 gives an instance N tabs (agent + shell today), so Kill tears
 	// down each tab's session, not just the agent's. The kill mode kill-sessions
 	// every tab (waiting for each pane to exit before the worktree delete, #802),
 	// deletes the worktree, and clears the refs — see teardownTabs. Best-effort:
 	// a stuck tmux or a failed worktree cleanup only logs so the caller can still
 	// drop the record (#478/#802). Returns nil regardless.
-	return i.teardownTabs(teardownKill{})
+	return i.teardownTabs(mode)
 }
 
 // CloseAttachOnly releases this instance's hold on its tmux sessions — the

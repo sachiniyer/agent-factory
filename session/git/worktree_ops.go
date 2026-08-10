@@ -617,6 +617,97 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	return r.state(), nil
 }
 
+// Test seams for the repo-gone cleanup's final destructive boundary.
+var (
+	repoGoneCleanupTimeout        = localGitTimeout
+	repoGoneOriginProbe           = func(path string) error { _, err := os.Stat(path); return err }
+	repoGoneBeforeWriterReap      = func(string) {}
+	repoGoneBeforeRecursiveDelete = func(string) {}
+	repoGoneRemoveDirectory       = removeClaimedRepoGoneDirectory
+	repoGoneReapMatching          = reapWorktreeWritersMatching
+	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir
+)
+
+// CleanupClaimedRepoGone removes an archived worktree whose origin repository
+// no longer exists, using the cleanup-only claim created by a failed restore.
+// The claim is checked after pane teardown, writers are reaped before deletion,
+// and its identity stays claimed through an identity-anchored recursive delete.
+// Any refusal or deadline rematerializes durable recovery ownership.
+func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error) {
+	completed := false
+	defer func() {
+		if !completed {
+			g.PreserveRelocationClaim(claim)
+		}
+	}()
+
+	if err := g.RevalidateRelocationClaim(claim); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err)
+	}
+	if g.repoPath == "" {
+		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: repo path is empty")
+	}
+	if err := boundedRepoGoneOriginProbe(g.repoPath); err == nil {
+		return CleanupStateUnknown, fmt.Errorf(
+			"cannot use repo-gone cleanup for %s: origin repo %s exists again",
+			claim.Path, g.repoPath,
+		)
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		g.markCleanupStalledWithClaim(&claim)
+		completed = true
+		return CleanupStateUnknown, fmt.Errorf(
+			"cannot establish that origin repo %s is gone before cleaning %s: %w",
+			g.repoPath, claim.Path, err,
+		)
+	} else if !os.IsNotExist(err) {
+		return CleanupStateUnknown, fmt.Errorf(
+			"cannot establish that origin repo %s is gone before cleaning %s: %w",
+			g.repoPath, claim.Path, err,
+		)
+	}
+
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
+	if err := g.RevalidateRelocationClaim(claim); err != nil {
+		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err)
+	}
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		err := repoGoneRemoveDirectory(claim.Path, claim.identity)
+		if err == nil {
+			err = g.completeRemovedRelocationClaim(claim)
+		}
+		deleteDone <- err
+	}()
+	timer := time.NewTimer(repoGoneCleanupTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-deleteDone:
+		if err != nil {
+			revalidationErr := g.RevalidateRelocationClaim(claim)
+			return CleanupStateUnknown, errors.Join(
+				fmt.Errorf("failed to remove repo-gone worktree %s: %w", claim.Path, err),
+				revalidationErr,
+			)
+		}
+	case <-timer.C:
+		// The worker may be stuck in an uninterruptible filesystem syscall and
+		// cannot safely be killed. Its opened handles identify only the claimed
+		// tree, so it may finish in the background; the caller still returns and
+		// the durable record remains the retry/manual-recovery handle.
+		g.markCleanupStalledWithClaim(&claim)
+		completed = true
+		return CleanupStateUnknown, fmt.Errorf(
+			"repo-gone recursive deletion of %s did not finish within %s: %w",
+			claim.Path, repoGoneCleanupTimeout, context.DeadlineExceeded,
+		)
+	}
+	completed = true
+	return CleanupSettled, nil
+}
+
 // shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
 // directory itself after `git worktree remove -f` returned removeErr. It is the
 // #802/#726 decision tree documented at the call site.
@@ -711,6 +802,13 @@ func reapWorktreeWriters(worktreePath string) {
 	// The path exists (callers reap only after an os.Stat succeeds), so resolving
 	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
 	root := normalizeWorktreePath(worktreePath)
+	reapWorktreeWritersMatching(worktreePath, func(pid int) bool {
+		cwd, ok := proctree.WorkingDir(pid)
+		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+	})
+}
+
+func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	snap, err := proctree.Snapshot()
 	if err != nil {
 		// Could not READ the process table — never the same fact as "no writers"
@@ -728,14 +826,7 @@ func reapWorktreeWriters(worktreePath string) {
 		}
 	}
 	for pid := range snap {
-		cwd, ok := proctree.WorkingDir(pid)
-		if !ok {
-			// Foreign process (its cwd link is not readable) or already gone: it
-			// cannot be proven to be one of ours, and an unreadable cwd is never
-			// treated as a match — the honest-unknown rule this package enforces.
-			continue
-		}
-		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
+		if !matches(pid) {
 			continue
 		}
 		// Take the whole subtree of the matching process: a child of a
