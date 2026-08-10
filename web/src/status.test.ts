@@ -36,7 +36,7 @@ test("idle detail renders only mechanical reason values and observed churn age",
       }),
       now,
     ),
-    "idle: settled after pane change · pane changed 2h ago",
+    "pane changed · 2h ago",
   );
   assert.equal(
     idleReasonDetail(sess({ idle_reason: "something-later" as never, last_pane_churn_at: "bad" }), now),

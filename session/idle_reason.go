@@ -32,11 +32,11 @@ func (r IdleReason) Label() string {
 	case IdleReasonPromptNotDelivered:
 		return "prompt not delivered"
 	case IdleReasonDeliveryUnconfirmed:
-		return "delivery unconfirmed"
+		return "delivery unknown"
 	case IdleReasonNoPaneChangeSinceDelivery:
-		return "no pane change since delivery"
+		return "no change after delivery"
 	case IdleReasonSettledAfterPaneChange:
-		return "settled after pane change"
+		return "pane changed"
 	default:
 		return ""
 	}

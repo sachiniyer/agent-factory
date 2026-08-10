@@ -9956,20 +9956,21 @@ var IDLE_REASON_LABELS = {
   "process-exited": "process exited",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
-  "delivery-unconfirmed": "delivery unconfirmed",
-  "no-pane-change-since-delivery": "no pane change since delivery",
-  "settled-after-pane-change": "settled after pane change"
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
 };
 function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
   const label = idleReasonLabel(s.idle_reason);
   if (!label) {
     return "";
   }
-  let detail = `idle: ${label}`;
+  let detail = label;
   if (s.last_pane_churn_at) {
     const churn = new Date(s.last_pane_churn_at);
     if (!Number.isNaN(churn.getTime())) {
-      detail += ` \xB7 pane changed ${formatPaneChurnAge(churn, now)} ago`;
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
     }
   }
   return detail;

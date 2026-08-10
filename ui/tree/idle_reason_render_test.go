@@ -16,7 +16,7 @@ func TestIdleReasonDetailUsesOnlyProjectedFactAndPaneAge(t *testing.T) {
 	now := time.Date(2026, 8, 10, 15, 0, 0, 0, time.UTC)
 	churnAt := now.Add(-2*time.Hour - 10*time.Minute)
 	assert.Equal(t,
-		"idle: settled after pane change · pane changed 2h ago",
+		"pane changed · 2h ago",
 		idleReasonDetail(session.IdleReasonSettledAfterPaneChange, churnAt, now))
 	assert.Empty(t, idleReasonDetail(session.IdleReason("future-value"), churnAt, now))
 }
@@ -46,6 +46,6 @@ func TestInstanceRendererSurfacesIdleReasonBeforeBranch(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, secondary)
-	assert.Contains(t, secondary, "idle: no pane change since delivery")
-	assert.Less(t, strings.Index(secondary, "idle:"), strings.Index(secondary, "feature"))
+	assert.Contains(t, secondary, "no change after delivery")
+	assert.Less(t, strings.Index(secondary, "no change"), strings.Index(secondary, "feature"))
 }

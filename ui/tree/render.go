@@ -579,9 +579,14 @@ func idleReasonDetail(reason session.IdleReason, churnAt, now time.Time) string 
 	if label == "" {
 		return ""
 	}
-	detail := "idle: " + label
+	detail := label
 	if !churnAt.IsZero() {
-		detail += " · pane changed " + formatPaneChurnAge(churnAt, now) + " ago"
+		age := formatPaneChurnAge(churnAt, now) + " ago"
+		if reason == session.IdleReasonSettledAfterPaneChange {
+			detail += " · " + age
+		} else {
+			detail += " · pane changed " + age
+		}
 	}
 	return detail
 }
