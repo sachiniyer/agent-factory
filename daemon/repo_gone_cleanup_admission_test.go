@@ -292,16 +292,19 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	// restart would read from disk.
 	previousLateDelete := lateGhostDeleteSessionRecord
 	releaseOldFinalizer := make(chan struct{})
+	oldFinalizerDone := make(chan struct{})
 	oldFinalizerReleased := false
-	lateGhostDeleteSessionRecord = func(m *Manager, repoID, title, stableID string, teardownErr error) (bool, error) {
+	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
 		<-releaseOldFinalizer
-		return previousLateDelete(m, repoID, title, stableID, teardownErr)
+		close(oldFinalizerDone)
+		return false, nil
 	}
 	t.Cleanup(func() {
-		lateGhostDeleteSessionRecord = previousLateDelete
 		if !oldFinalizerReleased {
 			close(releaseOldFinalizer)
 		}
+		<-oldFinalizerDone
+		lateGhostDeleteSessionRecord = previousLateDelete
 	})
 
 	previousDeleteTimeout := session.InstanceDeleteLockTimeout
@@ -314,7 +317,7 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	record := recordFor(t, repoID, "ghost-crash-window")
 	require.NotNil(t, record)
 	require.NotNil(t, record.Worktree.RelocationRecovery)
-	assert.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
+	require.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
 		"the durable row must record that descriptor cleanup entered its finalization fence")
 
 	// A new daemon must finish the tombstone from the durable fence alone; it
