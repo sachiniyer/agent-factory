@@ -122,6 +122,20 @@ func learnPinnedMachine(sshCmd, currentAddr string, currentPort int) (string, in
 		return "", 0
 	}
 
+	// AND AN ADDRESS THE DAEMON ITSELF HOLDS IS STILL "ME", even when it is globally
+	// unicast. IsGlobalUnicast accepts private fleet addressing, which is what makes
+	// it the right predicate above — and also means it accepts 10.x or 172.16.x
+	// addresses that may be the DAEMON'S OWN, or that route to another ssh service on
+	// this host. The reachability probe below would then succeed against the wrong
+	// machine, and shared keys and credentials make that silent. So an address
+	// assigned to any local interface is refused too.
+	if daemonHoldsAddressFn(ip) {
+		log.WarningLog.Printf("backend=ssh: the remote reports its address as %s, which is an address this "+
+			"daemon itself holds — so it identifies the daemon's own host rather than the backend, however "+
+			"globally routable it looks. This session stays pinned to %s (#3122)", addr, currentAddr)
+		return "", 0
+	}
+
 	// REACHABILITY IS NOT A GIVEN, and this is the limit of the approach. A backend
 	// behind a cloud balancer may report a private address the daemon cannot route
 	// to — a different VPC, a NAT boundary. Pinning to it would turn a working
@@ -170,32 +184,42 @@ func parseSSHConnectionServerAddr(raw string) (net.IP, int, bool) {
 	return ip, port, true
 }
 
-// sshPinnedCleanupTarget reads the machine a persisted handle pins to.
+// sshPinnedCleanupTarget reads the machine a persisted handle pins to, from the
+// one field that carries it. See SSHRuntimeCleanupData.DialAddress for why it is
+// one field and not two.
 //
-// DialEndpoint wins when present, because it is the only field that carries a
-// port; DialAddress alone means "#3118's address pin, on the configured port",
-// which is every handle written before machine-pinning and every handle whose
-// pinned port matched anyway. A malformed endpoint falls back to the address
-// rather than refusing: a teardown that will not compose leaks the workspace it
-// exists to remove (the #3044 lesson).
+// A bare address means "#3086's address pin, on the configured port", which is
+// every handle written before machine-pinning. A "host:port" value is a machine
+// pin. A value that is neither still PINS — the composer emits a relay for it, the
+// dial fails, and the reap is retained and retried. It must never fall through to
+// an unpinned name-based command: behind the multi-backend VIP this exists to fix,
+// that reaps whichever backend answers and retires the tombstone.
 func sshPinnedCleanupTarget(d *SSHRuntimeCleanupData) (string, int) {
 	if d == nil {
 		return "", 0
 	}
-	if ep := strings.TrimSpace(d.DialEndpoint); ep != "" {
-		if host, portText, err := net.SplitHostPort(ep); err == nil {
-			if port, convErr := strconv.Atoi(portText); convErr == nil && port > 0 && port <= 65535 &&
-				strings.TrimSpace(host) != "" {
-				return host, port
-			}
-		}
+	pin := strings.TrimSpace(d.DialAddress)
+	if pin == "" {
+		return "", 0
 	}
-	return d.DialAddress, 0
+	host, portText, err := net.SplitHostPort(pin)
+	if err != nil {
+		// A bare address, of either family: SplitHostPort refuses both "198.51.100.8"
+		// (no port) and "2001:db8::1" (too many colons), which is exactly the legacy
+		// spelling. Measured for both.
+		return pin, 0
+	}
+	port, convErr := strconv.Atoi(portText)
+	if convErr != nil || port <= 0 || port > 65535 || strings.TrimSpace(host) == "" {
+		// Structured like an endpoint but unusable. Keep pinning to the raw value so
+		// the dial fails and the record is retained, rather than silently unpinning.
+		return pin, 0
+	}
+	return host, port
 }
 
-// sshRecordPinnedMachine fills in the pin fields of a cleanup handle so that BOTH
-// this daemon and one rolled back to a release without DialEndpoint read it
-// safely. See DialEndpoint for why that asymmetry exists.
+// sshRecordPinnedMachine writes the pin into a cleanup handle so that this daemon
+// and one rolled back to a release without machine-pinning both read it safely.
 func sshRecordPinnedMachine(cleanup *SSHRuntimeCleanupData, dialAddr string, dialPort, configuredPort int) {
 	if strings.TrimSpace(dialAddr) == "" {
 		return
@@ -204,50 +228,40 @@ func sshRecordPinnedMachine(cleanup *SSHRuntimeCleanupData, dialAddr string, dia
 	if effective == 0 {
 		effective = configuredPort
 	}
-	cleanup.DialEndpoint = net.JoinHostPort(dialAddr, strconv.Itoa(effective))
 	if effective == configuredPort {
-		// Only here can an older daemon, which appends the configured port itself,
-		// reach the same machine — so it keeps a pin it reads correctly.
+		// An older release appends the configured port itself, so the bare address
+		// reaches the same machine there. Keep the spelling it understands.
 		cleanup.DialAddress = dialAddr
 		return
 	}
-
-	// OTHERWISE, FENCE THE RECORD so an older reader REFUSES it rather than reaping
-	// with it. Leaving DialAddress empty is not enough and was the first attempt:
-	// that reader then sees an unpinned handle and dials the NAME, which behind a
-	// multi-backend VIP is the silent wrong-machine reap this whole issue is about —
-	// `rm -rf` succeeds having removed nothing, the tombstone is retired, and the
-	// real workspace leaks permanently. Writing DialAddress is no better: that reader
-	// appends the CONFIGURED port and can reach a different fleet member.
-	//
-	// Neither encoding can be read safely, so the record must not be read at all. A
-	// reader without DialEndpoint validates `RemotePID != "" && !positivePID(...)`
-	// and turns a failure into unavailableRuntimeCleanup — ErrWorkspaceStateUnknown,
-	// which RETAINS the record and retries. So RemotePID carries a deliberately
-	// non-numeric sentinel and the real pid moves to AgentPID, which that reader
-	// ignores. Retained-and-retried beats silently-wrong-and-retired; the same
-	// fail-closed shape docker's EngineID uses for a legacy tombstone.
-	//
-	// This daemon reads the pid through sshCleanupRemotePID and is unaffected.
-	cleanup.AgentPID = cleanup.RemotePID
-	cleanup.RemotePID = sshRollbackFencePID
+	// The port differs, so no bare address is safe for a release that would pair it
+	// with the configured port. This spelling makes that release fail to dial and
+	// RETAIN the record — with the machine still recorded, because it round-trips
+	// this field intact.
+	cleanup.DialAddress = net.JoinHostPort(dialAddr, strconv.Itoa(effective))
 }
 
-// sshRollbackFencePID is the sentinel that makes a machine-pinned record
-// unreadable to a daemon predating #3122. It is deliberately non-numeric so
-// positivePID refuses it, and self-describing so a person reading the record or a
-// bug report sees why.
-const sshRollbackFencePID = "machine-pinned-see-3122"
+// daemonHoldsAddressFn is the seam the positive test needs: any address a test can
+// bind a listener on is, by definition, one this daemon holds — so "a reachable
+// machine that is NOT me" cannot be built locally. The guard's OWN cases use the
+// real implementation; only the positive case substitutes.
+var daemonHoldsAddressFn = daemonHoldsAddress
 
-// sshCleanupRemotePID is the remote agent-server pid, from wherever this record
-// keeps it. AgentPID wins because its presence means RemotePID holds the rollback
-// fence rather than a pid.
-func sshCleanupRemotePID(d *SSHRuntimeCleanupData) string {
-	if d == nil {
-		return ""
+// daemonHoldsAddress reports whether ip is assigned to one of this host's own
+// interfaces, which disqualifies it as a remote machine's identity.
+//
+// A lookup failure answers TRUE — refusing the pin — because the question being
+// asked is "can I prove this is somewhere else", and an unproven answer must not
+// authorise pinning every step, including the reap, at it.
+func daemonHoldsAddress(ip net.IP) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
 	}
-	if pid := strings.TrimSpace(d.AgentPID); pid != "" {
-		return pid
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.Equal(ip) {
+			return true
+		}
 	}
-	return d.RemotePID
+	return false
 }

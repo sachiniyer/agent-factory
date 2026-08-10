@@ -69,25 +69,30 @@ type SSHRuntimeCleanupData struct {
 	// the current mechanism. An empty value — a record written before #3090, or
 	// between #3100 and this change, or one whose provision could not settle on an
 	// address — dials the name, exactly as it always did.
-	DialAddress string `json:"dial_address,omitempty"`
-	// DialEndpoint is a pinned MACHINE as "host:port" (#3122). Behind an L4 balancer
-	// the backend listens on a different port than its VIP is reached on, so the port
-	// has to travel with the address.
+	// DialAddress is the machine this session was provisioned on, and the ONE field
+	// that carries the pin. Two spellings, both of which every release reads or
+	// round-trips safely:
 	//
-	// IT IS A SEPARATE FIELD BECAUSE A DAEMON CAN BE ROLLED BACK. A release that
-	// predates this ignores an unknown key but still honours DialAddress, and would
-	// relay to the machine's address on the CONFIGURED port — a port that machine may
-	// not serve, or worse, one where some other shared-key ssh service answers and a
-	// reap runs against the wrong host. So when the pinned port is NOT the configured
-	// one, DialAddress is deliberately left EMPTY: an older daemon then sees an
-	// unpinned handle and dials by name, exactly as it did before any of this, which
-	// is safe. Both are written only when they agree, so a rollback keeps the pin it
-	// can read correctly. See sshPinnedCleanupTarget for the reading side.
-	DialEndpoint string `json:"dial_endpoint,omitempty"`
-	// AgentPID carries the remote agent-server's pid when the ROLLBACK FENCE below
-	// is engaged, because the fence works by making RemotePID unreadable to an older
-	// reader. Empty means RemotePID holds it, which is every other handle.
-	AgentPID            string `json:"agent_pid,omitempty"`
+	//	"198.51.100.8"    an ADDRESS pin (#3086/#3118), reached on the configured port
+	//	"198.51.100.8:22" a MACHINE pin (#3122), carrying the port that machine serves
+	//
+	// The second spelling exists because behind an L4 balancer the backend listens on
+	// a different port than its VIP is reached on, so the port has to travel with the
+	// address. It is deliberately NOT a separate field: a daemon rolled back to a
+	// release without it would DROP that field on its next checkpoint — the pin and
+	// the machine gone for good — while still honouring a bare DialAddress and
+	// reaping some other backend. One field it already knows round-trips intact.
+	//
+	// And it fails closed there: that release appends the configured port itself, so
+	// "198.51.100.8:22" becomes an unresolvable "[198.51.100.8:22]:2200", the relay
+	// cannot dial, ssh exits 255, and the record is RETAINED and retried rather than
+	// reaping the wrong machine. Measured. Retained-and-retried beats
+	// silently-wrong-and-retired.
+	//
+	// A bare address is written whenever the machine's port IS the configured one, so
+	// an older release keeps a pin it reads correctly. See sshRecordPinnedMachine and
+	// sshPinnedCleanupTarget.
+	DialAddress         string `json:"dial_address,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
 
@@ -229,9 +234,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		if data.SSH == nil || strings.TrimSpace(data.SSH.Config.Host) == "" || strings.TrimSpace(data.SSH.SessionDir) == "" {
 			return nil, nil, fmt.Errorf("ssh cleanup handle is missing its host or remote session directory")
 		}
-		remotePID := sshCleanupRemotePID(data.SSH)
-		if remotePID != "" && !positivePID(remotePID) {
-			return nil, nil, fmt.Errorf("ssh cleanup handle has invalid remote pid %q", remotePID)
+		if data.SSH.RemotePID != "" && !positivePID(data.SSH.RemotePID) {
+			return nil, nil, fmt.Errorf("ssh cleanup handle has invalid remote pid %q", data.SSH.RemotePID)
 		}
 		cleanup := *data.SSH
 		// A handle persisted before #3044 may embed one port and carry another.
@@ -256,7 +260,7 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		p := newSSHSandboxProvisioner(ProvisionSpec{Title: title}, sshCmd, "", "")
 		p.sessionDir = data.SSH.SessionDir
-		p.remotePID = remotePID
+		p.remotePID = data.SSH.RemotePID
 		// The accept-new store is prepared inside each ATTEMPT, never here: this
 		// function composes a closure while persisted instances are being loaded,
 		// and a transiently unwritable AF home must not be captured as a permanently

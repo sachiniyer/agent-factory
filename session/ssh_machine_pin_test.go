@@ -87,6 +87,14 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 	}
 
 	t.Run("a different, reachable machine is pinned", func(t *testing.T) {
+		// The listener below is necessarily on a LOCAL address, which the guard
+		// correctly refuses — so this one case pretends the address is somewhere else.
+		// Everything the guard actually decides is asserted against the real
+		// implementation in the subtest below.
+		prev := daemonHoldsAddressFn
+		daemonHoldsAddressFn = func(net.IP) bool { return false }
+		defer func() { daemonHoldsAddressFn = prev }()
+
 		addr, port := learnPinnedMachine(
 			stubTransport(fmt.Sprintf("10.0.0.1 5 %s %d", host, reachablePort)), "198.51.100.7", 22)
 		assert.Equal(t, host, addr)
@@ -140,12 +148,19 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 		}()
 		selfPort := self.Addr().(*net.TCPAddr).Port
 
-		for name, reported := range map[string]string{
+		reported := map[string]string{
 			"loopback":      fmt.Sprintf("10.0.0.1 5 127.0.0.1 %d", selfPort),
 			"unspecified":   "10.0.0.1 5 0.0.0.0 22",
 			"link-local":    "10.0.0.1 5 169.254.1.1 22",
 			"IPv6 loopback": "10.0.0.1 5 ::1 22",
-		} {
+		}
+		// A GLOBALLY UNICAST address this daemon itself holds is still "me".
+		// IsGlobalUnicast accepts private fleet addressing, which is what makes it the
+		// right predicate — and also means it accepts a 10.x/172.16.x address that may
+		// be the daemon's own, where the reachability probe would succeed against the
+		// wrong machine and shared keys would make it silent.
+		reported["an address this daemon holds"] = fmt.Sprintf("10.0.0.1 5 %s 22", globalUnicastLocalAddr(t))
+		for name, reported := range reported {
 			t.Run(name, func(t *testing.T) {
 				addr, port := learnPinnedMachine(stubTransport(reported), "203.0.113.5", 22)
 				assert.Empty(t, addr, "%s is not a portable machine identity", name)
@@ -203,13 +218,13 @@ func TestRestoredHandleReapsTheMachineItRecorded(t *testing.T) {
 	raw, err := json.Marshal(&RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 		Config:              config.SSHConfig{Host: "vip.example", Port: 2200},
 		SessionDir:          "/root/.af-sessions/x.AbCdEf",
-		DialEndpoint:        "10.0.0.9:22",
+		DialAddress:         "10.0.0.9:22",
 		HostKeyVerification: config.SSHHostKeyStrict,
 	}})
 	require.NoError(t, err)
 	var back RuntimeCleanupData
 	require.NoError(t, json.Unmarshal(raw, &back))
-	require.Equal(t, "10.0.0.9:22", back.SSH.DialEndpoint,
+	require.Equal(t, "10.0.0.9:22", back.SSH.DialAddress,
 		"the port must survive the round trip, or the reap dials the VIP")
 
 	backend, _, err := restoreRuntimeCleanup("vip", "ssh", &back)
@@ -252,87 +267,92 @@ func globalUnicastLocalAddr(t *testing.T) string {
 	return ""
 }
 
-// A pinned machine must not hand a ROLLED-BACK daemon a target it will misread.
+// A pinned machine must survive a daemon ROLLBACK — both the reading of it and
+// the record itself.
 //
-// A release without DialEndpoint ignores it but still honours DialAddress, and
-// appends the CONFIGURED port itself. So DialAddress may only be written when the
-// pinned port IS the configured port; otherwise the older daemon would relay to
-// the machine on a port it may not serve — or one where another shared-key ssh
-// service answers and a reap runs against the wrong host.
-func TestPinnedMachineIsRecordedSafelyForAnOlderDaemon(t *testing.T) {
-	t.Run("a different port FENCES the record", func(t *testing.T) {
-		c := SSHRuntimeCleanupData{RemotePID: "4242"}
+// A release without machine-pinning DROPS any field it does not know on its next
+// checkpoint, so a pin kept in a new field would be gone for good after one
+// old-daemon restart, leaving no handle at all. The pin therefore lives in
+// DialAddress, which that release round-trips intact, in a spelling it cannot
+// misuse.
+func TestPinnedMachineSurvivesADaemonRollback(t *testing.T) {
+	t.Run("a differing port is spelled so an older release cannot misuse it", func(t *testing.T) {
+		var c SSHRuntimeCleanupData
 		sshRecordPinnedMachine(&c, "10.0.0.9", 22, 2200)
-		assert.Equal(t, "10.0.0.9:22", c.DialEndpoint)
+		assert.Equal(t, "10.0.0.9:22", c.DialAddress,
+			"an older release appends the CONFIGURED port itself, so this becomes an unresolvable "+
+				"[10.0.0.9:22]:2200, the relay cannot dial, ssh exits 255 and the record is RETAINED — "+
+				"rather than reaching some other backend and retiring the tombstone")
 
-		// Neither encoding can be read safely by a daemon without DialEndpoint:
-		// an empty DialAddress makes it dial the NAME — the VIP — which is the silent
-		// wrong-machine reap this issue is about; writing DialAddress makes it append
-		// the CONFIGURED port and possibly reach a different fleet member. So the
-		// record is made unreadable to it instead.
-		assert.Equal(t, sshRollbackFencePID, c.RemotePID,
-			"an older reader validates RemotePID and turns a failure into ErrWorkspaceStateUnknown, which "+
-				"RETAINS and retries rather than reaping with a target it cannot interpret")
-		assert.False(t, positivePID(c.RemotePID), "the fence only works if the old validator refuses it")
-		assert.Equal(t, "4242", c.AgentPID, "and the real pid must survive for readers that understand it")
+		// It is the ONLY field, so nothing is lost when a release that does not
+		// understand it re-serialises the record.
+		round := roundTripThroughOlderDaemon(t, c)
+		assert.Equal(t, "10.0.0.9:22", round.DialAddress, "the machine must survive an old daemon's checkpoint")
 
-		// This daemon is unaffected: it reads the machine and the pid back.
-		addr, port := sshPinnedCleanupTarget(&c)
+		addr, port := sshPinnedCleanupTarget(&round)
 		assert.Equal(t, "10.0.0.9", addr)
 		assert.Equal(t, 22, port)
-		assert.Equal(t, "4242", sshCleanupRemotePID(&c))
 	})
 
-	t.Run("a fenced record still restores and reaps HERE", func(t *testing.T) {
-		t.Setenv("HOME", t.TempDir())
-		defer SetSSHRelayBinaryForTest("/opt/af/af")()
-
-		c := SSHRuntimeCleanupData{
-			Config:              config.SSHConfig{Host: "vip.example", Port: 2200},
-			SessionDir:          "/root/.af-sessions/x.AbCdEf",
-			RemotePID:           "4242",
-			HostKeyVerification: config.SSHHostKeyStrict,
-		}
-		sshRecordPinnedMachine(&c, "10.0.0.9", 22, 2200)
-
-		backend, _, err := restoreRuntimeCleanup("fenced", "ssh", &RuntimeCleanupData{SSH: &c})
-		require.NoError(t, err, "the fence must stop OLDER readers, not this one")
-		sb, ok := backend.(*sshBackend)
-		require.True(t, ok)
-		assert.Equal(t, "4242", sb.provisioner.remotePID, "the identity-checked kill still needs the real pid")
-		assert.Contains(t, proxyCommandValue(t, sb.provisioner.sshCmd), "ssh-relay '10.0.0.9' 22")
-	})
-
-	t.Run("a matching port writes both", func(t *testing.T) {
-		c := SSHRuntimeCleanupData{RemotePID: "4242"}
+	t.Run("a matching port keeps the spelling an older release reads correctly", func(t *testing.T) {
+		var c SSHRuntimeCleanupData
 		sshRecordPinnedMachine(&c, "10.0.0.9", 2200, 2200)
-		assert.Equal(t, "10.0.0.9:2200", c.DialEndpoint)
 		assert.Equal(t, "10.0.0.9", c.DialAddress,
-			"here an older daemon appends the same port and reaches the same machine, so it keeps a pin")
-		assert.Equal(t, "4242", c.RemotePID, "and needs no fence, so its pid stays where it has always been")
-		assert.Empty(t, c.AgentPID)
+			"here it appends the same port and reaches the same machine, so it keeps a usable pin")
+		addr, port := sshPinnedCleanupTarget(&c)
+		assert.Equal(t, "10.0.0.9", addr)
+		assert.Zero(t, port, "zero means the configured port")
 	})
 
-	t.Run("an address pin with no port is unchanged", func(t *testing.T) {
+	t.Run("an address pin from before #3122 is unchanged", func(t *testing.T) {
 		var c SSHRuntimeCleanupData
 		sshRecordPinnedMachine(&c, "198.51.100.8", 0, 2200)
 		assert.Equal(t, "198.51.100.8", c.DialAddress)
 		addr, port := sshPinnedCleanupTarget(&c)
 		assert.Equal(t, "198.51.100.8", addr)
-		assert.Equal(t, 2200, port)
-	})
-
-	t.Run("a handle from before #3122 reads as an address pin", func(t *testing.T) {
-		addr, port := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{DialAddress: "198.51.100.8"})
-		assert.Equal(t, "198.51.100.8", addr)
-		assert.Zero(t, port, "zero means the configured port, which is what that handle always meant")
-	})
-
-	t.Run("a malformed endpoint falls back rather than refusing", func(t *testing.T) {
-		// A teardown that will not compose leaks the workspace it exists to remove.
-		addr, port := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{
-			DialEndpoint: "not-an-endpoint", DialAddress: "198.51.100.8"})
-		assert.Equal(t, "198.51.100.8", addr)
 		assert.Zero(t, port)
 	})
+
+	t.Run("legacy bare addresses of BOTH families read as address pins", func(t *testing.T) {
+		// SplitHostPort refuses both spellings, which is what makes the two forms
+		// distinguishable without a version marker.
+		for _, bare := range []string{"198.51.100.8", "2001:db8::1"} {
+			addr, port := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{DialAddress: bare})
+			assert.Equal(t, bare, addr)
+			assert.Zero(t, port)
+		}
+	})
+
+	t.Run("an unusable pin still PINS rather than unpinning", func(t *testing.T) {
+		// Falling back to a name-based command behind a multi-backend VIP is the very
+		// leak this fixes: it would reap whichever backend answered and retire the
+		// tombstone. Keeping the pin makes the dial fail and the record retry.
+		for _, broken := range []string{"10.0.0.9:not-a-port", "10.0.0.9:0", ":22"} {
+			addr, _ := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{DialAddress: broken})
+			assert.NotEmpty(t, addr, "%q must still produce a pin, so the reap fails closed", broken)
+		}
+	})
+}
+
+// roundTripThroughOlderDaemon models what a release without machine-pinning does
+// to a record: it decodes into a struct lacking any newer field and re-encodes,
+// silently dropping what it did not know.
+func roundTripThroughOlderDaemon(t *testing.T, c SSHRuntimeCleanupData) SSHRuntimeCleanupData {
+	t.Helper()
+	type olderRecord struct {
+		Config              config.SSHConfig `json:"config"`
+		SessionDir          string           `json:"session_dir"`
+		RemotePID           string           `json:"remote_pid,omitempty"`
+		DialAddress         string           `json:"dial_address,omitempty"`
+		HostKeyVerification string           `json:"host_key_verification,omitempty"`
+	}
+	raw, err := json.Marshal(&c)
+	require.NoError(t, err)
+	var older olderRecord
+	require.NoError(t, json.Unmarshal(raw, &older))
+	reserialised, err := json.Marshal(&older)
+	require.NoError(t, err)
+	var back SSHRuntimeCleanupData
+	require.NoError(t, json.Unmarshal(reserialised, &back))
+	return back
 }
