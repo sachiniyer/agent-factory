@@ -227,7 +227,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		teardownErr, lateCleanup = ghostCleanup(data, req.Title)
 		if session.TeardownStateUnknown(teardownErr) {
 			recovery := data.Worktree.RelocationRecovery
-			if lateCleanup != nil || recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled {
+			descriptorStalled := lateCleanup != nil || recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled
+			if descriptorStalled {
 				m.markGhostCleanupStalled(key, targetID)
 				if recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled {
 					if persistErr := m.persistGhostCleanupStall(repoID, data); persistErr != nil {
@@ -247,8 +248,12 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			// but the next attempt has to come from the user. A descriptor worker that
 			// merely outlived its deadline is not retried: its one definitive result
 			// is reconciled above.
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but no second teardown will start automatically (a ghost has no live instance for the poll to visit) — retry after a daemon restart if it remains: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)
+			if descriptorStalled {
+				log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
+				return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)
+			}
+			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
 		}
 	}
 
