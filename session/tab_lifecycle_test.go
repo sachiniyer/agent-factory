@@ -500,3 +500,35 @@ func TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab(t *testing.T) {
 	instance.appendPendingMetadataTabsLocked()
 	require.Len(t, instance.Tabs, 2, "a retried launch must not duplicate the restored tab")
 }
+
+// A sandbox recovery that fails BEFORE Launch leaves restored rows staged and
+// undrained. Both failure paths then persist whatever ToInstanceData returned, so
+// serializing only i.Tabs would write an empty roster and lose the tab permanently
+// — destroying the durability this restore exists to provide (#3062).
+func TestToInstanceData_PersistsStagedTabsWhenRecoveryFailsBeforeLaunch(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Empty(t, instance.Tabs, "premise: nothing is drained yet — this is the pre-Launch state")
+	require.Len(t, instance.pendingMetadataTabs, 1)
+
+	// What the failure paths persist.
+	round := instance.ToInstanceData()
+
+	var web *TabData
+	for i := range round.Tabs {
+		if round.Tabs[i].Kind == TabKindWeb {
+			web = &round.Tabs[i]
+		}
+	}
+	require.NotNil(t, web, "a staged tab must survive a recovery that failed before Launch")
+	require.Equal(t, "https://example.com/app", web.URL, "with its target, or it comes back empty")
+	require.Equal(t, "t1", web.ID, "and its stable id, so it is the same tab and not a new one")
+}

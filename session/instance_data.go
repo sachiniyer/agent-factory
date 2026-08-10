@@ -98,6 +98,14 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// each local tab's tmux session by its exact persisted name. An off-box
 	// session's fixed Agent tab has no daemon-side tmux, so it serializes with an
 	// empty TmuxName and is re-seeded when the AgentServer is launched.
+	// Staged-but-undrained tabs are part of the roster too. A sandbox recovery that
+	// fails BEFORE Launch leaves restored rows only in pendingMetadataTabs, and both
+	// failure paths then persist whatever ToInstanceData returned — so serializing
+	// only i.Tabs would write an empty roster and lose the tab permanently, which is
+	// the durability this restore exists to provide (#3062).
+	for _, td := range i.pendingMetadataTabs {
+		data.Tabs = append(data.Tabs, td)
+	}
 	for _, tab := range i.Tabs {
 		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
