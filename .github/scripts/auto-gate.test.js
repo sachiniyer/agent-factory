@@ -166,6 +166,39 @@ test("a read-only fork token leaves the decision unreported without failing the 
   );
 });
 
+test("a non-allowed author gets a passing manual decision without an automatic merge", async () => {
+  const github = fakeGateGithub({
+    author: "detail-app",
+    files: ["app/termpane.go"],
+    issueComments: [],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.equal(transaction.aggregate.ok, true);
+  assert.equal(github.mergedWith, null);
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "success");
+  assert.match(
+    exactDecision.output.summary,
+    /Auto Gate does not auto-merge PRs from this author; a maintainer must review and merge manually\./,
+  );
+  assert.match(exactDecision.output.summary, /missing the play-tested label/);
+  assert.match(exactDecision.output.summary, /Codex has not reviewed head/);
+  assert.doesNotMatch(exactDecision.output.summary, /not an allowed maintainer/);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+});
+
 test("a PR cannot read another PR's decision when both share one head", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -1264,6 +1297,7 @@ async function evaluateGate(options = {}) {
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
+  author = "sachiniyer",
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -1372,7 +1406,7 @@ function fakeGateGithub({
             merged: pullRequestOverride.merged ?? merged,
             mergeable: pullRequestOverride.mergeable || mergeable,
             mergeStateStatus: pullRequestOverride.mergeStateStatus || mergeStateStatus,
-            author: { login: "sachiniyer" },
+            author: { login: author },
             labels: { nodes: [] },
             commits: {
               nodes: [{ commit: { committedDate: headCommittedDate } }],

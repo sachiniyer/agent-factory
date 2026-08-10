@@ -57,6 +57,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const pr = await getPullRequest({ github, context, number });
   const reasons = [];
   const notes = [];
+  const manualMergeRequired = !ALLOWED_AUTHORS.has(pr.author);
 
   core.info(`Evaluating auto-gate for PR #${pr.number}: ${pr.title}`);
   core.info(`PR URL: ${pr.url}`);
@@ -74,10 +75,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 
   if (pr.isDraft) {
     reasons.push("PR is a draft");
-  }
-
-  if (!ALLOWED_AUTHORS.has(pr.author)) {
-    reasons.push(`author ${pr.author || "(unknown)"} is not an allowed maintainer/app`);
   }
 
   const baseRepository = `${context.repo.owner}/${context.repo.repo}`;
@@ -139,7 +136,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
-    shouldMerge: reasons.length === 0,
+    shouldMerge: !manualMergeRequired && reasons.length === 0,
+    manualMergeRequired,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
@@ -182,18 +180,27 @@ async function reportDecision({ github, context, core, result, manual = false })
         run.app?.id === GITHUB_ACTIONS_APP_ID,
     )
     .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+  const decisionPasses = result.shouldMerge || result.manualMergeRequired;
   const state =
-    manual && !priorDecision ? "never-ran" : result.shouldMerge ? "pass" : "waiting";
+    manual && !priorDecision
+      ? "never-ran"
+      : result.manualMergeRequired
+        ? "manual"
+        : result.shouldMerge
+          ? "pass"
+          : "waiting";
   const title =
     state === "never-ran"
-      ? `NEVER_RAN: no prior decision; recovery ${result.shouldMerge ? "passed" : "is waiting"}`
-      : result.shouldMerge
-        ? "PASS: Auto Gate requirements are satisfied"
-        : "WAITING: Auto Gate requirements are not yet satisfied";
+      ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
+      : result.manualMergeRequired
+        ? "PASS: maintainer review and manual merge required"
+        : result.shouldMerge
+          ? "PASS: Auto Gate requirements are satisfied"
+          : "WAITING: Auto Gate requirements are not yet satisfied";
 
   const decision = {
     status: "completed",
-    conclusion: result.shouldMerge ? "success" : "failure",
+    conclusion: decisionPasses ? "success" : "failure",
     output: {
       title,
       summary: result.summary,
@@ -379,6 +386,7 @@ async function processAggregateHead({
     return { state: "read-only", pending };
   }
 
+  let manualMergeRequired = false;
   for (const prNumber of pending.pullNumbers) {
     const result = await evaluate({ github, context, core, prNumber, setOutputs: false });
     if (evaluationFailed(result)) {
@@ -393,6 +401,7 @@ async function processAggregateHead({
       );
       return { state: "association-changed", pending };
     }
+    manualMergeRequired ||= Boolean(result.manualMergeRequired);
     const write = await reportDecision({ github, context, core, result, manual });
     if (write.state === "read-only") {
       return { state: "read-only", pending };
@@ -408,6 +417,13 @@ async function processAggregateHead({
   });
   if (aggregate.writeState === "read-only" || !aggregate.ok || !mergeEnabled) {
     return { state: aggregate.state, pending, aggregate };
+  }
+  if (manualMergeRequired) {
+    core.notice(
+      `Leaving aggregate ${pending.headSha} green for maintainer merge; ` +
+        "Auto Gate does not auto-merge every associated PR author.",
+    );
+    return { state: "manual", pending, aggregate };
   }
 
   const targetNumbers = new Set(
@@ -1331,10 +1347,22 @@ function parseTimestamp(value) {
 }
 
 function finish(core, setOutputs, result) {
-  const summary =
-    result.reasons.length === 0
-      ? `PASS: ${result.notes.join("; ")}`
-      : `BLOCKED: ${result.reasons.join("; ")}`;
+  let summary;
+  if (result.manualMergeRequired) {
+    const manual =
+      "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
+      "merge manually.";
+    const unmet =
+      result.reasons.length === 0
+        ? ""
+        : `\n\nUnmet automatic-merge requirements:\n- ${result.reasons.join("\n- ")}`;
+    summary = `PASS: ${manual}${unmet}`;
+  } else {
+    summary =
+      result.reasons.length === 0
+        ? `PASS: ${result.notes.join("; ")}`
+        : `BLOCKED: ${result.reasons.join("; ")}`;
+  }
 
   if (result.reasons.length === 0) {
     core.notice(summary);
