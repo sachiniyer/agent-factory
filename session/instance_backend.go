@@ -260,7 +260,7 @@ func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	}
 	if recovery.State == git.RelocationRecoveryCleanupReady {
 		if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
-			return fmt.Errorf("cleanup-ready worktree identity at %s is no longer valid: %w", path, err)
+			return fmt.Errorf("cleanup-ready worktree at %s is not admissible for repo-gone destruction: %w", path, err)
 		}
 		return nil
 	}

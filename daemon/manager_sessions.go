@@ -8,7 +8,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // errSessionNotFound classifies only a resolver's authoritative miss. Its text
@@ -114,12 +113,13 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 				req.Title, admissionErr,
 			)
 		}
-	} else if data != nil && data.Worktree.RelocationRecovery != nil &&
-		data.Worktree.RelocationRecovery.State != sessiongit.RelocationRecoveryCleanupStalled {
-		return session.InstanceData{}, fmt.Errorf(
-			"kill of ghost session %q was not started because its persisted worktree recovery state %q is unresolved; nothing was changed — retry archive or restore before destructive cleanup",
-			req.Title, data.Worktree.RelocationRecovery.State,
-		)
+	} else if data != nil {
+		if admissionErr := validateGhostWorktreeDestructionAdmission(data); admissionErr != nil {
+			return session.InstanceData{}, fmt.Errorf(
+				"kill of ghost session %q was not started because its persisted worktree recovery is not safe to consume; nothing was changed — retry archive or restore before destructive cleanup: %w",
+				req.Title, admissionErr,
+			)
+		}
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the

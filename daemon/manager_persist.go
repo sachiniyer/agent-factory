@@ -330,6 +330,65 @@ func ghostWorktreeRemovable(data *session.InstanceData) bool {
 	return err == nil && ghostRestoredWorktreeRemovable(&restored)
 }
 
+// validateGhostWorktreeDestructionAdmission is the persisted-row twin of
+// Instance.ValidateWorktreeDestructionAdmission. A cleanup-ready ghost has no
+// live GitWorktree on which the manager can run the normal pre-tombstone guard,
+// so reconstruct only its recovery handle, normalize restart state, and validate
+// the exact archive identity and still-missing origin before committing the kill.
+func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error {
+	recovery := data.Worktree.RelocationRecovery
+	if recovery == nil {
+		return nil
+	}
+	if recovery.State == git.RelocationRecoveryCleanupStalled && !recovery.IdentityKnown {
+		// Preserve the existing generic-cleanup retry admission. It carries no
+		// repo-gone deletion identity and is outside this specialized consumer.
+		return nil
+	}
+	if recovery.State != git.RelocationRecoveryCleanupReady &&
+		recovery.State != git.RelocationRecoveryCleanupStalled {
+		return fmt.Errorf("persisted worktree recovery state %q is unresolved", recovery.State)
+	}
+	restored, err := data.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return fmt.Errorf("restore cleanup ownership: %w", err)
+	}
+	if !ghostRestoredWorktreeRemovable(&restored) {
+		return fmt.Errorf("cleanup-ready recovery does not identify an AF-owned worktree")
+	}
+	branchCreatedByUs := false
+	if restored.Worktree.BranchCreatedByUs != nil {
+		branchCreatedByUs = *restored.Worktree.BranchCreatedByUs
+	}
+	gw, err := git.NewGitWorktreeFromStorage(
+		restored.Worktree.RepoPath,
+		restored.Worktree.WorktreePath,
+		restored.Worktree.SessionName,
+		restored.Worktree.BranchName,
+		restored.Worktree.BaseCommitSHA,
+		restored.Worktree.ExternalWorktree,
+		branchCreatedByUs,
+	)
+	if err != nil {
+		return fmt.Errorf("load cleanup-ready worktree: %w", err)
+	}
+	if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:         recovery.State,
+		AlternatePath: recovery.AlternatePath,
+		IdentityKnown: recovery.IdentityKnown,
+		Device:        recovery.Device,
+		Inode:         recovery.Inode,
+		FileType:      recovery.FileType,
+	}); err != nil {
+		return fmt.Errorf("restore cleanup-ready recovery: %w", err)
+	}
+	_, normalized, unresolved := gw.RelocationSnapshot()
+	if !unresolved || normalized.State != git.RelocationRecoveryCleanupReady {
+		return fmt.Errorf("persisted cleanup recovery normalized to non-admissible state %q", normalized.State)
+	}
+	return gw.ValidateRelocationCleanupAdmission()
+}
+
 var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
 	restored, restoreErr := data.RestoreRelocationRecoveryOriginals()
 	if restoreErr != nil {

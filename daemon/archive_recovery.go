@@ -80,3 +80,22 @@ func (m *Manager) prepareRepoGoneCleanup(
 	}
 	return nil
 }
+
+// persistRepoGoneAtRestoreUse handles the authoritative repo check immediately
+// before the worktree move. The git layer has already converted the live claim
+// into cleanup-ready ownership; persist that transition before reporting that
+// the repository disappeared after the daemon's earlier convenience guard.
+func (m *Manager) persistRepoGoneAtRestoreUse(
+	repoID, title string, instance *session.Instance, restoreErr error,
+) error {
+	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		return fmt.Errorf(
+			"cannot restore session %q because its origin repo disappeared before the worktree move, and could not persist the archived worktree recovery identity (%v): %w",
+			title, persistErr, restoreErr,
+		)
+	}
+	return fmt.Errorf(
+		"cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w",
+		title, instance.GetWorktreePath(), restoreErr,
+	)
+}

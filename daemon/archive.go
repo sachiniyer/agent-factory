@@ -733,7 +733,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	claimTransferred = true
 	if err := instance.RestoreArchivedWorktreeWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
-			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
+			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, instance, err)
 		}
 		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
 			// The bounded move may have reached either pathname before it was

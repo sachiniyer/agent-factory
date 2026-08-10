@@ -253,7 +253,21 @@ func (g *GitWorktree) RestoreWorktreeTo(dest string) error {
 // the lifecycle a second time.
 func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationClaim) error {
 	if err := g.ensureRepoPresent(); err != nil {
-		g.PreserveRelocationClaim(claim)
+		if errors.Is(err, ErrRepoGone) {
+			// The daemon's early guard is only a convenience; this is the
+			// authoritative check at the worktree-use boundary. Transfer the
+			// resolved archive identity directly into cleanup ownership so a
+			// repository that disappears between the two checks cannot leave a
+			// record-free archive for a later kill to misread.
+			if cleanupErr := g.PrepareRelocationClaimForCleanup(claim); cleanupErr != nil {
+				return errors.Join(err, fmt.Errorf(
+					"could not retain the archived worktree identity for cleanup: %w",
+					cleanupErr,
+				))
+			}
+		} else {
+			g.PreserveRelocationClaim(claim)
+		}
 		return err
 	}
 	return g.relocateWorktreeTo(dest, "restore", &claim)
