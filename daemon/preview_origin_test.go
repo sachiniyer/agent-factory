@@ -125,18 +125,58 @@ func newPreviewDaemonWithTabs(t *testing.T, tune func(*config.Config), targets .
 
 	cfg := config.DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
+	const autoPreviewListenAddr = "preview-fixture:auto"
 	// A CONCRETE preview port, not ":0". Editor origins are withheld on an ephemeral
 	// port on purpose — an origin is scheme+host+PORT, so a port the kernel re-picks
 	// every bind cannot carry the stable origin an editor's browser state depends on.
 	// A test that wants to exercise editor origins therefore has to configure the port
 	// a real operator would; grabbing a free one keeps that faithful without pinning a
-	// fixed number that concurrent tests would collide on.
-	cfg.PreviewListenAddr = grabFreeLoopbackAddr(t)
+	// fixed number that concurrent tests would collide on. The sentinel lets the tune
+	// hook opt out by supplying its own address: disabled and deliberately-conflicted
+	// fixtures must stay one-shot, while only this helper-owned address is retried.
+	cfg.PreviewListenAddr = autoPreviewListenAddr
 	if tune != nil {
 		tune(cfg)
 	}
-	m, err = NewManager(cfg)
+	autoPreview := cfg.PreviewListenAddr == autoPreviewListenAddr
+
+	var closeHTTP func() error
+	startHTTP := func(attemptCfg *config.Config, requirePreview bool) error {
+		candidate, err := NewManager(attemptCfg)
+		if err != nil {
+			return err
+		}
+		closeCandidate, err := startHTTPServer(candidate, newTaskScheduler(), nil)
+		if err != nil {
+			return err
+		}
+		if requirePreview && !candidate.lifecycle.snapshot().listeners.PreviewBound {
+			if closeErr := closeCandidate(); closeErr != nil {
+				return fmt.Errorf("%w (and closing the failed attempt: %v)",
+					errPreviewFixtureListenerUnbound, closeErr)
+			}
+			return errPreviewFixtureListenerUnbound
+		}
+		m = candidate
+		closeHTTP = closeCandidate
+		return nil
+	}
+
+	if autoPreview {
+		err = retryPreviewFixtureBind(previewFixtureBindAttempts, func() error {
+			addr, acquireErr := freeLoopbackAddr()
+			if acquireErr != nil {
+				return acquireErr
+			}
+			attemptCfg := *cfg
+			attemptCfg.PreviewListenAddr = addr
+			return startHTTP(&attemptCfg, true)
+		})
+	} else {
+		err = startHTTP(cfg, false)
+	}
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, closeHTTP()) })
 
 	const title = "previeworigin"
 	inst := startedLocalTabInstance(t, m, repo.ID, repoPath, title, "af_"+title+"_agent")
@@ -152,10 +192,6 @@ func newPreviewDaemonWithTabs(t *testing.T, tune func(*config.Config), targets .
 		require.NotEmpty(t, tabs[i+1].ID, "the preview origin is derived from the tab's STABLE id")
 		tabIDs = append(tabIDs, tabs[i+1].ID)
 	}
-
-	closeHTTP, err := startHTTPServer(m, newTaskScheduler(), nil)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, closeHTTP()) })
 
 	// Deliberately NOT asserting PreviewBound here: the withhold tests tune the
 	// config so the listener is disabled or its bind fails, and they need a REAL tab

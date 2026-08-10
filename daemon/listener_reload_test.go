@@ -421,13 +421,24 @@ func TestApplyConfigTokenlessNetworkWarnsAndBinds(t *testing.T) {
 }
 
 // grabFreeLoopbackAddr returns a currently-free 127.0.0.1:port address by binding
-// and immediately releasing it. A tiny race exists (the port could be taken before
-// the caller rebinds it); it is acceptable for a test on an otherwise-idle box.
+// and immediately releasing it. Callers that require a later bind to succeed must
+// retry the complete reserve-and-bind operation; retrying this reservation alone
+// cannot close the release/rebind race.
 func grabFreeLoopbackAddr(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	addr, err := freeLoopbackAddr()
 	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
 	return addr
+}
+
+func freeLoopbackAddr() (string, error) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		return "", err
+	}
+	return addr, nil
 }

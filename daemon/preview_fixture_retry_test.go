@@ -2,10 +2,15 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+const previewFixtureBindAttempts = 4
+
+var errPreviewFixtureListenerUnbound = errors.New("preview listener did not bind")
 
 func TestRetryPreviewFixtureBindRecoversFromTransientFailures(t *testing.T) {
 	transient := errors.New("address already in use")
@@ -37,8 +42,17 @@ func TestRetryPreviewFixtureBindStopsAtBound(t *testing.T) {
 	require.Equal(t, 3, attempts, "a persistent bind failure must not loop forever")
 }
 
-// retryPreviewFixtureBind is initially the fixture's historical one-shot bind.
-// The tests above pin the bounded retry behavior before the fixture adopts it.
-func retryPreviewFixtureBind(_ int, bind func() error) error {
-	return bind()
+// retryPreviewFixtureBind retries the complete reserve-and-bind attempt. Retrying
+// only the initial :0 reservation would leave the release/rebind race unchanged.
+func retryPreviewFixtureBind(maxAttempts int, bind func() error) error {
+	if maxAttempts < 1 {
+		return fmt.Errorf("preview listener bind has invalid attempt bound %d", maxAttempts)
+	}
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err = bind(); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("preview listener did not bind after %d attempts: %w", maxAttempts, err)
 }
