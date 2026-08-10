@@ -562,22 +562,24 @@ parse it rather than render it.`,
 		// Suppressed for --full, where nothing is above the captured region by
 		// definition, and for a measured zero, where the visible screen genuinely IS
 		// the whole pane.
-		if !previewFullFlag {
+		// The extra fields appear ONLY when the capture is partial, so a complete
+		// capture returns exactly the envelope it always did — {title, content}, all
+		// strings. That matters for compatibility: a consumer decoding into
+		// map[string]string keeps working for every complete capture, and the one case
+		// where it must notice a change is the one where the content is incomplete.
+		// Emitting lines_above:0 on a complete capture broke such a consumer
+		// (integration's CLI round-trip) to convey nothing.
+		if notice := previewPartialNotice(snapshot, previewFullFlag); notice != "" {
 			out["partial"] = true
 			if snapshot.LinesAboveKnown {
 				out["lines_above"] = snapshot.LinesAbove
-				if snapshot.LinesAbove == 0 {
-					// Nothing above: the capture is complete after all.
-					delete(out, "partial")
-				}
 			} else {
-				// UNMEASURED is not zero. Saying so is the whole point — a capture nobody
-				// measured must not be reported as one with nothing above it.
+				// UNMEASURED is not zero, and the absence of lines_above says so rather
+				// than a fabricated count. The explicit false is for a consumer that keys
+				// off presence.
 				out["lines_above_known"] = false
 			}
-			if notice := previewPartialNotice(snapshot, previewFullFlag); notice != "" {
-				fmt.Fprintln(os.Stderr, notice)
-			}
+			fmt.Fprintln(os.Stderr, notice)
 		}
 		return jsonOut(out)
 	},

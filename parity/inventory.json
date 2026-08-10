@@ -879,6 +879,24 @@
       "notes": "Closed by #1948. --full selects PreviewFullHistory over the visible capture, so the CLI can read scrollback instead of only the visible screen."
     },
     {
+      "id": "session.preview-plain",
+      "title": "Preview a tab with ANSI escape sequences stripped",
+      "tui": {
+        "status": "no",
+        "pointer": "app/live_stream.go renders escapes; a TUI wants them"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "web/src/terminal.ts feeds xterm, which interprets them"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsPreviewCmd --plain"
+      },
+      "verdict": "deliberate",
+      "notes": "Deliberately CLI-only (#3169). The rendering surfaces INTERPRET escapes; stripping them there would remove the colour they exist to show. Only a scripted consumer parsing the JSON envelope wants plain text, and each one was reimplementing the stripper af already vendors."
+    },
+    {
       "id": "session.preview-tab",
       "title": "Preview a specific tab (by ordinal or stable id)",
       "tui": {
@@ -1698,6 +1716,7 @@
       "af sessions list --all": "session.list",
       "af sessions list --help": "meta.discovery",
       "af sessions preview --full": "session.preview-full",
+      "af sessions preview --plain": "session.preview-plain",
       "af sessions preview --help": "meta.discovery",
       "af sessions preview --tab": "session.preview-tab",
       "af sessions preview --tab-id": "session.preview-tab",

@@ -42,7 +42,10 @@ func TestSessionsPreview_DoesNotMarkACompleteCapture(t *testing.T) {
 
 	require.NotContains(t, payload, "partial",
 		"nothing above the visible screen means the capture is complete")
-	require.Equal(t, float64(0), payload["lines_above"])
+	require.NotContains(t, payload, "lines_above",
+		"a complete capture must return the envelope unchanged — {title, content} — so a consumer "+
+			"decoding into map[string]string keeps working; lines_above:0 broke one to say nothing")
+	require.Len(t, payload, 2, "exactly title and content")
 }
 
 // THE CASE THAT MATTERS MOST, and the one a single-field design gets wrong:

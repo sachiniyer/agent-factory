@@ -24,7 +24,7 @@ func previewIdentityInstance(t *testing.T, agentName string) *Instance {
 	cmdExec, _ := raceHookExec(map[string]bool{agentName: true}, nil)
 	cmdExec.OutputFunc = func(cmd *exec.Cmd) ([]byte, error) {
 		if strings.Contains(cmd.String(), "display-message") {
-			return []byte("7 11 1 1 0 1 0 0 1"), nil
+			return []byte("7 11 1 1 0 1 0 0 1 0"), nil
 		}
 		for i, arg := range cmd.Args {
 			if arg == "-t" && i+1 < len(cmd.Args) {
