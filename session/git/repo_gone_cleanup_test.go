@@ -181,8 +181,9 @@ func TestCleanupClaimedRepoGone_RestartDoesNotTreatAbsentPathAsCompletedDelete(t
 	}
 }
 
-func TestCleanupClaimedRepoGone_RepoRecheckDeadlineRetainsClaim(t *testing.T) {
+func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
 	previousProbe := repoGoneOriginProbe
 	previousTimeout := relocationIdentityTimeout
 	blocked := make(chan struct{})
@@ -198,22 +199,17 @@ func TestCleanupClaimedRepoGone_RepoRecheckDeadlineRetainsClaim(t *testing.T) {
 		relocationIdentityTimeout = previousTimeout
 	})
 
-	type result struct {
-		state CleanupState
-		err   error
-	}
-	done := make(chan result, 1)
+	done := make(chan error, 1)
 	go func() {
-		state, err := gw.CleanupClaimedRepoGone(claim)
-		done <- result{state: state, err: err}
+		done <- gw.ValidateRelocationCleanupAdmission()
 	}()
 
 	select {
-	case got := <-done:
+	case err := <-done:
 		close(blocked)
 		<-probeFinished
-		if got.state != CleanupStateUnknown || !errors.Is(got.err, context.DeadlineExceeded) {
-			t.Fatalf("repo recheck deadline must be unknown; state=%v err=%v", got.state, got.err)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("repo recheck deadline must refuse admission: %v", err)
 		}
 	case <-time.After(250 * time.Millisecond):
 		close(blocked)
@@ -221,7 +217,7 @@ func TestCleanupClaimedRepoGone_RepoRecheckDeadlineRetainsClaim(t *testing.T) {
 		t.Fatal("repo-gone origin recheck ignored its hard caller deadline")
 	}
 	recovery, retained := gw.GetRelocationRecovery()
-	if !retained || recovery.State != RelocationRecoveryCleanupStalled || !recovery.IdentityKnown {
+	if !retained || recovery.State != RelocationRecoveryCleanupReady || !recovery.IdentityKnown {
 		t.Fatalf("origin recheck deadline lost cleanup authorization; retained=%v recovery=%+v", retained, recovery)
 	}
 }

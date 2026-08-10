@@ -244,9 +244,10 @@ func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.Relocation
 	return gw.PrepareRelocationClaimForCleanup(claim)
 }
 
-// ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
-// before kill intent is persisted and again at the local backend boundary, so a
-// recovery record can never be consulted only after panes were destroyed.
+// ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
+// backend separately consumes and revalidates the exact cleanup identity before
+// pane teardown; it must not repeat the origin-path admission after the durable
+// kill has committed.
 func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	i.mu.RLock()
 	gw := i.gitWorktree

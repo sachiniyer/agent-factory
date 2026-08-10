@@ -628,12 +628,27 @@ var (
 	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir
 )
 
-// CleanupClaimedRepoGone removes an archived worktree whose origin repository
-// no longer exists, using the cleanup-only claim created by a failed restore.
-// The claim is checked after pane teardown, writers are reaped before deletion,
-// and its identity stays claimed through an identity-anchored recursive delete.
-// Any refusal or deadline rematerializes durable recovery ownership.
+// CleanupClaimedRepoGone removes an archived worktree using the cleanup-only
+// claim authorized before the kill's durable commit. The claim is checked after
+// pane teardown, writers are reaped before deletion, and its identity stays
+// claimed through an identity-anchored recursive delete. The origin is
+// deliberately not probed again here: its absence was the pre-commit admission
+// condition, while a returned origin is a separate directory that must not be
+// able to strand an already committed kill.
 func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error) {
+	state, err, _ := g.cleanupClaimedRepoGone(claim)
+	return state, err
+}
+
+// CleanupClaimedRepoGoneWithLateResult is the ghost-cleanup form. On a caller
+// deadline, lateResult reports the descriptor worker's eventual result so the
+// daemon can reconcile the persisted row instead of leaving a completed delete
+// fenced forever. A nil channel means no worker outlived the call.
+func (g *GitWorktree) CleanupClaimedRepoGoneWithLateResult(claim RelocationClaim) (CleanupState, error, <-chan error) {
+	return g.cleanupClaimedRepoGone(claim)
+}
+
+func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error, <-chan error) {
 	completed := false
 	defer func() {
 		if !completed {
@@ -642,35 +657,14 @@ func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	}()
 
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
-		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err)
-	}
-	if g.repoPath == "" {
-		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: repo path is empty")
-	}
-	if err := boundedRepoGoneOriginProbe(g.repoPath); err == nil {
-		return CleanupStateUnknown, fmt.Errorf(
-			"cannot use repo-gone cleanup for %s: origin repo %s exists again",
-			claim.Path, g.repoPath,
-		)
-	} else if errors.Is(err, context.DeadlineExceeded) {
-		g.markCleanupStalledWithClaim(&claim)
-		completed = true
-		return CleanupStateUnknown, fmt.Errorf(
-			"cannot establish that origin repo %s is gone before cleaning %s: %w",
-			g.repoPath, claim.Path, err,
-		)
-	} else if !os.IsNotExist(err) {
-		return CleanupStateUnknown, fmt.Errorf(
-			"cannot establish that origin repo %s is gone before cleaning %s: %w",
-			g.repoPath, claim.Path, err,
-		)
+		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err), nil
 	}
 
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
-		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err)
+		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err), nil
 	}
 
 	deleteDone := make(chan error, 1)
@@ -690,7 +684,7 @@ func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 			return CleanupStateUnknown, errors.Join(
 				fmt.Errorf("failed to remove repo-gone worktree %s: %w", claim.Path, err),
 				revalidationErr,
-			)
+			), nil
 		}
 	case <-timer.C:
 		// The worker may be stuck in an uninterruptible filesystem syscall and
@@ -702,10 +696,10 @@ func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		return CleanupStateUnknown, fmt.Errorf(
 			"repo-gone recursive deletion of %s did not finish within %s: %w",
 			claim.Path, repoGoneCleanupTimeout, context.DeadlineExceeded,
-		)
+		), deleteDone
 	}
 	completed = true
-	return CleanupSettled, nil
+	return CleanupSettled, nil, nil
 }
 
 // shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree

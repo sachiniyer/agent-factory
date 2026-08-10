@@ -129,10 +129,10 @@ func TestKillSession_GhostCleanupTimeoutPersistsStallAndBlocksSameProcessRetry(t
 	manager, repoID := newCleanupReadyGhost(t, "ghost-stall")
 	previousCleanup := ghostCleanupWorktree
 	cleanupCalls := 0
-	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error) {
+	ghostCleanupWorktree = func(data *session.InstanceData, _ string) (sessiongit.CleanupState, error, <-chan error) {
 		cleanupCalls++
 		data.Worktree.RelocationRecovery.State = sessiongit.RelocationRecoveryCleanupStalled
-		return sessiongit.CleanupStateUnknown, context.DeadlineExceeded
+		return sessiongit.CleanupStateUnknown, context.DeadlineExceeded, nil
 	}
 	t.Cleanup(func() { ghostCleanupWorktree = previousCleanup })
 

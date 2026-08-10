@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // errSessionNotFound classifies only a resolver's authoritative miss. Its text
@@ -61,6 +62,12 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		delete(m.killRetries, key)
 		m.mu.Unlock()
 	}()
+	if instance == nil && data != nil && m.ghostCleanupStallActive(key, targetID) {
+		return session.InstanceData{}, fmt.Errorf(
+			"kill of ghost session %q was not retried because its prior descriptor cleanup is still running in this daemon process; its durable record is retained — restart the daemon before retrying",
+			req.Title,
+		)
+	}
 
 	// Serialize against a Lost-recovery in flight for this session (#1108
 	// PR 2): a kill arriving mid-Recover waits for the recover attempt to
@@ -216,17 +223,32 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// but sharing the predicate keeps this branch from re-introducing the #2017
 		// defect (a known-state error misreported as "workspace left intact"): any
 		// future known-state error would fall through to deleteSessionRecord instead.
-		if teardownErr = ghostCleanup(data, req.Title); session.TeardownStateUnknown(teardownErr) {
-			// NO automatic retry is promised here, deliberately (#1917 round 5).
+		var lateCleanup <-chan error
+		teardownErr, lateCleanup = ghostCleanup(data, req.Title)
+		if session.TeardownStateUnknown(teardownErr) {
+			recovery := data.Worktree.RelocationRecovery
+			if lateCleanup != nil || recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled {
+				m.markGhostCleanupStalled(key, targetID)
+				if recovery != nil && recovery.State == git.RelocationRecoveryCleanupStalled {
+					if persistErr := m.persistGhostCleanupStall(repoID, data); persistErr != nil {
+						teardownErr = errors.Join(teardownErr, fmt.Errorf("persist ghost cleanup stall: %w", persistErr))
+					}
+				}
+				if lateCleanup != nil {
+					m.reconcileLateGhostCleanup(repoID, req.Title, key, targetID, lateCleanup)
+				}
+			}
+			// NO new teardown attempt is promised here, deliberately (#1917 round 5).
 			// finishUserKill is reached only from refreshInstanceStatus, which
 			// iterates m.instances — and a ghost is precisely a record that could not
 			// be reconstructed into an instance, so it never enters that map and no
 			// poll will ever pick it up. The record and its tombstone survive, which
 			// keeps the workspace addressable and stops the poll classifying it Lost,
-			// but the next attempt has to come from the user. Telling them otherwise
-			// would be a promise the code cannot keep, which is worse than no promise.
-			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill to try again: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
+			// but the next attempt has to come from the user. A descriptor worker that
+			// merely outlived its deadline is not retried: its one definitive result
+			// is reconciled above.
+			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but no second teardown will start automatically (a ghost has no live instance for the poll to visit) — retry after a daemon restart if it remains: %v", req.Title, teardownErr)
+			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)
 		}
 	}
 

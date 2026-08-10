@@ -810,12 +810,10 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 // returned before pane teardown so the daemon retains the persisted handle.
 // See issue #478.
 func (b *LocalBackend) Kill(i *Instance) error {
-	if err := i.ValidateWorktreeDestructionAdmission(); err != nil {
-		return errors.Join(
-			fmt.Errorf("kill refused before pane teardown: %w", err),
-			ErrWorkspaceStateUnknown,
-		)
-	}
+	// The manager already checked the still-missing origin before committing the
+	// kill tombstone. prepareKillTeardown is the post-commit guard: it consumes
+	// and revalidates the exact directory identity before any pane is touched,
+	// without letting a later, separate origin directory revoke the transaction.
 	mode, preserveClaim, err := i.prepareKillTeardown()
 	if err != nil {
 		return err
