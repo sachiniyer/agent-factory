@@ -604,6 +604,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	_, serr := instance.SendPromptWithEvidence(prompt, nowFunc)
 	if serr != nil {
+		// The send crossed the runtime boundary, so even an error is an observed
+		// delivery fact: remote transport failure means could-not-confirm, not that
+		// the prompt missed. Persist it before this early return so a restart can
+		// still order later pane churn against the attempt (#3162/#3168).
+		m.persistAndPublishInstance(repoID, instance)
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {
 			// This return skips the whole-row checkpoint below, so unlike the success

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 
@@ -183,6 +184,8 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 		"Liveness": true, "InFlightOp": true, "LifecycleAction": true,
 		"CurrentAgent": true, "Program": true, "BackendType": true,
 		"TaskRunActive": true, "LimitResetAt": true, "CreatedAt": true, "UpdatedAt": true,
+		"IdleReason": true, "LastPromptAttemptAt": true,
+		"LastPromptDeliveryStatus": true, "LastPaneChurnAt": true,
 	}
 
 	// Populate EVERY field with a non-zero value, so anything that survives the
@@ -194,11 +197,15 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 		BackendType: "ssh", TaskRunActive: true, CanKill: true, CanHandoff: true,
 		IsRoot: true, UserKilled: true, StartupStateUnknown: true,
 		Height: 40, Width: 120,
-		Path:                  "/home/operator/private/repo",
-		TmuxName:              "af-mine",
-		Prompt:                "the operator's prompt text",
-		PendingHandoffMission: "mission",
-		Tabs:                  []session.TabData{{Name: "shell"}},
+		IdleReason:               session.IdleReasonDeliveryUnconfirmed,
+		LastPromptAttemptAt:      time.Unix(100, 0).UTC(),
+		LastPromptDeliveryStatus: session.PromptCouldNotConfirm,
+		LastPaneChurnAt:          time.Unix(90, 0).UTC(),
+		Path:                     "/home/operator/private/repo",
+		TmuxName:                 "af-mine",
+		Prompt:                   "the operator's prompt text",
+		PendingHandoffMission:    "mission",
+		Tabs:                     []session.TabData{{Name: "shell"}},
 	}
 	full.Worktree.RepoPath = "/home/operator/private/repo"
 	full.Worktree.WorktreePath = "/home/operator/private/repo/.af/worktrees/mine"
@@ -229,6 +236,10 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	assert.Equal(t, "mine", got.Title)
 	assert.Equal(t, "af/mine", got.Branch)
 	assert.Equal(t, session.Ready, got.Status)
+	assert.Equal(t, session.IdleReasonDeliveryUnconfirmed, got.IdleReason)
+	assert.Equal(t, time.Unix(100, 0).UTC(), got.LastPromptAttemptAt)
+	assert.Equal(t, session.PromptCouldNotConfirm, got.LastPromptDeliveryStatus)
+	assert.Equal(t, time.Unix(90, 0).UTC(), got.LastPaneChurnAt)
 	assert.Empty(t, got.Path, "the host's absolute repo root is the field this projection exists for")
 	assert.Empty(t, got.Worktree.WorktreePath, "the worktree carries host paths too, so the whole struct is withheld")
 }
