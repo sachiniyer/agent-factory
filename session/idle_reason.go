@@ -96,6 +96,16 @@ func (d InstanceData) ProjectIdleReason() InstanceData {
 	return d
 }
 
+// WithoutIdleEvidence returns a checkpoint that cannot attribute observations
+// from a retired runtime to its replacement.
+func (d InstanceData) WithoutIdleEvidence() InstanceData {
+	d.IdleReason = IdleReasonNone
+	d.LastPromptAttemptAt = time.Time{}
+	d.LastPromptDeliveryStatus = ""
+	d.LastPaneChurnAt = time.Time{}
+	return d
+}
+
 // RecordPromptAttempt stores the observation made by an actual prompt send.
 // attemptedAt must be captured before delivery begins, so a pane observation
 // racing the send can still be ordered after it. Invalid local values normalize

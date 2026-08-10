@@ -244,4 +244,12 @@ func TestIdleReasonProjectionAndStorageBoundary(t *testing.T) {
 	if !stored.LastPromptAttemptAt.Equal(attemptedAt) || stored.LastPromptDeliveryStatus != PromptDelivered {
 		t.Fatalf("mechanical evidence was scrubbed from storage: %+v", stored)
 	}
+
+	withChurn := data
+	withChurn.LastPaneChurnAt = attemptedAt.Add(time.Minute)
+	retired := withChurn.WithoutIdleEvidence()
+	if retired.IdleReason != IdleReasonNone || !retired.LastPromptAttemptAt.IsZero() ||
+		retired.LastPromptDeliveryStatus != "" || !retired.LastPaneChurnAt.IsZero() {
+		t.Fatalf("retired runtime evidence survived in checkpoint: %+v", retired)
+	}
 }

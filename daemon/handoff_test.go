@@ -506,6 +506,9 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 		release:        make(chan struct{}),
 	}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced-delivery", backend)
+	attemptedAt := time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC)
+	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), inst.StateEpoch())
 	inst.SetLimitReached(time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC))
 	done := make(chan error, 1)
 	go func() {
@@ -544,8 +547,10 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 	}
 	if len(checkpoint) != 1 || checkpoint[0].Program != tmux.ProgramGemini ||
 		checkpoint[0].Liveness != session.LiveRunning || !checkpoint[0].LimitResetAt.IsZero() ||
+		!checkpoint[0].LastPromptAttemptAt.IsZero() || checkpoint[0].LastPromptDeliveryStatus != "" ||
+		!checkpoint[0].LastPaneChurnAt.IsZero() || checkpoint[0].IdleReason != session.IdleReasonNone ||
 		!strings.Contains(checkpoint[0].PendingHandoffMission, "continuing work") {
-		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with the outgoing limit cleared and the rendered mission pending", checkpoint)
+		t.Fatalf("disk checkpoint during delivery fence = %+v; want incoming program as Running with predecessor idle/limit evidence cleared and the rendered mission pending", checkpoint)
 	}
 	if got := inst.GetInFlightOp(); got != session.OpNone {
 		t.Fatalf("in-flight op after mission delivery = %v, want OpNone", got)
