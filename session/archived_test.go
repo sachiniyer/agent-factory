@@ -82,6 +82,38 @@ func TestFromInstanceData_PreservesSnapshotArchiveWarning(t *testing.T) {
 		"a thin client rebuilding a live snapshot must not discard its only archive-loss notice")
 }
 
+func TestReconcileArchiveWarningMirrorsAndClearsProjection(t *testing.T) {
+	inst := &Instance{}
+	require.True(t, inst.ReconcileArchiveWarning("retained at /retained/source; incomplete archive"))
+	require.Equal(t, "retained at /retained/source; incomplete archive", inst.ArchiveWarning())
+	require.False(t, inst.ReconcileArchiveWarning(inst.ArchiveWarning()))
+	require.True(t, inst.ReconcileArchiveWarning(""))
+	require.Empty(t, inst.ArchiveWarning())
+}
+
+func TestLostArchiveWarningDoesNotClaimRestoreCompleted(t *testing.T) {
+	data := deadInstanceData(t, Lost, "af_lost_report_agent", "af_lost_report_shell")
+	data.Liveness = LiveLost
+	data.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef",
+		Skipped: []git.ArchiveSkippedEntry{{
+			Path: "private/credential", Reason: git.ArchiveSkipPermissionDenied,
+		}},
+	}}}
+
+	diskProjection := data.ForClientRead().ArchiveWarning
+	require.Contains(t, diskProjection, "incomplete archive")
+	require.NotContains(t, diskProjection, "completed",
+		"a Lost disk row has not established that restore ever finished")
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	liveProjection := restored.ToInstanceData().ArchiveWarning
+	require.Contains(t, liveProjection, "incomplete archive")
+	require.NotContains(t, liveProjection, "completed",
+		"a Lost daemon row may still be waiting for registration repair or recovery")
+}
+
 func TestToInstanceDataArchiveReportProjectionAllocationsAreBounded(t *testing.T) {
 	const skippedCount = 512
 	skipped := make([]git.ArchiveSkippedEntry, skippedCount)

@@ -275,16 +275,25 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
-		operation := "restore"
-		if livenessFromData(d) == LiveArchived {
-			operation = "archive"
-		}
-		d.ArchiveWarning = d.ArchiveReport.Warning(operation)
+		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
 	d.ArchiveReport = nil
 	d.archiveReportSource = nil
 	d.archiveReportPending = false
 	return d
+}
+
+func archiveWarningOperation(liveness Liveness) string {
+	switch liveness {
+	case LiveArchived:
+		return "archive"
+	case LiveLost:
+		// A report can be installed before registration repair succeeds. Until
+		// recovery settles, neither archive nor restore is known to have completed.
+		return ""
+	default:
+		return "restore"
+	}
 }
 
 // ForStorage returns data suitable for instances.json. InstanceData is also the

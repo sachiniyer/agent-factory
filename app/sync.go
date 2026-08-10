@@ -722,6 +722,13 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileAgentModelChange(d.ModelChange) {
 		changed = true
 	}
+	// The incomplete-archive notice is another projection-only axis. Automatic
+	// Lost recovery can add it while liveness stays Lost/Running, and retained-tree
+	// cleanup can clear it without changing status, so same-row polls must mirror
+	// both transitions explicitly.
+	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
+		changed = true
+	}
 	// Same shape for the re-created-root notice (#2629): it appears when the
 	// daemon heals a root and clears when any client opens that session's pane,
 	// both while the liveness sits at Ready. Reconciling it here is what makes an

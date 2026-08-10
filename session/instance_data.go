@@ -135,10 +135,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		branchCreatedByUs := i.gitWorktree.BranchCreatedByUs()
 		externalWorktree := i.gitWorktree.IsExternalWorktree()
 		startupStateUnknown := i.startupStateUnknown
-		operation := "restore"
-		if i.liveness == LiveArchived {
-			operation = "archive"
-		}
+		operation := archiveWarningOperation(i.liveness)
 		worktreePath, recovery, hasRecovery, hasArchiveReport, archiveWarning :=
 			i.gitWorktree.ProjectionSnapshot(operation)
 		data.archiveReportSource = i.gitWorktree

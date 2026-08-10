@@ -281,6 +281,22 @@ func instancePrefix(arrow string, width int) string {
 	return fmt.Sprintf(" %s ", arrow)
 }
 
+func retainedArchiveLocation(warning string) string {
+	const marker = "retained at "
+	start := strings.Index(warning, marker)
+	if start < 0 {
+		return ""
+	}
+	rest := warning[start:]
+	end := len(rest)
+	for _, delimiter := range []string{"; skipped paths", "; af skipped"} {
+		if index := strings.Index(rest, delimiter); index >= 0 && index < end {
+			end = index
+		}
+	}
+	return strings.TrimSpace(rest[:end])
+}
+
 // Render renders an instance row. expanded selects the ▾/▸ tree arrow; a
 // non-expandable instance (see Expandable) renders a blank arrow cell so its
 // title stays aligned with its siblings.
@@ -513,16 +529,31 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// Move the ordinary description's bottom padding to the warning so the
 		// notice is part of the same row block rather than separated by whitespace.
 		lines = append(lines, descS.PaddingBottom(0).Render(branchLine))
-		warningPrefix := strings.Repeat(" ", prefixWidth) + "⚠ "
-		warningWidth := r.width - runewidth.StringWidth(warningPrefix)
-		warningText := archiveWarning
-		if warningWidth <= 0 {
-			warningText = ""
-		} else if runewidth.StringWidth(warningText) > warningWidth {
-			warningText = runewidth.Truncate(warningText, warningWidth, "…")
+		warningTexts := []string{archiveWarning}
+		if location := retainedArchiveLocation(archiveWarning); location != "" {
+			// Put the recovery location before the prose-heavy warning. A typical
+			// sidebar cannot fit the full bounded report on one line, but it must
+			// still show where the complete bytes remain.
+			warningTexts = append([]string{location}, warningTexts...)
 		}
-		warningLine := warningPrefix + warningText
-		lines = append(lines, descS.Foreground(archiveWarningColor).Render(warningLine))
+		for index, warningText := range warningTexts {
+			glyph := "  "
+			if index == 0 {
+				glyph = "⚠ "
+			}
+			warningPrefix := strings.Repeat(" ", prefixWidth) + glyph
+			warningWidth := r.width - runewidth.StringWidth(warningPrefix)
+			if warningWidth <= 0 {
+				warningText = ""
+			} else if runewidth.StringWidth(warningText) > warningWidth {
+				warningText = runewidth.Truncate(warningText, warningWidth, "…")
+			}
+			warningStyle := descS.Foreground(archiveWarningColor)
+			if index < len(warningTexts)-1 {
+				warningStyle = warningStyle.PaddingBottom(0)
+			}
+			lines = append(lines, warningStyle.Render(warningPrefix+warningText))
+		}
 	}
 
 	// join title and subtitle

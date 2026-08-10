@@ -118,7 +118,7 @@ func (g *GitWorktree) ProjectionSnapshot(
 	if g.archiveWarningSuffix == "" {
 		g.refreshArchiveWarningLocked()
 	}
-	return path, recovery, hasRecovery, true, operation + g.archiveWarningSuffix
+	return path, recovery, hasRecovery, true, renderArchiveWarning(operation, g.archiveWarningSuffix)
 }
 
 func (g *GitWorktree) replaceArchiveReportLocked(report ArchiveReport) {

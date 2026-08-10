@@ -805,7 +805,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// covered: a later restore relocates off the occupied path rather than
 	// colliding with itself (RestoreWorktreePath's collision suffix).
 	if perr := commitRestore(); perr != nil {
-		return "", perr
+		return failedRestoredArchiveResult(instance, restoredPath, perr)
 	}
 
 	// Worktree is back in place. Re-spawn the agent and flip Running. On a
@@ -820,7 +820,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
-		return "", fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr)
+		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
 	}
 	log.InfoLog.Printf("restored session %q (repo %s): worktree moved back to %s, agent re-spawned", req.Title, repoID, worktreePath)
 	return restoredArchiveResult(instance, worktreePath)

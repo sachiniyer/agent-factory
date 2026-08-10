@@ -69,6 +69,22 @@ func TestInstanceRendererShowsSnapshotArchiveWarning(t *testing.T) {
 		"the persistent notice must keep the location of the complete retained source visible")
 }
 
+func TestInstanceRendererKeepsRetainedSourceAtNormalWidth(t *testing.T) {
+	const warning = "restore completed with an incomplete archive: af skipped 1 unreadable file; complete original tree(s) were retained at \"/retained/source\"; skipped paths: \"private/credential\""
+	inst, err := session.FromInstanceData(session.InstanceData{
+		ID: "archive-warning-width", Title: "feature", Branch: "af-feature",
+		Status: session.Lost, Liveness: session.LiveLost,
+		Program: "test", BackendType: "remote", ArchiveWarning: warning,
+	})
+	require.NoError(t, err)
+
+	r := NewInstanceRenderer()
+	r.SetWidth(100)
+	out := ansiEscape.ReplaceAllString(r.Render(inst, 1, false, false, false), "")
+	assert.Contains(t, out, "/retained/source",
+		"a normal-width rail must show where the complete source remains, not only the warning preamble")
+}
+
 // TestInstanceRendererNamePlaceholder pins the autocreate-name shadow text
 // (#2470): the row of the instance being named shows the suggested name while its
 // title is empty, and only that row, and only while empty.

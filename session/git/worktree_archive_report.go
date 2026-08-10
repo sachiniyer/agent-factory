@@ -215,14 +215,20 @@ type archiveWarningEntry struct {
 	reason ArchiveSkipReason
 }
 
-// Warning renders a bounded summary for archive or restore results. The full
-// lossless list stays in archive_report; transport responses name only a prefix
-// so a huge unreadable generated tree cannot turn a committed reply into a
-// multi-megabyte timeout.
+// Warning renders a bounded summary for archive, restore, or an unsettled Lost
+// row (the empty operation). The full lossless list stays in archive_report;
+// transport responses name only a prefix so a huge unreadable generated tree
+// cannot turn a committed reply into a multi-megabyte timeout.
 func (report ArchiveReport) Warning(operation string) string {
-	suffix := report.warningSuffix()
+	return renderArchiveWarning(operation, report.warningSuffix())
+}
+
+func renderArchiveWarning(operation, suffix string) string {
 	if suffix == "" {
 		return ""
+	}
+	if operation == "" {
+		return "incomplete archive:" + strings.TrimPrefix(suffix, " completed with an incomplete archive:")
 	}
 	return operation + suffix
 }
