@@ -17,7 +17,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.match(workflow, /workflow_dispatch:\s+inputs:\s+pr_number:/);
   assert.match(
     workflow,
-    /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled\]/,
+    /pull_request_target:\s+types: \[opened, reopened, closed, synchronize, edited, converted_to_draft, ready_for_review, labeled, unlabeled, auto_merge_enabled, auto_merge_disabled\]/,
   );
   assert.match(workflow, /workflow_run:\s+workflows: \[PR Validation\]\s+types: \[completed\]/);
   assert.match(workflow, /pr_number:\s+[\s\S]*?required: true[\s\S]*?type: number/);
