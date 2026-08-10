@@ -81,7 +81,7 @@ func learnPinnedMachine(sshCmd, currentAddr string, currentPort int) (string, in
 		return "", 0
 	}
 
-	addr, port, ok := parseSSHConnectionServerAddr(string(out))
+	ip, port, ok := parseSSHConnectionServerAddr(string(out))
 	if !ok {
 		// sshd has exported SSH_CONNECTION since the 1990s, so an unparseable value
 		// means something unusual is in the path (a wrapper, a forced command) rather
@@ -95,7 +95,30 @@ func learnPinnedMachine(sshCmd, currentAddr string, currentPort int) (string, in
 	// ordinary host, the machine's own address is the address af already pinned. It
 	// is also what an IP-preserving balancer (DSR) reports, where pinning the answer
 	// would be a no-op rather than a fix.
+	addr := ip.String()
 	if addr == currentAddr && port == currentPort {
+		return "", 0
+	}
+
+	// AN ACCEPTED-SOCKET ADDRESS IS NOT ALWAYS A MACHINE IDENTITY, and this check is
+	// what keeps the difference from being catastrophic. SSH_CONNECTION describes the
+	// socket the backend accepted, so a balancer that reaches its backends over
+	// LOOPBACK — one running on the backend host itself — makes every backend report
+	// 127.0.0.1. That address means "me" to whoever evaluates it, and the next thing
+	// af does is evaluate it FROM THE DAEMON: the reachability probe below would
+	// happily connect to the daemon's own sshd, af would persist 127.0.0.1, and every
+	// provision, tunnel and reap would target the daemon's own machine. Where keys and
+	// credentials are shared that does not even fail — it runs, including the reap.
+	//
+	// So only a GLOBALLY UNICAST address is portable enough to be a machine identity.
+	// That accepts ordinary private fleet addressing (10/8, 172.16/12, 192.168/16) and
+	// rejects loopback, unspecified, link-local and multicast in one predicate.
+	// Checked BEFORE the dial, so af never probes an address that means "me".
+	if !ip.IsGlobalUnicast() {
+		log.WarningLog.Printf("backend=ssh: the remote reports its address as %s, which is not a portable "+
+			"machine identity — SSH_CONNECTION describes the socket it accepted, so a balancer reaching its "+
+			"backends over loopback reports the same address for all of them. This session stays pinned to %s "+
+			"rather than to an address that would mean the daemon's own host (#3122)", addr, currentAddr)
 		return "", 0
 	}
 
@@ -129,20 +152,62 @@ func learnPinnedMachine(sshCmd, currentAddr string, currentPort int) (string, in
 // connection ON, which behind a balancer is the backend's own address rather than
 // the VIP — measured: two backends behind one VIP reported their own docker
 // addresses, matching what the container runtime said they were.
-func parseSSHConnectionServerAddr(raw string) (string, int, bool) {
+func parseSSHConnectionServerAddr(raw string) (net.IP, int, bool) {
 	fields := strings.Fields(strings.TrimSpace(raw))
 	if len(fields) != 4 {
-		return "", 0, false
+		return nil, 0, false
 	}
 	// Parsed, not merely non-empty: this value becomes a dial target and, through
 	// the ProxyCommand, a token in a composed shell command.
 	ip := net.ParseIP(fields[2])
 	if ip == nil {
-		return "", 0, false
+		return nil, 0, false
 	}
 	port, err := strconv.Atoi(fields[3])
 	if err != nil || port <= 0 || port > 65535 {
-		return "", 0, false
+		return nil, 0, false
 	}
-	return ip.String(), port, true
+	return ip, port, true
+}
+
+// sshPinnedCleanupTarget reads the machine a persisted handle pins to.
+//
+// DialEndpoint wins when present, because it is the only field that carries a
+// port; DialAddress alone means "#3118's address pin, on the configured port",
+// which is every handle written before machine-pinning and every handle whose
+// pinned port matched anyway. A malformed endpoint falls back to the address
+// rather than refusing: a teardown that will not compose leaks the workspace it
+// exists to remove (the #3044 lesson).
+func sshPinnedCleanupTarget(d *SSHRuntimeCleanupData) (string, int) {
+	if d == nil {
+		return "", 0
+	}
+	if ep := strings.TrimSpace(d.DialEndpoint); ep != "" {
+		if host, portText, err := net.SplitHostPort(ep); err == nil {
+			if port, convErr := strconv.Atoi(portText); convErr == nil && port > 0 && port <= 65535 &&
+				strings.TrimSpace(host) != "" {
+				return host, port
+			}
+		}
+	}
+	return d.DialAddress, 0
+}
+
+// sshRecordPinnedMachine fills in the pin fields of a cleanup handle so that BOTH
+// this daemon and one rolled back to a release without DialEndpoint read it
+// safely. See DialEndpoint for why that asymmetry exists.
+func sshRecordPinnedMachine(cleanup *SSHRuntimeCleanupData, dialAddr string, dialPort, configuredPort int) {
+	if strings.TrimSpace(dialAddr) == "" {
+		return
+	}
+	effective := dialPort
+	if effective == 0 {
+		effective = configuredPort
+	}
+	cleanup.DialEndpoint = net.JoinHostPort(dialAddr, strconv.Itoa(effective))
+	if effective == configuredPort {
+		// Only here can an older daemon, which appends the configured port itself,
+		// reach the same machine.
+		cleanup.DialAddress = dialAddr
+	}
 }

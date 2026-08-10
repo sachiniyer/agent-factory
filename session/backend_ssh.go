@@ -222,14 +222,12 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 			// session's workspace is actually on. A reap after a daemon restart
 			// composes its command from this, in a fresh process, which is the
 			// constraint that ruled out a ControlMaster multiplex (#3086).
-			DialAddress: dialAddr,
-			// The PORT that machine listens on, which behind a balancer is not the
-			// port the name is reached on (#3122). Zero means "the configured port",
-			// which is every handle written before machine-pinning.
-			DialPort:            dialPort,
 			HostKeyVerification: cfg.SSHHostKeyVerification,
 		},
 	}
+	// The pin fields are written together, because which of them is safe to write
+	// depends on whether a rolled-back daemon could read it correctly (#3122).
+	sshRecordPinnedMachine(res.Backend.(*sshBackend).cleanup, dialAddr, dialPort, pinPort)
 	return res, nil
 }
 

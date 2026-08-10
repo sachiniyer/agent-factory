@@ -25,21 +25,21 @@ func TestParsesTheServerSideOfSSHConnection(t *testing.T) {
 	// sshd's format is "client_ip client_port server_ip server_port"; the SERVER
 	// fields are the address that machine accepted the connection on, which behind
 	// a balancer is the backend's own address rather than the VIP.
-	addr, port, ok := parseSSHConnectionServerAddr("172.17.0.1 49266 172.17.0.4 22")
+	ip, port, ok := parseSSHConnectionServerAddr("172.17.0.1 49266 172.17.0.4 22")
 	require.True(t, ok)
-	assert.Equal(t, "172.17.0.4", addr)
+	assert.Equal(t, "172.17.0.4", ip.String())
 	assert.Equal(t, 22, port)
 
 	// Trailing newline is what a shell actually delivers.
-	addr, port, ok = parseSSHConnectionServerAddr("10.0.0.2 5 10.0.0.9 2222\n")
+	ip, port, ok = parseSSHConnectionServerAddr("10.0.0.2 5 10.0.0.9 2222\n")
 	require.True(t, ok)
-	assert.Equal(t, "10.0.0.9", addr)
+	assert.Equal(t, "10.0.0.9", ip.String())
 	assert.Equal(t, 2222, port)
 
 	// IPv6 round-trips through net.ParseIP's canonical spelling.
-	addr, _, ok = parseSSHConnectionServerAddr("::1 5 2001:DB8::1 22")
+	ip, _, ok = parseSSHConnectionServerAddr("::1 5 2001:DB8::1 22")
 	require.True(t, ok)
-	assert.Equal(t, "2001:db8::1", addr)
+	assert.Equal(t, "2001:db8::1", ip.String())
 
 	// Everything else is refused rather than guessed at: this value becomes a dial
 	// target AND a token in a composed shell command.
@@ -61,9 +61,11 @@ func TestParsesTheServerSideOfSSHConnection(t *testing.T) {
 
 // The decision, driven through the real transport seam with a stubbed remote.
 func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
-	// A listener standing in for the backend's own address:port, so "reachable" is
-	// a fact rather than an assumption.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// A listener on a GLOBAL UNICAST address, because loopback is now refused as a
+	// machine identity — see the loopback subtest below for why. This binds a real
+	// interface address so "reachable" stays a fact rather than an assumption.
+	host := globalUnicastLocalAddr(t)
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	require.NoError(t, err)
 	defer func() { _ = ln.Close() }()
 	go func() {
@@ -86,8 +88,8 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 
 	t.Run("a different, reachable machine is pinned", func(t *testing.T) {
 		addr, port := learnPinnedMachine(
-			stubTransport(fmt.Sprintf("10.0.0.1 5 127.0.0.1 %d", reachablePort)), "198.51.100.7", 22)
-		assert.Equal(t, "127.0.0.1", addr)
+			stubTransport(fmt.Sprintf("10.0.0.1 5 %s %d", host, reachablePort)), "198.51.100.7", 22)
+		assert.Equal(t, host, addr)
 		assert.Equal(t, reachablePort, port)
 	})
 
@@ -95,7 +97,7 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 		// An ordinary host, and also what an IP-preserving (DSR) balancer reports:
 		// re-pinning to it would change nothing.
 		addr, port := learnPinnedMachine(
-			stubTransport(fmt.Sprintf("10.0.0.1 5 127.0.0.1 %d", reachablePort)), "127.0.0.1", reachablePort)
+			stubTransport(fmt.Sprintf("10.0.0.1 5 %s %d", host, reachablePort)), host, reachablePort)
 		assert.Empty(t, addr)
 		assert.Zero(t, port)
 	})
@@ -114,6 +116,42 @@ func TestLearnPinnedMachineOnlyRepinsWhenItHelpsAndCanBeReached(t *testing.T) {
 		addr, port := learnPinnedMachine(stubTransport("10.0.0.1 5 198.51.100.9 22"), "203.0.113.5", 22)
 		assert.Empty(t, addr)
 		assert.Zero(t, port)
+	})
+
+	t.Run("an address that means \"me\" is refused", func(t *testing.T) {
+		// SSH_CONNECTION describes the socket the backend ACCEPTED, so a balancer that
+		// reaches its backends over loopback makes every one of them report 127.0.0.1.
+		// Evaluated from the daemon that address is the DAEMON'S OWN HOST, and the
+		// reachability probe would cheerfully connect to its sshd — after which every
+		// step, including the reap, would target the wrong machine entirely. A real
+		// listener is bound here so the probe WOULD have succeeded, which is what makes
+		// this test about the classification rather than about reachability.
+		self, selfErr := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, selfErr)
+		defer func() { _ = self.Close() }()
+		go func() {
+			for {
+				c, acceptErr := self.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+		selfPort := self.Addr().(*net.TCPAddr).Port
+
+		for name, reported := range map[string]string{
+			"loopback":      fmt.Sprintf("10.0.0.1 5 127.0.0.1 %d", selfPort),
+			"unspecified":   "10.0.0.1 5 0.0.0.0 22",
+			"link-local":    "10.0.0.1 5 169.254.1.1 22",
+			"IPv6 loopback": "10.0.0.1 5 ::1 22",
+		} {
+			t.Run(name, func(t *testing.T) {
+				addr, port := learnPinnedMachine(stubTransport(reported), "203.0.113.5", 22)
+				assert.Empty(t, addr, "%s is not a portable machine identity", name)
+				assert.Zero(t, port)
+			})
+		}
 	})
 
 	t.Run("an unusable answer falls back", func(t *testing.T) {
@@ -165,14 +203,14 @@ func TestRestoredHandleReapsTheMachineItRecorded(t *testing.T) {
 	raw, err := json.Marshal(&RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
 		Config:              config.SSHConfig{Host: "vip.example", Port: 2200},
 		SessionDir:          "/root/.af-sessions/x.AbCdEf",
-		DialAddress:         "10.0.0.9",
-		DialPort:            22,
+		DialEndpoint:        "10.0.0.9:22",
 		HostKeyVerification: config.SSHHostKeyStrict,
 	}})
 	require.NoError(t, err)
 	var back RuntimeCleanupData
 	require.NoError(t, json.Unmarshal(raw, &back))
-	require.Equal(t, 22, back.SSH.DialPort, "the port must survive the round trip, or the reap dials the VIP")
+	require.Equal(t, "10.0.0.9:22", back.SSH.DialEndpoint,
+		"the port must survive the round trip, or the reap dials the VIP")
 
 	backend, _, err := restoreRuntimeCleanup("vip", "ssh", &back)
 	require.NoError(t, err)
@@ -194,4 +232,76 @@ func TestRestoredHandleReapsTheMachineItRecorded(t *testing.T) {
 	assert.Contains(t, proxyCommandValue(t, ob.provisioner.sshCmd),
 		"ssh-relay '198.51.100.8' "+strconv.Itoa(2200),
 		"an older handle carries no port, so it keeps using the configured one")
+}
+
+// globalUnicastLocalAddr returns an address of this host that is a portable
+// machine identity, or skips. CI runners have one; a machine with only loopback
+// cannot exercise the reachable case at all.
+func globalUnicastLocalAddr(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	require.NoError(t, err)
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok || !ipNet.IP.IsGlobalUnicast() || ipNet.IP.To4() == nil {
+			continue
+		}
+		return ipNet.IP.String()
+	}
+	t.Skip("this host has no globally-unicast IPv4 address, so the reachable case cannot be built")
+	return ""
+}
+
+// A pinned machine must not hand a ROLLED-BACK daemon a target it will misread.
+//
+// A release without DialEndpoint ignores it but still honours DialAddress, and
+// appends the CONFIGURED port itself. So DialAddress may only be written when the
+// pinned port IS the configured port; otherwise the older daemon would relay to
+// the machine on a port it may not serve — or one where another shared-key ssh
+// service answers and a reap runs against the wrong host.
+func TestPinnedMachineIsRecordedSafelyForAnOlderDaemon(t *testing.T) {
+	t.Run("a different port writes no dial_address", func(t *testing.T) {
+		var c SSHRuntimeCleanupData
+		sshRecordPinnedMachine(&c, "10.0.0.9", 22, 2200)
+		assert.Equal(t, "10.0.0.9:22", c.DialEndpoint)
+		assert.Empty(t, c.DialAddress,
+			"a daemon without DialEndpoint would append the CONFIGURED port (2200) to this address and reach "+
+				"the wrong socket; seeing no pin at all it dials by name, which is what it did before #3122")
+
+		// And this daemon still reads the machine back.
+		addr, port := sshPinnedCleanupTarget(&c)
+		assert.Equal(t, "10.0.0.9", addr)
+		assert.Equal(t, 22, port)
+	})
+
+	t.Run("a matching port writes both", func(t *testing.T) {
+		var c SSHRuntimeCleanupData
+		sshRecordPinnedMachine(&c, "10.0.0.9", 2200, 2200)
+		assert.Equal(t, "10.0.0.9:2200", c.DialEndpoint)
+		assert.Equal(t, "10.0.0.9", c.DialAddress,
+			"here an older daemon appends the same port and reaches the same machine, so it keeps a pin")
+	})
+
+	t.Run("an address pin with no port is unchanged", func(t *testing.T) {
+		var c SSHRuntimeCleanupData
+		sshRecordPinnedMachine(&c, "198.51.100.8", 0, 2200)
+		assert.Equal(t, "198.51.100.8", c.DialAddress)
+		addr, port := sshPinnedCleanupTarget(&c)
+		assert.Equal(t, "198.51.100.8", addr)
+		assert.Equal(t, 2200, port)
+	})
+
+	t.Run("a handle from before #3122 reads as an address pin", func(t *testing.T) {
+		addr, port := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{DialAddress: "198.51.100.8"})
+		assert.Equal(t, "198.51.100.8", addr)
+		assert.Zero(t, port, "zero means the configured port, which is what that handle always meant")
+	})
+
+	t.Run("a malformed endpoint falls back rather than refusing", func(t *testing.T) {
+		// A teardown that will not compose leaks the workspace it exists to remove.
+		addr, port := sshPinnedCleanupTarget(&SSHRuntimeCleanupData{
+			DialEndpoint: "not-an-endpoint", DialAddress: "198.51.100.8"})
+		assert.Equal(t, "198.51.100.8", addr)
+		assert.Zero(t, port)
+	})
 }

@@ -70,11 +70,20 @@ type SSHRuntimeCleanupData struct {
 	// between #3100 and this change, or one whose provision could not settle on an
 	// address — dials the name, exactly as it always did.
 	DialAddress string `json:"dial_address,omitempty"`
-	// DialPort is the port the pinned MACHINE listens on, which behind an L4 load
-	// balancer is not the port its VIP is reached on (#3122). Zero means "the port
-	// in Config", which is every handle written before machine-pinning existed — so
-	// an older record replays exactly as it always did.
-	DialPort            int    `json:"dial_port,omitempty"`
+	// DialEndpoint is a pinned MACHINE as "host:port" (#3122). Behind an L4 balancer
+	// the backend listens on a different port than its VIP is reached on, so the port
+	// has to travel with the address.
+	//
+	// IT IS A SEPARATE FIELD BECAUSE A DAEMON CAN BE ROLLED BACK. A release that
+	// predates this ignores an unknown key but still honours DialAddress, and would
+	// relay to the machine's address on the CONFIGURED port — a port that machine may
+	// not serve, or worse, one where some other shared-key ssh service answers and a
+	// reap runs against the wrong host. So when the pinned port is NOT the configured
+	// one, DialAddress is deliberately left EMPTY: an older daemon then sees an
+	// unpinned handle and dials by name, exactly as it did before any of this, which
+	// is safe. Both are written only when they agree, so a rollback keeps the pin it
+	// can read correctly. See sshPinnedCleanupTarget for the reading side.
+	DialEndpoint        string `json:"dial_endpoint,omitempty"`
 	HostKeyVerification string `json:"host_key_verification,omitempty"`
 }
 
@@ -235,7 +244,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		// on. Reach THAT machine rather than re-resolving the name — see DialAddress.
 		// An empty one composes the ordinary name-based command, so a record from
 		// before any of this reaps exactly as it always did.
-		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, data.SSH.DialAddress, data.SSH.DialPort)
+		pinAddr, pinPort := sshPinnedCleanupTarget(data.SSH)
+		sshCmd, cmdErr := sshCommandPinnedTo(legacyCfg, data.SSH.HostKeyVerification, pinAddr, pinPort)
 		if cmdErr != nil {
 			return nil, nil, fmt.Errorf("ssh cleanup handle has an unusable address: %w", cmdErr)
 		}
