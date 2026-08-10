@@ -328,6 +328,54 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	oldFinalizerReleased = true
 }
 
+func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "live-retry-crash-window")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "live-retry-crash-window", RepoID: repoID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "origin repo "+repoPath+" is gone")
+	recovery := recordFor(t, repoID, "live-retry-crash-window").Worktree.RelocationRecovery
+	require.NotNil(t, recovery)
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+
+	// A previous explicit kill can leave this durable tombstone when pane teardown
+	// is unknown. The poll then reaches finishUserKill with the same live instance
+	// and cleanup-ready handle, so this is a reachable destructive retry rather
+	// than a synthetic direct call into worktree cleanup.
+	require.NoError(t, manager.persistKillTombstone(repoID, inst, nil))
+	instancesPath, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	var releaseLock func()
+	inst.SetBackend(&afterKillBackend{
+		Backend: &session.LocalBackend{},
+		afterKill: func() {
+			// Block the post-Kill checkpoint after descriptor cleanup has returned.
+			// Only the callback inside the descriptor fence can have reached disk.
+			releaseLock = holdFileLock(t, instancesPath)
+		},
+	})
+	t.Cleanup(func() {
+		if releaseLock != nil {
+			releaseLock()
+		}
+	})
+
+	previousDeleteTimeout := session.InstanceDeleteLockTimeout
+	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
+
+	manager.finishUserKill(repoID, inst)
+	require.NotNil(t, releaseLock, "the retry must reach the fallible tail after descriptor cleanup")
+	assert.False(t, exists(archivedPath), "descriptor cleanup must finish before the tail checkpoint fails")
+
+	retained := recordFor(t, repoID, "live-retry-crash-window")
+	require.NotNil(t, retained)
+	require.NotNil(t, retained.Worktree.RelocationRecovery)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupFinalizing, retained.Worktree.RelocationRecovery.State,
+		"the automatic retry must durably enter the finalization fence before unlinking the archive root")
+}
+
 func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "live-tail")
 	require.NoError(t, os.RemoveAll(repoPath))
