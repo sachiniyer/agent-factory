@@ -116,6 +116,66 @@ func TestArchiveReportStorageProjectionFencesOlderReaders(t *testing.T) {
 	assert.Equal(t, data.ArchiveReport.RetainedTrees, current.GetArchiveReport().RetainedTrees)
 }
 
+// v10235InstanceData is the last release's archive-report-blind wire shape.
+// Unlike v1.0.228, v1.0.235 understands relocation recovery, so the rollback
+// projection can use that existing admission fence to keep an explicit kill
+// from deleting the row which owns the otherwise-unknown report.
+type v10235InstanceData struct {
+	ID                  string          `json:"id,omitempty"`
+	Title               string          `json:"title"`
+	Path                string          `json:"path"`
+	Branch              string          `json:"branch"`
+	Status              Status          `json:"status"`
+	Liveness            Liveness        `json:"liveness,omitempty"`
+	Program             string          `json:"program"`
+	BackendType         string          `json:"backend_type,omitempty"`
+	StartupStateUnknown bool            `json:"startup_state_unknown,omitempty"`
+	Worktree            GitWorktreeData `json:"worktree"`
+	Tabs                []TabData       `json:"tabs,omitempty"`
+}
+
+func TestArchiveReportStorageProjectionMakesV10235KillRefuse(t *testing.T) {
+	branchCreatedByUs := true
+	data := deadInstanceData(t, Archived, "af_report_kill_fence_agent", "af_report_kill_fence_shell")
+	data.Worktree.ExternalWorktree = false
+	data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	data.ArchiveReport = &git.ArchiveReport{RetainedTrees: []git.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-0123456789abcdef0123456789abcdef", IdentityKnown: true,
+		Device: 1, Inode: 2, FileType: 0o040000,
+		Skipped: []git.ArchiveSkippedEntry{{
+			Path: "private/credential", Reason: git.ArchiveSkipPermissionDenied,
+		}},
+	}}}
+
+	loaded, err := FromInstanceData(data)
+	require.NoError(t, err)
+	stored := loaded.ToInstanceData().ForStorage()
+
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var legacyWire v10235InstanceData
+	require.NoError(t, json.Unmarshal(payload, &legacyWire))
+	legacyPayload, err := json.Marshal(legacyWire)
+	require.NoError(t, err)
+	var legacyView InstanceData
+	require.NoError(t, json.Unmarshal(legacyPayload, &legacyView))
+	require.Nil(t, legacyView.ArchiveReport, "the rollback fixture must actually omit the new report")
+	require.NotNil(t, legacyView.Worktree.RelocationRecovery,
+		"the previous reader needs an admission fence it understands")
+
+	legacy, err := FromInstanceData(legacyView)
+	require.NoError(t, err)
+	err = legacy.Kill()
+	require.ErrorContains(t, err, "worktree recovery state",
+		"v1.0.235 explicit kill must retain the row instead of no-oping external cleanup and deleting it")
+
+	current, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	require.NotNil(t, current.gitWorktree)
+	require.False(t, current.gitWorktree.HasUnresolvedRelocation(),
+		"the current reader must remove the rollback-only kill fence")
+}
+
 // TestFromInstanceData_ArchivedLoadsInert: an Archived record (#1028) loads
 // WITHOUT calling Start — no tmux is spawned or reconnected, the instance stays
 // started=false, and its gitWorktree is bound to the persisted (archived) path.

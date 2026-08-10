@@ -128,9 +128,9 @@ type ArchiveReport struct {
 	RetainedTrees []ArchiveRetainedTree `json:"retained_trees"`
 	// RollbackFence carries the ownership flags that ForStorage projects through
 	// fields understood by the previous release. A pre-#3066 daemon ignores this
-	// report, but sees an inert startup-unknown, external worktree and therefore
-	// refuses to restore or delete the incomplete published copy. A current daemon
-	// reads these originals before reconstructing the worktree and removes the
+	// report, but sees an inert startup-unknown, external worktree and unresolved
+	// relocation, so it refuses both restore and explicit kill. A current daemon
+	// reads these originals before reconstructing the worktree and removes every
 	// compatibility fence in memory.
 	RollbackFence *ArchiveRollbackFence `json:"rollback_fence,omitempty"`
 }
@@ -142,6 +142,26 @@ type ArchiveRollbackFence struct {
 	OriginalStartupStateUnknown bool  `json:"original_startup_state_unknown"`
 	OriginalExternalWorktree    bool  `json:"original_external_worktree"`
 	OriginalBranchCreatedByUs   *bool `json:"original_branch_created_by_us"`
+	// RelocationRecoveryProjected distinguishes a new rollback fence from one
+	// written before archive reports also projected a kill-admission latch. When
+	// true, OriginalRelocationRecovery is authoritative even when nil.
+	RelocationRecoveryProjected bool                               `json:"relocation_recovery_projected,omitempty"`
+	OriginalRelocationRecovery  *ArchiveRollbackRelocationRecovery `json:"original_relocation_recovery,omitempty"`
+}
+
+// ArchiveRollbackRelocationRecovery is the pre-projection relocation state.
+// It mirrors session.GitWorktreeRelocationRecoveryData here because the git
+// package cannot depend on session's storage DTO.
+type ArchiveRollbackRelocationRecovery struct {
+	State                       RelocationRecoveryState `json:"state,omitempty"`
+	AlternatePath               string                  `json:"alternate_path,omitempty"`
+	IdentityKnown               bool                    `json:"identity_known,omitempty"`
+	Device                      uint64                  `json:"device,omitempty"`
+	Inode                       uint64                  `json:"inode,omitempty"`
+	FileType                    uint32                  `json:"file_type,omitempty"`
+	OriginalExternalWorktree    *bool                   `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs   *bool                   `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown *bool                   `json:"original_startup_state_unknown,omitempty"`
 }
 
 // Empty reports whether every archive copy was complete.
@@ -162,9 +182,24 @@ func (report ArchiveReport) Clone() ArchiveReport {
 			branchCreatedByUs := *fence.OriginalBranchCreatedByUs
 			fence.OriginalBranchCreatedByUs = &branchCreatedByUs
 		}
+		if fence.OriginalRelocationRecovery != nil {
+			recovery := *fence.OriginalRelocationRecovery
+			recovery.OriginalExternalWorktree = cloneBool(recovery.OriginalExternalWorktree)
+			recovery.OriginalBranchCreatedByUs = cloneBool(recovery.OriginalBranchCreatedByUs)
+			recovery.OriginalStartupStateUnknown = cloneBool(recovery.OriginalStartupStateUnknown)
+			fence.OriginalRelocationRecovery = &recovery
+		}
 		clone.RollbackFence = &fence
 	}
 	return clone
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func (report ArchiveReport) append(newReport ArchiveReport) ArchiveReport {
