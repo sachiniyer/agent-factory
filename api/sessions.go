@@ -3,10 +3,14 @@ package api
 import (
 	"errors"
 	"fmt"
-	"github.com/sachiniyer/agent-factory/internal/agentaccount"
-	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"os"
 	"os/exec"
 	"strings"
+
+	xansi "github.com/charmbracelet/x/ansi"
+
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
@@ -37,15 +41,15 @@ var (
 	closeTabViaDaemon       = daemon.CloseTab
 	renameTabViaDaemon      = daemon.RenameTab
 	reorderTabViaDaemon     = daemon.ReorderTab
-	previewSessionViaDaemon = func(req daemon.PreviewRequest) (string, bool, bool, error) {
+	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		if !apiclient.IsRemoteTarget() {
-			return daemon.PreviewSession(req)
+			return daemon.PreviewSessionSnapshot(req)
 		}
 		client, err := apiclient.NewTargeted()
 		if err != nil {
-			return "", false, false, err
+			return daemon.PreviewResponse{}, err
 		}
-		return client.Preview(req)
+		return client.PreviewSnapshot(req)
 	}
 	preflightLocalSession = preflight.LocalSessionPrereqs
 	// snapshotViaDaemon is the non-spawning read path for list/get/whoami
@@ -449,6 +453,7 @@ var (
 	previewTabNameFlag string
 	previewTabIDFlag   string
 	previewFullFlag    bool
+	previewPlainFlag   bool
 )
 
 // previewTabMissErr is the message for a tab-level miss — an --tab-id that no
@@ -489,7 +494,14 @@ name, then slot — the same order every tab verb uses. An id or name that does
 not resolve is an error, never a silent fall back to a slot: that would capture
 whatever tab had shifted into it.
 
---full returns the entire scrollback instead of the visible screen.`,
+--full returns the entire scrollback instead of the visible screen. The default
+capture is the VISIBLE SCREEN, so for a pane that has scrolled it omits whatever
+is above — the output says so ("partial" in the JSON, a note on stderr) and names
+how many lines were left out, because a partial capture that looks complete is how
+a working session gets read as a wedged one (#3169).
+
+--plain strips ANSI escape sequences from the captured content, for callers that
+parse it rather than render it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -509,7 +521,7 @@ whatever tab had shifted into it.
 		// capture-pane the command actually needed. The daemon already owns the
 		// canonical live Instance and is the sole capture path, so selectors travel
 		// there unresolved and are applied atomically against its current tab roster.
-		content, gone, tabGone, err := previewSessionViaDaemon(daemon.PreviewRequest{
+		snapshot, err := previewSessionViaDaemon(daemon.PreviewRequest{
 			Title:   args[0],
 			RepoID:  repoID,
 			Tab:     previewTabFlag,
@@ -523,16 +535,51 @@ whatever tab had shifted into it.
 		// A tab-level miss is NOT a dead session. Reporting one as the other
 		// tells the user their running session ended because they mistyped a
 		// selector. The daemon carries the distinction so this path never guesses.
-		if tabGone {
+		if snapshot.TabGone {
 			return jsonError(previewTabMissErr())
 		}
-		if gone {
+		if snapshot.Gone {
 			return jsonError(fmt.Errorf("session %q is no longer running", args[0]))
 		}
-		return jsonOut(map[string]string{
+		content := snapshot.Content
+		if previewPlainFlag {
+			// One flag instead of every scripted consumer reimplementing this. The
+			// escape sequences are meaningful to a terminal and noise to a parser, and
+			// af already vendors the stripper the TUI uses, so callers were writing by
+			// hand what af could have handed them (#3169).
+			content = xansi.Strip(content)
+		}
+		out := map[string]any{
 			"title":   args[0],
 			"content": content,
-		})
+		}
+		// The MARKER, and the reason this issue exists: a visible-screen capture that
+		// omits scrollback must not read as a complete one (#3169). Reported as
+		// structured fields for scripts AND as a human line for the operator reading
+		// the terminal, because the failure was someone reading a capture and acting on
+		// it.
+		//
+		// Suppressed for --full, where nothing is above the captured region by
+		// definition, and for a measured zero, where the visible screen genuinely IS
+		// the whole pane.
+		if !previewFullFlag {
+			out["partial"] = true
+			if snapshot.LinesAboveKnown {
+				out["lines_above"] = snapshot.LinesAbove
+				if snapshot.LinesAbove == 0 {
+					// Nothing above: the capture is complete after all.
+					delete(out, "partial")
+				}
+			} else {
+				// UNMEASURED is not zero. Saying so is the whole point — a capture nobody
+				// measured must not be reported as one with nothing above it.
+				out["lines_above_known"] = false
+			}
+			if notice := previewPartialNotice(snapshot, previewFullFlag); notice != "" {
+				fmt.Fprintln(os.Stderr, notice)
+			}
+		}
+		return jsonOut(out)
 	},
 }
 

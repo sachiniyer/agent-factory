@@ -1673,7 +1673,14 @@ name, then slot — the same order every tab verb uses. An id or name that does
 not resolve is an error, never a silent fall back to a slot: that would capture
 whatever tab had shifted into it.
 
---full returns the entire scrollback instead of the visible screen.
+--full returns the entire scrollback instead of the visible screen. The default
+capture is the VISIBLE SCREEN, so for a pane that has scrolled it omits whatever
+is above — the output says so ("partial" in the JSON, a note on stderr) and names
+how many lines were left out, because a partial capture that looks complete is how
+a working session gets read as a wedged one (#3169).
+
+--plain strips ANSI escape sequences from the captured content, for callers that
+parse it rather than render it.
 
 ```
 af sessions preview <title> [flags]
@@ -1684,6 +1691,7 @@ af sessions preview <title> [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--full` |  | Capture the entire scrollback instead of the visible screen |
+| `--plain` |  | Strip ANSI escape sequences from the captured content |
 | `--tab` | `int` | Tab slot to capture, 0-based as the tab bar reads left to right (slot 0 is the agent tab) (default `0`) |
 | `--tab-id` | `string` | Stable id of the tab to capture (#1738); wins over --tab-name and --tab |
 | `--tab-name` | `string` | Name of the tab to capture, as reported by "af sessions get" (not the TUI's "Agent"/"Terminal" label); wins over --tab |

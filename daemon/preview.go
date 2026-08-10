@@ -87,6 +87,16 @@ type PreviewResponse struct {
 	// session really did die mid-capture. Carrying the fact is the alternative to
 	// inferring it.
 	TabGone bool `json:"tab_gone,omitempty"`
+	// LinesAbove / LinesAboveKnown carry how much scrollback sits ABOVE the captured
+	// region, so a visible-screen capture can say it was partial (#3169).
+	//
+	// Both, because 0 and "unmeasured" are different answers: a remote sandbox does
+	// not carry the count over its REST preview, and rendering unknown as "0 more
+	// lines above" would report a partial capture as complete — the exact failure
+	// being fixed. omitempty on the bool is safe for the same reason it is on
+	// HasModes: absent means unknown, which is the conservative reading.
+	LinesAbove      int  `json:"lines_above,omitempty"`
+	LinesAboveKnown bool `json:"lines_above_known,omitempty"`
 }
 
 // Preview captures one tab's content through the session's agent-server — the same
@@ -164,5 +174,7 @@ func (s *controlServer) Preview(req PreviewRequest, resp *PreviewResponse) error
 	resp.Content = snapshot.Content
 	resp.Modes = snapshot.Modes
 	resp.HasModes = snapshot.HasModes
+	resp.LinesAbove = snapshot.LinesAbove
+	resp.LinesAboveKnown = snapshot.LinesAboveKnown
 	return nil
 }

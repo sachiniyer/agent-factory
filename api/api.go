@@ -649,6 +649,7 @@ func init() {
 	sessionsPreviewCmd.Flags().StringVar(&previewTabNameFlag, "tab-name", "", "Name of the tab to capture, as reported by \"af sessions get\" (not the TUI's \"Agent\"/\"Terminal\" label); wins over --tab")
 	sessionsPreviewCmd.Flags().StringVar(&previewTabIDFlag, "tab-id", "", "Stable id of the tab to capture (#1738); wins over --tab-name and --tab")
 	sessionsPreviewCmd.Flags().BoolVar(&previewFullFlag, "full", false, "Capture the entire scrollback instead of the visible screen")
+	sessionsPreviewCmd.Flags().BoolVar(&previewPlainFlag, "plain", false, "Strip ANSI escape sequences from the captured content")
 
 	// --prompt is an ALIAS for the positional <prompt>, mirroring `sessions
 	// create --prompt` so the two sibling verbs take the same concept the same

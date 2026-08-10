@@ -16,6 +16,16 @@ type PreviewSnapshot struct {
 	Content  string
 	Modes    terminal.Modes
 	HasModes bool
+	// LinesAbove is how many scrollback lines sit ABOVE the captured region, and
+	// LinesAboveKnown says whether anyone measured (#3169).
+	//
+	// Two fields rather than one, because 0 and "unmeasured" are different answers
+	// and collapsing them is the bug being fixed: a visible-screen capture reported
+	// as having nothing above it reads as COMPLETE. A remote sandbox does not carry
+	// the count over its REST preview, so unknown is a real state, not a defensive
+	// one — and it must render as "not measured", never as "nothing above".
+	LinesAbove      int
+	LinesAboveKnown bool
 }
 
 func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnapshot {
@@ -29,6 +39,9 @@ func previewSnapshotWithModes(content string, ts *tmux.TmuxSession) PreviewSnaps
 	}
 	snapshot.Modes = state.Modes
 	snapshot.HasModes = true
+	// Free: this is the same display-message the modes came from (#3169).
+	snapshot.LinesAbove = state.HistorySize
+	snapshot.LinesAboveKnown = true
 	return snapshot
 }
 

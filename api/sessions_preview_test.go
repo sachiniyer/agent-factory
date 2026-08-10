@@ -25,9 +25,9 @@ func TestSessionsPreviewUsesDaemonCapturePath(t *testing.T) {
 
 	var got daemon.PreviewRequest
 	prevPreview := previewSessionViaDaemon
-	previewSessionViaDaemon = func(req daemon.PreviewRequest) (string, bool, bool, error) {
+	previewSessionViaDaemon = func(req daemon.PreviewRequest) (daemon.PreviewResponse, error) {
 		got = req
-		return "captured by daemon", false, false, nil
+		return daemon.PreviewResponse{Content: "captured by daemon"}, nil
 	}
 	t.Cleanup(func() { previewSessionViaDaemon = prevPreview })
 
@@ -43,7 +43,7 @@ func TestSessionsPreviewUsesDaemonCapturePath(t *testing.T) {
 		t.Fatalf("Preview request = %+v, want title/repo and every selector forwarded unchanged", got)
 	}
 
-	var payload map[string]string
+	var payload map[string]any
 	if err := json.Unmarshal(out, &payload); err != nil {
 		t.Fatalf("preview output is not JSON (%q): %v", out, err)
 	}
