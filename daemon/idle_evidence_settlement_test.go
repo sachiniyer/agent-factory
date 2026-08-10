@@ -76,7 +76,7 @@ func TestPollSettlementBookkeepingIsOrderedWithItsWrite(t *testing.T) {
 		heldAtRecord = true
 	}
 
-	manager.persistPollChange(repoID, inst, session.Running, time.Time{}, false)
+	manager.persistPollChange(repoID, inst, session.LiveRunning, time.Time{}, false)
 	require.True(t, probed, "poll never reached settlement bookkeeping")
 	require.True(t, heldAtRecord,
 		"settlement bookkeeping escaped the write ordering lock; an older success can erase a newer failed-write retry")
