@@ -76,6 +76,10 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /Squash merge PR after fresh aggregate evaluation[\s\S]*?await autoGate\.merge\(/,
   );
+  assert.match(
+    workflow,
+    /const expectedPrefix = `Refusing to merge PR #\$\{process\.env\.PR_NUMBER\};`[\s\S]*?if \(!message\.startsWith\(expectedPrefix\)\) \{\s+throw error;/,
+  );
   assert.doesNotMatch(workflow, /AUTO_GATE_TOKEN/);
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
 });

@@ -355,10 +355,22 @@ jobs:
             if (typeof autoGate.evaluateAggregateDecision !== "function") {
               core.notice("Aggregate enforcement activates after this workflow lands on master.");
             }
-            await autoGate.merge({
-              github,
-              context,
-              core,
-              prNumber: Number(process.env.PR_NUMBER),
-              expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
-            });
+            try {
+              await autoGate.merge({
+                github,
+                context,
+                core,
+                prNumber: Number(process.env.PR_NUMBER),
+                expectedHeadSha: process.env.EXPECTED_HEAD_SHA,
+              });
+            } catch (error) {
+              const message = error && error.message ? error.message : String(error);
+              const expectedPrefix = `Refusing to merge PR #${process.env.PR_NUMBER};`;
+              if (!message.startsWith(expectedPrefix)) {
+                throw error;
+              }
+              // A fresh gate refusal is ordinary waiting state. The fixed
+              // aggregate remains the red enforcement record; infrastructure
+              // and merge API errors still fail this workflow job.
+              core.notice(message);
+            }
