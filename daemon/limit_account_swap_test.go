@@ -129,6 +129,13 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	// The move is already committed. Removing the opt-in stops future choices,
 	// but cannot make this identity change silent by abandoning its notice.
 	writeLimitAccountCandidates(t, "limit_account_candidates = []\n")
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(home, "accounts", "claude", "work")); err != nil {
+		t.Fatal(err)
+	}
 	backend.mu.Lock()
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
@@ -143,6 +150,65 @@ func TestResumeFromLimit_CommittedSwapStillDeliversNoticeAfterOptOut(t *testing.
 	if len(prompts) != 1 || !strings.Contains(prompts[0], `claude account "work"`) {
 		t.Fatalf("committed identity change lost its in-session notice after opt-out: %q", prompts)
 	}
+}
+
+func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *testing.T) {
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "finish", time.Time{})
+	configureLimitAccountCandidate(t, manager, "work")
+
+	worktreePath := filepath.Join(t.TempDir(), "worktree")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktreePath, inst.Title, "retry-branch", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const agentName = "af_pending_swap"
+	executor := tabNameKeyedExec(map[string]bool{agentName: true})
+	pty := tabPtyFactory{t: t, cmdExec: executor}
+	agent := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, executor)
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetTmuxSession(agent)
+	if _, err := inst.AddProcessTab("make", "build"); err != nil {
+		t.Fatal(err)
+	}
+	data := inst.ToInstanceData()
+	if len(data.Tabs) != 2 {
+		t.Fatalf("fixture tabs = %d, want agent plus sibling", len(data.Tabs))
+	}
+	siblingName := data.Tabs[1].TmuxName
+	if state, err := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
+		siblingName, "make", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
+		t.Fatalf("make sibling absent: state=%v err=%v", state, err)
+	}
+	if inst.TabAlive(1) {
+		t.Fatal("fixture sibling must be absent while the replacement agent answers live")
+	}
+
+	requirePendingSwap := func() {
+		t.Helper()
+		if _, to, pending := inst.PendingAccountSwap(); !pending || to != "work" {
+			t.Fatalf("pending account swap = (%q, %v), want work", to, pending)
+		}
+	}
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.ValidateAccountSwap("work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.SelectAccountAutomatically("", "work"); err != nil {
+		t.Fatal(err)
+	}
+	inst.EndLimitResume()
+	requirePendingSwap()
+
+	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err == nil {
+		t.Fatal("live agent with a missing expected sibling completed the pending account swap")
+	}
+	requirePendingSwap()
 }
 
 func TestResumeLimitedSessions_CommittedSwapFinishesAfterAutoResumeOptOut(t *testing.T) {

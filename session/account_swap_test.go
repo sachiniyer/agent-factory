@@ -91,6 +91,37 @@ func TestValidateAccountSwapRefusesSiblingIdentityOverride(t *testing.T) {
 	require.ErrorContains(t, err, "overrides the account directory")
 }
 
+func TestAutomaticAccountSwapFailsClosedForDocker(t *testing.T) {
+	inst := accountSwapTestInstance(tmux.ProgramClaude)
+	inst.SetBackend(&dockerBackend{})
+	require.False(t, inst.SupportsAutomaticAccountSwap(),
+		"automatic Docker replacement needs a durable runtime identity and frozen provision plan")
+}
+
+func TestValidateAccountSwapMintsAClaudeConversationForEachMove(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	_, err = agentaccount.Register(home, tmux.ProgramClaude, "personal")
+	require.NoError(t, err)
+
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	first := inst.accountSwapLaunch.conversation.ID
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	require.True(t, inst.ClearPendingAccountSwap("", "work"))
+	inst.EndLimitResume()
+
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("personal"))
+	second := inst.accountSwapLaunch.conversation.ID
+	require.NotEmpty(t, first)
+	require.NotEmpty(t, second)
+	require.NotEqual(t, first, second,
+		"returning to an account-local store must never reuse an earlier Claude session id")
+}
+
 func TestValidateAccountSwapPreflightsResolvedScopedLaunch(t *testing.T) {
 	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude --model sonnet")
 
@@ -257,4 +288,8 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 	require.ErrorContains(t, handoff.ValidateRuntimeAction(RuntimeActionHandoff), "account swap")
 	require.NoError(t, handoff.ValidateRuntimeAction(RuntimeActionResumeLimit),
 		"the pending notice must remain deliverable")
+
+	tabSpawn := newPending()
+	require.ErrorContains(t, tabSpawn.TabSpawnBlocked(), "account swap",
+		"a durable identity change must fence new credential-bearing panes until replacement completes")
 }
