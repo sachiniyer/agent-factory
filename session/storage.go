@@ -95,7 +95,8 @@ type InstanceData struct {
 	// still known to be later. Persisted across daemon restarts.
 	LastPromptAttemptAt time.Time `json:"last_prompt_attempt_at,omitzero"`
 	// LastPromptDeliveryStatus is the closed observation returned by the delivery
-	// path. could-not-confirm remains uncertainty (#3162), never a failed delivery.
+	// path. sent-unverified and could-not-confirm remain uncertainty (#3162), never
+	// failed delivery.
 	LastPromptDeliveryStatus PromptDeliveryStatus `json:"last_prompt_delivery_status,omitempty"`
 	// LastPaneChurnAt is when the daemon most recently observed Observation.Updated.
 	// It proves bytes changed, not who produced them or what they meant.

@@ -60,6 +60,15 @@ func TestIdleReasonForUsesOnlyMechanicalFacts(t *testing.T) {
 			want: IdleReasonDeliveryUnconfirmed,
 		},
 		{
+			name: "sent prompt could not be verified and pane did not change",
+			data: InstanceData{
+				Liveness:                 LiveReady,
+				LastPromptAttemptAt:      attemptedAt,
+				LastPromptDeliveryStatus: PromptSentUnverified,
+			},
+			want: IdleReasonDeliveryUnconfirmed,
+		},
+		{
 			name: "delivered prompt has no later pane change",
 			data: InstanceData{
 				Liveness:                 LiveReady,
@@ -84,6 +93,16 @@ func TestIdleReasonForUsesOnlyMechanicalFacts(t *testing.T) {
 				Liveness:                 LiveReady,
 				LastPromptAttemptAt:      attemptedAt,
 				LastPromptDeliveryStatus: PromptCouldNotConfirm,
+				LastPaneChurnAt:          paneChangedAt,
+			},
+			want: IdleReasonSettledAfterPaneChange,
+		},
+		{
+			name: "sent unverified prompt followed by pane change settled",
+			data: InstanceData{
+				Liveness:                 LiveReady,
+				LastPromptAttemptAt:      attemptedAt,
+				LastPromptDeliveryStatus: PromptSentUnverified,
 				LastPaneChurnAt:          paneChangedAt,
 			},
 			want: IdleReasonSettledAfterPaneChange,

@@ -74,7 +74,7 @@ func IdleReasonFor(data InstanceData) IdleReason {
 		return IdleReasonPromptNotDelivered
 	}
 	switch data.LastPromptDeliveryStatus {
-	case PromptCouldNotConfirm:
+	case PromptSentUnverified, PromptCouldNotConfirm:
 		if data.LastPaneChurnAt.After(data.LastPromptAttemptAt) {
 			return IdleReasonSettledAfterPaneChange
 		}

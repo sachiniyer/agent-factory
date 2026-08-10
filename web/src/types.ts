@@ -139,8 +139,8 @@ export interface SessionData {
   idle_reason?: IdleReason;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
-  /** Closed delivery observation. could-not-confirm is uncertainty, not failure. */
-  last_prompt_delivery_status?: "delivered" | "not-delivered" | "could-not-confirm";
+  /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
+  last_prompt_delivery_status?: "delivered" | "not-delivered" | "sent-unverified" | "could-not-confirm";
   /** RFC3339 time when the daemon most recently observed pane bytes change. */
   last_pane_churn_at?: string;
   /** One-shot note on a re-created root agent that did not demonstrably come back
