@@ -185,12 +185,11 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 	gw.PreserveRelocationClaim(claim)
 	previousProbe := repoGoneOriginProbe
 	previousTimeout := relocationIdentityTimeout
-	blocked := make(chan struct{})
 	probeFinished := make(chan struct{})
 	relocationIdentityTimeout = 25 * time.Millisecond
-	repoGoneOriginProbe = func(*GitWorktree) error {
+	repoGoneOriginProbe = func(ctx context.Context, _ *GitWorktree) error {
 		defer close(probeFinished)
-		<-blocked
+		<-ctx.Done()
 		return ErrRepoGone
 	}
 	t.Cleanup(func() {
@@ -205,14 +204,11 @@ func TestValidateRelocationCleanupAdmission_RepoRecheckDeadlineRetainsAuthorizat
 
 	select {
 	case err := <-done:
-		close(blocked)
 		<-probeFinished
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("repo recheck deadline must refuse admission: %v", err)
 		}
 	case <-time.After(250 * time.Millisecond):
-		close(blocked)
-		<-done
 		t.Fatal("repo-gone origin recheck ignored its hard caller deadline")
 	}
 	recovery, retained := gw.GetRelocationRecovery()

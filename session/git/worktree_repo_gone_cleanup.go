@@ -8,25 +8,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-// probeRepoGoneOrigin applies restore's repository-validity rule under a
-// teardown-safe Git deadline. A missing or answered non-Git directory is gone;
-// an unreadable path or timed-out Git process is unknown and must fail closed.
-func probeRepoGoneOrigin(worktree *GitWorktree) error {
+// probeRepoGoneOrigin applies restore's repository-validity rule under the
+// caller's teardown-safe deadline. Git owns the path lookup too: an os.Stat
+// before a context-aware command could outlive the deadline on a stalled
+// filesystem, leaving one abandoned goroutine per retry. A missing or answered
+// non-Git directory is gone; an unreadable path or timed-out Git process is
+// unknown and must fail closed.
+func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 	if worktree.repoPath == "" {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
 	}
-	if _, err := os.Stat(worktree.repoPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
+	if _, err := worktree.runGitCommandContext(ctx, worktree.repoPath, "rev-parse", "--git-dir"); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
-		return err
-	}
-	if _, err := worktree.runGitLocalCommand(worktree.repoPath, "rev-parse", "--git-dir"); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return err
+		if definitiveMissingRepository(err) {
+			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
 		}
 		if definitiveNonGitRepository(worktree.repoPath, err) {
 			return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
@@ -34,6 +33,19 @@ func probeRepoGoneOrigin(worktree *GitWorktree) error {
 		return err
 	}
 	return nil
+}
+
+// definitiveMissingRepository recognizes only Git's C-locale failure to enter
+// the requested root. Permission, safe-directory, command-start and every other
+// operational error remain unknown and cannot authorize deletion.
+func definitiveMissingRepository(probeErr error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(probeErr, &exitErr) {
+		return false
+	}
+	diagnostic := string(exitErr.Stderr)
+	return strings.Contains(diagnostic, "cannot change to") &&
+		strings.Contains(diagnostic, "No such file or directory")
 }
 
 // definitiveNonGitRepository accepts only Git's stable outside-repository
@@ -52,19 +64,16 @@ func definitiveNonGitRepository(repoPath string, probeErr error) bool {
 }
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
-	result := make(chan error, 1)
-	go func() { result <- repoGoneOriginProbe(worktree) }()
-	timer := time.NewTimer(relocationIdentityTimeout)
-	defer timer.Stop()
-	select {
-	case err := <-result:
-		return err
-	case <-timer.C:
+	ctx, cancel := context.WithTimeout(context.Background(), relocationIdentityTimeout)
+	defer cancel()
+	err := repoGoneOriginProbe(ctx, worktree)
+	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf(
 			"timed out after %s while checking origin repository %s: %w",
-			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
+			relocationIdentityTimeout, worktree.repoPath, ctxErr,
 		)
 	}
+	return err
 }
 
 // CheckRepoPresentForRelocation applies the same bounded, fail-closed

@@ -221,6 +221,17 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// let the next poll try again: this loop IS the retry, and it is the reason a
 	// bounded teardown does not need a daemon restart to converge (#1917).
 	teardownErr := instance.Kill()
+	if !session.TeardownStateUnknown(teardownErr) {
+		// A settled live teardown may have consumed the only in-memory copy of a
+		// cleanup-ready relocation record. Make that settlement durable before the
+		// editor/delete tail, matching explicit KillSession; otherwise a daemon exit
+		// after either tail failure reloads the stale record against an absent archive.
+		if err := m.persistInstanceErr(repoID, instance); err != nil {
+			m.noteKillRetryFailure(key, instance.Title,
+				fmt.Errorf("could not persist the settled live teardown: %w", err))
+			return
+		}
+	}
 	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
 		m.noteKillRetryFailure(key, instance.Title,
 			fmt.Errorf("could not confirm the VS Code editor stopped: %w", err))
