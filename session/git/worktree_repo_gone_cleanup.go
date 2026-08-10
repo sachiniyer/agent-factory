@@ -53,7 +53,7 @@ func removeClaimedRepoGoneDirectory(path string, expected pathIdentity) error {
 	}
 
 	repoGoneBeforeWriterReap(path)
-	reapClaimedWorktreeWriters(directory, path, expected)
+	reapClaimedWorktreeWriters(path, expected)
 	repoGoneBeforeRecursiveDelete(path)
 	manifest, err := snapshotCopiedTree(directory, path)
 	if err != nil {
@@ -67,7 +67,7 @@ func removeClaimedRepoGoneDirectory(path string, expected pathIdentity) error {
 	}, true)
 }
 
-func reapClaimedWorktreeWriters(_ *os.File, path string, expected pathIdentity) {
+func reapClaimedWorktreeWriters(path string, expected pathIdentity) {
 	repoGoneReapMatching(path, func(pid int) bool {
 		cwd, _, ok := repoGoneOpenWorkingDir(pid)
 		if !ok {

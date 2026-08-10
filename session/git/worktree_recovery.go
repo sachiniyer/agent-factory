@@ -122,13 +122,10 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 		if !recovery.IdentityKnown {
 			return nil
 		}
-		if _, err := boundedRelocationPathIdentity(g.worktreePath); errors.Is(err, os.ErrNotExist) {
-			// An identity-qualified cleanup stall is written only after an
-			// authorized descriptor walk started. If its target is absent after
-			// restart, the late worker completed the root removal and there is no
-			// unresolved pathname left to authorize.
-			return nil
-		}
+		// Absence is not completion proof: the same state is also written when
+		// the origin-repo probe times out before deletion starts, and another
+		// process may rename the archive before restart. Only the live descriptor
+		// worker can reconcile its own late success.
 		recovery.State = RelocationRecoveryCleanupReady
 	default:
 		return fmt.Errorf("unknown relocation recovery state %q", recovery.State)

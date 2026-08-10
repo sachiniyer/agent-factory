@@ -142,6 +142,30 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	}
 }
 
+func TestCleanupClaimedRepoGone_RestartDoesNotTreatAbsentPathAsCompletedDelete(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "renamed-before-restart")
+	gw, err := NewGitWorktreeFromStorage(
+		filepath.Join(root, "missing-repo"), worktree, "repo-gone", "af/repo-gone", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("recreate worktree handle after restart: %v", err)
+	}
+	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
+		State:         RelocationRecoveryCleanupStalled,
+		IdentityKnown: true,
+		Device:        17,
+		Inode:         23,
+		FileType:      uint32(syscall.S_IFDIR),
+	}); err != nil {
+		t.Fatalf("reload identity-qualified cleanup stall: %v", err)
+	}
+	_, recovery, retained := gw.RelocationSnapshot()
+	if !retained || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("absent pathname was misread as completed deletion; retained=%v recovery=%+v", retained, recovery)
+	}
+}
+
 func TestCleanupClaimedRepoGone_RepoRecheckDeadlineRetainsClaim(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	previousProbe := repoGoneOriginProbe
