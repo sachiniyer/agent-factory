@@ -56,8 +56,8 @@ const (
 	// rendered enough prompt-specific evidence to verify the paste. If the later
 	// Enter command also succeeds, only those transport facts may be reported.
 	deliveryObservedUnverified
-	// deliveryCouldNotObserve: the terminal capture failed or the prompt had no
-	// distinctive text, so confirmation itself was unavailable.
+	// deliveryCouldNotObserve: the terminal capture failed, so confirmation
+	// itself was unavailable.
 	deliveryCouldNotObserve
 )
 
@@ -672,8 +672,16 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 	if probe.completion == "" {
 		// Nothing distinctive to confirm (empty/all-whitespace prompt). There is
 		// no positive check to make, so keep the ORIGINAL 500ms drain rather than
-		// quietly shortening it.
+		// quietly shortening it. Still inspect the pane afterward: a successful
+		// capture distinguishes a readable-but-unverified send from an observer
+		// failure even though neither can prove delivery.
+		deadline := time.Now().Add(pasteDeliveryMaxWait)
 		time.Sleep(emptyPromptDrain)
+		if remaining := time.Until(deadline); remaining > 0 {
+			if content, ok := t.capturePaneForDeliveryWithin(remaining); ok {
+				return deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
+			}
+		}
 		return deliveryObservation{outcome: deliveryCouldNotObserve}
 	}
 	deadline := time.Now().Add(pasteDeliveryMaxWait)

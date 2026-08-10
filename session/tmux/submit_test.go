@@ -709,6 +709,37 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
 		"a successful delivery to a non-echoing agent must not manufacture an ERROR")
 }
 
+func TestSubmitWithoutDistinctiveTextStillObservesReadablePane(t *testing.T) {
+	savedDrain := emptyPromptDrain
+	emptyPromptDrain = time.Millisecond
+	defer func() { emptyPromptDrain = savedDrain }()
+
+	pasted := false
+	postPasteCaptures := 0
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pasted = true
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			if pasted {
+				postPasteCaptures++
+			}
+			return []byte("readable composer"), nil
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), cmdExec)
+
+	status, err := session.SendKeysCommandObserved(" \n\t ")
+	require.NoError(t, err)
+	require.Equal(t, PromptSentUnverified, status,
+		"a readable observer must stay distinct from an observer failure even when the prompt has no matchable text")
+	require.Positive(t, postPasteCaptures,
+		"the no-fragment path must inspect the pane after the paste before classifying the observer")
+}
+
 // TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable is the polarity
 // guard for the capture itself. Every check here is a probe that can fail to
 // SEE, and a probe that cannot see must never manufacture a negative — the
