@@ -286,9 +286,17 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase))
 		}
-		if err := tmuxSession.Restore(workDir); err != nil {
+		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
+		if err != nil {
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
+		}
+		if restoreResult == tmux.RestoreRespawned {
+			// The persisted delivery verdict and pane age belonged to the process
+			// that disappeared with the old tmux server. A pure reattach preserves
+			// them; a confirmed respawn must not attribute them to its replacement.
+			i.ClearIdleEvidence()
+			resetAgentBrokerCaptures(i)
 		}
 	} else {
 		i.mu.RLock()

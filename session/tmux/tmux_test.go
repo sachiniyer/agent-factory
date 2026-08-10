@@ -166,7 +166,9 @@ func TestRestoreSwapsMonitorWhenSessionExists(t *testing.T) {
 
 	session := newTmuxSession(toTmuxName("existing", ""), "claude", ptyFactory, cmdExec)
 
-	require.NoError(t, session.Restore("/some/work/dir"))
+	result, err := session.RestoreWithResult("/some/work/dir")
+	require.NoError(t, err)
+	require.Equal(t, RestoreReattached, result)
 
 	require.Equal(t, 0, len(ptyFactory.cmds), "Restore must open no PTY / attach-session client")
 	require.NotNil(t, session.monitor, "Restore must install a fresh status monitor")
@@ -210,7 +212,9 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	workdir := t.TempDir()
 	session := newTmuxSession(toTmuxName("missing", ""), "claude", ptyFactory, cmdExec)
 
-	require.NoError(t, session.Restore(workdir))
+	result, err := session.RestoreWithResult(workdir)
+	require.NoError(t, err)
+	require.Equal(t, RestoreRespawned, result)
 
 	require.Equal(t, 1, len(ptyFactory.cmds),
 		"expected only the re-spawn new-session PTY command (no attach-session)")

@@ -437,6 +437,15 @@ func claudeTrustPromptPresent(content string) bool {
 		strings.Contains(content, "Do you trust the files in this folder?")
 }
 
+// RestoreResult says whether RestoreWithResult reattached to the persisted
+// process or had to create a replacement process for it.
+type RestoreResult uint8
+
+const (
+	RestoreReattached RestoreResult = iota
+	RestoreRespawned
+)
+
 // Restore attaches to an existing tmux session. If the session is missing
 // (e.g. the tmux server died after a machine reboot, see #386) and workDir is
 // non-empty, a fresh session is spawned in workDir using the same program so
@@ -451,6 +460,14 @@ func claudeTrustPromptPresent(content string) bool {
 // without such a flag, or programs that already include one, are left
 // untouched.
 func (t *TmuxSession) Restore(workDir string) error {
+	_, err := t.RestoreWithResult(workDir)
+	return err
+}
+
+// RestoreWithResult performs Restore and reports whether its definitive-absence
+// branch successfully created a replacement process. Callers that retain facts
+// about one concrete pane use this result to retire them only on replacement.
+func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	// !ExistsOrUnknown is the definitively-absent branch (#1962): only a session
 	// tmux CONFIRMED gone triggers the re-spawn. A wedged→"exists" falls through
 	// to the pure rebind below, which is the safe direction — re-spawning against
@@ -459,13 +476,16 @@ func (t *TmuxSession) Restore(workDir string) error {
 	// absence, and this preserves it.
 	if !t.ExistsOrUnknown() {
 		if workDir == "" {
-			return fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
+			return RestoreReattached, fmt.Errorf("tmux session %q does not exist", t.sanitizedName)
 		}
 		log.InfoLog.Printf("tmux session %q missing on Restore; re-spawning in %s", t.sanitizedName, workDir)
 		// Program AND declaration together: the resume flags are af-authored, so a
 		// stale declaration would refuse an account-scoped restore (#3083 review).
 		t.rewriteProgramCmdByAf(resumeProgram)
-		return t.Start(workDir)
+		if err := t.Start(workDir); err != nil {
+			return RestoreReattached, err
+		}
+		return RestoreRespawned, nil
 	}
 
 	// The session is live. Restore is now a pure logical rebind (#1592 Phase 2
@@ -476,5 +496,5 @@ func (t *TmuxSession) Restore(workDir string) error {
 	// swapped under monitorMu because the daemon poll may be inside HasUpdated()
 	// reading the old pointer and mutating its fields right now (#1528).
 	t.setMonitor(newStatusMonitor())
-	return nil
+	return RestoreReattached, nil
 }
