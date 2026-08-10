@@ -296,7 +296,11 @@ func ConversationSelectorArgs(program string) []string {
 	case ProgramClaude:
 		return claudeConversationSelectorArgs(tokens[agentIdx+1:])
 	case ProgramCodex:
-		idx := agentIdx + 1
+		idx := codexSubcommandIndex(tokens[agentIdx+1:])
+		if idx < 0 {
+			return nil
+		}
+		idx += agentIdx + 1
 		if idx < len(tokens) && tokens[idx] == "exec" {
 			idx++
 		}
@@ -306,6 +310,70 @@ func ConversationSelectorArgs(program string) []string {
 		}
 	}
 	return nil
+}
+
+// codexSubcommandIndex returns the first Codex subcommand or prompt token
+// after consuming the global options accepted before it. Value-taking options
+// are listed explicitly so a value named "resume" is never mistaken for the
+// resume subcommand. An unknown option is ambiguous and therefore stops the
+// scan instead of guessing whether its next word is a value.
+func codexSubcommandIndex(args []string) int {
+	for idx := 0; idx < len(args); {
+		arg := args[idx]
+		switch {
+		case arg == "--":
+			return -1
+		case codexGlobalOptionHasAttachedValue(arg), codexGlobalBooleanOption(arg):
+			idx++
+		case codexGlobalOptionTakesValue(arg):
+			idx += 2
+			if idx > len(args) {
+				return -1
+			}
+		case strings.HasPrefix(arg, "-"):
+			return -1
+		default:
+			return idx
+		}
+	}
+	return -1
+}
+
+func codexGlobalOptionTakesValue(arg string) bool {
+	switch arg {
+	case "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
+		"-i", "--image", "-m", "--model", "--local-provider", "-p", "--profile",
+		"-s", "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexGlobalOptionHasAttachedValue(arg string) bool {
+	for _, prefix := range []string{
+		"--config=", "--enable=", "--disable=", "--remote=", "--remote-auth-token-env=",
+		"--image=", "--model=", "--local-provider=", "--profile=", "--sandbox=", "--cd=",
+		"--add-dir=", "--ask-for-approval=",
+	} {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return len(arg) > 2 && (strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-i") ||
+		strings.HasPrefix(arg, "-m") || strings.HasPrefix(arg, "-p") || strings.HasPrefix(arg, "-s") ||
+		strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-a"))
+}
+
+func codexGlobalBooleanOption(arg string) bool {
+	switch arg {
+	case "--strict-config", "--oss", "--approve-for-me",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+		"--search", "--no-alt-screen", "-h", "--help", "-V", "--version":
+		return true
+	default:
+		return false
+	}
 }
 
 func claudeConversationSelectorArgs(args []string) []string {
