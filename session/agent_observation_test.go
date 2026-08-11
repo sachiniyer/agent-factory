@@ -17,6 +17,23 @@ type deliveryWinsObservationBackend struct {
 	releaseSend chan struct{}
 }
 
+type retiredObservationBackend struct {
+	*FakeBackend
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	calls        int
+}
+
+func (b *retiredObservationBackend) HasUpdated(*Instance) (bool, bool, string) {
+	b.calls++
+	if b.calls == 1 {
+		close(b.firstStarted)
+		<-b.releaseFirst
+		return true, false, "predecessor observation"
+	}
+	return true, false, "successor observation"
+}
+
 func (b *deliveryWinsObservationBackend) HasUpdated(*Instance) (bool, bool, string) {
 	return true, false, "post-delivery response"
 }
@@ -188,5 +205,47 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 	}
 	if inst.RecordPaneChurnAtEpoch(time.Now(), oldEpoch) {
 		t.Fatal("predecessor snapshot crossed the runtime-replacement epoch fence")
+	}
+}
+
+// A completed transport call is not necessarily an observation of the current
+// runtime. Runtime replacement rotates the observation generation without
+// waiting for predecessor I/O, so SnapshotAgent must revalidate after Snapshot
+// returns and retry rather than hand the caller a retired runtime's liveness.
+func TestSnapshotAgentDiscardsRetiredRuntimeResult(t *testing.T) {
+	backend := &retiredObservationBackend{
+		FakeBackend:  NewFakeBackend(),
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	inst, err := NewInstance(InstanceOptions{Title: "retired", Path: t.TempDir(), Program: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(backend)
+
+	type result struct {
+		obs   Observation
+		epoch uint64
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		obs, _, _, epoch, err := inst.SnapshotAgent()
+		done <- result{obs: obs, epoch: epoch, err: err}
+	}()
+	<-backend.firstStarted
+	inst.ClearIdleEvidence()
+	close(backend.releaseFirst)
+
+	got := <-done
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.obs.Content != "successor observation" || backend.calls != 2 {
+		t.Fatalf("snapshot = %q after %d calls, want successor observation after retry", got.obs.Content, backend.calls)
+	}
+	if got.epoch != inst.StateEpoch() {
+		t.Fatalf("snapshot epoch = %d, want successor epoch %d", got.epoch, inst.StateEpoch())
 	}
 }
