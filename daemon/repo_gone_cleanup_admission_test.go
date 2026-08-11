@@ -177,6 +177,31 @@ func TestRestoreArchived_OriginProbeFailurePersistsUnresolvedClaim(t *testing.T)
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_PathDerivationFailurePersistsUnresolvedClaim(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "path-unknown")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "path-unknown", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.Nil(t, recordFor(t, repoID, "path-unknown").Worktree.RelocationRecovery,
+		"precondition: an ordinary successful archive starts without a recovery record")
+
+	previous := beforeRestoreWorktreePath
+	beforeRestoreWorktreePath = func() {
+		require.NoError(t, os.RemoveAll(repoPath), "remove origin after the guard but before destination derivation")
+	}
+	t.Cleanup(func() { beforeRestoreWorktreePath = previous })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "path-unknown", RepoID: repoID})
+	require.Error(t, err)
+	assert.True(t, exists(archivedPath), "path derivation failure must leave the archive intact")
+	recovery := recordFor(t, repoID, "path-unknown").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "path derivation failure must materialize a durable unresolved claim")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))

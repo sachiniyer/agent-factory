@@ -731,6 +731,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// does (#1540): a subdirectory user's worktree is restored under
 	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
 	// needed only for subdirectory placement.
+	beforeRestoreWorktreePath()
 	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
 	if err != nil {
 		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)

@@ -13,6 +13,10 @@ import (
 // interval in production; tests use the seam to make that race deterministic.
 var beforeRestoreWorktreeUse = func() {}
 
+// Test seam immediately before restore derives a repo-dependent destination.
+// Production never reassigns it.
+var beforeRestoreWorktreePath = func() {}
+
 func (m *Manager) guardRepoGoneRestore(
 	repoID, title, repoPath string,
 	instance *session.Instance,

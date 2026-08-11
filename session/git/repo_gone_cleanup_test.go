@@ -467,6 +467,37 @@ func TestValidateRelocationCleanupAdmission_DeadlineCancelsOriginProbeProcess(t 
 	t.Fatalf("origin probe process %d survived after the admission deadline returned", pid)
 }
 
+func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	previousProbe := repoGoneOriginProbe
+	previousTimeout := relocationIdentityTimeout
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	repoGoneOriginProbe = func(context.Context, *GitWorktree) error {
+		started <- struct{}{}
+		<-release
+		return errors.New("probe released")
+	}
+	relocationIdentityTimeout = 25 * time.Millisecond
+	t.Cleanup(func() {
+		repoGoneOriginProbe = previousProbe
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, context.DeadlineExceeded) {
+			close(release)
+			t.Fatalf("attempt %d did not fail closed at the probe deadline: %v", attempt+1, err)
+		}
+	}
+	if got := len(started); got != 1 {
+		close(release)
+		t.Fatalf("deadline spawned %d origin probes for one stuck operation, want one process fence", got)
+	}
+	close(release)
+}
+
 func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)
@@ -506,6 +537,67 @@ func TestValidateRelocationCleanupAdmission_NonDirectoryOriginRemainsRepoGone(t 
 
 	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
 		t.Fatalf("a non-directory origin is conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
+func TestDefinitiveMissingRepository_IgnoresReasonWordsInsidePath(t *testing.T) {
+	probeErr := &exec.ExitError{Stderr: []byte(
+		"fatal: cannot change to '/tmp/Not a directory/repo': Permission denied\n",
+	)}
+	if definitiveMissingRepository(probeErr) {
+		t.Fatal("a reason phrase inside the quoted pathname authorized deletion despite the terminal permission error")
+	}
+}
+
+func TestCleanupClaimedRepoGone_RetainedTreeDeletionSharesDeadline(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	previousCleanup := repoGoneCleanupRetainedTrees
+	previousTimeout := repoGoneCleanupTimeout
+	started := make(chan struct{})
+	release := make(chan struct{})
+	repoGoneCleanupTimeout = 25 * time.Millisecond
+	repoGoneCleanupRetainedTrees = func(*GitWorktree) error {
+		close(started)
+		<-release
+		return errors.New("retained tree remained unavailable")
+	}
+	t.Cleanup(func() {
+		repoGoneCleanupRetainedTrees = previousCleanup
+		repoGoneCleanupTimeout = previousTimeout
+	})
+
+	type result struct {
+		state CleanupState
+		err   error
+		late  <-chan error
+	}
+	done := make(chan result, 1)
+	go func() {
+		state, err, late := gw.CleanupClaimedRepoGoneWithLateResult(claim)
+		done <- result{state: state, err: err, late: late}
+	}()
+	<-started
+
+	var observed result
+	select {
+	case observed = <-done:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-done
+		t.Fatal("retained-tree deletion ran outside the repo-gone cleanup deadline")
+	}
+	if observed.state != CleanupStateUnknown || !errors.Is(observed.err, context.DeadlineExceeded) || observed.late == nil {
+		close(release)
+		t.Fatalf("retained-tree deadline did not return a retryable late result: state=%v err=%v late=%v", observed.state, observed.err, observed.late)
+	}
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupStalled {
+		close(release)
+		t.Fatalf("retained-tree deadline lost the cleanup process fence: retained=%v recovery=%+v", retained, recovery)
+	}
+	close(release)
+	if err := <-observed.late; err == nil {
+		t.Fatal("released retained-tree failure was lost")
 	}
 }
 

@@ -19,6 +19,10 @@ const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
 
 var cleanupGenerationInstall = installCleanupGeneration
 
+var repoGoneCleanupRetainedTrees = func(worktree *GitWorktree) error {
+	return worktree.cleanupRetainedArchiveTrees()
+}
+
 // probeRepoGoneOrigin applies restore's repository-validity rule. Its caller
 // supplies a hard outer deadline covering both the context-aware Git probe and
 // the affirmative metadata lookup needed to distinguish an absent `.git` entry
@@ -470,7 +474,7 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	// handle, so consume them before the primary archive and before the daemon can
 	// delete the session row. This is the same ordering as ordinary Cleanup; a
 	// refusal preserves the relocation claim and therefore the whole transaction.
-	if err := g.cleanupRetainedArchiveTrees(); err != nil {
+	if err := repoGoneCleanupRetainedTrees(g); err != nil {
 		return CleanupStateUnknown, fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err), nil
 	}
 

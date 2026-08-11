@@ -156,3 +156,35 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 		t.Fatalf("generation timeout lost its unresolved record; retained=%v recovery=%+v", retained, recovery)
 	}
 }
+
+func TestInstallCleanupGeneration_DoesNotOverwriteNewerGeneration(t *testing.T) {
+	worktree := t.TempDir()
+	identity, err := inspectRelocationPathIdentity(worktree)
+	if err != nil {
+		t.Fatalf("inspect archive: %v", err)
+	}
+	directory, err := os.Open(worktree)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	defer directory.Close()
+	const newerGeneration = "0123456789abcdef0123456789abcdef"
+	if err := unix.Fsetxattr(int(directory.Fd()), cleanupGenerationXattr, []byte(newerGeneration), 0); err != nil {
+		t.Fatalf("install newer cleanup generation: %v", err)
+	}
+
+	observed, err := installCleanupGeneration(worktree, identity)
+	if err != nil {
+		t.Fatalf("late generation installer must adopt the winner: %v", err)
+	}
+	if observed != newerGeneration {
+		t.Fatalf("late generation installer overwrote a newer generation: got %q want %q", observed, newerGeneration)
+	}
+	stored, err := cleanupGenerationFromFile(directory)
+	if err != nil {
+		t.Fatalf("read cleanup generation: %v", err)
+	}
+	if stored != newerGeneration {
+		t.Fatalf("stale installer changed durable generation: got %q want %q", stored, newerGeneration)
+	}
+}
