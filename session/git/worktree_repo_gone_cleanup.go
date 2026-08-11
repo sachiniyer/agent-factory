@@ -28,7 +28,7 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 		if definitiveMissingRepository(err) {
 			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
 		}
-		if definitiveNonGitRepository(worktree.repoPath, err) {
+		if definitiveNonGitRepository(err) {
 			return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
 		}
 		return err
@@ -46,22 +46,24 @@ func definitiveMissingRepository(probeErr error) bool {
 	}
 	diagnostic := string(exitErr.Stderr)
 	return strings.Contains(diagnostic, "cannot change to") &&
-		strings.Contains(diagnostic, "No such file or directory")
+		(strings.Contains(diagnostic, "No such file or directory") ||
+			strings.Contains(diagnostic, "Not a directory"))
 }
 
 // definitiveNonGitRepository accepts only Git's stable outside-repository
-// answer with no repository metadata at the recorded root. Command-start,
-// permission, corrupt-metadata, safe-directory, and other execution failures
-// remain unknown and therefore cannot authorize deletion.
-func definitiveNonGitRepository(repoPath string, probeErr error) bool {
+// answer. Git has already completed the filesystem lookup inside the caller's
+// deadline; a second pathname lookup here would both race that answer and be
+// able to outlive the deadline. Command-start, permission, safe-directory, and
+// other execution failures remain unknown and therefore cannot authorize
+// deletion.
+func definitiveNonGitRepository(probeErr error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(probeErr, &exitErr) ||
 		!strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
 		os.Getenv("GIT_DIR") != "" {
 		return false
 	}
-	_, metadataErr := os.Lstat(filepath.Join(repoPath, ".git"))
-	return errors.Is(metadataErr, os.ErrNotExist)
+	return true
 }
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {

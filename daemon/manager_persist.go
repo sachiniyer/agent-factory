@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -338,7 +339,8 @@ func ghostWorktreeRemovable(data *session.InstanceData) bool {
 // so reconstruct only its recovery handle, normalize restart state, and validate
 // the exact archive identity and still-missing origin before committing the kill.
 func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error {
-	recovery := data.Worktree.RelocationRecovery
+	current := data.RestoreArchiveRollbackFence()
+	recovery := current.Worktree.RelocationRecovery
 	if recovery == nil {
 		return nil
 	}
@@ -352,7 +354,6 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 		recovery.State != git.RelocationRecoveryCleanupFinalizing {
 		return fmt.Errorf("persisted worktree recovery state %q is unresolved", recovery.State)
 	}
-	current := data.RestoreArchiveRollbackFence()
 	restored, err := current.RestoreRelocationRecoveryOriginals()
 	if err != nil {
 		return fmt.Errorf("restore cleanup ownership: %w", err)
@@ -538,6 +539,20 @@ func (m *Manager) clearGhostCleanupStall(key, stableID string) {
 	m.mu.Unlock()
 }
 
+// completeLateGhostKill applies the same observable tail as a synchronous
+// ghost kill after its identity-anchored worker removes the durable row. The
+// root grace is armed before publishing removal so neither the ensure loop nor
+// event consumers can reinterpret the deleted session as still live.
+func (m *Manager) completeLateGhostKill(repoID, title, stableID string) {
+	if session.IsReservedTitle(title) {
+		m.mu.Lock()
+		m.rootKilledAt[repoID] = nowFunc()
+		m.mu.Unlock()
+		log.InfoLog.Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+	}
+	m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: stableID, Title: title})
+}
+
 func (m *Manager) persistGhostCleanupStall(repoID string, data *session.InstanceData) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
@@ -568,6 +583,7 @@ func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string,
 				if err == nil {
 					m.clearGhostCleanupStall(key, stableID)
 					if deleted {
+						m.completeLateGhostKill(repoID, title, stableID)
 						log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
 					} else {
 						log.InfoLog.Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
