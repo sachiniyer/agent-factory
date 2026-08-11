@@ -3,11 +3,13 @@ package daemon
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -459,11 +461,23 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 		t.Fatal(err)
 	}
 	const agentName = "af_pending_swap"
-	executor := tabNameKeyedExec(map[string]bool{agentName: true})
+	innerExecutor := tabNameKeyedExec(map[string]bool{agentName: true})
+	blockedSibling := ""
+	executor := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if blockedSibling != "" && strings.Contains(cmd.String(), "new-session") &&
+				strings.Contains(cmd.String(), blockedSibling) {
+				return errors.New("process restart refused")
+			}
+			return innerExecutor.Run(cmd)
+		},
+		OutputFunc: innerExecutor.Output,
+	}
 	pty := tabPtyFactory{t: t, cmdExec: executor}
 	agent := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", pty, executor)
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(agent)
+	inst.SetBackend(&session.LocalBackend{})
 	if _, err := inst.AddProcessTab("make", "build"); err != nil {
 		t.Fatal(err)
 	}
@@ -472,6 +486,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 		t.Fatalf("fixture tabs = %d, want agent plus sibling", len(data.Tabs))
 	}
 	siblingName := data.Tabs[1].TmuxName
+	blockedSibling = siblingName
 	if state, err := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		siblingName, "make", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
 		t.Fatalf("make sibling absent: state=%v err=%v", state, err)
