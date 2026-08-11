@@ -16,6 +16,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/require"
 )
 
 func configureLimitAccountCandidate(t *testing.T, manager *Manager, name string) {
@@ -587,6 +588,44 @@ func TestRefreshStatuses_PendingAccountSwapDoesNotSuppressNonLimitRows(t *testin
 	if got := inst.GetLiveness(); got != session.LiveLost {
 		t.Fatalf("non-limit row with stale pending marker after status poll = %v, want Lost", got)
 	}
+}
+
+func TestResumeFromLimit_TeardownRefusalFallsBackWhenOrdinaryResumeIsDue(t *testing.T) {
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
+	configureLimitAccountCandidate(t, manager, "work")
+
+	const agentName = "af_swap_fallback"
+	inner := tabNameKeyedExec(map[string]bool{agentName: true})
+	executor := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				return errors.New("tmux did not confirm teardown")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "claude", nil, executor))
+	inst.SetBackend(&session.LocalBackend{})
+	worktreePath := filepath.Join(t.TempDir(), "worktree")
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktreePath, inst.Title, "fallback-branch", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	require.NoError(t, err)
+	require.NotNil(t, swap)
+	swap.fallbackDue = true
+	key := daemonInstanceKey(repoID, inst.Title)
+	_ = manager.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, swap)
+
+	require.True(t, swap.fellBack,
+		"a pre-commit teardown refusal must not starve an already-due ordinary resume")
+	account, automatic := inst.AccountSelection()
+	require.Empty(t, account)
+	require.False(t, automatic, "a refused teardown must not commit the candidate identity")
 }
 
 func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testing.T) {

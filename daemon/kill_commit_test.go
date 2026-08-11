@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/require"
 )
 
 // unsafeTeardownBackend starts fine but its teardown can never complete SAFELY: it
@@ -633,6 +634,21 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 	if rec := recordFor(t, repoID, "unknown-state"); rec == nil {
 		t.Fatal("the record must survive a refused delete")
 	}
+}
+
+func TestDeleteSessionRecord_DiscardsUnkeyedLimitEvidence(t *testing.T) {
+	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "malformed-evidence")
+	evidence := session.InstanceData{AccountLimitObservations: []session.AccountLimitObservationData{
+		{Agent: "", Account: "work", ResetAt: time.Now().Add(time.Hour)},
+		{Agent: "claude", Account: "", ResetAt: time.Now().Add(time.Hour)},
+	}}
+
+	deleted, err := manager.deleteSessionRecord(repoID, "malformed-evidence", "", nil, evidence)
+	require.NoError(t, err,
+		"evidence without a complete agent/account key cannot exclude an identity and must not retain a completed teardown forever")
+	require.True(t, deleted)
+	require.Nil(t, recordFor(t, repoID, "malformed-evidence"),
+		"discarding unusable evidence must let the completed session deletion settle")
 }
 
 // TestKillSession_GhostUnsafeTeardown_DoesNotPromiseAnAutomaticRetry is round-5
