@@ -291,6 +291,38 @@ func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
 		"an ordinary literal process remains a valid account-scoped sibling")
 }
 
+func TestAccountShellCommandDisablesStartupFilesAndStripsTheirSelectors(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for shell, want := range map[string]string{
+		"/bin/bash": "/bin/bash --noprofile --norc -i",
+		"/bin/sh":   "/bin/sh -i",
+		"/bin/zsh":  "/bin/zsh --no-rcs --no-globalrcs -i",
+	} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err)
+		require.Equal(t, want, command)
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, account))
+
+		scoped, err := ApplyAccountEnvironment([]string{
+			"PATH=/bin",
+			"ENV=/tmp/ambient-shrc",
+			"BASH_ENV=/tmp/ambient-bashrc",
+			"ZDOTDIR=/tmp/ambient-zdotdir",
+		}, command, account)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+	}
+}
+
+func TestAccountShellCommandRefusesUnprovenShellExecutable(t *testing.T) {
+	_, err := AccountShellCommand("bash")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "absolute")
+	_, err = AccountShellCommand("/opt/custom-shell")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no startup-file-free")
+}
+
 func TestValidateAccountEnvironmentCommandRefusesSelectedAgentArguments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{

@@ -429,17 +429,27 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.Unlock()
 	passthrough := sessionEnvPassthroughForInstance(i)
-	for idx, tab := range tabs {
+	for _, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue
 		}
 		if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
 			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}
-		if idx == 0 {
-			tab.tmux.SetAccountForAgent(agent, account)
-			continue
+		if err := setTabAccountEnvironment(tab, agent, account); err != nil {
+			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}
+	}
+	return nil
+}
+
+func setTabAccountEnvironment(tab *Tab, agent, account string) error {
+	switch tab.Kind {
+	case TabKindAgent:
+		tab.tmux.SetAccountForAgent(agent, account)
+	case TabKindShell:
+		return tab.tmux.SetAccountShellEnvironmentForAgent(agent, account)
+	default:
 		tab.tmux.SetAccountEnvironmentForAgent(agent, account)
 	}
 	return nil
@@ -450,6 +460,9 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	account, _ := i.AccountSelection()
-	tab.tmux.SetAccountEnvironmentForAgent(sessionenv.AgentForCommand(i.AgentProgram()), account)
+	agent := sessionenv.AgentForCommand(i.AgentProgram())
+	if err := setTabAccountEnvironment(tab, agent, account); err != nil {
+		return fmt.Errorf("prepare account-scoped shell: %w", err)
+	}
 	return nil
 }

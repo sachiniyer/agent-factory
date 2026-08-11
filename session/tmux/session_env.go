@@ -69,6 +69,25 @@ func (t *TmuxSession) SetAccountEnvironmentForAgent(agent, name string) {
 	t.accountEnvironmentOnly = name != ""
 }
 
+// SetAccountShellEnvironmentForAgent scopes an af-created interactive shell.
+// Named-account shells use the one startup-file-free form the account boundary
+// recognizes; an arbitrary shell command remains a refused process command.
+func (t *TmuxSession) SetAccountShellEnvironmentForAgent(agent, name string) error {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	if name != "" {
+		program, err := sessionenv.AccountShellCommand(t.program)
+		if err != nil {
+			return err
+		}
+		t.program = program
+	}
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+	return nil
+}
+
 // SetLaunchProgram sets the pane command AND af's executable/argument proof
 // under ONE programMu hold (#3083 review, #3108).
 //

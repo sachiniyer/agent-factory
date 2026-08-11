@@ -117,6 +117,9 @@ func ValidateAccountCommand(command string, account Account) error {
 // command to be the agent itself; it protects the selected environment that the
 // sibling pane receives.
 func ValidateAccountEnvironmentCommand(command string, account Account) error {
+	if isAccountShellCommand(command) {
+		return nil
+	}
 	proof := commandProof{agent: account.Agent}
 	overrides, provable := commandOverridesName(command, proof)
 	if overrides {

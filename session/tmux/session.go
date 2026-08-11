@@ -437,3 +437,19 @@ func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSess
 	sibling.SetAccountEnvironmentForAgent(accountAgent, account)
 	return sibling
 }
+
+// NewShellSiblingSession is NewSiblingSession for an af-created terminal. A
+// selected account requires a startup-file-free shell form so the user's rc
+// files cannot replace the identity after the boundary is applied.
+func (t *TmuxSession) NewShellSiblingSession(sanitizedName, shell string) (*TmuxSession, error) {
+	t.programMu.RLock()
+	extra := append([]string(nil), t.envPassthrough...)
+	account, accountAgent := t.account, t.accountAgent
+	t.programMu.RUnlock()
+	sibling := newTmuxSession(sanitizedName, shell, t.ptyFactory, t.cmdExec)
+	_ = sibling.SetEnvPassthrough(extra)
+	if err := sibling.SetAccountShellEnvironmentForAgent(accountAgent, account); err != nil {
+		return nil, err
+	}
+	return sibling, nil
+}

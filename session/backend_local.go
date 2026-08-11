@@ -800,7 +800,12 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 			reserved[token] = true
 			tmuxName = prefix + token
 		}
-		shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+		shellTmux, err := agentTmux.NewShellSiblingSession(tmuxName, defaultShell())
+		if err != nil {
+			log.WarningLog.Printf("prepare shell tab %q for %q failed: %v", name, i.Title, err)
+			failures = append(failures, fmt.Errorf("prepare shell tab %q: %w", name, err))
+			continue
+		}
 		if err := shellTmux.Start(worktreePath); err != nil {
 			log.WarningLog.Printf("start shell tab %q for %q failed: %v", name, i.Title, err)
 			failures = append(failures, fmt.Errorf("start shell tab %q: %w", name, err))

@@ -205,7 +205,14 @@ func applyAccountEnvironment(env []string, command string, account Account) ([]s
 	if err := ValidateAccountEnvironmentCommand(command, account); err != nil {
 		return nil, err
 	}
-	return applyAccount(env, command, account, false)
+	scoped, err := applyAccount(env, command, account, false)
+	if err != nil {
+		return nil, err
+	}
+	if isAccountShellCommand(command) {
+		scoped = stripAccountShellStartupEnvironment(scoped)
+	}
+	return scoped, nil
 }
 
 func applyAccount(env []string, command string, account Account, validateCommand bool) ([]string, error) {

@@ -160,12 +160,14 @@ func TestSiblingSessionInheritsAccountEnvironment(t *testing.T) {
 
 	agent := NewTmuxSession("account-parent", "claude")
 	agent.SetAccountForAgent("claude", "work")
-	shell := agent.NewSiblingSession("account-shell", "/bin/sh")
+	shell, err := agent.NewShellSiblingSession("account-shell", "/bin/sh")
+	require.NoError(t, err)
 
 	wrapped, _, _, err := shell.launchEnvironment()
 	require.NoError(t, err)
 	require.Contains(t, wrapped, "__af-session-env-exec-account-environment")
 	require.Contains(t, wrapped, "work")
+	require.Equal(t, "/bin/sh -i", shell.Program())
 }
 
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {

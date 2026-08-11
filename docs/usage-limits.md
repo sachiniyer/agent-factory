@@ -116,8 +116,11 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process
   pane before committing the new identity, then restores them with the selected
-  account environment; the agent starts a fresh provider conversation. A
-  resolved command that explicitly pins `--continue`, `--resume`, `--session-id`,
+  account environment; the agent starts a fresh provider conversation. New
+  account-scoped terminal tabs remain interactive but skip shell startup files,
+  because an rc file can otherwise replace the selected identity after af has
+  established it. A resolved command that explicitly pins `--continue`,
+  `--resume`, `--session-id`,
   or `codex resume` is not safe to carry across accounts, so af names those
   arguments and keeps the existing wait instead.
 - **Operator-only.** `limit_auto_resume`, `limit_retry_interval`, and

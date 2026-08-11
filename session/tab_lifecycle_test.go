@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -119,6 +120,26 @@ func TestAddShellTab_AppendsAndNamesUniquely(t *testing.T) {
 	assert.True(t, inst.TabAlive(2))
 	assert.NotEqual(t, tab.tmux.SanitizedName(), tab2.tmux.SanitizedName(),
 		"each shell tab must have a unique tmux session name")
+}
+
+func TestAddShellTab_AccountUsesStartupFreeShell(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("SHELL", "/bin/bash")
+
+	inst := startedMockInstance(t, "af_tabs_account_shell")
+	inst.Account = "work"
+	inst.Tabs[0].tmux.SetAccountForAgent("claude", "work")
+
+	tab, err := inst.AddShellTab()
+	require.NoError(t, err)
+	require.NoError(t, sessionenv.ValidateAccountEnvironmentCommand(tab.tmux.Program(), sessionenv.Account{
+		Agent: "claude",
+		Name:  "work",
+		Dir:   "/accounts/claude/work",
+	}), "an af-created account shell must be safe to execute at the account boundary")
+	require.Contains(t, tab.tmux.Program(), "--noprofile")
+	require.Contains(t, tab.tmux.Program(), "--norc")
 }
 
 // TestCloseTab_RemovesAndProtectsAgent verifies CloseTab removes a shell tab and
