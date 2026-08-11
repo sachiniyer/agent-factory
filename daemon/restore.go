@@ -181,7 +181,15 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 	}
 
-	if err := instance.Recover(); err != nil {
+	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
+	// a failed recovery leaves its evidence intact, but before the backend can
+	// lower the restore fence and expose the replacement. A failed write remains
+	// owed and does not veto a replacement that is already running (#2883).
+	if err := instance.RecoverWithLiveBoundary(func() {
+		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
+		}
+	}); err != nil {
 		m.persistInstance(repoID, instance)
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
 		return "", err
@@ -192,6 +200,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// still writing to disk. A blip in that window would be judged against the
 	// dead sandbox's count. A manual restore is the same lifecycle event as an
 	// automatic one; only the trigger differs (#1794).
+	// The live-boundary retirement above made the fence drop crash safe. This reset is
+	// still required for transport observations accumulated while Recover ran.
 	m.noteRuntimeReplaced(repoID, instance)
 	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag

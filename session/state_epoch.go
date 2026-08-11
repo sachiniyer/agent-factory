@@ -16,17 +16,17 @@ import "time"
 // shown a limit-blocked session that was in fact working.
 //
 // stateEpoch makes "has the authoritative state moved since I looked?" answerable
-// in ONE comparison. It is bumped under i.mu by every mutation of the lifecycle
-// state the daemon reasons about — the liveness axis, the in-flight op axis, and
-// the usage-limit reset time — so an observer captures it alongside the content it
-// decides from and hands it back when it applies the decision. The apply is then a
+// in ONE comparison. It is bumped under i.mu by every lifecycle mutation the
+// daemon reasons about, and by prompt/runtime boundaries that retire pane evidence,
+// so an observer captures it alongside the content it decides from and hands it
+// back when it applies the decision. The apply is then a
 // compare-and-set under that same mutex: same epoch → the decision is still about
 // the state it was made about, and is applied; different epoch → something newer
 // landed, the decision is known-stale, and it is DROPPED.
 //
-// It is bumped only on a REAL change (the tracked triple actually differs), so a
-// re-observation of the state a session is already in — the poll's common case —
-// never invalidates another observer's in-flight decision.
+// It is bumped only on a REAL lifecycle change or a new evidence boundary, so a
+// re-observation of unchanged state — the poll's common case — never invalidates
+// another observer's in-flight decision.
 //
 // Dropping is safe and self-healing precisely because the guard is
 // per-observation rather than a time window: the poll re-observes on its next tick
@@ -36,7 +36,7 @@ import "time"
 // for N seconds after a resume" guard could not promise. Under-applying by one
 // tick is recoverable; clobbering a newer transition is not.
 
-// StateEpoch returns the instance's lifecycle-state generation counter (#2135).
+// StateEpoch returns the instance's observation generation counter (#2135).
 // Capture it BEFORE the observation a decision will be made from, and hand it back
 // to the epoch-scoped applier (TransitionEvent.AtEpoch / SetLimitReachedAtEpoch)
 // so a decision that a newer transition has superseded is dropped instead of

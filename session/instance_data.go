@@ -16,9 +16,9 @@ func (i *Instance) ToInstanceData() InstanceData {
 }
 
 // ToInstanceDataWithEpoch returns the serializable form together with the
-// lifecycle epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
+// observation epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
 // deliberately does not cover every field in InstanceData (tabs are the notable
-// example), so it may correlate lifecycle observations but must not be used as a
+// example), so it may correlate pane observations but must not be used as a
 // whole-projection freshness guard. Writers of the whole payload re-read it in
 // their ordering domain instead; see daemon.persistPollChange.
 func (i *Instance) ToInstanceDataWithEpoch() (InstanceData, uint64) {
@@ -39,28 +39,32 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// the daemon truth; InFlightOp rides daemon snapshots so secondary TUIs can
 		// cold-start into archive/restore operations without lossy Status
 		// reconstruction (#1436). Disk writers scrub InFlightOp before persistence.
-		Status:                i.statusLocked(),
-		Liveness:              i.liveness,
-		InFlightOp:            i.inFlightOp,
-		LifecycleAction:       lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled),
-		CanKill:               canKillFor(i.ID, i.inFlightOp),
-		CanHandoff:            i.canHandoffLocked(),
-		CurrentAgent:          i.currentAgentNameLocked(),
-		IsRoot:                IsReservedTitle(i.Title),
-		ModelChange:           agentModelChangeForLiveness(i.agentModelChange, i.liveness),
-		ArchiveWarning:        i.archiveWarning,
-		Height:                i.Height,
-		Width:                 i.Width,
-		CreatedAt:             i.CreatedAt,
-		UpdatedAt:             time.Now(),
-		Program:               i.Program,
-		Account:               i.Account,
-		Prompt:                i.Prompt,
-		PendingHandoffMission: i.pendingHandoffMission,
-		UserKilled:            i.userKilled,
-		StartupStateUnknown:   i.startupStateUnknown,
-		RootRecreateContext:   i.rootRecreateContext,
+		Status:                   i.statusLocked(),
+		Liveness:                 i.liveness,
+		InFlightOp:               i.inFlightOp,
+		LifecycleAction:          lifecycleActionFor(i.ID, i.liveness, i.inFlightOp, i.startupStateUnknown, i.userKilled),
+		CanKill:                  canKillFor(i.ID, i.inFlightOp),
+		CanHandoff:               i.canHandoffLocked(),
+		CurrentAgent:             i.currentAgentNameLocked(),
+		IsRoot:                   IsReservedTitle(i.Title),
+		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
+		ArchiveWarning:           i.archiveWarning,
+		LastPromptAttemptAt:      i.lastPromptAttemptAt,
+		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
+		LastPaneChurnAt:          i.lastPaneChurnAt,
+		Height:                   i.Height,
+		Width:                    i.Width,
+		CreatedAt:                i.CreatedAt,
+		UpdatedAt:                time.Now(),
+		Program:                  i.Program,
+		Account:                  i.Account,
+		Prompt:                   i.Prompt,
+		PendingHandoffMission:    i.pendingHandoffMission,
+		UserKilled:               i.userKilled,
+		StartupStateUnknown:      i.startupStateUnknown,
+		RootRecreateContext:      i.rootRecreateContext,
 	}
+	data.IdleReason = IdleReasonFor(data)
 	data.RuntimeCleanupStateUnknown = i.runtimeCleanupStateUnknown
 
 	if i.backend != nil {
@@ -264,20 +268,23 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// same event that restarts the daemon, so this fact has to come back from
 		// disk or the cap would re-decide it from a Lost state that cannot tell a
 		// finished run from an interrupted one.
-		taskRunActive:         data.TaskRunActive,
-		limitResetAt:          data.LimitResetAt,
-		agentModelChange:      agentModelChangeForLiveness(data.ModelChange, liveness),
-		archiveWarning:        data.ArchiveWarning,
-		Height:                data.Height,
-		Width:                 data.Width,
-		CreatedAt:             data.CreatedAt,
-		UpdatedAt:             data.UpdatedAt,
-		Program:               data.Program,
-		Account:               data.Account,
-		Prompt:                data.Prompt,
-		pendingHandoffMission: data.PendingHandoffMission,
-		userKilled:            data.UserKilled,
-		startupStateUnknown:   data.StartupStateUnknown,
+		taskRunActive:            data.TaskRunActive,
+		limitResetAt:             data.LimitResetAt,
+		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
+		archiveWarning:           data.ArchiveWarning,
+		lastPromptAttemptAt:      data.LastPromptAttemptAt,
+		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
+		lastPaneChurnAt:          data.LastPaneChurnAt,
+		Height:                   data.Height,
+		Width:                    data.Width,
+		CreatedAt:                data.CreatedAt,
+		UpdatedAt:                data.UpdatedAt,
+		Program:                  data.Program,
+		Account:                  data.Account,
+		Prompt:                   data.Prompt,
+		pendingHandoffMission:    data.PendingHandoffMission,
+		userKilled:               data.UserKilled,
+		startupStateUnknown:      data.StartupStateUnknown,
 		// Survives the restart on purpose (#2629): a root that came back amnesiac
 		// is still amnesiac, and a daemon restart is a likely part of the same
 		// outage. An unrecognized value from a newer binary loads as-is and

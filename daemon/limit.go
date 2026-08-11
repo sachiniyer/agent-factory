@@ -122,6 +122,11 @@ var testHookPollBeforePublish = func() {}
 // deterministically, with no goroutines or sleeps. No-op in production.
 var testHookPollBeforePersistLock = func() {}
 
+// testHookPollBeforeSettlementRecord runs after the poll's durable write and
+// before its settlement bookkeeping. Both must remain inside the repo start
+// lock: tests use this seam to pin that ordering without a scheduler race.
+var testHookPollBeforeSettlementRecord = func() {}
+
 // persistPollChange writes an instance's state to disk when the poll changed
 // something durable this tick (the #960 targeted writer): its LIVENESS
 // transitioned, OR — evaluated INDEPENDENTLY — its usage-limit reset time changed
@@ -171,13 +176,24 @@ func (m *Manager) persistPollChange(
 	beforeReset time.Time,
 	projectionChanged bool,
 ) {
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, false)
+}
+
+func (m *Manager) persistPollChangeWithIdleEvidence(
+	repoID string,
+	instance *session.Instance,
+	before session.Liveness,
+	beforeReset time.Time,
+	projectionChanged bool,
+	idleEvidenceCheckpoint bool,
+) {
 	if instance.GetInFlightOp() != session.OpNone {
 		return
 	}
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged
+	durableChanged := livenessChanged || resetChanged || idleEvidenceCheckpoint
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -193,6 +209,17 @@ func (m *Manager) persistPollChange(
 	var err error
 	if durableChanged {
 		err = persistInstanceData(repoID, data)
+	}
+	key := daemonInstanceKey(repoID, instance.Title)
+	testHookPollBeforeSettlementRecord()
+	switch {
+	case err == nil && durableChanged:
+		// Any successful whole-row checkpoint subsumes an older evidence write.
+		m.recordSettlementWrite(repoID, key, instance, nil)
+	case err != nil && idleEvidenceCheckpoint:
+		// The first post-prompt churn edge is one-shot in memory. Preserve the
+		// obligation after a failed write so a later poll can make it durable.
+		m.recordSettlementWrite(repoID, key, instance, err)
 	}
 	// Push the change onto the events plane (#1592 PR5): this is the single choke
 	// point every liveness/limit transition already flows through, so one publish
@@ -517,19 +544,18 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// block below has to restore THIS episode's window, not a zeroed one — the
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
-		if rerr := instance.Respawn(); rerr != nil {
+		if rerr := instance.RespawnWithLiveBoundary(func() {
+			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+			}
+		}); rerr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
-		// Re-fetch: a REMOTE respawn re-provisions a FRESH sandbox and rebinds the
-		// instance to its endpoint (bindProvisionResult swaps remoteClient and clears
-		// the cached agent-server), so the `as` captured above is a client pinned to
-		// the sandbox Respawn just tore down — SendPrompt below would target a dead
-		// endpoint and the resume could never clear the limit (#1786). Inert for local
-		// sessions, whose localAgentServer resolves i.backend per call.
-		as = instance.AgentServer()
+		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
+		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
 		// agent is NOT a resumed one: this session stays parked at the wall until the
 		// SendPrompt below actually delivers its pending prompt, so LiveLimitReached
@@ -596,7 +622,19 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
 	}
-	if serr := as.SendPrompt(prompt); serr != nil {
+	_, serr := instance.SendPromptWithEvidence(prompt, nowFunc)
+	if serr != nil {
+		// The send crossed the runtime boundary, so even an error is an observed
+		// delivery fact: remote transport failure means could-not-confirm, not that
+		// the prompt missed. Persist it before this early return so a restart can
+		// still order later pane churn against the attempt (#3162/#3168).
+		evidenceErr := m.persistSettlement(repoID, key, instance)
+		if evidenceErr != nil {
+			log.WarningLog.Printf("limit resume prompt evidence for %q: %v", instance.Title, evidenceErr)
+		} else {
+			// The successful evidence checkpoint persisted the whole respawn row too.
+			settleErr = nil
+		}
 		resumeErr := fmt.Errorf("failed to resume %q: %w", requestedTitle, serr)
 		if settleErr != nil {
 			// This return skips the whole-row checkpoint below, so unlike the success
@@ -632,18 +670,20 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	repoStartLock.Lock()
 	data := instance.ToInstanceData()
 	persistErr := persistInstanceData(repoID, data)
+	// This final whole-row checkpoint is itself a settlement: on the live-stall
+	// arm it is the only write of the successful prompt evidence and cleared
+	// limit. Record either outcome before releasing the same repo ordering lock,
+	// so a failure is retried and an older success cannot erase a newer failure.
+	m.recordSettlementWrite(repoID, key, instance, persistErr)
+	if persistErr == nil {
+		// The later whole-row write also subsumes any earlier failed respawn
+		// settlement carried in settleErr.
+		settleErr = nil
+	}
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	repoStartLock.Unlock()
 	if persistErr != nil {
 		log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
-	} else if settleErr != nil {
-		// That write persisted the WHOLE row — the provenance the earlier settlement
-		// was carrying AND the resume that just landed — so the durability gap it
-		// described is closed. Retire the owed retry and the error with it: reporting
-		// a completed, fully durable resume as a failure would make a caller treat it
-		// as one.
-		m.clearOwedSettlement(repoID, instance)
-		settleErr = nil
 	}
 	if settleErr != nil {
 		// The resume itself landed — the prompt was delivered and the limit lifted —

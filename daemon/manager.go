@@ -537,10 +537,12 @@ func (m *Manager) restoreInstances() error {
 	if err != nil {
 		return err
 	}
+	owed := persistLoadRuntimeReplacements(instances)
 	m.attachCredentialsToAll(instances)
 	m.mu.Lock()
 	m.instances = instances
 	m.ghostTaskRuns = ghosts
+	m.registerLoadRuntimeSettlementsLocked(owed)
 	m.mu.Unlock()
 	return nil
 }
@@ -676,6 +678,7 @@ func (m *Manager) refreshLocked() error {
 	if err != nil {
 		return err
 	}
+	owed := persistLoadRuntimeReplacements(refreshed)
 	m.attachCredentialsToAll(refreshed)
 	m.instances = refreshed
 	// Replaced wholesale, never merged: the ghost set is a projection of what is on
@@ -683,6 +686,7 @@ func (m *Manager) refreshLocked() error {
 	// ghost, or its slot would be held twice — once by the ghost and once by the
 	// instance it became.
 	m.ghostTaskRuns = ghosts
+	m.registerLoadRuntimeSettlementsLocked(owed)
 	return nil
 }
 

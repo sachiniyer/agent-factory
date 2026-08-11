@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
@@ -196,6 +197,67 @@ func TestListSessions_DiskFallbackSanitizesArchiveStorageMetadata(t *testing.T) 
 	}
 	if view.Worktree.BranchCreatedByUs == nil || !*view.Worktree.BranchCreatedByUs {
 		t.Fatal("disk fallback did not restore the original branch ownership")
+	}
+}
+
+func TestListSessions_DiskFallbackProjectsIdleReason(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	stubSnapshot(t, daemonUnavailable)
+
+	stored := session.InstanceData{
+		Title:                    "worker",
+		Status:                   session.Ready,
+		Liveness:                 session.LiveReady,
+		LastPromptAttemptAt:      time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+		LastPromptDeliveryStatus: session.PromptDelivered,
+	}.ForStorage()
+	raw, err := json.Marshal([]session.InstanceData{stored})
+	if err != nil {
+		t.Fatalf("marshal stored row: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-a", raw); err != nil {
+		t.Fatalf("save row: %v", err)
+	}
+
+	got, err := listSessions("repo-a")
+	if err != nil {
+		t.Fatalf("listSessions: %v", err)
+	}
+	if len(got) != 1 || got[0].IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("disk fallback reason = %+v, want %q", got, session.IdleReasonNoPaneChangeSinceDelivery)
+	}
+}
+
+func TestDirectDiskFallbacksProjectIdleReason(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
+	stored := session.InstanceData{
+		Title:                    "worker",
+		TmuxName:                 "af_worker",
+		Status:                   session.Ready,
+		Liveness:                 session.LiveReady,
+		LastPromptAttemptAt:      attemptedAt,
+		LastPromptDeliveryStatus: session.PromptDelivered,
+	}.ForStorage()
+	raw, err := json.Marshal([]session.InstanceData{stored})
+	if err != nil {
+		t.Fatalf("marshal stored row: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-a", raw); err != nil {
+		t.Fatalf("save row: %v", err)
+	}
+
+	byTitle, _, err := findInstanceByTitle("worker")
+	if err != nil || byTitle.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("title fallback = (%+v, %v), want projected reason", byTitle, err)
+	}
+	byScopedTitle, _, err := findInstanceByTitleInScope("repo-a", "worker")
+	if err != nil || byScopedTitle.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("scoped title fallback = (%+v, %v), want projected reason", byScopedTitle, err)
+	}
+	byTmux, err := diskWhoami("af_worker")
+	if err != nil || byTmux.IdleReason != session.IdleReasonNoPaneChangeSinceDelivery {
+		t.Fatalf("whoami fallback = (%+v, %v), want projected reason", byTmux, err)
 	}
 }
 

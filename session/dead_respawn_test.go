@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/log"
@@ -487,10 +488,58 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 	}
 	defer func() { restoreTmuxSession = prev }()
 
-	restored, err := FromInstanceData(deadInstanceData(t, Running, agentName, shellName))
+	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
+	data := deadInstanceData(t, Ready, agentName, shellName)
+	data.LastPromptAttemptAt = attemptedAt
+	data.LastPromptDeliveryStatus = PromptDelivered
+	data.LastPaneChurnAt = attemptedAt.Add(time.Minute)
+	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 
 	assert.Greater(t, newSessions, 0,
 		"a live instance with a missing session must still re-spawn on load (#386/#930)")
 	assert.True(t, restored.Started())
+	reason, churnAt := restored.IdleReasonSnapshot()
+	assert.Equal(t, IdleReasonNone, reason,
+		"a replacement process must not inherit the predecessor runtime's idle reason")
+	assert.True(t, churnAt.IsZero(),
+		"a replacement process must not inherit the predecessor runtime's pane-churn age")
+	assert.True(t, restored.ConsumeLoadRuntimeReplacement(),
+		"the daemon loader must be told to persist the replacement's evidence clear")
+}
+
+func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	const agentName = "af_live_agent"
+	shellName := agentName + shellTmuxSuffix
+
+	var newSessions int
+	exec := countingExec(map[string]bool{agentName: true, shellName: true}, &newSessions)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	defer func() { restoreTmuxSession = prev }()
+
+	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
+	churnAt := attemptedAt.Add(time.Minute)
+	data := deadInstanceData(t, Ready, agentName, shellName)
+	data.LastPromptAttemptAt = attemptedAt
+	data.LastPromptDeliveryStatus = PromptDelivered
+	data.LastPaneChurnAt = churnAt
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	assert.Zero(t, newSessions, "a live persisted process must be reattached, not replaced")
+	reason, gotChurnAt := restored.IdleReasonSnapshot()
+	assert.Equal(t, IdleReasonSettledAfterPaneChange, reason,
+		"a pure reattach must preserve the persisted runtime's idle evidence")
+	assert.Equal(t, churnAt, gotChurnAt,
+		"a pure reattach must preserve the persisted runtime's pane-churn age")
+	assert.False(t, restored.ConsumeLoadRuntimeReplacement(),
+		"a pure reattach must not request an evidence-clear settlement")
 }

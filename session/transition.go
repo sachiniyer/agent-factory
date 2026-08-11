@@ -526,6 +526,9 @@ func SetIllegalTransitionHook(fn func(msg string)) (restore func()) {
 // yielding edge (ObserveLiveness always, ConfirmLive under a teardown op) that
 // is out-of-set is a silent no-op. INERT until Phase 2d migrates the writers.
 func (i *Instance) Transition(ev TransitionEvent) error {
+	if ev.kind == tkConfirmLive {
+		i.runLiveBoundary()
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.transitionLocked(ev)

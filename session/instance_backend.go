@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -45,16 +46,62 @@ func (i *Instance) Kill() error {
 	return i.AgentServer().Kill()
 }
 
-// Recover re-establishes a Lost instance's backing session (#1108). Called by
-// the daemon's restore loop and by user-initiated restore (#1300); loads stay
-// side-effect free (#970). Lifecycle eligibility is enforced here, before any
-// backend can provision or spawn a runtime; backend capability alone is never
-// permission to revive a row.
+// runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the
+// exact lifecycle edge that exposes a replacement. The callback runs outside
+// Instance.mu, immediately before ConfirmLive takes that lock and clears the
+// restore fence. A pointer plus sync.Once keeps the boundary one-shot while the
+// registration remains installed for the whole backend call.
+type runtimeLiveBoundary struct {
+	fn   func()
+	once sync.Once
+}
+
+// Recover re-establishes a Lost instance's backing session (#1108).
 func (i *Instance) Recover() error {
+	return i.RecoverWithLiveBoundary(nil)
+}
+
+// RecoverWithLiveBoundary is Recover with a callback at the replacement's
+// ConfirmLive edge. It exists for lifecycle facts that must be settled after a
+// backend has successfully created the runtime but before the restore fence is
+// dropped. The callback cannot veto recovery: settlement failures remain owed
+// for retry, and a full disk must not turn a running replacement back into Lost.
+func (i *Instance) RecoverWithLiveBoundary(beforeLive func()) error {
 	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
-	return i.currentBackend().Recover(i)
+	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
+}
+
+func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
+	if beforeLive == nil {
+		return run()
+	}
+	boundary := &runtimeLiveBoundary{fn: beforeLive}
+	i.liveBoundaryMu.Lock()
+	if i.liveBoundary != nil {
+		i.liveBoundaryMu.Unlock()
+		return fmt.Errorf("session %q already has a live boundary registered", i.Title)
+	}
+	i.liveBoundary = boundary
+	i.liveBoundaryMu.Unlock()
+	defer func() {
+		i.liveBoundaryMu.Lock()
+		if i.liveBoundary == boundary {
+			i.liveBoundary = nil
+		}
+		i.liveBoundaryMu.Unlock()
+	}()
+	return run()
+}
+
+func (i *Instance) runLiveBoundary() {
+	i.liveBoundaryMu.Lock()
+	boundary := i.liveBoundary
+	i.liveBoundaryMu.Unlock()
+	if boundary != nil {
+		boundary.once.Do(boundary.fn)
+	}
 }
 
 // Respawn re-establishes the instance's backing session in place without a
@@ -128,10 +175,17 @@ func (i *Instance) EndLimitResume() bool {
 // On success the backend ends in ConfirmLive, which is allowed from OpRespawning and
 // clears it. On failure the fence stays up and the caller's EndLimitResume lowers it.
 func (i *Instance) Respawn() error {
+	return i.RespawnWithLiveBoundary(nil)
+}
+
+// RespawnWithLiveBoundary is Respawn with the same pre-ConfirmLive callback as
+// RecoverWithLiveBoundary. Limit recovery uses it to retire facts owned by the
+// exited, limit-blocked process before its replacement becomes visible.
+func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
-	return i.currentBackend().Respawn(i)
+	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Respawn(i) })
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing

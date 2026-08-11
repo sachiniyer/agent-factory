@@ -231,13 +231,16 @@ type StreamEndpoint struct {
 
 // Observation is the non-interactive snapshot the daemon's liveness poll
 // reads each tick (#1592 Phase 2): whether the pane changed since the last probe,
-// whether the program is showing a prompt awaiting input, and the raw captured
-// pane content so the usage-limit detector (#1146) can inspect it without a
-// second capture. It replaces the daemon reading the tmux-shaped HasUpdated probe
-// directly.
+// whether this capture only established a reattach baseline, whether the program
+// is showing a prompt awaiting input, and the raw captured pane content so the
+// usage-limit detector (#1146) can inspect it without a second capture. It
+// replaces the daemon reading the tmux-shaped HasUpdated probe directly.
 type Observation struct {
 	// Updated is true if the session output changed since the last probe.
 	Updated bool
+	// Baseline is true for the first successful pane capture after reattaching to
+	// an existing runtime. It proves neither pane churn nor observed idleness.
+	Baseline bool
 	// HasPrompt is true if the program is showing a yes/no prompt awaiting input.
 	HasPrompt bool
 	// Content is the raw captured pane content, handed back so the idle branch can

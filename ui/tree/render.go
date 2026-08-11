@@ -500,19 +500,28 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			branch += fmt.Sprintf(" (%s)", repoName)
 		}
 	}
+	description := branch
+	if reason, churnAt := i.IdleReasonSnapshot(); reason != session.IdleReasonNone {
+		detail := idleReasonDetail(reason, churnAt, time.Now())
+		if branch == "" {
+			description = detail
+		} else {
+			description = detail + " · " + branch
+		}
+	}
 	// Don't show the branch if there's no space for it; otherwise fit it into
 	// remainingWidth. runewidth.Truncate reserves the "…" tail (1 cell) inside
 	// remainingWidth itself, so we must NOT subtract for the tail here. The old
 	// code subtracted 3 to reserve the ASCII "..." tail — now that the tail is
 	// a single cell, that over-reserved 2 cells and mis-truncated at narrow
 	// widths (#1772 review).
-	branchWidth := runewidth.StringWidth(branch)
+	branchWidth := runewidth.StringWidth(description)
 	if remainingWidth <= 0 {
-		branch = ""
+		description = ""
 	} else if branchWidth > remainingWidth {
-		branch = runewidth.Truncate(branch, remainingWidth, "…")
+		description = runewidth.Truncate(description, remainingWidth, "…")
 	}
-	remainingWidth -= runewidth.StringWidth(branch)
+	remainingWidth -= runewidth.StringWidth(description)
 
 	// Add spaces to fill the remaining width.
 	spaces := ""
@@ -520,7 +529,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		spaces = strings.Repeat(" ", remainingWidth)
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, branch, spaces)
+	branchLine := fmt.Sprintf("%s %s-%s%s", strings.Repeat(" ", prefixWidth), branchIcon, description, spaces)
 
 	lines := []string{title}
 	if archiveWarning == "" {
@@ -560,6 +569,40 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 	return text
+}
+
+// idleReasonDetail renders only the mechanically established vocabulary from
+// session.IdleReason. The elapsed suffix is explicitly since the last OBSERVED
+// pane churn; it does not claim the agent answered, finished, or became wedged.
+func idleReasonDetail(reason session.IdleReason, churnAt, now time.Time) string {
+	label := reason.Label()
+	if label == "" {
+		return ""
+	}
+	detail := label
+	if !churnAt.IsZero() {
+		age := formatPaneChurnAge(churnAt, now) + " ago"
+		if reason == session.IdleReasonSettledAfterPaneChange {
+			detail += " · " + age
+		} else {
+			detail += " · pane changed " + age
+		}
+	}
+	return detail
+}
+
+func formatPaneChurnAge(churnAt, now time.Time) string {
+	age := now.Sub(churnAt)
+	if age < time.Minute {
+		return "<1m"
+	}
+	if age < time.Hour {
+		return fmt.Sprintf("%dm", int(age/time.Minute))
+	}
+	if age < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(age/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
 }
 
 // activeTabMarker is the tmux-style cue RenderTab appends to the tab row the

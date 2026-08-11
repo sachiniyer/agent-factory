@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   canManageTabs,
   documentTitle,
+  refreshIdleReasonAges,
   isActionableSession,
   isKillableSession,
   supportsTabManagement,
@@ -38,6 +39,33 @@ function state(over: Partial<AppState> = {}): AppState {
     ...over,
   } as AppState;
 }
+
+test("relative idle ages refresh without a session event", () => {
+  const row = {
+    dataset: {
+      idleTitleBase: "worker — Ready",
+      idleTitleModel: "",
+      idleTitleArchive: "; archive incomplete",
+    },
+    title: "",
+    setAttribute(name: string, value: string) {
+      if (name === "title") this.title = value;
+    },
+  };
+  const idle = {
+    dataset: {
+      idleReason: "settled-after-pane-change",
+      paneChurnAt: "2026-08-10T12:50:00Z",
+    },
+    textContent: "pane changed · <1m ago · ",
+    closest: () => row,
+  };
+  const root = { querySelectorAll: () => [idle] };
+
+  refreshIdleReasonAges(root as unknown as ParentNode, new Date("2026-08-10T15:00:00Z"));
+  assert.equal(idle.textContent, "pane changed · 2h ago · ");
+  assert.equal(row.title, "worker — Ready; pane changed · 2h ago; archive incomplete");
+});
 
 test("rail actionability is granted only by the daemon projection (#2234)", () => {
   assert.equal(

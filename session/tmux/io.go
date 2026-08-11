@@ -15,6 +15,10 @@ import (
 type statusMonitor struct {
 	// Store hashes to save memory.
 	prevOutputHash []byte
+	// baselinePending makes the first successful capture after reattaching to an
+	// existing process establish state without claiming the pane changed. Fresh
+	// starts and respawns leave it false: their first output is genuinely new.
+	baselinePending bool
 	// dead is set once a capture-pane failure has been confirmed by
 	// ExistsOrUnknown() reporting the tmux session is gone. While true,
 	// HasUpdated short-circuits and emits no further logs so a stale
@@ -26,6 +30,10 @@ type statusMonitor struct {
 
 func newStatusMonitor() *statusMonitor {
 	return &statusMonitor{}
+}
+
+func newReattachStatusMonitor() *statusMonitor {
+	return &statusMonitor{baselinePending: true}
 }
 
 // hash hashes the string.
@@ -86,6 +94,14 @@ func (t *TmuxSession) TapDAndEnter() error {
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if the tmux
 // pane has a prompt for aider or claude code, plus the raw captured content so the daemon's usage-limit detector (#1146) can inspect it without a second capture ("" on early return).
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string) {
+	updated, hasPrompt, content, _ = t.HasUpdatedWithBaseline()
+	return updated, hasPrompt, content
+}
+
+// HasUpdatedWithBaseline also reports the first successful capture after a
+// reattach. That capture seeds comparison state: it proves neither pane churn
+// nor idleness, so daemon observations must preserve the distinction.
+func (t *TmuxSession) HasUpdatedWithBaseline() (updated bool, hasPrompt bool, content string, baseline bool) {
 	// A nil monitor means Restore never ran for this session: a persisted Dead
 	// instance is loaded with started=true but LocalBackend.Start returns before
 	// Restore (which is the only place monitor is initialized) so the corpse is
@@ -113,7 +129,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	alive := mon != nil && !mon.dead
 	t.monitorMu.Unlock()
 	if !alive {
-		return false, false, ""
+		return false, false, "", false
 	}
 
 	content, err := t.CapturePaneContent()
@@ -129,10 +145,10 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 			t.monitorMu.Lock()
 			mon.dead = true
 			t.monitorMu.Unlock()
-			return false, false, ""
+			return false, false, "", false
 		}
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
-		return false, false, ""
+		return false, false, "", false
 	}
 
 	// Only set hasPrompt for agents with a known confirmation dialog, keyed
@@ -157,12 +173,14 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, content string
 	// compare-and-store against prevOutputHash needs the lock.
 	newHash := mon.hash(content)
 	t.monitorMu.Lock()
-	changed := !bytes.Equal(newHash, mon.prevOutputHash)
-	if changed {
+	baseline = mon.baselinePending
+	changed := !baseline && !bytes.Equal(newHash, mon.prevOutputHash)
+	if baseline || changed {
 		mon.prevOutputHash = newHash
+		mon.baselinePending = false
 	}
 	t.monitorMu.Unlock()
-	return changed, hasPrompt, content
+	return changed, hasPrompt, content, baseline
 }
 
 // CapturePaneContent captures the content of the tmux pane. When the capture
