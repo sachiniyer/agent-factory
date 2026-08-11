@@ -535,23 +535,31 @@ func TestToInstanceData_PersistsStagedTabsWhenRecoveryFailsBeforeLaunch(t *testi
 	require.Equal(t, "t1", web.ID, "and its stable id, so it is the same tab and not a new one")
 }
 
-// A browser canonicalises 127.1 and 2130706433 to 127.0.0.1 and takes the proxy
-// path, which then refuses them by Go's own predicate. Admitting one would create
-// a tab that is durable and permanently unusable (#3062).
+// A browser canonicalises legacy IPv4 forms before choosing the proxy path.
+// Loopback forms must be refused, but the parser must not classify valid DNS
+// names or numeric forms of external addresses as loopback (#3062).
 func TestRefuseTabKind_RejectsBrowserCanonicalLoopbackShorthands(t *testing.T) {
 	remote := Capabilities{Workspace: WorkspaceRemote}
 	for _, target := range []string{
 		"http://127.1:3000",
 		"http://2130706433:3000",
 		"http://0x7f000001:3000",
+		"http://0177.1:3000",
+		"http://127.0.0.1.:3000",
 	} {
 		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, target),
 			"%s is loopback to a browser and must not be admitted off-box", target)
 	}
-	// A real external host is still admitted — the shape test must not swallow it.
-	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"))
-	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://a1.example.com:8443/app"),
-		"a hostname containing digits is still a hostname")
+	for _, target := range []string{
+		"https://example.com/app",
+		"https://a1.de/app",
+		"https://dead.beef/app",
+		"http://134744072/app",  // browser-canonical 8.8.8.8
+		"http://0x08080808/app", // browser-canonical 8.8.8.8
+	} {
+		require.NoError(t, remote.RefuseTabKind(TabKindWeb, target),
+			"%s is external to a browser and must remain admissible off-box", target)
+	}
 }
 
 // Staged rows are persisted OUTSIDE the ordered Tabs list. A recovery that fails

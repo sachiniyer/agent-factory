@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -108,7 +109,7 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		// resolves both to 127.0.0.1, picks the proxy path, and the proxy then
 		// refuses them by that same Go predicate. Admitting one would create a tab
 		// that is durable and permanently unusable, which is worse than refusing it.
-		if webTargetHostIsNumericShorthand(target) {
+		if webTargetHostIsBrowserLoopbackShorthand(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a browser resolves that host to loopback, and a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace — see #3062", target)
 		}
 		// An EXTERNAL absolute URL is admitted. It is iframed directly and never
@@ -314,15 +315,11 @@ func (p AgentSwapPlan) ConversationCapture() ConversationCaptureSnapshot {
 	return p.conversationCapture
 }
 
-// webTargetHostIsNumericShorthand reports whether a target's host is an all-numeric
-// form a browser may canonicalise to an IPv4 address that Go's net.ParseIP does not
-// accept — 127.1, 2130706433, 0x7f000001 and friends.
-//
-// It is deliberately a SHAPE test rather than an attempt to reimplement the
-// browser's parser. Getting that parser subtly wrong in the permissive direction
-// admits an unusable tab; refusing an all-numeric hostname costs nothing real,
-// because no external service is addressed that way.
-func webTargetHostIsNumericShorthand(target string) bool {
+// webTargetHostIsBrowserLoopbackShorthand reports whether a browser parses a
+// non-canonical host as a legacy IPv4 address in 127/8. Go's net.ParseIP does
+// not accept these forms, but the browser canonicalises them before deciding
+// whether the web tab uses the daemon proxy (#3062).
+func webTargetHostIsBrowserLoopbackShorthand(target string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(target))
 	if err != nil || parsed == nil {
 		return false
@@ -331,12 +328,59 @@ func webTargetHostIsNumericShorthand(target string) bool {
 	if host == "" || net.ParseIP(host) != nil {
 		return false // a real IP literal; IsLoopbackWebTarget already classified it
 	}
-	for _, r := range host {
-		if r != '.' && (r < '0' || r > '9') && !(r >= 'a' && r <= 'f') && !(r >= 'A' && r <= 'F') && r != 'x' && r != 'X' {
-			return false // contains a letter no numeric form uses — a real hostname
-		}
+	address, ok := parseBrowserIPv4Address(host)
+	return ok && byte(address>>24) == 127
+}
+
+// parseBrowserIPv4Address implements the URL-standard legacy IPv4 grammar:
+// one to four decimal, octal, or 0x-prefixed components, with the final
+// component filling the remaining bytes. It returns false for ordinary DNS
+// names even when every letter happens to be a hexadecimal digit.
+func parseBrowserIPv4Address(host string) (uint32, bool) {
+	parts := strings.Split(host, ".")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
 	}
-	// All characters come from the numeric/hex vocabulary. A hostname made only of
-	// those is not a service name anyone registers; it is a packed-IPv4 spelling.
-	return strings.ContainsAny(host, "0123456789")
+	if len(parts) == 0 || len(parts) > 4 {
+		return 0, false
+	}
+
+	numbers := make([]uint64, len(parts))
+	for idx, part := range parts {
+		number, ok := parseBrowserIPv4Number(part)
+		if !ok || (idx < len(parts)-1 && number > 255) {
+			return 0, false
+		}
+		numbers[idx] = number
+	}
+	lastLimit := uint64(1) << uint(8*(5-len(parts)))
+	if numbers[len(numbers)-1] >= lastLimit {
+		return 0, false
+	}
+
+	address := numbers[len(numbers)-1]
+	for idx := 0; idx < len(numbers)-1; idx++ {
+		address += numbers[idx] << uint(8*(3-idx))
+	}
+	return uint32(address), true
+}
+
+func parseBrowserIPv4Number(input string) (uint64, bool) {
+	if input == "" {
+		return 0, false
+	}
+	base := 10
+	digits := input
+	if len(input) >= 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X') {
+		base = 16
+		digits = input[2:]
+	} else if len(input) >= 2 && input[0] == '0' {
+		base = 8
+		digits = input[1:]
+	}
+	if digits == "" {
+		return 0, true
+	}
+	number, err := strconv.ParseUint(digits, base, 64)
+	return number, err == nil
 }
