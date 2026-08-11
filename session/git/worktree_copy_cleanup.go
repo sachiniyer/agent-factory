@@ -501,11 +501,21 @@ func retainedRouteEntries(routes []copiedDirectoryRoute) int {
 }
 
 func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
-	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, false)
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, false, nil)
 }
 
 func removeCopiedEntryRestoringName(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
-	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true)
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true, nil)
+}
+
+func removeCopiedEntryRestoringNameWithCheckpoint(
+	directory *os.File,
+	path string,
+	entry copiedEntry,
+	protectUnexpected bool,
+	checkpoint func(string) error,
+) error {
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true, checkpoint)
 }
 
 func removeCopiedEntryWithRestore(
@@ -513,6 +523,7 @@ func removeCopiedEntryWithRestore(
 	path string,
 	entry copiedEntry,
 	protectUnexpected, restoreNameOnUnlinkFailure bool,
+	checkpoint func(string) error,
 ) error {
 	if err := removeTreeBeforeEntryClaim(directory, path); err != nil {
 		return err
@@ -528,6 +539,11 @@ func removeCopiedEntryWithRestore(
 	claimedName, err := privateMoveName("delete")
 	if err != nil {
 		return err
+	}
+	if checkpoint != nil {
+		if err := checkpoint(filepath.Join(path, claimedName)); err != nil {
+			return err
+		}
 	}
 	if err := renameAtNoReplace(int(directory.Fd()), entry.name, int(directory.Fd()), claimedName); err != nil {
 		return fmt.Errorf("failed to secure entry %s for removal: %w", filepath.Join(path, entry.name), err)

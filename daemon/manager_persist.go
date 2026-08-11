@@ -412,6 +412,15 @@ var ghostCleanupWorktree = func(
 		report.RollbackFence = nil
 		restored.ArchiveReport = &report
 	}
+	checkpointBaseline := restored
+	if recovery := restored.Worktree.RelocationRecovery; recovery != nil {
+		clone := *recovery
+		checkpointBaseline.Worktree.RelocationRecovery = &clone
+	}
+	if restored.ArchiveReport != nil {
+		report := restored.ArchiveReport.Clone()
+		checkpointBaseline.ArchiveReport = &report
+	}
 	*data = restored
 	persisted := data
 	if !ghostRestoredWorktreeRemovable(data) {
@@ -464,13 +473,13 @@ var ghostCleanupWorktree = func(
 		// A descriptor worker may outlive ghostCleanup's caller deadline. Build a
 		// detached checkpoint so that late persistence never races the manager's
 		// reads of its temporary loaded row.
-		checkpointData := *persisted
-		if recovery := persisted.Worktree.RelocationRecovery; recovery != nil {
+		checkpointData := checkpointBaseline
+		if recovery := checkpointBaseline.Worktree.RelocationRecovery; recovery != nil {
 			clone := *recovery
 			checkpointData.Worktree.RelocationRecovery = &clone
 		}
-		if persisted.ArchiveReport != nil {
-			report := persisted.ArchiveReport.Clone()
+		if checkpointBaseline.ArchiveReport != nil {
+			report := checkpointBaseline.ArchiveReport.Clone()
 			checkpointData.ArchiveReport = &report
 		}
 		projectGhostPersistenceSnapshot(&checkpointData, gw)

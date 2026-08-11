@@ -184,6 +184,29 @@ func boundedRelocationCleanupIdentity(path string) (cleanupPathInspection, error
 	}
 }
 
+func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string, error) {
+	type result struct {
+		generation string
+		err        error
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		generation, err := cleanupGenerationInstall(path, expected)
+		resultC <- result{generation: generation, err: err}
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		return observed.generation, observed.err
+	case <-timer.C:
+		return "", fmt.Errorf(
+			"timed out after %s while installing cleanup generation at %s: %w",
+			relocationIdentityTimeout, path, context.DeadlineExceeded,
+		)
+	}
+}
+
 func installCleanupGeneration(path string, expected pathIdentity) (string, error) {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -279,7 +302,7 @@ func removeClaimedRepoGoneDirectory(
 	path string,
 	expected pathIdentity,
 	expectedGeneration string,
-	beforeRootRemoval func() error,
+	beforeRootRemoval func(string) error,
 ) error {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -317,23 +340,22 @@ func removeClaimedRepoGoneDirectory(
 	if err := removeCopiedTree(directory, path, manifest, true); err != nil {
 		return recheckCleanupRoot(parent, name, path, expected, err)
 	}
-	if beforeRootRemoval != nil {
-		if err := beforeRootRemoval(); err != nil {
-			return err
-		}
-	}
-	return removeCopiedEntryRestoringName(parent, parentPath, copiedEntry{
+	return removeCopiedEntryRestoringNameWithCheckpoint(parent, parentPath, copiedEntry{
 		name: name, source: expected, directory: &copiedDirectory{},
-	}, true)
+	}, true, beforeRootRemoval)
 }
 
 // removeFinalizingRepoGoneRoot consumes only the empty root marker described by
 // cleanup_finalizing. The descriptor walk had already removed and verified all
-// children before that state was persisted. If the name is now absent, replaced,
-// or replaced, the original empty marker is no longer ours to remove and
-// finalization leaves the current pathname untouched. A surviving exact marker
-// which has been repopulated remains an unresolved cleanup obligation.
-func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGeneration string) error {
+// children before that state was persisted. If the name is now absent, the
+// original empty marker is gone. A replacement, changed generation, or surviving
+// exact marker which has been repopulated remains an unresolved cleanup obligation.
+func removeFinalizingRepoGoneRoot(
+	path string,
+	expected pathIdentity,
+	expectedGeneration string,
+	beforeRootRemoval func(string) error,
+) error {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
 	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "repo-gone finalization parent")
@@ -353,7 +375,7 @@ func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGe
 		return err
 	}
 	if !expected.same(identity) {
-		return nil
+		return unverifiedCleanupError("finalizing root %s no longer has its claimed identity", path)
 	}
 	directory, _, err := openDirectoryAt(parent, name, path, "repo-gone finalization root")
 	if err != nil {
@@ -369,7 +391,7 @@ func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGe
 	}
 	if generation != expectedGeneration || expectedGeneration == "" {
 		_ = directory.Close()
-		return nil
+		return unverifiedCleanupError("finalizing root %s no longer has its claimed generation", path)
 	}
 	names, err := directoryNames(directory, path)
 	_ = directory.Close()
@@ -381,13 +403,9 @@ func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGe
 			"refusing to finish repo-gone cleanup because finalizing root %s was repopulated", path,
 		)
 	}
-	err = removeCopiedEntryRestoringName(parent, parentPath, copiedEntry{
+	err = removeCopiedEntryRestoringNameWithCheckpoint(parent, parentPath, copiedEntry{
 		name: name, source: expected, directory: &copiedDirectory{},
-	}, true)
-	var changed *unverifiedCleanupPathError
-	if errors.As(err, &changed) {
-		return nil
-	}
+	}, true, beforeRootRemoval)
 	return err
 }
 
@@ -418,15 +436,23 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 			g.PreserveRelocationClaim(claim)
 		}
 	}()
+	checkpoint := g.repoGoneFinalizationCheckpointSnapshot()
 	if claim.cleanupFinalizing {
 		if !claim.cleanupRootGone {
-			if err := removeFinalizingRepoGoneRoot(claim.Path, claim.identity, claim.cleanupGeneration); err != nil {
+			if err := removeFinalizingRepoGoneRoot(
+				claim.Path, claim.identity, claim.cleanupGeneration,
+				func(securedPath string) error {
+					return g.checkpointRepoGoneFinalization(claim, securedPath, checkpoint)
+				},
+			); err != nil {
 				return CleanupStateUnknown, fmt.Errorf(
 					"finish repo-gone cleanup root %s: %w", claim.Path, err,
 				), nil
 			}
-		}
-		if err := g.completeRepoGoneFinalization(claim); err != nil {
+			if err := g.completeRemovedRelocationClaim(claim); err != nil {
+				return CleanupStateUnknown, err, nil
+			}
+		} else if err := g.completeRepoGoneFinalization(claim); err != nil {
 			return CleanupStateUnknown, err, nil
 		}
 		completed = true
@@ -452,11 +478,10 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err), nil
 	}
 
-	checkpoint := g.repoGoneFinalizationCheckpointSnapshot()
 	deleteDone := make(chan error, 1)
 	go func() {
-		err := repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func() error {
-			return g.checkpointRepoGoneFinalization(claim, checkpoint)
+		err := repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func(securedPath string) error {
+			return g.checkpointRepoGoneFinalization(claim, securedPath, checkpoint)
 		})
 		if err == nil {
 			err = g.completeRemovedRelocationClaim(claim)

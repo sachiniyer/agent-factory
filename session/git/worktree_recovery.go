@@ -347,32 +347,61 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	switch normalized.State {
 	case RelocationRecoveryCleanupFinalizing:
 		expected := normalized.identity()
-		identity, err := boundedRelocationPathIdentity(primary)
-		rootGone := false
-		switch {
-		case err == nil && expected.same(identity):
-		case err == nil:
-			rootGone = true
-		case errors.Is(err, os.ErrNotExist):
-			rootGone = true
-		default:
-			return RelocationClaim{}, errors.Join(fmt.Errorf(
-				"cannot inspect finalizing cleanup root %s: %w", primary, err,
-			), ErrRelocateStateUnknown)
+		primaryIdentity, primaryErr := boundedRelocationPathIdentity(primary)
+		primaryMatches := primaryErr == nil && expected.same(primaryIdentity)
+		var primaryGenerationErr error
+		if primaryMatches {
+			primaryGenerationErr = requireCleanupPathIdentity(primary, expected, normalized.CleanupGeneration)
+			if primaryGenerationErr == nil {
+				g.relocationRecovery = nil
+				return g.activateRelocationClaimLocked(RelocationClaim{
+					Path: primary, AlternatePath: normalized.AlternatePath, identity: expected,
+					cleanupAuthorized: true, cleanupGeneration: normalized.CleanupGeneration,
+					cleanupFinalizing: true,
+				}), nil
+			}
 		}
-		if !rootGone {
-			generationErr := requireCleanupPathIdentity(primary, expected, normalized.CleanupGeneration)
-			if generationErr != nil {
+		if normalized.AlternatePath != "" {
+			alternateIdentity, alternateErr := boundedRelocationPathIdentity(normalized.AlternatePath)
+			if alternateErr == nil && expected.same(alternateIdentity) {
+				if generationErr := requireCleanupPathIdentity(
+					normalized.AlternatePath, expected, normalized.CleanupGeneration,
+				); generationErr != nil {
+					return RelocationClaim{}, errors.Join(fmt.Errorf(
+						"cannot verify secured finalizing cleanup generation at %s: %w",
+						normalized.AlternatePath, generationErr,
+					), ErrRelocateStateUnknown)
+				}
+				selected := normalized.AlternatePath
+				g.setWorktreeLocationLocked(selected)
+				g.relocationRecovery = nil
+				return g.activateRelocationClaimLocked(RelocationClaim{
+					Path: selected, AlternatePath: primary, identity: expected,
+					cleanupAuthorized: true, cleanupGeneration: normalized.CleanupGeneration,
+					cleanupFinalizing: true,
+				}), nil
+			}
+			if alternateErr != nil && !errors.Is(alternateErr, os.ErrNotExist) {
 				return RelocationClaim{}, errors.Join(fmt.Errorf(
-					"cannot verify finalizing cleanup generation at %s: %w", primary, generationErr,
+					"cannot inspect secured finalizing cleanup root %s: %w", normalized.AlternatePath, alternateErr,
 				), ErrRelocateStateUnknown)
 			}
 		}
+		if primaryGenerationErr != nil {
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cannot verify finalizing cleanup generation at %s: %w", primary, primaryGenerationErr,
+			), ErrRelocateStateUnknown)
+		}
+		if primaryErr != nil && !errors.Is(primaryErr, os.ErrNotExist) {
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cannot inspect finalizing cleanup root %s: %w", primary, primaryErr,
+			), ErrRelocateStateUnknown)
+		}
 		g.relocationRecovery = nil
 		return g.activateRelocationClaimLocked(RelocationClaim{
-			Path: primary, identity: expected,
+			Path: primary, AlternatePath: normalized.AlternatePath, identity: expected,
 			cleanupAuthorized: true, cleanupGeneration: normalized.CleanupGeneration,
-			cleanupFinalizing: true, cleanupRootGone: rootGone,
+			cleanupFinalizing: true, cleanupRootGone: true,
 		}), nil
 	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled, RelocationRecoveryCleanupReady:
 		if normalized.IdentityKnown && normalized.AlternatePath != "" {
@@ -603,6 +632,7 @@ func (g *GitWorktree) repoGoneFinalizationCheckpointSnapshot() func() error {
 
 func (g *GitWorktree) checkpointRepoGoneFinalization(
 	claim RelocationClaim,
+	securedPath string,
 	checkpoint func() error,
 ) error {
 	g.relocationMu.Lock()
@@ -614,6 +644,7 @@ func (g *GitWorktree) checkpointRepoGoneFinalization(
 	}
 	recovery := recoveryFromClaim(claim)
 	recovery.State = RelocationRecoveryCleanupFinalizing
+	recovery.AlternatePath = securedPath
 	g.relocationRecovery = &recovery
 	g.relocationMu.Unlock()
 
@@ -696,7 +727,7 @@ func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) er
 	if err := g.revalidateRelocationClaimLocked(claim, false); err != nil {
 		return err
 	}
-	generation, err := cleanupGenerationInstall(claim.Path, claim.identity)
+	generation, err := boundedCleanupGenerationInstall(claim.Path, claim.identity)
 	if err != nil {
 		g.recordStaleClaimLocked(claim)
 		return errors.Join(fmt.Errorf("cannot establish durable cleanup generation at %s: %w", claim.Path, err), ErrRelocateStateUnknown)

@@ -301,7 +301,7 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	blocked := make(chan struct{})
 	workerFinished := make(chan struct{})
 	repoGoneCleanupTimeout = 25 * time.Millisecond
-	repoGoneRemoveDirectory = func(string, pathIdentity, string, func() error) error {
+	repoGoneRemoveDirectory = func(string, pathIdentity, string, func(string) error) error {
 		defer close(workerFinished)
 		<-blocked
 		return nil
@@ -589,7 +589,7 @@ func TestValidateRelocationCleanupAdmission_GitExecutionFailureFailsClosed(t *te
 func TestCleanupClaimedRepoGone_AnsweredErrorPreservesCleanupAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
-	repoGoneRemoveDirectory = func(string, pathIdentity, string, func() error) error {
+	repoGoneRemoveDirectory = func(string, pathIdentity, string, func(string) error) error {
 		return errors.New("temporary I/O refusal")
 	}
 	t.Cleanup(func() { repoGoneRemoveDirectory = previousRemove })
