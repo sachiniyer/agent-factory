@@ -70,7 +70,7 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 	if root == "" {
 		root = instance.Path
 	}
-	resolved, err := config.ResolveConfigForInspectionFromGlobal(root, global)
+	resolved, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, global)
 	if err != nil {
 		return nil, fmt.Errorf("resolve limit account candidates for %q: %w", instance.Title, err)
 	}

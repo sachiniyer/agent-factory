@@ -106,6 +106,30 @@ func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 // this form so a global config save cannot split one decision across two
 // generations; like ResolveConfigForInspection, it records no load observation.
 func ResolveConfigForInspectionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	var err error
+	global, err = prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	return resolveConfigFromGlobal(repoRoot, global, suppressInRepoLoadObservation)
+}
+
+// ResolveConfigForIdentityDecisionFromGlobal resolves the same effective config
+// over an already-loaded global snapshot, but refuses to ignore an unreadable
+// personal-project layer. Automatic credential selection requires the complete
+// candidate policy; silently inheriting a global candidate when the personal
+// restrictions cannot be read could move work onto an identity the user did not
+// authorize for this project.
+func ResolveConfigForIdentityDecisionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	var err error
+	global, err = prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	return resolveConfigFromGlobalWithPersonalPolicy(repoRoot, global, suppressInRepoLoadObservation, true)
+}
+
+func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
 	if global != nil && global.source.builtIn == nil {
 		data, err := toml.Marshal(global)
 		if err != nil {
@@ -118,7 +142,7 @@ func ResolveConfigForInspectionFromGlobal(repoRoot string, global *Config) (*Res
 		}
 		global = snapshot
 	}
-	return resolveConfigFromGlobal(repoRoot, global, suppressInRepoLoadObservation)
+	return global, nil
 }
 
 type inRepoLoadObservation uint8
@@ -142,6 +166,15 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 }
 
 func resolveConfigFromGlobal(repoRoot string, global *Config, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	return resolveConfigFromGlobalWithPersonalPolicy(repoRoot, global, observation, false)
+}
+
+func resolveConfigFromGlobalWithPersonalPolicy(
+	repoRoot string,
+	global *Config,
+	observation inRepoLoadObservation,
+	requireReadablePersonalPolicy bool,
+) (*ResolvedConfig, error) {
 	documents, err := globalResolutionDocuments(global)
 	if err != nil {
 		return nil, err
@@ -184,7 +217,12 @@ func resolveConfigFromGlobal(repoRoot string, global *Config, observation inRepo
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocument(repoRoot)
+	var personalDoc sourceDocument
+	if requireReadablePersonalPolicy {
+		personalDoc, err = projectPersonalDocumentStrict(repoRoot)
+	} else {
+		personalDoc, err = projectPersonalDocument(repoRoot)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -244,12 +282,20 @@ func emptyProjectPersonalDocument() sourceDocument {
 // explicit `af config --project` / `af projects` paths still surface the real
 // error, because they call the registry directly.
 func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
-	project, found, err := projectForRoot(repoRoot)
+	document, err := projectPersonalDocumentStrict(repoRoot)
 	if err != nil {
 		projectRegistryWarnOnce.Do(func() {
 			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)
 		})
 		return emptyProjectPersonalDocument(), nil
+	}
+	return document, nil
+}
+
+func projectPersonalDocumentStrict(repoRoot string) (sourceDocument, error) {
+	project, found, err := projectForRoot(repoRoot)
+	if err != nil {
+		return sourceDocument{}, err
 	}
 	if !found {
 		return emptyProjectPersonalDocument(), nil

@@ -337,7 +337,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	if instance != nil {
 		observations = instance.AccountLimitObservations()
 	} else if data != nil {
-		observations = append([]session.AccountLimitObservationData(nil), data.AccountLimitObservations...)
+		_, observations = session.AccountLimitEvidenceFromData(*data)
 	}
 	deleted, err := m.deleteSessionRecord(repoID, req.Title, targetID, teardownErr, observations)
 	if err != nil {

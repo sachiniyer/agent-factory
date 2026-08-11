@@ -128,11 +128,13 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 		if args, selectedAgent := accountEnvironmentAgentArguments(command, account.Agent); selectedAgent {
 			if len(args) > 0 {
 				return accountCommandValidationErrorf(
-					"account %q cannot scope sibling environment for agent %q: its direct agent command contains undeclared arguments %s, which can override the selected identity",
+					"account %q cannot scope sibling environment for agent %q: its command contains the selected agent with undeclared arguments %s; "+
+						"af cannot prove an enclosing executable treats it as data rather than a nested launch",
 					account.Name, account.Agent, quoteArguments(args))
 			}
 			return accountCommandValidationErrorf(
-				"account %q cannot scope sibling environment for agent %q: af cannot prove this direct agent executable uses the selected identity",
+				"account %q cannot scope sibling environment for agent %q: its command contains the selected agent behind another executable; "+
+					"af cannot prove the enclosing executable treats it as data rather than a nested launch",
 				account.Name, account.Agent)
 		}
 	}
@@ -144,12 +146,13 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 	return nil
 }
 
-// accountEnvironmentAgentArguments recognizes a literal sibling command that
-// directly runs the selected agent, optionally through exec or the modelled env
-// wrapper, and returns its arguments. A sibling may run arbitrary ordinary
-// processes under the selected environment, but agent arguments are themselves
-// an identity mechanism (for example Codex -c can select the machine keyring),
-// so an undeclared argument list must be named and refused.
+// accountEnvironmentAgentArguments recognizes the selected agent anywhere in a
+// literal sibling command after the modelled exec/env prefixes and returns the
+// words after it. A non-leading occurrence may be data or a nested launch, but
+// af cannot distinguish those at the identity boundary. Refusing both is the
+// conservative answer: agent arguments are themselves an identity mechanism
+// (for example Codex -c can select the machine keyring), and an arbitrary
+// executable cannot be trusted to preserve the selected environment.
 func accountEnvironmentAgentArguments(command, agent string) ([]string, bool) {
 	call, ok := singleSimpleCall(command)
 	if !ok || !callIsLiteral(call) {
@@ -172,10 +175,12 @@ func accountEnvironmentAgentArguments(command, agent string) ([]string, bool) {
 		}
 		words = words[1+invocation.CommandIndex:]
 	}
-	if len(words) == 0 || filepath.Base(words[0]) != agent {
-		return nil, false
+	for idx, word := range words {
+		if filepath.Base(word) == agent {
+			return append([]string(nil), words[idx+1:]...), true
+		}
 	}
-	return append([]string(nil), words[1:]...), true
+	return nil, false
 }
 
 // accountEnvironmentCommandNeedsProof identifies shell syntax that constructs
