@@ -19,6 +19,7 @@ const (
 	RelocationRecoveryStalled        RelocationRecoveryState = "relocation_stalled"
 	RelocationRecoveryClaimStale     RelocationRecoveryState = "claim_stale"
 	RelocationRecoveryCleanupStalled RelocationRecoveryState = "cleanup_stalled"
+	RelocationRecoveryCleanupReady   RelocationRecoveryState = "cleanup_ready"
 )
 
 // RelocationClaim is a point-in-time assertion that Path named one exact
@@ -34,7 +35,12 @@ type RelocationClaim struct {
 	// The owner must either reach a revalidated use boundary or rematerialize the
 	// claim if an earlier gate aborts the operation.
 	recoveryOwned bool
-	claimID       uint64
+	// cleanupAuthorized preserves a cleanup-ready claim across an answered
+	// transient error. Only a failed identity or generation validation may
+	// downgrade it to claim_stale.
+	cleanupAuthorized bool
+	cleanupGeneration string
+	claimID           uint64
 }
 
 // SetRelocationIdentityErrorForTest makes identity inspection of one exact path
@@ -169,6 +175,10 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 		if !recovery.IdentityKnown {
 			return fmt.Errorf("stale relocation claim identity is missing")
 		}
+	case RelocationRecoveryCleanupReady:
+		if !recovery.IdentityKnown {
+			return fmt.Errorf("cleanup-ready relocation identity is missing")
+		}
 	case RelocationRecoveryStalled:
 		// A read-only probe may time out before any identity can be captured.
 	case RelocationRecoveryCleanupStalled:
@@ -243,6 +253,7 @@ func (g *GitWorktree) recordStall(state RelocationRecoveryState, claim *Relocati
 		recovery.Inode = claim.identity.inode
 		recovery.FileType = claim.identity.fileType
 		recovery.AlternatePath = claim.AlternatePath
+		recovery.CleanupGeneration = claim.cleanupGeneration
 	}
 	g.relocationRecovery = &recovery
 	g.releaseRelocationClaimLocked(claim)
@@ -300,7 +311,7 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 	normalized := normalizeRecovery(*recovery)
 	g.relocationRecovery = &normalized
 	switch normalized.State {
-	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled:
+	case RelocationRecoveryStalled, RelocationRecoveryCleanupStalled, RelocationRecoveryCleanupReady:
 		if normalized.IdentityKnown && normalized.AlternatePath != "" {
 			// A stalled operation can retain the same two identity-qualified
 			// candidates as an interrupted move. Resolve both under this lock;
@@ -320,10 +331,19 @@ func (g *GitWorktree) ClaimRelocationSource() (RelocationClaim, error) {
 				"worktree path %s no longer identifies the directory captured before the stall", primary,
 			), ErrRelocateStateUnknown)
 		}
+		if normalized.State == RelocationRecoveryCleanupReady {
+			if err := requireCleanupPathIdentity(primary, normalized.identity(), normalized.CleanupGeneration); err != nil {
+				g.relocationRecovery.State = RelocationRecoveryClaimStale
+				return RelocationClaim{}, errors.Join(fmt.Errorf(
+					"worktree path %s has no matching durable cleanup generation: %w", primary, err,
+				), ErrRelocateStateUnknown)
+			}
+		}
 		g.relocationRecovery = nil
 		return g.activateRelocationClaimLocked(RelocationClaim{
 			Path: primary, AlternatePath: normalized.AlternatePath,
-			identity: identity,
+			identity: identity, cleanupAuthorized: normalized.State == RelocationRecoveryCleanupReady,
+			cleanupGeneration: normalized.CleanupGeneration,
 		}), nil
 	case RelocationRecoveryMoveUnknown, RelocationRecoveryClaimStale:
 		return g.resolveCandidateRecordLocked(primary, normalized)
@@ -338,10 +358,19 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 	expected := recovery.identity()
 	primaryIdentity, primaryErr := boundedRelocationPathIdentity(primary)
 	if primaryErr == nil && expected.same(primaryIdentity) {
+		if recovery.State == RelocationRecoveryCleanupReady {
+			if err := requireCleanupPathIdentity(primary, expected, recovery.CleanupGeneration); err != nil {
+				g.relocationRecovery.State = RelocationRecoveryClaimStale
+				return RelocationClaim{}, errors.Join(fmt.Errorf(
+					"cleanup candidate %s has no matching durable generation: %w", primary, err,
+				), ErrRelocateStateUnknown)
+			}
+		}
 		g.relocationRecovery = nil
 		return g.activateRelocationClaimLocked(RelocationClaim{
 			Path: primary, AlternatePath: recovery.AlternatePath,
-			identity: expected,
+			identity: expected, cleanupAuthorized: recovery.State == RelocationRecoveryCleanupReady,
+			cleanupGeneration: recovery.CleanupGeneration,
 		}), nil
 	}
 	if recovery.AlternatePath == "" {
@@ -380,11 +409,20 @@ func (g *GitWorktree) resolveCandidateRecordLocked(primary string, recovery Relo
 		), ErrRelocateStateUnknown)
 	}
 	selected := recovery.AlternatePath
+	if recovery.State == RelocationRecoveryCleanupReady {
+		if err := requireCleanupPathIdentity(selected, expected, recovery.CleanupGeneration); err != nil {
+			g.relocationRecovery.State = RelocationRecoveryClaimStale
+			return RelocationClaim{}, errors.Join(fmt.Errorf(
+				"cleanup candidate %s has no matching durable generation: %w", selected, err,
+			), ErrRelocateStateUnknown)
+		}
+	}
 	g.setWorktreeLocationLocked(selected)
 	g.relocationRecovery = nil
 	return g.activateRelocationClaimLocked(RelocationClaim{
 		Path: selected, AlternatePath: primary,
-		identity: expected,
+		identity: expected, cleanupAuthorized: recovery.State == RelocationRecoveryCleanupReady,
+		cleanupGeneration: recovery.CleanupGeneration,
 	}), nil
 }
 
@@ -402,13 +440,18 @@ func recoveryFromClaim(claim RelocationClaim) RelocationRecovery {
 	if alternate == claim.Path {
 		alternate = ""
 	}
+	state := RelocationRecoveryClaimStale
+	if claim.cleanupAuthorized {
+		state = RelocationRecoveryCleanupReady
+	}
 	return RelocationRecovery{
-		State:         RelocationRecoveryClaimStale,
-		AlternatePath: alternate,
-		IdentityKnown: true,
-		Device:        claim.identity.device,
-		Inode:         claim.identity.inode,
-		FileType:      claim.identity.fileType,
+		State:             state,
+		AlternatePath:     alternate,
+		IdentityKnown:     true,
+		Device:            claim.identity.device,
+		Inode:             claim.identity.inode,
+		FileType:          claim.identity.fileType,
+		CleanupGeneration: claim.cleanupGeneration,
 	}
 }
 
@@ -438,6 +481,25 @@ func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
 		g.releaseRelocationClaimLocked(&claim)
 		return
 	}
+	recovery := recoveryFromClaim(claim)
+	g.relocationRecovery = &recovery
+	g.releaseRelocationClaimLocked(&claim)
+}
+
+// PreserveRelocationClaimAsUnresolved materializes a non-destructive recovery
+// record even for a claim obtained from record-free state. Restore uses this
+// when an origin probe gives no answer: the directory identity is known, but
+// neither relocation nor cleanup is authorized until a later retry resolves it.
+func (g *GitWorktree) PreserveRelocationClaimAsUnresolved(claim RelocationClaim) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery != nil {
+		g.releaseRelocationClaimLocked(&claim)
+		return
+	}
+	if claim.recoveryOwned && !g.ownsRelocationClaimLocked(claim) {
+		return
+	}
 	g.recordStaleClaimLocked(claim)
 }
 
@@ -458,6 +520,49 @@ func (g *GitWorktree) SettleRelocationClaim(claim RelocationClaim) error {
 	g.relocationMu.Lock()
 	defer g.relocationMu.Unlock()
 	return g.revalidateRelocationClaimLocked(claim, true)
+}
+
+// PrepareRelocationClaimForCleanup turns a resolved point-in-time claim into a
+// durable obligation which only the kill cleanup path may consume. The old
+// recovery record was already cleared when the claim was resolved; this record
+// represents the later destructive decision and keeps its identity across the
+// time between a repo-gone restore and an explicit kill.
+func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if err := g.revalidateRelocationClaimLocked(claim, false); err != nil {
+		return err
+	}
+	generation, err := boundedCleanupGenerationInstall(claim.Path, claim.identity)
+	if err != nil {
+		g.recordStaleClaimLocked(claim)
+		return errors.Join(fmt.Errorf(
+			"cannot establish durable cleanup generation at %s: %w", claim.Path, err,
+		), ErrRelocateStateUnknown)
+	}
+	claim.cleanupAuthorized = true
+	claim.cleanupGeneration = generation
+	recovery := recoveryFromClaim(claim)
+	g.relocationRecovery = &recovery
+	g.releaseRelocationClaimLocked(&claim)
+	return nil
+}
+
+// StagePreparedRelocationCleanupAsUnresolved removes destructive authority
+// from a cleanup-ready record while preserving its exact identity and durable
+// generation. The daemon uses this before the first write of the authoritative
+// repo-disappeared-at-use transition, so a failed cleanup-ready write leaves a
+// persisted claim_stale fence rather than record-free state.
+func (g *GitWorktree) StagePreparedRelocationCleanupAsUnresolved() error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery == nil || g.relocationRecovery.State != RelocationRecoveryCleanupReady {
+		return errors.Join(fmt.Errorf(
+			"worktree has no prepared cleanup identity to stage as unresolved",
+		), ErrRelocateStateUnknown)
+	}
+	g.relocationRecovery.State = RelocationRecoveryClaimStale
+	return nil
 }
 
 func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, settle bool) error {
@@ -491,6 +596,14 @@ func (g *GitWorktree) revalidateRelocationClaimLocked(claim RelocationClaim, set
 			"worktree path %s no longer identifies the directory selected during recovery", claim.Path,
 		), ErrRelocateStateUnknown)
 	}
+	if claim.cleanupAuthorized {
+		if err := requireCleanupPathIdentity(claim.Path, claim.identity, claim.cleanupGeneration); err != nil {
+			g.recordStaleClaimLocked(claim)
+			return errors.Join(fmt.Errorf(
+				"worktree path %s no longer carries its durable cleanup generation: %w", claim.Path, err,
+			), ErrRelocateStateUnknown)
+		}
+	}
 	if settle {
 		g.releaseRelocationClaimLocked(&claim)
 	}
@@ -503,6 +616,7 @@ func (g *GitWorktree) recordStaleClaimLocked(claim RelocationClaim) {
 		alternate = ""
 	}
 	recovery := recoveryFromClaim(claim)
+	recovery.State = RelocationRecoveryClaimStale
 	recovery.AlternatePath = alternate
 	g.relocationRecovery = &recovery
 	g.releaseRelocationClaimLocked(&claim)

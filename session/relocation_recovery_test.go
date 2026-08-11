@@ -108,11 +108,12 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	)
 	require.NoError(t, err)
 	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
-		State:         git.RelocationRecoveryClaimStale,
-		IdentityKnown: true,
-		Device:        uint64(stat.Dev),
-		Inode:         uint64(stat.Ino),
-		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+		State:             git.RelocationRecoveryClaimStale,
+		IdentityKnown:     true,
+		Device:            uint64(stat.Dev),
+		Inode:             uint64(stat.Ino),
+		FileType:          uint32(stat.Mode & syscall.S_IFMT),
+		CleanupGeneration: "0123456789abcdef0123456789abcdef",
 	}))
 	inst, err := NewInstance(InstanceOptions{Title: "archived", Path: root, Program: "claude"})
 	require.NoError(t, err)
@@ -123,6 +124,8 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	require.NoError(t, err)
 	require.Contains(t, string(payload), `"relocation_recovery"`,
 		"precondition: the current writer must emit the additive recovery record")
+	require.Contains(t, string(payload), `"cleanup_generation"`,
+		"precondition: the non-reusable cleanup identity must survive the rollback projection")
 
 	var legacy v10228InstanceData
 	require.NoError(t, json.Unmarshal(payload, &legacy),

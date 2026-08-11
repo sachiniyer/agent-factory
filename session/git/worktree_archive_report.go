@@ -159,6 +159,7 @@ type ArchiveRollbackRelocationRecovery struct {
 	Device                      uint64                  `json:"device,omitempty"`
 	Inode                       uint64                  `json:"inode,omitempty"`
 	FileType                    uint32                  `json:"file_type,omitempty"`
+	CleanupGeneration           string                  `json:"cleanup_generation,omitempty"`
 	OriginalExternalWorktree    *bool                   `json:"original_external_worktree,omitempty"`
 	OriginalBranchCreatedByUs   *bool                   `json:"original_branch_created_by_us,omitempty"`
 	OriginalStartupStateUnknown *bool                   `json:"original_startup_state_unknown,omitempty"`

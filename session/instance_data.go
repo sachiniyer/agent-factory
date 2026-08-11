@@ -198,6 +198,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				Device:                      recovery.Device,
 				Inode:                       recovery.Inode,
 				FileType:                    recovery.FileType,
+				CleanupGeneration:           recovery.CleanupGeneration,
 				OriginalExternalWorktree:    &externalWorktree,
 				OriginalBranchCreatedByUs:   &branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
@@ -401,12 +402,13 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			}
 			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-					State:         recovery.State,
-					AlternatePath: recovery.AlternatePath,
-					IdentityKnown: recovery.IdentityKnown,
-					Device:        recovery.Device,
-					Inode:         recovery.Inode,
-					FileType:      recovery.FileType,
+					State:             recovery.State,
+					AlternatePath:     recovery.AlternatePath,
+					IdentityKnown:     recovery.IdentityKnown,
+					Device:            recovery.Device,
+					Inode:             recovery.Inode,
+					FileType:          recovery.FileType,
+					CleanupGeneration: recovery.CleanupGeneration,
 				}); err != nil {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}

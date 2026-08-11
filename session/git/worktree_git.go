@@ -139,8 +139,9 @@ func (g *GitWorktree) runGitCommandContext(ctx context.Context, path string, arg
 	baseArgs := []string{"-C", path}
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
-	// remote needs auth and no terminal is attached.
-	cmd.Env = append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough), "GIT_TERMINAL_PROMPT=0")
+	// remote needs auth and no terminal is attached. Force stable diagnostics so
+	// repository classification is fail-closed and locale-independent.
+	cmd.Env = g.gitCommandEnvironment()
 	// Own process group so the deadline kills git AND its transport child
 	// together. exec.CommandContext's default Cancel SIGKILLs only the git
 	// process, leaving ssh / git-remote-https orphaned and still holding the
@@ -188,4 +189,9 @@ func (g *GitWorktree) runGitCommandContext(ctx context.Context, path string, arg
 	}
 
 	return string(output), nil
+}
+
+func (g *GitWorktree) gitCommandEnvironment() []string {
+	return append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough),
+		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }

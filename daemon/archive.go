@@ -3,7 +3,6 @@ package daemon
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -724,21 +723,21 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Repo-gone check up front: SiblingWorktreePath and the worktree move both
 	// need the origin repo, so surface the actionable message (archive left
 	// intact) before either fails with a generic error.
-	if _, statErr := os.Stat(repoPath); statErr != nil {
-		if settleErr := m.settleRepoGoneRelocation(repoID, req.Title, repoPath, instance, relocationClaim); settleErr != nil {
-			return "", settleErr
-		}
-		claimTransferred = true
-		return "", fmt.Errorf("cannot restore session %q: its origin repo %s is gone; the archived worktree is intact at %s — recover it manually with git", req.Title, repoPath, instance.GetWorktreePath())
+	if repoGone, err := m.guardRepoGoneRestore(repoID, req.Title, repoPath, instance, relocationClaim); err != nil {
+		claimTransferred = repoGone
+		return "", err
 	}
 	// Honor the configured worktree_root placement, exactly as session creation
 	// does (#1540): a subdirectory user's worktree is restored under
 	// $AF_HOME/worktrees/<branch>, not stranded beside the repo. The branch is
 	// needed only for subdirectory placement.
+	beforeRestoreWorktreePath()
 	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
 	if err != nil {
-		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+		claimTransferred = true
+		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
+	beforeRestoreWorktreeUse()
 
 	// Move the worktree back next to the repo. A repo-gone failure leaves the
 	// archive intact (the git layer guarantees this) and surfaces an actionable
@@ -746,7 +745,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	claimTransferred = true
 	if err := instance.RestoreArchivedWorktreeWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
-			return "", fmt.Errorf("cannot restore session %q: its origin repo is gone; the archived worktree is intact at %s — recover it manually with git: %w", req.Title, instance.GetWorktreePath(), err)
+			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
 		}
 		if errors.Is(err, sessiongit.ErrRelocateStateUnknown) {
 			// The bounded move may have reached either pathname before it was
@@ -765,7 +764,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			}
 			return "", fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", req.Title, worktreeRecoveryLocation(instance), err)
 		}
-		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
+		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, err)
 	}
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and
