@@ -728,32 +728,7 @@ func reapWorktreeWriters(worktreePath string) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	seen := make(map[int]bool)
-	var procs []proctree.Process
-	add := func(p proctree.Process) {
-		if !seen[p.PID] {
-			seen[p.PID] = true
-			procs = append(procs, p)
-		}
-	}
-	for pid := range snap {
-		cwd, ok := proctree.WorkingDir(pid)
-		if !ok {
-			// Foreign process (its cwd link is not readable) or already gone: it
-			// cannot be proven to be one of ours, and an unreadable cwd is never
-			// treated as a match — the honest-unknown rule this package enforces.
-			continue
-		}
-		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
-			continue
-		}
-		// Take the whole subtree of the matching process: a child of a
-		// worktree-cwd'd writer is this session's too even if it chdir'd elsewhere,
-		// and it may be the actual file-creator holding the directory non-empty.
-		for _, p := range proctree.TreeOf(snap, pid) {
-			add(p)
-		}
-	}
+	procs := worktreeWriterProcesses(root, snap, os.Getpid(), proctree.WorkingDir, proctree.IsTmuxServer)
 	if len(procs) == 0 {
 		return
 	}
@@ -769,6 +744,73 @@ func reapWorktreeWriters(worktreePath string) {
 		// the tmux reaper follows). `format` is KillEscalating's own constant literal.
 		log.WarningLog.Printf("worktree %s: leaked past its session: "+format, append([]any{worktreePath}, args...)...)
 	})
+}
+
+// worktreeWriterProcesses selects the identity-verified snapshot entries the
+// worktree reaper may signal. The process fact functions are explicit so tests
+// can cover dangerous ancestry shapes without scanning or signalling real
+// processes on the host.
+func worktreeWriterProcesses(
+	root string,
+	snap map[int]proctree.Process,
+	selfPID int,
+	workingDir func(int) (string, bool),
+	isTmuxServer func(int) bool,
+) []proctree.Process {
+	// The daemon can inherit a cwd inside a worktree when an af invocation
+	// auto-starts it there, and the shared tmux server inherits its cwd from the
+	// client that first started it. Neither may be a selected root or be reached
+	// through another matching ancestor. Prune each protected subtree during that
+	// walk; descendants remain eligible when their own cwd independently matches.
+	protectedInfrastructure := func(pid int) bool {
+		return pid == selfPID || isTmuxServer(pid)
+	}
+	seen := make(map[int]bool)
+	var procs []proctree.Process
+	add := func(p proctree.Process) {
+		if !seen[p.PID] {
+			seen[p.PID] = true
+			procs = append(procs, p)
+		}
+	}
+	for pid := range snap {
+		cwd, ok := workingDir(pid)
+		if !ok {
+			// Foreign process (its cwd link is not readable) or already gone: it
+			// cannot be proven to be one of ours, and an unreadable cwd is never
+			// treated as a match — the honest-unknown rule this package enforces.
+			continue
+		}
+		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
+			continue
+		}
+		if protectedInfrastructure(pid) {
+			// A tmux server is shared infrastructure whose cwd comes from the client
+			// that first started it. It is not owned by this worktree, and selecting
+			// its tree could terminate every tmux session on the server. The same
+			// subtree rule protects a self-matching daemon and its unrelated sessions.
+			continue
+		}
+		if seen[pid] {
+			continue
+		}
+		// Take the whole subtree of the matching process: a child of a
+		// worktree-cwd'd writer is this session's too even if it chdir'd elsewhere,
+		// and it may be the actual file-creator holding the directory non-empty.
+		pruned := make(map[int]bool)
+		for _, p := range proctree.TreeOf(snap, pid) {
+			if pruned[p.PPID] {
+				pruned[p.PID] = true
+				continue
+			}
+			if protectedInfrastructure(p.PID) {
+				pruned[p.PID] = true
+				continue
+			}
+			add(p)
+		}
+	}
+	return procs
 }
 
 // pathAtOrUnder reports whether cleaned path p is root itself or a path nested
