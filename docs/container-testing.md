@@ -179,8 +179,9 @@ play-test spawned. Teardown is container exit, not a checklist.
 
 By default, instances run a cheap bash stand-in. It is deliberately loud:
 the sandbox banner identifies it, and every stand-in pane prints that it is
-bash rather than an agent plus the UI behavior it cannot prove. This keeps a
-captured pane from being mistaken for real-agent evidence.
+bash rather than an agent plus the UI behavior it cannot prove. Its prompt also
+retains a stand-in marker after command output scrolls. This keeps a captured
+pane from being mistaken for real-agent evidence.
 
 For a real agent pane, ask the harness to install Codex with its official
 standalone installer:
@@ -207,7 +208,7 @@ defaults to a **unique per-run value** (#1171) so concurrent runs can't
 ```bash
 export AF_PLAYTEST_NAME="af-playtest-$$"
 make playtest-container-detached
-docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'
 docker exec "$AF_PLAYTEST_NAME" tmux new-session -d -s drive -x 80 -y 24
 docker exec "$AF_PLAYTEST_NAME" tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
 docker exec "$AF_PLAYTEST_NAME" tmux capture-pane -p -t drive

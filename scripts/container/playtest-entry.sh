@@ -12,6 +12,7 @@ set -euo pipefail
 
 SANDBOX="$HOME/sandbox"
 export AGENT_FACTORY_HOME="${AGENT_FACTORY_HOME:-$SANDBOX/home}"
+rm -f "$SANDBOX/playtest-ready"
 # Disable startup auto-update inside the sandbox (#1596). A container binary is
 # built at the branch's main.go version, which is typically behind the latest
 # release, so on boot it would download a new binary and RESTART THE DAEMON —
@@ -66,6 +67,11 @@ if [ ! -d "$MOCK" ]; then
     chmod +x test.sh
     git add -A && git commit -qm "initial project"
 fi
+
+# This is the setup join for detached drivers. It verifies every prerequisite
+# above, then publishes the marker atomically; waiting on the earlier af binary
+# raced real-agent installation and mock-repo scaffolding (#3177).
+bash /src/scripts/container/mark-playtest-ready.sh
 
 cat <<EOF
 

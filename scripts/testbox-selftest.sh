@@ -162,6 +162,13 @@ else
     no "the detached sandbox dropped AF_PLAYTEST_CODEX_RELEASE"
 fi
 
+run_testbox playtest-ready 0 selftest
+if has "$LOG" "^exec .*until \\[ -f /home/dev/sandbox/playtest-ready \\]"; then
+    ok "drivers wait for complete play-test scaffolding"
+else
+    no "drivers declare readiness before the play-test scaffold is complete"
+fi
+
 printf '\n=== cleanup happens, on the passing run and the FAILING one ===\n'
 
 if has "$LOG" "^image prune"; then

@@ -10,7 +10,10 @@ INSTALLER="$(mktemp)"
 trap 'rm -f "$INSTALLER"' EXIT
 
 echo "play-test: installing Codex $RELEASE with the official standalone installer …"
-curl -fsSL "$INSTALLER_URL" -o "$INSTALLER"
+case "$INSTALLER_URL" in
+file://*) cp "${INSTALLER_URL#file://}" "$INSTALLER" ;;
+*) curl -fsSL "$INSTALLER_URL" -o "$INSTALLER" ;;
+esac
 CODEX_INSTALL_DIR="$HOME/bin" \
     CODEX_NON_INTERACTIVE=true \
     CODEX_RELEASE="$RELEASE" \

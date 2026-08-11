@@ -14,11 +14,25 @@ AGENT="${AF_PLAYTEST_AGENT:-standin}"
 
 mkdir -p "$AF_HOME" "$BIN_DIR" "$SANDBOX"
 
+json_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\b'/\\b}"
+    value="${value//$'\f'/\\f}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
+
 write_config() {
     local program="$1" command="$2"
-    jq -n --arg program "$program" --arg command "$command" \
-        '{default_program: $program, program_overrides: {($program): $command}}' \
-        >"$AF_HOME/config.json"
+    local program_json command_json
+    program_json="$(json_quote "$program")"
+    command_json="$(json_quote "$command")"
+    printf '{\n  "default_program": %s,\n  "program_overrides": {\n    %s: %s\n  }\n}\n' \
+        "$program_json" "$program_json" "$command_json" >"$AF_HOME/config.json"
 }
 
 case "$AGENT" in
@@ -37,7 +51,11 @@ Use AF_PLAYTEST_AGENT=codex for a real-agent play-test.
 ===============================================================
 
 NOTICE
-exec bash "$@"
+if [ "$#" -gt 0 ]; then
+    exec bash "$@"
+fi
+export PS1='[Play-test stand-in: bash] \w \$ '
+exec bash --noprofile --norc -i
 STANDIN
     chmod +x "$standin"
     write_config claude "$standin"
