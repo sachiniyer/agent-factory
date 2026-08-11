@@ -259,6 +259,43 @@ func TestRestoreArchived_CleanupPreparationPersistFailureLeavesStaleFence(t *tes
 	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
 }
 
+func TestRestoreArchived_AuthoritativeRepoGonePersistFailureLeavesStaleFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "late-gone-persist-failure")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "late-gone-persist-failure", RepoID: repoID})
+	require.NoError(t, err)
+	require.Nil(t, recordFor(t, repoID, "late-gone-persist-failure").Worktree.RelocationRecovery,
+		"precondition: an ordinary successful archive starts without a recovery record")
+
+	previousUse := beforeRestoreWorktreeUse
+	beforeRestoreWorktreeUse = func() {
+		require.NoError(t, os.RemoveAll(repoPath), "remove origin immediately before the authoritative probe")
+	}
+	t.Cleanup(func() { beforeRestoreWorktreeUse = previousUse })
+
+	diskFull := errors.New("forced authoritative cleanup-ready persistence failure")
+	previousPersist := testHookPersistInstanceData
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title != "late-gone-persist-failure" || data.Worktree.RelocationRecovery == nil {
+			return nil
+		}
+		if data.Worktree.RelocationRecovery.State == sessiongit.RelocationRecoveryCleanupReady {
+			return diskFull
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = previousPersist })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "late-gone-persist-failure", RepoID: repoID})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, diskFull.Error())
+	recovery := recordFor(t, repoID, "late-gone-persist-failure").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "failed late cleanup-ready persistence must leave a staged durable fence")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))

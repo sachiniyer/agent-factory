@@ -506,6 +506,44 @@ func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *te
 	}
 }
 
+func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *testing.T) {
+	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
+	previousProbe := repoGoneOriginProbe
+	previousTimeout := relocationIdentityTimeout
+	started := make(chan struct{})
+	release := make(chan struct{})
+	repoGoneOriginProbe = func(context.Context, *GitWorktree) error {
+		close(started)
+		<-release
+		return nil
+	}
+	relocationIdentityTimeout = time.Second
+	t.Cleanup(func() {
+		repoGoneOriginProbe = previousProbe
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	result := make(chan error, 1)
+	go func() { result <- boundedRepoGoneOriginProbe(gw) }()
+	<-started
+	repoGoneOriginProbeFlights.Lock()
+	close(release)
+	select {
+	case err := <-result:
+		repoGoneOriginProbeFlights.Unlock()
+		t.Fatalf("probe woke its caller before removing the completed process fence: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	repoGoneOriginProbeFlights.Unlock()
+
+	if err := <-result; err != nil {
+		t.Fatalf("completed origin probe failed after its fence was unpublished: %v", err)
+	}
+	if err := boundedRepoGoneOriginProbe(gw); err != nil {
+		t.Fatalf("immediate authoritative recheck reused a completed flight: %v", err)
+	}
+}
+
 func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)
@@ -516,6 +554,20 @@ func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testi
 
 	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
 		t.Fatalf("a non-Git origin is still conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
+func TestValidateRelocationCleanupAdmission_FilteredAmbientGitDirDoesNotObscureRepoGone(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("recreate origin pathname without git metadata: %v", err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "unrelated-git-dir"))
+
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("GIT_DIR filtered from the Git subprocess cannot make a conclusive missing origin unknown: %v", err)
 	}
 }
 
