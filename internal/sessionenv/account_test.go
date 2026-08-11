@@ -291,6 +291,21 @@ func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
 		"an ordinary literal process remains a valid account-scoped sibling")
 }
 
+func TestValidateAccountEnvironmentCommandRefusesSelectedAgentArguments(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`codex -c cli_auth_credentials_store="keyring"`,
+		`env codex --config cli_auth_credentials_store="keyring"`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "selected-agent arguments in sibling %q can redirect identity", command)
+		require.Contains(t, err.Error(), "arguments")
+		require.Contains(t, err.Error(), "cli_auth_credentials_store")
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand("make -j4", account),
+		"arguments to an ordinary non-agent process remain valid in a scoped sibling")
+}
+
 // The docker and ssh backends generate an ABSOLUTE af path for the agent-server
 // handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
 // rule refuses af's own launch on those backends, so account scoping would fail
