@@ -84,6 +84,53 @@ func TestReapWorktreeWriters_DoesNotSelectScannerProcessTree(t *testing.T) {
 	require.NoError(t, err, "scanner subprocess failed:\n%s", out)
 }
 
+func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T) {
+	const (
+		ancestorPID    = 10
+		infrastructure = 20
+		unrelatedChild = 30
+		matchingChild  = 40
+	)
+	root := "/managed/worktree"
+	outside := "/somewhere/else"
+	snap := map[int]proctree.Process{
+		ancestorPID:    {PID: ancestorPID, PPID: 1},
+		infrastructure: {PID: infrastructure, PPID: ancestorPID},
+		unrelatedChild: {PID: unrelatedChild, PPID: infrastructure},
+		matchingChild:  {PID: matchingChild, PPID: infrastructure},
+	}
+	workingDirs := map[int]string{
+		ancestorPID:    root,
+		infrastructure: root,
+		unrelatedChild: outside,
+		matchingChild:  root,
+	}
+	workingDir := func(pid int) (string, bool) {
+		dir, ok := workingDirs[pid]
+		return dir, ok
+	}
+
+	t.Run("scanner", func(t *testing.T) {
+		got := worktreeWriterProcesses(root, snap, infrastructure, workingDir, func(int) bool { return false })
+		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
+			"a matching ancestor must not carry the scanner and its unrelated subtree into the kill set")
+	})
+
+	t.Run("tmux server", func(t *testing.T) {
+		got := worktreeWriterProcesses(root, snap, 99, workingDir, func(pid int) bool { return pid == infrastructure })
+		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
+			"a matching ancestor must not carry the shared tmux server and its unrelated subtree into the kill set")
+	})
+}
+
+func processPIDs(processes []proctree.Process) []int {
+	pids := make([]int, 0, len(processes))
+	for _, process := range processes {
+		pids = append(pids, process.PID)
+	}
+	return pids
+}
+
 // TestCleanup_ReapsSurvivingWriterBeforeRemoval is the #2025 fail-first
 // regression: a session whose agent left a live process writing into the
 // worktree orphans the tree, because teardown removes the worktree WITHOUT first
