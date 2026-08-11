@@ -157,6 +157,25 @@ func TestRestoreArchived_NonGitOriginCreatesCleanupIdentityBeforePathResolution(
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_OriginProbeFailurePersistsUnresolvedClaim(t *testing.T) {
+	manager, repoID, _, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "probe-unknown")
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+	require.NoError(t, gw.SettleRelocationClaim(claim), "start from the reachable record-free archive state")
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	t.Setenv("PATH", t.TempDir())
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "probe-unknown", RepoID: repoID})
+	require.Error(t, err)
+	assert.True(t, exists(archivedPath), "unknown origin probe must leave the archive intact")
+	recovery := recordFor(t, repoID, "probe-unknown").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "record-free claim must become a durable non-destructive fence")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))
@@ -250,6 +269,22 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testing.T) {
 	manager, repoID := newCleanupReadyGhost(t, "ghost-sync-success")
 	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	retained := filepath.Join(t.TempDir(), ".af-source-0123456789abcdef0123456789abcdef")
+	require.NoError(t, os.Mkdir(retained, 0o755))
+	retainedInfo, err := os.Stat(retained)
+	require.NoError(t, err)
+	retainedStat, ok := retainedInfo.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	record := recordFor(t, repoID, "ghost-sync-success")
+	record.ArchiveReport = &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: retained, IdentityKnown: true,
+		Device: uint64(retainedStat.Dev), Inode: uint64(retainedStat.Ino),
+		FileType: uint32(retainedStat.Mode & syscall.S_IFMT),
+	}}}
+	require.NoError(t, persistInstanceData(repoID, *record))
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale,
+		recordFor(t, repoID, "ghost-sync-success").Worktree.RelocationRecovery.State,
+		"precondition: archive rollback projection must hide cleanup_ready")
 
 	previousCleanup := ghostCleanupWorktree
 	var releaseLock func()
@@ -257,6 +292,7 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 		// Mirror the real descriptor cleanup's definitive success: the archive is
 		// gone and the temporary in-memory recovery handle has been consumed.
 		data.Worktree.RelocationRecovery = nil
+		data.ArchiveReport = nil
 		path, err := config.RepoInstancesPath(repoID)
 		require.NoError(t, err)
 		releaseLock = holdFileLock(t, path)
@@ -276,7 +312,7 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 	lateGhostCleanupRetryInterval = 5 * time.Millisecond
 	t.Cleanup(func() { lateGhostCleanupRetryInterval = previousRetryInterval })
 
-	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-sync-success", RepoID: repoID})
+	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-sync-success", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
 	require.NotNil(t, releaseLock, "the tail failure must happen after descriptor cleanup succeeded")
 	releaseLock()

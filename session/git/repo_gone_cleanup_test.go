@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -179,6 +180,73 @@ func TestCleanupClaimedRepoGone_FinalizingRetryLeavesReplacement(t *testing.T) {
 	}
 }
 
+func TestCleanupClaimedRepoGone_FinalizingRetryRetainsRepopulatedRoot(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	if err := os.Remove(filepath.Join(worktree, "work.txt")); err != nil {
+		t.Fatalf("empty root before finalization retry: %v", err)
+	}
+	finalizing, err := NewGitWorktreeFromStorage(
+		gw.GetRepoPath(), worktree, "repo-gone", "af/repo-gone", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("restore finalizing worktree: %v", err)
+	}
+	if err := finalizing.RestoreRelocationRecovery(RelocationRecovery{
+		State: RelocationRecoveryCleanupFinalizing, IdentityKnown: true,
+		Device: claim.identity.device, Inode: claim.identity.inode, FileType: claim.identity.fileType,
+		CleanupGeneration: claim.cleanupGeneration,
+	}); err != nil {
+		t.Fatalf("restore finalizing recovery: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "late-work.txt"), []byte("writer survived"), 0o644); err != nil {
+		t.Fatalf("repopulate finalizing root: %v", err)
+	}
+
+	finalizingClaim, err := finalizing.ClaimRelocationSource()
+	if err != nil {
+		t.Fatalf("claim finalization retry: %v", err)
+	}
+	state, err := finalizing.CleanupClaimedRepoGone(finalizingClaim)
+	if state != CleanupStateUnknown || err == nil {
+		t.Fatalf("repopulated finalizing root must remain retryable; state=%v err=%v", state, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "late-work.txt")); err != nil {
+		t.Fatalf("finalization retry touched repopulated work: %v", err)
+	}
+	recovery, retained := finalizing.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupFinalizing {
+		t.Fatalf("repopulated root lost its finalization record; retained=%v recovery=%+v", retained, recovery)
+	}
+}
+
+func TestCleanupClaimedRepoGone_RootUnlinkFailureRestoresFinalizingName(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	previousClaim := removeTreeBeforeEntryClaim
+	repopulated := false
+	removeTreeBeforeEntryClaim = func(directory *os.File, path string) error {
+		if !repopulated && path == filepath.Dir(worktree) {
+			repopulated = true
+			if err := os.WriteFile(filepath.Join(worktree, "late-work.txt"), []byte("writer survived"), 0o644); err != nil {
+				return err
+			}
+		}
+		return previousClaim(directory, path)
+	}
+	t.Cleanup(func() { removeTreeBeforeEntryClaim = previousClaim })
+
+	state, err := gw.CleanupClaimedRepoGone(claim)
+	if !repopulated || state != CleanupStateUnknown || err == nil {
+		t.Fatalf("late root entry must make unlink retryable; repopulated=%v state=%v err=%v", repopulated, state, err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "late-work.txt")); err != nil {
+		t.Fatalf("failed root unlink did not restore the durable finalizing pathname: %v", err)
+	}
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupFinalizing {
+		t.Fatalf("failed root unlink lost its finalization record; retained=%v recovery=%+v", retained, recovery)
+	}
+}
+
 func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 	retained := filepath.Join(filepath.Dir(worktree), ".af-source-0123456789abcdef0123456789abcdef")
@@ -197,10 +265,23 @@ func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *test
 			newArchiveSkippedEntry("private-work.txt", ArchiveSkipPermissionDenied),
 		}),
 	}})
+	hookCanceled := false
+	gw.hooksCancel = func() { hookCanceled = true }
+	previousClaim := removeTreeBeforeEntryClaim
+	removeTreeBeforeEntryClaim = func(directory *os.File, path string) error {
+		if strings.HasPrefix(path, retained) && !hookCanceled {
+			return errors.New("retained-tree deletion started before hook cancellation")
+		}
+		return previousClaim(directory, path)
+	}
+	t.Cleanup(func() { removeTreeBeforeEntryClaim = previousClaim })
 
 	state, err := gw.CleanupClaimedRepoGone(claim)
 	if err != nil || state != CleanupSettled {
 		t.Fatalf("cleanup with retained archive tree did not settle: state=%v err=%v", state, err)
+	}
+	if !hookCanceled {
+		t.Fatal("repo-gone cleanup did not cancel its archive hook")
 	}
 	if _, err := os.Stat(retained); !os.IsNotExist(err) {
 		t.Fatalf("cleanup orphaned a retained archive tree after removing its durable row: %v", err)
@@ -396,6 +477,22 @@ func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testi
 
 	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
 		t.Fatalf("a non-Git origin is still conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
+func TestValidateRelocationCleanupAdmission_AncestorRepoDoesNotReplaceOrigin(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	root := filepath.Dir(gw.GetRepoPath())
+	if err := exec.Command("git", "init", root).Run(); err != nil {
+		t.Fatalf("create ancestor repository: %v", err)
+	}
+	if err := os.MkdirAll(gw.GetRepoPath(), 0o755); err != nil {
+		t.Fatalf("create recorded non-Git origin beneath ancestor: %v", err)
+	}
+
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("ancestor repository must not be mistaken for the recorded origin: %v", err)
 	}
 }
 
