@@ -220,7 +220,16 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// worktree and take away the user's only handle on it, so keep the record and
 	// let the next poll try again: this loop IS the retry, and it is the reason a
 	// bounded teardown does not need a daemon restart to converge (#1917).
+	// Match explicit KillSession's pre-unlink durability fence. A retained
+	// tombstone can reach this retry with cleanup_ready still live; installing the
+	// checkpoint before Kill ensures descriptor cleanup persists
+	// cleanup_finalizing before removing the archive root. The post-Kill persist
+	// below is too late to close that crash window.
+	restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
+		return m.persistInstanceErr(repoID, instance)
+	})
 	teardownErr := instance.Kill()
+	restoreCheckpoint()
 	if !session.TeardownStateUnknown(teardownErr) {
 		// A settled live teardown may have consumed the only in-memory copy of a
 		// cleanup-ready relocation record. Make that settlement durable before the
