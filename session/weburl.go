@@ -80,6 +80,9 @@ func NormalizeWebTabURL(raw string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
 		}
+		if err := validateBrowserDomainHost(canonicalHost); err != nil {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
+		}
 	} else {
 		canonicalHost = net.ParseIP(host).String()
 	}
@@ -127,6 +130,34 @@ func NormalizeWebTabURL(raw string) (string, error) {
 		u.Host = net.JoinHostPort(canonicalHost, canonicalPort)
 	}
 	return u.String(), nil
+}
+
+// validateBrowserDomainHost applies the URL Standard checks that follow UTS #46
+// ToASCII processing. The IDNA profile intentionally disables strict DNS rules
+// for browser compatibility, so it can return empty labels or ASCII URL
+// delimiters without an error; both make the resulting special-URL host invalid.
+func validateBrowserDomainHost(host string) error {
+	rootless := strings.TrimSuffix(host, ".")
+	if rootless == "" {
+		return fmt.Errorf("browser canonicalization removes every domain label")
+	}
+	for _, label := range strings.Split(rootless, ".") {
+		if label == "" {
+			return fmt.Errorf("browser canonicalization produces an empty domain label")
+		}
+	}
+	for _, r := range host {
+		// WHATWG forbidden domain code points: every C0 control, DEL, and the
+		// URL delimiters that cannot occur in a special-URL domain.
+		if r <= 0x1f || r == 0x7f {
+			return fmt.Errorf("browser canonicalization produces forbidden domain code point U+%04X", r)
+		}
+		switch r {
+		case ' ', '#', '%', '/', ':', '<', '>', '?', '@', '[', '\\', ']', '^', '|':
+			return fmt.Errorf("browser canonicalization produces forbidden domain code point %q", r)
+		}
+	}
+	return nil
 }
 
 // WebTabURLForPort builds the loopback URL a `--port N` convenience flag targets.

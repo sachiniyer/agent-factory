@@ -13,6 +13,7 @@ func TestNormalizeWebTabURL(t *testing.T) {
 		{name: "loopback ip host:port", in: "127.0.0.1:5173", want: "http://127.0.0.1:5173"},
 		{name: "full http url kept", in: "http://localhost:8080/app", want: "http://localhost:8080/app"},
 		{name: "external https url kept", in: "https://example.com/x", want: "https://example.com/x"},
+		{name: "rooted fqdn keeps one trailing label", in: "https://example.com./x", want: "https://example.com./x"},
 		{name: "ideographic dot in host", in: "http://127。0。0。1:3000", want: "http://127.0.0.1:3000"},
 		{name: "fullwidth dot in host", in: "http://127．0．0．1:3000", want: "http://127.0.0.1:3000"},
 		{name: "halfwidth dot in host", in: "http://127｡0｡0｡1:3000", want: "http://127.0.0.1:3000"},
@@ -37,6 +38,12 @@ func TestNormalizeWebTabURL(t *testing.T) {
 		{name: "ipvfuture host rejected", in: "http://[v1.foo]:3000", wantErr: true},
 		{name: "bracketed ipv4 rejected", in: "http://[127.0.0.1]:3000", wantErr: true},
 		{name: "idna-ignored-only host rejected", in: "https://\u00ad/x", wantErr: true},
+		{name: "root-only domain rejected", in: "https://./x", wantErr: true},
+		{name: "leading empty domain label rejected", in: "https://.example.com/x", wantErr: true},
+		{name: "interior empty domain label rejected", in: "https://example..com/x", wantErr: true},
+		{name: "multiple trailing empty labels rejected", in: "https://example.com../x", wantErr: true},
+		{name: "idna-mapped host delimiter rejected", in: "https://example／evil.com/x", wantErr: true},
+		{name: "idna-mapped port delimiter rejected", in: "https://example.com：443/x", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,6 +61,23 @@ func TestNormalizeWebTabURL(t *testing.T) {
 				t.Fatalf("NormalizeWebTabURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateBrowserDomainHostRejectsURLStandardForbiddenCodePoints(t *testing.T) {
+	for _, forbidden := range []rune{
+		0x00, 0x01, 0x1f, ' ', '#', '%', '/', ':', '<', '>', '?', '@', '[', '\\', ']', '^', '|', 0x7f,
+	} {
+		host := "example" + string(forbidden) + ".com"
+		if err := validateBrowserDomainHost(host); err == nil {
+			t.Errorf("validateBrowserDomainHost(%q) accepted forbidden code point U+%04X", host, forbidden)
+		}
+	}
+
+	for _, valid := range []string{"example.com", "example.com.", "_service.example"} {
+		if err := validateBrowserDomainHost(valid); err != nil {
+			t.Errorf("validateBrowserDomainHost(%q) unexpected error: %v", valid, err)
+		}
 	}
 }
 
