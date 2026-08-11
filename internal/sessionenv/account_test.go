@@ -280,6 +280,17 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 	}
 }
 
+func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{"bash", "/bin/zsh", "env bash", "exec -- /bin/sh"} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "bare shell %q can reload ambient identity from startup files", command)
+		require.Contains(t, err.Error(), "cannot prove")
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand("make", account),
+		"an ordinary literal process remains a valid account-scoped sibling")
+}
+
 // The docker and ssh backends generate an ABSOLUTE af path for the agent-server
 // handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
 // rule refuses af's own launch on those backends, so account scoping would fail

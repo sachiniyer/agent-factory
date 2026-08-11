@@ -480,6 +480,9 @@ func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testin
 	if _, err := inst.AddProcessTab("make", "build"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := inst.AddVSCodeTab("editor"); err != nil {
+		t.Fatal(err)
+	}
 	if state, err := agent.Close(); state != tmux.PaneStateKnown || err != nil {
 		t.Fatalf("make agent absent: state=%v err=%v", state, err)
 	}
@@ -491,12 +494,19 @@ func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testin
 		t.Fatal(err)
 	}
 
-	manager := &Manager{}
+	manager := &Manager{
+		instances: map[string]*session.Instance{"key": inst},
+		vscode:    newVSCodeSupervisor(),
+	}
+	registerVSCodeMarker(manager, "key")
 	if err := manager.prepareRuntimeForAccountSwap("repo", "key", inst); err != nil {
 		t.Fatal(err)
 	}
 	if inst.TabAlive(1) {
 		t.Fatal("an absent agent pane must not let a still-live sibling bypass account-swap teardown")
+	}
+	if vscodeServerRegistered(manager, "key") {
+		t.Fatal("an account swap left the daemon-owned VS Code process on the old identity")
 	}
 }
 

@@ -63,6 +63,31 @@ func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
 		"account limit evidence must survive the daemon restart boundary")
 }
 
+func TestAccountLimitObservationPreservesSafestReset(t *testing.T) {
+	earlier := time.Date(2026, 8, 10, 18, 0, 0, 0, time.UTC)
+	later := earlier.Add(7 * 24 * time.Hour)
+
+	t.Run("later reset is not shortened", func(t *testing.T) {
+		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+		i.SetLimitReached(later)
+		i.ClearLimitReached()
+		i.SetLimitReached(earlier)
+
+		require.Equal(t, later, i.AccountLimitObservations()[0].ResetAt,
+			"a short-window wall must not erase a still-active longer quota wall")
+	})
+
+	t.Run("unknown reset dominates", func(t *testing.T) {
+		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+		i.SetLimitReached(time.Time{})
+		i.ClearLimitReached()
+		i.SetLimitReached(later)
+
+		require.True(t, i.AccountLimitObservations()[0].ResetAt.IsZero(),
+			"a later timestamp cannot make an indefinite limit observation safe to reuse")
+	})
+}
+
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still
 // blocks the session, but LimitResetAt reports no known time.
 func TestSetLimitReached_NoResetTime(t *testing.T) {

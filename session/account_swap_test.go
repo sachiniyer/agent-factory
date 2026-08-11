@@ -56,6 +56,7 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 		{"codex resume old-chat", "resume old-chat"},
 		{"codex --model gpt-5 resume old-chat", "resume old-chat"},
 		{"codex exec resume --last --model gpt-5", "resume --last"},
+		{"codex exec --model gpt-5 resume old-chat", "resume old-chat"},
 	} {
 		t.Run(tc.program, func(t *testing.T) {
 			err := accountSwapTestInstance(tc.program).ValidateAccountSwap("work")
@@ -63,6 +64,13 @@ func TestValidateAccountSwapRefusesConversationSelectors(t *testing.T) {
 			require.ErrorContains(t, err, tc.arg, "the refusal must name the user-pinned selector")
 		})
 	}
+}
+
+func TestValidatedAccountSwapFencesLazyVSCodeStartBeforeCommit(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	require.ErrorContains(t, inst.TabSpawnBlocked(), "account swap",
+		"a preflighted swap must fence an existing VS Code tab from lazily starting its old-identity editor")
 }
 
 func TestSelectAccountAutomaticallyClearsPriorConversationAndCapture(t *testing.T) {
