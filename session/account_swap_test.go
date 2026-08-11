@@ -196,6 +196,60 @@ func (p failAccountSwapProcessPty) Start(cmd *exec.Cmd) (*os.File, error) {
 
 func (p failAccountSwapProcessPty) Close() {}
 
+func shortLivedProcessExec(processName string) cmd_test.MockCmdExec {
+	var newSessions int
+	inner := countingExec(map[string]bool{}, &newSessions)
+	spawned := false
+	probesAfterSpawn := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			command := cmd.String()
+			if strings.Contains(command, processName) {
+				switch {
+				case strings.Contains(command, "new-session"):
+					spawned = true
+				case strings.Contains(command, "has-session") && spawned:
+					probesAfterSpawn++
+					if probesAfterSpawn > 2 {
+						return assertNoSession
+					}
+				}
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+}
+
+func TestRespawnForAccountSwapAcceptsProcessThatExitsAfterSuccessfulRestart(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	const agentName = "af_swap_short_process"
+	processName := agentName + shellTmuxSuffix
+	executor := shortLivedProcessExec(processName)
+	inst := lostInstanceForRecover(t, agentName, processName, executor)
+	inst.mu.Lock()
+	inst.Tabs[1].Kind = TabKindProcess
+	inst.Tabs[1].Command = "true"
+	inst.Tabs[1].tmux.SetProgram("true")
+	inst.mu.Unlock()
+	inst.Path = initTempGitRepo(t)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+
+	require.NoError(t, inst.RespawnForAccountSwap(),
+		"a process that started under the selected account may complete before the replacement is validated")
+}
+
 func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)

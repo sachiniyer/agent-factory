@@ -22,6 +22,7 @@ type autoAccountSwap struct {
 	previousAuto         bool
 	previousConversation session.AgentConversationData
 	to                   string
+	candidates           []string
 	agent                string
 	alreadySet           bool
 	fallbackDue          bool
@@ -137,24 +138,47 @@ func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, gl
 	for account := range limitedSet {
 		limited = append(limited, account)
 	}
-	target, found := quota.SelectAccountCandidate(quota.AccountSelection{
+	candidates := quota.SelectAccountCandidates(quota.AccountSelection{
 		CurrentAccount:      current,
 		CurrentAutoSelected: currentAuto,
 		Candidates:          resolved.LimitAccountCandidates,
 		Registered:          registered,
 		Limited:             limited,
 	})
-	if !found {
+	if len(candidates) == 0 {
 		return nil, nil
 	}
 	return &autoAccountSwap{
 		from:            limitedAccount,
 		previousAccount: current,
 		previousAuto:    currentAuto,
-		to:              target,
+		to:              candidates[0],
+		candidates:      candidates,
 		agent:           agent,
 		global:          global,
 	}, nil
+}
+
+// preflightAccountSwapCandidates is the candidate-specific half of admission.
+// Keeping the ordered set here lets the sole gate distinguish an unprovable
+// candidate from an unprovable policy or evidence read without making the
+// scheduler itself an authority.
+func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string) error) (*autoAccountSwap, error) {
+	candidates := append([]string(nil), swap.candidates...)
+	if len(candidates) == 0 && strings.TrimSpace(swap.to) != "" {
+		candidates = []string{swap.to}
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("no account candidate is available for launch preflight")
+	}
+	candidate := candidates[0]
+	if err := validate(candidate); err != nil {
+		return nil, fmt.Errorf("account %q: %w", candidate, err)
+	}
+	admitted := *swap
+	admitted.to = candidate
+	admitted.candidates = candidates
+	return &admitted, nil
 }
 
 // admitAccountSwap is the sole admission gate for a new identity replacement.
@@ -175,10 +199,7 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	if swap.alreadySet {
 		return nil, errors.New("identity selection is already committed; new-swap admission cannot authorize recovery")
 	}
-	if err := instance.ValidateAccountSwap(swap.to); err != nil {
-		return nil, fmt.Errorf("account %q: %w", swap.to, err)
-	}
-	return swap, nil
+	return preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
 }
 
 func accountSwapIdentity(agent, account string) string {

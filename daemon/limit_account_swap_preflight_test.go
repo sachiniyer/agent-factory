@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -8,6 +9,43 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+func TestPreflightAccountSwapCandidatesUsesTheFirstProvenIdentity(t *testing.T) {
+	swap := &autoAccountSwap{to: "broken", candidates: []string{"broken", "work"}}
+	var attempted []string
+	admitted, err := preflightAccountSwapCandidates(swap, func(candidate string) error {
+		attempted = append(attempted, candidate)
+		if candidate == "broken" {
+			return errors.New("credential directory is unusable")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("later explicitly authorized candidate was not tried: %v (attempted %q)", err, attempted)
+	}
+	if admitted.to != "work" {
+		t.Fatalf("admitted account = %q, want first proven candidate work (attempted %q)", admitted.to, attempted)
+	}
+}
+
+func TestAdmitAccountSwapRefusesVSCodeIntegratedShells(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	if _, err := inst.AddVSCodeTab("editor"); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	defer inst.EndLimitResume()
+	swap, err := manager.admitAccountSwap(inst, manager.Config())
+	if err == nil {
+		t.Fatalf("VS Code integrated shell was admitted without identity proof: %+v", swap)
+	}
+	if swap != nil {
+		t.Fatalf("refused VS Code boundary returned a swap: %+v", swap)
+	}
+}
 
 func TestResumeLimitedSessions_UnusableCandidatesFallBackWhenResetDue(t *testing.T) {
 	base := nowFunc()
