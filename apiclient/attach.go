@@ -208,7 +208,22 @@ func driveAttachStream(conn *websocket.Conn, handback *terminalHandback, in canc
 			if msg.Binary {
 				switch msg.Frame.Op {
 				case agentproto.OpPTYOut, agentproto.OpRepaint:
-					_, _ = out.Write(msg.Frame.Data)
+					// A failed write ENDS the attach (#3191). Discarding it left this
+					// goroutine reading and re-writing to a destination that had already
+					// refused everything — a `af attach | head`, a closed terminal, a full
+					// pipe — so the loop span until the pane exited, doing nothing but
+					// burning the frames the server was still paying to send.
+					//
+					// It is also the only honest response available: `out` is the user's
+					// terminal, so a write failure means the thing this attach exists to
+					// feed is gone. There is nowhere left to report to, which is exactly
+					// why the error must move the CONTROL FLOW rather than a message.
+					//
+					// Same shape as remoteClientlessChannel's capture loop, which already
+					// returns on werr — this is that pattern, not a new one.
+					if _, werr := out.Write(msg.Frame.Data); werr != nil {
+						return
+					}
 				}
 				continue
 			}
