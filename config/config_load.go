@@ -25,7 +25,8 @@ import (
 // of silently inheriting defaults (#734):
 //   - Neither file exists → DefaultConfig() is materialized as config.toml,
 //     with no error. This is the first-run path and must keep working.
-//   - A contentless config file (zero-byte or, for TOML, whitespace/BOM-only)
+//   - A contentless config file (zero-byte or, for TOML, an empty document such
+//     as whitespace/BOM/comments only)
 //     with no other config present is the fingerprint of a failed/partial
 //     first-run write (#864, a regression of #838): the stub is removed and
 //     defaults regenerated rather than wedging every future startup. A

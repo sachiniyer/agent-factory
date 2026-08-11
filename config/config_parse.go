@@ -68,9 +68,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 // the defaults — the TOML twin of parseConfig, sharing validateConfig so the
 // two formats can never drift on semantics (#1030).
 //
-// A config.toml with no content — zero bytes, only whitespace, or only a BOM
-// — is technically valid TOML (an empty document), but nothing materializes
-// this file, so such a stub is always hand-made (e.g. `touch config.toml`) —
+// A config.toml with no settings — zero bytes, only whitespace, only a BOM, or
+// comments only — is technically valid TOML (an empty document), but nothing
+// materializes this file, so such a stub is always hand-made —
 // and because its mere existence shadows config.json, silently treating it
 // as "all defaults" would disguise the shadowing as a settings loss. Per the
 // #734/#758 posture it is a loud error instead (the TOML analogue of the
@@ -105,14 +105,21 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	return validateConfig(config, prettyConfigPath)
 }
 
-// isEffectivelyEmptyToml reports whether data carries no TOML content at all:
-// zero bytes, only whitespace, or only a UTF-8 BOM (with or without trailing
-// whitespace). Every such file decodes as a valid empty document, so without
-// this check a `touch`ed or whitespace-only config.toml would silently become
-// an all-defaults canonical config while shadowing a real config.json.
+// isEffectivelyEmptyToml reports whether data decodes to an empty TOML
+// document. That includes zero bytes, whitespace, a UTF-8 BOM, and comments
+// without any keys or tables. Every such file is valid TOML, so without this
+// check it would silently become an all-defaults canonical config while
+// shadowing a real config.json.
 func isEffectivelyEmptyToml(data []byte) bool {
 	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	return len(bytes.TrimSpace(trimmed)) == 0
+	if len(bytes.TrimSpace(trimmed)) == 0 {
+		return true
+	}
+	var document map[string]any
+	if err := toml.Unmarshal(trimmed, &document); err != nil {
+		return false
+	}
+	return len(document) == 0
 }
 
 // tomlParseError renders a TOML decode failure for the file described by
