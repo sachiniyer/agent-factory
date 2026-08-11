@@ -151,12 +151,16 @@ func TestNormalizeWebTabURLRejectsBrowserUnusableTargets(t *testing.T) {
 	if got, err := NormalizeWebTabURL("http://localhost:6000/x"); err != nil || got != "http://localhost:6000/x" {
 		t.Errorf("NormalizeWebTabURL(loopback bad-port target) = %q, %v; want proxyable target preserved", got, err)
 	}
+	if got, err := NormalizeWebTabURL("https://☕.example/x"); err != nil || got != "https://xn--53h.example/x" {
+		t.Errorf("NormalizeWebTabURL(valid relaxed IDNA target) = %q, %v; want browser-compatible ACE host", got, err)
+	}
 }
 
 // The special-use localhost name covers every subdomain, not only the exact
 // label. Browsers resolve these names on the viewer's loopback interface, so an
 // off-box tab must take the same refusal path as localhost itself.
 func TestIsLoopbackWebTargetRecognizesLocalhostSubdomains(t *testing.T) {
+	remote := Capabilities{Workspace: WorkspaceRemote}
 	for _, raw := range []string{
 		"https://app.localhost:3000",
 		"https://deep.app.localhost./x",
@@ -164,6 +168,9 @@ func TestIsLoopbackWebTargetRecognizesLocalhostSubdomains(t *testing.T) {
 	} {
 		if !IsLoopbackWebTarget(raw) {
 			t.Errorf("IsLoopbackWebTarget(%q) = false, want true for wildcard localhost", raw)
+		}
+		if err := remote.RefuseTabKind(TabKindWeb, raw); err == nil {
+			t.Errorf("remote RefuseTabKind(web, %q) = nil, want off-box loopback refusal", raw)
 		}
 	}
 	if IsLoopbackWebTarget("https://notlocalhost.example/x") {

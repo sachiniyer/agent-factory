@@ -126,6 +126,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		}
 		data.Tabs = append(data.Tabs, td)
 	}
+	// An archived off-box row is inert, but the web rail still renders its
+	// metadata-only tabs as restore placeholders. After a daemon restart those
+	// rows live in pendingMetadataTabs, outside the ordered roster by design; make
+	// them visible only in the snapshot projection, behind an implicit agent row.
+	// ForStorage restores snapshotStorageTabs before writing instances.json, so
+	// durability keeps using PendingTabs and never reintroduces the index-0 bug.
+	if i.liveness == LiveArchived && len(i.pendingMetadataTabs) > 0 {
+		data.snapshotTabsProjected = true
+		data.snapshotStorageTabs = data.Tabs
+		data.Tabs = append([]TabData(nil), data.Tabs...)
+		if len(data.Tabs) == 0 {
+			data.Tabs = append(data.Tabs, TabData{Name: "agent", Kind: TabKindAgent})
+		}
+		data.Tabs = append(data.Tabs, i.pendingMetadataTabs...)
+	}
 
 	// Cleanup handles for tabs whose roster removal is durable but whose tmux
 	// teardown was never confirmed (#2669). Projected alongside Tabs, and from the

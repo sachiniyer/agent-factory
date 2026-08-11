@@ -80,6 +80,19 @@ func NormalizeWebTabURL(raw string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
 		}
+		// x/net/idna can successfully encode a Unicode label into an ACE label
+		// that its own Punycode-validation path rejects when that ACE is supplied
+		// directly. Browsers reject the navigation in that case (for example a
+		// mixed-direction aℵb.com label), so make the canonical output traverse
+		// the decoder-backed path too before persisting it.
+		validatedHost, validateErr := browserHostIDNA.ToASCII(canonicalHost)
+		if validateErr != nil || validatedHost != canonicalHost {
+			if validateErr == nil {
+				validateErr = fmt.Errorf("canonical ACE host is not stable (%q)", validatedHost)
+			}
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects canonical host %q: %w",
+				host, canonicalHost, validateErr)
+		}
 		if err := validateBrowserDomainHost(canonicalHost); err != nil {
 			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
 		}
@@ -113,6 +126,13 @@ func NormalizeWebTabURL(raw string) (string, error) {
 		if portErr != nil {
 			return "", fmt.Errorf("invalid web tab URL port %q: must be between 0 and 65535", canonicalPort)
 		}
+		// A direct HTTP(S) frame is subject to Fetch's bad-port block before a
+		// request is sent. Loopback is the deliberate exception here: Agent
+		// Factory serves it through a same-origin reverse-proxy URL, so the browser
+		// never sees or blocks the target port itself.
+		if browserFetchBlocksPort(portNumber) && !isLoopbackHost(canonicalHost) {
+			return "", fmt.Errorf("invalid web tab URL port %d: browsers block HTTP(S) requests to this port", portNumber)
+		}
 		canonicalPort = strconv.FormatUint(portNumber, 10)
 		if (u.Scheme == "http" && canonicalPort == "80") ||
 			(u.Scheme == "https" && canonicalPort == "443") {
@@ -130,6 +150,24 @@ func NormalizeWebTabURL(raw string) (string, error) {
 		u.Host = net.JoinHostPort(canonicalHost, canonicalPort)
 	}
 	return u.String(), nil
+}
+
+// browserFetchBlocksPort mirrors Fetch's bad-port table for HTTP(S) requests.
+// Keep the values explicit: this is a browser interop boundary, not an OS
+// service-name lookup, and the standard's set is intentionally finite.
+func browserFetchBlocksPort(port uint64) bool {
+	switch port {
+	case 0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25,
+		37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104,
+		109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143,
+		161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+		532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+		995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061,
+		6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080:
+		return true
+	default:
+		return false
+	}
 }
 
 // validateBrowserDomainHost applies the URL Standard checks that follow UTS #46
@@ -191,7 +229,7 @@ func isLoopbackHost(host string) bool {
 	if host == "" {
 		return false
 	}
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {

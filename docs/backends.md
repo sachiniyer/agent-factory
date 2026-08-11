@@ -3,10 +3,13 @@
 A session's **backend** decides *where* its workspace and agent run. Every
 backend exposes the same session surface — attach, preview, prompt delivery, the
 live PTY stream — so the TUI, CLI, and daemon drive a containerised session much
-like a local one. The one difference is **tab management**: only a local session
-has a daemon-side worktree to spawn tabs into, so adding/closing tabs (`t`/`w`,
-`af sessions tab-create`) is local-only; off-box sessions (docker, ssh, sandbox,
-hook) carry a fixed single agent tab.
+like a local one. Tab admission follows what each kind needs: shell/process tabs
+need a local PTY and process, and VS Code needs a daemon-side worktree/editor, so
+those remain local-only. A metadata-only web tab spawns neither and can be added
+to an off-box session (docker, ssh, sandbox, hook) when its target is an external
+HTTPS URL. Loopback targets still need an agent-side relay and are refused for
+now; plain HTTP cannot be framed by the HTTPS web UI. Admitted remote web tabs
+can be closed, renamed, and reordered like local web tabs.
 
 | Backend | Where the agent runs | Selected with |
 |---------|----------------------|---------------|

@@ -211,6 +211,12 @@ type InstanceData struct {
 	// missing because the row lives only in the staging area (#3062).
 	PendingTabs []TabData          `json:"pending_tabs,omitempty"`
 	TabKinds    []TabKindAllowance `json:"tab_kinds,omitempty"`
+	// snapshotTabsProjected marks an archived snapshot whose visible Tabs roster
+	// was synthesized from PendingTabs. The private storage copy lets ForStorage
+	// restore the ordered durable roster exactly, so a UI projection can never put
+	// a staged web row back into the agent's index-0 persistence contract.
+	snapshotTabsProjected bool
+	snapshotStorageTabs   []TabData
 	// TabRosterMutable is Capabilities.TabManagement projected: whether this
 	// session's tab ROSTER may be mutated (rename, reorder). It is a different
 	// question from either creating a kind or closing a tab, and it has a different
@@ -324,6 +330,11 @@ func archiveWarningOperation(liveness Liveness) string {
 // daemon Snapshot payload, so it can carry transient in-flight operation state;
 // disk persistence must not.
 func (d InstanceData) ForStorage() InstanceData {
+	if d.snapshotTabsProjected {
+		d.Tabs = d.snapshotStorageTabs
+		d.snapshotTabsProjected = false
+		d.snapshotStorageTabs = nil
+	}
 	reportDetached := false
 	if d.archiveReportSource != nil {
 		path, recovery, hasRecovery, report := d.archiveReportSource.PersistenceSnapshot()
