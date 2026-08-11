@@ -173,6 +173,76 @@ func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *test
 	}
 }
 
+func TestBoundedRepoGoneOriginProbe_PublishesCompletionBeforeUnfencing(t *testing.T) {
+	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
+	previousProbe := repoGoneOriginProbe
+	previousHook := repoGoneOriginProbeAfterUnpublish
+	previousTimeout := relocationIdentityTimeout
+	publicationGap := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	repoGoneOriginProbe = func(context.Context, *GitWorktree) error { return nil }
+	repoGoneOriginProbeAfterUnpublish = func() {
+		close(publicationGap)
+		<-releaseWorker
+	}
+	relocationIdentityTimeout = 25 * time.Millisecond
+	t.Cleanup(func() {
+		repoGoneOriginProbe = previousProbe
+		repoGoneOriginProbeAfterUnpublish = previousHook
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	result := make(chan error, 1)
+	go func() { result <- boundedRepoGoneOriginProbe(gw) }()
+	<-publicationGap
+	err := <-result
+	close(releaseWorker)
+	if err != nil {
+		t.Fatalf("a completed origin probe was discarded at its publication boundary: %v", err)
+	}
+}
+
+func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "archive")
+	previousInstall := cleanupGenerationInstall
+	previousHook := cleanupGenerationInstallAfterUnpublish
+	previousTimeout := relocationIdentityTimeout
+	publicationGap := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	cleanupGenerationInstall = func(string, pathIdentity) (string, error) {
+		return "installed-generation", nil
+	}
+	cleanupGenerationInstallAfterUnpublish = func() {
+		close(publicationGap)
+		<-releaseWorker
+	}
+	relocationIdentityTimeout = 25 * time.Millisecond
+	t.Cleanup(func() {
+		cleanupGenerationInstall = previousInstall
+		cleanupGenerationInstallAfterUnpublish = previousHook
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	type result struct {
+		generation string
+		err        error
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		generation, err := boundedCleanupGenerationInstall(path, pathIdentity{})
+		resultC <- result{generation: generation, err: err}
+	}()
+	<-publicationGap
+	observed := <-resultC
+	close(releaseWorker)
+	if observed.err != nil || observed.generation != "installed-generation" {
+		t.Fatalf(
+			"a completed generation install was discarded at its publication boundary: generation=%q err=%v",
+			observed.generation, observed.err,
+		)
+	}
+}
+
 func TestBoundedRepoGoneOriginProbe_SharesHealthyActiveFlight(t *testing.T) {
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe
@@ -237,6 +307,27 @@ func TestCheckRepoPresentForRelocation_FiltersAmbientGitDir(t *testing.T) {
 	err := CheckRepoPresentForRelocation(repoPath)
 	if !errors.Is(err, ErrRepoGone) {
 		t.Fatalf("filtered GIT_DIR obscured a conclusive non-Git origin: %v", err)
+	}
+}
+
+func TestProbeRepoGoneOrigin_IgnoresHookRepositoryOverrides(t *testing.T) {
+	repoPath := filepath.Join(t.TempDir(), "origin")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("create origin repository: %v", err)
+	}
+	gw, err := NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(t.TempDir(), "archive"), "repo-gone", "af/repo-gone", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("restore worktree: %v", err)
+	}
+	if err := gw.SetHookEnvironment([]string{"GIT_WORK_TREE"}); err != nil {
+		t.Fatalf("configure hook environment: %v", err)
+	}
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+
+	if err := probeRepoGoneOrigin(context.Background(), gw); err != nil {
+		t.Fatalf("hook repository override changed origin classification: %v", err)
 	}
 }
 

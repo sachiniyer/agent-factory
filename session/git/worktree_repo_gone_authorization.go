@@ -30,7 +30,10 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 	if worktree.repoPath == "" {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
 	}
-	topLevel, err := worktree.runGitCommandContext(ctx, worktree.repoPath, "rev-parse", "--show-toplevel")
+	commandEnv := repoGoneGitCommandEnvironment()
+	topLevel, err := worktree.runGitCommandContextWithEnvironment(
+		ctx, worktree.repoPath, commandEnv, "rev-parse", "--show-toplevel",
+	)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -38,7 +41,7 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 		if definitiveMissingRepository(err) {
 			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
 		}
-		if definitiveNonGitRepository(err, worktree.gitCommandEnvironment()) {
+		if definitiveNonGitRepository(err, commandEnv) {
 			repoInfo, repoErr := os.Stat(worktree.repoPath)
 			switch {
 			case errors.Is(repoErr, os.ErrNotExist):
@@ -115,6 +118,7 @@ func environmentContainsName(environment []string, wanted string) bool {
 }
 
 var repoGoneOriginProbe = probeRepoGoneOrigin
+var repoGoneOriginProbeAfterUnpublish = func() {}
 
 type repoGoneOriginProbeFlight struct {
 	done   chan struct{}
@@ -156,8 +160,9 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		if repoGoneOriginProbeFlights.byPath[worktree.repoPath] == flight {
 			delete(repoGoneOriginProbeFlights.byPath, worktree.repoPath)
 		}
-		repoGoneOriginProbeFlights.Unlock()
 		close(flight.done)
+		repoGoneOriginProbeFlights.Unlock()
+		repoGoneOriginProbeAfterUnpublish()
 	}()
 	return waitForRepoGoneOriginProbe(worktree.repoPath, flight)
 }
@@ -173,12 +178,15 @@ func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlig
 		if repoGoneOriginProbeFlights.byPath[repoPath] == flight {
 			flight.timedOut = true
 			flight.cancel()
+			repoGoneOriginProbeFlights.Unlock()
+			return fmt.Errorf(
+				"timed out after %s while checking origin repository %s: %w",
+				relocationIdentityTimeout, repoPath, context.DeadlineExceeded,
+			)
 		}
 		repoGoneOriginProbeFlights.Unlock()
-		return fmt.Errorf(
-			"timed out after %s while checking origin repository %s: %w",
-			relocationIdentityTimeout, repoPath, context.DeadlineExceeded,
-		)
+		<-flight.done
+		return flight.err
 	}
 }
 
@@ -255,6 +263,8 @@ var cleanupGenerationInstallFlights = struct {
 	byPath map[string]*cleanupGenerationInstallFlight
 }{byPath: make(map[string]*cleanupGenerationInstallFlight)}
 
+var cleanupGenerationInstallAfterUnpublish = func() {}
+
 func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string, error) {
 	cleanupGenerationInstallFlights.Lock()
 	if cleanupGenerationInstallFlights.byPath[path] != nil {
@@ -273,8 +283,9 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		if cleanupGenerationInstallFlights.byPath[path] == flight {
 			delete(cleanupGenerationInstallFlights.byPath, path)
 		}
-		cleanupGenerationInstallFlights.Unlock()
 		close(flight.done)
+		cleanupGenerationInstallFlights.Unlock()
+		cleanupGenerationInstallAfterUnpublish()
 	}()
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
@@ -282,6 +293,13 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 	case <-flight.done:
 		return flight.generation, flight.err
 	case <-timer.C:
+		cleanupGenerationInstallFlights.Lock()
+		if cleanupGenerationInstallFlights.byPath[path] != flight {
+			cleanupGenerationInstallFlights.Unlock()
+			<-flight.done
+			return flight.generation, flight.err
+		}
+		cleanupGenerationInstallFlights.Unlock()
 		return "", fmt.Errorf(
 			"timed out after %s while installing cleanup generation at %s: %w",
 			relocationIdentityTimeout, path, context.DeadlineExceeded,
