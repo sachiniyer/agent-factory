@@ -361,9 +361,9 @@ func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) 
 		}
 	})
 
-	previousDeleteTimeout := session.InstanceDeleteLockTimeout
-	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
-	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
+	previousPersistTimeout := config.RepoInstancesLockTimeout
+	config.RepoInstancesLockTimeout = 25 * time.Millisecond
+	t.Cleanup(func() { config.RepoInstancesLockTimeout = previousPersistTimeout })
 
 	manager.finishUserKill(repoID, inst)
 	require.NotNil(t, releaseLock, "the retry must reach the fallible tail after descriptor cleanup")
