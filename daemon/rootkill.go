@@ -262,7 +262,7 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	// is unknown, so this loop keeps the record and retries instead of orphaning the
 	// workspace. This loop IS the retry.
 	deleted, err := m.deleteSessionRecord(repoID, instance.Title, instance.ID, teardownErr,
-		instance.AccountLimitObservations())
+		instance.ToInstanceData())
 	if err != nil {
 		m.noteKillRetryFailure(key, instance.Title, err)
 		return

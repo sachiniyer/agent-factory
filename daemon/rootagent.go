@@ -719,7 +719,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// is unknown. This site was still log-and-delete after two audits I called
 	// exhaustive — which is the argument for there being exactly one place to call.
 	deleted, err := m.deleteSessionRecord(repoID, session.RootSessionTitle, inst.ID, teardownErr,
-		inst.AccountLimitObservations())
+		inst.ToInstanceData())
 	if err != nil {
 		// Return the ERROR, not (false, nil) (#1917 round 8). "No, but fine" is
 		// absence-of-error wearing a different hat: the caller reads it as "nothing to

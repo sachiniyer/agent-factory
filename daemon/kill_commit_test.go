@@ -589,7 +589,7 @@ func TestDeleteSessionRecord_EndpointDeadButWorkspaceGone_ClearsTheTombstone(t *
 	}
 
 	endpointDead := fmt.Errorf("kill agent: dial tcp: connection refused")
-	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead, nil)
+	deleted, err := manager.deleteSessionRecord(repoID, "remote-ish", "", endpointDead, session.InstanceData{})
 
 	if err != nil {
 		t.Fatalf("a teardown error that is NOT about workspace state must not block the delete: the "+
@@ -621,7 +621,7 @@ func TestDeleteSessionRecord_UnknownState_StillBlocks(t *testing.T) {
 	manager, repoID, _ := installRaceBackend(t, &raceBackend{}, "unknown-state")
 
 	unknown := fmt.Errorf("kill %q: tab %q: %w", "unknown-state", "agent", session.ErrPaneMayBeLive)
-	deleted, err := manager.deleteSessionRecord(repoID, "unknown-state", "", unknown, nil)
+	deleted, err := manager.deleteSessionRecord(repoID, "unknown-state", "", unknown, session.InstanceData{})
 
 	if err == nil {
 		t.Fatal("an unknown-STATE teardown must still block the record delete: the workspace may " +
