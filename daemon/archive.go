@@ -764,7 +764,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 			}
 			return "", fmt.Errorf("restore of %q was cut off mid-relocate; both possible worktree locations are recorded (%s), destructive cleanup is blocked, and a retry will resolve the directory identity: %w", req.Title, worktreeRecoveryLocation(instance), err)
 		}
-		return "", fmt.Errorf("failed to restore worktree for %q: %w", req.Title, err)
+		return "", m.persistUnresolvedRestoreFailure(repoID, req.Title, instance, err)
 	}
 
 	// The relocate SUCCEEDED, so the worktree's new location is now certain — and

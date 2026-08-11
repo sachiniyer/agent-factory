@@ -693,8 +693,13 @@ func (g *GitWorktree) completeRemovedRelocationClaim(claim RelocationClaim) erro
 		g.relocationRecovery.State == RelocationRecoveryCleanupFinalizing &&
 		g.relocationRecovery.IdentityKnown && g.relocationRecovery.identity().same(claim.identity) &&
 		g.relocationRecovery.CleanupGeneration == claim.cleanupGeneration {
-		g.relocationRecovery = nil
-		g.releaseRelocationClaimLocked(&claim)
+		if g.ownsRelocationClaimLocked(claim) {
+			g.relocationRecovery = nil
+			g.releaseRelocationClaimLocked(&claim)
+		}
+		// If the caller deadline already released ownership, keep the durable
+		// finalization fence. A later live retry can consume the now-absent root
+		// safely; clearing here would route it through ordinary pathname cleanup.
 		return nil
 	}
 	if g.worktreePath == claim.Path && g.ownsRelocationClaimLocked(claim) && g.relocationRecovery == nil {

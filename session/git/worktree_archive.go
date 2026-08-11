@@ -277,7 +277,7 @@ func (g *GitWorktree) RestoreWorktreeToWithClaim(dest string, claim RelocationCl
 				))
 			}
 		} else {
-			g.PreserveRelocationClaim(claim)
+			g.PreserveRelocationClaimAsUnresolved(claim)
 		}
 		return err
 	}

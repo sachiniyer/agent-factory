@@ -604,6 +604,7 @@ var (
 func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
 	go func() {
 		if err := <-lateResult; err != nil {
+			m.clearGhostCleanupStall(key, stableID)
 			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
 			return
 		}

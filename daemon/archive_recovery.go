@@ -62,6 +62,20 @@ func (m *Manager) persistRestorePathFailure(
 	return pathErr
 }
 
+func (m *Manager) persistUnresolvedRestoreFailure(
+	repoID, title string,
+	instance *session.Instance,
+	restoreErr error,
+) error {
+	wrapped := fmt.Errorf("failed to restore worktree for %q: %w", title, restoreErr)
+	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		return errors.Join(wrapped, fmt.Errorf(
+			"could not persist its unresolved archived worktree identity: %w", persistErr,
+		))
+	}
+	return wrapped
+}
+
 // claimRestoreRelocation resolves the archived worktree and durably records any
 // failed bounded probe before the restore handler returns.
 func (m *Manager) claimRestoreRelocation(
@@ -93,6 +107,24 @@ func (m *Manager) prepareRepoGoneCleanup(
 	instance *session.Instance,
 	claim sessiongit.RelocationClaim,
 ) error {
+	// Stage a non-destructive fence before installing cleanup authority. If the
+	// later cleanup_ready write fails, restart sees claim_stale rather than the
+	// record-free archive that this transaction began with.
+	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
+	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		return fmt.Errorf(
+			"cannot restore session %q because its origin repo %s is gone, and could not persist an unresolved archived worktree identity: %w",
+			title, repoPath, persistErr,
+		)
+	}
+	stagedClaim, err := instance.ClaimWorktreeRelocationForRetry()
+	if err != nil {
+		return fmt.Errorf(
+			"cannot restore session %q because its origin repo is gone and the staged archived worktree identity could not be reclaimed: %w",
+			title, err,
+		)
+	}
+	claim = stagedClaim
 	if err := instance.PrepareWorktreeRelocationClaimForCleanup(claim); err != nil {
 		prepareErr := fmt.Errorf(
 			"cannot restore session %q because its origin repo is gone and the archived worktree identity could not be established: %w",
