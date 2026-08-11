@@ -334,7 +334,7 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
 	require.NotNil(t, releaseLock, "the tail failure must happen after descriptor cleanup succeeded")
-	record := recordFor(t, repoID, "ghost-crash-window")
+	record = recordFor(t, repoID, "ghost-crash-window")
 	require.NotNil(t, record)
 	require.NotNil(t, record.Worktree.RelocationRecovery)
 	require.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
