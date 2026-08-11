@@ -22,18 +22,63 @@ const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 // exist, so only the first is checked against the head (#2878).
 const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
+const READ_RETRY_DELAYS_MS = [250, 1000];
+
+// Use this only for side-effect-free GitHub reads. Merge, check-write,
+// workflow-dispatch, and GraphQL mutation calls are deliberately not replayed.
+async function retryRead(label, operation) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRetryableReadError(error)) {
+        throw error;
+      }
+      if (attempt >= READ_RETRY_DELAYS_MS.length) {
+        const failure = new Error(
+          `${label} after ${attempt + 1} attempts: ${error.message || String(error)}`,
+        );
+        failure.name = "AutoGateReadError";
+        failure.autoGateReadFailure = true;
+        failure.status = error.status;
+        failure.cause = error;
+        throw failure;
+      }
+      await delay(READ_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+function isRetryableReadError(error) {
+  const status = Number(error?.status);
+  if (Number.isFinite(status)) {
+    return status === 408 || status === 429 || status >= 500;
+  }
+  const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
+  return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+function isReadFailure(error) {
+  return error?.autoGateReadFailure === true;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 async function evaluate({ github, context, core, prNumber, setOutputs = true }) {
   try {
     return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
   } catch (error) {
     const message = formatError(error);
-    core.warning(error && error.stack ? error.stack : message);
+    const warning = isReadFailure(error) ? message : error?.stack || message;
+    core.warning(warning);
     return finish(core, setOutputs, {
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
       isOpen: false,
       docsChanged: false,
+      readFailure: isReadFailure(error),
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
     });
@@ -168,12 +213,16 @@ async function reportDecision({ github, context, core, result, manual = false })
 
   const identity = decisionIdentity(result.prNumber, result.headSha);
   const { owner, repo } = context.repo;
-  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-    owner,
-    repo,
-    ref: result.headSha,
-    per_page: 100,
-  });
+  const checkRuns = await retryRead(
+    `could not read check runs for PR #${result.prNumber} at ${result.headSha}`,
+    () =>
+      github.paginate(github.rest.checks.listForRef, {
+        owner,
+        repo,
+        ref: result.headSha,
+        per_page: 100,
+      }),
+  );
   const priorDecision = checkRuns
     .filter(
       (run) =>
@@ -299,6 +348,53 @@ async function invalidateAggregateDecision({ github, context, core, headSha }) {
   };
 }
 
+async function blockAggregateEvaluation({
+  github,
+  context,
+  core,
+  headSha,
+  checkRunId,
+  reason,
+}) {
+  const sha = normalizeHeadSha(headSha);
+  if (!sha) {
+    throw new Error(`Invalid head SHA for blocked Auto Gate aggregate: ${headSha}`);
+  }
+  const detail = String(reason || "required GitHub read failed").replace(/^BLOCKED:\s*/i, "");
+  const summary =
+    `${detail}. Auto Gate did not infer an empty PR set or any PR state from the failed read; ` +
+    "this commit remains blocked until a complete evaluation succeeds.";
+  const decision = {
+    status: "completed",
+    conclusion: "failure",
+    output: {
+      title: "BLOCKED: Auto Gate could not complete a required GitHub read",
+      summary,
+    },
+  };
+  const write = await upsertAggregateCheck({
+    github,
+    context,
+    core,
+    headSha: sha,
+    checkRuns: [],
+    decision,
+    checkRunId,
+  });
+  core.notice(`BLOCKED: ${detail}`);
+  return {
+    ok: false,
+    headSha: sha,
+    pullNumbers: [],
+    blockers: [detail],
+    checkRuns: [],
+    summary,
+    ...write,
+    checkRunId,
+    state: "evaluation-error",
+  };
+}
+
 async function beginAggregateDecision({ github, context, core, headSha }) {
   const invalidated = await invalidateAggregateDecision({
     github,
@@ -310,7 +406,22 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
     return invalidated;
   }
   const sha = invalidated.headSha;
-  const aggregate = await evaluateAggregateDecision({ github, context, headSha: sha });
+  let aggregate;
+  try {
+    aggregate = await evaluateAggregateDecision({ github, context, headSha: sha });
+  } catch (error) {
+    if (!isReadFailure(error)) {
+      throw error;
+    }
+    return blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha: sha,
+      checkRunId: invalidated.checkRunId,
+      reason: formatError(error),
+    });
+  }
   return {
     ...aggregate,
     writeState: invalidated.writeState,
@@ -321,7 +432,22 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
 }
 
 async function reportAggregateDecision({ github, context, core, headSha, checkRunId }) {
-  const aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  let aggregate;
+  try {
+    aggregate = await evaluateAggregateDecision({ github, context, headSha });
+  } catch (error) {
+    if (!isReadFailure(error)) {
+      throw error;
+    }
+    return blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha,
+      checkRunId,
+      reason: formatError(error),
+    });
+  }
   if (checkRunId) {
     const identity = aggregateIdentity(aggregate.headSha);
     const latestGeneration = newestCheckGeneration(
@@ -382,16 +508,55 @@ async function processAggregateHead({
   targets = [],
   mergeEnabled = false,
   manual = false,
+  readFailureReason = "",
 }) {
+  // Target resolution happens before the serialized head lane. If that read
+  // exhausted its retries, publish its failure without performing a second
+  // evaluation that could silently turn the same run green or merge the PR.
+  if (readFailureReason) {
+    const invalidated = await invalidateAggregateDecision({
+      github,
+      context,
+      core,
+      headSha,
+    });
+    if (invalidated.writeState === "read-only") {
+      return { state: "read-only", pending: invalidated };
+    }
+    const aggregate = await blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha: invalidated.headSha,
+      checkRunId: invalidated.checkRunId,
+      reason: readFailureReason,
+    });
+    return { state: "evaluation-error", pending: invalidated, aggregate };
+  }
+
   const pending = await beginAggregateDecision({ github, context, core, headSha });
   if (pending.writeState === "read-only") {
     return { state: "read-only", pending };
+  }
+  if (pending.state === "evaluation-error") {
+    return { state: "evaluation-error", pending, aggregate: pending };
   }
 
   let manualMergeRequired = false;
   for (const prNumber of pending.pullNumbers) {
     const result = await evaluate({ github, context, core, prNumber, setOutputs: false });
     if (evaluationFailed(result)) {
+      if (result.readFailure) {
+        const aggregate = await blockAggregateEvaluation({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+          checkRunId: pending.checkRunId,
+          reason: `PR #${prNumber} could not be evaluated: ${result.summary}`,
+        });
+        return { state: "evaluation-error", pending, aggregate };
+      }
       throw new Error(`Auto Gate evaluation failed for PR #${prNumber}: ${result.summary}`);
     }
     if (result.headSha !== pending.headSha) {
@@ -403,11 +568,27 @@ async function processAggregateHead({
       );
       return { state: "association-changed", pending };
     }
-    if (result.manualMergeRequired && result.nativeAutoMergeEnabled) {
-      await disableNativeAutoMerge({ github, core, result });
+    let write;
+    try {
+      if (result.manualMergeRequired && result.nativeAutoMergeEnabled) {
+        await disableNativeAutoMerge({ github, core, result });
+      }
+      manualMergeRequired ||= Boolean(result.manualMergeRequired);
+      write = await reportDecision({ github, context, core, result, manual });
+    } catch (error) {
+      if (!isReadFailure(error)) {
+        throw error;
+      }
+      const aggregate = await blockAggregateEvaluation({
+        github,
+        context,
+        core,
+        headSha: pending.headSha,
+        checkRunId: pending.checkRunId,
+        reason: formatError(error),
+      });
+      return { state: "evaluation-error", pending, aggregate };
     }
-    manualMergeRequired ||= Boolean(result.manualMergeRequired);
-    const write = await reportDecision({ github, context, core, result, manual });
     if (write.state === "read-only") {
       return { state: "read-only", pending };
     }
@@ -474,6 +655,17 @@ async function processAggregateHead({
           `Merge attempt and aggregate invalidation both failed on ${pending.headSha}`,
         );
       }
+      if (isReadFailure(error)) {
+        const blocked = await blockAggregateEvaluation({
+          github,
+          context,
+          core,
+          headSha: pending.headSha,
+          checkRunId: invalidated.checkRunId,
+          reason: formatError(error),
+        });
+        return { state: "evaluation-error", pending, aggregate: blocked, invalidated };
+      }
       if (!message.startsWith(`Refusing to merge PR #${prNumber};`)) {
         throw error;
       }
@@ -494,12 +686,14 @@ async function evaluateAggregateDecision({ github, context, headSha }) {
   }
   const pulls = await listOpenMasterPullRequestsForHead({ github, context, headSha: sha });
   const { owner, repo } = context.repo;
-  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-    owner,
-    repo,
-    ref: sha,
-    per_page: 100,
-  });
+  const checkRuns = await retryRead(`could not read check runs at commit ${sha}`, () =>
+    github.paginate(github.rest.checks.listForRef, {
+      owner,
+      repo,
+      ref: sha,
+      per_page: 100,
+    }),
+  );
   const blockers = [];
   if (pulls.length === 0) {
     // Never pre-authorize a commit before a PR exists. A vacuously successful
@@ -558,7 +752,10 @@ async function evaluateAggregateFresh({ github, context, core, headSha }) {
       setOutputs: false,
     });
     if (evaluationFailed(result)) {
-      throw new Error(`Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`);
+      throw evaluationFailure(
+        `Auto Gate fresh aggregate evaluation failed for PR #${pull.number}: ${result.summary}`,
+        result,
+      );
     }
     if (result.headSha !== sha) {
       blockers.push(`PR #${pull.number} no longer evaluates at this commit`);
@@ -695,6 +892,14 @@ function evaluationFailed(result) {
   return result.reasons?.some((reason) => reason.startsWith("auto-gate evaluation error:"));
 }
 
+function evaluationFailure(message, result) {
+  const error = new Error(message);
+  if (result?.readFailure) {
+    error.autoGateReadFailure = true;
+  }
+  return error;
+}
+
 function formatAggregateSummary(pullNumbers, blockers, pending) {
   const shared = pullNumbers.length > 1;
   const coupling =
@@ -762,7 +967,10 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
 
   const gate = await evaluate({ github, context, core, prNumber, setOutputs: false });
   if (evaluationFailed(gate)) {
-    throw new Error(`Auto Gate merge evaluation failed for PR #${prNumber}: ${gate.summary}`);
+    throw evaluationFailure(
+      `Auto Gate merge evaluation failed for PR #${prNumber}: ${gate.summary}`,
+      gate,
+    );
   }
   if (!gate.shouldMerge) {
     throw new Error(`Refusing to merge PR #${prNumber}; gate no longer passes: ${gate.summary}`);
@@ -882,14 +1090,19 @@ async function resolveTargets({ github, context, core, prNumber }) {
 
 async function listOpenMasterPullRequestsForHead({ github, context, headSha }) {
   const { owner, repo } = context.repo;
-  const pulls = await github.paginate(
-    github.rest.repos.listPullRequestsAssociatedWithCommit,
-    {
-      owner,
-      repo,
-      commit_sha: headSha,
-      per_page: 100,
-    },
+  // This association list is a merge-path ownership read. A failed read is not
+  // an empty result: retry transient failures, then propagate an explicit
+  // failure so the aggregate stays red without claiming the commit has no PRs.
+  const pulls = await retryRead(`could not enumerate PRs at commit ${headSha}`, () =>
+    github.paginate(
+      github.rest.repos.listPullRequestsAssociatedWithCommit,
+      {
+        owner,
+        repo,
+        commit_sha: headSha,
+        per_page: 100,
+      },
+    ),
   );
   return pulls
     .filter(
@@ -954,7 +1167,9 @@ async function getPullRequest({ github, context, number }) {
     }
   `;
 
-  const response = await github.graphql(query, { owner, repo, number });
+  const response = await retryRead(`could not read PR #${number}`, () =>
+    github.graphql(query, { owner, repo, number }),
+  );
   const pr = response.repository.pullRequest;
   if (!pr) {
     throw new Error(`PR #${number} was not found`);
@@ -1002,12 +1217,14 @@ async function disableNativeAutoMerge({ github, core, result }) {
 
 async function listPullRequestFiles({ github, context, number }) {
   const { owner, repo } = context.repo;
-  const files = await github.paginate(github.rest.pulls.listFiles, {
-    owner,
-    repo,
-    pull_number: number,
-    per_page: 100,
-  });
+  const files = await retryRead(`could not list files for PR #${number}`, () =>
+    github.paginate(github.rest.pulls.listFiles, {
+      owner,
+      repo,
+      pull_number: number,
+      per_page: 100,
+    }),
+  );
   return files.map((file) => file.filename);
 }
 
@@ -1037,18 +1254,22 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   }
 
   const { owner, repo } = context.repo;
-  const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-    owner,
-    repo,
-    ref: sha,
-    per_page: 100,
-  });
-  const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
-    owner,
-    repo,
-    ref: sha,
-    per_page: 100,
-  });
+  const checkRuns = await retryRead(`could not read check runs at commit ${sha}`, () =>
+    github.paginate(github.rest.checks.listForRef, {
+      owner,
+      repo,
+      ref: sha,
+      per_page: 100,
+    }),
+  );
+  const statuses = await retryRead(`could not read commit statuses at ${sha}`, () =>
+    github.paginate(github.rest.repos.listCommitStatusesForRef, {
+      owner,
+      repo,
+      ref: sha,
+      per_page: 100,
+    }),
+  );
 
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
@@ -1080,11 +1301,13 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
   const errors = [];
 
   try {
-    const response = await github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
-      owner,
-      repo,
-      branch,
-    });
+    const response = await retryRead(`could not read branch rules for ${branch}`, () =>
+      github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
+        owner,
+        repo,
+        branch,
+      }),
+    );
 
     for (const rule of response.data || []) {
       if (rule.type !== "required_status_checks") {
@@ -1109,9 +1332,13 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
   }
 
   try {
-    const response = await github.request(
-      "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks",
-      { owner, repo, branch },
+    const response = await retryRead(
+      `could not read branch protection checks for ${branch}`,
+      () =>
+        github.request(
+          "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks",
+          { owner, repo, branch },
+        ),
     );
 
     for (const contextName of response.data.contexts || []) {
@@ -1223,18 +1450,22 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
   }
 
-  const comments = await github.paginate(github.rest.issues.listComments, {
-    owner,
-    repo,
-    issue_number: number,
-    per_page: 100,
-  });
-  const reviews = await github.paginate(github.rest.pulls.listReviews, {
-    owner,
-    repo,
-    pull_number: number,
-    per_page: 100,
-  });
+  const comments = await retryRead(`could not read issue comments for PR #${number}`, () =>
+    github.paginate(github.rest.issues.listComments, {
+      owner,
+      repo,
+      issue_number: number,
+      per_page: 100,
+    }),
+  );
+  const reviews = await retryRead(`could not read reviews for PR #${number}`, () =>
+    github.paginate(github.rest.pulls.listReviews, {
+      owner,
+      repo,
+      pull_number: number,
+      per_page: 100,
+    }),
+  );
   const codexComments = comments.filter((comment) => comment.user?.login === CODEX_REVIEWER);
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
@@ -1263,12 +1494,14 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
   }
 
-  const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
-    owner,
-    repo,
-    pull_number: number,
-    per_page: 100,
-  });
+  const reviewComments = await retryRead(`could not read review comments for PR #${number}`, () =>
+    github.paginate(github.rest.pulls.listReviewComments, {
+      owner,
+      repo,
+      pull_number: number,
+      per_page: 100,
+    }),
+  );
   const resolvedByAllowedReply = new Set(
     reviewComments
       .filter((comment) => {
@@ -1429,6 +1662,7 @@ module.exports = {
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,
+  isReadFailure,
   merge,
   processAggregateHead,
   reportAggregateDecision,

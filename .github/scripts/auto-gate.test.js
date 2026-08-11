@@ -54,8 +54,10 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\(knownEventHeads\.map[\s\S]*?throw error;/,
+    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?const readFailure = autoGate\?\.isReadFailure\?\.\(error\) === true;[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\([\s\S]*?knownEventHeads\.map[\s\S]*?read_failure: readFailure \? summary : ""[\s\S]*?if \(readFailure\)[\s\S]*?core\.setFailed\(summary\);[\s\S]*?return;[\s\S]*?throw error;/,
   );
+  assert.match(workflow, /READ_FAILURE: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
+  assert.match(workflow, /readFailureReason: process\.env\.READ_FAILURE/);
   assert.match(
     workflow,
     /if: >-\s+always\(\) &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '' &&\s+needs\.auto-gate\.outputs\.aggregate_heads != '\[\]'/,
@@ -565,9 +567,28 @@ test("a stale aggregate PASS is made non-green before decisions refresh", async 
   assert.match(github.createdChecks[0].output.summary, /refreshing every open master PR/);
 });
 
-test("a resolver read failure cannot leave an earlier aggregate PASS authoritative", async () => {
+test("a transient association read is retried without becoming an empty PR set", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({ associationError: error });
+
+  const aggregate = await autoGate.evaluateAggregateDecision({
+    github,
+    context: fakeContext(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(github.associationReads, 2);
+  assert.deepEqual(aggregate.pullNumbers, [1465]);
+  assert.doesNotMatch(aggregate.blockers.join("\n"), /No open pull request/);
+});
+
+test("a persistent association read failure ends with an explicit blocked aggregate", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
   const github = fakeGateGithub({
-    associationError: new Error("association lookup unavailable"),
+    associationError: error,
+    associationErrorEveryRead: true,
     checkRuns: [
       ...happyCheckRuns(),
       checkRun({
@@ -578,22 +599,87 @@ test("a resolver read failure cannot leave an earlier aggregate PASS authoritati
       }),
     ],
   });
+  const notices = [];
+  const core = { ...fakeCore(), notice: (message) => notices.push(message) };
 
-  await assert.rejects(
-    autoGate.beginAggregateDecision({
-      github,
-      context: fakeContext(),
-      core: fakeCore(),
-      headSha: HEAD_SHA,
-    }),
-    /association lookup unavailable/,
-  );
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core,
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
 
-  assert.equal(github.associationReads, 1);
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.associationReads, 3);
   assert.equal(github.createdChecks.length, 1);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
-  assert.equal(github.updatedChecks.length, 0);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(
+    github.updatedChecks[0].output.summary,
+    /could not enumerate PRs at commit .* after 3 attempts: fetch failed/,
+  );
+  assert.match(notices.join("\n"), /BLOCKED:.*could not enumerate PRs/i);
+  assert.equal(github.mergedWith, null);
+  assert.equal(
+    github.createdChecks.some((check) => check.name === decisionName(1465, HEAD_SHA)),
+    false,
+  );
+});
+
+test("a persistent PR query failure keeps the aggregate blocked without rethrowing", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({ graphqlErrorsByNumber: { 1465: error } });
+  const warnings = [];
+  const core = { ...fakeCore(), warning: (message) => warnings.push(message) };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core,
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.graphqlReadsByNumber[1465], 3);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(
+    github.updatedChecks[0].output.summary,
+    /could not read PR #1465 after 3 attempts: fetch failed/,
+  );
+  assert.match(warnings.join("\n"), /could not read PR #1465/);
+  assert.doesNotMatch(warnings.join("\n"), /\n\s+at /);
+  assert.equal(github.mergedWith, null);
+});
+
+test("a resolver read failure is terminal instead of being reevaluated downstream", async () => {
+  const github = fakeGateGithub();
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+    readFailureReason: "could not read PR #1465 after 3 attempts: fetch failed",
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.associationReads, 0);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].conclusion, "failure");
+  assert.match(github.updatedChecks[0].output.summary, /could not read PR #1465/);
+  assert.equal(github.mergedWith, null);
 });
 
 test("an older transaction cannot overwrite a newer invalidation generation", async () => {
@@ -1362,6 +1448,7 @@ function fakeGateGithub({
   nativeAutoMergeDisableError = null,
   associationError = null,
   associationErrorAtRead = 1,
+  associationErrorEveryRead = false,
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -1412,6 +1499,7 @@ function fakeGateGithub({
     reviewCommentReads: 0,
     reviewCommentReadsByNumber: {},
     createdChecks: [],
+    graphqlReadsByNumber: {},
     updatedChecks: [],
     rest: {
       actions: {
@@ -1433,6 +1521,8 @@ function fakeGateGithub({
         github.disabledAutoMergePullRequestIds.push(variables.pullRequestId);
         return { disablePullRequestAutoMerge: { pullRequest: { number: 1465 } } };
       }
+      github.graphqlReadsByNumber[variables.number] =
+        (github.graphqlReadsByNumber[variables.number] || 0) + 1;
       if (graphqlErrorsByNumber[variables.number]) {
         throw graphqlErrorsByNumber[variables.number];
       }
@@ -1486,7 +1576,10 @@ function fakeGateGithub({
       }
       if (fn === listPullRequestsAssociatedWithCommit) {
         github.associationReads += 1;
-        if (associationError && github.associationReads === associationErrorAtRead) {
+        if (
+          associationError &&
+          (associationErrorEveryRead || github.associationReads === associationErrorAtRead)
+        ) {
           throw associationError;
         }
         if (associatedPullRequestSnapshots) {

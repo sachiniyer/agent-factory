@@ -95,8 +95,9 @@ jobs:
               .map((value) => String(value || "").toLowerCase())
               .filter((value) => /^[0-9a-f]{40}$/.test(value)))].sort();
 
+            let autoGate;
             try {
-              const autoGate = require(helperPath);
+              autoGate = require(helperPath);
               const rawPrNumber = process.env.PR_NUMBER.trim();
               const explicitPrNumber = rawPrNumber ? Number(rawPrNumber) : undefined;
               if (
@@ -128,6 +129,7 @@ jobs:
                 if (evaluationFailed) {
                   const failure = new Error(result.summary);
                   failure.failWorkflow = true;
+                  failure.autoGateReadFailure = result.readFailure === true;
                   throw failure;
                 }
                 targets = result.headSha
@@ -164,13 +166,26 @@ jobs:
             } catch (error) {
               const message = error && error.message ? error.message : String(error);
               const summary = `BLOCKED: auto-gate evaluation error: ${message}`;
-              core.warning(error && error.stack ? error.stack : message);
+              const readFailure = autoGate?.isReadFailure?.(error) === true;
+              core.warning(readFailure ? message : error && error.stack ? error.stack : message);
               core.notice(summary);
               core.setOutput("targets", "[]");
               core.setOutput(
                 "aggregate_heads",
-                JSON.stringify(knownEventHeads.map((headSha) => ({ head_sha: headSha }))),
+                JSON.stringify(
+                  knownEventHeads.map((headSha) => ({
+                    head_sha: headSha,
+                    read_failure: readFailure ? summary : "",
+                  })),
+                ),
               );
+              // A retry-exhausted read is already represented by a BLOCKED
+              // verdict. Let invalidation/apply publish that red decision;
+              // rethrowing here discards the actionable terminal outcome.
+              if (readFailure) {
+                core.setFailed(summary);
+                return;
+              }
               throw error;
             }
 
@@ -248,6 +263,7 @@ jobs:
           HEAD_SHA: ${{ matrix.aggregate.head_sha }}
           TARGETS_JSON: ${{ needs.auto-gate.outputs.targets }}
           MERGE_ENABLED: ${{ vars.AUTO_GATE_ENABLED }}
+          READ_FAILURE: ${{ matrix.aggregate.read_failure || '' }}
         with:
           # The built-in Actions identity owns both decision layers and has no
           # ruleset bypass. The fixed aggregate is the enforcement boundary.
@@ -269,6 +285,7 @@ jobs:
                 })),
                 mergeEnabled: process.env.MERGE_ENABLED === "true",
                 manual: context.eventName === "workflow_dispatch",
+                readFailureReason: process.env.READ_FAILURE,
               });
               return;
             }
