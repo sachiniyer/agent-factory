@@ -544,7 +544,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// block below has to restore THIS episode's window, not a zeroed one — the
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
-		if rerr := instance.Respawn(); rerr != nil {
+		if rerr := instance.RespawnWithLiveBoundary(func() {
+			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+			}
+		}); rerr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh

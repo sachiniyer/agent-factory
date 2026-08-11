@@ -1,6 +1,7 @@
 package session
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -9,6 +10,7 @@ type observationFenceBackend struct {
 	*FakeBackend
 	snapshotStarted chan struct{}
 	releaseSnapshot chan struct{}
+	startedOnce     sync.Once
 }
 
 type deliveryWinsObservationBackend struct {
@@ -94,7 +96,7 @@ func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
 }
 
 func (b *observationFenceBackend) HasUpdated(*Instance) (bool, bool, string) {
-	close(b.snapshotStarted)
+	b.startedOnce.Do(func() { close(b.snapshotStarted) })
 	<-b.releaseSnapshot
 	return true, false, "pre-delivery capture"
 }

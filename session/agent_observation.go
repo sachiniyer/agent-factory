@@ -35,8 +35,10 @@ func (i *Instance) agentObservationTarget() agentObservationTarget {
 // owns that runtime's observation lock, so a delivery that won the lock cannot
 // advance the epoch and then have its post-delivery snapshot rejected with the
 // older one. A target retired while this call waited is retried against its
-// successor; a replacement during Snapshot still advances the current instance
-// away from the returned epoch and makes the caller's apply fail closed.
+// successor. A replacement during Snapshot is revalidated after transport I/O
+// and retried too: callers perform transport-liveness side effects before some
+// epoch-scoped applies, so returning a retired observation is not safe merely
+// because its later state mutation would be rejected.
 func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64, error) {
 	for {
 		target := i.agentObservationTarget()
@@ -54,7 +56,13 @@ func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64
 			return Observation{}, target.server, op, epoch, nil
 		}
 		obs, err := target.server.Snapshot()
+		i.mu.RLock()
+		current = i.agentObservation == target.runtime
+		i.mu.RUnlock()
 		target.runtime.mu.Unlock()
+		if !current {
+			continue
+		}
 		return obs, target.server, op, epoch, err
 	}
 }

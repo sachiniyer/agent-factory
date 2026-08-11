@@ -433,7 +433,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
 	if err := inst.RecoverWithLiveBoundary(func() {
-		if perr := m.prepareRecoverReplacement(repoID, key, inst); perr != nil {
+		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
 		}
 	}); err != nil {

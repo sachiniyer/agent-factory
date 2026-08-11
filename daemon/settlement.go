@@ -60,20 +60,20 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	return nil
 }
 
-// prepareRecoverReplacement durably retires facts owned by the predecessor
-// before a Recover backend can expose its replacement. Production Recover
+// prepareRuntimeReplacement durably retires facts owned by the predecessor at
+// the replacement's ConfirmLive boundary. Production Recover and Respawn
 // implementations confirm the fresh runtime live before returning, so clearing
-// and persisting only after Recover leaves a crash window: restart sees the new
-// process, classifies it as a reattach, and reloads the predecessor evidence.
+// and persisting only after they return leaves a crash window: restart sees the
+// new process, classifies it as a reattach, and reloads predecessor evidence.
 //
-// The ordinary post-Recover noteRuntimeReplaced call remains necessary. A slow
-// remote recovery can accumulate fresh transport observations after this
-// write-ahead reset and before it returns; the post-success reset retires those
-// in-memory observations, while this settlement makes the crash boundary safe.
-func (m *Manager) prepareRecoverReplacement(repoID, key string, instance *session.Instance) error {
+// The ordinary post-operation noteRuntimeReplaced call remains necessary. A
+// slow remote replacement can accumulate fresh transport observations after
+// this boundary reset and before it returns; the post-success reset retires
+// those in-memory observations, while this settlement makes the fence safe.
+func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
 	m.noteRuntimeReplaced(repoID, instance)
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
-		return fmt.Errorf("the predecessor runtime could not be retired before recovery: %w", err)
+		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}
 	return nil
 }
