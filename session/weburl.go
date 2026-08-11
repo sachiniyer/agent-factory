@@ -3,7 +3,9 @@ package session
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/idna"
@@ -53,12 +55,33 @@ func NormalizeWebTabURL(raw string) (string, error) {
 	// Rebuild only the authority: mapping across raw would also change path/query
 	// data. IP literals already have their canonical URL syntax and are not IDNs.
 	host := u.Hostname()
-	canonicalHost := host
-	if net.ParseIP(host) == nil && !strings.Contains(host, ":") {
+	var canonicalHost string
+	bracketedHost := strings.HasPrefix(u.Host, "[")
+	if bracketedHost {
+		// WHATWG URLs bracket only IPv6. Go also accepts IPvFuture-like names,
+		// bracketed IPv4, and scoped zone identifiers, none of which browsers accept.
+		if !strings.Contains(host, ":") {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: brackets require an IPv6 address", host)
+		}
+		address, addressErr := netip.ParseAddr(host)
+		if addressErr != nil || !address.Is6() || address.Zone() != "" {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects this IPv6 literal", host)
+		}
+		canonicalHost = address.String()
+		if address.Is4In6() {
+			raw := address.As16()
+			canonicalHost = fmt.Sprintf("::ffff:%x:%x",
+				uint16(raw[12])<<8|uint16(raw[13]), uint16(raw[14])<<8|uint16(raw[15]))
+		}
+	} else if strings.Contains(host, ":") {
+		return "", fmt.Errorf("invalid web tab URL hostname %q: IPv6 addresses must be bracketed", host)
+	} else if net.ParseIP(host) == nil {
 		canonicalHost, err = browserHostIDNA.ToASCII(host)
 		if err != nil {
 			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
 		}
+	} else {
+		canonicalHost = net.ParseIP(host).String()
 	}
 	// The URL Standard treats a domain ending in a number as a legacy IPv4
 	// candidate. A failed parse is not an ordinary DNS name: browsers reject the
@@ -73,12 +96,27 @@ func NormalizeWebTabURL(raw string) (string, error) {
 			byte(address>>24), byte(address>>16), byte(address>>8), byte(address),
 		).String()
 	}
-	if canonicalHost != host {
-		port := u.Port()
-		u.Host = canonicalHost
-		if port != "" {
-			u.Host = net.JoinHostPort(canonicalHost, port)
+	canonicalPort := u.Port()
+	if canonicalPort != "" {
+		portNumber, portErr := strconv.ParseUint(canonicalPort, 10, 16)
+		if portErr != nil {
+			return "", fmt.Errorf("invalid web tab URL port %q: must be between 0 and 65535", canonicalPort)
 		}
+		canonicalPort = strconv.FormatUint(portNumber, 10)
+		if (u.Scheme == "http" && canonicalPort == "80") ||
+			(u.Scheme == "https" && canonicalPort == "443") {
+			canonicalPort = ""
+		}
+	}
+
+	// Rebuild every authority, even when its bytes did not change. This removes an
+	// empty/default port and guarantees IPv6 is the only bracketed host form.
+	u.Host = canonicalHost
+	if strings.Contains(canonicalHost, ":") {
+		u.Host = "[" + canonicalHost + "]"
+	}
+	if canonicalPort != "" {
+		u.Host = net.JoinHostPort(canonicalHost, canonicalPort)
 	}
 	return u.String(), nil
 }
