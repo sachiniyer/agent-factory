@@ -75,7 +75,9 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	}
 
 	// Before the checkout is touched, not after: see stopHooks.
-	g.stopHooks()
+	if err := g.stopHooks(); err != nil {
+		return err
+	}
 
 	branchCreatedByUs := g.branchCreatedByUs
 	if err := g.setupFromExistingBranch(); err != nil {
@@ -112,7 +114,9 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 	}
 
 	// Before the remove/add, not after: see stopHooks.
-	g.stopHooks()
+	if err := g.stopHooks(); err != nil {
+		return err
+	}
 
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
 	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
@@ -131,18 +135,41 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 	return nil
 }
 
-// hookStopTimeout bounds how long a rebuild waits for the previous hook run to
-// actually be gone after cancelling it. Cancellation SIGKILLs the hook's process
-// group, but cmd.Wait can still take up to hookWaitDelay to return when a
+// hookStopTimeout bounds how long cleanup or rebuild waits for the previous hook
+// run to actually be gone after cancelling it. Cancellation SIGKILLs the hook's
+// process group, but cmd.Wait can still take up to hookWaitDelay to return when a
 // backgrounded grandchild holds the capture pipe — so this has to exceed that
-// bound to mean anything. It is a bound, not a promise: a rebuild that waited
-// forever would wedge Lost recovery, which is strictly worse than the residual
-// risk of proceeding.
-const hookStopTimeout = 10 * time.Second
+// bound to mean anything. A timeout fails closed before worktree mutation.
+var hookStopTimeout = 10 * time.Second
 
-// stopHooks retires the previous post-worktree hook run. It MUST be called
-// before the rebuild touches the checkout, and startHooks only after the tree
-// exists again (#2770).
+// cancelAndWaitHooks retires the current post-worktree hook run. A closed
+// hooksDone means the runner has returned from cmd.Wait, so the hook process has
+// been joined rather than merely signalled. Callers must fail closed on a timeout:
+// modifying the checkout while an unjoined hook may still use it recreates the
+// exact remove/write race this boundary exists to prevent.
+func (g *GitWorktree) cancelAndWaitHooks() error {
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
+	if g.hooksDone == nil {
+		return nil
+	}
+
+	timer := time.NewTimer(hookStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-g.hooksDone:
+		return nil
+	case <-timer.C:
+		return fmt.Errorf(
+			"post-worktree hooks for %s did not exit within %s of cancellation; refusing to modify the worktree while the hook process may still be using it",
+			g.worktreePath, hookStopTimeout)
+	}
+}
+
+// stopHooks retires the previous post-worktree hook run and installs a fresh
+// context. It MUST be called before the rebuild touches the checkout, and
+// startHooks only after the tree exists again (#2770).
 //
 // Recovery reuses the live GitWorktree — respawn calls Rebuild* on
 // i.gitWorktree with no Cleanup() in between — so a hook still running from
@@ -164,21 +191,14 @@ const hookStopTimeout = 10 * time.Second
 // at its first context check and leave the tree silently unprovisioned — and
 // Cleanup() cancels the same context, so a rebuild after one would never
 // provision at all.
-func (g *GitWorktree) stopHooks() {
-	if g.hooksCancel != nil {
-		g.hooksCancel()
-	}
-	if g.hooksDone != nil {
-		select {
-		case <-g.hooksDone:
-		case <-time.After(hookStopTimeout):
-			log.WarningLog.Printf("post-worktree hooks for %s did not exit within %s of cancellation; rebuilding anyway",
-				g.worktreePath, hookStopTimeout)
-		}
+func (g *GitWorktree) stopHooks() error {
+	if err := g.cancelAndWaitHooks(); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g.hooksCtx = ctx
 	g.hooksCancel = cancel
+	return nil
 }
 
 // startHooks launches the post-worktree hook run for a freshly rebuilt tree, on
@@ -489,17 +509,20 @@ func (r *cleanupRun) state() CleanupState {
 // on to delete the session's record MUST gate on the state, not on the error.
 // If the worktree was not created by agent-factory (externalWorktree), only prune is done.
 func (g *GitWorktree) Cleanup() (CleanupState, error) {
-	// Cancel any in-flight post-worktree hooks before removing the worktree.
-	if g.hooksCancel != nil {
-		g.hooksCancel()
-	}
-
 	// The run owns the state from the first line, so even the early returns below
 	// derive it instead of asserting one (#1917). Nothing in this function names a
 	// CleanupState constant: that is the rule that makes the next command added here
 	// safe by default. These early paths run no git at all, so the run is trivially
 	// settled — but that is r.state()'s answer to give, not this function's.
 	r := &cleanupRun{g: g}
+	// A cancellation signal is not process-exit proof. Join the hook runner before
+	// even inspecting the checkout, so neither git removal nor TempDir teardown can
+	// race a hook that is still creating files under it (#3173).
+	if err := g.cancelAndWaitHooks(); err != nil {
+		r.unknown = true
+		r.errs = append(r.errs, err)
+		return r.state(), errors.Join(r.errs...)
+	}
 
 	// For external worktrees, don't remove the worktree or delete the branch
 	if g.externalWorktree {
