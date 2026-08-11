@@ -85,6 +85,22 @@ type InstanceData struct {
 	// scrubbed by ForStorage so a resolved or replaced process cannot inherit a
 	// stale warning after daemon restart.
 	ModelChange *AgentModelChange `json:"model_change,omitempty"`
+	// IdleReason is the smallest mechanically established explanation for a
+	// non-working row (#3168). It is derived from the evidence fields below and
+	// never from pane wording. Projection-only: ForStorage scrubs it, while live
+	// snapshots and daemonless list fallback recompute it with IdleReasonFor.
+	IdleReason IdleReason `json:"idle_reason,omitempty"`
+	// LastPromptAttemptAt orders the most recent actual prompt send against later
+	// pane churn. Callers capture it before sending so churn racing the delivery is
+	// still known to be later. Persisted across daemon restarts.
+	LastPromptAttemptAt time.Time `json:"last_prompt_attempt_at,omitzero"`
+	// LastPromptDeliveryStatus is the closed observation returned by the delivery
+	// path. sent-unverified and could-not-confirm remain uncertainty (#3162), never
+	// failed delivery.
+	LastPromptDeliveryStatus PromptDeliveryStatus `json:"last_prompt_delivery_status,omitempty"`
+	// LastPaneChurnAt is when the daemon most recently observed Observation.Updated.
+	// It proves bytes changed, not who produced them or what they meant.
+	LastPaneChurnAt time.Time `json:"last_pane_churn_at,omitzero"`
 	// TaskRunActive records whether this session's task run is still in flight
 	// (#1892) — true from creation, false once the agent goes idle or startup
 	// settles terminal-unknown. It is the one fact the watch-task concurrency cap
@@ -336,6 +352,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.CurrentAgent = ""
 	d.IsRoot = false
 	d.ModelChange = nil
+	d.IdleReason = IdleReasonNone
 	// Derived from the backend on every snapshot, exactly like CanKill above, so
 	// persisting them stores a stale answer that a restart would recompute anyway —
 	// and these carry long, versioned refusal PROSE, which would sit in every

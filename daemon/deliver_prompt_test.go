@@ -163,7 +163,7 @@ func TestSendPromptWithStatusPreservesObservedAbsence(t *testing.T) {
 		readyFakeBackend: readyFakeBackend{FakeBackend: session.NewFakeBackend()},
 		status:           session.PromptNotDelivered,
 	}
-	registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
+	inst := registerStarted(t, manager, repoID, repoPath, "worker", backend, true, session.Ready)
 
 	status, err := manager.SendPromptWithStatus(SendPromptRequest{
 		Title: "worker", RepoID: repoID, Prompt: "ship it",
@@ -171,6 +171,10 @@ func TestSendPromptWithStatusPreservesObservedAbsence(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, session.PromptNotDelivered, status,
 		"the daemon must not collapse the runtime's observed absence into delivery")
+	data := inst.ToInstanceData()
+	require.False(t, data.LastPromptAttemptAt.IsZero())
+	require.Equal(t, session.PromptNotDelivered, data.LastPromptDeliveryStatus)
+	require.Equal(t, session.IdleReasonPromptNotDelivered, data.IdleReason)
 }
 
 // failingPromptBackend returns the low-level send error that should never leak

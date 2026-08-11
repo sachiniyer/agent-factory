@@ -321,6 +321,69 @@ func TestRefreshInstanceStatus_LiveSessionIsObserved(t *testing.T) {
 	}
 }
 
+type retiredAliveProbeBackend struct {
+	*session.FakeBackend
+	aliveStarted chan struct{}
+	releaseAlive chan struct{}
+	once         sync.Once
+}
+
+func (b *retiredAliveProbeBackend) HasUpdated(*session.Instance) (bool, bool, string) {
+	return false, false, ""
+}
+
+func (b *retiredAliveProbeBackend) IsAlive(*session.Instance) (bool, error) {
+	b.once.Do(func() {
+		close(b.aliveStarted)
+		<-b.releaseAlive
+	})
+	return true, nil
+}
+
+func (b *retiredAliveProbeBackend) Type() string { return "local" }
+
+// A successful Snapshot can still belong to the predecessor if replacement
+// rotates its runtime after SnapshotAgent's final check but before the daemon
+// records its liveness side effects. The late Alive answer must not confirm the
+// replacement whose confirmation counter was armed while that probe was blocked.
+func TestRefreshInstanceStatus_RetiredProbeCannotConfirmReplacement(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &retiredAliveProbeBackend{
+		FakeBackend:  session.NewFakeBackend(),
+		aliveStarted: make(chan struct{}),
+		releaseAlive: make(chan struct{}),
+	}
+	inst := registerStarted(t, manager, repoID, repoPath, "retired-probe", backend, true, session.Running)
+
+	pollDone := make(chan struct{})
+	go func() {
+		manager.refreshInstanceStatus(repoID, inst)
+		close(pollDone)
+	}()
+	select {
+	case <-backend.aliveStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("status poll never reached the predecessor liveness probe")
+	}
+
+	inst.ClearIdleEvidence()
+	manager.armRestoreConfirmation(repoID, inst)
+	close(backend.releaseAlive)
+	select {
+	case <-pollDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("retired status poll did not return")
+	}
+
+	manager.mu.Lock()
+	state := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
+	confirmed := state != nil && manager.observedAliveSinceSpawnLocked(repoID, inst, state)
+	manager.mu.Unlock()
+	if confirmed {
+		t.Fatal("predecessor liveness was counted after replacement armed its confirmation boundary")
+	}
+}
+
 // wedgedProbeBackend models #1917 round 8's ROOT: a primitive that cannot say "I
 // don't know". Its liveness probe TIMED OUT — tmux never answered — which
 // sessionExists laundered into `true` and Alive reported as (true, nil).

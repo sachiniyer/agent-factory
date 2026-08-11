@@ -39,6 +39,7 @@ import {
   compareSessionsForRail,
   isArchived,
   isCreating,
+  idleReasonDetail,
   isLimitReached,
   isRootSession,
   type RowKind,
@@ -856,6 +857,7 @@ export class AppShell {
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   private mainRendered = false;
+  private readonly idleAgeTimer: number;
 
   // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
   // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
@@ -1119,6 +1121,12 @@ export class AppShell {
     // The modal host is a persistent overlay layer index.ts mounts modals into; it
     // sits above the app body and is empty except while a modal is open.
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    this.idleAgeTimer = window.setInterval(() => refreshIdleReasonAges(this.railList), 15_000);
+  }
+
+  /** Stop wall-clock-only rail work when logout replaces this shell. */
+  dispose(): void {
+    window.clearInterval(this.idleAgeTimer);
   }
 
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
@@ -2908,12 +2916,18 @@ function sessionRow(
   const managed = actionable || killable;
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
-  const branch = h(
-    "div",
-    { class: "af-row-branch" },
-    icon("git-branch", "af-branch-icon"),
-    s.branch || "—",
-  );
+  const idleDetail = idleReasonDetail(s);
+  const branchParts: Array<Node | string> = [icon("git-branch", "af-branch-icon")];
+  if (idleDetail) {
+    const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} · `);
+    idle.dataset.idleReason = s.idle_reason ?? "";
+    if (s.last_pane_churn_at) {
+      idle.dataset.paneChurnAt = s.last_pane_churn_at;
+    }
+    branchParts.push(idle);
+  }
+  branchParts.push(s.branch || "—");
+  const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
 
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
@@ -2937,10 +2951,14 @@ function sessionRow(
   const modelChange = s.model_change
     ? `; model changed from ${s.model_change.before} to ${s.model_change.after}`
     : "";
+  const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  row.dataset.idleTitleBase = `${s.title} — ${status.label}`;
+  row.dataset.idleTitleModel = modelChange;
+  row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.setAttribute(
     "title",
-    `${s.title} — ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`,
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`,
   );
   if (!actionable && !managed) {
     // The server withheld both capabilities: a creating row has no session yet,
@@ -2950,4 +2968,27 @@ function sessionRow(
     row.addEventListener("click", () => openSession(s.id));
   }
   return row;
+}
+
+/** Patch relative pane ages without waiting for a session event or rebuilding
+ * the rail. The row's branch, controls, selection, and scroll position survive. */
+export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()): void {
+  for (const idle of root.querySelectorAll<HTMLElement>(".af-idle-reason[data-pane-churn-at]")) {
+    const detail = idleReasonDetail(
+      {
+        idle_reason: idle.dataset.idleReason as SessionData["idle_reason"],
+        last_pane_churn_at: idle.dataset.paneChurnAt,
+      } as SessionData,
+      now,
+    );
+    idle.textContent = detail ? `${detail} · ` : "";
+    const row = idle.closest(".af-row") as HTMLElement | null;
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`,
+      );
+    }
+  }
 }

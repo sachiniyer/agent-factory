@@ -323,29 +323,36 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// post-fence epoch. Its observation would then look current and be APPLIED — here
 	// that means settling LiveReady from the empty snapshot of a runtime being torn
 	// down, which ends the task run early and leaves a failed respawn unretryable.
-	op, epoch := instance.InFlightOpAndEpoch()
+	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
 		return
 	}
-	obs, err := instance.AgentServer().Snapshot()
+	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
+	if observedOp != session.OpNone {
+		return
+	}
 	if err != nil {
 		return
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
-	if obs.Updated || obs.HasPrompt {
-		// Still working or waiting on the user: either way the run has not
-		// finished, so there is nothing for the cap to learn this tick.
-		m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
+	churnCheckpoint := false
+	if obs.Updated {
+		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
+	if obs.Baseline || obs.Updated || obs.HasPrompt {
+		// Updated/prompt proves the run remains active; a baseline cannot establish
+		// that it finished. Either way, the cap has no completion to learn this tick.
+		m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 		return
 	}
 	// Idle output. The normal poll would probe liveness here to tell a healthy idle
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
-	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 	// The run may have just ended here, on the one path that cannot act on it: the
 	// attach owns this session's tmux. Park the declared lifecycle so the first
 	// unpaused tick applies it, instead of losing the edge entirely (#2595).
@@ -509,27 +516,18 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (#1592 Phase 2 PR4) — never the tmux-shaped Backend probes directly, so this
 	// poll makes no assumption that the session is local tmux. For the local
 	// runtime the agent-server drives tmux in-process.
-	// Captured BEFORE the observation below, so the idle resolve can tell whether
-	// the conclusion it draws from that capture is still about the state it
-	// observed — or whether a resume/kill/archive has moved the session on since
-	// (#2135). See resolveIdleLiveness and session/state_epoch.go.
-	//
-	// Read together with the op axis, and re-check it here (#2997). The skip above
+	// Read the op axis again here (#2997). The skip above
 	// ran earlier in this tick: a fence raised in between has already been passed,
-	// and the epoch captured after it would make this tick's observation look
-	// current and be APPLIED to a session an operation owns. Reading both at once
-	// makes the epoch necessarily older than any later fence, so the guard drops the
-	// observation instead. Clearing the episode matches every other skip above — a
-	// tick we did not observe cannot be part of a consecutive run (#1794).
-	op, epoch := instance.InFlightOpAndEpoch()
+	// so this early check only avoids unnecessary I/O. SnapshotAgent samples the
+	// authoritative op and epoch after it owns the observation fence; a delivery
+	// that won that fence cannot have its post-delivery capture applied with an
+	// older epoch. Clearing the episode matches every other skip above — a tick we
+	// did not observe cannot be part of a consecutive run (#1794).
+	op, _ := instance.InFlightOpAndEpoch()
 	if op != session.OpNone {
 		m.clearRemoteLoss(key)
 		return
 	}
-	// Select the AgentServer only after capturing the epoch. A remote runtime swap
-	// replaces this handle; taking the handle first could pair the outgoing server
-	// with the incoming runtime's epoch and make a stale observation look current.
-	as := instance.AgentServer()
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	// The task run's own in-flight marker, captured beside the liveness it will be
@@ -541,7 +539,15 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
-	obs, err := as.Snapshot()
+	// SnapshotAgent binds the server, epoch, and generation to one runtime-scoped
+	// observation lock. It retries transport I/O retired before return; the
+	// generation below fences daemon-owned side effects if replacement lands after
+	// that final transport check, while the epoch fences Instance mutations.
+	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
+	if observedOp != session.OpNone {
+		m.clearRemoteLoss(key)
+		return
+	}
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to
@@ -561,15 +567,34 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// If both probes are unanswerable, the last-known liveness is deliberately
 		// retained: connectivity alone cannot distinguish a dead sandbox from a
 		// live one holding unpushed work.
-		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset, epoch)
+		m.settleRemoteProbeFailure(
+			repoID,
+			key,
+			instance,
+			as,
+			observationGeneration,
+			before,
+			beforeReset,
+			epoch,
+		)
 		return
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
+	churnCheckpoint := false
+	if updated {
+		// Observation.Updated proves only that captured pane bytes changed. Record
+		// that timestamp without interpreting the bytes as an answer or completion.
+		// The first churn after a prompt is checkpointed below even if the row stays
+		// Running; later spinner churn does not create an event/write storm.
+		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.
-	m.clearRemoteLoss(key)
+	if !m.clearRemoteLossAtGeneration(key, instance, observationGeneration) {
+		return
+	}
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).
@@ -582,11 +607,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// #1910's hot loop, rebuilt out of an absent error. Absence of an error is not
 	// evidence; only something that can say YES is.
 	//
-	// The three yeses below are exactly the branches that carry one, and the comment
+	// The four yeses below are exactly the branches that carry one, and the comment
 	// on the idle branch names the reason the fourth cannot: (false,false) "a healthy
 	// idle session and a dead one both produce — indistinguishable on their own".
 	observedAlive := false
 	switch {
+	case obs.Baseline:
+		// The first successful capture after a reattach establishes the pane hash.
+		// It proves the runtime answered, but says neither "changed" nor "idle":
+		// preserve the last-known liveness and task-run state for the next tick.
+		observedAlive = true
 	case updated:
 		// Fresh output. Only a live pane produces bytes, and a dead one yields "" —
 		// so this is affirmative on its own, no probe needed.
@@ -631,11 +661,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		}
 	}
 	if observedAlive {
-		m.noteAliveObservation(repoID, instance)
+		m.noteAliveObservationAtGeneration(repoID, instance, observationGeneration)
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
-	m.persistPollChange(repoID, instance, before, beforeReset, projectionChanged)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
 
 	// The run this session was spawned for may have just finished on the idle edge
 	// above. Apply the owning task's declared lifecycle (#2595) — last, after the

@@ -354,9 +354,15 @@ func (m *Manager) SendPromptWithStatus(req SendPromptRequest) (session.PromptDel
 	// is the reliable command path automated deliveries need. This crosses the
 	// socket, so its failure is ambiguous ("never sent" vs "sent, reply lost") and
 	// is deliberately NOT tagged notAttempted — an ambiguous failure stays charged.
-	status, err := session.SendPromptWithStatus(instance.AgentServer(), req.Prompt)
+	status, err := instance.SendPromptWithEvidence(req.Prompt, nowFunc)
+	// Delivery evidence changes the row even when liveness does not. Publish it
+	// immediately so list clients can distinguish a confirmed miss from #3162's
+	// honest could-not-confirm instead of waiting for the status poll.
+	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+		log.WarningLog.Printf("prompt delivery evidence for %q: %v", instance.Title, perr)
+	}
 	if err != nil {
-		return session.PromptCouldNotConfirm, fmt.Errorf("failed to send prompt: %w", err)
+		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
 	return status, nil
 }

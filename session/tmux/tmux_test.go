@@ -166,7 +166,9 @@ func TestRestoreSwapsMonitorWhenSessionExists(t *testing.T) {
 
 	session := newTmuxSession(toTmuxName("existing", ""), "claude", ptyFactory, cmdExec)
 
-	require.NoError(t, session.Restore("/some/work/dir"))
+	result, err := session.RestoreWithResult("/some/work/dir")
+	require.NoError(t, err)
+	require.Equal(t, RestoreReattached, result)
 
 	require.Equal(t, 0, len(ptyFactory.cmds), "Restore must open no PTY / attach-session client")
 	require.NotNil(t, session.monitor, "Restore must install a fresh status monitor")
@@ -210,7 +212,9 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	workdir := t.TempDir()
 	session := newTmuxSession(toTmuxName("missing", ""), "claude", ptyFactory, cmdExec)
 
-	require.NoError(t, session.Restore(workdir))
+	result, err := session.RestoreWithResult(workdir)
+	require.NoError(t, err)
+	require.Equal(t, RestoreRespawned, result)
 
 	require.Equal(t, 1, len(ptyFactory.cmds),
 		"expected only the re-spawn new-session PTY command (no attach-session)")
@@ -491,12 +495,10 @@ func TestHasUpdatedSilentWhenSessionGone(t *testing.T) {
 	require.Equal(t, int32(1), hasSessionCalls.Load(), "no further has-session calls while dead")
 }
 
-// TestHasUpdatedRespawnResetsDead documents that a re-spawn via Restore
-// produces a fresh statusMonitor with dead cleared, so polling resumes
-// normally after the session comes back. This is the recovery path for
-// issue #489 — operators don't have to restart the daemon after a stale
-// instance is healed.
-func TestHasUpdatedRespawnResetsDead(t *testing.T) {
+// TestHasUpdatedRespawnResetsDead documents that a reattach via Restore
+// produces a fresh statusMonitor with dead cleared, so polling resumes after
+// the session comes back without reporting its baseline capture as pane churn.
+func TestHasUpdatedReattachResetsDeadAndBaselinesCapture(t *testing.T) {
 	var captureOK, sessionAlive atomic.Bool
 	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
 	_ = captureErrorLog(t)
@@ -512,9 +514,26 @@ func TestHasUpdatedRespawnResetsDead(t *testing.T) {
 	require.NotNil(t, session.monitor)
 	require.False(t, session.monitor.dead, "fresh monitor after Restore must not be dead")
 
-	// Polling resumes and produces a normal updated=true on first content.
-	updated, _, _ := session.HasUpdated()
-	require.True(t, updated, "first capture after Restore should report updated")
+	// Polling resumes, but the first successful capture only establishes the
+	// replacement monitor's baseline. It is not evidence that the pane changed.
+	updated, _, _, baseline := session.HasUpdatedWithBaseline()
+	require.False(t, updated, "first capture after reattach must only establish a baseline")
+	require.True(t, baseline, "the caller must distinguish a baseline from observed idleness")
+	updated, _, _, baseline = session.HasUpdatedWithBaseline()
+	require.False(t, updated, "unchanged second capture must remain unchanged")
+	require.False(t, baseline, "the reattach baseline must be reported exactly once")
+}
+
+func TestSeedDeliveryBaselineComparesTheNextCapture(t *testing.T) {
+	var captureOK, sessionAlive atomic.Bool
+	captureOK.Store(true)
+	sessionAlive.Store(true)
+	session, _, _ := makeAttachedSession(t, &captureOK, &sessionAlive)
+
+	session.seedDeliveryBaseline("pane content")
+	updated, _, _, baseline := session.HasUpdatedWithBaseline()
+	require.False(t, updated, "delivery boundary must not become pane churn")
+	require.False(t, baseline, "the boundary was captured at delivery, not deferred to this poll")
 }
 
 // TestHasUpdatedTransientErrorKeepsLogging covers the other branch of #489:

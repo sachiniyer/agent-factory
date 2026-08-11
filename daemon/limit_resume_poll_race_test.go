@@ -10,13 +10,14 @@ import (
 
 // limitRacePollBackend is a FakeBackend that reproduces the #2135 interleaving
 // exactly: its pane capture returns a fixed usage-limit banner every idle tick,
-// and it runs a one-shot hook AFTER the content has been captured but BEFORE the
-// poll acts on it. The hook is where the racing resume lands, so the poll's
-// decision is provably made from PRE-resume content.
+// and its following liveness probe runs a one-shot hook AFTER the content has
+// been captured but BEFORE the poll acts on it. The hook is where the racing
+// resume lands, so the poll's decision is provably made from PRE-resume content.
 //
-// Driving the race from inside the capture (rather than from a second goroutine)
-// makes it deterministic: the poll goroutine is the one that runs the resume, so
-// there is no sleep, no barrier, and no flake.
+// Driving the race from the following probe (rather than from a second goroutine)
+// makes it deterministic without re-entering prompt delivery while Snapshot holds
+// its same-runtime observation lock: the poll goroutine runs the resume after
+// Snapshot returns, so there is no sleep, barrier, or deadlock.
 type limitRacePollBackend struct {
 	*session.FakeBackend
 	mu           sync.Mutex
@@ -28,13 +29,19 @@ type limitRacePollBackend struct {
 func (b *limitRacePollBackend) HasUpdated(*session.Instance) (bool, bool, string) {
 	b.mu.Lock()
 	content := b.content
+	b.mu.Unlock()
+	return false, false, content
+}
+
+func (b *limitRacePollBackend) IsAlive(*session.Instance) (bool, error) {
+	b.mu.Lock()
 	hook := b.afterCapture
 	b.afterCapture = nil // one-shot: later ticks are ordinary polls
 	b.mu.Unlock()
 	if hook != nil {
 		hook()
 	}
-	return false, false, content
+	return true, nil
 }
 
 func (b *limitRacePollBackend) SendPromptCommand(_ *session.Instance, prompt string) error {

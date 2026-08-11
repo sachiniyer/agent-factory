@@ -47,11 +47,15 @@ func recordTmuxCommands(t *testing.T, program string, text string) []recordedCmd
 		},
 		// capture-pane reads the pane back: echo the loaded paste so the positive
 		// delivery check (#1982) confirms on the first poll instead of waiting out
-		// pasteDeliveryMaxWait. capture-pane goes through Output, so it never lands
-		// in cmds — the load/paste/Enter shape assertions are unaffected.
+		// pasteDeliveryMaxWait. The final Output invocation also carries send-keys
+		// Enter, so record that combined boundary command as the fourth submit step.
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			mu.Lock()
 			defer mu.Unlock()
+			if isDeliveryBoundaryCommand(c) {
+				cmds = append(cmds, recordedCmd{args: c.Args})
+				return []byte(deliveryBoundarySentinel + "\n" + loaded), nil
+			}
 			return []byte(loaded), nil
 		},
 	}
@@ -86,6 +90,10 @@ func hasArg(args []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func isDeliveryBoundaryCommand(c *exec.Cmd) bool {
+	return strings.Contains(strings.Join(c.Args, " "), "send-keys") && hasArg(c.Args, "Enter")
 }
 
 // TestCodexSubmitUsesBracketedPaste is the #1254 regression: codex's composer
@@ -695,7 +703,13 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneDoesNotEcho(t *testing.T) {
 			return nil
 		},
 		// A pane that never renders what it receives.
-		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte("AF-RECEIVER-READY"), nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if isDeliveryBoundaryCommand(c) {
+				enterSent = true
+				return []byte(deliveryBoundarySentinel + "\nAF-RECEIVER-READY"), nil
+			}
+			return []byte("AF-RECEIVER-READY"), nil
+		},
 	}
 	session := newTmuxSession("af_proj", ProgramCodex, NewMockPtyFactory(t), cmdExec)
 
@@ -753,6 +767,9 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error { return nil },
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if isDeliveryBoundaryCommand(c) {
+				return []byte(deliveryBoundarySentinel + "\n"), fmt.Errorf("capture failed after Enter")
+			}
 			return nil, fmt.Errorf("no server running on /tmp/tmux-1000/default")
 		},
 	}
@@ -765,6 +782,48 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 		"a failed observer must stay distinct from a readable but unverified send")
 	require.Empty(t, errors.String(),
 		"a failed observation probe must not manufacture an ERROR")
+}
+
+// TestSubmitBaselinesFirstPollAfterPartialBoundaryCaptureFailure pins the
+// status-monitor side of the best-effort delivery contract. Enter reaching tmux
+// is still a successful send when the capture later in that same command queue
+// fails, but the missing boundary is not permission to compare the next pane
+// against an empty hash and call its ordinary contents post-delivery churn.
+func TestSubmitBaselinesFirstPollAfterPartialBoundaryCaptureFailure(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	const prompt = "answer with PARTIAL_BOUNDARY_DONE"
+	pane := "idle composer"
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pane = prompt
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if isDeliveryBoundaryCommand(c) {
+				pane = "submitted composer"
+				return []byte(deliveryBoundarySentinel), fmt.Errorf("capture failed after Enter")
+			}
+			return []byte(pane), nil
+		},
+	}
+
+	s := newTmuxSession("af_partial_delivery_boundary", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+	s.setMonitor(newStatusMonitor())
+	status, err := s.SendKeysCommandObserved(prompt)
+	require.NoError(t, err, "the sentinel proves Enter reached tmux")
+	require.Equal(t, PromptDelivered, status)
+
+	updated, _, _, baseline := s.HasUpdatedWithBaseline()
+	require.False(t, updated, "ordinary pane contents after the failed boundary capture are not proven churn")
+	require.True(t, baseline, "the first successful capture must establish the missing delivery baseline")
+
+	pane = "completed response"
+	updated, _, _, baseline = s.HasUpdatedWithBaseline()
+	require.True(t, updated, "a later observed pane change must remain visible")
+	require.False(t, baseline)
 }
 
 // TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent is the #2266
@@ -813,7 +872,11 @@ func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T)
 					}
 					return nil
 				},
-				OutputFunc: func(*exec.Cmd) ([]byte, error) {
+				OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+					if isDeliveryBoundaryCommand(c) {
+						enterSent = true
+						return []byte(deliveryBoundarySentinel + "\n" + tt.paneAfter), nil
+					}
 					if pasted {
 						return []byte(tt.paneAfter), nil
 					}
@@ -862,6 +925,10 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 		// changes; the diagnostic must retain THIS authorizing frame rather than
 		// recapturing unrelated pixels.
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if isDeliveryBoundaryCommand(c) {
+				enterSent = true
+				return []byte(deliveryBoundarySentinel + "\npost-Enter pane changed to an unrelated frame"), nil
+			}
 			if enterSent {
 				return []byte("post-Enter pane changed to an unrelated frame"), nil
 			}
@@ -1163,6 +1230,10 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
 			mu.Lock()
 			defer mu.Unlock()
+			if isDeliveryBoundaryCommand(c) {
+				enterSawConfirmedText = confirmedText
+				return []byte(deliveryBoundarySentinel + "\nsubmitted composer"), nil
+			}
 			captureCalls++
 			// Withhold the pasted text for the first few polls (drain latency),
 			// then reveal it — inside a composer border box, to prove the tail is
@@ -1184,4 +1255,49 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 		"submit must poll capture-pane until the paste lands, not send Enter blind (#1982); got %d captures", captureCalls)
 	require.True(t, enterSawConfirmedText,
 		"Enter must be sent only AFTER a capture confirmed the pasted text is present (#1982)")
+}
+
+// TestSubmitSeedsTheDeliveryBoundaryWithoutHidingFastOutput pins the ordering
+// between Enter and status monitoring. The delivery-driven composer redraw is
+// the baseline, but output that appears immediately after submission must still
+// be reported as churn even when the whole turn finishes before the next daemon
+// poll.
+func TestSubmitSeedsTheDeliveryBoundaryWithoutHidingFastOutput(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	const prompt = "answer now with DELIVERY_BOUNDARY_DONE"
+	var pane = "idle composer"
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "paste-buffer") {
+				pane = prompt
+			}
+			if strings.Contains(joined, "send-keys") && hasArg(c.Args, "Enter") {
+				pane = "submitted composer"
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "send-keys") && hasArg(c.Args, "Enter") {
+				pane = "submitted composer"
+				return []byte(deliveryBoundarySentinel + "\n" + pane), nil
+			}
+			return []byte(pane), nil
+		},
+	}
+
+	s := newTmuxSession("af_delivery_boundary", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+	s.setMonitor(newStatusMonitor())
+	require.NoError(t, s.SendKeysCommand(prompt))
+
+	updated, _, _, baseline := s.HasUpdatedWithBaseline()
+	require.False(t, updated, "the exact post-Enter composer frame is the delivery baseline")
+	require.False(t, baseline, "a seeded boundary is not a deferred baseline observation")
+
+	pane = "completed response"
+	updated, _, _, baseline = s.HasUpdatedWithBaseline()
+	require.True(t, updated, "a response completed before the next poll must not be hidden")
+	require.False(t, baseline)
 }

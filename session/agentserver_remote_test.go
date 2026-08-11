@@ -88,7 +88,7 @@ func TestRemoteAgentServerSnapshotCarriesModelChange(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"data": agentSnapshotResp{
-				Updated: true, Content: "ready", ModelChange: want,
+				Updated: true, Baseline: true, Content: "ready", ModelChange: want,
 			},
 			"error": nil,
 		}); err != nil {
@@ -105,7 +105,7 @@ func TestRemoteAgentServerSnapshotCarriesModelChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
-	if !obs.Updated || obs.Content != "ready" || !sameAgentModelChange(obs.ModelChange, want) {
+	if !obs.Updated || !obs.Baseline || obs.Content != "ready" || !sameAgentModelChange(obs.ModelChange, want) {
 		t.Fatalf("remote snapshot dropped model change: %+v", obs)
 	}
 }

@@ -428,7 +428,15 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.mu.Unlock()
 	}
 
-	if err := inst.Recover(); err != nil {
+	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
+	// a failed recovery leaves its evidence intact, but before the backend can
+	// lower the restore fence and expose the replacement. A failed write remains
+	// owed and does not veto a replacement that is already running (#2883).
+	if err := inst.RecoverWithLiveBoundary(func() {
+		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
+			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
+		}
+	}); err != nil {
 		// Persist the instance even on failure, matching the manual restore path
 		// (restore.go): Recover can mutate durable worktree state before it fails
 		// — a rebuild reconstructs the worktree+branch and flips branchCreatedByUs
@@ -453,6 +461,8 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// killsInFlight, and Recover has already cleared the restore fence, so it can
 	// probe the new sandbox the instant Recover returns; every statement between
 	// the swap and this reset widens that window for nothing.
+	// The live-boundary retirement above made the fence drop crash safe. This reset is
+	// still required for transport observations accumulated while Recover ran.
 	m.noteRuntimeReplaced(repoID, inst)
 	// Then persist, same as the manual restore path (restore.go): Recover mutates
 	// durable worktree state on the way to SUCCESS too, not only before a failure

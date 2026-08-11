@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -75,8 +76,15 @@ type Instance struct {
 	// goroutines (writers) and the main bubbletea loop (readers):
 	// started, liveness/inFlightOp, Tabs (and the agent tab's tmux session),
 	// gitWorktree, prInfo, diffStats.
-	mu sync.RWMutex
-
+	mu               sync.RWMutex
+	agentObservation *agentObservationRuntime
+	// agentObservationGeneration is atomic because daemon-owned side effects
+	// validate an observation while holding Manager.mu, not Instance.mu. Runtime
+	// replacement invalidates it before later manager bookkeeping, which orders a
+	// predecessor side effect either wholly before the replacement or drops it.
+	agentObservationGeneration atomic.Uint64
+	liveBoundaryMu             sync.Mutex
+	liveBoundary               *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt
@@ -156,10 +164,14 @@ type Instance struct {
 	// archiveWarning retains a daemon snapshot's projection-only notice so thin
 	// client renderers do not drop incomplete-archive state during reconstruction.
 	archiveWarning string
-	// stateEpoch is the generation counter for the lifecycle state above — the two
-	// axes plus limitResetAt — bumped by every writer that actually changes one of
-	// them (#2135). It is how an observer that decided from a captured pane learns
-	// its decision has been superseded by a newer transition before it applies it;
+	// Durable delivery and pane-churn evidence; never a semantic claim (#3168).
+	lastPromptAttemptAt      time.Time
+	lastPromptDeliveryStatus PromptDeliveryStatus
+	lastPaneChurnAt          time.Time
+	loadRuntimeReplaced      bool
+	// stateEpoch is the generation counter for lifecycle state and prompt-observation
+	// boundaries, bumped by every writer that changes one (#2135, #3168). It is how
+	// an observer learns whether its captured-pane decision was superseded before it applies it;
 	// see state_epoch.go. Mutex-protected, in-memory only: it describes a window
 	// between an observation and its apply, and no such window survives a restart.
 	stateEpoch uint64
@@ -964,36 +976,4 @@ func (i *Instance) dropTabWhere(pred func(*Tab) bool, label string) bool {
 		}
 	}
 	return true
-}
-
-// replaceTabFieldLocked swaps the tab at idx for a COPY carrying the mutation f
-// applies, instead of writing the field in place. Callers must hold i.mu for
-// writing.
-//
-// GetTabs copies only the SLICE and hands out the same *Tab pointers, which
-// callers (tree.TabLabels on the render path, the pane refresh) then read
-// without holding i.mu — so assigning to a live tab's Name/ID races those
-// readers. Copy-on-write keeps the readers race-free: a reader that already
-// holds the old pointer keeps reading a consistent old value, and the next
-// GetTabs hands out the new one. The tmux pointer rides along on the copy, so
-// the tab's live session is preserved across the swap (no PTY blip).
-func (i *Instance) replaceTabFieldLocked(idx int, f func(*Tab)) {
-	cp := *i.Tabs[idx]
-	f(&cp)
-	i.Tabs[idx] = &cp
-}
-
-// setTmuxLocked stores ts as the agent tab's tmux session, materializing the
-// single Agent tab on first assignment so the agent session is always Tabs[0].
-// Passing nil clears the session but leaves the tab in place (and is a no-op
-// before the agent tab exists). Callers must hold i.mu for writing.
-func (i *Instance) setTmuxLocked(ts *tmux.TmuxSession) {
-	if len(i.Tabs) == 0 {
-		if ts == nil {
-			return
-		}
-		i.Tabs = []*Tab{newAgentTab(ts)}
-		return
-	}
-	i.Tabs[0].tmux = ts
 }

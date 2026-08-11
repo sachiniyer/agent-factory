@@ -34,7 +34,10 @@ var (
 // length the delivery check additionally requires the completion to be seen in
 // TWO consecutive captures, so a one-frame coincidence cannot confirm delivery
 // early and let Enter race the paste after all.
-const minDistinctiveFragment = 8
+const (
+	minDistinctiveFragment   = 8
+	deliveryBoundarySentinel = "__af_delivery_enter_sent_v1__"
+)
 
 // deliveryOutcome keeps two different kinds of uncertainty separate. "The pane
 // did not show the prompt" is an observed absence only when the terminal capture
@@ -309,9 +312,19 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 	// never worse than the old blind sleep.
 	observation := t.waitForPasteDelivered(probe)
 
-	// Send Enter separately to submit.
-	if err := t.sendEnter(); err != nil {
+	// Submit and capture the delivery boundary in one tmux command queue. tmux
+	// executes the capture immediately after enqueueing Enter, before returning
+	// to service pane output, so the captured frame includes delivery-driven
+	// composer state but cannot swallow a response that completes before the next
+	// daemon poll.
+	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
+	if err != nil {
 		return PromptCouldNotConfirm, err
+	}
+	if boundaryOK {
+		t.seedDeliveryBaseline(boundary)
+	} else {
+		t.deferDeliveryBaseline()
 	}
 
 	if observation.outcome == deliveryObservedAbsent {
@@ -327,20 +340,56 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 	return observation.outcome.promptDeliveryStatus(), nil
 }
 
-// sendEnter submits whatever is pending in the pane. Bounded by
-// tmuxCommandTimeout (#2099): it is the last step of a submit the daemon drives
-// while holding the per-session op lock, so an unbounded stall here leaves the
-// session unpromptable rather than merely dropping one Enter.
-func (t *TmuxSession) sendEnter() error {
+// sendEnterAndCaptureBoundary submits whatever is pending and captures the pane
+// in the same tmux command queue. display-message emits a sentinel between the
+// two commands: if capture-pane fails after Enter was accepted, partial stdout
+// still proves the send succeeded and we preserve the existing best-effort
+// delivery contract without inventing a send failure. Only a complete capture
+// can seed the status monitor.
+//
+// Bounded by tmuxCommandTimeout (#2099): it is the last step of a submit the
+// daemon drives while holding the per-session op lock, so an unbounded stall
+// here leaves the session unpromptable rather than merely dropping one Enter.
+func (t *TmuxSession) sendEnterAndCaptureBoundary() (string, bool, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
-	if err := t.runTmuxBounded(ctx, "send-keys", "-t", exactTarget(t.sanitizedName), "Enter"); err != nil {
+	target := exactTarget(t.sanitizedName)
+	out, err := t.outputTmuxBounded(ctx,
+		"send-keys", "-t", target, "Enter", ";",
+		"display-message", "-p", deliveryBoundarySentinel, ";",
+		"capture-pane", "-p", "-e", "-J", "-t", target,
+	)
+	boundary, enterSent := deliveryBoundaryOutput(out)
+	if err != nil && !enterSent {
 		if ctx.Err() != nil {
-			return fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return "", false, fmt.Errorf("%w: send-keys Enter after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return err
+		return "", false, err
 	}
-	return nil
+	if !enterSent {
+		// A successful command queue proves both commands completed. Keeping this
+		// fallback also lets executor-level tests return only capture-pane output;
+		// the sentinel is load-bearing only on the partial-output error path.
+		return string(out), true, nil
+	}
+	if err != nil {
+		log.WarningLog.Printf("submit: Enter reached session %q, but its delivery-boundary capture failed; the next successful pane capture will establish the baseline: %v",
+			t.sanitizedName, err)
+		return "", false, nil
+	}
+	return boundary, true, nil
+}
+
+func deliveryBoundaryOutput(out []byte) (string, bool) {
+	s := string(out)
+	if s == deliveryBoundarySentinel {
+		return "", true
+	}
+	prefix := deliveryBoundarySentinel + "\n"
+	if !strings.HasPrefix(s, prefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(s, prefix), true
 }
 
 // clearComposerDraft best-effort removes any text stranded in the pane's

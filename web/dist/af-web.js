@@ -9951,6 +9951,43 @@ var ROW_KIND_LABELS = {
   limit: "Limit reached",
   archived: "Archived"
 };
+var IDLE_REASON_LABELS = {
+  "usage-limit": "usage limit",
+  "process-exited": "process exited",
+  "recreate-pending": "recreate notice pending",
+  "prompt-not-delivered": "prompt not delivered",
+  "delivery-unconfirmed": "delivery unknown",
+  "no-pane-change-since-delivery": "no change after delivery",
+  "settled-after-pane-change": "pane changed"
+};
+function idleReasonDetail(s, now = /* @__PURE__ */ new Date()) {
+  const label = idleReasonLabel(s.idle_reason);
+  if (!label) {
+    return "";
+  }
+  let detail = label;
+  if (s.last_pane_churn_at) {
+    const churn = new Date(s.last_pane_churn_at);
+    if (!Number.isNaN(churn.getTime())) {
+      const age = `${formatPaneChurnAge(churn, now)} ago`;
+      detail += s.idle_reason === "settled-after-pane-change" ? ` \xB7 ${age}` : ` \xB7 pane changed ${age}`;
+    }
+  }
+  return detail;
+}
+function idleReasonLabel(reason) {
+  return reason ? IDLE_REASON_LABELS[reason] ?? "" : "";
+}
+function formatPaneChurnAge(churn, now) {
+  const ageMs = Math.max(0, now.getTime() - churn.getTime());
+  const minute = 6e4;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (ageMs < minute) return "<1m";
+  if (ageMs < hour) return `${Math.floor(ageMs / minute)}m`;
+  if (ageMs < day) return `${Math.floor(ageMs / hour)}h`;
+  return `${Math.floor(ageMs / day)}d`;
+}
 var READY_ICON = "circle";
 var DEAD_ICON = "circle";
 var LOST_ICON = "circle-dashed";
@@ -13073,6 +13110,7 @@ var AppShell = class {
     this.toast = h2("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     this.el = h2("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
+    this.idleAgeTimer = window.setInterval(() => refreshIdleReasonAges(this.railList), 15e3);
   }
   el;
   railCount;
@@ -13201,6 +13239,7 @@ var AppShell = class {
   // selection-changed guard alone wouldn't fire) — otherwise the pane is blank on
   // load until a select-then-deselect. (#1592 Phase 5 PR9)
   mainRendered = false;
+  idleAgeTimer;
   // The narrow-viewport session rail (web mobile pass): below ~768px the rail is an
   // off-canvas drawer that the .af-nav-toggle hamburger slides over the terminal, so a
   // phone gives the terminal the full width. This is the ONLY piece of the responsive
@@ -13212,6 +13251,10 @@ var AppShell = class {
   navToggle;
   navScrim;
   navOpen = false;
+  /** Stop wall-clock-only rail work when logout replaces this shell. */
+  dispose() {
+    window.clearInterval(this.idleAgeTimer);
+  }
   /** Points the browser tab at what is on screen, so a pinned/backgrounded tab and the
    *  history entry name the session and project rather than a static "Agent Factory".
    *  Assigns only on a real change (a rename, a selection, or a project switch). */
@@ -14382,12 +14425,18 @@ function sessionRow(s, selected, openSession, buildActions) {
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
-  const branch = h2(
-    "div",
-    { class: "af-row-branch" },
-    icon("git-branch", "af-branch-icon"),
-    s.branch || "\u2014"
-  );
+  const idleDetail = idleReasonDetail(s);
+  const branchParts = [icon("git-branch", "af-branch-icon")];
+  if (idleDetail) {
+    const idle = h2("span", { class: "af-idle-reason" }, `${idleDetail} \xB7 `);
+    idle.dataset.idleReason = s.idle_reason ?? "";
+    if (s.last_pane_churn_at) {
+      idle.dataset.paneChurnAt = s.last_pane_churn_at;
+    }
+    branchParts.push(idle);
+  }
+  branchParts.push(s.branch || "\u2014");
+  const branch = h2("div", { class: "af-row-branch" }, ...branchParts);
   const main = h2("div", { class: "af-row-main" }, title, branch);
   const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = h2("li", { class: cls });
@@ -14403,10 +14452,14 @@ function sessionRow(s, selected, openSession, buildActions) {
   row.setAttribute("role", "option");
   row.setAttribute("aria-selected", selected ? "true" : "false");
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
+  const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
+  row.dataset.idleTitleBase = `${s.title} \u2014 ${status.label}`;
+  row.dataset.idleTitleModel = modelChange;
+  row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.setAttribute(
     "title",
-    `${s.title} \u2014 ${status.label}${modelChange}${archiveWarning === "" ? "" : `; ${archiveWarning}`}`
+    `${row.dataset.idleTitleBase}${idleReason}${row.dataset.idleTitleModel}${row.dataset.idleTitleArchive}`
   );
   if (!actionable && !managed) {
     row.setAttribute("aria-disabled", "true");
@@ -14414,6 +14467,26 @@ function sessionRow(s, selected, openSession, buildActions) {
     row.addEventListener("click", () => openSession(s.id));
   }
   return row;
+}
+function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
+  for (const idle of root2.querySelectorAll(".af-idle-reason[data-pane-churn-at]")) {
+    const detail = idleReasonDetail(
+      {
+        idle_reason: idle.dataset.idleReason,
+        last_pane_churn_at: idle.dataset.paneChurnAt
+      },
+      now
+    );
+    idle.textContent = detail ? `${detail} \xB7 ` : "";
+    const row = idle.closest(".af-row");
+    if (row) {
+      const reason = detail ? `; ${detail}` : "";
+      row.setAttribute(
+        "title",
+        `${row.dataset.idleTitleBase ?? ""}${reason}${row.dataset.idleTitleModel ?? ""}${row.dataset.idleTitleArchive ?? ""}`
+      );
+    }
+  }
 }
 
 // src/index.ts
@@ -14519,6 +14592,7 @@ function rerender() {
   const state = store.get();
   if (state.phase === "login") {
     if (shell) {
+      shell.dispose();
       shell = null;
     }
     disposeSplit();

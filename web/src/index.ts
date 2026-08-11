@@ -298,6 +298,7 @@ function rerender(): void {
   const state = store.get();
   if (state.phase === "login") {
     if (shell) {
+      shell.dispose();
       shell = null; // dropped from the tree by renderLogin below
     }
     disposeSplit();
