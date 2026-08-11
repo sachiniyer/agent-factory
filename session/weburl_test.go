@@ -129,6 +129,48 @@ func TestIsLoopbackWebTarget(t *testing.T) {
 	}
 }
 
+// Browsers reject some authorities that net/url and the lookup-oriented IDNA
+// profile accept. Persisting one creates a durable tab whose iframe and external
+// fallback both fail before a request is sent, so admission has to fail too.
+func TestNormalizeWebTabURLRejectsBrowserUnusableTargets(t *testing.T) {
+	for _, raw := range []string{
+		"https://aℵb.com/x",
+		"https://xn--ab-vld.com/x",
+		"https://example.com:22/x",
+		"https://example.com:6000/x",
+		"https://example.com:10080/x",
+	} {
+		if got, err := NormalizeWebTabURL(raw); err == nil {
+			t.Errorf("NormalizeWebTabURL(%q) = %q, want browser-incompatible target rejected", raw, got)
+		}
+	}
+
+	// Loopback targets use Agent Factory's same-origin reverse proxy, so the
+	// browser never fetches the target port directly. Fetch's bad-port rule must
+	// not regress a local dev server that deliberately listens on one of them.
+	if got, err := NormalizeWebTabURL("http://localhost:6000/x"); err != nil || got != "http://localhost:6000/x" {
+		t.Errorf("NormalizeWebTabURL(loopback bad-port target) = %q, %v; want proxyable target preserved", got, err)
+	}
+}
+
+// The special-use localhost name covers every subdomain, not only the exact
+// label. Browsers resolve these names on the viewer's loopback interface, so an
+// off-box tab must take the same refusal path as localhost itself.
+func TestIsLoopbackWebTargetRecognizesLocalhostSubdomains(t *testing.T) {
+	for _, raw := range []string{
+		"https://app.localhost:3000",
+		"https://deep.app.localhost./x",
+		"https://APP.LOCALHOST/x",
+	} {
+		if !IsLoopbackWebTarget(raw) {
+			t.Errorf("IsLoopbackWebTarget(%q) = false, want true for wildcard localhost", raw)
+		}
+	}
+	if IsLoopbackWebTarget("https://notlocalhost.example/x") {
+		t.Error("an ordinary external domain must not be classified as wildcard localhost")
+	}
+}
+
 // TestIsLoopbackHostTrailingDot pins the loopback classifier directly on the
 // rooted-FQDN forms (#2004): "localhost." and "127.0.0.1." are the same host as
 // their unrooted forms and are loopback, while a doubled dot or a bare dot is

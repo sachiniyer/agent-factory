@@ -613,3 +613,32 @@ func TestToInstanceData_StagedRowsNeverOccupyTheAgentSlot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, again.pendingMetadataTabs, 1, "restaging must not duplicate the row")
 }
+
+// An archived off-box session is inert, but its metadata-only web tabs are still
+// useful restore placeholders in snapshots. The storage representation must keep
+// those rows out of ordered Tabs: after a failed pre-Launch restore, folding a
+// pending web row into Tabs would put it in the agent's index-0 slot.
+func TestToInstanceData_ArchivedRemoteProjectsMetadataTabsWithoutPersistingThemInRoster(t *testing.T) {
+	data := InstanceData{
+		Title:       "archived-off-box",
+		BackendType: "ssh",
+		Status:      Archived,
+		Liveness:    LiveArchived,
+		Tabs: []TabData{
+			{ID: "agent-id", Name: "agent", Kind: TabKindAgent},
+			{ID: "web-id", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/docs"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	projection := instance.ToInstanceData()
+	require.Len(t, projection.Tabs, 2, "archived snapshots must retain the inert web placeholder")
+	require.Equal(t, TabKindAgent, projection.Tabs[0].Kind, "the synthetic agent row keeps the ordering contract")
+	require.Equal(t, "web-id", projection.Tabs[1].ID)
+	require.Equal(t, "https://example.com/docs", projection.Tabs[1].URL)
+
+	stored := projection.ForStorage()
+	require.Empty(t, stored.Tabs,
+		"the snapshot-only roster must not fold staged rows back into ordered durable Tabs")
+}
