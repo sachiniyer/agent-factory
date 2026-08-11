@@ -171,12 +171,13 @@ func TestLoadInRepoConfigTOMLMalformed(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	t.Run("contentless file", func(t *testing.T) {
-		// Zero bytes, whitespace-only, and BOM-only all decode as a valid
+		// Zero bytes, whitespace-only, BOM-only, and comments all decode as a valid
 		// empty TOML document; each must stay a loud error (#1139 review).
 		for name, content := range map[string]string{
 			"zero-byte":       "",
 			"whitespace-only": " \n\t\n",
 			"BOM-only":        "\xef\xbb\xbf",
+			"comment-only":    "# no repository settings yet\n",
 		} {
 			t.Run(name, func(t *testing.T) {
 				repoRoot := t.TempDir()

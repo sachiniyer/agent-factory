@@ -75,11 +75,18 @@ claude = "/usr/local/bin/claude --verbose"
 }
 
 func TestLoadProjectConfigEmptyFileIsError(t *testing.T) {
-	_, _, project := registeredTestProject(t)
-	writePersonalConfig(t, project.ID, "   \n")
-	_, err := LoadProjectConfig(project.ID)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "empty")
+	for name, content := range map[string]string{
+		"whitespace-only": "   \n",
+		"comment-only":    "# no personal overrides yet\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, project := registeredTestProject(t)
+			writePersonalConfig(t, project.ID, content)
+			_, err := LoadProjectConfig(project.ID)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "empty")
+		})
+	}
 }
 
 func TestLoadProjectConfigRejectsGlobalOnlyKey(t *testing.T) {

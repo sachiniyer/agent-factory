@@ -1248,6 +1248,7 @@ error = "#cc9393"
 			{"whitespace-only", " \n\t\n  \n"},
 			{"BOM-only", "\xef\xbb\xbf"},
 			{"BOM-and-whitespace", "\xef\xbb\xbf \n\t"},
+			{"comment-only", "# keep legacy config for now\n\n# no settings yet\n"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
@@ -1263,6 +1264,10 @@ error = "#cc9393"
 				assert.Nil(t, cfg, "a contentless config.toml must never load as an all-defaults config")
 				assert.Contains(t, err.Error(), TomlConfigFileName)
 				assert.Contains(t, err.Error(), "empty")
+				preservedJSON, readErr := os.ReadFile(filepath.Join(configDir, ConfigFileName))
+				require.NoError(t, readErr)
+				assert.JSONEq(t, jsonContent, string(preservedJSON),
+					"refusing the TOML shadow must leave the user's working config.json untouched")
 			})
 		}
 	})

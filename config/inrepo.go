@@ -270,8 +270,8 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		globalConfigLocation = prettyHomePath(filepath.Join(configDir, ConfigFileName))
 		tomlGlobalConfigLocation = prettyHomePath(filepath.Join(configDir, TomlConfigFileName))
 	}
-	if len(data) == 0 || (isToml && isEffectivelyEmptyToml(data)) {
-		// A contentless config.toml (zero bytes, whitespace, or a bare BOM)
+	if (isToml && isEffectivelyEmptyToml(data)) || (!isToml && len(data) == 0) {
+		// A contentless config.toml (zero bytes, whitespace, a bare BOM, or comments)
 		// is valid TOML — an empty document — but an empty in-repo config is
 		// never something to declare on purpose; keep the loud contract for
 		// both formats (same guard as the global config, #1139 review).
