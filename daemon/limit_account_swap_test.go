@@ -185,6 +185,45 @@ func TestAccountSwapForLimit_UsesHistoricalObservationAfterAgentHandoff(t *testi
 	}
 }
 
+func TestAccountSwapForLimit_UsesObservationFromUnloadablePersistedSession(t *testing.T) {
+	installInstantBackend(t)
+	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
+	configureLimitAccountCandidate(t, manager, "work")
+
+	observer := registerStarted(t, manager, repoID, target.Path, "unloadable-work-limit",
+		session.NewFakeBackend(), true, session.Running)
+	observer.Account = "work"
+	observer.SetLimitReached(time.Time{})
+	manager.persistInstance(repoID, observer)
+
+	// A restart can parse this row but fail to materialize its Instance. The raw
+	// durable observation must still exclude the exhausted identity even though
+	// the row contributes nothing to the manager's in-memory instance map.
+	failLoadFor(t, observer.Title)
+	loaded, _, err := refreshDaemonInstances(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded[daemonInstanceKey(repoID, observer.Title)] != nil {
+		t.Fatal("fixture observation row unexpectedly materialized")
+	}
+	restarted, err := NewManager(manager.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.mu.Lock()
+	restarted.instances = loaded
+	restarted.mu.Unlock()
+
+	swap, err := restarted.accountSwapForLimit(target, restarted.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap != nil {
+		t.Fatalf("unloadable session's known-limited account became eligible after restart: %#v", swap)
+	}
+}
+
 func TestResumeFromLimitPromotesPendingClaudeConversationBeforeClear(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
