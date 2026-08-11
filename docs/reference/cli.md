@@ -1863,7 +1863,11 @@ the session (auto-suffixed -2, -3, …). So the name you pass is not always the
 name you get — the resolved tab name is printed on success, and that is the one
 the other tab verbs address.
 
-Not available for remote sessions: they have no local worktree.
+For remote sessions, only external HTTPS web tabs are admitted. That kind is
+metadata-only: it needs no PTY and spawns no process in the missing daemon-side
+worktree. Shell, process, and VS Code tabs still require local runtime/worktree
+resources, while loopback web targets still need a relay through the off-box
+agent and plain HTTP cannot be framed by an HTTPS Agent Factory UI.
 
 ```
 af sessions tab-create <title> [flags]
@@ -1903,9 +1907,9 @@ miss lists the tabs that exist, with those labels, so a wrong name is a next
 step rather than a dead end.
 
 The agent tab can't be deleted — use "af sessions kill" to tear down the whole
-session. Deleting a tab or session that doesn't exist is an error, not a
-silent success. Not available for remote sessions: their tabs are fixed by
-remote_hooks config.
+session. Deleting a tab or session that doesn't exist is an error, not a silent
+success. On remote sessions, admitted metadata-only web tabs can be deleted;
+PTY-backed kinds are never admitted there.
 
 ```
 af sessions tab-delete <title> [flags]
@@ -1947,8 +1951,9 @@ success — that is what the tab is actually called, and what the other tab verb
 now address it by.
 
 The rename persists across a daemon/af restart and does not disturb the tab's
-running process. Not available for remote sessions (their tabs are fixed by
-remote_hooks config) or archived sessions (restore them first).
+running process. On remote sessions, admitted metadata-only web tabs can be
+renamed; PTY-backed kinds are never admitted there. Archived sessions still
+have to be restored first.
 
 ```
 af sessions tab-rename <title> [flags]
@@ -1986,8 +1991,9 @@ can be moved in front of it. That is structural, not cosmetic — the agent tab 
 identified by its position throughout a session's lifecycle.
 
 The new order persists across a daemon/af restart and does not disturb any tab's
-running process. Not available for remote sessions (their tabs are fixed by
-remote_hooks config) or archived sessions (restore them first).
+running process. On remote sessions, admitted metadata-only web tabs can be
+reordered; PTY-backed kinds are never admitted there. Archived sessions still
+have to be restored first.
 
 ```
 af sessions tab-reorder <title> [flags]

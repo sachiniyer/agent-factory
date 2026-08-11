@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -356,6 +357,11 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	for _, tab := range d.Tabs {
 		r.noteTmuxName(tab.TmuxName)
 	}
+	// PendingTabs is the durability staging area for metadata-only rows. It uses
+	// the same TabData shape as Tabs, so its names need the same log treatment.
+	for _, tab := range d.PendingTabs {
+		r.noteTmuxName(tab.TmuxName)
+	}
 	// A pending-teardown handle names a tmux session the same way a live tab
 	// does, and the retry logs it on every daemon start until the kill is
 	// confirmed — so the log tail prints these names most often for exactly the
@@ -596,25 +602,13 @@ func redactInstanceData(d *session.InstanceData) {
 		}
 	}
 	for i := range d.Tabs {
-		if d.Tabs[i].Command != "" {
-			d.Tabs[i].Command = redactedMarker
-		}
-		if d.Tabs[i].TmuxName != "" {
-			d.Tabs[i].TmuxName = redactedMarker
-		}
-		// A web tab's URL is user-supplied (any http/https target passes
-		// NormalizeWebTabURL) and can name internal infrastructure or a private
-		// repo — the same class of sensitive URL PRInfo.URL is redacted for
-		// below (#1954). Redact non-loopback targets; keep loopback ones (the
-		// proxied dev-server case), which are safe and useful for triage,
-		// mirroring the loopback/non-loopback split the daemon proxy already
-		// draws (session.IsLoopbackWebTarget).
-		if d.Tabs[i].URL != "" && !session.IsLoopbackWebTarget(d.Tabs[i].URL) {
-			d.Tabs[i].URL = redactedMarker
-		}
-		if d.Tabs[i].Conversation != nil {
-			d.Tabs[i].Conversation.ID = ""
-		}
+		redactTabData(&d.Tabs[i])
+	}
+	// PendingTabs contains the same TabData shape under a separate ordering and
+	// durability contract. Keeping one field redaction function prevents a row
+	// from becoming less private merely because restore staged it (#3062).
+	for i := range d.PendingTabs {
+		redactTabData(&d.PendingTabs[i])
 	}
 	if d.AgentConversation != nil {
 		d.AgentConversation.ID = ""
@@ -624,6 +618,34 @@ func redactInstanceData(d *session.InstanceData) {
 	}
 	if d.PRInfo.URL != "" {
 		d.PRInfo.URL = redactedMarker
+	}
+}
+
+func redactTabData(tab *session.TabData) {
+	if tab.Command != "" {
+		tab.Command = redactedMarker
+	}
+	if tab.TmuxName != "" {
+		tab.TmuxName = redactedMarker
+	}
+	// A web tab's URL is user-supplied (any http/https target passes
+	// NormalizeWebTabURL) and can name internal infrastructure or a private
+	// repo — the same class of sensitive URL PRInfo.URL is redacted for
+	// below (#1954). External targets are dropped wholesale. For a loopback
+	// dev-server, retain only the origin needed for triage: userinfo, paths,
+	// queries and fragments can all carry credentials even though the host is
+	// safe to name.
+	if tab.URL != "" {
+		if !session.IsLoopbackWebTarget(tab.URL) {
+			tab.URL = redactedMarker
+		} else if parsed, err := url.Parse(tab.URL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			tab.URL = redactedMarker
+		} else {
+			tab.URL = (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
+		}
+	}
+	if tab.Conversation != nil {
+		tab.Conversation.ID = ""
 	}
 }
 

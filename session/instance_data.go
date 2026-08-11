@@ -73,7 +73,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		// from BackendType (#3060). Computed here, on the snapshot every surface
 		// reads, so the TUI, the web UI and the API all get the same answer.
 		data.TabKinds = tabKindAllowances(i.backend.Capabilities())
-		rosterMutable := i.backend.Capabilities().TabManagement
+		// NOT Capabilities.TabManagement any more. tabMutationTarget dropped that gate
+		// when the first off-box tab was admitted (#3062), so projecting it would tell
+		// clients to hide close/rename/reorder for tabs the daemon now accepts —
+		// the drift this projection exists to prevent, running backwards. Archived is
+		// the remaining refusal and is checked by its own path on both sides.
+		rosterMutable := true
 		data.TabRosterMutable = &rosterMutable
 		if provider, ok := i.backend.(runtimeCleanupProvider); ok {
 			// Stage the exact off-box teardown identity privately on every snapshot.
@@ -103,6 +108,13 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// each local tab's tmux session by its exact persisted name. An off-box
 	// session's fixed Agent tab has no daemon-side tmux, so it serializes with an
 	// empty TmuxName and is re-seeded when the AgentServer is launched.
+	// Staged-but-undrained rows are persisted in their OWN field. A sandbox recovery
+	// that fails BEFORE Launch leaves them only in pendingMetadataTabs, and both
+	// failure paths persist whatever this returns — so dropping them loses the tab
+	// permanently. Appending them to Tabs is equally wrong: Tabs reserves index 0
+	// for the agent, and a failed recovery leaves it empty, so a staged web tab
+	// would land in that slot (#3062).
+	data.PendingTabs = append(data.PendingTabs, i.pendingMetadataTabs...)
 	for _, tab := range i.Tabs {
 		td := TabData{ID: tab.ID, Name: tab.Name, Kind: tab.Kind, Command: tab.Command, URL: tab.URL}
 		if tab.tmux != nil {
@@ -113,6 +125,21 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			td.Handoffs = append([]AgentHandoff(nil), tab.Handoffs...)
 		}
 		data.Tabs = append(data.Tabs, td)
+	}
+	// An archived off-box row is inert, but the web rail still renders its
+	// metadata-only tabs as restore placeholders. After a daemon restart those
+	// rows live in pendingMetadataTabs, outside the ordered roster by design; make
+	// them visible only in the snapshot projection, behind an implicit agent row.
+	// ForStorage restores snapshotStorageTabs before writing instances.json, so
+	// durability keeps using PendingTabs and never reintroduces the index-0 bug.
+	if i.liveness == LiveArchived && len(i.pendingMetadataTabs) > 0 {
+		data.snapshotTabsProjected = true
+		data.snapshotStorageTabs = data.Tabs
+		data.Tabs = append([]TabData(nil), data.Tabs...)
+		if len(data.Tabs) == 0 {
+			data.Tabs = append(data.Tabs, TabData{Name: "agent", Kind: TabKindAgent})
+		}
+		data.Tabs = append(data.Tabs, i.pendingMetadataTabs...)
 	}
 
 	// Cleanup handles for tabs whose roster removal is durable but whose tmux
@@ -295,6 +322,16 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// re-provisioned on restore (re-running launch_cmd for hook), never
 		// reconstructed here.
 		instance.backend = newInertSandboxBackend(data.BackendType)
+		// A metadata-only tab needs nothing this branch cannot rebuild: a web tab is
+		// a name and a URL, binding no tmux and reading no worktree. Dropping it made
+		// off-box admission non-durable — the tab vanished at the next daemon restart
+		// with nothing erroring, which is the harder failure to notice (#3062).
+		//
+		// STAGED, not appended: see pendingMetadataTabs. Writing into Tabs here would
+		// stop Launch seeding the agent tab and leave a web tab in index 0.
+		// From both sources: rows that were on the roster when the record was written,
+		// and rows a previous recovery staged but never drained.
+		instance.pendingMetadataTabs = append(metadataTabsFrom(data), data.PendingTabs...)
 		// A kill tombstone is a durable promise to FINISH teardown after a restart;
 		// an unknown cleanup outcome is the same obligation without terminal kill
 		// intent. Rebuild only that teardown handle — no endpoint, tunnel, or live
@@ -526,4 +563,24 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 	if data.AgentConversation != nil {
 		instance.SetAgentConversation(*data.AgentConversation)
 	}
+}
+
+// metadataTabsFrom selects the persisted rows whose kind needs nothing from the
+// workspace, for a backend whose workspace did not survive the restart.
+//
+// The agent row is excluded: the backend seeds its own on Launch, bound to the
+// live runtime, and a copied record would be a second one with no runtime behind
+// it. Every other kind is dropped as before — they describe a worktree and a PTY
+// that no longer exist, so a row for them would be an entry every later operation
+// fails on.
+func metadataTabsFrom(data InstanceData) []TabData {
+	var out []TabData
+	for _, td := range data.Tabs {
+		kind := tabKindForData(td.Kind)
+		if kind == TabKindAgent || TabKindRequires(kind) != TabNeedsMetadataOnly {
+			continue
+		}
+		out = append(out, td)
+	}
+	return out
 }

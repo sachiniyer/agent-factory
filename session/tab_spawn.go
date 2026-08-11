@@ -265,11 +265,10 @@ func (i *Instance) appendReconciledTab(matchID, name string, tab *Tab) bool {
 // reverse-proxies), so there is nothing to spawn: the append itself is the whole
 // operation. url must already be normalized (session.NormalizeWebTabURL); the
 // name is requestedName when non-empty, otherwise "web", made unique
-// within the instance ("web", "web-2", …). Local instances only, matching
-// shell/process tabs: a web tab is persisted on the local instance record and
-// rebuilt from it on restart. Off-box sessions have a fixed runtime-provided tab
-// roster instead (callers reject non-TabManagement backends first). Errors when
-// the instance is not started or has no worktree.
+// within the instance ("web", "web-2", …). A web tab is persisted on the
+// instance record and rebuilt from it on restart; capability admission decides
+// which targets a local or off-box backend can serve. Errors when the instance
+// is not started or its agent tab has not been materialized yet.
 func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	if strings.TrimSpace(url) == "" {
 		return nil, fmt.Errorf("a web tab requires a non-empty URL")
@@ -292,6 +291,14 @@ func (i *Instance) AddWebTab(url, requestedName string) (*Tab, error) {
 	}
 	if err := tabSpawnPreconditionErr(i.started, i.tmuxLocked() != nil, i.gitWorktree != nil, TabKindWeb); err != nil {
 		return nil, err
+	}
+	// Index 0 is reserved for the agent everywhere: it is unclosable and is what
+	// PTY streams target. A failed off-box restore deliberately leaves started=true
+	// (so the Lost retry loop runs) but has no roster until remote Launch seeds the
+	// agent. Do not let metadata-only admission fill that empty slot and suppress
+	// agent seeding on the retry.
+	if len(i.Tabs) == 0 || i.Tabs[0] == nil || i.Tabs[0].Kind != TabKindAgent {
+		return nil, fmt.Errorf("cannot add a web tab before the session's agent tab is ready")
 	}
 	tab := newWebTab(url)
 	tab.Name = uniqueTabName(i.Tabs, base)

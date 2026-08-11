@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -266,10 +268,22 @@ func TestArrangeTab_RejectsArchivedSession(t *testing.T) {
 	}
 }
 
-// TestArrangeTab_RejectsRemoteInstance: a remote session's tabs come from its
-// remote_hooks config, not from user edits, so neither verb applies — mirroring
-// CreateTab/CloseTab and the TUI's rules.
-func TestArrangeTab_RejectsRemoteInstance(t *testing.T) {
+// TestArrangeTab_OffBoxTurnsOnTheTabNotTheSession: #3062 admitted the first
+// user-managed tab on an off-box session, so rename and reorder no longer refuse
+// the SESSION — they turn on what the tab is.
+//
+// The axis, not a list: a web tab is METADATA-ONLY — a name and a URL, spawning no
+// process and binding no PTY — so renaming or reordering one touches nothing an
+// off-box session lacks. shell, process and vscode each need a local worktree or
+// tmux, which is why they stay refused and web does not.
+//
+// ArrangeTab and CloseTab admit exactly the SAME sessions, because both resolve
+// through tabMutationTarget and that is now the only session-level gate. They
+// differ only in their own per-verb rules — CloseTab refuses the agent tab, these
+// two do not need to, since renaming or moving it strands nothing. Recorded
+// because two verbs quietly disagreeing about one predicate is how the per-kind
+// gating drifted before.
+func TestArrangeTab_OffBoxTurnsOnTheTabNotTheSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
@@ -293,16 +307,31 @@ func TestArrangeTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, title)] = inst
 	manager.mu.Unlock()
 
+	// THE INVARIANT THE RELAXATION RESTS ON. tabMutationTarget no longer asks
+	// whether the backend manages tabs, and that is only safe while no PTY- or
+	// worktree-backed tab can EXIST off-box for these verbs to act on. Asserted here
+	// so a future change that admits one fails this rather than silently letting a
+	// rename reach a tmux that is not there.
+	caps := inst.Capabilities()
+	require.NoError(t, caps.RefuseTabKind(session.TabKindWeb, "https://example.com/app"),
+		"premise: an external web tab is admitted off-box (#3062)")
+	for _, kind := range []session.TabKind{session.TabKindShell, session.TabKindProcess, session.TabKindVSCode} {
+		require.Errorf(t, caps.RefuseTabKind(kind, ""),
+			"a PTY- or worktree-backed kind (%v) must still be refused off-box", kind)
+	}
+
+	// The session refusal is gone for both verbs; a missing tab is now a plain
+	// not-found. The rejection moved, it did not disappear.
 	if _, err := manager.RenameTab(RenameTabRequest{Title: title, RepoID: repo.ID, TabName: "shell", NewName: "editor"}); err == nil {
-		t.Fatal("expected a remote rejection for rename, got nil")
-	} else if !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("expected a remote-rejection error, got: %v", err)
+		t.Fatal("expected an error for a tab that is not there, got nil")
+	} else if strings.Contains(err.Error(), "fixed by its runtime") {
+		t.Fatalf("the blanket runtime refusal must be gone for rename, got: %v", err)
 	}
 
 	if _, _, err := manager.ReorderTab(ReorderTabRequest{Title: title, RepoID: repo.ID, TabName: "shell", NewIndex: 1}); err == nil {
-		t.Fatal("expected a remote rejection for reorder, got nil")
-	} else if !strings.Contains(err.Error(), "remote") {
-		t.Fatalf("expected a remote-rejection error, got: %v", err)
+		t.Fatal("expected an error for a tab that is not there, got nil")
+	} else if strings.Contains(err.Error(), "fixed by its runtime") {
+		t.Fatalf("the blanket runtime refusal must be gone for reorder, got: %v", err)
 	}
 }
 

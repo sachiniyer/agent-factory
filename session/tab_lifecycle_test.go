@@ -358,7 +358,9 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 // TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict pins the contract the web UI
 // consumes (#3060). The point is not the values — those are RefuseTabKind's and
 // will change as #3062/#3054 lift refusals — but that the projection IS
-// RefuseTabKind, so an affordance and the call behind it cannot drift.
+// RefuseTabKind, so an affordance and the call behind it cannot drift. Web uses
+// the representative external HTTPS target that answers the menu-level "can
+// this kind work at all?" question; submission re-asks with the actual URL.
 func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 	for _, workspace := range []WorkspaceKind{WorkspaceLocalWorktree, WorkspaceRemote} {
 		caps := Capabilities{Workspace: workspace}
@@ -371,8 +373,12 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 			kind, ok := ParseTabKindName(a.Kind)
 			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
 
-			// The assertion that matters:each entry equals what RefuseTabKind says now.
-			err := caps.RefuseTabKind(kind, "")
+			// The assertion that matters: each entry equals what RefuseTabKind says now.
+			target := ""
+			if kind == TabKindWeb {
+				target = tabKindAllowanceExternalWebTarget
+			}
+			err := caps.RefuseTabKind(kind, target)
 			require.Equalf(t, err == nil, a.Allowed, "kind %q disagrees with RefuseTabKind", a.Kind)
 			if err != nil {
 				require.Equalf(t, err.Error(), a.Reason,
@@ -446,4 +452,193 @@ func TestTabRosterMutable_FalseSurvivesSerialization(t *testing.T) {
 	absent, err := json.Marshal(InstanceData{Title: "s"})
 	require.NoError(t, err)
 	require.NotContains(t, string(absent), "tab_roster_mutable")
+}
+
+// TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab is #3062's restore half,
+// and it pins BOTH halves of what went wrong the first time this was attempted.
+//
+//   - The web tab must come back at all: dropping it made off-box admission
+//     non-durable, since the tab vanished at the next daemon restart with nothing
+//     erroring.
+//   - It must come back BEHIND the agent tab. remoteAgentBackend.Launch seeds an
+//     agent tab only when the roster is empty, so restoring into Tabs at load time
+//     stopped it seeding and left a web tab at index 0 — the slot that is
+//     unclosable and that the PTY stream targets, so every consumer would read it
+//     as the agent.
+//
+// The drain is exercised directly rather than through Launch: a restored sandbox
+// row loads an INERT backend whose Launch refuses ("not provisioned"), because the
+// live runtime is re-provisioned on restore rather than reconstructed here. Launch
+// is the caller; this pins what it calls.
+func TestSandboxRestore_KeepsMetadataTabsBehindTheAgentTab(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+			// A PTY tab's workspace did not survive; it stays dropped, or the roster
+			// gains an entry every later operation fails on.
+			{ID: "t2", Name: "shell", Kind: TabKindShell, TmuxName: "af_x__shell"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	// Staged, NOT written into Tabs: that is what preserves the agent's slot.
+	require.Empty(t, instance.Tabs, "restored metadata tabs must not occupy the roster before the agent tab exists")
+	require.Len(t, instance.pendingMetadataTabs, 1, "only the metadata-only tab is staged")
+	require.Equal(t, "docs", instance.pendingMetadataTabs[0].Name)
+
+	// What Launch does: seed the agent tab, then drain.
+	instance.Tabs = []*Tab{newRemoteAgentTab()}
+	instance.appendPendingMetadataTabsLocked()
+
+	require.Len(t, instance.Tabs, 2)
+	require.Equal(t, TabKindAgent, instance.Tabs[0].Kind,
+		"index 0 must be the AGENT tab — it is unclosable and the PTY stream targets it")
+	web := instance.Tabs[1]
+	require.Equal(t, TabKindWeb, web.Kind, "the web tab must survive the restart — it needs no worktree")
+	require.Equal(t, "https://example.com/app", web.URL, "and its target with it, or the tab is empty")
+	require.NotEmpty(t, web.ID, "restored tabs stay addressable by a stable id")
+
+	// One-shot: a retried launch must not append the same tab twice.
+	instance.appendPendingMetadataTabsLocked()
+	require.Len(t, instance.Tabs, 2, "a retried launch must not duplicate the restored tab")
+}
+
+// A sandbox recovery that fails BEFORE Launch leaves restored rows staged and
+// undrained. Both failure paths then persist whatever ToInstanceData returned, so
+// serializing only i.Tabs would write an empty roster and lose the tab permanently
+// — destroying the durability this restore exists to provide (#3062).
+func TestToInstanceData_PersistsStagedTabsWhenRecoveryFailsBeforeLaunch(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Empty(t, instance.Tabs, "premise: nothing is drained yet — this is the pre-Launch state")
+	require.Len(t, instance.pendingMetadataTabs, 1)
+
+	// What the failure paths persist.
+	round := instance.ToInstanceData()
+
+	// In PendingTabs, NOT Tabs: Tabs reserves index 0 for the agent, and a failed
+	// recovery leaves it empty, so a staged row emitted there would take that slot.
+	var web *TabData
+	for i := range round.PendingTabs {
+		if round.PendingTabs[i].Kind == TabKindWeb {
+			web = &round.PendingTabs[i]
+		}
+	}
+	require.NotNil(t, web, "a staged tab must survive a recovery that failed before Launch")
+	require.Equal(t, "https://example.com/app", web.URL, "with its target, or it comes back empty")
+	require.Equal(t, "t1", web.ID, "and its stable id, so it is the same tab and not a new one")
+}
+
+// A browser canonicalises legacy IPv4 forms before choosing the proxy path.
+// Loopback forms must be refused, but the parser must not classify valid DNS
+// names or numeric forms of external addresses as loopback (#3062).
+func TestRefuseTabKind_RejectsBrowserCanonicalLoopbackShorthands(t *testing.T) {
+	remote := Capabilities{Workspace: WorkspaceRemote}
+	for _, target := range []string{
+		"http://127.1:3000",
+		"http://2130706433:3000",
+		"http://0x7f000001:3000",
+		"http://0177.1:3000",
+		"http://127.0.0.1.:3000",
+	} {
+		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, target),
+			"%s is loopback to a browser and must not be admitted off-box", target)
+	}
+	for _, target := range []string{
+		"https://example.com/app",
+		"https://a1.de/app",
+		"https://dead.beef/app",
+		"https://134744072/app",  // browser-canonical 8.8.8.8
+		"https://0x08080808/app", // browser-canonical 8.8.8.8
+	} {
+		require.NoError(t, remote.RefuseTabKind(TabKindWeb, target),
+			"%s is external to a browser and must remain admissible off-box", target)
+	}
+}
+
+// The URL Standard maps these three domain separators to an ASCII dot before
+// browser navigation. Admission must make the same host canonicalization so a
+// loopback tab cannot be persisted as an apparently external, unusable target.
+func TestRefuseTabKind_RejectsBrowserUnicodeDotLoopback(t *testing.T) {
+	remote := Capabilities{Workspace: WorkspaceRemote}
+	for _, target := range []string{
+		"http://127。0。0。1:3000",
+		"http://127．0．0．1:3000",
+		"http://127｡0｡0｡1:3000",
+		"http://ｌｏｃａｌｈｏｓｔ:3000",
+	} {
+		normalized, err := NormalizeWebTabURL(target)
+		require.NoError(t, err)
+		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, normalized),
+			"%s is browser-canonical loopback and must not be admitted off-box", target)
+	}
+}
+
+// Staged rows are persisted OUTSIDE the ordered Tabs list. A recovery that fails
+// before Launch leaves Tabs empty, so emitting a staged web tab there would put it
+// in the agent's index-0 slot — clients would render it as the unclosable agent,
+// and daemon mutations would report it missing (#3062).
+func TestToInstanceData_StagedRowsNeverOccupyTheAgentSlot(t *testing.T) {
+	data := InstanceData{
+		Title:       "off-box",
+		BackendType: "ssh",
+		Tabs: []TabData{
+			{ID: "t0", Name: "agent", Kind: TabKindAgent},
+			{ID: "t1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/app"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.Empty(t, instance.Tabs, "premise: the pre-Launch state, nothing drained")
+
+	round := instance.ToInstanceData()
+	require.Empty(t, round.Tabs, "no row may occupy the agent slot while the roster is empty")
+	require.Len(t, round.PendingTabs, 1, "but the staged row is still persisted, or it is lost")
+	require.Equal(t, "https://example.com/app", round.PendingTabs[0].URL)
+
+	// And it survives a reload without being double-staged.
+	again, err := FromInstanceData(round)
+	require.NoError(t, err)
+	require.Len(t, again.pendingMetadataTabs, 1, "restaging must not duplicate the row")
+}
+
+// An archived off-box session is inert, but its metadata-only web tabs are still
+// useful restore placeholders in snapshots. The storage representation must keep
+// those rows out of ordered Tabs: after a failed pre-Launch restore, folding a
+// pending web row into Tabs would put it in the agent's index-0 slot.
+func TestToInstanceData_ArchivedRemoteProjectsMetadataTabsWithoutPersistingThemInRoster(t *testing.T) {
+	data := InstanceData{
+		Title:       "archived-off-box",
+		BackendType: "ssh",
+		Status:      Archived,
+		Liveness:    LiveArchived,
+		Tabs: []TabData{
+			{ID: "agent-id", Name: "agent", Kind: TabKindAgent},
+			{ID: "web-id", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/docs"},
+		},
+	}
+	instance, err := FromInstanceData(data)
+	require.NoError(t, err)
+
+	projection := instance.ToInstanceData()
+	require.Len(t, projection.Tabs, 2, "archived snapshots must retain the inert web placeholder")
+	require.Equal(t, TabKindAgent, projection.Tabs[0].Kind, "the synthetic agent row keeps the ordering contract")
+	require.Equal(t, "web-id", projection.Tabs[1].ID)
+	require.Equal(t, "https://example.com/docs", projection.Tabs[1].URL)
+
+	stored := projection.ForStorage()
+	require.Empty(t, stored.Tabs,
+		"the snapshot-only roster must not fold staged rows back into ordered durable Tabs")
 }

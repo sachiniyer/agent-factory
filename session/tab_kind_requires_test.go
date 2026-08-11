@@ -71,27 +71,57 @@ func TestRefuseTabKindGivesEachKindItsOwnReason(t *testing.T) {
 // daemon-host routing gap for an external URL states a requirement that tab does
 // not have — the same defect one level down. Both targets are refused, for
 // different and individually true reasons.
-func TestWebRefusalNamesOnlyTheBlockersThatApply(t *testing.T) {
+func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
 	loopback := remoteCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000")
 	external := remoteCaps().RefuseTabKind(TabKindWeb, "https://example.com")
-	require.Error(t, loopback)
-	require.Error(t, external, "an off-box web tab is still not restored across a restart, whatever it points at")
+
+	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
+	require.NoError(t, external,
+		"an external HTTPS URL is directly frameable and survives a restart, so neither blocker applies")
 
 	assert.Contains(t, strings.ToLower(loopback.Error()), "proxied",
-		"a loopback target IS reverse-proxied from the daemon host; the refusal must say so")
-	assert.NotContains(t, strings.ToLower(external.Error()), "proxied",
-		"an external URL is iframed directly and never proxied; claiming otherwise is the #3053 defect recreated")
-
-	// The blocker they DO share is the one that is unconditionally true.
-	for name, err := range map[string]error{"loopback": loopback, "external": external} {
-		assert.Contains(t, strings.ToLower(err.Error()), "restored",
-			"%s refusal must name the restore gap, which applies to every off-box web tab", name)
-		assert.Contains(t, err.Error(), "3062", "%s refusal must point at the work that lifts it", name)
-	}
+		"the surviving refusal must name the routing gap, which is what is actually true of it")
+	assert.Contains(t, loopback.Error(), "3062", "and point at the work that lifts it")
+	assert.NotContains(t, strings.ToLower(loopback.Error()), "restored",
+		"the restore gap is closed; citing it would state a requirement this tab no longer has")
 
 	// A local session takes neither branch.
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000"))
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "https://example.com"))
+}
+
+func TestRefuseTabKind_OffBoxExternalWebTabsRequireHTTPS(t *testing.T) {
+	remote := remoteCaps()
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"),
+		"an HTTPS external target is directly frameable off-box")
+	err := remote.RefuseTabKind(TabKindWeb, "http://example.com/app")
+	require.Error(t, err, "an HTTP external target becomes active mixed content under an HTTPS web UI")
+	assert.Contains(t, strings.ToLower(err.Error()), "https")
+	assert.Contains(t, strings.ToLower(err.Error()), "mixed content")
+
+	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://example.com/app"),
+		"the mixed-content restriction is only for a directly framed off-box target")
+}
+
+// An unspecified address names every interface on the machine interpreting it,
+// not the sandbox that supplied the tab metadata. An off-box iframe would either
+// reach the viewer's machine or fail before showing the remote service, so this is
+// local-only even though it is not classified as loopback by net.IP.IsLoopback.
+func TestRefuseTabKind_OffBoxRejectsUnspecifiedWebTargets(t *testing.T) {
+	remote := remoteCaps()
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"),
+		"premise: an ordinary external HTTPS metadata tab is admissible off-box")
+	for _, raw := range []string{
+		"https://0.0.0.0:3000/app",
+		"https://0:3000/app",
+		"https://[::]:3000/app",
+	} {
+		target, err := NormalizeWebTabURL(raw)
+		require.NoErrorf(t, err, "NormalizeWebTabURL(%q)", raw)
+		err = remote.RefuseTabKind(TabKindWeb, target)
+		require.Errorf(t, err, "%s must not be admitted as an off-box external target", raw)
+		assert.Contains(t, strings.ToLower(err.Error()), "unspecified")
+	}
 }
 
 // TestRefuseTabKindNamesTheUnmetRequirement is the other half of #3053: a

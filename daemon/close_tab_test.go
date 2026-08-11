@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -406,11 +408,33 @@ func TestCloseTab_RejectsRemoteInstance(t *testing.T) {
 	manager.instances[daemonInstanceKey(repo.ID, "rem")] = inst
 	manager.mu.Unlock()
 
-	// The session-level gate stands: no user-managed tab can exist on an off-box
-	// session yet, because RefuseTabKind admits none of the four kinds there
-	// (#3053 classified them; #3062 is what would admit the first one).
+	// #3062 admitted the first such tab, so the blanket session gate is gone and
+	// this verb now turns on WHAT THE TAB IS.
+	//
+	// The axis, not a list: a web tab is METADATA-ONLY — a name and a URL, spawning
+	// no process and binding no PTY — so nothing about closing one needs the local
+	// worktree or tmux an off-box session does not have. shell, process and vscode
+	// each need one or the other, which is why they are refused here and web is not.
+	caps := inst.Capabilities()
+	require.NoError(t, caps.RefuseTabKind(session.TabKindWeb, "https://example.com/app"),
+		"premise: an external web tab is admitted off-box (#3062), which is why this verb must serve it")
+
+	// THE INVARIANT THE RELAXATION RESTS ON, asserted here so it cannot lapse
+	// silently. tabMutationTarget no longer asks whether the backend manages tabs;
+	// that is only safe while no PTY-backed tab can EXIST off-box to be mutated. If
+	// a future change admits one, this fails rather than letting a close reach a
+	// tmux that is not there.
+	for _, kind := range []session.TabKind{session.TabKindShell, session.TabKindProcess, session.TabKindVSCode} {
+		require.Errorf(t, caps.RefuseTabKind(kind, ""),
+			"a PTY- or worktree-backed kind (%v) must still be refused off-box; the mutation gate was dropped on that basis", kind)
+	}
+
+	// A tab that does not exist is still a plain not-found, not a capability
+	// refusal: the rejection moved, it did not disappear.
 	_, err = manager.CloseTab(CloseTabRequest{Title: "rem", RepoID: repo.ID, TabName: "shell"})
-	assertTabRejection(t, err, "fixed by its runtime")
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "fixed by its runtime",
+		"the blanket runtime refusal is gone; what remains is that no such tab is there")
 }
 
 func closeBlockingTabExec(alive map[string]bool, blockedKillName string, killStarted chan<- struct{}, releaseKill <-chan struct{}) (cmd_test.MockCmdExec, func(string) bool) {

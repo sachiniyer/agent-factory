@@ -3,8 +3,20 @@ package session
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"golang.org/x/net/idna"
+)
+
+var browserHostIDNA = idna.New(
+	idna.MapForLookup(),
+	idna.Transitional(false),
+	idna.StrictDomainName(false),
+	idna.CheckHyphens(false),
+	idna.BidiRule(),
 )
 
 // NormalizeWebTabURL validates and normalizes a web-tab target into an absolute
@@ -37,7 +49,153 @@ func NormalizeWebTabURL(raw string) (string, error) {
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("web tab URL %q has no host", raw)
 	}
+	// Browsers apply nontransitional UTS #46 processing before deciding where to
+	// navigate. Persist the same ASCII hostname so width mappings, Unicode domain
+	// separators, and IDNs cannot make browser and daemon classifications disagree.
+	// Rebuild only the authority: mapping across raw would also change path/query
+	// data. IP literals already have their canonical URL syntax and are not IDNs.
+	host := u.Hostname()
+	var canonicalHost string
+	bracketedHost := strings.HasPrefix(u.Host, "[")
+	if bracketedHost {
+		// WHATWG URLs bracket only IPv6. Go also accepts IPvFuture-like names,
+		// bracketed IPv4, and scoped zone identifiers, none of which browsers accept.
+		if !strings.Contains(host, ":") {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: brackets require an IPv6 address", host)
+		}
+		address, addressErr := netip.ParseAddr(host)
+		if addressErr != nil || !address.Is6() || address.Zone() != "" {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects this IPv6 literal", host)
+		}
+		canonicalHost = address.String()
+		if address.Is4In6() {
+			raw := address.As16()
+			canonicalHost = fmt.Sprintf("::ffff:%x:%x",
+				uint16(raw[12])<<8|uint16(raw[13]), uint16(raw[14])<<8|uint16(raw[15]))
+		}
+	} else if strings.Contains(host, ":") {
+		return "", fmt.Errorf("invalid web tab URL hostname %q: IPv6 addresses must be bracketed", host)
+	} else if net.ParseIP(host) == nil {
+		canonicalHost, err = browserHostIDNA.ToASCII(host)
+		if err != nil {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
+		}
+		// x/net/idna can successfully encode a Unicode label into an ACE label
+		// that its own Punycode-validation path rejects when that ACE is supplied
+		// directly. Browsers reject the navigation in that case (for example a
+		// mixed-direction aℵb.com label), so make the canonical output traverse
+		// the decoder-backed path too before persisting it.
+		validatedHost, validateErr := browserHostIDNA.ToASCII(canonicalHost)
+		if validateErr != nil || validatedHost != canonicalHost {
+			if validateErr == nil {
+				validateErr = fmt.Errorf("canonical ACE host is not stable (%q)", validatedHost)
+			}
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects canonical host %q: %w",
+				host, canonicalHost, validateErr)
+		}
+		if err := validateBrowserDomainHost(canonicalHost); err != nil {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
+		}
+	} else {
+		canonicalHost = net.ParseIP(host).String()
+	}
+	// UTS #46 maps some compatibility characters away entirely. A hostname made
+	// only from ignored characters (for example a soft hyphen) therefore returns
+	// "" without an IDNA error. Never rebuild that as an authority-less URL:
+	// browsers reinterpret https:///path as a different host rather than the host
+	// the user submitted.
+	if canonicalHost == "" {
+		return "", fmt.Errorf("invalid web tab URL hostname %q: browser canonicalization removes the host", host)
+	}
+	// The URL Standard treats a domain ending in a number as a legacy IPv4
+	// candidate. A failed parse is not an ordinary DNS name: browsers reject the
+	// URL outright (for example 09 or 1.2.3.999). Canonicalize successful parses
+	// too, so the stored target is exactly the dotted host the browser will use.
+	if browserHostEndsInNumber(canonicalHost) {
+		address, ok := parseBrowserIPv4Address(canonicalHost)
+		if !ok {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects malformed numeric host", host)
+		}
+		canonicalHost = net.IPv4(
+			byte(address>>24), byte(address>>16), byte(address>>8), byte(address),
+		).String()
+	}
+	canonicalPort := u.Port()
+	if canonicalPort != "" {
+		portNumber, portErr := strconv.ParseUint(canonicalPort, 10, 16)
+		if portErr != nil {
+			return "", fmt.Errorf("invalid web tab URL port %q: must be between 0 and 65535", canonicalPort)
+		}
+		// A direct HTTP(S) frame is subject to Fetch's bad-port block before a
+		// request is sent. Loopback is the deliberate exception here: Agent
+		// Factory serves it through a same-origin reverse-proxy URL, so the browser
+		// never sees or blocks the target port itself.
+		if browserFetchBlocksPort(portNumber) && !isLoopbackHost(canonicalHost) {
+			return "", fmt.Errorf("invalid web tab URL port %d: browsers block HTTP(S) requests to this port", portNumber)
+		}
+		canonicalPort = strconv.FormatUint(portNumber, 10)
+		if (u.Scheme == "http" && canonicalPort == "80") ||
+			(u.Scheme == "https" && canonicalPort == "443") {
+			canonicalPort = ""
+		}
+	}
+
+	// Rebuild every authority, even when its bytes did not change. This removes an
+	// empty/default port and guarantees IPv6 is the only bracketed host form.
+	u.Host = canonicalHost
+	if strings.Contains(canonicalHost, ":") {
+		u.Host = "[" + canonicalHost + "]"
+	}
+	if canonicalPort != "" {
+		u.Host = net.JoinHostPort(canonicalHost, canonicalPort)
+	}
 	return u.String(), nil
+}
+
+// browserFetchBlocksPort mirrors Fetch's bad-port table for HTTP(S) requests.
+// Keep the values explicit: this is a browser interop boundary, not an OS
+// service-name lookup, and the standard's set is intentionally finite.
+func browserFetchBlocksPort(port uint64) bool {
+	switch port {
+	case 0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25,
+		37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103, 104,
+		109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143,
+		161, 179, 389, 427, 465, 512, 513, 514, 515, 526, 530, 531,
+		532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+		995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061,
+		6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080:
+		return true
+	default:
+		return false
+	}
+}
+
+// validateBrowserDomainHost applies the URL Standard checks that follow UTS #46
+// ToASCII processing. The IDNA profile intentionally disables strict DNS rules
+// for browser compatibility, so it can return empty labels or ASCII URL
+// delimiters without an error; both make the resulting special-URL host invalid.
+func validateBrowserDomainHost(host string) error {
+	rootless := strings.TrimSuffix(host, ".")
+	if rootless == "" {
+		return fmt.Errorf("browser canonicalization removes every domain label")
+	}
+	for _, label := range strings.Split(rootless, ".") {
+		if label == "" {
+			return fmt.Errorf("browser canonicalization produces an empty domain label")
+		}
+	}
+	for _, r := range host {
+		// WHATWG forbidden domain code points: every C0 control, DEL, and the
+		// URL delimiters that cannot occur in a special-URL domain.
+		if r <= 0x1f || r == 0x7f {
+			return fmt.Errorf("browser canonicalization produces forbidden domain code point U+%04X", r)
+		}
+		switch r {
+		case ' ', '#', '%', '/', ':', '<', '>', '?', '@', '[', '\\', ']', '^', '|':
+			return fmt.Errorf("browser canonicalization produces forbidden domain code point %q", r)
+		}
+	}
+	return nil
 }
 
 // WebTabURLForPort builds the loopback URL a `--port N` convenience flag targets.
@@ -71,7 +229,7 @@ func isLoopbackHost(host string) bool {
 	if host == "" {
 		return false
 	}
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {

@@ -101,8 +101,10 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 			webTab, webErr := newInst().AddWebTab("http://localhost:3000", "")
 			require.NoError(t, webErr,
 				"AddWebTab must serve a worktree-less sandbox instance: a web tab needs no worktree (#3053)")
-			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, ""),
-				"the capability layer must still refuse a web tab off-box until #3062 lands")
+			require.NoError(t, b.Capabilities().RefuseTabKind(TabKindWeb, "https://example.com/app"),
+				"an external HTTPS web tab is served off-box: nothing proxies it and it survives a restart (#3062)")
+			require.Error(t, b.Capabilities().RefuseTabKind(TabKindWeb, "http://localhost:3000"),
+				"a loopback target still needs a relay through the agent-server (#3062)")
 			require.NotNil(t, webTab)
 			assert.Equal(t, TabKindWeb, webTab.Kind)
 			assert.Nil(t, webTab.tmux, "a web tab must hold no tmux session")
@@ -125,6 +127,27 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 				"the process refusal must name the spawn it cannot do")
 		})
 	}
+}
+
+// A restore failure before remote Launch leaves started=true so the Lost retry
+// loop can run, but the roster is still empty and PendingTabs are still staged.
+// Web is metadata-only, yet it must not occupy slot 0 before Launch seeds the
+// agent tab: that slot is unclosable and is the PTY stream's target.
+func TestAddWebTab_RejectsFailedRestoreBeforeAgentTab(t *testing.T) {
+	inst, err := FromInstanceData(InstanceData{
+		Title: "failed-restore", BackendType: "ssh", Status: Archived,
+		PendingTabs: []TabData{{ID: "web-old", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/docs"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(BeginRestore()))
+	require.NoError(t, inst.Transition(AbortRestoreToLost()))
+	require.True(t, inst.Started(), "Lost restore retries require started=true")
+	require.Empty(t, inst.GetTabs(), "remote Launch has not seeded the agent tab")
+
+	_, err = inst.AddWebTab("https://example.com/new", "new")
+	require.Error(t, err, "a metadata tab must not take the reserved agent slot")
+	assert.Contains(t, strings.ToLower(err.Error()), "agent tab")
+	require.Empty(t, inst.GetTabs(), "a refused create must leave slot 0 empty for remote Launch")
 }
 
 // TestSandboxTabSpawnErrorIsNotMisleading covers the copy half of #1874. The old

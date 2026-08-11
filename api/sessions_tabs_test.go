@@ -98,6 +98,34 @@ func TestSessionsTabsAliasesRegistered(t *testing.T) {
 	}
 }
 
+// Remote sessions can now admit metadata-only external HTTPS web tabs, and the
+// daemon accepts close/rename/reorder for those rows. Command help must describe
+// that narrow boundary instead of preserving the old all-remote refusal.
+func TestSessionsTabHelpExplainsRemoteMetadataOnlyBoundary(t *testing.T) {
+	createHelp := sessionsTabCreateCmd.Long
+	for _, want := range []string{"remote sessions", "external HTTPS", "no PTY", "no process"} {
+		if !strings.Contains(createHelp, want) {
+			t.Errorf("tab-create help is missing %q:\n%s", want, createHelp)
+		}
+	}
+	if strings.Contains(createHelp, "Not available for remote sessions") {
+		t.Errorf("tab-create help still claims the admitted remote web flow is unavailable:\n%s", createHelp)
+	}
+
+	for name, help := range map[string]string{
+		"tab-delete":  sessionsTabDeleteCmd.Long,
+		"tab-rename":  sessionsTabRenameCmd.Long,
+		"tab-reorder": sessionsTabReorderCmd.Long,
+	} {
+		if !strings.Contains(help, "remote sessions") || !strings.Contains(help, "metadata-only web tabs") {
+			t.Errorf("%s help does not name the admitted remote roster boundary:\n%s", name, help)
+		}
+		if strings.Contains(help, "tabs are fixed") || strings.Contains(help, "Not available for remote sessions") {
+			t.Errorf("%s help still claims every remote roster is fixed:\n%s", name, help)
+		}
+	}
+}
+
 func setTabCreateFlagsForTest(t *testing.T, command, name, kind, url string, port int) {
 	t.Helper()
 	previousCommand, previousName, previousKind := tabCreateCommandFlag, tabCreateNameFlag, tabCreateKindFlag

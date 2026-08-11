@@ -557,6 +557,21 @@ func TestAfUsageReference_CoversFullSurface(t *testing.T) {
 	}
 }
 
+func TestAfUsageReference_NamesTheRemoteTabBoundaryPerKind(t *testing.T) {
+	if strings.Contains(afUsageReference, "not for remote sessions") {
+		t.Fatal("af usage still forbids every tab remotely after external web tabs became admissible")
+	}
+	for _, want := range []string{
+		"Shell, process, and VS Code tabs require a local session",
+		"external HTTPS web tabs work on remote sessions",
+		"loopback web targets still require a local session",
+	} {
+		if !strings.Contains(afUsageReference, want) {
+			t.Errorf("af usage must name the per-kind remote tab boundary with %q", want)
+		}
+	}
+}
+
 // TestAfUsageReference_ProgramEnumMatchesSupportedPrograms pins the hardcoded
 // --program enum in the usage text to tmux.SupportedPrograms. Every other
 // --program surface (CLI validation, the config manifest, the web picker)

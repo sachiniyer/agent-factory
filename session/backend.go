@@ -3,6 +3,10 @@ package session
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
+	"strings"
 )
 
 // WorkspaceKind describes where a backend's workspace physically lives, so
@@ -86,16 +90,47 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		if c.Workspace == WorkspaceLocalWorktree {
 			return nil
 		}
-		// True of every off-box web tab: the sandbox branch of FromInstanceData
-		// rebuilds an inert backend with an empty roster, so the persisted row
-		// does not come back.
-		const notRestored = "a persisted web tab is not restored on the sandbox recovery path"
+		// Per-TARGET, because the two blockers were never one blocker (#3062).
+		//
+		// A LOOPBACK target is still refused. webtab_proxy.go returns a webTabTarget
+		// with no transport for TabKindWeb, so the daemon proxies it over its OWN TCP
+		// stack: `--port 3000` resolves on the daemon host rather than in the
+		// workspace, and can surface an unrelated daemon-local service inside the
+		// session's tab. Lifting this needs a relay through the agent-server — its
+		// own endpoint, not the per-tab PTY frame stream, whose lifetime is a
+		// terminal subscription and which a large web response would head-of-line
+		// block.
 		if IsLoopbackWebTarget(target) {
-			// Additionally true only here: loopback targets are the ones the
-			// daemon reverse-proxies, and it proxies them from its OWN host.
-			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, and %s — see #3062", target, notRestored)
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace, so it would serve the daemon's own %s — see #3062", target, target)
 		}
-		return fmt.Errorf("this session cannot open a web tab yet: %s, so it would disappear at the next daemon restart — see #3062", notRestored)
+		// A host a BROWSER would canonicalise to loopback is refused too, even where
+		// Go does not read it as one. net.ParseIP rejects the shorthands 127.1 and
+		// 2130706433, so IsLoopbackWebTarget calls them external — but a browser
+		// resolves both to 127.0.0.1, picks the proxy path, and the proxy then
+		// refuses them by that same Go predicate. Admitting one would create a tab
+		// that is durable and permanently unusable, which is worse than refusing it.
+		if webTargetHostIsBrowserLoopbackShorthand(target) {
+			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a browser resolves that host to loopback, and a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace — see #3062", target)
+		}
+		// An unspecified IP names the machine interpreting the address, not the
+		// sandbox that supplied the metadata. Framing it directly would either hit
+		// the viewer's own machine or fail as an invalid destination; it can never
+		// identify the intended off-box service.
+		if webTargetHostIsUnspecified(target) {
+			return fmt.Errorf("this session cannot open a web tab pointing at %s: an unspecified address does not identify the off-box workspace; use an externally reachable HTTPS hostname or IP", target)
+		}
+		// An external target is framed directly. Require HTTPS because the documented
+		// reverse-proxy deployment serves the Agent Factory UI over HTTPS, where a
+		// browser blocks an HTTP iframe as active mixed content before any redirect
+		// can upgrade it. Loopback targets took the proxy refusal above instead.
+		parsedTarget, err := url.Parse(target)
+		if err != nil || !strings.EqualFold(parsedTarget.Scheme, "https") {
+			return fmt.Errorf("this session cannot open an external HTTP web tab: off-box external targets are framed directly, and an HTTPS Agent Factory UI blocks HTTP frames as active mixed content; use an HTTPS URL")
+		}
+		// An external HTTPS URL never touches the proxy, so the routing gap above is
+		// not a requirement it has; and FromInstanceData stages metadata-only tabs
+		// across a sandbox restart, so it no longer disappears after a restart.
+		return nil
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {
 			// Names the missing EDITOR, not the missing worktree path. The path is
@@ -292,4 +327,118 @@ type AgentSwapPlan struct {
 // capture API, but cannot retarget it after the outgoing runtime is stopped.
 func (p AgentSwapPlan) ConversationCapture() ConversationCaptureSnapshot {
 	return p.conversationCapture
+}
+
+// webTargetHostIsBrowserLoopbackShorthand reports whether a browser parses a
+// non-canonical host as a legacy IPv4 address in 127/8. Go's net.ParseIP does
+// not accept these forms, but the browser canonicalises them before deciding
+// whether the web tab uses the daemon proxy (#3062).
+func webTargetHostIsBrowserLoopbackShorthand(target string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed == nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host == "" || net.ParseIP(host) != nil {
+		return false // a real IP literal; IsLoopbackWebTarget already classified it
+	}
+	address, ok := parseBrowserIPv4Address(host)
+	const (
+		loopbackStart = uint64(127) << 24
+		loopbackEnd   = uint64(128) << 24
+	)
+	return ok && address >= loopbackStart && address < loopbackEnd
+}
+
+// webTargetHostIsUnspecified reports whether target's host is the IPv4 or IPv6
+// unspecified address. This is deliberately separate from IsLoopbackWebTarget:
+// only the off-box admission boundary rejects it, without changing the daemon
+// proxy's established loopback-only trust boundary for local sessions.
+func webTargetHostIsUnspecified(target string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed == nil {
+		return false
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	return ip != nil && ip.IsUnspecified()
+}
+
+// parseBrowserIPv4Address implements the URL-standard legacy IPv4 grammar:
+// one to four decimal, octal, or 0x-prefixed components, with the final
+// component filling the remaining bytes. It returns false for ordinary DNS
+// names even when every letter happens to be a hexadecimal digit.
+func parseBrowserIPv4Address(host string) (uint64, bool) {
+	parts := strings.Split(host, ".")
+	if len(parts) > 0 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 || len(parts) > 4 {
+		return 0, false
+	}
+
+	numbers := make([]uint64, len(parts))
+	for idx, part := range parts {
+		number, ok := parseBrowserIPv4Number(part)
+		if !ok || (idx < len(parts)-1 && number > 255) {
+			return 0, false
+		}
+		numbers[idx] = number
+	}
+	lastLimit := uint64(1) << uint(8*(5-len(parts)))
+	if numbers[len(numbers)-1] >= lastLimit {
+		return 0, false
+	}
+
+	address := numbers[len(numbers)-1]
+	for idx := 0; idx < len(numbers)-1; idx++ {
+		address += numbers[idx] << uint(8*(3-idx))
+	}
+	return address, true
+}
+
+// browserHostEndsInNumber implements the URL Standard discriminator between an
+// ordinary domain and a legacy IPv4 candidate. An all-decimal final component
+// counts even when its octal interpretation is invalid (for example 09); that
+// distinction is what makes the browser reject it instead of doing a DNS lookup.
+func browserHostEndsInNumber(host string) bool {
+	parts := strings.Split(host, ".")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return false
+	}
+	last := parts[len(parts)-1]
+	allDecimal := true
+	for _, r := range last {
+		if r < '0' || r > '9' {
+			allDecimal = false
+			break
+		}
+	}
+	if allDecimal {
+		return true
+	}
+	_, ok := parseBrowserIPv4Number(last)
+	return ok
+}
+
+func parseBrowserIPv4Number(input string) (uint64, bool) {
+	if input == "" {
+		return 0, false
+	}
+	base := 10
+	digits := input
+	if len(input) >= 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X') {
+		base = 16
+		digits = input[2:]
+	} else if len(input) >= 2 && input[0] == '0' {
+		base = 8
+		digits = input[1:]
+	}
+	if digits == "" {
+		return 0, true
+	}
+	number, err := strconv.ParseUint(digits, base, 64)
+	return number, err == nil
 }

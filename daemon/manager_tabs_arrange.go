@@ -94,9 +94,19 @@ func (m *Manager) tabMutationTarget(reqID, reqTitle, reqRepoID string, labels ta
 	// to read, and a web tab cannot be SERVED off-box yet (#3062). Relaxing this
 	// belongs with the change that admits the first such tab, not before it:
 	// until then it would be a path nothing can reach.
-	if !instance.Capabilities().TabManagement {
-		return nil, "", "", nil, fmt.Errorf("cannot %s on session %q: its tab list is fixed by its runtime, not user-managed — this session's workspace runs off-box (docker/ssh/remote)", labels.action, title)
-	}
+	// No blanket refusal any more, and the reason it is safe to drop is a property
+	// of what such a roster can CONTAIN rather than a new per-tab check here.
+	//
+	// On a backend without TabManagement, Capabilities.RefuseTabKind admits exactly
+	// one kind — an external-target web tab, which spawns nothing and reads nothing
+	// (#3062) — and refuses shell, process and vscode outright. So the roster can
+	// only ever hold the agent tab plus metadata-only tabs, and there is no
+	// process-or-worktree mutation for this gate to prevent. Keeping the refusal
+	// would instead strand the tabs the same release just started admitting: created
+	// by an agent or the CLI, visible in the bar, and impossible to close.
+	//
+	// The agent tab stays protected by CloseTab's own check, which is where that
+	// belongs — it is true of every backend, not just this one.
 	// Fast path only: reject an already-archived session without making the caller
 	// wait on the op-lock. The authoritative check is the post-lock one below.
 	if instance.IsArchived() {

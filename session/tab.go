@@ -513,14 +513,14 @@ func defaultShell() string {
 // control that has no call behind it.
 //
 // It answers the MENU-level question — may this session gain a tab of this kind at
-// all — and passes an empty target for that reason. A web tab's refusal can be
-// sharper once a URL is known (RefuseTabKind names the daemon-host proxy gap only
-// for a loopback target), but no target exists at the moment a client decides
-// whether to OFFER the kind. Both of that kind's branches refuse off-box and
-// neither refuses on a local worktree, so the menu-level verdict is the same
-// either way; only the wording of a refusal a user has not yet triggered differs.
-// The call itself still re-asks with the real target, so nothing is decided here
-// that the create path does not check again.
+// all. For web, that means whether ANY target is admissible, so the projection
+// asks about a reserved external HTTPS origin. No user target exists when the
+// client decides whether to offer the kind, and passing "" would accidentally
+// ask the sharper submit-time question "is this external URL HTTPS?". The create
+// path still re-asks with the real target and can refuse HTTP, loopback, or an
+// invalid authority without hiding the entire web-tab affordance.
+const tabKindAllowanceExternalWebTarget = "https://example.invalid"
+
 func tabKindAllowances(c Capabilities) []TabKindAllowance {
 	// Every Kind here must be SUBMIT-READY: a value a client can put straight into
 	// CreateTabRequest.Kind. That rules out "process", which has no --kind spelling
@@ -540,11 +540,41 @@ func tabKindAllowances(c Capabilities) []TabKindAllowance {
 			continue
 		}
 		allowance := TabKindAllowance{Kind: name, Allowed: true}
-		if err := c.RefuseTabKind(kind, ""); err != nil {
+		target := ""
+		if kind == TabKindWeb {
+			target = tabKindAllowanceExternalWebTarget
+		}
+		if err := c.RefuseTabKind(kind, target); err != nil {
 			allowance.Allowed = false
 			allowance.Reason = err.Error()
 		}
 		out = append(out, allowance)
 	}
 	return out
+}
+
+// appendPendingMetadataTabsLocked drains tabs staged by a sandbox restore onto the
+// roster, AFTER the backend has seeded the agent tab.
+//
+// The staging exists for that ordering. remoteAgentBackend.Launch seeds an agent
+// tab only when the roster is EMPTY, so writing restored tabs into Tabs at load
+// time stops it seeding and leaves a web tab at index 0 — the slot that is
+// unclosable and that the PTY stream targets, so every consumer would read it as
+// the agent. Restoring into a staging field and draining here keeps the agent
+// first without either side needing to know about the other's ordering (#3062).
+//
+// One-shot: a retried launch of the same object must not append twice.
+// Caller holds i.mu.
+func (i *Instance) appendPendingMetadataTabsLocked() {
+	pending := i.pendingMetadataTabs
+	i.pendingMetadataTabs = nil
+	for _, td := range pending {
+		id := td.ID
+		if id == "" {
+			// Rollforward, as restoreLocalTabs does: a row persisted before #1738 has
+			// no id and must be addressable by a stable one from this load forward.
+			id = newTabID()
+		}
+		i.Tabs = append(i.Tabs, &Tab{ID: id, Name: td.Name, Kind: tabKindForData(td.Kind), URL: td.URL})
+	}
 }
