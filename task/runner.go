@@ -50,12 +50,13 @@ var (
 	// supplies the strictness that excludes banners, loading panes, and stale
 	// fragments.
 	ampPromptFrameTop = regexp.MustCompile(`^\s*╭─`)
-	// ampPromptFrameBottom matches the bottom rule of the same frame, which carries
-	// the repo/branch, e.g. "╰──── repo (branch) ────╯". Requiring BOTH the anchored
-	// top and the closing bottom confirms the input box fully rendered and is
-	// accepting input — it excludes amp's blank loading pane and its "Welcome to
-	// Amp" banner, neither of which draws the box (the reason the match is strict).
-	ampPromptFrameBottom = regexp.MustCompile(`╰[─ ].*[─ ]╯`)
+	// ampPromptFrameBottom matches the standalone bottom rule of the same frame,
+	// which carries the repo/branch, e.g. "╰──── repo (branch) ────╯". Anchoring
+	// it keeps identical glyphs in a user-authored interior row from closing the
+	// frame. Requiring BOTH anchored borders confirms the input box fully rendered
+	// and is accepting input — it excludes amp's blank loading pane and its
+	// "Welcome to Amp" banner, neither of which draws the box.
+	ampPromptFrameBottom = regexp.MustCompile(`^\s*╰[─ ].*[─ ]╯`)
 	// ampWorkingIndicator matches the status segment amp draws into the LEFT end
 	// of its prompt frame's bottom rule while a turn is in flight — a spinner
 	// glyph plus a verb, e.g. "╰ ∼ Streaming ────…" or "╰ ∼ Thinking ────…". An
