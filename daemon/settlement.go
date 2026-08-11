@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -40,17 +41,16 @@ type settleOwedEntry struct {
 // write lands. It announces like every other committed change (#2782) — memory
 // has already moved, whether or not disk agreed yet.
 func (m *Manager) persistSettlement(repoID, key string, instance *session.Instance) error {
-	// persistAndPublishInstanceErr goes through startLockForRepo, which takes m.mu
-	// — the #2106 lock contract, so the bookkeeping below happens after it returns.
-	err := m.persistAndPublishInstanceErr(repoID, instance)
-	owedKey := stableSessionKey(repoID, instance)
-	m.mu.Lock()
-	if err != nil {
-		m.settleOwed[owedKey] = settleOwedEntry{repoID: repoID, key: key, instance: instance}
-	} else {
-		delete(m.settleOwed, owedKey)
-	}
-	m.mu.Unlock()
+	// Bookkeeping belongs to the SAME repo-ordered critical section as the write.
+	// If it happened after unlock, an older successful checkpoint could resume
+	// late and erase the retry obligation from a newer failed settlement.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := instance.ToInstanceData()
+	err := persistInstanceData(repoID, data)
+	m.publishEvent(agentproto.EventSessionUpdated, data)
+	m.recordSettlementWrite(repoID, key, instance, err)
+	repoStartLock.Unlock()
 	if err != nil {
 		return fmt.Errorf(
 			"the settled state for %q could not be written to disk "+
@@ -58,6 +58,48 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 			instance.Title, err)
 	}
 	return nil
+}
+
+// prepareRuntimeReplacement durably retires facts owned by the predecessor at
+// the replacement's ConfirmLive boundary. Production Recover and Respawn
+// implementations confirm the fresh runtime live before returning, so clearing
+// and persisting only after they return leaves a crash window: restart sees the
+// new process, classifies it as a reattach, and reloads predecessor evidence.
+//
+// The ordinary post-operation noteRuntimeReplaced call remains necessary. A
+// slow remote replacement can accumulate fresh transport observations after
+// this boundary reset and before it returns; the post-success reset retires
+// those in-memory observations, while this settlement makes the fence safe.
+func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *session.Instance) error {
+	m.noteRuntimeReplaced(repoID, instance)
+	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {
+	if err := m.persistSettlement(repoID, daemonInstanceKey(repoID, title), instance); err != nil {
+		log.WarningLog.Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
+	}
+}
+
+// recordSettlementWrite keeps a failed whole-row write eligible for poll retry,
+// or retires an older obligation when a later whole-row write subsumes it. Every
+// production caller invokes it before releasing the repo start lock that ordered
+// the corresponding write, so completion scheduling cannot invert those facts.
+func (m *Manager) recordSettlementWrite(repoID, key string, instance *session.Instance, err error) {
+	owedKey := stableSessionKey(repoID, instance)
+	m.mu.Lock()
+	if err != nil {
+		if m.settleOwed == nil {
+			m.settleOwed = make(map[string]settleOwedEntry)
+		}
+		m.settleOwed[owedKey] = settleOwedEntry{repoID: repoID, key: key, instance: instance}
+	} else {
+		delete(m.settleOwed, owedKey)
+	}
+	m.mu.Unlock()
 }
 
 // FlushOwedSettlements retries settlement writes that did not land, so a
@@ -127,19 +169,4 @@ func (m *Manager) flushOneOwedSettlement(entry settleOwedEntry) error {
 		return nil
 	}
 	return m.persistSettlement(entry.repoID, entry.key, entry.instance)
-}
-
-// clearOwedSettlement retires a row's owed retry because a LATER write already
-// made its state durable.
-//
-// A multi-step operation can persist the whole row again after a settlement
-// failed — ToInstanceData carries everything, so the later write subsumes the
-// earlier one. Leaving the entry enrolled would retry a write nothing needs, and
-// leaving its error to be reported would tell a caller that a fully durable
-// operation failed. Both are wrong in the same direction: describing a gap that
-// has since closed.
-func (m *Manager) clearOwedSettlement(repoID string, instance *session.Instance) {
-	m.mu.Lock()
-	delete(m.settleOwed, stableSessionKey(repoID, instance))
-	m.mu.Unlock()
 }

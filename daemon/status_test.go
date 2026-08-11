@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
@@ -63,6 +64,12 @@ func (b *updatedOnlyBackend) HasUpdated(*session.Instance) (bool, bool, string) 
 }
 func (b *updatedOnlyBackend) TapEnter(*session.Instance) { b.tapped++ }
 
+type reattachBaselineBackend struct{ *session.FakeBackend }
+
+func (b *reattachBaselineBackend) HasUpdatedWithBaseline(*session.Instance) (bool, bool, string, bool) {
+	return false, false, "active pane", true
+}
+
 // registerStarted seeds a single on-disk record and registers a live in-memory
 // instance with the supplied backend and starting status under the daemon's key.
 // One instance per repo: seedDiskInstance overwrites the repo file, so callers
@@ -117,6 +124,47 @@ func persistedStatus(t *testing.T, repoID, title string) session.Status {
 	return session.Status(0)
 }
 
+func persistedInstanceByTitle(t *testing.T, repoID, title string) session.InstanceData {
+	t.Helper()
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var data []session.InstanceData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
+	}
+	for _, d := range data {
+		if d.Title == title {
+			return d
+		}
+	}
+	t.Fatalf("instance %q not found in persisted store", title)
+	return session.InstanceData{}
+}
+
+// A prompt can arrive while an agent is already Running. Its first later pane
+// churn must survive a daemon restart even though the liveness never changes;
+// later spinner churn still must not write on every poll.
+func TestRefreshStatusesPersistsFirstPostPromptChurnWhileRunning(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "prompt-churn", &updatedOnlyBackend{
+		FakeBackend: session.NewFakeBackend(),
+	}, true, session.Running)
+	attemptedAt := time.Now().Add(-time.Minute)
+	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist prompt attempt: %v", err)
+	}
+
+	manager.refreshInstanceStatus(repoID, inst)
+
+	stored := persistedInstanceByTitle(t, repoID, "prompt-churn")
+	if !stored.LastPaneChurnAt.After(attemptedAt) {
+		t.Fatalf("persisted churn = %v, want after prompt %v", stored.LastPaneChurnAt, attemptedAt)
+	}
+}
+
 // TestRefreshStatuses_LiveIdleSessionBecomesReady is the control for #935 ported
 // daemon-side: a live, idle session (IsAlive true, HasUpdated false,false) must
 // be marked Ready, and the daemon — the sole writer now — must persist that
@@ -133,6 +181,35 @@ func TestRefreshStatuses_LiveIdleSessionBecomesReady(t *testing.T) {
 	}
 	if got := persistedStatus(t, repoID, "idle"); got != session.Ready {
 		t.Fatalf("persisted status = %v, want Ready (daemon must persist the transition)", got)
+	}
+}
+
+func TestRefreshStatuses_ReattachBaselineDoesNotSettleActiveTaskRun(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title: "reattached", Path: repoPath, Program: "claude", TaskID: "task-reattached",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetBackend(&reattachBaselineBackend{FakeBackend: session.NewFakeBackend()})
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	seedDiskInstance(t, repoID, inst.Title, repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, inst.Title)] = inst
+	manager.mu.Unlock()
+
+	manager.RefreshStatuses()
+
+	if got := inst.GetStatus(); got != session.Running {
+		t.Fatalf("baseline capture changed status to %v; want Running", got)
+	}
+	if !inst.TaskRunActive() {
+		t.Fatal("baseline capture ended the active task run")
+	}
+	if churnAt := inst.ToInstanceData().LastPaneChurnAt; !churnAt.IsZero() {
+		t.Fatalf("baseline capture recorded pane churn at %v", churnAt)
 	}
 }
 
@@ -302,6 +379,13 @@ func TestRefreshStatuses_UpdatedWithoutPromptDoesNotTap(t *testing.T) {
 	inst := manager.instances[daemonInstanceKey(repoID, "updated-only")]
 	if got := inst.GetStatus(); got != session.Running {
 		t.Fatalf("status = %v, want Running (updated output drives Running)", got)
+	}
+	data := inst.ToInstanceData()
+	if data.LastPaneChurnAt.IsZero() {
+		t.Fatal("updated pane did not record its mechanical churn timestamp")
+	}
+	if data.IdleReason != session.IdleReasonNone {
+		t.Fatalf("running row received idle reason %q", data.IdleReason)
 	}
 }
 

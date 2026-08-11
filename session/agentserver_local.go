@@ -83,6 +83,13 @@ func (i *Instance) AgentServer() AgentServer {
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.agentServerLocked()
+}
+
+// agentServerLocked is AgentServer's cache constructor for callers that must
+// bind another runtime-owned value to the exact same server generation.
+// Caller holds i.mu for writing.
+func (i *Instance) agentServerLocked() AgentServer {
 	if i.agentSrv == nil {
 		switch {
 		case i.remoteClient != nil:
@@ -123,6 +130,10 @@ func backendIsRemoteWorkspace(b Backend) bool {
 
 var _ AgentServer = (*localAgentServer)(nil)
 
+type baselineUpdateBackend interface {
+	HasUpdatedWithBaseline(*Instance) (updated bool, hasPrompt bool, content string, baseline bool)
+}
+
 func (s *localAgentServer) Provision(firstTimeSetup bool) error {
 	return s.inst.currentBackend().Provision(s.inst, firstTimeSetup)
 }
@@ -147,9 +158,16 @@ func (s *localAgentServer) Snapshot() (Observation, error) {
 	// of another (#2096).
 	b := s.inst.currentBackend()
 	b.CheckAndHandleTrustPrompt(s.inst)
-	updated, hasPrompt, content := b.HasUpdated(s.inst)
+	var updated, hasPrompt, baseline bool
+	var content string
+	if aware, ok := b.(baselineUpdateBackend); ok {
+		updated, hasPrompt, content, baseline = aware.HasUpdatedWithBaseline(s.inst)
+	} else {
+		updated, hasPrompt, content = b.HasUpdated(s.inst)
+	}
 	return Observation{
 		Updated:     updated,
+		Baseline:    baseline,
 		HasPrompt:   hasPrompt,
 		Content:     content,
 		ModelChange: b.AgentModelChange(s.inst),

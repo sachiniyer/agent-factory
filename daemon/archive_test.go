@@ -707,6 +707,9 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
 	inst.SetBackend(backend)
+	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
+	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), inst.StateEpoch())
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
@@ -737,6 +740,9 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	rec := recordFor(t, repoID, "worker")
 	require.NotNil(t, rec)
 	assert.Equal(t, worktreePath, rec.Worktree.WorktreePath)
+	assert.True(t, rec.LastPromptAttemptAt.IsZero(), "restored process inherited the archived runtime's prompt boundary")
+	assert.Empty(t, rec.LastPromptDeliveryStatus, "restored process inherited the archived runtime's delivery verdict")
+	assert.True(t, rec.LastPaneChurnAt.IsZero(), "restored process inherited the archived runtime's pane age")
 
 	list, lerr := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain").CombinedOutput()
 	require.NoError(t, lerr, string(list))

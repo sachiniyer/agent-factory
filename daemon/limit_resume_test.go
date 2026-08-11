@@ -184,6 +184,9 @@ func TestResumeFromLimit_PersistsRespawnMutationsWhenSendPromptFails(t *testing.
 	if rec.Worktree.BranchName != branch {
 		t.Fatalf("persisted branch = %q, want %q (the rebuilt branch must be recorded or kill orphans it)", rec.Worktree.BranchName, branch)
 	}
+	if rec.LastPromptAttemptAt.IsZero() || rec.LastPromptDeliveryStatus != session.PromptCouldNotConfirm {
+		t.Fatalf("persisted prompt evidence = (%v, %q), want a could-not-confirm attempt", rec.LastPromptAttemptAt, rec.LastPromptDeliveryStatus)
+	}
 }
 
 // TestResumeFromLimit_KeepsLimitBlockedWhenSendPromptFails is the post-#1857

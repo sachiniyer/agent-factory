@@ -626,7 +626,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// (same session, new runtime), so nothing else can notice the swap; only this
 	// site knows it happened.
 	m.noteRuntimeReplaced(repoID, instance)
-	m.persistInstance(repoID, instance)
+	m.persistRuntimeReplacement(repoID, title, instance)
 	log.InfoLog.Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return title, nil
 }
@@ -814,7 +814,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 		}
 		return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("restored worktree for %q but failed to re-spawn its agent (it will be retried): %w", req.Title, err))
 	}
-
+	m.noteRuntimeReplaced(repoID, instance)
 	worktreePath := instance.GetWorktreePath()
 	if perr := commitRestore(); perr != nil {
 		return failedRestoredArchiveResult(instance, worktreePath, fmt.Errorf("re-spawned the agent for %q, but %w", req.Title, perr))
@@ -940,12 +940,12 @@ func (m *Manager) persistAndPublishInstance(repoID string, instance *session.Ins
 }
 
 // persistAndPublishInstanceErr is persistAndPublishInstance with the write error
-// RETURNED rather than logged, for the caller whose durability gates correctness
-// rather than merely dating a checkpoint: the handoff settlement (#2781, see
-// persistHandoffSettlement). It is the persistInstanceErr/persistInstance pairing
-// one layer up, and the announcement stays unconditional either way — memory has
-// already changed, so every other client must converge on it whether or not disk
-// agreed yet.
+// RETURNED rather than logged, for callers whose durability gates correctness
+// rather than merely dating a checkpoint. Settlement writers that also maintain
+// retry bookkeeping use persistSettlement so that bookkeeping remains in the
+// same repo-ordered critical section as the write. The announcement stays
+// unconditional either way — memory has already changed, so every other client
+// must converge on it whether or not disk agreed yet.
 func (m *Manager) persistAndPublishInstanceErr(repoID string, instance *session.Instance) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()

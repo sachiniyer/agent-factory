@@ -247,7 +247,8 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
 	}
 	if len(matches) > 0 {
-		return &matches[0], matchRepoIDs[0], nil
+		projected := matches[0].ProjectIdleReason()
+		return &projected, matchRepoIDs[0], nil
 	}
 	if len(corrupted) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
@@ -330,7 +331,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 			return nil, fmt.Errorf("failed to parse sessions: %w", err)
 		}
 		for i := range data {
-			data[i] = data[i].ForClientRead()
+			data[i] = data[i].ForClientRead().ProjectIdleReason()
 		}
 		// Single repo: the (repoID, title) key reduces to title order.
 		sort.Slice(data, func(i, j int) bool { return data[i].Title < data[j].Title })
@@ -363,7 +364,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 			// repoID + NUL + title (daemonInstanceKey). NUL sorts before any
 			// printable byte, so this is exactly the daemon's (repoID, title)
 			// order.
-			rows = append(rows, keyedInstance{key: rid + "\x00" + inst.Title, data: inst})
+			rows = append(rows, keyedInstance{key: rid + "\x00" + inst.Title, data: inst.ProjectIdleReason()})
 		}
 	}
 	if len(corrupted) > 0 {
@@ -396,7 +397,7 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 		}
 		for i := range instances {
 			if instances[i].TmuxName == tmuxName {
-				view := instances[i].ForClientRead()
+				view := instances[i].ForClientRead().ProjectIdleReason()
 				return &view, nil
 			}
 		}
@@ -447,7 +448,8 @@ func findInstanceByTitleInScope(repoID, title string) (*session.InstanceData, st
 	}
 	for i := range instances {
 		if instances[i].Title == title {
-			return &instances[i], repoID, nil
+			projected := instances[i].ProjectIdleReason()
+			return &projected, repoID, nil
 		}
 	}
 	// Wrap the sentinel so a scoped clean miss stays distinguishable from a
