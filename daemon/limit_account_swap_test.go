@@ -261,6 +261,63 @@ func TestResumeLimitedSessionsCapturesReplacementCodexConversation(t *testing.T)
 	t.Fatalf("replacement Codex conversation was never captured: %+v", inst.AgentConversation())
 }
 
+func TestResumeFromLimit_LiveCommittedCodexSwapRecapturesBeforeClearingMarker(t *testing.T) {
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Time{})
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountHome, err := agentaccount.Register(home, tmux.ProgramCodex, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.Program = tmux.ProgramCodex
+	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	worktree := filepath.Join(t.TempDir(), "codex-worktree")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		inst.Path, worktree, inst.Title, "codex-branch", "", false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.SetGitWorktreeForTest(gw)
+
+	// Model the restart window: the account selection and replacement are live,
+	// but the old daemon exited before its asynchronous capture could persist the
+	// new Codex conversation id.
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	if err := inst.ValidateAccountSwap("work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inst.SelectAccountAutomatically("", "work"); err != nil {
+		t.Fatal(err)
+	}
+	inst.EndLimitResume()
+	backend.onRespawn = func(*session.Instance) {
+		writeDaemonCodexRolloutFileWithCwd(t, accountHome,
+			"rollout-2026-08-10T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", worktree)
+	}
+
+	if err := manager.resumeFromLimit(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatal(err)
+	}
+	_, respawns, _ := backend.snapshot()
+	if respawns != 1 {
+		t.Fatalf("live committed Codex replacement respawns = %d, want 1 recapture launch", respawns)
+	}
+	if conv := inst.AgentConversation(); conv.Agent != tmux.ProgramCodex ||
+		conv.ID != "019f386f-7206-7fc2-803b-f7045e07a242" {
+		t.Fatalf("committed replacement cleared without durable Codex conversation: %+v", conv)
+	}
+	if _, _, pending := inst.PendingAccountSwap(); pending {
+		t.Fatal("durably captured committed replacement retained pending marker")
+	}
+}
+
 func TestResumeLimitedSessions_ExplicitAccountPinIsNeverOverridden(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()

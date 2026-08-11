@@ -642,6 +642,7 @@ func TestConversationSelectorArgs_CodexExecOptions(t *testing.T) {
 		{"boolean option", "codex exec --json resume old-chat", []string{"resume", "old-chat"}},
 		{"equals value named resume", "codex exec --model=resume resume old-chat", []string{"resume", "old-chat"}},
 		{"separate value named resume", "codex exec --model resume", nil},
+		{"exec alias", "codex e resume old-chat", []string{"resume", "old-chat"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, ConversationSelectorArgs(tc.program))
