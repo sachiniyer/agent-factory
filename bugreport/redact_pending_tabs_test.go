@@ -13,6 +13,7 @@ import (
 func TestRedactInstanceDataRedactsPendingTabsLikeLiveTabs(t *testing.T) {
 	const externalURL = "https://internal.example.com/private/app"
 	const loopbackURL = "http://localhost:3000/dashboard"
+	const loopbackOrigin = "http://localhost:3000"
 	d := session.InstanceData{
 		PendingTabs: []session.TabData{
 			{
@@ -43,8 +44,8 @@ func TestRedactInstanceDataRedactsPendingTabsLikeLiveTabs(t *testing.T) {
 	if external.ID != "pending-external" || external.Name != "docs" || external.Kind != session.TabKindWeb {
 		t.Fatalf("pending tab structural fields were mutated: %+v", external)
 	}
-	if d.PendingTabs[1].URL != loopbackURL {
-		t.Fatalf("loopback pending-tab URL must survive for triage: got %q, want %q", d.PendingTabs[1].URL, loopbackURL)
+	if d.PendingTabs[1].URL != loopbackOrigin {
+		t.Fatalf("loopback pending-tab URL must retain only its origin: got %q, want %q", d.PendingTabs[1].URL, loopbackOrigin)
 	}
 }
 
@@ -56,5 +57,24 @@ func TestNoteSessionRecordsPendingTabTmuxName(t *testing.T) {
 	got := r.scrubLog("restore: staging metadata tab " + name)
 	if strings.Contains(got, name) {
 		t.Fatalf("log tail retained an unrecorded pending-tab tmux name: %q", got)
+	}
+}
+
+func TestRedactInstanceDataStripsSecretsFromLoopbackTabURL(t *testing.T) {
+	d := session.InstanceData{Tabs: []session.TabData{{
+		Kind: session.TabKindWeb,
+		URL:  "http://admin:private-password@localhost:3000/private/path?token=secret#fragment",
+	}}}
+
+	redactInstanceData(&d)
+
+	const want = "http://localhost:3000"
+	if d.Tabs[0].URL != want {
+		t.Fatalf("loopback URL redaction = %q, want secret-free origin %q", d.Tabs[0].URL, want)
+	}
+	for _, secret := range []string{"admin", "private-password", "private/path", "token", "secret", "fragment"} {
+		if strings.Contains(d.Tabs[0].URL, secret) {
+			t.Fatalf("loopback URL retained %q after redaction: %q", secret, d.Tabs[0].URL)
+		}
 	}
 }

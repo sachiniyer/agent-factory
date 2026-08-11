@@ -112,10 +112,17 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		if webTargetHostIsBrowserLoopbackShorthand(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a browser resolves that host to loopback, and a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace — see #3062", target)
 		}
-		// An EXTERNAL absolute URL is admitted. It is iframed directly and never
-		// touches the proxy, so the routing gap above is not a requirement it has;
-		// and FromInstanceData now stages metadata-only tabs across a sandbox
-		// restart, so it no longer disappears at the next daemon restart.
+		// An external target is framed directly. Require HTTPS because the documented
+		// reverse-proxy deployment serves the Agent Factory UI over HTTPS, where a
+		// browser blocks an HTTP iframe as active mixed content before any redirect
+		// can upgrade it. Loopback targets took the proxy refusal above instead.
+		parsedTarget, err := url.Parse(target)
+		if err != nil || !strings.EqualFold(parsedTarget.Scheme, "https") {
+			return fmt.Errorf("this session cannot open an external HTTP web tab: off-box external targets are framed directly, and an HTTPS Agent Factory UI blocks HTTP frames as active mixed content; use an HTTPS URL")
+		}
+		// An external HTTPS URL never touches the proxy, so the routing gap above is
+		// not a requirement it has; and FromInstanceData stages metadata-only tabs
+		// across a sandbox restart, so it no longer disappears after a restart.
 		return nil
 	case TabNeedsLocalWorktreeRead:
 		if c.Workspace != WorkspaceLocalWorktree {

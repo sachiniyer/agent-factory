@@ -554,8 +554,8 @@ func TestRefuseTabKind_RejectsBrowserCanonicalLoopbackShorthands(t *testing.T) {
 		"https://example.com/app",
 		"https://a1.de/app",
 		"https://dead.beef/app",
-		"http://134744072/app",  // browser-canonical 8.8.8.8
-		"http://0x08080808/app", // browser-canonical 8.8.8.8
+		"https://134744072/app",  // browser-canonical 8.8.8.8
+		"https://0x08080808/app", // browser-canonical 8.8.8.8
 	} {
 		require.NoError(t, remote.RefuseTabKind(TabKindWeb, target),
 			"%s is external to a browser and must remain admissible off-box", target)

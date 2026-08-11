@@ -453,6 +453,7 @@ func TestScrubSessionTitlesDoesNotRewriteItsOwnMarker(t *testing.T) {
 func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
 	const externalURL = "https://github.com/company/private-repo/pull/42"
 	const loopbackURL = "http://localhost:3000/dashboard"
+	const loopbackOrigin = "http://localhost:3000"
 	d := session.InstanceData{
 		ID:      "abc123",
 		Program: "claude",
@@ -467,8 +468,8 @@ func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
 	if d.Tabs[0].URL != redactedMarker {
 		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, same class as PRInfo.URL)", d.Tabs[0].URL)
 	}
-	if d.Tabs[1].URL != loopbackURL {
-		t.Errorf("loopback web tab URL must survive for triage: got %q, want %q", d.Tabs[1].URL, loopbackURL)
+	if d.Tabs[1].URL != loopbackOrigin {
+		t.Errorf("loopback web tab URL must retain only its origin: got %q, want %q", d.Tabs[1].URL, loopbackOrigin)
 	}
 }
 

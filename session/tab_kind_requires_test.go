@@ -77,7 +77,7 @@ func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
 
 	require.Error(t, loopback, "a loopback target is still proxied from the daemon host")
 	require.NoError(t, external,
-		"an external URL is iframed directly and now survives a restart, so neither blocker applies to it")
+		"an external HTTPS URL is directly frameable and survives a restart, so neither blocker applies")
 
 	assert.Contains(t, strings.ToLower(loopback.Error()), "proxied",
 		"the surviving refusal must name the routing gap, which is what is actually true of it")
@@ -88,6 +88,19 @@ func TestWebRefusalIsPerTargetNotPerKind(t *testing.T) {
 	// A local session takes neither branch.
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://localhost:3000"))
 	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "https://example.com"))
+}
+
+func TestRefuseTabKind_OffBoxExternalWebTabsRequireHTTPS(t *testing.T) {
+	remote := remoteCaps()
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"),
+		"an HTTPS external target is directly frameable off-box")
+	err := remote.RefuseTabKind(TabKindWeb, "http://example.com/app")
+	require.Error(t, err, "an HTTP external target becomes active mixed content under an HTTPS web UI")
+	assert.Contains(t, strings.ToLower(err.Error()), "https")
+	assert.Contains(t, strings.ToLower(err.Error()), "mixed content")
+
+	require.NoError(t, localCaps().RefuseTabKind(TabKindWeb, "http://example.com/app"),
+		"the mixed-content restriction is only for a directly framed off-box target")
 }
 
 // TestRefuseTabKindNamesTheUnmetRequirement is the other half of #3053: a

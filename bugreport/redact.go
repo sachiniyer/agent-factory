@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -630,12 +631,18 @@ func redactTabData(tab *session.TabData) {
 	// A web tab's URL is user-supplied (any http/https target passes
 	// NormalizeWebTabURL) and can name internal infrastructure or a private
 	// repo — the same class of sensitive URL PRInfo.URL is redacted for
-	// below (#1954). Redact non-loopback targets; keep loopback ones (the
-	// proxied dev-server case), which are safe and useful for triage,
-	// mirroring the loopback/non-loopback split the daemon proxy already
-	// draws (session.IsLoopbackWebTarget).
-	if tab.URL != "" && !session.IsLoopbackWebTarget(tab.URL) {
-		tab.URL = redactedMarker
+	// below (#1954). External targets are dropped wholesale. For a loopback
+	// dev-server, retain only the origin needed for triage: userinfo, paths,
+	// queries and fragments can all carry credentials even though the host is
+	// safe to name.
+	if tab.URL != "" {
+		if !session.IsLoopbackWebTarget(tab.URL) {
+			tab.URL = redactedMarker
+		} else if parsed, err := url.Parse(tab.URL); err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			tab.URL = redactedMarker
+		} else {
+			tab.URL = (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host}).String()
+		}
 	}
 	if tab.Conversation != nil {
 		tab.Conversation.ID = ""
