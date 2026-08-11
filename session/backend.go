@@ -369,6 +369,33 @@ func parseBrowserIPv4Address(host string) (uint64, bool) {
 	return address, true
 }
 
+// browserHostEndsInNumber implements the URL Standard discriminator between an
+// ordinary domain and a legacy IPv4 candidate. An all-decimal final component
+// counts even when its octal interpretation is invalid (for example 09); that
+// distinction is what makes the browser reject it instead of doing a DNS lookup.
+func browserHostEndsInNumber(host string) bool {
+	parts := strings.Split(host, ".")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return false
+	}
+	last := parts[len(parts)-1]
+	allDecimal := true
+	for _, r := range last {
+		if r < '0' || r > '9' {
+			allDecimal = false
+			break
+		}
+	}
+	if allDecimal {
+		return true
+	}
+	_, ok := parseBrowserIPv4Number(last)
+	return ok
+}
+
 func parseBrowserIPv4Number(input string) (uint64, bool) {
 	if input == "" {
 		return 0, false

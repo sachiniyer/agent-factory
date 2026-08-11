@@ -19,10 +19,15 @@ func TestNormalizeWebTabURL(t *testing.T) {
 		{name: "domain separators stay scoped to host", in: "https://example。com/path。part", want: "https://example.com/path%E3%80%82part"},
 		{name: "fullwidth localhost", in: "http://ｌｏｃａｌｈｏｓｔ:3000", want: "http://localhost:3000"},
 		{name: "unicode domain becomes ascii", in: "https://bücher.example/path", want: "https://xn--bcher-kva.example/path"},
+		{name: "short legacy ipv4 becomes dotted", in: "http://127.1:3000", want: "http://127.0.0.1:3000"},
+		{name: "integer legacy ipv4 becomes dotted", in: "http://134744072", want: "http://8.8.8.8"},
+		{name: "numeric label before dns suffix stays a domain", in: "https://09.example/path", want: "https://09.example/path"},
 		{name: "whitespace trimmed", in: "  localhost:3000 ", want: "http://localhost:3000"},
 		{name: "empty rejected", in: "   ", wantErr: true},
 		{name: "non-http scheme rejected", in: "ftp://host/x", wantErr: true},
 		{name: "file scheme rejected", in: "file:///etc/passwd", wantErr: true},
+		{name: "invalid octal numeric host rejected", in: "http://09:3000", wantErr: true},
+		{name: "overflowing numeric component rejected", in: "http://1.2.3.999:3000", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

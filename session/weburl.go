@@ -60,6 +60,19 @@ func NormalizeWebTabURL(raw string) (string, error) {
 			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
 		}
 	}
+	// The URL Standard treats a domain ending in a number as a legacy IPv4
+	// candidate. A failed parse is not an ordinary DNS name: browsers reject the
+	// URL outright (for example 09 or 1.2.3.999). Canonicalize successful parses
+	// too, so the stored target is exactly the dotted host the browser will use.
+	if browserHostEndsInNumber(canonicalHost) {
+		address, ok := parseBrowserIPv4Address(canonicalHost)
+		if !ok {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: browser rejects malformed numeric host", host)
+		}
+		canonicalHost = net.IPv4(
+			byte(address>>24), byte(address>>16), byte(address>>8), byte(address),
+		).String()
+	}
 	if canonicalHost != host {
 		port := u.Port()
 		u.Host = canonicalHost
