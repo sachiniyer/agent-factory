@@ -164,3 +164,20 @@ func TestIsWorkingContentAmpQuotedCompleteFrame(t *testing.T) {
 		t.Error("IsWorkingContent(complete working frame above the current idle frame, amp) = true, want false — the current frame is the bottom-most, so a settled session must go green")
 	}
 }
+
+// TestIsWorkingContentAmpPatternInCurrentFrameInterior covers an idle user
+// discussing amp's working indicator. Pane capture preserves only rendered
+// text, so the matcher must distinguish the standalone bottom border from the
+// same glyphs inside the current frame instead of assuming text provenance.
+func TestIsWorkingContentAmpPatternInCurrentFrameInterior(t *testing.T) {
+	idleWithPattern := `╭───────────────────────────────────── $0.07 ─ medium ─╮
+│ What does amp's working indicator look like?         │
+│                                                      │
+│ ╰ ∼ Streaming ──── example ╯                        │
+│                                                      │
+╰─────────────────────────────────────────── /tmp/repo (master) ─╯
+`
+	if IsWorkingContent(idleWithPattern, tmux.ProgramAmp) {
+		t.Error("IsWorkingContent(amp frame with a working-indicator example in user text, amp) = true, want false")
+	}
+}
