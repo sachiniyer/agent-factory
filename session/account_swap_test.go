@@ -248,6 +248,14 @@ func TestRespawnForAccountSwapAcceptsProcessThatExitsAfterSuccessfulRestart(t *t
 
 	require.NoError(t, inst.RespawnForAccountSwap(),
 		"a process that started under the selected account may complete before the replacement is validated")
+	require.NoError(t, inst.ValidateAccountSwapReplacementPanes())
+	stored := inst.ToInstanceData()
+	require.True(t, stored.PendingAccountSwap.ReplacementPanesStarted,
+		"successful pane starts must be durable proof for crash recovery")
+	restored, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	require.NoError(t, restored.ValidateAccountSwapReplacementPanes(),
+		"a restart must not reinterpret a completed process as a failed launch")
 }
 
 func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {

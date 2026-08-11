@@ -280,9 +280,10 @@ type InstanceData struct {
 // From may be empty for the ambient identity; the pointer's presence, rather
 // than either string, is the recovery obligation.
 type AccountSwapData struct {
-	From           string `json:"from,omitempty"`
-	To             string `json:"to"`
-	ConversationID string `json:"conversation_id,omitempty"`
+	From                    string `json:"from,omitempty"`
+	To                      string `json:"to"`
+	ConversationID          string `json:"conversation_id,omitempty"`
+	ReplacementPanesStarted bool   `json:"replacement_panes_started,omitempty"`
 }
 
 // AccountLimitObservationData is durable evidence that one named identity hit

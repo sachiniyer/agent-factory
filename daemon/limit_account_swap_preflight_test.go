@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,9 @@ func TestAdmitAccountSwapRefusesVSCodeIntegratedShells(t *testing.T) {
 	swap, err := manager.admitAccountSwap(inst, manager.Config())
 	if err == nil {
 		t.Fatalf("VS Code integrated shell was admitted without identity proof: %+v", swap)
+	}
+	if !strings.Contains(err.Error(), "VS Code") || !strings.Contains(err.Error(), "cannot prove") {
+		t.Fatalf("VS Code refusal did not name the unprovable boundary: %v", err)
 	}
 	if swap != nil {
 		t.Fatalf("refused VS Code boundary returned a swap: %+v", swap)

@@ -353,9 +353,6 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 		return err
 	}
 	if err := b.respawnWithConversation(i, false, plan); err != nil {
-		return err
-	}
-	if err := validateAccountSwapSiblingTabs(i); err != nil {
 		stopErr := b.stopForAccountSwap(i, false)
 		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",
 			i.Title, errors.Join(err, stopErr))
@@ -363,41 +360,31 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 	return nil
 }
 
-func validateAccountSwapSiblingTabs(i *Instance) error {
-	i.mu.RLock()
-	tabs := append([]*Tab(nil), i.Tabs...)
-	i.mu.RUnlock()
-	var failures []error
-	for idx, tab := range tabs {
-		if idx == 0 || tab == nil || !tab.Kind.HasTmux() {
-			continue
-		}
-		if tab.tmux == nil {
-			failures = append(failures, fmt.Errorf("tab %q has no tmux binding", tab.Name))
-			continue
-		}
-		exists, known := tab.tmux.ProbeSession()
-		switch {
-		case !known:
-			failures = append(failures, fmt.Errorf("tab %q did not answer its restart probe", tab.Name))
-		case !exists:
-			failures = append(failures, fmt.Errorf("tab %q did not restart", tab.Name))
-		}
+func (i *Instance) markAccountSwapReplacementPanesStarted() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap == nil || i.pendingAccountSwap.To != i.Account {
+		return fmt.Errorf("account swap for %q has no committed replacement to mark started", i.Title)
 	}
-	return errors.Join(failures...)
+	i.pendingAccountSwap.ReplacementPanesStarted = true
+	return nil
 }
 
-// ValidateAccountSwapReplacementPanes proves that every persisted sibling in a
-// committed local replacement is live before its notice marker can be cleared.
-// Agent liveness is established separately by the daemon's authoritative probe.
+// ValidateAccountSwapReplacementPanes requires durable proof that every pane's
+// tmux start returned successfully. A process command may legitimately finish
+// before this check, so later liveness is not launch proof. A crash before the
+// proof is checkpointed leaves false and forces the daemon to rebuild the whole
+// replacement boundary before delivering its notice.
 func (i *Instance) ValidateAccountSwapReplacementPanes() error {
-	account, _ := i.AccountSelection()
-	_, target, pending := i.PendingAccountSwap()
-	if !pending || account != target {
+	i.mu.RLock()
+	account := i.Account
+	pending := cloneAccountSwapData(i.pendingAccountSwap)
+	i.mu.RUnlock()
+	if pending == nil || account != pending.To {
 		return fmt.Errorf("account swap for %q has no committed replacement to validate", i.Title)
 	}
-	if err := validateAccountSwapSiblingTabs(i); err != nil {
-		return fmt.Errorf("account swap replacement for %q is missing expected panes: %w", i.Title, err)
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("account swap replacement for %q has no durable proof that every pane started", i.Title)
 	}
 	return nil
 }

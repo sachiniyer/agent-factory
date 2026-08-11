@@ -532,8 +532,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			accountSwap.fellBack = true
 			accountSwap = nil
 		} else {
-			accountSwap = admitted
-			accountSwap.fallbackDue = fallbackDue
+			admitted.fallbackDue = fallbackDue
+			// Update the scheduler-owned opportunity too: the first candidate can
+			// be unprovable while a later explicitly configured one is admitted,
+			// and the completion log must name the identity actually selected.
+			*accountSwap = *admitted
 		}
 	}
 	if accountSwap != nil && !accountSwap.alreadySet {

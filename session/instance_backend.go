@@ -202,14 +202,27 @@ func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 // belongs to the previous account's separate home; Docker already provisions a
 // fresh sandbox and launch through its ordinary Respawn implementation.
 func (i *Instance) RespawnForAccountSwap() error {
+	return i.RespawnForAccountSwapWithLiveBoundary(nil)
+}
+
+// RespawnForAccountSwapWithLiveBoundary is the fresh-conversation account
+// replacement with the same pre-ConfirmLive callback used by ordinary respawn.
+// The idle-evidence mechanism owns that boundary; account swapping only routes
+// its distinct launch through it.
+func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func()) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {
 		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
-	backend := i.currentBackend()
-	if local, ok := backend.(*LocalBackend); ok {
-		return local.respawnFresh(i)
+	if err := i.withLiveBoundary(beforeLive, func() error {
+		backend := i.currentBackend()
+		if local, ok := backend.(*LocalBackend); ok {
+			return local.respawnFresh(i)
+		}
+		return backend.Respawn(i)
+	}); err != nil {
+		return err
 	}
-	return backend.Respawn(i)
+	return i.markAccountSwapReplacementPanesStarted()
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing

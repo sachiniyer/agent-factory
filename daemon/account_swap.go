@@ -171,14 +171,18 @@ func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string)
 	if len(candidates) == 0 {
 		return nil, errors.New("no account candidate is available for launch preflight")
 	}
-	candidate := candidates[0]
-	if err := validate(candidate); err != nil {
-		return nil, fmt.Errorf("account %q: %w", candidate, err)
+	var refusals []error
+	for _, candidate := range candidates {
+		if err := validate(candidate); err != nil {
+			refusals = append(refusals, fmt.Errorf("account %q: %w", candidate, err))
+			continue
+		}
+		admitted := *swap
+		admitted.to = candidate
+		admitted.candidates = candidates
+		return &admitted, nil
 	}
-	admitted := *swap
-	admitted.to = candidate
-	admitted.candidates = candidates
-	return &admitted, nil
+	return nil, fmt.Errorf("no explicitly configured account has a proven launch: %w", errors.Join(refusals...))
 }
 
 // admitAccountSwap is the sole admission gate for a new identity replacement.
@@ -198,6 +202,9 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	}
 	if swap.alreadySet {
 		return nil, errors.New("identity selection is already committed; new-swap admission cannot authorize recovery")
+	}
+	if instanceHasVSCodeTab(instance) {
+		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
 	}
 	return preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
 }
