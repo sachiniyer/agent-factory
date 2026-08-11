@@ -267,7 +267,7 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	manager, repoID := newCleanupReadyGhost(t, "ghost-crash-window")
 	stubGhostTmux(t, tmux.PaneStateKnown, nil)
-	retained := filepath.Join(t.TempDir(), "retained-source")
+	retained := filepath.Join(t.TempDir(), ".af-source-0123456789abcdef0123456789abcdef")
 	require.NoError(t, os.Mkdir(retained, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(retained, "private.txt"), []byte("retained"), 0o644))
 	retainedInfo, err := os.Stat(retained)
