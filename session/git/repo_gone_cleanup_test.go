@@ -404,16 +404,61 @@ func TestValidateRelocationCleanupAdmission_NonDirectoryOriginRemainsRepoGone(t 
 	}
 }
 
-func TestValidateRelocationCleanupAdmission_CorruptGitMetadataIsConclusiveNonGit(t *testing.T) {
+func TestValidateRelocationCleanupAdmission_UnreadableGitMetadataFailsClosed(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)
 	repoPath := gw.GetRepoPath()
 	if err := os.MkdirAll(filepath.Join(repoPath, ".git"), 0o755); err != nil {
-		t.Fatalf("create unusable git metadata: %v", err)
+		t.Fatalf("create repository metadata: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(repoPath, ".git"), 0); err != nil {
+		t.Fatalf("make repository metadata unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(repoPath, ".git"), 0o755) })
+
+	if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("unreadable metadata must not be classified as a missing origin, got: %v", err)
+	}
+	if recovery, retained := gw.GetRelocationRecovery(); !retained || recovery.State != RelocationRecoveryCleanupReady {
+		t.Fatalf("an unreadable origin must retain cleanup authorization without consuming it; retained=%v recovery=%+v", retained, recovery)
+	}
+}
+
+func TestValidateRelocationCleanupAdmission_IdentityTupleAloneFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "replacement")
+	if err := os.Mkdir(worktree, 0o755); err != nil {
+		t.Fatalf("create same-tuple replacement fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "user-work.txt"), []byte("not authorized"), 0o644); err != nil {
+		t.Fatalf("write replacement fixture: %v", err)
+	}
+	info, err := os.Stat(worktree)
+	if err != nil {
+		t.Fatalf("stat replacement fixture: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("replacement stat has no syscall identity")
+	}
+	gw, err := NewGitWorktreeFromStorage(
+		filepath.Join(root, "missing-repo"), worktree, "reused", "af/reused", "", false, true,
+	)
+	if err != nil {
+		t.Fatalf("restore worktree handle: %v", err)
+	}
+	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
+		State: RelocationRecoveryCleanupReady, IdentityKnown: true,
+		Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
+	}); err != nil {
+		t.Fatalf("restore tuple-only cleanup record: %v", err)
 	}
 
-	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
-		t.Fatalf("Git's completed non-repository verdict must not be followed by an unbounded metadata lookup: %v", err)
+	if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("a reusable inode tuple without a durable generation must fail closed, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "user-work.txt")); err != nil {
+		t.Fatalf("tuple-only cleanup authority touched replacement work: %v", err)
 	}
 }
 

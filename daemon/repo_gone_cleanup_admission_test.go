@@ -267,6 +267,24 @@ func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testin
 func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	manager, repoID := newCleanupReadyGhost(t, "ghost-crash-window")
 	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	retained := filepath.Join(t.TempDir(), "retained-source")
+	require.NoError(t, os.Mkdir(retained, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(retained, "private.txt"), []byte("retained"), 0o644))
+	retainedInfo, err := os.Stat(retained)
+	require.NoError(t, err)
+	retainedStat, ok := retainedInfo.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	record := recordFor(t, repoID, "ghost-crash-window")
+	require.NotNil(t, record)
+	record.ArchiveReport = &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: retained, IdentityKnown: true,
+		Device: uint64(retainedStat.Dev), Inode: uint64(retainedStat.Ino),
+		FileType: uint32(retainedStat.Mode & syscall.S_IFMT),
+	}}}
+	require.NoError(t, persistInstanceData(repoID, *record))
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale,
+		recordFor(t, repoID, "ghost-crash-window").Worktree.RelocationRecovery.State,
+		"precondition: storage must project cleanup_ready behind the archive rollback fence")
 
 	// Drive the real descriptor cleanup, then hold the instances lock before the
 	// ordinary row-delete tail. This models a daemon dying after the archive root
@@ -313,7 +331,7 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	session.InstanceDeleteLockTimeout = 25 * time.Millisecond
 	t.Cleanup(func() { session.InstanceDeleteLockTimeout = previousDeleteTimeout })
 
-	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
+	_, err = manager.KillSession(KillSessionRequest{Title: "ghost-crash-window", RepoID: repoID})
 	require.ErrorIs(t, err, config.ErrLockTimeout)
 	require.NotNil(t, releaseLock, "the tail failure must happen after descriptor cleanup succeeded")
 	record := recordFor(t, repoID, "ghost-crash-window")
@@ -321,6 +339,8 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	require.NotNil(t, record.Worktree.RelocationRecovery)
 	require.Equal(t, sessiongit.RelocationRecoveryState("cleanup_finalizing"), record.Worktree.RelocationRecovery.State,
 		"the durable row must record that descriptor cleanup entered its finalization fence")
+	assert.True(t, record.ArchiveReport == nil || record.ArchiveReport.Empty(),
+		"the same checkpoint must retire the consumed retained-tree handle")
 
 	// The session/git finalization-retry tests load this persisted state into a
 	// fresh worktree and prove both absent-root completion and replacement safety.
