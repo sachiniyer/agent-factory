@@ -231,6 +231,18 @@ func (i *Instance) PreserveWorktreeRelocationClaimForRetry(claim git.RelocationC
 	}
 }
 
+// PreserveWorktreeRelocationClaimAsUnresolved fences a resolved archive when a
+// later read-only gate cannot answer. Unlike the ordinary abort helper, it also
+// materializes record-free claims so kill cannot read absence as permission.
+func (i *Instance) PreserveWorktreeRelocationClaimAsUnresolved(claim git.RelocationClaim) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		gw.PreserveRelocationClaimAsUnresolved(claim)
+	}
+}
+
 // PrepareWorktreeRelocationClaimForCleanup persists a resolved archived-path
 // identity as a cleanup-only obligation. It is the non-relocating completion
 // path used when the origin repo is gone.

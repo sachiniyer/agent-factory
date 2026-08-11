@@ -21,7 +21,14 @@ func (m *Manager) guardRepoGoneRestore(
 	if err := sessiongit.CheckRepoPresentForRelocation(repoPath); err == nil {
 		return false, nil
 	} else if !errors.Is(err, sessiongit.ErrRepoGone) {
-		return false, fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, title, err)
+		probeErr := fmt.Errorf("cannot establish origin repo state for %s for session %q: %w", repoPath, title, err)
+		instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
+		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+			return false, errors.Join(probeErr, fmt.Errorf(
+				"could not persist the unresolved archived worktree identity: %w", persistErr,
+			))
+		}
+		return false, probeErr
 	}
 	if err := m.prepareRepoGoneCleanup(repoID, title, repoPath, instance, claim); err != nil {
 		return false, err

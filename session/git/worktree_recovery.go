@@ -554,6 +554,23 @@ func (g *GitWorktree) PreserveRelocationClaim(claim RelocationClaim) {
 	g.releaseRelocationClaimLocked(&claim)
 }
 
+// PreserveRelocationClaimAsUnresolved materializes a non-destructive recovery
+// record even for a claim obtained from record-free state. Restore uses this
+// when an origin probe gives no answer: the directory identity is known, but
+// neither relocation nor cleanup is authorized until a later retry resolves it.
+func (g *GitWorktree) PreserveRelocationClaimAsUnresolved(claim RelocationClaim) {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.relocationRecovery != nil {
+		g.releaseRelocationClaimLocked(&claim)
+		return
+	}
+	if claim.recoveryOwned && !g.ownsRelocationClaimLocked(claim) {
+		return
+	}
+	g.recordStaleClaimLocked(claim)
+}
+
 // RevalidateRelocationClaim checks a point-in-time claim immediately before a
 // pathname is consumed. Failure recreates durable state before returning, so a
 // stale claim can never degrade into an absent record.

@@ -244,7 +244,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// but sharing the predicate keeps this branch from re-introducing the #2017
 		// defect (a known-state error misreported as "workspace left intact"): any
 		// future known-state error would fall through to deleteSessionRecord instead.
-		recovery := data.Worktree.RelocationRecovery
+		decoded := data.RestoreArchiveRollbackFence()
+		recovery := decoded.Worktree.RelocationRecovery
 		descriptorCleanup := recovery != nil && recovery.IdentityKnown &&
 			(recovery.State == git.RelocationRecoveryCleanupReady ||
 				recovery.State == git.RelocationRecoveryCleanupStalled ||

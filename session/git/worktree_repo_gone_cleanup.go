@@ -26,7 +26,8 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 	if worktree.repoPath == "" {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
 	}
-	if _, err := worktree.runGitCommandContext(ctx, worktree.repoPath, "rev-parse", "--git-dir"); err != nil {
+	topLevel, err := worktree.runGitCommandContext(ctx, worktree.repoPath, "rev-parse", "--show-toplevel")
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
@@ -52,6 +53,21 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 			}
 		}
 		return err
+	}
+	recorded, err := os.Stat(worktree.repoPath)
+	if err != nil {
+		return fmt.Errorf("inspect recorded repository root: %w", err)
+	}
+	resolvedPath := strings.TrimSuffix(topLevel, "\n")
+	resolved, err := os.Stat(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("inspect Git repository root %s: %w", resolvedPath, err)
+	}
+	if !os.SameFile(recorded, resolved) {
+		return fmt.Errorf(
+			"%w: recorded origin %s resolves through ancestor repository %s",
+			ErrRepoGone, worktree.repoPath, resolvedPath,
+		)
 	}
 	return nil
 }
@@ -304,7 +320,7 @@ func removeClaimedRepoGoneDirectory(
 			return err
 		}
 	}
-	return removeCopiedEntry(parent, parentPath, copiedEntry{
+	return removeCopiedEntryRestoringName(parent, parentPath, copiedEntry{
 		name: name, source: expected, directory: &copiedDirectory{},
 	}, true)
 }
@@ -312,8 +328,9 @@ func removeClaimedRepoGoneDirectory(
 // removeFinalizingRepoGoneRoot consumes only the empty root marker described by
 // cleanup_finalizing. The descriptor walk had already removed and verified all
 // children before that state was persisted. If the name is now absent, replaced,
-// or newly populated, the original empty marker is no longer ours to remove and
-// finalization leaves the current pathname untouched.
+// or replaced, the original empty marker is no longer ours to remove and
+// finalization leaves the current pathname untouched. A surviving exact marker
+// which has been repopulated remains an unresolved cleanup obligation.
 func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGeneration string) error {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
@@ -358,9 +375,11 @@ func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGe
 		return err
 	}
 	if len(names) != 0 {
-		return nil
+		return unverifiedCleanupError(
+			"refusing to finish repo-gone cleanup because finalizing root %s was repopulated", path,
+		)
 	}
-	err = removeCopiedEntry(parent, parentPath, copiedEntry{
+	err = removeCopiedEntryRestoringName(parent, parentPath, copiedEntry{
 		name: name, source: expected, directory: &copiedDirectory{},
 	}, true)
 	var changed *unverifiedCleanupPathError
@@ -415,6 +434,9 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
 		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err), nil
 	}
+	if g.hooksCancel != nil {
+		g.hooksCancel()
+	}
 	// Current archives may carry complete retained source trees for files the
 	// published copy could not read. Their report is the only durable ownership
 	// handle, so consume them before the primary archive and before the daemon can
@@ -424,9 +446,6 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 		return CleanupStateUnknown, fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err), nil
 	}
 
-	if g.hooksCancel != nil {
-		g.hooksCancel()
-	}
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
 		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err), nil
 	}
