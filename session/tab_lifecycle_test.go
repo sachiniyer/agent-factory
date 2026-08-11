@@ -571,11 +571,10 @@ func TestRefuseTabKind_RejectsBrowserUnicodeDotLoopback(t *testing.T) {
 		"http://127。0。0。1:3000",
 		"http://127．0．0．1:3000",
 		"http://127｡0｡0｡1:3000",
+		"http://ｌｏｃａｌｈｏｓｔ:3000",
 	} {
 		normalized, err := NormalizeWebTabURL(target)
 		require.NoError(t, err)
-		require.Equal(t, "http://127.0.0.1:3000", normalized,
-			"the browser and daemon must persist the same canonical host")
 		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, normalized),
 			"%s is browser-canonical loopback and must not be admitted off-box", target)
 	}

@@ -21,7 +21,7 @@ Sessions (one agent per isolated worktree):
   af sessions handoff <title> --to <agent>             Continue a stuck session under a different agent (same worktree/branch)
   af sessions restore <title>                          Restore an archived, lost, or dead session
 
-Tabs (extra processes and views in your instance's worktree; no limit on how many; not for remote sessions). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
+Tabs (extra processes and views in your instance's worktree; no limit on how many). Shell, process, and VS Code tabs require a local session; external-URL web tabs work on remote sessions; loopback web targets still require a local session (--port is loopback). The <title> is the target session — for your own, get it from "af sessions whoami". Tabs are how you put something in front of the user; use them instead of an external browser, editor, or global tool.
   af sessions tab-create <title> --kind shell                    Terminal tab running $SHELL in the worktree (the same Terminal the TUI/web opens)
   af sessions tab-create <title> --command <cmd> [--name <tab>]   Process tab running <cmd> in the worktree; prints the tab name; persists across restarts
   af sessions tab-create <title> --kind web --url <u>|--port <n>  Web tab — a live browser view (no process) shown to the user in the web UI; this is how you show a URL, site, or dev server (--port n = http://localhost:n)

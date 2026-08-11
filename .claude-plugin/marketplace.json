@@ -9,7 +9,7 @@
       "name": "agent-factory",
       "source": "./plugins/claude/agent-factory",
       "description": "Run and schedule AI coding agents in isolated git worktrees with the Agent Factory (af) CLI",
-      "version": "3.8.3680816536+sha256.db64cd98b4631f17"
+      "version": "3.9.3951225355+sha256.eb82ea0bd7020c61"
     }
   ]
 }

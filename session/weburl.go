@@ -5,6 +5,16 @@ import (
 	"net"
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/idna"
+)
+
+var browserHostIDNA = idna.New(
+	idna.MapForLookup(),
+	idna.Transitional(false),
+	idna.StrictDomainName(false),
+	idna.CheckHyphens(false),
+	idna.BidiRule(),
 )
 
 // NormalizeWebTabURL validates and normalizes a web-tab target into an absolute
@@ -37,30 +47,27 @@ func NormalizeWebTabURL(raw string) (string, error) {
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("web tab URL %q has no host", raw)
 	}
-	// Browsers map these URL-standard domain separators to an ASCII dot before
-	// deciding where to navigate. Persist the same canonical hostname so both
-	// admission and the proxy classify browser-equivalent loopback spellings the
-	// same way. Rebuild only the authority: replacing across raw would also change
-	// valid path and query data containing these runes.
-	if host := normalizeBrowserDomainSeparators(u.Hostname()); host != u.Hostname() {
+	// Browsers apply nontransitional UTS #46 processing before deciding where to
+	// navigate. Persist the same ASCII hostname so width mappings, Unicode domain
+	// separators, and IDNs cannot make browser and daemon classifications disagree.
+	// Rebuild only the authority: mapping across raw would also change path/query
+	// data. IP literals already have their canonical URL syntax and are not IDNs.
+	host := u.Hostname()
+	canonicalHost := host
+	if net.ParseIP(host) == nil && !strings.Contains(host, ":") {
+		canonicalHost, err = browserHostIDNA.ToASCII(host)
+		if err != nil {
+			return "", fmt.Errorf("invalid web tab URL hostname %q: %w", host, err)
+		}
+	}
+	if canonicalHost != host {
 		port := u.Port()
-		u.Host = host
+		u.Host = canonicalHost
 		if port != "" {
-			u.Host = net.JoinHostPort(host, port)
+			u.Host = net.JoinHostPort(canonicalHost, port)
 		}
 	}
 	return u.String(), nil
-}
-
-func normalizeBrowserDomainSeparators(host string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\u3002', '\uff0e', '\uff61':
-			return '.'
-		default:
-			return r
-		}
-	}, host)
 }
 
 // WebTabURLForPort builds the loopback URL a `--port N` convenience flag targets.

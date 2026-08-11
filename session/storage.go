@@ -672,12 +672,16 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		unknownRuntimeCleanup := data.RuntimeCleanupStateUnknown
 		unresolvedRelocation := data.Worktree.RelocationRecovery != nil
 		archiveReportPending := data.archiveReportPending
+		pendingTabs := len(data.PendingTabs) > 0
+		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
+			unresolvedRelocation || archiveReportPending
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
-		// incoming runtime. The explicit marker outranks the lossy legacy status.
-		if (status == Loading || status == Deleting) && !pendingHandoff &&
-			!unknownRuntimeCleanup && !unresolvedRelocation && !archiveReportPending {
+		// incoming runtime. Explicit durable state outranks the lossy legacy status.
+		// PendingTabs does NOT override Deleting: an explicit delete still wins over
+		// preserving its UI metadata, so a crash cannot resurrect the session.
+		if (status == Loading || status == Deleting) && !durableRetention {
 			continue
 		}
 		// The !Started() skip drops transient never-started junk (a create that
@@ -701,8 +705,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !pendingHandoff && !unknownRuntimeCleanup && !unresolvedRelocation &&
-			!archiveReportPending {
+			!data.StartupStateUnknown && !durableRetention && !pendingTabs {
 			continue
 		}
 		root := inst.GetRepoPath()

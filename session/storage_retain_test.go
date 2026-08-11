@@ -368,3 +368,43 @@ func TestSaveInstances_KeepsPendingHandoffAlongsideStartedSibling(t *testing.T) 
 	}
 	t.Fatal("whole-repo save dropped the pending handoff row while its incoming runtime was live")
 }
+
+// A failed off-box recovery can stage a metadata-only tab before Launch while
+// leaving the restored instance inert. The staged row is a durability claim:
+// if a live sibling causes a whole-repo checkpoint, dropping the inert instance
+// also drops the only copy of the web tab before the next recovery can retry.
+func TestSaveInstances_KeepsPendingTabsAlongsideStartedSibling(t *testing.T) {
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+	pending, err := FromInstanceData(InstanceData{
+		Title: "failed-off-box-recovery", Path: repoPath, BackendType: "ssh", Status: Running,
+		PendingTabs: []TabData{{ID: "web-1", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/docs"}},
+	})
+	if err != nil {
+		t.Fatalf("FromInstanceData: %v", err)
+	}
+	if pending.Started() {
+		t.Fatal("a restored off-box row must remain inert until recovery launches it")
+	}
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, pending}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	for _, row := range readDisk(t, state, repoPath) {
+		if row.Title != pending.Title {
+			continue
+		}
+		if len(row.PendingTabs) != 1 || row.PendingTabs[0].ID != "web-1" {
+			t.Fatalf("retained off-box row lost its staged web tab: %+v", row.PendingTabs)
+		}
+		return
+	}
+	t.Fatal("whole-repo save dropped the inert off-box row while PendingTabs was its recovery claim")
+}

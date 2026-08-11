@@ -329,6 +329,7 @@ func TestRepoSaveDropsDeletingFromMemory(t *testing.T) {
 	// unless the instance is Deleting.
 	deleting := makeAliveInstance("mid-teardown", repoPath)
 	deleting.SetStatusForTest(Deleting)
+	deleting.pendingMetadataTabs = []TabData{{ID: "web-1", Kind: TabKindWeb, URL: "https://example.com"}}
 
 	storage, err := NewStorage(ms, repoID)
 	require.NoError(t, err)
@@ -336,7 +337,7 @@ func TestRepoSaveDropsDeletingFromMemory(t *testing.T) {
 	require.NoError(t, storage.SaveInstances([]*Instance{deleting}))
 
 	result := readDisk(t, ms, repoPath)
-	assert.Empty(t, result, "Deleting instance must never be persisted (#844)")
+	assert.Empty(t, result, "Deleting instance must never be persisted, even with staged tab metadata (#844)")
 }
 
 // TestRepoSaveReapsLegacyLoadingGhost verifies that an older binary's

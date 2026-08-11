@@ -17,6 +17,8 @@ func TestNormalizeWebTabURL(t *testing.T) {
 		{name: "fullwidth dot in host", in: "http://127．0．0．1:3000", want: "http://127.0.0.1:3000"},
 		{name: "halfwidth dot in host", in: "http://127｡0｡0｡1:3000", want: "http://127.0.0.1:3000"},
 		{name: "domain separators stay scoped to host", in: "https://example。com/path。part", want: "https://example.com/path%E3%80%82part"},
+		{name: "fullwidth localhost", in: "http://ｌｏｃａｌｈｏｓｔ:3000", want: "http://localhost:3000"},
+		{name: "unicode domain becomes ascii", in: "https://bücher.example/path", want: "https://xn--bcher-kva.example/path"},
 		{name: "whitespace trimmed", in: "  localhost:3000 ", want: "http://localhost:3000"},
 		{name: "empty rejected", in: "   ", wantErr: true},
 		{name: "non-http scheme rejected", in: "ftp://host/x", wantErr: true},
