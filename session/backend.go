@@ -329,14 +329,18 @@ func webTargetHostIsBrowserLoopbackShorthand(target string) bool {
 		return false // a real IP literal; IsLoopbackWebTarget already classified it
 	}
 	address, ok := parseBrowserIPv4Address(host)
-	return ok && byte(address>>24) == 127
+	const (
+		loopbackStart = uint64(127) << 24
+		loopbackEnd   = uint64(128) << 24
+	)
+	return ok && address >= loopbackStart && address < loopbackEnd
 }
 
 // parseBrowserIPv4Address implements the URL-standard legacy IPv4 grammar:
 // one to four decimal, octal, or 0x-prefixed components, with the final
 // component filling the remaining bytes. It returns false for ordinary DNS
 // names even when every letter happens to be a hexadecimal digit.
-func parseBrowserIPv4Address(host string) (uint32, bool) {
+func parseBrowserIPv4Address(host string) (uint64, bool) {
 	parts := strings.Split(host, ".")
 	if len(parts) > 0 && parts[len(parts)-1] == "" {
 		parts = parts[:len(parts)-1]
@@ -362,7 +366,7 @@ func parseBrowserIPv4Address(host string) (uint32, bool) {
 	for idx := 0; idx < len(numbers)-1; idx++ {
 		address += numbers[idx] << uint(8*(3-idx))
 	}
-	return uint32(address), true
+	return address, true
 }
 
 func parseBrowserIPv4Number(input string) (uint64, bool) {
