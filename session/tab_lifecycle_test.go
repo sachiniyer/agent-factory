@@ -358,7 +358,9 @@ func TestTmuxTeardownCount_CountsSessionsNotRosterEntries(t *testing.T) {
 // TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict pins the contract the web UI
 // consumes (#3060). The point is not the values — those are RefuseTabKind's and
 // will change as #3062/#3054 lift refusals — but that the projection IS
-// RefuseTabKind, so an affordance and the call behind it cannot drift.
+// RefuseTabKind, so an affordance and the call behind it cannot drift. Web uses
+// the representative external HTTPS target that answers the menu-level "can
+// this kind work at all?" question; submission re-asks with the actual URL.
 func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 	for _, workspace := range []WorkspaceKind{WorkspaceLocalWorktree, WorkspaceRemote} {
 		caps := Capabilities{Workspace: workspace}
@@ -371,8 +373,12 @@ func TestTabKindAllowances_ProjectsTheDaemonsOwnVerdict(t *testing.T) {
 			kind, ok := ParseTabKindName(a.Kind)
 			require.Truef(t, ok, "%q must be a name the CLI accepts", a.Kind)
 
-			// The assertion that matters:each entry equals what RefuseTabKind says now.
-			err := caps.RefuseTabKind(kind, "")
+			// The assertion that matters: each entry equals what RefuseTabKind says now.
+			target := ""
+			if kind == TabKindWeb {
+				target = tabKindAllowanceExternalWebTarget
+			}
+			err := caps.RefuseTabKind(kind, target)
 			require.Equalf(t, err == nil, a.Allowed, "kind %q disagrees with RefuseTabKind", a.Kind)
 			if err != nil {
 				require.Equalf(t, err.Error(), a.Reason,
