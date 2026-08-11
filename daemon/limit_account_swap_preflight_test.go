@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -31,9 +32,7 @@ func TestPreflightAccountSwapCandidatesUsesTheFirstProvenIdentity(t *testing.T) 
 func TestAdmitAccountSwapRefusesVSCodeIntegratedShells(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
-	if _, err := inst.AddVSCodeTab("editor"); err != nil {
-		t.Fatal(err)
-	}
+	inst.Tabs = append(inst.Tabs, &session.Tab{ID: "editor", Name: "editor", Kind: session.TabKindVSCode})
 	if err := inst.BeginLimitResume(); err != nil {
 		t.Fatal(err)
 	}
