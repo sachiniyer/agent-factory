@@ -202,6 +202,63 @@ func TestRestoreArchived_PathDerivationFailurePersistsUnresolvedClaim(t *testing
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_AuthoritativeProbeFailurePersistsUnresolvedClaim(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "use-probe-unknown")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "use-probe-unknown", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.Nil(t, recordFor(t, repoID, "use-probe-unknown").Worktree.RelocationRecovery,
+		"precondition: an ordinary successful archive starts without a recovery record")
+
+	previous := beforeRestoreWorktreeUse
+	beforeRestoreWorktreeUse = func() { t.Setenv("PATH", t.TempDir()) }
+	t.Cleanup(func() { beforeRestoreWorktreeUse = previous })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "use-probe-unknown", RepoID: repoID})
+	require.Error(t, err)
+	assert.True(t, exists(archivedPath), "authoritative probe failure must leave the archive intact")
+	recovery := recordFor(t, repoID, "use-probe-unknown").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "authoritative probe failure must materialize a durable unresolved claim")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
+func TestRestoreArchived_CleanupPreparationPersistFailureLeavesStaleFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "prepare-persist-failure")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "prepare-persist-failure", RepoID: repoID})
+	require.NoError(t, err)
+	require.Nil(t, recordFor(t, repoID, "prepare-persist-failure").Worktree.RelocationRecovery,
+		"precondition: an ordinary successful archive starts without a recovery record")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	diskFull := errors.New("forced cleanup-ready persistence failure")
+	previousPersist := testHookPersistInstanceData
+	writes := 0
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title != "prepare-persist-failure" {
+			return nil
+		}
+		writes++
+		if writes == 2 {
+			return diskFull
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = previousPersist })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "prepare-persist-failure", RepoID: repoID})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, diskFull.Error())
+	assert.Equal(t, 2, writes, "cleanup preparation must stage a durable stale fence before cleanup_ready")
+	recovery := recordFor(t, repoID, "prepare-persist-failure").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "failed cleanup-ready persistence must leave the staged durable fence")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))
@@ -290,6 +347,23 @@ func TestLateGhostCleanup_DeleteFailureIsRetriedFromDefinitiveSuccess(t *testing
 	require.Eventually(t, func() bool {
 		return !manager.ghostCleanupStallActive(key, stableID)
 	}, 250*time.Millisecond, time.Millisecond, "a successful retry must release the process-epoch fence")
+}
+
+func TestLateGhostCleanup_WorkerErrorReleasesProcessFence(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-late-error")
+	key := daemonInstanceKey(repoID, "ghost-late-error")
+	stableID := "ghost-late-error-id"
+	manager.markGhostCleanupStalled(key, stableID)
+
+	lateResult := make(chan error, 1)
+	lateResult <- errors.New("transient descriptor failure")
+	manager.reconcileLateGhostCleanup(repoID, "ghost-late-error", key, stableID, lateResult)
+
+	require.Eventually(t, func() bool {
+		return !manager.ghostCleanupStallActive(key, stableID)
+	}, 250*time.Millisecond, time.Millisecond, "a completed worker error must release the process-only fence")
+	assert.NotNil(t, recordFor(t, repoID, "ghost-late-error"),
+		"releasing the process fence must retain the durable cleanup row for retry")
 }
 
 func TestKillSession_GhostCleanupSettledTailFailureRetriesFinalization(t *testing.T) {

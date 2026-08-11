@@ -1,9 +1,11 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,8 +126,14 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 	previousTimeout := relocationIdentityTimeout
 	release := make(chan struct{})
 	started := make(chan struct{})
+	workerFinished := make(chan struct{}, 2)
+	var starts atomic.Int32
 	cleanupGenerationInstall = func(string, pathIdentity) (string, error) {
-		close(started)
+		starts.Add(1)
+		defer func() { workerFinished <- struct{}{} }()
+		if starts.Load() == 1 {
+			close(started)
+		}
 		<-release
 		return "late-generation", nil
 	}
@@ -150,7 +158,19 @@ func TestPrepareRelocationClaimForCleanup_BoundsGenerationInstall(t *testing.T) 
 		<-result
 		t.Fatal("generation installation exceeded its outer deadline")
 	}
+	if _, retryErr := boundedCleanupGenerationInstall(worktree, identity); !errors.Is(retryErr, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("retry did not observe the timed-out generation process fence: %v", retryErr)
+	}
+	if got := starts.Load(); got != 1 {
+		close(release)
+		for range got {
+			<-workerFinished
+		}
+		t.Fatalf("generation deadline spawned %d installers, want one process fence", got)
+	}
 	close(release)
+	<-workerFinished
 	recovery, retained := gw.GetRelocationRecovery()
 	if !retained || recovery.State != RelocationRecoveryClaimStale {
 		t.Fatalf("generation timeout lost its unresolved record; retained=%v recovery=%+v", retained, recovery)
@@ -186,5 +206,67 @@ func TestInstallCleanupGeneration_DoesNotOverwriteNewerGeneration(t *testing.T) 
 	}
 	if stored != newerGeneration {
 		t.Fatalf("stale installer changed durable generation: got %q want %q", stored, newerGeneration)
+	}
+}
+
+func TestCleanupClaimedRepoGone_LateLiveSuccessRetainsFinalizationFence(t *testing.T) {
+	gw, claim, worktree := repoGoneCleanupClaim(t)
+	previousRemove := repoGoneRemoveDirectory
+	previousTimeout := repoGoneCleanupTimeout
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerFinished := make(chan struct{})
+	repoGoneCleanupTimeout = 25 * time.Millisecond
+	repoGoneRemoveDirectory = func(path string, _ pathIdentity, _ string, checkpoint func(string) error) error {
+		defer close(workerFinished)
+		secured := path + "-secured"
+		if err := os.Rename(path, secured); err != nil {
+			return err
+		}
+		if err := checkpoint(secured); err != nil {
+			return err
+		}
+		close(started)
+		<-release
+		return os.RemoveAll(secured)
+	}
+	t.Cleanup(func() {
+		repoGoneRemoveDirectory = previousRemove
+		repoGoneCleanupTimeout = previousTimeout
+	})
+
+	type result struct {
+		state CleanupState
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		state, err := gw.CleanupClaimedRepoGone(claim)
+		done <- result{state: state, err: err}
+	}()
+	<-started
+	observed := <-done
+	if observed.state != CleanupStateUnknown || !errors.Is(observed.err, context.DeadlineExceeded) {
+		close(release)
+		<-workerFinished
+		t.Fatalf("live cleanup did not return at its deadline: state=%v err=%v", observed.state, observed.err)
+	}
+	close(release)
+	<-workerFinished
+
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupFinalizing {
+		t.Fatalf("late live success dropped its durable finalization fence; retained=%v recovery=%+v", retained, recovery)
+	}
+	retry, err := gw.ClaimRelocationSource()
+	if err != nil {
+		t.Fatalf("claim late live finalization: %v", err)
+	}
+	state, err := gw.CleanupClaimedRepoGone(retry)
+	if err != nil || state != CleanupSettled {
+		t.Fatalf("finalize late live cleanup: state=%v err=%v", state, err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("late live cleanup unexpectedly rematerialized the removed archive: %v", err)
 	}
 }
