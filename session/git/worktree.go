@@ -69,7 +69,6 @@ type GitWorktree struct {
 	// archiveReport changes. Live snapshots prepend only archive/restore and never
 	// clone or rescan the storage-only report.
 	archiveWarningSuffix string
-
 	// Path to the repository
 	repoPath string
 	// Path to the worktree

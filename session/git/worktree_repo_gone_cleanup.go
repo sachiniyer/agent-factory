@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -86,10 +87,10 @@ func definitiveMissingRepository(probeErr error) bool {
 	if !errors.As(probeErr, &exitErr) {
 		return false
 	}
-	diagnostic := string(exitErr.Stderr)
+	diagnostic := strings.TrimSpace(string(exitErr.Stderr))
 	return strings.Contains(diagnostic, "cannot change to") &&
-		(strings.Contains(diagnostic, "No such file or directory") ||
-			strings.Contains(diagnostic, "Not a directory"))
+		(strings.HasSuffix(diagnostic, ": No such file or directory") ||
+			strings.HasSuffix(diagnostic, ": Not a directory"))
 }
 
 // definitiveNonGitRepository accepts only Git's stable outside-repository
@@ -106,19 +107,47 @@ func definitiveNonGitRepository(probeErr error) bool {
 	return true
 }
 
+type repoGoneOriginProbeFlight struct {
+	done   chan struct{}
+	err    error
+	cancel context.CancelFunc
+}
+
+var repoGoneOriginProbeFlights = struct {
+	sync.Mutex
+	byPath map[string]*repoGoneOriginProbeFlight
+}{byPath: make(map[string]*repoGoneOriginProbeFlight)}
+
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
+	repoGoneOriginProbeFlights.Lock()
+	if repoGoneOriginProbeFlights.byPath[worktree.repoPath] != nil {
+		repoGoneOriginProbeFlights.Unlock()
+		return fmt.Errorf(
+			"origin repository check for %s is still running after an earlier deadline: %w",
+			worktree.repoPath, context.DeadlineExceeded,
+		)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	type result struct{ err error }
-	resultC := make(chan result, 1)
-	go func() { resultC <- result{err: repoGoneOriginProbe(ctx, worktree)} }()
+	flight := &repoGoneOriginProbeFlight{done: make(chan struct{}), cancel: cancel}
+	repoGoneOriginProbeFlights.byPath[worktree.repoPath] = flight
+	repoGoneOriginProbeFlights.Unlock()
+	go func() {
+		flight.err = repoGoneOriginProbe(ctx, worktree)
+		close(flight.done)
+		cancel()
+		repoGoneOriginProbeFlights.Lock()
+		if repoGoneOriginProbeFlights.byPath[worktree.repoPath] == flight {
+			delete(repoGoneOriginProbeFlights.byPath, worktree.repoPath)
+		}
+		repoGoneOriginProbeFlights.Unlock()
+	}()
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
-	case observed := <-resultC:
-		cancel()
-		return observed.err
+	case <-flight.done:
+		return flight.err
 	case <-timer.C:
-		cancel()
+		flight.cancel()
 		return fmt.Errorf(
 			"timed out after %s while checking origin repository %s: %w",
 			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
@@ -237,8 +266,14 @@ func installCleanupGeneration(path string, expected pathIdentity) (string, error
 		return "", fmt.Errorf("generate cleanup identity for %s: %w", path, err)
 	}
 	generation := hex.EncodeToString(random)
-	if err := unix.Fsetxattr(int(directory.Fd()), cleanupGenerationXattr, []byte(generation), 0); err != nil {
-		return "", fmt.Errorf("store cleanup identity on %s: %w", path, err)
+	if err := unix.Fsetxattr(int(directory.Fd()), cleanupGenerationXattr, []byte(generation), unix.XATTR_CREATE); err != nil {
+		if !errors.Is(err, unix.EEXIST) {
+			return "", fmt.Errorf("store cleanup identity on %s: %w", path, err)
+		}
+		generation, err = cleanupGenerationFromFile(directory)
+		if err != nil {
+			return "", fmt.Errorf("adopt existing cleanup identity on %s: %w", path, err)
+		}
 	}
 	if err := directory.Sync(); err != nil {
 		return "", fmt.Errorf("make cleanup identity durable on %s: %w", path, err)
@@ -469,22 +504,21 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
-	// Current archives may carry complete retained source trees for files the
-	// published copy could not read. Their report is the only durable ownership
-	// handle, so consume them before the primary archive and before the daemon can
-	// delete the session row. This is the same ordering as ordinary Cleanup; a
-	// refusal preserves the relocation claim and therefore the whole transaction.
-	if err := repoGoneCleanupRetainedTrees(g); err != nil {
-		return CleanupStateUnknown, fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err), nil
-	}
-
-	if err := g.RevalidateRelocationClaim(claim); err != nil {
-		return CleanupStateUnknown, fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err), nil
-	}
-
 	deleteDone := make(chan error, 1)
 	go func() {
-		err := repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func(securedPath string) error {
+		// Current archives may carry complete retained source trees for files the
+		// published copy could not read. Consume those handles and the primary
+		// archive inside one deadline-bound transaction.
+		err := repoGoneCleanupRetainedTrees(g)
+		if err != nil {
+			deleteDone <- fmt.Errorf("remove retained archive trees before repo-gone cleanup: %w", err)
+			return
+		}
+		if err := g.RevalidateRelocationClaim(claim); err != nil {
+			deleteDone <- fmt.Errorf("repo-gone cleanup identity changed before reaping writers: %w", err)
+			return
+		}
+		err = repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func(securedPath string) error {
 			return g.checkpointRepoGoneFinalization(claim, securedPath, checkpoint)
 		})
 		if err == nil {

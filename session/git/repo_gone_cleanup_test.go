@@ -473,8 +473,10 @@ func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *te
 	previousProbe := repoGoneOriginProbe
 	previousTimeout := relocationIdentityTimeout
 	started := make(chan struct{}, 2)
+	finished := make(chan struct{}, 2)
 	release := make(chan struct{})
 	repoGoneOriginProbe = func(context.Context, *GitWorktree) error {
+		defer func() { finished <- struct{}{} }()
 		started <- struct{}{}
 		<-release
 		return errors.New("probe released")
@@ -485,17 +487,23 @@ func TestValidateRelocationCleanupAdmission_DeadlineReusesOriginProbeFence(t *te
 		relocationIdentityTimeout = previousTimeout
 	})
 
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, context.DeadlineExceeded) {
-			close(release)
-			t.Fatalf("attempt %d did not fail closed at the probe deadline: %v", attempt+1, err)
-		}
-	}
-	if got := len(started); got != 1 {
+	if err := boundedRepoGoneOriginProbe(gw); !errors.Is(err, context.DeadlineExceeded) {
 		close(release)
+		t.Fatalf("first attempt did not fail closed at the probe deadline: %v", err)
+	}
+	reloaded := &GitWorktree{repoPath: gw.repoPath}
+	if err := boundedRepoGoneOriginProbe(reloaded); !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("retry did not observe the process fence: %v", err)
+	}
+	got := len(started)
+	close(release)
+	for range got {
+		<-finished
+	}
+	if got != 1 {
 		t.Fatalf("deadline spawned %d origin probes for one stuck operation, want one process fence", got)
 	}
-	close(release)
 }
 
 func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testing.T) {

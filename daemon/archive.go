@@ -734,7 +734,8 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	beforeRestoreWorktreePath()
 	dest, err := sessiongit.RestoreWorktreePath(repoPath, req.Title, instance.GetBranch())
 	if err != nil {
-		return "", fmt.Errorf("cannot determine restore location for %q: %w", req.Title, err)
+		claimTransferred = true
+		return "", m.persistRestorePathFailure(repoID, req.Title, instance, relocationClaim, err)
 	}
 	beforeRestoreWorktreeUse()
 

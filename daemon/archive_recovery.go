@@ -43,6 +43,25 @@ func (m *Manager) guardRepoGoneRestore(
 	)
 }
 
+// persistRestorePathFailure closes the interval between a successful origin
+// guard and repo-dependent destination derivation. The guard's point-in-time
+// answer cannot let a later failure return a record-free destructive default.
+func (m *Manager) persistRestorePathFailure(
+	repoID, title string,
+	instance *session.Instance,
+	claim sessiongit.RelocationClaim,
+	pathCause error,
+) error {
+	pathErr := fmt.Errorf("cannot determine restore location for %q: %w", title, pathCause)
+	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
+	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		return errors.Join(pathErr, fmt.Errorf(
+			"could not persist the unresolved archived worktree identity: %w", persistErr,
+		))
+	}
+	return pathErr
+}
+
 // claimRestoreRelocation resolves the archived worktree and durably records any
 // failed bounded probe before the restore handler returns.
 func (m *Manager) claimRestoreRelocation(
