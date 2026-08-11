@@ -378,12 +378,13 @@ func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error
 		return fmt.Errorf("load cleanup-ready worktree: %w", err)
 	}
 	if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-		State:         recovery.State,
-		AlternatePath: recovery.AlternatePath,
-		IdentityKnown: recovery.IdentityKnown,
-		Device:        recovery.Device,
-		Inode:         recovery.Inode,
-		FileType:      recovery.FileType,
+		State:             recovery.State,
+		AlternatePath:     recovery.AlternatePath,
+		IdentityKnown:     recovery.IdentityKnown,
+		Device:            recovery.Device,
+		Inode:             recovery.Inode,
+		FileType:          recovery.FileType,
+		CleanupGeneration: recovery.CleanupGeneration,
 	}); err != nil {
 		return fmt.Errorf("restore cleanup-ready recovery: %w", err)
 	}
@@ -401,13 +402,18 @@ var ghostCleanupWorktree = func(
 	title string,
 	checkpoint func(*session.InstanceData) error,
 ) (git.CleanupState, error, <-chan error) {
-	persisted := data
 	current := data.RestoreArchiveRollbackFence()
 	restored, restoreErr := current.RestoreRelocationRecoveryOriginals()
 	if restoreErr != nil {
 		return git.CleanupStateUnknown, fmt.Errorf("ghost recovery ownership is invalid: %w", restoreErr), nil
 	}
-	data = &restored
+	if restored.ArchiveReport != nil {
+		report := restored.ArchiveReport.Clone()
+		report.RollbackFence = nil
+		restored.ArchiveReport = &report
+	}
+	*data = restored
+	persisted := data
 	if !ghostRestoredWorktreeRemovable(data) {
 		return git.CleanupSettled, nil, nil
 	}
@@ -438,12 +444,13 @@ var ghostCleanupWorktree = func(
 	recovery := data.Worktree.RelocationRecovery
 	if recovery != nil {
 		if recoveryErr := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-			State:         recovery.State,
-			AlternatePath: recovery.AlternatePath,
-			IdentityKnown: recovery.IdentityKnown,
-			Device:        recovery.Device,
-			Inode:         recovery.Inode,
-			FileType:      recovery.FileType,
+			State:             recovery.State,
+			AlternatePath:     recovery.AlternatePath,
+			IdentityKnown:     recovery.IdentityKnown,
+			Device:            recovery.Device,
+			Inode:             recovery.Inode,
+			FileType:          recovery.FileType,
+			CleanupGeneration: recovery.CleanupGeneration,
 		}); recoveryErr != nil {
 			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
 			return git.CleanupStateUnknown, recoveryErr, nil
@@ -461,7 +468,11 @@ var ghostCleanupWorktree = func(
 			clone := *recovery
 			checkpointData.Worktree.RelocationRecovery = &clone
 		}
-		projectGhostRelocationRecovery(&checkpointData, gw)
+		if persisted.ArchiveReport != nil {
+			report := persisted.ArchiveReport.Clone()
+			checkpointData.ArchiveReport = &report
+		}
+		projectGhostPersistenceSnapshot(&checkpointData, gw)
 		if checkpoint == nil {
 			return nil
 		}
@@ -476,7 +487,7 @@ var ghostCleanupWorktree = func(
 			return git.CleanupStateUnknown, claimErr, nil
 		}
 		state, cleanupErr, lateResult := gw.CleanupClaimedRepoGoneWithLateResult(claim)
-		projectGhostRelocationRecovery(persisted, gw)
+		projectGhostPersistenceSnapshot(persisted, gw)
 		return state, cleanupErr, lateResult
 	}
 	state, cleanupErr := gw.Cleanup()
@@ -486,26 +497,35 @@ var ghostCleanupWorktree = func(
 	return state, cleanupErr, nil
 }
 
-// projectGhostRelocationRecovery copies only the lifecycle fields from the
-// temporary GitWorktree. The ownership-projection fields belong to the durable
-// row and must survive until the cleanup obligation is consumed.
-func projectGhostRelocationRecovery(data *session.InstanceData, gw *git.GitWorktree) {
-	recovery, ok := gw.GetRelocationRecovery()
+// projectGhostPersistenceSnapshot copies relocation ownership and archive
+// completeness from one atomic GitWorktree snapshot. The semantic in-memory
+// report never carries a compatibility fence; ForStorage rebuilds that fence
+// from these current values immediately before writing the row.
+func projectGhostPersistenceSnapshot(data *session.InstanceData, gw *git.GitWorktree) {
+	path, recovery, ok, report := gw.PersistenceSnapshot()
+	data.Worktree.WorktreePath = path
 	if !ok {
 		data.Worktree.RelocationRecovery = nil
-		return
+	} else {
+		persisted := data.Worktree.RelocationRecovery
+		if persisted == nil {
+			persisted = &session.GitWorktreeRelocationRecoveryData{}
+			data.Worktree.RelocationRecovery = persisted
+		}
+		persisted.State = recovery.State
+		persisted.AlternatePath = recovery.AlternatePath
+		persisted.IdentityKnown = recovery.IdentityKnown
+		persisted.Device = recovery.Device
+		persisted.Inode = recovery.Inode
+		persisted.FileType = recovery.FileType
+		persisted.CleanupGeneration = recovery.CleanupGeneration
 	}
-	persisted := data.Worktree.RelocationRecovery
-	if persisted == nil {
-		persisted = &session.GitWorktreeRelocationRecoveryData{}
-		data.Worktree.RelocationRecovery = persisted
+	if report.Empty() {
+		data.ArchiveReport = nil
+	} else {
+		report.RollbackFence = nil
+		data.ArchiveReport = &report
 	}
-	persisted.State = recovery.State
-	persisted.AlternatePath = recovery.AlternatePath
-	persisted.IdentityKnown = recovery.IdentityKnown
-	persisted.Device = recovery.Device
-	persisted.Inode = recovery.Inode
-	persisted.FileType = recovery.FileType
 }
 
 func (m *Manager) ghostCleanupStallActive(key, stableID string) bool {

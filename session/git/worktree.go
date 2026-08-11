@@ -126,6 +126,10 @@ type RelocationRecovery struct {
 	Device        uint64
 	Inode         uint64
 	FileType      uint32
+	// CleanupGeneration is a random value stored on the authorized directory
+	// itself. Device/inode pairs can be recycled after deletion; the generation
+	// makes that reuse distinguishable across daemon restarts.
+	CleanupGeneration string
 }
 
 func (r RelocationRecovery) identity() pathIdentity {

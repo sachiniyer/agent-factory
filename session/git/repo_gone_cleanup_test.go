@@ -37,15 +37,22 @@ func repoGoneCleanupClaim(t *testing.T) (*GitWorktree, RelocationClaim, string) 
 		t.Fatalf("restore worktree handle: %v", err)
 	}
 	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
-		State:         RelocationRecoveryCleanupReady,
+		State:         RelocationRecoveryClaimStale,
 		IdentityKnown: true,
 		Device:        uint64(stat.Dev),
 		Inode:         uint64(stat.Ino),
 		FileType:      uint32(stat.Mode & syscall.S_IFMT),
 	}); err != nil {
-		t.Fatalf("restore cleanup-ready identity: %v", err)
+		t.Fatalf("restore unresolved identity: %v", err)
 	}
 	claim, err := gw.ClaimRelocationSource()
+	if err != nil {
+		t.Fatalf("claim unresolved source: %v", err)
+	}
+	if err := gw.PrepareRelocationClaimForCleanup(claim); err != nil {
+		t.Fatalf("prepare cleanup-ready identity: %v", err)
+	}
+	claim, err = gw.ClaimRelocationSource()
 	if err != nil {
 		t.Fatalf("claim cleanup-ready source: %v", err)
 	}
@@ -141,6 +148,7 @@ func TestCleanupClaimedRepoGone_FinalizingRetryLeavesReplacement(t *testing.T) {
 	if err := finalizing.RestoreRelocationRecovery(RelocationRecovery{
 		State: RelocationRecoveryCleanupFinalizing, IdentityKnown: true,
 		Device: claim.identity.device, Inode: claim.identity.inode, FileType: claim.identity.fileType,
+		CleanupGeneration: claim.cleanupGeneration,
 	}); err != nil {
 		t.Fatalf("restore finalizing recovery: %v", err)
 	}
@@ -212,7 +220,7 @@ func TestCleanupClaimedRepoGone_RecursiveDeleteDeadlineRetainsClaim(t *testing.T
 	blocked := make(chan struct{})
 	workerFinished := make(chan struct{})
 	repoGoneCleanupTimeout = 25 * time.Millisecond
-	repoGoneRemoveDirectory = func(string, pathIdentity, func() error) error {
+	repoGoneRemoveDirectory = func(string, pathIdentity, string, func() error) error {
 		defer close(workerFinished)
 		<-blocked
 		return nil
@@ -484,7 +492,7 @@ func TestValidateRelocationCleanupAdmission_GitExecutionFailureFailsClosed(t *te
 func TestCleanupClaimedRepoGone_AnsweredErrorPreservesCleanupAuthorization(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	previousRemove := repoGoneRemoveDirectory
-	repoGoneRemoveDirectory = func(string, pathIdentity, func() error) error {
+	repoGoneRemoveDirectory = func(string, pathIdentity, string, func() error) error {
 		return errors.New("temporary I/O refusal")
 	}
 	t.Cleanup(func() { repoGoneRemoveDirectory = previousRemove })

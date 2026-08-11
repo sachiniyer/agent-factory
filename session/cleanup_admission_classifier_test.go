@@ -30,13 +30,20 @@ func TestLocalBackendKill_PostCommitRelocationRefusalIsUnknown(t *testing.T) {
 		t.Fatalf("restore worktree handle: %v", err)
 	}
 	if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-		State:         git.RelocationRecoveryCleanupReady,
+		State:         git.RelocationRecoveryClaimStale,
 		IdentityKnown: true,
 		Device:        uint64(stat.Dev),
 		Inode:         uint64(stat.Ino),
 		FileType:      uint32(stat.Mode & syscall.S_IFMT),
 	}); err != nil {
-		t.Fatalf("restore cleanup-ready recovery: %v", err)
+		t.Fatalf("restore unresolved cleanup recovery: %v", err)
+	}
+	claim, err := gw.ClaimRelocationSource()
+	if err != nil {
+		t.Fatalf("claim unresolved cleanup recovery: %v", err)
+	}
+	if err := gw.PrepareRelocationClaimForCleanup(claim); err != nil {
+		t.Fatalf("prepare cleanup-ready recovery: %v", err)
 	}
 	if err := os.Rename(worktree, worktree+"-original"); err != nil {
 		t.Fatalf("move archive after pre-tombstone admission: %v", err)

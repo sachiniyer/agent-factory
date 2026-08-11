@@ -313,6 +313,7 @@ func (d InstanceData) ForStorage() InstanceData {
 				State: recovery.State, AlternatePath: recovery.AlternatePath,
 				IdentityKnown: recovery.IdentityKnown, Device: recovery.Device,
 				Inode: recovery.Inode, FileType: recovery.FileType,
+				CleanupGeneration:           recovery.CleanupGeneration,
 				OriginalExternalWorktree:    &externalWorktree,
 				OriginalBranchCreatedByUs:   branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
@@ -425,6 +426,7 @@ func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
 			Device:                      recovery.Device,
 			Inode:                       recovery.Inode,
 			FileType:                    recovery.FileType,
+			CleanupGeneration:           recovery.CleanupGeneration,
 			OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
 			OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
 			OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
@@ -444,6 +446,7 @@ func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRe
 		Device:                      recovery.Device,
 		Inode:                       recovery.Inode,
 		FileType:                    recovery.FileType,
+		CleanupGeneration:           recovery.CleanupGeneration,
 		OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
 		OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
 		OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
@@ -578,6 +581,7 @@ type GitWorktreeRelocationRecoveryData struct {
 	Device                      uint64                      `json:"device"`
 	Inode                       uint64                      `json:"inode"`
 	FileType                    uint32                      `json:"file_type"`
+	CleanupGeneration           string                      `json:"cleanup_generation,omitempty"`
 	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
 	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
 	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`

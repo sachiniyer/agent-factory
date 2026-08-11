@@ -3,7 +3,6 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -19,14 +18,7 @@ func TestGhostWorktreeRemovable_RestoresOwnershipBeforeRollbackFence(t *testing.
 	if err := os.WriteFile(filepath.Join(archive, "work.txt"), []byte("user work"), 0o644); err != nil {
 		t.Fatalf("write archived worktree: %v", err)
 	}
-	info, err := os.Stat(archive)
-	if err != nil {
-		t.Fatalf("stat archived worktree: %v", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatal("archived worktree stat has no syscall identity")
-	}
+	recovery := preparedCleanupRecovery(t, filepath.Join(root, "missing-repo"), archive, "ghost")
 	originalExternal := false
 	originalBranchCreated := true
 	originalStartupUnknown := false
@@ -42,9 +34,10 @@ func TestGhostWorktreeRemovable_RestoresOwnershipBeforeRollbackFence(t *testing.
 			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
 				State:                       git.RelocationRecoveryCleanupStalled,
 				IdentityKnown:               true,
-				Device:                      uint64(stat.Dev),
-				Inode:                       uint64(stat.Ino),
-				FileType:                    uint32(stat.Mode & syscall.S_IFMT),
+				Device:                      recovery.Device,
+				Inode:                       recovery.Inode,
+				FileType:                    recovery.FileType,
+				CleanupGeneration:           recovery.CleanupGeneration,
 				OriginalExternalWorktree:    &originalExternal,
 				OriginalBranchCreatedByUs:   &originalBranchCreated,
 				OriginalStartupStateUnknown: &originalStartupUnknown,

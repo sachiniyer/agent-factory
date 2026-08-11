@@ -2,6 +2,8 @@ package git
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -9,14 +11,17 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-// probeRepoGoneOrigin applies restore's repository-validity rule under the
-// caller's teardown-safe deadline. Git owns the path lookup too: an os.Stat
-// before a context-aware command could outlive the deadline on a stalled
-// filesystem, leaving one abandoned goroutine per retry. A missing or answered
-// non-Git directory is gone; an unreadable path or timed-out Git process is
-// unknown and must fail closed.
+const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
+
+// probeRepoGoneOrigin applies restore's repository-validity rule. Its caller
+// supplies a hard outer deadline covering both the context-aware Git probe and
+// the affirmative metadata lookup needed to distinguish an absent `.git` entry
+// from an unreadable one. A missing or answered non-Git directory is gone; an
+// unreadable path or timed-out probe is unknown and must fail closed.
 func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 	if worktree.repoPath == "" {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
@@ -29,7 +34,22 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 			return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
 		}
 		if definitiveNonGitRepository(err) {
-			return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
+			repoInfo, repoErr := os.Stat(worktree.repoPath)
+			switch {
+			case errors.Is(repoErr, os.ErrNotExist):
+				return fmt.Errorf("%w: %s is no longer present: %v", ErrRepoGone, worktree.repoPath, err)
+			case repoErr != nil:
+				return errors.Join(err, fmt.Errorf("inspect repository root: %w", repoErr))
+			case !repoInfo.IsDir():
+				return fmt.Errorf("%w: %s is no longer a directory: %v", ErrRepoGone, worktree.repoPath, err)
+			}
+			_, metadataErr := os.Lstat(filepath.Join(worktree.repoPath, ".git"))
+			switch {
+			case errors.Is(metadataErr, os.ErrNotExist):
+				return fmt.Errorf("%w: %s is no longer a git repository: %v", ErrRepoGone, worktree.repoPath, err)
+			case metadataErr != nil:
+				return errors.Join(err, fmt.Errorf("inspect repository metadata: %w", metadataErr))
+			}
 		}
 		return err
 	}
@@ -51,11 +71,9 @@ func definitiveMissingRepository(probeErr error) bool {
 }
 
 // definitiveNonGitRepository accepts only Git's stable outside-repository
-// answer. Git has already completed the filesystem lookup inside the caller's
-// deadline; a second pathname lookup here would both race that answer and be
-// able to outlive the deadline. Command-start, permission, safe-directory, and
-// other execution failures remain unknown and therefore cannot authorize
-// deletion.
+// answer. The caller separately proves that the recorded root has no `.git`
+// entry; the same Git diagnostic is also emitted for unreadable metadata and
+// therefore is not sufficient deletion authority by itself.
 func definitiveNonGitRepository(probeErr error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(probeErr, &exitErr) ||
@@ -67,16 +85,163 @@ func definitiveNonGitRepository(probeErr error) bool {
 }
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
-	ctx, cancel := context.WithTimeout(context.Background(), relocationIdentityTimeout)
-	defer cancel()
-	err := repoGoneOriginProbe(ctx, worktree)
-	if ctxErr := ctx.Err(); ctxErr != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct{ err error }
+	resultC := make(chan result, 1)
+	go func() { resultC <- result{err: repoGoneOriginProbe(ctx, worktree)} }()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		cancel()
+		return observed.err
+	case <-timer.C:
+		cancel()
 		return fmt.Errorf(
 			"timed out after %s while checking origin repository %s: %w",
-			relocationIdentityTimeout, worktree.repoPath, ctxErr,
+			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
 		)
 	}
-	return err
+}
+
+type cleanupPathInspection struct {
+	identity   pathIdentity
+	generation string
+}
+
+func inspectRelocationCleanupIdentity(path string) (cleanupPathInspection, error) {
+	base, err := relocationPathIdentity(path)
+	if err != nil {
+		return cleanupPathInspection{}, err
+	}
+	parentPath := filepath.Dir(path)
+	name := filepath.Base(path)
+	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "cleanup identity parent")
+	if err != nil {
+		return cleanupPathInspection{}, err
+	}
+	defer parent.Close()
+	directory, _, err := openDirectoryAt(parent, name, path, "cleanup identity root")
+	if err != nil {
+		return cleanupPathInspection{}, err
+	}
+	defer directory.Close()
+	opened, err := identityFromFile(directory)
+	if err != nil {
+		return cleanupPathInspection{}, err
+	}
+	named, err := identityAt(parent, name)
+	if err != nil || !base.same(opened) || !base.same(named) {
+		return cleanupPathInspection{}, unverifiedCleanupError(
+			"cleanup path %s changed while its durable generation was inspected", path,
+		)
+	}
+	generation, err := cleanupGenerationFromFile(directory)
+	if err != nil {
+		return cleanupPathInspection{}, err
+	}
+	return cleanupPathInspection{identity: opened, generation: generation}, nil
+}
+
+func boundedRelocationCleanupIdentity(path string) (cleanupPathInspection, error) {
+	type result struct {
+		inspection cleanupPathInspection
+		err        error
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		inspection, err := inspectRelocationCleanupIdentity(path)
+		resultC <- result{inspection: inspection, err: err}
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		return observed.inspection, observed.err
+	case <-timer.C:
+		return cleanupPathInspection{}, fmt.Errorf(
+			"timed out after %s while checking cleanup identity at %s: %w",
+			relocationIdentityTimeout, path, context.DeadlineExceeded,
+		)
+	}
+}
+
+func installCleanupGeneration(path string, expected pathIdentity) (string, error) {
+	parentPath := filepath.Dir(path)
+	name := filepath.Base(path)
+	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "cleanup generation parent")
+	if err != nil {
+		return "", err
+	}
+	defer parent.Close()
+	directory, _, err := openDirectoryAt(parent, name, path, "cleanup generation root")
+	if err != nil {
+		return "", err
+	}
+	defer directory.Close()
+	opened, err := identityFromFile(directory)
+	if err != nil {
+		return "", err
+	}
+	named, err := identityAt(parent, name)
+	if err != nil || !expected.same(opened) || !expected.same(named) {
+		return "", unverifiedCleanupError("cleanup path %s changed before its generation was installed", path)
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate cleanup identity for %s: %w", path, err)
+	}
+	generation := hex.EncodeToString(random)
+	if err := unix.Fsetxattr(int(directory.Fd()), cleanupGenerationXattr, []byte(generation), 0); err != nil {
+		return "", fmt.Errorf("store cleanup identity on %s: %w", path, err)
+	}
+	if err := directory.Sync(); err != nil {
+		return "", fmt.Errorf("make cleanup identity durable on %s: %w", path, err)
+	}
+	return generation, nil
+}
+
+func cleanupGenerationFromFile(directory *os.File) (string, error) {
+	size, err := unix.Fgetxattr(int(directory.Fd()), cleanupGenerationXattr, nil)
+	if err != nil {
+		return "", fmt.Errorf("read durable cleanup generation: %w", err)
+	}
+	if size <= 0 || size > 128 {
+		return "", fmt.Errorf("durable cleanup generation has invalid size %d", size)
+	}
+	value := make([]byte, size)
+	read, err := unix.Fgetxattr(int(directory.Fd()), cleanupGenerationXattr, value)
+	if err != nil {
+		return "", fmt.Errorf("read durable cleanup generation: %w", err)
+	}
+	return string(value[:read]), nil
+}
+
+func validatedCleanupPathIdentity(path, expectedGeneration string) (pathIdentity, error) {
+	if expectedGeneration == "" {
+		return pathIdentity{}, fmt.Errorf("cleanup record has no durable directory generation")
+	}
+	inspection, err := boundedRelocationCleanupIdentity(path)
+	if err != nil {
+		return pathIdentity{}, err
+	}
+	if inspection.generation != expectedGeneration {
+		return pathIdentity{}, unverifiedCleanupError(
+			"cleanup path %s has a different durable directory generation", path,
+		)
+	}
+	return inspection.identity, nil
+}
+
+func requireCleanupPathIdentity(path string, expected pathIdentity, expectedGeneration string) error {
+	identity, err := validatedCleanupPathIdentity(path, expectedGeneration)
+	if err != nil {
+		return err
+	}
+	if !expected.same(identity) {
+		return unverifiedCleanupError("cleanup path %s has a different filesystem identity", path)
+	}
+	return nil
 }
 
 // CheckRepoPresentForRelocation applies the same bounded, fail-closed
@@ -95,6 +260,7 @@ func CheckRepoPresentForRelocation(repoPath string) error {
 func removeClaimedRepoGoneDirectory(
 	path string,
 	expected pathIdentity,
+	expectedGeneration string,
 	beforeRootRemoval func() error,
 ) error {
 	parentPath := filepath.Dir(path)
@@ -117,6 +283,10 @@ func removeClaimedRepoGoneDirectory(
 	namedIdentity, err := identityAt(parent, name)
 	if err != nil || !expected.same(openedIdentity) || !expected.same(namedIdentity) {
 		return unverifiedCleanupError("refusing to remove repo-gone worktree %s because its claimed identity changed", path)
+	}
+	generation, err := cleanupGenerationFromFile(directory)
+	if err != nil || generation != expectedGeneration || expectedGeneration == "" {
+		return unverifiedCleanupError("refusing to remove repo-gone worktree %s because its durable generation changed", path)
 	}
 
 	repoGoneBeforeWriterReap(path)
@@ -144,7 +314,7 @@ func removeClaimedRepoGoneDirectory(
 // children before that state was persisted. If the name is now absent, replaced,
 // or newly populated, the original empty marker is no longer ours to remove and
 // finalization leaves the current pathname untouched.
-func removeFinalizingRepoGoneRoot(path string, expected pathIdentity) error {
+func removeFinalizingRepoGoneRoot(path string, expected pathIdentity, expectedGeneration string) error {
 	parentPath := filepath.Dir(path)
 	name := filepath.Base(path)
 	parent, _, err := openDirectoryPathFollowingLinks(parentPath, "repo-gone finalization parent")
@@ -172,6 +342,15 @@ func removeFinalizingRepoGoneRoot(path string, expected pathIdentity) error {
 			return nil
 		}
 		return err
+	}
+	generation, generationErr := cleanupGenerationFromFile(directory)
+	if generationErr != nil {
+		_ = directory.Close()
+		return generationErr
+	}
+	if generation != expectedGeneration || expectedGeneration == "" {
+		_ = directory.Close()
+		return nil
 	}
 	names, err := directoryNames(directory, path)
 	_ = directory.Close()
@@ -220,7 +399,7 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	}()
 	if claim.cleanupFinalizing {
 		if !claim.cleanupRootGone {
-			if err := removeFinalizingRepoGoneRoot(claim.Path, claim.identity); err != nil {
+			if err := removeFinalizingRepoGoneRoot(claim.Path, claim.identity, claim.cleanupGeneration); err != nil {
 				return CleanupStateUnknown, fmt.Errorf(
 					"finish repo-gone cleanup root %s: %w", claim.Path, err,
 				), nil
@@ -255,7 +434,7 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	checkpoint := g.repoGoneFinalizationCheckpointSnapshot()
 	deleteDone := make(chan error, 1)
 	go func() {
-		err := repoGoneRemoveDirectory(claim.Path, claim.identity, func() error {
+		err := repoGoneRemoveDirectory(claim.Path, claim.identity, claim.cleanupGeneration, func() error {
 			return g.checkpointRepoGoneFinalization(claim, checkpoint)
 		})
 		if err == nil {

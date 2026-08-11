@@ -76,12 +76,15 @@ func TestLocalBackendKill_PaneAbortRestoresConsumedCleanupClaim(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
-		State:         git.RelocationRecoveryCleanupReady,
+		State:         git.RelocationRecoveryClaimStale,
 		IdentityKnown: true,
 		Device:        uint64(stat.Dev),
 		Inode:         uint64(stat.Ino),
 		FileType:      uint32(stat.Mode & syscall.S_IFMT),
 	}))
+	cleanupClaim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+	require.NoError(t, gw.PrepareRelocationClaimForCleanup(cleanupClaim))
 
 	previousClose := killCloseTab
 	killCloseTab = func(_ *tmux.TmuxSession, _, _ string) (teardownState, bool, error) {

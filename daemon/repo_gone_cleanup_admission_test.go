@@ -29,10 +29,7 @@ func newCleanupReadyGhost(t *testing.T, title string) (*Manager, string) {
 	require.NoError(t, err)
 	archive := filepath.Join(t.TempDir(), "archive")
 	require.NoError(t, os.Mkdir(archive, 0o755))
-	info, err := os.Stat(archive)
-	require.NoError(t, err)
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
+	recovery := preparedCleanupRecovery(t, repoPath, archive, title)
 	originalExternal := false
 	originalBranchCreated := true
 	originalStartupUnknown := false
@@ -45,7 +42,8 @@ func newCleanupReadyGhost(t *testing.T, title string) (*Manager, string) {
 			BranchName: "af/" + title, BranchCreatedByUs: &branchCreated,
 			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
 				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
-				Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
+				Device: recovery.Device, Inode: recovery.Inode, FileType: recovery.FileType,
+				CleanupGeneration:        recovery.CleanupGeneration,
 				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
 				OriginalStartupStateUnknown: &originalStartupUnknown,
 			},
@@ -56,6 +54,31 @@ func newCleanupReadyGhost(t *testing.T, title string) (*Manager, string) {
 	manager, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	return manager, repo.ID
+}
+
+func preparedCleanupRecovery(t *testing.T, repoPath, archive, title string) sessiongit.RelocationRecovery {
+	t.Helper()
+	info, err := os.Stat(archive)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, archive, title, "af/"+title, "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	claim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+	require.NoError(t, gw.PrepareRelocationClaimForCleanup(claim))
+	recovery, ok := gw.GetRelocationRecovery()
+	require.True(t, ok)
+	return recovery
 }
 
 func archivedInstanceWithRecoveryClaim(t *testing.T, title string) (*Manager, string, string, *session.Instance, string) {
@@ -312,9 +335,11 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	// restart would read from disk.
 	previousLateDelete := lateGhostDeleteSessionRecord
 	releaseOldFinalizer := make(chan struct{})
+	oldFinalizerStarted := make(chan struct{})
 	oldFinalizerDone := make(chan struct{})
 	oldFinalizerReleased := false
 	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
+		close(oldFinalizerStarted)
 		<-releaseOldFinalizer
 		close(oldFinalizerDone)
 		return false, nil
@@ -323,7 +348,14 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 		if !oldFinalizerReleased {
 			close(releaseOldFinalizer)
 		}
-		<-oldFinalizerDone
+		select {
+		case <-oldFinalizerStarted:
+			select {
+			case <-oldFinalizerDone:
+			case <-time.After(time.Second):
+			}
+		default:
+		}
 		lateGhostDeleteSessionRecord = previousLateDelete
 	})
 
@@ -402,10 +434,7 @@ func TestValidateGhostCleanupAdmission_RestoresArchiveRollbackRecoveryFirst(t *t
 	root := t.TempDir()
 	archive := filepath.Join(root, "archive")
 	require.NoError(t, os.Mkdir(archive, 0o755))
-	info, err := os.Stat(archive)
-	require.NoError(t, err)
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
+	recovery := preparedCleanupRecovery(t, filepath.Join(root, "missing-repo"), archive, "rollback-cleanup")
 	originalExternal := false
 	originalBranchCreated := true
 	originalStartupUnknown := false
@@ -419,7 +448,8 @@ func TestValidateGhostCleanupAdmission_RestoresArchiveRollbackRecoveryFirst(t *t
 			BranchCreatedByUs: &branchCreated,
 			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
 				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
-				Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
+				Device: recovery.Device, Inode: recovery.Inode, FileType: recovery.FileType,
+				CleanupGeneration:        recovery.CleanupGeneration,
 				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
 				OriginalStartupStateUnknown: &originalStartupUnknown,
 			},

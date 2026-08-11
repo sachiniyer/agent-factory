@@ -64,10 +64,20 @@ func (m *Manager) prepareRepoGoneCleanup(
 	claim sessiongit.RelocationClaim,
 ) error {
 	if err := instance.PrepareWorktreeRelocationClaimForCleanup(claim); err != nil {
-		return fmt.Errorf(
+		prepareErr := fmt.Errorf(
 			"cannot restore session %q because its origin repo is gone and the archived worktree identity could not be established: %w",
 			title, err,
 		)
+		// Preparation replaces a consumed point-in-time claim with durable stale
+		// evidence when the cleanup generation cannot be established. Persist that
+		// fail-closed transition before returning; otherwise the previous on-disk
+		// record could still be interpreted as an admissible retry after restart.
+		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+			return errors.Join(prepareErr, fmt.Errorf(
+				"could not persist the unresolved archived worktree identity: %w", persistErr,
+			))
+		}
+		return prepareErr
 	}
 	if err := m.persistInstanceErr(repoID, instance); err != nil {
 		// The in-memory cleanup-ready record remains fail-closed. The previous
