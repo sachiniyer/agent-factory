@@ -36,6 +36,7 @@ func TestNormalizeWebTabURL(t *testing.T) {
 		{name: "zoned ipv6 rejected", in: "http://[fe80::1%25eth0]:3000", wantErr: true},
 		{name: "ipvfuture host rejected", in: "http://[v1.foo]:3000", wantErr: true},
 		{name: "bracketed ipv4 rejected", in: "http://[127.0.0.1]:3000", wantErr: true},
+		{name: "idna-ignored-only host rejected", in: "https://\u00ad/x", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

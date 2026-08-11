@@ -83,6 +83,14 @@ func NormalizeWebTabURL(raw string) (string, error) {
 	} else {
 		canonicalHost = net.ParseIP(host).String()
 	}
+	// UTS #46 maps some compatibility characters away entirely. A hostname made
+	// only from ignored characters (for example a soft hyphen) therefore returns
+	// "" without an IDNA error. Never rebuild that as an authority-less URL:
+	// browsers reinterpret https:///path as a different host rather than the host
+	// the user submitted.
+	if canonicalHost == "" {
+		return "", fmt.Errorf("invalid web tab URL hostname %q: browser canonicalization removes the host", host)
+	}
 	// The URL Standard treats a domain ending in a number as a legacy IPv4
 	// candidate. A failed parse is not an ordinary DNS name: browsers reject the
 	// URL outright (for example 09 or 1.2.3.999). Canonicalize successful parses
