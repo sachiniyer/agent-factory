@@ -178,6 +178,33 @@ func TestRestoreArchived_AuthoritativeProbeFailurePersistsUnresolvedClaim(t *tes
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_GenericUseFailurePersistsRecordFreeClaim(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "use-failure")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "use-failure", RepoID: repoID})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.Nil(t, recordFor(t, repoID, "use-failure").Worktree.RelocationRecovery)
+	destination, err := sessiongit.RestoreWorktreePath(repoPath, "use-failure", inst.GetBranch())
+	require.NoError(t, err)
+
+	previous := beforeRestoreWorktreeUse
+	beforeRestoreWorktreeUse = func() {
+		require.NoError(t, os.Mkdir(destination, 0o755),
+			"occupy the selected destination after path derivation")
+	}
+	t.Cleanup(func() { beforeRestoreWorktreeUse = previous })
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "use-failure", RepoID: repoID})
+	require.Error(t, err)
+	assert.True(t, exists(archivedPath), "generic restore failure must leave the archive intact")
+	recovery := recordFor(t, repoID, "use-failure").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "generic restore failure must persist its record-free claim")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Empty(t, recovery.CleanupLifecycle)
+}
+
 func TestRestoreArchived_CleanupPreparationPersistFailureLeavesStaleFence(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "prepare-persist-failure")

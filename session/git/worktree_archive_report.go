@@ -153,17 +153,20 @@ type ArchiveRollbackFence struct {
 // It mirrors session.GitWorktreeRelocationRecoveryData here because the git
 // package cannot depend on session's storage DTO.
 type ArchiveRollbackRelocationRecovery struct {
-	State                       RelocationRecoveryState `json:"state,omitempty"`
-	CleanupLifecycle            RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
-	AlternatePath               string                  `json:"alternate_path,omitempty"`
-	IdentityKnown               bool                    `json:"identity_known,omitempty"`
-	Device                      uint64                  `json:"device,omitempty"`
-	Inode                       uint64                  `json:"inode,omitempty"`
-	FileType                    uint32                  `json:"file_type,omitempty"`
-	CleanupGeneration           string                  `json:"cleanup_generation,omitempty"`
-	OriginalExternalWorktree    *bool                   `json:"original_external_worktree,omitempty"`
-	OriginalBranchCreatedByUs   *bool                   `json:"original_branch_created_by_us,omitempty"`
-	OriginalStartupStateUnknown *bool                   `json:"original_startup_state_unknown,omitempty"`
+	State                              RelocationRecoveryState `json:"state,omitempty"`
+	CleanupLifecycle                   RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
+	AlternatePath                      string                  `json:"alternate_path,omitempty"`
+	IdentityKnown                      bool                    `json:"identity_known,omitempty"`
+	Device                             uint64                  `json:"device,omitempty"`
+	Inode                              uint64                  `json:"inode,omitempty"`
+	FileType                           uint32                  `json:"file_type,omitempty"`
+	CleanupGeneration                  string                  `json:"cleanup_generation,omitempty"`
+	CleanupOriginalExternalWorktree    *bool                   `json:"cleanup_original_external_worktree,omitempty"`
+	CleanupOriginalBranchCreatedByUs   *bool                   `json:"cleanup_original_branch_created_by_us,omitempty"`
+	CleanupOriginalStartupStateUnknown *bool                   `json:"cleanup_original_startup_state_unknown,omitempty"`
+	OriginalExternalWorktree           *bool                   `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs          *bool                   `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown        *bool                   `json:"original_startup_state_unknown,omitempty"`
 }
 
 // Empty reports whether every archive copy was complete.
@@ -186,6 +189,9 @@ func (report ArchiveReport) Clone() ArchiveReport {
 		}
 		if fence.OriginalRelocationRecovery != nil {
 			recovery := *fence.OriginalRelocationRecovery
+			recovery.CleanupOriginalExternalWorktree = cloneBool(recovery.CleanupOriginalExternalWorktree)
+			recovery.CleanupOriginalBranchCreatedByUs = cloneBool(recovery.CleanupOriginalBranchCreatedByUs)
+			recovery.CleanupOriginalStartupStateUnknown = cloneBool(recovery.CleanupOriginalStartupStateUnknown)
 			recovery.OriginalExternalWorktree = cloneBool(recovery.OriginalExternalWorktree)
 			recovery.OriginalBranchCreatedByUs = cloneBool(recovery.OriginalBranchCreatedByUs)
 			recovery.OriginalStartupStateUnknown = cloneBool(recovery.OriginalStartupStateUnknown)

@@ -65,9 +65,11 @@ func (m *Manager) persistRestorePathFailure(
 func (m *Manager) persistUnresolvedRestoreFailure(
 	repoID, title string,
 	instance *session.Instance,
+	claim sessiongit.RelocationClaim,
 	restoreErr error,
 ) error {
 	wrapped := fmt.Errorf("failed to restore worktree for %q: %w", title, restoreErr)
+	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
 	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
 		return errors.Join(wrapped, fmt.Errorf(
 			"could not persist its unresolved archived worktree identity: %w", persistErr,

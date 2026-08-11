@@ -113,6 +113,28 @@ func TestInstallCleanupGeneration_DoesNotOverwriteNewerGeneration(t *testing.T) 
 	}
 }
 
+func TestCleanupGenerationFromFile_RejectsShrinkingValue(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open cleanup directory: %v", err)
+	}
+	defer directory.Close()
+	previousRead := cleanupGenerationRead
+	reads := 0
+	cleanupGenerationRead = func(int, string, []byte) (int, error) {
+		reads++
+		if reads == 1 {
+			return 32, nil
+		}
+		return 0, nil
+	}
+	t.Cleanup(func() { cleanupGenerationRead = previousRead })
+
+	if _, err := cleanupGenerationFromFile(directory); err == nil {
+		t.Fatal("a cleanup generation which shrank between reads was accepted")
+	}
+}
+
 func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *testing.T) {
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe

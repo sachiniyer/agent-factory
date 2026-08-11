@@ -228,15 +228,21 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// fail-closed fields. A current reader must recover the exact original
 		// ownership and startup state; missing metadata is not a zero value and
 		// must never turn the rollback fence into deletion authority.
-		if recovery.OriginalExternalWorktree == nil ||
-			recovery.OriginalBranchCreatedByUs == nil ||
-			recovery.OriginalStartupStateUnknown == nil {
+		originalExternal := recovery.OriginalExternalWorktree
+		originalBranch := recovery.OriginalBranchCreatedByUs
+		originalStartup := recovery.OriginalStartupStateUnknown
+		if recovery.CleanupLifecycle != "" {
+			originalExternal = recovery.CleanupOriginalExternalWorktree
+			originalBranch = recovery.CleanupOriginalBranchCreatedByUs
+			originalStartup = recovery.CleanupOriginalStartupStateUnknown
+		}
+		if originalExternal == nil || originalBranch == nil || originalStartup == nil {
 			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
 		}
-		data.Worktree.ExternalWorktree = *recovery.OriginalExternalWorktree
-		branchCreatedByUs := *recovery.OriginalBranchCreatedByUs
+		data.Worktree.ExternalWorktree = *originalExternal
+		branchCreatedByUs := *originalBranch
 		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
-		data.StartupStateUnknown = *recovery.OriginalStartupStateUnknown
+		data.StartupStateUnknown = *originalStartup
 	}
 	id := data.ID
 	if id == "" {

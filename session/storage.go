@@ -457,17 +457,20 @@ func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
 	}
 	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 		fence.OriginalRelocationRecovery = &git.ArchiveRollbackRelocationRecovery{
-			State:                       recovery.State,
-			CleanupLifecycle:            recovery.CleanupLifecycle,
-			AlternatePath:               recovery.AlternatePath,
-			IdentityKnown:               recovery.IdentityKnown,
-			Device:                      recovery.Device,
-			Inode:                       recovery.Inode,
-			FileType:                    recovery.FileType,
-			CleanupGeneration:           recovery.CleanupGeneration,
-			OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
-			OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-			OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+			State:                              recovery.State,
+			CleanupLifecycle:                   recovery.CleanupLifecycle,
+			AlternatePath:                      recovery.AlternatePath,
+			IdentityKnown:                      recovery.IdentityKnown,
+			Device:                             recovery.Device,
+			Inode:                              recovery.Inode,
+			FileType:                           recovery.FileType,
+			CleanupGeneration:                  recovery.CleanupGeneration,
+			CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
+			CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
+			CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
+			OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
+			OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
+			OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
 		}
 	}
 	return fence
@@ -478,17 +481,20 @@ func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRe
 		return nil
 	}
 	return &GitWorktreeRelocationRecoveryData{
-		State:                       recovery.State,
-		CleanupLifecycle:            recovery.CleanupLifecycle,
-		AlternatePath:               recovery.AlternatePath,
-		IdentityKnown:               recovery.IdentityKnown,
-		Device:                      recovery.Device,
-		Inode:                       recovery.Inode,
-		FileType:                    recovery.FileType,
-		CleanupGeneration:           recovery.CleanupGeneration,
-		OriginalExternalWorktree:    cloneBoolPointer(recovery.OriginalExternalWorktree),
-		OriginalBranchCreatedByUs:   cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
-		OriginalStartupStateUnknown: cloneBoolPointer(recovery.OriginalStartupStateUnknown),
+		State:                              recovery.State,
+		CleanupLifecycle:                   recovery.CleanupLifecycle,
+		AlternatePath:                      recovery.AlternatePath,
+		IdentityKnown:                      recovery.IdentityKnown,
+		Device:                             recovery.Device,
+		Inode:                              recovery.Inode,
+		FileType:                           recovery.FileType,
+		CleanupGeneration:                  recovery.CleanupGeneration,
+		CleanupOriginalExternalWorktree:    cloneBoolPointer(recovery.CleanupOriginalExternalWorktree),
+		CleanupOriginalBranchCreatedByUs:   cloneBoolPointer(recovery.CleanupOriginalBranchCreatedByUs),
+		CleanupOriginalStartupStateUnknown: cloneBoolPointer(recovery.CleanupOriginalStartupStateUnknown),
+		OriginalExternalWorktree:           cloneBoolPointer(recovery.OriginalExternalWorktree),
+		OriginalBranchCreatedByUs:          cloneBoolPointer(recovery.OriginalBranchCreatedByUs),
+		OriginalStartupStateUnknown:        cloneBoolPointer(recovery.OriginalStartupStateUnknown),
 	}
 }
 
@@ -617,16 +623,19 @@ type GitWorktreeRelocationRecoveryData struct {
 	State git.RelocationRecoveryState `json:"state,omitempty"`
 	// CleanupLifecycle carries cleanup-only states additively while State is
 	// projected to claim_stale for previous releases which reject new enum values.
-	CleanupLifecycle            git.RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
-	AlternatePath               string                      `json:"alternate_path"`
-	IdentityKnown               bool                        `json:"identity_known,omitempty"`
-	Device                      uint64                      `json:"device"`
-	Inode                       uint64                      `json:"inode"`
-	FileType                    uint32                      `json:"file_type"`
-	CleanupGeneration           string                      `json:"cleanup_generation,omitempty"`
-	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
-	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
-	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`
+	CleanupLifecycle                   git.RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
+	AlternatePath                      string                      `json:"alternate_path"`
+	IdentityKnown                      bool                        `json:"identity_known,omitempty"`
+	Device                             uint64                      `json:"device"`
+	Inode                              uint64                      `json:"inode"`
+	FileType                           uint32                      `json:"file_type"`
+	CleanupGeneration                  string                      `json:"cleanup_generation,omitempty"`
+	CleanupOriginalExternalWorktree    *bool                       `json:"cleanup_original_external_worktree,omitempty"`
+	CleanupOriginalBranchCreatedByUs   *bool                       `json:"cleanup_original_branch_created_by_us,omitempty"`
+	CleanupOriginalStartupStateUnknown *bool                       `json:"cleanup_original_startup_state_unknown,omitempty"`
+	OriginalExternalWorktree           *bool                       `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs          *bool                       `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown        *bool                       `json:"original_startup_state_unknown,omitempty"`
 }
 
 func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocationRecoveryData) {
@@ -635,6 +644,19 @@ func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocation
 	}
 	switch recovery.State {
 	case git.RelocationRecoveryCleanupReady:
+		// The immediately preceding reader understands recovery but not this
+		// additive lifecycle. Preserve the actual values for current readers, and
+		// give the old reader ownership values which remain safe even after its
+		// repo-gone restore consumes claim_stale and clears the record.
+		recovery.CleanupOriginalExternalWorktree = cloneBoolPointer(recovery.OriginalExternalWorktree)
+		recovery.CleanupOriginalBranchCreatedByUs = cloneBoolPointer(recovery.OriginalBranchCreatedByUs)
+		recovery.CleanupOriginalStartupStateUnknown = cloneBoolPointer(recovery.OriginalStartupStateUnknown)
+		safeExternal := true
+		safeBranchOwned := false
+		safeStartupUnknown := true
+		recovery.OriginalExternalWorktree = &safeExternal
+		recovery.OriginalBranchCreatedByUs = &safeBranchOwned
+		recovery.OriginalStartupStateUnknown = &safeStartupUnknown
 		recovery.CleanupLifecycle = recovery.State
 		recovery.State = git.RelocationRecoveryClaimStale
 	}

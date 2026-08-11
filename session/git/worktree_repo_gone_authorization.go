@@ -19,6 +19,7 @@ import (
 const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
 
 var cleanupGenerationInstall = installCleanupGeneration
+var cleanupGenerationRead = unix.Fgetxattr
 
 // probeRepoGoneOrigin applies restore's repository-validity rule. Its caller
 // supplies a hard outer deadline covering both the context-aware Git probe and
@@ -338,7 +339,7 @@ func installCleanupGeneration(path string, expected pathIdentity) (string, error
 }
 
 func cleanupGenerationFromFile(directory *os.File) (string, error) {
-	size, err := unix.Fgetxattr(int(directory.Fd()), cleanupGenerationXattr, nil)
+	size, err := cleanupGenerationRead(int(directory.Fd()), cleanupGenerationXattr, nil)
 	if err != nil {
 		return "", fmt.Errorf("read durable cleanup generation: %w", err)
 	}
@@ -346,9 +347,15 @@ func cleanupGenerationFromFile(directory *os.File) (string, error) {
 		return "", fmt.Errorf("durable cleanup generation has invalid size %d", size)
 	}
 	value := make([]byte, size)
-	read, err := unix.Fgetxattr(int(directory.Fd()), cleanupGenerationXattr, value)
+	read, err := cleanupGenerationRead(int(directory.Fd()), cleanupGenerationXattr, value)
 	if err != nil {
 		return "", fmt.Errorf("read durable cleanup generation: %w", err)
+	}
+	if read != size || read <= 0 {
+		return "", fmt.Errorf(
+			"durable cleanup generation changed size while it was read: queried %d bytes, read %d",
+			size, read,
+		)
 	}
 	return string(value[:read]), nil
 }
