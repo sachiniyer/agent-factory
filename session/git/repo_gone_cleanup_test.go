@@ -391,6 +391,32 @@ func TestValidateRelocationCleanupAdmission_NonGitOriginRemainsRepoGone(t *testi
 	}
 }
 
+func TestValidateRelocationCleanupAdmission_NonDirectoryOriginRemainsRepoGone(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := os.WriteFile(repoPath, []byte("unrelated replacement"), 0o644); err != nil {
+		t.Fatalf("replace missing origin with a regular file: %v", err)
+	}
+
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("a non-directory origin is conclusively repo-gone and must not strand cleanup: %v", err)
+	}
+}
+
+func TestValidateRelocationCleanupAdmission_CorruptGitMetadataIsConclusiveNonGit(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	gw.PreserveRelocationClaim(claim)
+	repoPath := gw.GetRepoPath()
+	if err := os.MkdirAll(filepath.Join(repoPath, ".git"), 0o755); err != nil {
+		t.Fatalf("create unusable git metadata: %v", err)
+	}
+
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("Git's completed non-repository verdict must not be followed by an unbounded metadata lookup: %v", err)
+	}
+}
+
 func TestValidateRelocationCleanupAdmission_GitExecutionFailureFailsClosed(t *testing.T) {
 	gw, claim, _ := repoGoneCleanupClaim(t)
 	gw.PreserveRelocationClaim(claim)

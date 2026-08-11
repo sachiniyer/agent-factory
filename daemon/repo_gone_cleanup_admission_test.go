@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -374,6 +376,88 @@ func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) 
 	require.NotNil(t, retained.Worktree.RelocationRecovery)
 	assert.Equal(t, sessiongit.RelocationRecoveryCleanupFinalizing, retained.Worktree.RelocationRecovery.State,
 		"the automatic retry must durably enter the finalization fence before unlinking the archive root")
+}
+
+func TestValidateGhostCleanupAdmission_RestoresArchiveRollbackRecoveryFirst(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(archive, 0o755))
+	info, err := os.Stat(archive)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	originalExternal := false
+	originalBranchCreated := true
+	originalStartupUnknown := false
+	branchCreated := true
+	data := session.InstanceData{
+		ID: "rollback-cleanup-id", Title: "rollback-cleanup", Status: session.Archived,
+		Liveness: session.LiveArchived, BackendType: "local",
+		Worktree: session.GitWorktreeData{
+			RepoPath: filepath.Join(root, "missing-repo"), WorktreePath: archive,
+			SessionName: "rollback-cleanup", BranchName: "af/rollback-cleanup",
+			BranchCreatedByUs: &branchCreated,
+			RelocationRecovery: &session.GitWorktreeRelocationRecoveryData{
+				State: sessiongit.RelocationRecoveryCleanupReady, IdentityKnown: true,
+				Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
+				OriginalExternalWorktree: &originalExternal, OriginalBranchCreatedByUs: &originalBranchCreated,
+				OriginalStartupStateUnknown: &originalStartupUnknown,
+			},
+		},
+		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+			Path: filepath.Join(root, "retained-source"), IdentityKnown: true,
+			Device: 17, Inode: 23, FileType: uint32(syscall.S_IFDIR),
+			Skipped: []sessiongit.ArchiveSkippedEntry{{Path: "private/work", Reason: sessiongit.ArchiveSkipPermissionDenied}},
+		}}},
+	}
+	stored := data.ForStorage()
+	require.NotNil(t, stored.Worktree.RelocationRecovery)
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale, stored.Worktree.RelocationRecovery.State,
+		"precondition: the old-reader projection must hide cleanup_ready")
+
+	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored),
+		"current admission must decode cleanup_ready before interpreting the projected state")
+}
+
+func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, session.RootSessionTitle)
+	key := daemonInstanceKey(repoID, session.RootSessionTitle)
+	const stableID = "root-id"
+
+	previousDelete := lateGhostDeleteSessionRecord
+	deleted := make(chan struct{})
+	lateGhostDeleteSessionRecord = func(*Manager, string, string, string, error) (bool, error) {
+		close(deleted)
+		return true, nil
+	}
+	t.Cleanup(func() { lateGhostDeleteSessionRecord = previousDelete })
+
+	subscriberID, events := manager.events.subscribe()
+	t.Cleanup(func() { manager.events.unsubscribe(subscriberID) })
+	lateResult := make(chan error, 1)
+	lateResult <- nil
+	manager.reconcileLateGhostCleanup(repoID, session.RootSessionTitle, key, stableID, lateResult)
+
+	select {
+	case <-deleted:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("late ghost finalizer did not consume its durable row")
+	}
+	manager.mu.Lock()
+	_, rootGraceArmed := manager.rootKilledAt[repoID]
+	manager.mu.Unlock()
+	assert.True(t, rootGraceArmed, "late root cleanup must arm the same grace window as synchronous kill")
+
+	select {
+	case event := <-events:
+		assert.Equal(t, agentproto.EventSessionKilled, event.Type)
+		var data session.InstanceData
+		require.NoError(t, json.Unmarshal(event.Data, &data))
+		assert.Equal(t, stableID, data.ID)
+		assert.Equal(t, session.RootSessionTitle, data.Title)
+	case <-time.After(250 * time.Millisecond):
+		t.Error("late ghost cleanup removed the row without publishing session.killed")
+	}
 }
 
 func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
