@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -52,6 +53,52 @@ func TestConfigAssistantRoutesRegistered(t *testing.T) {
 		if got := do(c.method, c.path); got != c.want {
 			t.Errorf("%s %s = %d, want %d", c.method, c.path, got, c.want)
 		}
+	}
+}
+
+// TestConfigAssistantDeleteRejectsQuiescingBeforeReap pins the browser route to
+// the same state-mutation admission rule as the TUI's ReapConfigAgent RPC. The
+// route must reject before it changes hub state: otherwise a 503 response added
+// after reap would still report safety while killing the assistant.
+func TestConfigAssistantDeleteRejectsQuiescingBeforeReap(t *testing.T) {
+	lifecycle := readyLifecycle(t)
+	lifecycle.markQuiescing()
+	ready := make(chan struct{})
+	close(ready)
+
+	streamer := &fakeBareStreamer{}
+	reaped := false
+	hub := &configAssistantHub{
+		current: &configAssistant{name: "af-config-test", streamer: streamer},
+		reapFn: func(string) error {
+			reaped = true
+			return nil
+		},
+	}
+	server := &controlServer{manager: &Manager{
+		ready:            ready,
+		lifecycle:        lifecycle,
+		configAssistants: hub,
+	}}
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodDelete, "/v1/config-assistant", nil)
+	server.configAssistantDeleteHandler(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("DELETE while quiescing status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(recorder.Body.String(), daemonQuiescingErrText) {
+		t.Errorf("DELETE while quiescing response = %q, want quiescing admission error", recorder.Body.String())
+	}
+	if reaped {
+		t.Error("DELETE while quiescing reached the config-assistant reaper")
+	}
+	if got := streamer.closeCount(); got != 0 {
+		t.Errorf("DELETE while quiescing closed the assistant stream %d times", got)
+	}
+	if hub.current == nil {
+		t.Error("DELETE while quiescing cleared the running assistant")
 	}
 }
 
