@@ -10,9 +10,126 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// The tmux server is shared infrastructure, not a writer owned by the
+// worktree. It can nevertheless inherit a cwd inside the worktree from the
+// client that first started it. Reaping that process would terminate every
+// session on the shared server.
+//
+// This fixture is deliberately not a real tmux server: it is one disposable
+// sleep process with tmux's server argv shape and a cwd in a unique temporary
+// directory. The production predicate reads argv, so the fixture exercises the
+// real identification and kill-set path without touching the user's tmux.
+func TestReapWorktreeWriters_DoesNotKillTmuxServer(t *testing.T) {
+	worktree := t.TempDir()
+	cmd := exec.Command("sleep", "300")
+	cmd.Args[0] = "tmux: server"
+	cmd.Dir = worktree
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	process, err := proctree.Lookup(cmd.Process.Pid)
+	require.NoError(t, err)
+	requireEventually(t, 5*time.Second, func() bool {
+		_, ok := proctree.WorkingDir(process.PID)
+		return ok
+	}, "the tmux-server fixture cwd never became observable")
+
+	reapWorktreeWriters(worktree)
+
+	require.True(t, proctree.AliveSame(process),
+		"a tmux server whose cwd is inside a removed worktree must not enter the kill set")
+}
+
+// The scanning process may itself inherit a cwd inside the worktree (the daemon
+// does this when an af client auto-starts it there). Selecting that process as a
+// root is unsafe even though proctree refuses to signal its own PID: TreeOf also
+// selects every daemon child, including processes belonging to other sessions.
+func TestReapWorktreeWriters_DoesNotSelectScannerProcessTree(t *testing.T) {
+	const helperEnv = "AF_TEST_REAP_WORKTREE_SCANNER"
+	if os.Getenv(helperEnv) == "1" {
+		outside := os.Getenv(helperEnv + "_OUTSIDE")
+		cmd := exec.Command("sleep", "300")
+		cmd.Dir = outside
+		require.NoError(t, cmd.Start())
+		t.Cleanup(func() {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		})
+		process, err := proctree.Lookup(cmd.Process.Pid)
+		require.NoError(t, err)
+		worktree, err := os.Getwd()
+		require.NoError(t, err)
+
+		reapWorktreeWriters(worktree)
+
+		require.True(t, proctree.AliveSame(process),
+			"matching the scanner itself must not add its unrelated descendants to the kill set")
+		return
+	}
+
+	worktree := t.TempDir()
+	outside := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReapWorktreeWriters_DoesNotSelectScannerProcessTree$")
+	cmd.Dir = worktree
+	cmd.Env = append(os.Environ(), helperEnv+"=1", helperEnv+"_OUTSIDE="+outside)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "scanner subprocess failed:\n%s", out)
+}
+
+func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T) {
+	const (
+		ancestorPID    = 10
+		infrastructure = 20
+		unrelatedChild = 30
+		matchingChild  = 40
+	)
+	root := "/managed/worktree"
+	outside := "/somewhere/else"
+	snap := map[int]proctree.Process{
+		ancestorPID:    {PID: ancestorPID, PPID: 1},
+		infrastructure: {PID: infrastructure, PPID: ancestorPID},
+		unrelatedChild: {PID: unrelatedChild, PPID: infrastructure},
+		matchingChild:  {PID: matchingChild, PPID: infrastructure},
+	}
+	workingDirs := map[int]string{
+		ancestorPID:    root,
+		infrastructure: root,
+		unrelatedChild: outside,
+		matchingChild:  root,
+	}
+	workingDir := func(pid int) (string, bool) {
+		dir, ok := workingDirs[pid]
+		return dir, ok
+	}
+
+	t.Run("scanner", func(t *testing.T) {
+		got := worktreeWriterProcesses(root, snap, infrastructure, workingDir, func(int) bool { return false })
+		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
+			"a matching ancestor must not carry the scanner and its unrelated subtree into the kill set")
+	})
+
+	t.Run("tmux server", func(t *testing.T) {
+		got := worktreeWriterProcesses(root, snap, 99, workingDir, func(pid int) bool { return pid == infrastructure })
+		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
+			"a matching ancestor must not carry the shared tmux server and its unrelated subtree into the kill set")
+	})
+}
+
+func processPIDs(processes []proctree.Process) []int {
+	pids := make([]int, 0, len(processes))
+	for _, process := range processes {
+		pids = append(pids, process.PID)
+	}
+	return pids
+}
 
 // TestCleanup_ReapsSurvivingWriterBeforeRemoval is the #2025 fail-first
 // regression: a session whose agent left a live process writing into the
