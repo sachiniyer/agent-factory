@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -45,16 +46,58 @@ func (i *Instance) Kill() error {
 	return i.AgentServer().Kill()
 }
 
-// Recover re-establishes a Lost instance's backing session (#1108). Called by
-// the daemon's restore loop and by user-initiated restore (#1300); loads stay
-// side-effect free (#970). Lifecycle eligibility is enforced here, before any
-// backend can provision or spawn a runtime; backend capability alone is never
-// permission to revive a row.
+// recoverLiveBoundary lets the daemon settle predecessor-owned evidence at the
+// exact lifecycle edge that exposes a replacement. The callback runs outside
+// Instance.mu, immediately before ConfirmLive takes that lock and clears the
+// restore fence. A pointer plus sync.Once keeps the boundary one-shot while the
+// registration remains installed for the whole backend call.
+type recoverLiveBoundary struct {
+	fn   func()
+	once sync.Once
+}
+
+// Recover re-establishes a Lost instance's backing session (#1108).
 func (i *Instance) Recover() error {
+	return i.RecoverWithLiveBoundary(nil)
+}
+
+// RecoverWithLiveBoundary is Recover with a callback at the replacement's
+// ConfirmLive edge. It exists for lifecycle facts that must be settled after a
+// backend has successfully created the runtime but before the restore fence is
+// dropped. The callback cannot veto recovery: settlement failures remain owed
+// for retry, and a full disk must not turn a running replacement back into Lost.
+func (i *Instance) RecoverWithLiveBoundary(beforeLive func()) error {
 	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
+	if beforeLive == nil {
+		return i.currentBackend().Recover(i)
+	}
+	boundary := &recoverLiveBoundary{fn: beforeLive}
+	i.recoverBoundaryMu.Lock()
+	if i.recoverBoundary != nil {
+		i.recoverBoundaryMu.Unlock()
+		return fmt.Errorf("recover: session %q already has a live boundary registered", i.Title)
+	}
+	i.recoverBoundary = boundary
+	i.recoverBoundaryMu.Unlock()
+	defer func() {
+		i.recoverBoundaryMu.Lock()
+		if i.recoverBoundary == boundary {
+			i.recoverBoundary = nil
+		}
+		i.recoverBoundaryMu.Unlock()
+	}()
 	return i.currentBackend().Recover(i)
+}
+
+func (i *Instance) runRecoverLiveBoundary() {
+	i.recoverBoundaryMu.Lock()
+	boundary := i.recoverBoundary
+	i.recoverBoundaryMu.Unlock()
+	if boundary != nil {
+		boundary.once.Do(boundary.fn)
+	}
 }
 
 // Respawn re-establishes the instance's backing session in place without a

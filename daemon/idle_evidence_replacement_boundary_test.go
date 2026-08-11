@@ -18,7 +18,9 @@ type liveBeforeRecoverReturnBackend struct {
 }
 
 func (b *liveBeforeRecoverReturnBackend) Recover(inst *session.Instance) error {
-	inst.SetStatusForTest(session.Running)
+	if err := inst.Transition(session.ConfirmLive()); err != nil {
+		return err
+	}
 	close(b.live)
 	<-b.release
 	return nil
