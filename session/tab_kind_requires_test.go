@@ -103,6 +103,27 @@ func TestRefuseTabKind_OffBoxExternalWebTabsRequireHTTPS(t *testing.T) {
 		"the mixed-content restriction is only for a directly framed off-box target")
 }
 
+// An unspecified address names every interface on the machine interpreting it,
+// not the sandbox that supplied the tab metadata. An off-box iframe would either
+// reach the viewer's machine or fail before showing the remote service, so this is
+// local-only even though it is not classified as loopback by net.IP.IsLoopback.
+func TestRefuseTabKind_OffBoxRejectsUnspecifiedWebTargets(t *testing.T) {
+	remote := remoteCaps()
+	require.NoError(t, remote.RefuseTabKind(TabKindWeb, "https://example.com/app"),
+		"premise: an ordinary external HTTPS metadata tab is admissible off-box")
+	for _, raw := range []string{
+		"https://0.0.0.0:3000/app",
+		"https://0:3000/app",
+		"https://[::]:3000/app",
+	} {
+		target, err := NormalizeWebTabURL(raw)
+		require.NoErrorf(t, err, "NormalizeWebTabURL(%q)", raw)
+		err = remote.RefuseTabKind(TabKindWeb, target)
+		require.Errorf(t, err, "%s must not be admitted as an off-box external target", raw)
+		assert.Contains(t, strings.ToLower(err.Error()), "unspecified")
+	}
+}
+
 // TestRefuseTabKindNamesTheUnmetRequirement is the other half of #3053: a
 // refusal that survives must say what it actually is. "Not supported on this
 // backend" cannot be told apart from a kind that could have worked.
