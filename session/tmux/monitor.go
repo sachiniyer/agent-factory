@@ -32,3 +32,15 @@ func (t *TmuxSession) seedDeliveryBaseline(content string) {
 		t.monitor.baselinePending = false
 	}
 }
+
+// deferDeliveryBaseline makes the next successful status capture establish
+// comparison state without claiming pane churn. This is the honest fallback
+// when tmux proves Enter ran but the capture later in that command queue fails:
+// there is no post-delivery frame against which the next pane can be compared.
+func (t *TmuxSession) deferDeliveryBaseline() {
+	t.monitorMu.Lock()
+	defer t.monitorMu.Unlock()
+	if t.monitor != nil {
+		t.monitor.baselinePending = true
+	}
+}

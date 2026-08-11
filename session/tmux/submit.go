@@ -323,6 +323,8 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 	}
 	if boundaryOK {
 		t.seedDeliveryBaseline(boundary)
+	} else {
+		t.deferDeliveryBaseline()
 	}
 
 	if observation.outcome == deliveryObservedAbsent {
@@ -371,7 +373,7 @@ func (t *TmuxSession) sendEnterAndCaptureBoundary() (string, bool, error) {
 		return string(out), true, nil
 	}
 	if err != nil {
-		log.WarningLog.Printf("submit: Enter reached session %q, but its delivery-boundary capture failed; pane churn remains unbaselined: %v",
+		log.WarningLog.Printf("submit: Enter reached session %q, but its delivery-boundary capture failed; the next successful pane capture will establish the baseline: %v",
 			t.sanitizedName, err)
 		return "", false, nil
 	}

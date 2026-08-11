@@ -784,6 +784,48 @@ func TestSubmitDoesNotManufactureAFailureWhenThePaneIsUnreadable(t *testing.T) {
 		"a failed observation probe must not manufacture an ERROR")
 }
 
+// TestSubmitBaselinesFirstPollAfterPartialBoundaryCaptureFailure pins the
+// status-monitor side of the best-effort delivery contract. Enter reaching tmux
+// is still a successful send when the capture later in that same command queue
+// fails, but the missing boundary is not permission to compare the next pane
+// against an empty hash and call its ordinary contents post-delivery churn.
+func TestSubmitBaselinesFirstPollAfterPartialBoundaryCaptureFailure(t *testing.T) {
+	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
+
+	const prompt = "answer with PARTIAL_BOUNDARY_DONE"
+	pane := "idle composer"
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pane = prompt
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if isDeliveryBoundaryCommand(c) {
+				pane = "submitted composer"
+				return []byte(deliveryBoundarySentinel), fmt.Errorf("capture failed after Enter")
+			}
+			return []byte(pane), nil
+		},
+	}
+
+	s := newTmuxSession("af_partial_delivery_boundary", ProgramCodex, NewMockPtyFactory(t), cmdExec)
+	s.setMonitor(newStatusMonitor())
+	status, err := s.SendKeysCommandObserved(prompt)
+	require.NoError(t, err, "the sentinel proves Enter reached tmux")
+	require.Equal(t, PromptDelivered, status)
+
+	updated, _, _, baseline := s.HasUpdatedWithBaseline()
+	require.False(t, updated, "ordinary pane contents after the failed boundary capture are not proven churn")
+	require.True(t, baseline, "the first successful capture must establish the missing delivery baseline")
+
+	pane = "completed response"
+	updated, _, _, baseline = s.HasUpdatedWithBaseline()
+	require.True(t, updated, "a later observed pane change must remain visible")
+	require.False(t, baseline)
+}
+
 // TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent is the #2266
 // fail-first pair. Claude's ability to render a composer is not proof that it
 // rendered THIS payload: long pastes are deliberately collapsed, while a
