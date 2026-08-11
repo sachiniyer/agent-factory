@@ -627,7 +627,7 @@ func (m *Manager) restoreRemoteSession(repoID string, instance *session.Instance
 	// (same session, new runtime), so nothing else can notice the swap; only this
 	// site knows it happened.
 	m.noteRuntimeReplaced(repoID, instance)
-	m.persistInstance(repoID, instance)
+	m.persistRuntimeReplacement(repoID, title, instance)
 	log.InfoLog.Printf("restored remote session %q (repo %s): fresh sandbox provisioned, branch cloned back, agent relaunched", title, repoID)
 	return title, nil
 }

@@ -181,6 +181,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 	}
 
+	// Recover implementations can expose the replacement (ConfirmLive) before
+	// returning. Retire the predecessor evidence on disk first, so a daemon exit
+	// inside that backend boundary cannot reload it onto the replacement.
+	if err := m.prepareRecoverReplacement(repoID, key, instance); err != nil {
+		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
+		return "", fmt.Errorf("cannot safely restore session %q: %w", title, err)
+	}
 	if err := instance.Recover(); err != nil {
 		m.persistInstance(repoID, instance)
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
@@ -192,6 +199,8 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// still writing to disk. A blip in that window would be judged against the
 	// dead sandbox's count. A manual restore is the same lifecycle event as an
 	// automatic one; only the trigger differs (#1794).
+	// The write-ahead retirement above made a crash safe. This second reset is
+	// still required for transport observations accumulated while Recover ran.
 	m.noteRuntimeReplaced(repoID, instance)
 	// A SETTLEMENT, not a checkpoint (#2883). Recover can have rebuilt the
 	// worktree and recreated the branch, flipping branchCreatedByUs — the flag

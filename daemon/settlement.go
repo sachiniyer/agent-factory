@@ -60,6 +60,30 @@ func (m *Manager) persistSettlement(repoID, key string, instance *session.Instan
 	return nil
 }
 
+// prepareRecoverReplacement durably retires facts owned by the predecessor
+// before a Recover backend can expose its replacement. Production Recover
+// implementations confirm the fresh runtime live before returning, so clearing
+// and persisting only after Recover leaves a crash window: restart sees the new
+// process, classifies it as a reattach, and reloads the predecessor evidence.
+//
+// The ordinary post-Recover noteRuntimeReplaced call remains necessary. A slow
+// remote recovery can accumulate fresh transport observations after this
+// write-ahead reset and before it returns; the post-success reset retires those
+// in-memory observations, while this settlement makes the crash boundary safe.
+func (m *Manager) prepareRecoverReplacement(repoID, key string, instance *session.Instance) error {
+	m.noteRuntimeReplaced(repoID, instance)
+	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		return fmt.Errorf("the predecessor runtime could not be retired before recovery: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) persistRuntimeReplacement(repoID, title string, instance *session.Instance) {
+	if err := m.persistSettlement(repoID, daemonInstanceKey(repoID, title), instance); err != nil {
+		log.WarningLog.Printf("restored remote session %q with predecessor evidence cleared in memory but not yet on disk: %v", title, err)
+	}
+}
+
 // recordSettlementWrite keeps a failed whole-row write eligible for poll retry,
 // or retires an older obligation when a later whole-row write subsumes it. Every
 // production caller invokes it before releasing the repo start lock that ordered

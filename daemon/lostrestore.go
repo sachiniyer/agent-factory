@@ -428,6 +428,13 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		m.mu.Unlock()
 	}
 
+	// Recover can confirm the replacement live before returning. Make the
+	// predecessor-evidence retirement durable first; otherwise an exit inside
+	// that boundary reloads stale evidence onto the already-created runtime.
+	if err := m.prepareRecoverReplacement(repoID, key, inst); err != nil {
+		m.recordLostRestoreFailure(key, repoID, inst, err, lostRestoreAutomatic)
+		return
+	}
 	if err := inst.Recover(); err != nil {
 		// Persist the instance even on failure, matching the manual restore path
 		// (restore.go): Recover can mutate durable worktree state before it fails
@@ -453,6 +460,8 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// killsInFlight, and Recover has already cleared the restore fence, so it can
 	// probe the new sandbox the instant Recover returns; every statement between
 	// the swap and this reset widens that window for nothing.
+	// The write-ahead retirement above made a crash safe. This second reset is
+	// still required for transport observations accumulated while Recover ran.
 	m.noteRuntimeReplaced(repoID, inst)
 	// Then persist, same as the manual restore path (restore.go): Recover mutates
 	// durable worktree state on the way to SUCCESS too, not only before a failure
