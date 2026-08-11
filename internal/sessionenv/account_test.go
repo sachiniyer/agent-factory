@@ -311,6 +311,9 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappe
 	for _, command := range []string{
 		`command codex -c cli_auth_credentials_store="keyring"`,
 		`nice codex -c cli_auth_credentials_store="keyring"`,
+		`nohup codex -c cli_auth_credentials_store="keyring"`,
+		`timeout 30 codex -c cli_auth_credentials_store="keyring"`,
+		`setsid codex -c cli_auth_credentials_store="keyring"`,
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "launch wrapper %q must not hide a selected-agent identity override", command)

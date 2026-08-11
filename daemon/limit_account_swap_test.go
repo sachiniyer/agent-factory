@@ -44,6 +44,31 @@ func writeLimitAccountCandidates(t *testing.T, contents string) {
 	}
 }
 
+func TestAccountSwapForLimitRefusesUnreadablePersonalIdentityPolicy(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(home, config.ProjectRegistryDirName)
+	if err := os.WriteFile(registryPath, []byte("not a project registry"), 0o600); err != nil {
+		t.Fatalf("corrupt project registry: %v", err)
+	}
+	if _, err := config.ListProjects(); err == nil {
+		t.Fatal("precondition: corrupt project registry must be unreadable")
+	}
+
+	swap, err := manager.accountSwapForLimit(inst, manager.Config())
+	if err == nil {
+		t.Fatalf("automatic identity decision inherited global candidate despite unreadable personal policy: %+v", swap)
+	}
+	if swap != nil {
+		t.Fatalf("automatic identity decision returned a swap with unresolved personal policy: %+v", swap)
+	}
+}
+
 func TestResumeLimitedSessions_SwapsAmbientSessionToConfiguredUnblockedAccount(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -368,6 +369,42 @@ func TestKillSession_GhostWorktreeTimeout_RetainsTheRecord(t *testing.T) {
 	}
 	requireGhostRecordRetained(t, repoID, "ghost-wt",
 		"its worktree may be half-deleted and this record is the only handle anything has on the leftovers")
+}
+
+func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T) {
+	manager, repoID := newGhostKillManager(t, "legacy-limit", "af_legacy-limit")
+	resetAt := time.Now().Add(time.Hour).UTC().Round(0)
+	record := recordFor(t, repoID, "legacy-limit")
+	if record == nil {
+		t.Fatal("setup: legacy ghost record is missing")
+	}
+	record.Program = tmux.ProgramClaude
+	record.Account = "work"
+	record.AccountAutoSelected = false
+	record.Liveness = session.LiveLimitReached
+	record.LimitResetAt = resetAt
+	record.AccountLimitObservations = nil
+	raw, err := json.Marshal([]session.InstanceData{*record})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatalf("persist legacy ghost row: %v", err)
+	}
+
+	stubGhostTmux(t, tmux.PaneStateKnown, nil)
+	stubGhostWorktree(t, git.CleanupSettled, nil)
+	if _, err := manager.KillSession(KillSessionRequest{Title: "legacy-limit", RepoID: repoID}); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	observations, err := loadAccountLimitLedger()
+	if err != nil {
+		t.Fatalf("load retained account-limit evidence: %v", err)
+	}
+	if len(observations) != 1 || observations[0].Agent != tmux.ProgramClaude ||
+		observations[0].Account != "work" || !observations[0].ResetAt.Equal(resetAt) {
+		t.Fatalf("retained observations = %+v, want legacy claude/work limit through %v", observations, resetAt)
+	}
 }
 
 // unsafeKillBackend fails to START and cannot clean up safely afterwards: its Kill
