@@ -217,21 +217,43 @@ func boundedRelocationCleanupIdentity(path string) (cleanupPathInspection, error
 	}
 }
 
+type cleanupGenerationInstallFlight struct {
+	done       chan struct{}
+	generation string
+	err        error
+}
+
+var cleanupGenerationInstallFlights = struct {
+	sync.Mutex
+	byPath map[string]*cleanupGenerationInstallFlight
+}{byPath: make(map[string]*cleanupGenerationInstallFlight)}
+
 func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string, error) {
-	type result struct {
-		generation string
-		err        error
+	cleanupGenerationInstallFlights.Lock()
+	if cleanupGenerationInstallFlights.byPath[path] != nil {
+		cleanupGenerationInstallFlights.Unlock()
+		return "", fmt.Errorf(
+			"cleanup generation installation for %s is still running after an earlier deadline: %w",
+			path, context.DeadlineExceeded,
+		)
 	}
-	resultC := make(chan result, 1)
+	flight := &cleanupGenerationInstallFlight{done: make(chan struct{})}
+	cleanupGenerationInstallFlights.byPath[path] = flight
+	cleanupGenerationInstallFlights.Unlock()
 	go func() {
-		generation, err := cleanupGenerationInstall(path, expected)
-		resultC <- result{generation: generation, err: err}
+		flight.generation, flight.err = cleanupGenerationInstall(path, expected)
+		close(flight.done)
+		cleanupGenerationInstallFlights.Lock()
+		if cleanupGenerationInstallFlights.byPath[path] == flight {
+			delete(cleanupGenerationInstallFlights.byPath, path)
+		}
+		cleanupGenerationInstallFlights.Unlock()
 	}()
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
-	case observed := <-resultC:
-		return observed.generation, observed.err
+	case <-flight.done:
+		return flight.generation, flight.err
 	case <-timer.C:
 		return "", fmt.Errorf(
 			"timed out after %s while installing cleanup generation at %s: %w",
@@ -261,6 +283,14 @@ func installCleanupGeneration(path string, expected pathIdentity) (string, error
 	if err != nil || !expected.same(opened) || !expected.same(named) {
 		return "", unverifiedCleanupError("cleanup path %s changed before its generation was installed", path)
 	}
+	if generation, err := cleanupGenerationFromFile(directory); err == nil {
+		if err := directory.Sync(); err != nil {
+			return "", fmt.Errorf("make existing cleanup identity durable on %s: %w", path, err)
+		}
+		return generation, nil
+	} else if !isXattrVanished(err) {
+		return "", fmt.Errorf("inspect existing cleanup identity on %s: %w", path, err)
+	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", fmt.Errorf("generate cleanup identity for %s: %w", path, err)
@@ -270,10 +300,10 @@ func installCleanupGeneration(path string, expected pathIdentity) (string, error
 		if !errors.Is(err, unix.EEXIST) {
 			return "", fmt.Errorf("store cleanup identity on %s: %w", path, err)
 		}
-		generation, err = cleanupGenerationFromFile(directory)
-		if err != nil {
-			return "", fmt.Errorf("adopt existing cleanup identity on %s: %w", path, err)
-		}
+	}
+	generation, err = cleanupGenerationFromFile(directory)
+	if err != nil {
+		return "", fmt.Errorf("verify stored cleanup identity on %s: %w", path, err)
 	}
 	if err := directory.Sync(); err != nil {
 		return "", fmt.Errorf("make cleanup identity durable on %s: %w", path, err)
