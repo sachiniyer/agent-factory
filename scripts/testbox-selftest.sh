@@ -147,6 +147,21 @@ else
     no "the cache volumes are auto-created unlabelled"
 fi
 
+printf '\n=== play-test agent selection reaches the sandbox ===\n'
+
+AF_PLAYTEST_AGENT=codex AF_PLAYTEST_CODEX_RELEASE=0.147.0 \
+    run_testbox playtest-agent 0 playtest -d
+if has "$LOG" "^run .* -e AF_PLAYTEST_AGENT=codex .*playtest-entry\.sh hold"; then
+    ok "the selected play-test agent reaches the detached sandbox"
+else
+    no "the detached sandbox dropped AF_PLAYTEST_AGENT"
+fi
+if has "$LOG" "^run .* -e AF_PLAYTEST_CODEX_RELEASE=0\.147\.0 .*playtest-entry\.sh hold"; then
+    ok "the selected Codex release reaches the detached sandbox"
+else
+    no "the detached sandbox dropped AF_PLAYTEST_CODEX_RELEASE"
+fi
+
 printf '\n=== cleanup happens, on the passing run and the FAILING one ===\n'
 
 if has "$LOG" "^image prune"; then

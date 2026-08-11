@@ -36,13 +36,12 @@ echo ">>> building af from /src ..."
 (cd / && git config --global --add safe.directory /src) 2>/dev/null || true
 (cd /src && go build -buildvcs=false -o "$HOME/bin/af" .)
 
-# Cheap instances: run a plain shell instead of a real agent. Since
-# #1116/#1131 af keys flag injection and readiness off the program the
-# override actually runs, so bare "bash" gets no claude flags appended and
-# counts as ready once the pane shows output — no wrapper needed.
-cat >"$AGENT_FACTORY_HOME/config.json" <<EOF
-{ "default_program": "claude", "program_overrides": { "claude": "bash" } }
-EOF
+# Choose the pane program before scaffolding the repo. The default stand-in
+# prints its limitation inside every pane, so captured evidence cannot look like
+# a real-agent run. AF_PLAYTEST_AGENT=codex downloads the official standalone
+# Codex CLI and records its version instead (#3177).
+bash /src/scripts/container/configure-playtest-agent.sh
+PLAYTEST_AGENT_STATUS="$(cat "$SANDBOX/playtest-agent.txt")"
 
 # Mock project repo — small but real, so worktrees/diffs have something to
 # show. Never a real repo: the real repos aren't in this container at all.
@@ -75,6 +74,7 @@ cat <<EOF
   AF home:  $AGENT_FACTORY_HOME  (throwaway)
   mock repo: $MOCK
   tmux:     this container's own server — kill-server is harmless here
+  agent:    $PLAYTEST_AGENT_STATUS
 
   start playing:   cd $MOCK && af
   teardown:        exit the shell (or: docker rm -f <container>)

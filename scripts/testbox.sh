@@ -439,6 +439,8 @@ start_playtest_detached() {
         --name "$PLAYTEST_NAME" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
         -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
+        -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
+        -e "AF_PLAYTEST_CODEX_RELEASE=${AF_PLAYTEST_CODEX_RELEASE:-latest}" \
         "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null || rc=$?
     finish_image_start
     return "$rc"
@@ -511,6 +513,8 @@ playtest)
             --name "$PLAYTEST_NAME" \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
             -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
+            -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
+            -e "AF_PLAYTEST_CODEX_RELEASE=${AF_PLAYTEST_CODEX_RELEASE:-latest}" \
             "$IMAGE" bash /src/scripts/container/playtest-entry.sh || rc=$?
         finish_image_start
         exit "$rc"
