@@ -112,6 +112,13 @@ func (c Capabilities) RefuseTabKind(kind TabKind, target string) error {
 		if webTargetHostIsBrowserLoopbackShorthand(target) {
 			return fmt.Errorf("this session cannot open a web tab pointing at %s yet: a browser resolves that host to loopback, and a loopback target is reverse-proxied from the daemon host rather than from the session's off-box workspace — see #3062", target)
 		}
+		// An unspecified IP names the machine interpreting the address, not the
+		// sandbox that supplied the metadata. Framing it directly would either hit
+		// the viewer's own machine or fail as an invalid destination; it can never
+		// identify the intended off-box service.
+		if webTargetHostIsUnspecified(target) {
+			return fmt.Errorf("this session cannot open a web tab pointing at %s: an unspecified address does not identify the off-box workspace; use an externally reachable HTTPS hostname or IP", target)
+		}
 		// An external target is framed directly. Require HTTPS because the documented
 		// reverse-proxy deployment serves the Agent Factory UI over HTTPS, where a
 		// browser blocks an HTTP iframe as active mixed content before any redirect
@@ -341,6 +348,19 @@ func webTargetHostIsBrowserLoopbackShorthand(target string) bool {
 		loopbackEnd   = uint64(128) << 24
 	)
 	return ok && address >= loopbackStart && address < loopbackEnd
+}
+
+// webTargetHostIsUnspecified reports whether target's host is the IPv4 or IPv6
+// unspecified address. This is deliberately separate from IsLoopbackWebTarget:
+// only the off-box admission boundary rejects it, without changing the daemon
+// proxy's established loopback-only trust boundary for local sessions.
+func webTargetHostIsUnspecified(target string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(target))
+	if err != nil || parsed == nil {
+		return false
+	}
+	ip := net.ParseIP(parsed.Hostname())
+	return ip != nil && ip.IsUnspecified()
 }
 
 // parseBrowserIPv4Address implements the URL-standard legacy IPv4 grammar:
