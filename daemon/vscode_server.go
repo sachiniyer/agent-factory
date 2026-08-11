@@ -694,7 +694,7 @@ func (v *vscodeSupervisor) ensureServerForInstanceWithEnvironment(
 		return vscodeEndpoint{}, err
 	}
 
-	server, err := v.spawnLockedWithEnvironment(key, instanceID, binary, worktree, environ)
+	server, err := v.spawnLocked(key, instanceID, binary, worktree, environ)
 	if err != nil {
 		v.failures[key] = vscodeFailure{err: err, at: v.now(), instanceID: instanceID}
 		return vscodeEndpoint{}, err
@@ -741,11 +741,7 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 // There is no retry loop. The TCP path needed one to re-roll a lost port race;
 // a socket path is chosen by the daemon inside a directory only the daemon can
 // write, so there is no race to lose and a failure here is a real failure (#1873).
-func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string) (*vscodeServer, error) {
-	return v.spawnLockedWithEnvironment(key, instanceID, binary, worktree, vscodeChildEnv())
-}
-
-func (v *vscodeSupervisor) spawnLockedWithEnvironment(
+func (v *vscodeSupervisor) spawnLocked(
 	key, instanceID, binary, worktree string, environ []string,
 ) (*vscodeServer, error) {
 	// Before the first editor of this daemon's life, clear out any left by the
