@@ -124,12 +124,58 @@ func ValidateAccountEnvironmentCommand(command string, account Account) error {
 			"account %q cannot scope sibling environment for agent %q: its command sets an identity variable itself, which overrides the account directory",
 			account.Name, account.Agent)
 	}
+	if !provable {
+		if args, selectedAgent := accountEnvironmentAgentArguments(command, account.Agent); selectedAgent {
+			if len(args) > 0 {
+				return accountCommandValidationErrorf(
+					"account %q cannot scope sibling environment for agent %q: its direct agent command contains undeclared arguments %s, which can override the selected identity",
+					account.Name, account.Agent, quoteArguments(args))
+			}
+			return accountCommandValidationErrorf(
+				"account %q cannot scope sibling environment for agent %q: af cannot prove this direct agent executable uses the selected identity",
+				account.Name, account.Agent)
+		}
+	}
 	if !provable && accountEnvironmentCommandNeedsProof(command) {
 		return accountCommandValidationErrorf(
 			"account %q cannot scope sibling environment for agent %q: af cannot prove this interpreter or shell wrapper preserves the selected account identity",
 			account.Name, account.Agent)
 	}
 	return nil
+}
+
+// accountEnvironmentAgentArguments recognizes a literal sibling command that
+// directly runs the selected agent, optionally through exec or the modelled env
+// wrapper, and returns its arguments. A sibling may run arbitrary ordinary
+// processes under the selected environment, but agent arguments are themselves
+// an identity mechanism (for example Codex -c can select the machine keyring),
+// so an undeclared argument list must be named and refused.
+func accountEnvironmentAgentArguments(command, agent string) ([]string, bool) {
+	call, ok := singleSimpleCall(command)
+	if !ok || !callIsLiteral(call) {
+		return nil, false
+	}
+	words, ok := literalCommandArgs(call.Args)
+	if !ok {
+		return nil, false
+	}
+	if len(words) > 0 && words[0] == "exec" {
+		words = words[1:]
+		if len(words) > 0 && words[0] == "--" {
+			words = words[1:]
+		}
+	}
+	if len(words) > 0 && filepath.Base(words[0]) == "env" {
+		invocation, err := envcommand.Parse(words[1:], envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 {
+			return nil, false
+		}
+		words = words[1+invocation.CommandIndex:]
+	}
+	if len(words) == 0 || filepath.Base(words[0]) != agent {
+		return nil, false
+	}
+	return append([]string(nil), words[1:]...), true
 }
 
 // accountEnvironmentCommandNeedsProof identifies shell syntax that constructs

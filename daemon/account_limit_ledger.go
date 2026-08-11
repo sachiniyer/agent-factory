@@ -49,9 +49,13 @@ func loadAccountLimitLedger() ([]session.AccountLimitObservationData, error) {
 // so an unloadable session cannot make a known-limited identity eligible after
 // restart. Any unreadable repo fails closed at the automatic-swap decision.
 func loadPersistedAccountLimitObservations() ([]session.AccountLimitObservationData, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, skipped, err := config.LoadAllRepoInstancesReportingSkips()
 	if err != nil {
 		return nil, err
+	}
+	if len(skipped) > 0 {
+		return nil, fmt.Errorf("account-limit evidence may be present in unreadable repo state: %s",
+			strings.Join(skipped, ", "))
 	}
 	var observations []session.AccountLimitObservationData
 	for repoID, raw := range allInstances {
