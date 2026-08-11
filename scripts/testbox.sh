@@ -439,13 +439,15 @@ start_playtest_detached() {
         --name "$PLAYTEST_NAME" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
         -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
+        -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
+        -e "AF_PLAYTEST_CODEX_RELEASE=${AF_PLAYTEST_CODEX_RELEASE:-latest}" \
         "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null || rc=$?
     finish_image_start
     return "$rc"
 }
 
 # ensure_playtest_up — start the detached sandbox if it is not already
-# running, then block until af has finished building inside it.
+# running, then block until every driver prerequisite has been scaffolded.
 ensure_playtest_up() {
     if ! "$ENGINE" inspect -f '{{.State.Running}}' "$PLAYTEST_NAME" 2>/dev/null | grep -q true; then
         "$ENGINE" rm -f "$PLAYTEST_NAME" >/dev/null 2>&1 || true
@@ -457,7 +459,8 @@ ensure_playtest_up() {
     # An existing sandbox already protects the image; a newly started one was
     # positively observed by docker run -d / the startup watcher above.
     finish_image_start
-    "$ENGINE" exec "$PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+    "$ENGINE" exec "$PLAYTEST_NAME" sh -c \
+        'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'
 }
 
 cmd="${1:-test}"
@@ -497,8 +500,8 @@ playtest)
     fix_cache_perms
     if [ "${1:-}" = "-d" ]; then
         start_playtest_detached
-        echo "playtest sandbox '$PLAYTEST_NAME' is starting (af builds on boot)."
-        echo "  wait for it:  $ENGINE exec $PLAYTEST_NAME sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'"
+        echo "playtest sandbox '$PLAYTEST_NAME' is starting (setup runs on boot)."
+        echo "  wait for it:  $ENGINE exec $PLAYTEST_NAME sh -c 'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'"
         echo "  drive it:     $ENGINE exec $PLAYTEST_NAME tmux new-session -d -s drive -x 80 -y 24"
         echo "                $ENGINE exec $PLAYTEST_NAME tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter"
         echo "                $ENGINE exec $PLAYTEST_NAME tmux capture-pane -p -t drive"
@@ -511,6 +514,8 @@ playtest)
             --name "$PLAYTEST_NAME" \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
             -e "AGENT_FACTORY_AUTO_UPDATE=${AGENT_FACTORY_AUTO_UPDATE:-false}" \
+            -e "AF_PLAYTEST_AGENT=${AF_PLAYTEST_AGENT:-standin}" \
+            -e "AF_PLAYTEST_CODEX_RELEASE=${AF_PLAYTEST_CODEX_RELEASE:-latest}" \
             "$IMAGE" bash /src/scripts/container/playtest-entry.sh || rc=$?
         finish_image_start
         exit "$rc"

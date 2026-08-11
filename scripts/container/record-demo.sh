@@ -263,7 +263,8 @@ engine run -d --rm --init \
     --name "$NAME" \
     -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
     "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null
-engine exec "$NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+engine exec "$NAME" sh -c \
+    'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'
 
 echo ">>> recording ..."
 engine exec \
