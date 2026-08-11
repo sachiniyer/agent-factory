@@ -129,6 +129,27 @@ func TestSandboxInstanceTabSpawnIsPerKind(t *testing.T) {
 	}
 }
 
+// A restore failure before remote Launch leaves started=true so the Lost retry
+// loop can run, but the roster is still empty and PendingTabs are still staged.
+// Web is metadata-only, yet it must not occupy slot 0 before Launch seeds the
+// agent tab: that slot is unclosable and is the PTY stream's target.
+func TestAddWebTab_RejectsFailedRestoreBeforeAgentTab(t *testing.T) {
+	inst, err := FromInstanceData(InstanceData{
+		Title: "failed-restore", BackendType: "ssh", Status: Archived,
+		PendingTabs: []TabData{{ID: "web-old", Name: "docs", Kind: TabKindWeb, URL: "https://example.com/docs"}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, inst.Transition(BeginRestore()))
+	require.NoError(t, inst.Transition(AbortRestoreToLost()))
+	require.True(t, inst.Started(), "Lost restore retries require started=true")
+	require.Empty(t, inst.GetTabs(), "remote Launch has not seeded the agent tab")
+
+	_, err = inst.AddWebTab("https://example.com/new", "new")
+	require.Error(t, err, "a metadata tab must not take the reserved agent slot")
+	assert.Contains(t, strings.ToLower(err.Error()), "agent tab")
+	require.Empty(t, inst.GetTabs(), "a refused create must leave slot 0 empty for remote Launch")
+}
+
 // TestSandboxTabSpawnErrorIsNotMisleading covers the copy half of #1874. The old
 // message was "cannot add a tab to an instance that is not started", which is
 // false on its face: the instance IS started. An error a user cannot act on is
