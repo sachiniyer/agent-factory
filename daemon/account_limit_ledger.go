@@ -42,6 +42,33 @@ func loadAccountLimitLedger() ([]session.AccountLimitObservationData, error) {
 	return readAccountLimitLedger(path)
 }
 
+// loadPersistedAccountLimitObservations reads quota evidence straight from
+// every durable session row. A row that fails FromInstanceData is deliberately
+// absent from Manager.instances, but that load failure is not evidence that its
+// account became usable. Keep raw-row decoding independent of materialization
+// so an unloadable session cannot make a known-limited identity eligible after
+// restart. Any unreadable repo fails closed at the automatic-swap decision.
+func loadPersistedAccountLimitObservations() ([]session.AccountLimitObservationData, error) {
+	allInstances, err := config.LoadAllRepoInstances()
+	if err != nil {
+		return nil, err
+	}
+	var observations []session.AccountLimitObservationData
+	for repoID, raw := range allInstances {
+		if raw == nil || string(raw) == "[]" || string(raw) == "null" {
+			continue
+		}
+		var rows []session.InstanceData
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, fmt.Errorf("decode account-limit observations for repo %s: %w", repoID, err)
+		}
+		for _, row := range rows {
+			observations = append(observations, row.AccountLimitObservations...)
+		}
+	}
+	return observations, nil
+}
+
 func readAccountLimitLedger(path string) ([]session.AccountLimitObservationData, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {

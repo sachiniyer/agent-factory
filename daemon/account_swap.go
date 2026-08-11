@@ -98,6 +98,11 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 	if err != nil {
 		return nil, fmt.Errorf("load retained account-limit evidence for %q: %w", instance.Title, err)
 	}
+	persisted, err := loadPersistedAccountLimitObservations()
+	if err != nil {
+		return nil, fmt.Errorf("load persisted account-limit evidence for %q: %w", instance.Title, err)
+	}
+	retained = append(retained, persisted...)
 	for _, observation := range retained {
 		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
 			continue
