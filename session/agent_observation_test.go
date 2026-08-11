@@ -73,7 +73,7 @@ func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
 	}
 	snapshotDone := make(chan snapshotResult, 1)
 	go func() {
-		_, _, op, epoch, err := inst.SnapshotAgent()
+		_, _, _, op, epoch, err := inst.SnapshotAgent()
 		snapshotDone <- snapshotResult{op: op, epoch: epoch, err: err}
 	}()
 	close(backend.releaseSend)
@@ -120,7 +120,7 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, _, _, _, err := inst.SnapshotAgent()
+		_, _, _, _, _, err := inst.SnapshotAgent()
 		snapshotDone <- err
 	}()
 	<-backend.snapshotStarted
@@ -174,7 +174,7 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, _, _, _, err := inst.SnapshotAgent()
+		_, _, _, _, _, err := inst.SnapshotAgent()
 		snapshotDone <- err
 	}()
 	<-backend.snapshotStarted
@@ -227,14 +227,15 @@ func TestSnapshotAgentDiscardsRetiredRuntimeResult(t *testing.T) {
 	inst.SetBackend(backend)
 
 	type result struct {
-		obs   Observation
-		epoch uint64
-		err   error
+		obs        Observation
+		generation AgentObservationGeneration
+		epoch      uint64
+		err        error
 	}
 	done := make(chan result, 1)
 	go func() {
-		obs, _, _, epoch, err := inst.SnapshotAgent()
-		done <- result{obs: obs, epoch: epoch, err: err}
+		obs, _, generation, _, epoch, err := inst.SnapshotAgent()
+		done <- result{obs: obs, generation: generation, epoch: epoch, err: err}
 	}()
 	<-backend.firstStarted
 	inst.ClearIdleEvidence()
@@ -249,5 +250,8 @@ func TestSnapshotAgentDiscardsRetiredRuntimeResult(t *testing.T) {
 	}
 	if got.epoch != inst.StateEpoch() {
 		t.Fatalf("snapshot epoch = %d, want successor epoch %d", got.epoch, inst.StateEpoch())
+	}
+	if !inst.AgentObservationCurrent(got.generation) {
+		t.Fatal("successor observation generation is not current")
 	}
 }

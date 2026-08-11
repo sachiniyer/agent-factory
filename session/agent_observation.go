@@ -6,7 +6,16 @@ import (
 )
 
 type agentObservationRuntime struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	generation AgentObservationGeneration
+}
+
+// AgentObservationGeneration identifies the concrete runtime that answered a
+// SnapshotAgent call. Its value is deliberately opaque outside session;
+// daemon-owned liveness bookkeeping may compare it through Instance, but cannot
+// manufacture or advance it.
+type AgentObservationGeneration struct {
+	value uint64
 }
 
 type agentObservationTarget struct {
@@ -22,7 +31,9 @@ func (i *Instance) agentObservationTarget() agentObservationTarget {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.agentObservation == nil {
-		i.agentObservation = &agentObservationRuntime{}
+		i.agentObservation = &agentObservationRuntime{
+			generation: AgentObservationGeneration{value: i.agentObservationGeneration.Add(1)},
+		}
 	}
 	return agentObservationTarget{
 		server:  i.agentServerLocked(),
@@ -39,7 +50,14 @@ func (i *Instance) agentObservationTarget() agentObservationTarget {
 // and retried too: callers perform transport-liveness side effects before some
 // epoch-scoped applies, so returning a retired observation is not safe merely
 // because its later state mutation would be rejected.
-func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64, error) {
+func (i *Instance) SnapshotAgent() (
+	Observation,
+	AgentServer,
+	AgentObservationGeneration,
+	InFlightOp,
+	uint64,
+	error,
+) {
 	for {
 		target := i.agentObservationTarget()
 		target.runtime.mu.Lock()
@@ -53,7 +71,7 @@ func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64
 		}
 		if op != OpNone {
 			target.runtime.mu.Unlock()
-			return Observation{}, target.server, op, epoch, nil
+			return Observation{}, target.server, target.runtime.generation, op, epoch, nil
 		}
 		obs, err := target.server.Snapshot()
 		i.mu.RLock()
@@ -63,8 +81,17 @@ func (i *Instance) SnapshotAgent() (Observation, AgentServer, InFlightOp, uint64
 		if !current {
 			continue
 		}
-		return obs, target.server, op, epoch, err
+		return obs, target.server, target.runtime.generation, op, epoch, err
 	}
+}
+
+// AgentObservationCurrent reports whether generation still names the runtime
+// whose transport produced an observation. Callers that use the result to
+// mutate separately locked state must perform this comparison inside that
+// state's critical section: replacement invalidates the generation before its
+// own later bookkeeping reaches the same lock.
+func (i *Instance) AgentObservationCurrent(generation AgentObservationGeneration) bool {
+	return generation.value != 0 && i.agentObservationGeneration.Load() == generation.value
 }
 
 // SendPromptWithEvidence starts the attempt timestamp only after any pane

@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -77,8 +78,13 @@ type Instance struct {
 	// gitWorktree, prInfo, diffStats.
 	mu               sync.RWMutex
 	agentObservation *agentObservationRuntime
-	liveBoundaryMu   sync.Mutex
-	liveBoundary     *runtimeLiveBoundary
+	// agentObservationGeneration is atomic because daemon-owned side effects
+	// validate an observation while holding Manager.mu, not Instance.mu. Runtime
+	// replacement invalidates it before later manager bookkeeping, which orders a
+	// predecessor side effect either wholly before the replacement or drops it.
+	agentObservationGeneration atomic.Uint64
+	liveBoundaryMu             sync.Mutex
+	liveBoundary               *runtimeLiveBoundary
 	// ID is the instance's stable identity (#1195): a random UUID minted once at
 	// NewInstance, persisted, and never mutated. The reconcile uses it to tell
 	// "same session" from "title reused" (#765) without leaning on CreatedAt

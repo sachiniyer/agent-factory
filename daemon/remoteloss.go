@@ -140,14 +140,23 @@ func isRemoteWorkspace(instance *session.Instance) bool {
 	return instance.Capabilities().Workspace == session.WorkspaceRemote
 }
 
-// noteRemoteProbeFailure records one UNANSWERABLE remote probe and reports
-// whether the loss now looks DURABLE — N consecutive unanswered probes spanning
-// at least the grace period. Until both hold the caller must leave the session's
-// liveness alone and let the next tick decide.
-func (m *Manager) noteRemoteProbeFailure(key, title string) bool {
+// noteRemoteProbeFailureAtGeneration records one UNANSWERABLE remote probe and
+// reports whether the observation is still current and the loss now looks
+// DURABLE — N consecutive unanswered probes spanning at least the grace period.
+// Until both hold the caller must leave the session's liveness alone and let the
+// next tick decide.
+func (m *Manager) noteRemoteProbeFailureAtGeneration(
+	key,
+	title string,
+	instance *session.Instance,
+	generation session.AgentObservationGeneration,
+) (durable, current bool) {
 	now := nowFunc()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !instance.AgentObservationCurrent(generation) {
+		return false, false
+	}
 	st := m.remoteLossStates[key]
 	if st == nil {
 		st = &remoteLossState{firstFailureAt: now}
@@ -155,13 +164,13 @@ func (m *Manager) noteRemoteProbeFailure(key, title string) bool {
 	}
 	st.consecutiveFailures++
 	if st.consecutiveFailures < remoteLostFailureThreshold {
-		return false
+		return false, true
 	}
 	if now.Sub(st.firstFailureAt) < remoteLostGracePeriod {
-		return false
+		return false, true
 	}
 	log.WarningLog.Printf("remote session %q has failed %d consecutive agent-server probes over %s; confirming before marking it Lost", title, st.consecutiveFailures, now.Sub(st.firstFailureAt).Round(time.Second))
-	return true
+	return true, true
 }
 
 // clearRemoteLoss drops a session's debounce state. Callers must have ANSWERED
@@ -173,6 +182,24 @@ func (m *Manager) clearRemoteLoss(key string) {
 	m.mu.Lock()
 	delete(m.remoteLossStates, key)
 	m.mu.Unlock()
+}
+
+// clearRemoteLossAtGeneration applies an observation-owned clear only while its
+// runtime generation is current. The comparison is inside Manager.mu: if a
+// replacement invalidates immediately after it, that replacement's own clear
+// reaches this same lock later and orders after the predecessor side effect.
+func (m *Manager) clearRemoteLossAtGeneration(
+	key string,
+	instance *session.Instance,
+	generation session.AgentObservationGeneration,
+) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !instance.AgentObservationCurrent(generation) {
+		return false
+	}
+	delete(m.remoteLossStates, key)
+	return true
 }
 
 // remoteSandboxLiveness keeps all three outcomes of the final pre-recovery probe.
@@ -287,7 +314,16 @@ func (m *Manager) sweepRemoteLossStates() {
 // rather than once per tick. That is also what keeps a wedged sandbox from
 // double-stalling the serial poll: it can no longer spend a full 30s Snapshot
 // AND a full 30s Alive on every single tick (#1794).
-func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session.Instance, before session.Liveness, beforeReset time.Time, epoch uint64) {
+func (m *Manager) settleRemoteProbeFailure(
+	repoID,
+	key string,
+	instance *session.Instance,
+	agentServer session.AgentServer,
+	generation session.AgentObservationGeneration,
+	before session.Liveness,
+	beforeReset time.Time,
+	epoch uint64,
+) {
 	if !isRemoteWorkspace(instance) {
 		// A local agent-server's Snapshot never errors; if that ever changes,
 		// an unexplained local error is not evidence of death. Leave it be.
@@ -301,26 +337,36 @@ func (m *Manager) settleRemoteProbeFailure(repoID, key string, instance *session
 		// normal branches settle the real liveness.
 		return
 	}
-	if !m.noteRemoteProbeFailure(key, instance.Title) {
+	durable, current := m.noteRemoteProbeFailureAtGeneration(key, instance.Title, instance, generation)
+	if !current {
+		return
+	}
+	if !durable {
 		return // not durable yet — the next tick decides
 	}
 	// Durable unreachability. Confirm with the INDEPENDENT Alive() probe before
 	// transitioning: Snapshot can fail on its own (a capture error from a server
 	// that is up and answering), and Lost is the trigger for a destructive
 	// re-provision, so it is worth one bounded round-trip to be sure.
-	switch probe := aliveWithin(instance.AgentServer(), remoteLostConfirmTimeout); probe {
+	switch probe := aliveWithin(agentServer, remoteLostConfirmTimeout); probe {
 	case probeAlive:
+		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
+			return
+		}
 		log.InfoLog.Printf("remote session %q failed repeated snapshots but its agent-server answers as alive; leaving its status alone", instance.Title)
-		m.clearRemoteLoss(key)
 		return
 	case probeAbsent, probeAnsweredDead:
+		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
+			return
+		}
 		// The server answered: reachable, agent gone. The snapshots were failing
 		// for some other reason. An answer of any kind ends the transport episode.
 		log.WarningLog.Printf("remote session %q: agent-server reports its agent is gone — marking it Lost", instance.Title)
-		m.clearRemoteLoss(key)
 	case probeUnknown:
+		if !m.clearRemoteLossAtGeneration(key, instance, generation) {
+			return
+		}
 		log.WarningLog.Printf("remote session %q: agent-server unreachable and still unanswerable after %s — leaving its last-known status unchanged; unreachable is not evidence that this sandbox is gone", instance.Title, remoteLostGracePeriod)
-		m.clearRemoteLoss(key)
 		return
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
@@ -449,8 +495,28 @@ func (m *Manager) noteAliveObservation(repoID string, instance *session.Instance
 	// recording the observations the restore-confirmation depends on.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.noteAliveObservationLocked(repoID, instance)
+}
+
+func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.Instance) {
 	if m.instances[daemonInstanceKey(repoID, instance.Title)] != instance {
 		return
 	}
 	m.aliveObservations[stableSessionKey(repoID, instance)]++
+}
+
+// noteAliveObservationAtGeneration is the poll-owned form. It validates the
+// runtime generation inside Manager.mu so a predecessor answer cannot land
+// after a replacement snapshots this counter as its confirmation boundary.
+func (m *Manager) noteAliveObservationAtGeneration(
+	repoID string,
+	instance *session.Instance,
+	generation session.AgentObservationGeneration,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !instance.AgentObservationCurrent(generation) {
+		return
+	}
+	m.noteAliveObservationLocked(repoID, instance)
 }

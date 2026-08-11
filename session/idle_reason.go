@@ -197,7 +197,9 @@ func (i *Instance) ClearIdleEvidence() bool {
 	i.lastPaneChurnAt = time.Time{}
 	// A predecessor snapshot may still be blocked in transport I/O. Rotate the
 	// serialization domain instead of making replacement delivery wait for it;
-	// the epoch bump below rejects that snapshot when it eventually returns.
+	// the generation invalidation fences daemon-owned side effects while the epoch
+	// bump below rejects instance state applied after that snapshot returns.
+	i.agentObservationGeneration.Add(1)
 	i.agentObservation = nil
 	i.stateEpoch++
 	return changed

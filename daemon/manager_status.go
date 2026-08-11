@@ -328,7 +328,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 		m.clearRemoteLoss(key)
 		return
 	}
-	obs, _, observedOp, epoch, err := instance.SnapshotAgent()
+	obs, _, _, observedOp, epoch, err := instance.SnapshotAgent()
 	// Whatever happened, no loss episode survives an attach (see above).
 	m.clearRemoteLoss(key)
 	if observedOp != session.OpNone {
@@ -539,10 +539,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
 	// usage-limit detector (#1146) without a second capture-pane.
-	// SnapshotAgent binds the server and epoch to its runtime-scoped observation
-	// lock. A swap can therefore retire blocked predecessor I/O while the returned
-	// epoch still rejects its eventual result.
-	obs, as, observedOp, epoch, err := instance.SnapshotAgent()
+	// SnapshotAgent binds the server, epoch, and generation to one runtime-scoped
+	// observation lock. It retries transport I/O retired before return; the
+	// generation below fences daemon-owned side effects if replacement lands after
+	// that final transport check, while the epoch fences Instance mutations.
+	obs, as, observationGeneration, observedOp, epoch, err := instance.SnapshotAgent()
 	if observedOp != session.OpNone {
 		m.clearRemoteLoss(key)
 		return
@@ -566,7 +567,16 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// If both probes are unanswerable, the last-known liveness is deliberately
 		// retained: connectivity alone cannot distinguish a dead sandbox from a
 		// live one holding unpushed work.
-		m.settleRemoteProbeFailure(repoID, key, instance, before, beforeReset, epoch)
+		m.settleRemoteProbeFailure(
+			repoID,
+			key,
+			instance,
+			as,
+			observationGeneration,
+			before,
+			beforeReset,
+			epoch,
+		)
 		return
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
@@ -582,7 +592,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.
-	m.clearRemoteLoss(key)
+	if !m.clearRemoteLossAtGeneration(key, instance, observationGeneration) {
+		return
+	}
 
 	// AFFIRMATIVE liveness evidence for this tick, decided in ONE place and only
 	// where the poll actually learned something (#1917 round 7).
@@ -649,7 +661,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		}
 	}
 	if observedAlive {
-		m.noteAliveObservation(repoID, instance)
+		m.noteAliveObservationAtGeneration(repoID, instance, observationGeneration)
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
