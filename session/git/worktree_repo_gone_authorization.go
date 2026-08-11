@@ -119,6 +119,10 @@ type repoGoneOriginProbeFlight struct {
 	done   chan struct{}
 	err    error
 	cancel context.CancelFunc
+	// timedOut distinguishes a healthy shared in-flight probe from a worker
+	// which already exceeded an outer deadline and remains fenced until exit.
+	timedOut bool
+	waiters  int
 }
 
 var repoGoneOriginProbeFlights = struct {
@@ -128,7 +132,12 @@ var repoGoneOriginProbeFlights = struct {
 
 func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 	repoGoneOriginProbeFlights.Lock()
-	if repoGoneOriginProbeFlights.byPath[worktree.repoPath] != nil {
+	if active := repoGoneOriginProbeFlights.byPath[worktree.repoPath]; active != nil {
+		if !active.timedOut {
+			active.waiters++
+			repoGoneOriginProbeFlights.Unlock()
+			return waitForRepoGoneOriginProbe(worktree.repoPath, active)
+		}
 		repoGoneOriginProbeFlights.Unlock()
 		return fmt.Errorf(
 			"origin repository check for %s is still running after an earlier deadline: %w",
@@ -136,7 +145,7 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	flight := &repoGoneOriginProbeFlight{done: make(chan struct{}), cancel: cancel}
+	flight := &repoGoneOriginProbeFlight{done: make(chan struct{}), cancel: cancel, waiters: 1}
 	repoGoneOriginProbeFlights.byPath[worktree.repoPath] = flight
 	repoGoneOriginProbeFlights.Unlock()
 	go func() {
@@ -149,16 +158,25 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		repoGoneOriginProbeFlights.Unlock()
 		close(flight.done)
 	}()
+	return waitForRepoGoneOriginProbe(worktree.repoPath, flight)
+}
+
+func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlight) error {
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
 		return flight.err
 	case <-timer.C:
-		flight.cancel()
+		repoGoneOriginProbeFlights.Lock()
+		if repoGoneOriginProbeFlights.byPath[repoPath] == flight {
+			flight.timedOut = true
+			flight.cancel()
+		}
+		repoGoneOriginProbeFlights.Unlock()
 		return fmt.Errorf(
 			"timed out after %s while checking origin repository %s: %w",
-			relocationIdentityTimeout, worktree.repoPath, context.DeadlineExceeded,
+			relocationIdentityTimeout, repoPath, context.DeadlineExceeded,
 		)
 	}
 }

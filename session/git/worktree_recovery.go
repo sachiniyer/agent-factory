@@ -58,6 +58,17 @@ func SetRelocationIdentityErrorForTest(path string, err error) func() {
 	return func() { relocationPathIdentity = previous }
 }
 
+// SetCleanupGenerationInstallErrorForTest makes cleanup-generation installation
+// fail and returns a restore function. It lets daemon tests prove that the
+// already-persisted claim_stale fence survives a late authorization failure.
+func SetCleanupGenerationInstallErrorForTest(err error) func() {
+	previous := cleanupGenerationInstall
+	cleanupGenerationInstall = func(string, pathIdentity) (string, error) {
+		return "", err
+	}
+	return func() { cleanupGenerationInstall = previous }
+}
+
 func normalizeRecovery(recovery RelocationRecovery) RelocationRecovery {
 	if recovery.State == "" {
 		// Records written before the explicit lifecycle always represented two
@@ -178,6 +189,9 @@ func (g *GitWorktree) RestoreRelocationRecovery(recovery RelocationRecovery) err
 	case RelocationRecoveryCleanupReady:
 		if !recovery.IdentityKnown {
 			return fmt.Errorf("cleanup-ready relocation identity is missing")
+		}
+		if recovery.CleanupGeneration == "" {
+			return fmt.Errorf("cleanup-ready relocation generation is missing")
 		}
 	case RelocationRecoveryStalled:
 		// A read-only probe may time out before any identity can be captured.
@@ -545,23 +559,6 @@ func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) er
 	recovery := recoveryFromClaim(claim)
 	g.relocationRecovery = &recovery
 	g.releaseRelocationClaimLocked(&claim)
-	return nil
-}
-
-// StagePreparedRelocationCleanupAsUnresolved removes destructive authority
-// from a cleanup-ready record while preserving its exact identity and durable
-// generation. The daemon uses this before the first write of the authoritative
-// repo-disappeared-at-use transition, so a failed cleanup-ready write leaves a
-// persisted claim_stale fence rather than record-free state.
-func (g *GitWorktree) StagePreparedRelocationCleanupAsUnresolved() error {
-	g.relocationMu.Lock()
-	defer g.relocationMu.Unlock()
-	if g.relocationRecovery == nil || g.relocationRecovery.State != RelocationRecoveryCleanupReady {
-		return errors.Join(fmt.Errorf(
-			"worktree has no prepared cleanup identity to stage as unresolved",
-		), ErrRelocateStateUnknown)
-	}
-	g.relocationRecovery.State = RelocationRecoveryClaimStale
 	return nil
 }
 

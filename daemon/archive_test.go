@@ -828,7 +828,8 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	recovery := recordFor(t, repoID, "worker").Worktree.RelocationRecovery
 	require.NotNil(t, recovery,
 		"repo-gone resolution must persist the selected identity until cleanup consumes it")
-	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
 	assert.Error(t, inst.ValidateWorktreeDestructionAdmission(),
 		"slice 1 must leave cleanup_ready blocked until the live consumer lands")

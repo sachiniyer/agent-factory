@@ -401,8 +401,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 				return nil, fmt.Errorf("failed to restore git worktree: %w", err)
 			}
 			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+				recoveryState, stateErr := runtimeRelocationRecoveryState(recovery)
+				if stateErr != nil {
+					return nil, fmt.Errorf("failed to decode worktree relocation recovery: %w", stateErr)
+				}
 				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-					State:             recovery.State,
+					State:             recoveryState,
 					AlternatePath:     recovery.AlternatePath,
 					IdentityKnown:     recovery.IdentityKnown,
 					Device:            recovery.Device,

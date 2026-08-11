@@ -310,18 +310,6 @@ func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.Relocation
 	return gw.PrepareRelocationClaimForCleanup(claim)
 }
 
-// StagePreparedWorktreeRelocationCleanupAsUnresolved removes cleanup authority
-// until the daemon has durably staged and reinstalled the transition.
-func (i *Instance) StagePreparedWorktreeRelocationCleanupAsUnresolved() error {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return fmt.Errorf("cannot stage worktree cleanup for %q: instance has no worktree", i.Title)
-	}
-	return gw.StagePreparedRelocationCleanupAsUnresolved()
-}
-
 // ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
 // before kill intent is persisted and again at the local backend boundary, so a
 // recovery record can never be consulted only after panes were destroyed.

@@ -151,6 +151,60 @@ func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *test
 	}
 }
 
+func TestBoundedRepoGoneOriginProbe_SharesHealthyActiveFlight(t *testing.T) {
+	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
+	previousProbe := repoGoneOriginProbe
+	previousTimeout := relocationIdentityTimeout
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var starts atomic.Int32
+	repoGoneOriginProbe = func(context.Context, *GitWorktree) error {
+		starts.Add(1)
+		close(started)
+		<-release
+		return nil
+	}
+	relocationIdentityTimeout = time.Second
+	t.Cleanup(func() {
+		repoGoneOriginProbe = previousProbe
+		relocationIdentityTimeout = previousTimeout
+	})
+
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() { first <- boundedRepoGoneOriginProbe(gw) }()
+	<-started
+	go func() { second <- boundedRepoGoneOriginProbe(gw) }()
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		repoGoneOriginProbeFlights.Lock()
+		flight := repoGoneOriginProbeFlights.byPath[gw.repoPath]
+		joined := flight != nil && flight.waiters == 2
+		repoGoneOriginProbeFlights.Unlock()
+		if joined {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			<-first
+			<-second
+			t.Fatal("second restore did not join the healthy active origin probe")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first origin probe failed: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("shared origin probe failed: %v", err)
+	}
+	if got := starts.Load(); got != 1 {
+		t.Fatalf("two restores started %d origin probes, want one shared flight", got)
+	}
+}
+
 func TestCheckRepoPresentForRelocation_FiltersAmbientGitDir(t *testing.T) {
 	repoPath := filepath.Join(t.TempDir(), "non-git-origin")
 	if err := os.Mkdir(repoPath, 0o755); err != nil {

@@ -62,7 +62,8 @@ func TestRestoreArchived_RepoGoneKeepsIdentityUntilKill(t *testing.T) {
 	assert.True(t, exists(archivedPath), "failed restore must leave the archive intact")
 	recovery := recordFor(t, repoID, "repo-gone-authorization").Worktree.RelocationRecovery
 	require.NotNil(t, recovery, "repo-gone restore must preserve a durable cleanup authorization")
-	assert.Equal(t, sessiongit.RelocationRecoveryState("cleanup_ready"), recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
 
 	_, err = manager.KillSession(KillSessionRequest{
@@ -89,7 +90,8 @@ func TestRestoreArchived_RepoDisappearsAfterGuardKeepsCleanupIdentity(t *testing
 	assert.Equal(t, session.Archived, inst.GetStatus())
 	recovery := recordFor(t, repoID, "late-gone").Worktree.RelocationRecovery
 	require.NotNil(t, recovery, "the authoritative repo-gone exit must leave a durable cleanup handle")
-	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
 }
 
@@ -106,7 +108,8 @@ func TestRestoreArchived_NonGitOriginCreatesCleanupIdentityBeforePathResolution(
 	recovery := recordFor(t, repoID, "non-git-origin").Worktree.RelocationRecovery
 	require.NotNil(t, recovery,
 		"the pre-path guard must create cleanup authorization for a non-Git origin")
-	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
 }
 
@@ -226,7 +229,7 @@ func TestRestoreArchived_AuthoritativeRepoGonePersistFailureLeavesStaleFence(t *
 		if data.Title != "late-gone-persist-failure" || data.Worktree.RelocationRecovery == nil {
 			return nil
 		}
-		if data.Worktree.RelocationRecovery.State == sessiongit.RelocationRecoveryCleanupReady {
+		if data.Worktree.RelocationRecovery.CleanupLifecycle == sessiongit.RelocationRecoveryCleanupReady {
 			return diskFull
 		}
 		return nil
@@ -242,6 +245,31 @@ func TestRestoreArchived_AuthoritativeRepoGonePersistFailureLeavesStaleFence(t *
 	assert.True(t, recovery.IdentityKnown)
 }
 
+func TestRestoreArchived_AuthoritativeGenerationFailurePersistsStaleFence(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "late-generation-failure")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "late-generation-failure", RepoID: repoID})
+	require.NoError(t, err)
+
+	previousUse := beforeRestoreWorktreeUse
+	beforeRestoreWorktreeUse = func() {
+		require.NoError(t, os.RemoveAll(repoPath), "remove origin immediately before the authoritative probe")
+	}
+	t.Cleanup(func() { beforeRestoreWorktreeUse = previousUse })
+	generationFailure := errors.New("forced cleanup generation failure")
+	restoreInstall := sessiongit.SetCleanupGenerationInstallErrorForTest(generationFailure)
+	t.Cleanup(restoreInstall)
+
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "late-generation-failure", RepoID: repoID})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, generationFailure.Error())
+	recovery := recordFor(t, repoID, "late-generation-failure").Worktree.RelocationRecovery
+	require.NotNil(t, recovery, "late generation failure must leave its pre-authorization fence durable")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Empty(t, recovery.CleanupLifecycle)
+}
+
 func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "repo-returned")
 	require.NoError(t, os.RemoveAll(repoPath))
@@ -250,7 +278,8 @@ func TestRestoreArchived_RepoReturnsBeforeKillRefusesBeforeTombstone(t *testing.
 	require.Error(t, err)
 	recovery := recordFor(t, repoID, "repo-returned").Worktree.RelocationRecovery
 	require.NotNil(t, recovery)
-	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	require.NoError(t, exec.Command("git", "init", repoPath).Run(),
 		"bring a valid origin repository back before kill")
 

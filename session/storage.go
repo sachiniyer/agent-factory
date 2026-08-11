@@ -406,6 +406,7 @@ func (d InstanceData) ForStorage() InstanceData {
 		// reconstructing the worktree.
 		d.Worktree.RelocationRecovery = archiveReportKillFence(report)
 	}
+	projectRelocationRecoveryForPreviousRelease(d.Worktree.RelocationRecovery)
 	if d.Worktree.RelocationRecovery != nil {
 		// v1.0.228 predates relocation_recovery and ignores unknown JSON fields.
 		// Project the unresolved row through safety fields that version already
@@ -457,6 +458,7 @@ func archiveRollbackFence(data InstanceData) *git.ArchiveRollbackFence {
 	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
 		fence.OriginalRelocationRecovery = &git.ArchiveRollbackRelocationRecovery{
 			State:                       recovery.State,
+			CleanupLifecycle:            recovery.CleanupLifecycle,
 			AlternatePath:               recovery.AlternatePath,
 			IdentityKnown:               recovery.IdentityKnown,
 			Device:                      recovery.Device,
@@ -477,6 +479,7 @@ func archiveRollbackRelocationRecovery(recovery *git.ArchiveRollbackRelocationRe
 	}
 	return &GitWorktreeRelocationRecoveryData{
 		State:                       recovery.State,
+		CleanupLifecycle:            recovery.CleanupLifecycle,
 		AlternatePath:               recovery.AlternatePath,
 		IdentityKnown:               recovery.IdentityKnown,
 		Device:                      recovery.Device,
@@ -611,7 +614,10 @@ type GitWorktreeData struct {
 }
 
 type GitWorktreeRelocationRecoveryData struct {
-	State                       git.RelocationRecoveryState `json:"state,omitempty"`
+	State git.RelocationRecoveryState `json:"state,omitempty"`
+	// CleanupLifecycle carries cleanup-only states additively while State is
+	// projected to claim_stale for previous releases which reject new enum values.
+	CleanupLifecycle            git.RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
 	AlternatePath               string                      `json:"alternate_path"`
 	IdentityKnown               bool                        `json:"identity_known,omitempty"`
 	Device                      uint64                      `json:"device"`
@@ -621,6 +627,35 @@ type GitWorktreeRelocationRecoveryData struct {
 	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
 	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
 	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`
+}
+
+func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocationRecoveryData) {
+	if recovery == nil {
+		return
+	}
+	switch recovery.State {
+	case git.RelocationRecoveryCleanupReady:
+		recovery.CleanupLifecycle = recovery.State
+		recovery.State = git.RelocationRecoveryClaimStale
+	}
+}
+
+func runtimeRelocationRecoveryState(
+	recovery *GitWorktreeRelocationRecoveryData,
+) (git.RelocationRecoveryState, error) {
+	if recovery.CleanupLifecycle == "" {
+		return recovery.State, nil
+	}
+	if recovery.State != git.RelocationRecoveryClaimStale {
+		return "", fmt.Errorf(
+			"cleanup lifecycle %q requires a claim_stale compatibility state, got %q",
+			recovery.CleanupLifecycle, recovery.State,
+		)
+	}
+	if recovery.CleanupLifecycle != git.RelocationRecoveryCleanupReady {
+		return "", fmt.Errorf("unknown cleanup relocation lifecycle %q", recovery.CleanupLifecycle)
+	}
+	return recovery.CleanupLifecycle, nil
 }
 
 // Storage handles saving and loading instances using the state interface.

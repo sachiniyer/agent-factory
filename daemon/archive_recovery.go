@@ -162,18 +162,11 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 }
 
 // persistRepoGoneAtRestoreUse handles the authoritative repo check immediately
-// before the worktree move. The git layer has already converted the live claim
-// into in-memory cleanup ownership; restage it without destructive authority so
-// a failed first cleanup-ready write cannot recreate a record-free archive.
+// before the worktree move. The git layer has materialized claim_stale but no
+// destructive authority; persist that fence before installing cleanup_ready.
 func (m *Manager) persistRepoGoneAtRestoreUse(
 	repoID, title, repoPath string, instance *session.Instance, restoreErr error,
 ) error {
-	if err := instance.StagePreparedWorktreeRelocationCleanupAsUnresolved(); err != nil {
-		return errors.Join(fmt.Errorf(
-			"cannot stage the archived worktree identity after its origin repo disappeared before the move: %w",
-			err,
-		), restoreErr)
-	}
 	if err := m.persistAndInstallRepoGoneCleanup(repoID, title, repoPath, instance); err != nil {
 		return errors.Join(err, restoreErr)
 	}

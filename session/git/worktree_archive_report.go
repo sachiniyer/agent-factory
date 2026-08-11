@@ -154,6 +154,7 @@ type ArchiveRollbackFence struct {
 // package cannot depend on session's storage DTO.
 type ArchiveRollbackRelocationRecovery struct {
 	State                       RelocationRecoveryState `json:"state,omitempty"`
+	CleanupLifecycle            RelocationRecoveryState `json:"cleanup_lifecycle,omitempty"`
 	AlternatePath               string                  `json:"alternate_path,omitempty"`
 	IdentityKnown               bool                    `json:"identity_known,omitempty"`
 	Device                      uint64                  `json:"device,omitempty"`
