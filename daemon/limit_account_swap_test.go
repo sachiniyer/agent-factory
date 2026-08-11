@@ -44,7 +44,7 @@ func writeLimitAccountCandidates(t *testing.T, contents string) {
 	}
 }
 
-func TestAccountSwapForLimitRefusesUnreadablePersonalIdentityPolicy(t *testing.T) {
+func TestAdmitAccountSwapRefusesUnreadablePersonalIdentityPolicy(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
 
@@ -60,7 +60,11 @@ func TestAccountSwapForLimitRefusesUnreadablePersonalIdentityPolicy(t *testing.T
 		t.Fatal("precondition: corrupt project registry must be unreadable")
 	}
 
-	swap, err := manager.accountSwapForLimit(inst, manager.Config())
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	defer inst.EndLimitResume()
+	swap, err := manager.admitAccountSwap(inst, manager.Config())
 	if err == nil {
 		t.Fatalf("automatic identity decision inherited global candidate despite unreadable personal policy: %+v", swap)
 	}
@@ -118,7 +122,7 @@ func TestResumeLimitedSessions_AllConfiguredAccountsLimitedKeepsWaiting(t *testi
 	}
 }
 
-func TestAccountSwapForLimitRetainsEarlierAccountLimitEvidence(t *testing.T) {
+func TestAccountSwapOpportunityRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
 	home, err := config.GetConfigDir()
 	if err != nil {
@@ -154,7 +158,7 @@ func TestAccountSwapForLimitRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	requireSwapSelection("work", "personal")
 	inst.SetLimitReached(time.Time{})
 
-	swap, err := manager.accountSwapForLimit(inst, manager.Config())
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +167,7 @@ func TestAccountSwapForLimitRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	}
 }
 
-func TestAccountSwapForLimit_RetainsObservationAfterSessionKill(t *testing.T) {
+func TestAccountSwapOpportunity_RetainsObservationAfterSessionKill(t *testing.T) {
 	base := nowFunc()
 	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
@@ -180,7 +184,7 @@ func TestAccountSwapForLimit_RetainsObservationAfterSessionKill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	swap, err := restarted.accountSwapForLimit(target, restarted.Config())
+	swap, err := restarted.accountSwapOpportunityFromFacts(target, restarted.Config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +193,7 @@ func TestAccountSwapForLimit_RetainsObservationAfterSessionKill(t *testing.T) {
 	}
 }
 
-func TestAccountSwapForLimit_UsesHistoricalObservationAfterAgentHandoff(t *testing.T) {
+func TestAccountSwapOpportunity_UsesHistoricalObservationAfterAgentHandoff(t *testing.T) {
 	base := nowFunc()
 	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
@@ -201,7 +205,7 @@ func TestAccountSwapForLimit_UsesHistoricalObservationAfterAgentHandoff(t *testi
 	observer.ClearLimitReached()
 	observer.Program = tmux.ProgramCodex
 
-	swap, err := manager.accountSwapForLimit(target, manager.Config())
+	swap, err := manager.accountSwapOpportunityFromFacts(target, manager.Config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +214,7 @@ func TestAccountSwapForLimit_UsesHistoricalObservationAfterAgentHandoff(t *testi
 	}
 }
 
-func TestAccountSwapForLimit_UsesObservationFromUnloadablePersistedSession(t *testing.T) {
+func TestAccountSwapOpportunity_UsesObservationFromUnloadablePersistedSession(t *testing.T) {
 	installInstantBackend(t)
 	manager, repoID, target, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
 	configureLimitAccountCandidate(t, manager, "work")
@@ -240,7 +244,7 @@ func TestAccountSwapForLimit_UsesObservationFromUnloadablePersistedSession(t *te
 	restarted.instances = loaded
 	restarted.mu.Unlock()
 
-	swap, err := restarted.accountSwapForLimit(target, restarted.Config())
+	swap, err := restarted.accountSwapOpportunityFromFacts(target, restarted.Config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +635,7 @@ func TestPrepareRuntimeForAccountSwap_AbsentAgentStillStopsLiveSibling(t *testin
 	}
 }
 
-func TestAccountSwapForLimit_UsesThePollsFrozenGlobalConfig(t *testing.T) {
+func TestAccountSwapOpportunity_UsesThePollsFrozenGlobalConfig(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	home, err := config.GetConfigDir()
 	if err != nil {
@@ -646,7 +650,7 @@ func TestAccountSwapForLimit_UsesThePollsFrozenGlobalConfig(t *testing.T) {
 	frozen.LimitAccountCandidates = []string{"first"}
 	writeLimitAccountCandidates(t, "limit_account_candidates = [\"second\"]\n")
 
-	swap, err := manager.accountSwapForLimit(inst, frozen)
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, frozen)
 	if err != nil {
 		t.Fatal(err)
 	}

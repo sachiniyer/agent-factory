@@ -13,20 +13,20 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// autoAccountSwap is the identity decision frozen immediately before the
-// limit-resume transaction. from is the account that produced the wall (empty
-// means ambient); to is an explicit configured, registered, unblocked candidate.
+// autoAccountSwap is only a scheduling opportunity until admitAccountSwap
+// returns it under the limit-resume fence. from is the account that produced the
+// wall (empty means ambient); to is a configured candidate.
 type autoAccountSwap struct {
 	from                 string
 	previousAccount      string
 	previousAuto         bool
 	previousConversation session.AgentConversationData
 	to                   string
-	candidates           []string
 	agent                string
 	alreadySet           bool
 	fallbackDue          bool
 	fellBack             bool
+	global               *config.Config
 }
 
 // committedAccountSwap recognizes a replacement whose identity checkpoint
@@ -50,10 +50,12 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 	}
 }
 
-// accountSwapForLimit answers only from facts af actually has. "Unblocked"
-// means no live wall or retained, unexpired observation records a limit for
-// that agent/account; it is never promoted into a provider quota claim.
-func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
+// accountSwapOpportunityFromFacts is a scheduling hint, never admission. It
+// returns candidates only when identity policy and the registered-account,
+// durable-repo, live-session, and retained-limit sources were all read
+// successfully. "Unblocked" means only that none of those complete sources has
+// a live or unexpired limit observation; it is not a provider quota claim.
+func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
 	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
@@ -135,50 +137,48 @@ func (m *Manager) accountSwapForLimit(instance *session.Instance, global *config
 	for account := range limitedSet {
 		limited = append(limited, account)
 	}
-	targets := quota.SelectAccountCandidates(quota.AccountSelection{
+	target, found := quota.SelectAccountCandidate(quota.AccountSelection{
 		CurrentAccount:      current,
 		CurrentAutoSelected: currentAuto,
 		Candidates:          resolved.LimitAccountCandidates,
 		Registered:          registered,
 		Limited:             limited,
 	})
-	if len(targets) == 0 {
+	if !found {
 		return nil, nil
 	}
-	target := targets[0]
 	return &autoAccountSwap{
 		from:            limitedAccount,
 		previousAccount: current,
 		previousAuto:    currentAuto,
 		to:              target,
-		candidates:      targets,
 		agent:           agent,
-		alreadySet:      currentAuto && current == target && current != limitedAccount,
+		global:          global,
 	}, nil
 }
 
-// preflightAccountSwapCandidates keeps candidate order but refuses to let one
-// unusable account starve later configured identities. Validation also freezes
-// the exact launch plan, so the selected candidate is written back to the swap
-// only after that preflight succeeds.
-func preflightAccountSwapCandidates(swap *autoAccountSwap, validate func(string) error) error {
-	if swap == nil || swap.alreadySet {
-		return nil
+// admitAccountSwap is the sole admission gate for a new identity replacement.
+// It runs under the limit-resume fence immediately before teardown and rebuilds
+// every fact instead of trusting the scheduler's earlier timing hint. A swap is
+// admitted only when the complete identity policy parses, every durable repo was
+// scanned, registered accounts and unexpired limit evidence are readable, and
+// the exact selected-account launch plan can be frozen. Any failed or incomplete
+// read is a refusal that leaves the existing runtime and identity untouched.
+func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
+	swap, err := m.accountSwapOpportunityFromFacts(instance, global)
+	if err != nil {
+		return nil, err
 	}
-	candidates := swap.candidates
-	if len(candidates) == 0 {
-		candidates = []string{swap.to}
+	if swap == nil {
+		return nil, errors.New("no configured, registered account without current limit evidence is available")
 	}
-	var failures []error
-	for _, candidate := range candidates {
-		if err := validate(candidate); err != nil {
-			failures = append(failures, fmt.Errorf("account %q: %w", candidate, err))
-			continue
-		}
-		swap.to = candidate
-		return nil
+	if swap.alreadySet {
+		return nil, errors.New("identity selection is already committed; new-swap admission cannot authorize recovery")
 	}
-	return errors.Join(failures...)
+	if err := instance.ValidateAccountSwap(swap.to); err != nil {
+		return nil, fmt.Errorf("account %q: %w", swap.to, err)
+	}
+	return swap, nil
 }
 
 func accountSwapIdentity(agent, account string) string {

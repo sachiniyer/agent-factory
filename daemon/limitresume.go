@@ -180,7 +180,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// which is what a resume episode is about (#2876).
 	now := nowFunc()
 	stateKey := stableSessionKey(repoID, inst)
-	accountSwap, swapErr := m.accountSwapForLimit(inst, cfg)
+	accountSwap, swapErr := m.accountSwapOpportunityFromFacts(inst, cfg)
 	if swapErr != nil {
 		log.WarningLog.Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
 	}
@@ -260,21 +260,11 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || inst.GetLiveness() != session.LiveLimitReached {
 		return
 	}
-	// Re-evaluate at the operation boundary. A candidate can become limited, be
-	// unregistered, or be removed from project config after the point-in-time
-	// scan above; none of those may be carried into a credential replacement.
 	if accountSwap != nil {
-		var err error
-		accountSwap, err = m.accountSwapForLimit(inst, cfg)
-		if err != nil {
-			log.WarningLog.Printf("account-swap recheck for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, err)
-		}
-		if accountSwap == nil && (!ordinarySchedulable || now.Before(ordinaryDue)) {
-			return
-		}
-		if accountSwap != nil {
-			accountSwap.fallbackDue = ordinarySchedulable && !now.Before(ordinaryDue)
-		}
+		// This value only schedules the attempt. admitAccountSwap rebuilds all facts
+		// after the limit-resume fence is raised and is the only result allowed to
+		// reach teardown.
+		accountSwap.fallbackDue = ordinarySchedulable && !now.Before(ordinaryDue)
 	}
 
 	// Whether this episode carried a parseable reset time, captured BEFORE the
