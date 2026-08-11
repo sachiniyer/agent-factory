@@ -158,13 +158,14 @@ func TestRestoreArchived_NonGitOriginCreatesCleanupIdentityBeforePathResolution(
 }
 
 func TestRestoreArchived_OriginProbeFailurePersistsUnresolvedClaim(t *testing.T) {
-	manager, repoID, _, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "probe-unknown")
-	gw, err := inst.GetGitWorktree()
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "probe-unknown")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "probe-unknown", RepoID: repoID})
 	require.NoError(t, err)
-	claim, err := gw.ClaimRelocationSource()
-	require.NoError(t, err)
-	require.NoError(t, gw.SettleRelocationClaim(claim), "start from the reachable record-free archive state")
-	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	archivedPath := inst.GetWorktreePath()
+	require.Nil(t, recordFor(t, repoID, "probe-unknown").Worktree.RelocationRecovery,
+		"precondition: an ordinary successful archive starts without a recovery record")
 	t.Setenv("PATH", t.TempDir())
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "probe-unknown", RepoID: repoID})
