@@ -180,13 +180,13 @@ testbox-image:
 testbox-clean:
 	scripts/testbox.sh clean
 
-# Tests for the container harness's OWN disk hygiene: that cleanup runs even
-# when the suite fails, and that every prune is scoped to artifacts the harness
-# built. Pure logic against a fake docker — no containers, no images, no daemon
-# — so it runs on the host in about a second and gates every PR, the same deal
-# as lifecycle-selftest.
+# Cheap tests for the container harness itself: disk cleanup stays scoped and
+# active on failure, play-test agent selection reaches the sandbox, stand-in
+# panes mark their own evidence, and the real Codex install path is scriptable.
+# No containers, images, daemon, or network are used.
 testbox-selftest:
 	bash scripts/testbox-selftest.sh
+	bash scripts/playtest-agent-selftest.sh
 
 # Web client toolchain (#1592 Phase 5). The JS build+test are gated ENTIRELY behind
 # these targets: `go build ./...` and `make test-container` never invoke Node — the

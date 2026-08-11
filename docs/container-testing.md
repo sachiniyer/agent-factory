@@ -171,12 +171,33 @@ make playtest-container
 ```
 
 Builds `af` from your checkout inside the container and drops you into a
-shell with a ready-made sandbox: a throwaway `AGENT_FACTORY_HOME` (with
-`program_overrides` so instances run `bash`, not real agents), a small
+shell with a ready-made sandbox: a throwaway `AGENT_FACTORY_HOME`, a small
 mock project repo to drive sessions against, and the container's own tmux
 server — `tmux kill-server` in there is harmless. Exiting the shell tears
 down everything: the daemon, the tmux server, and every process the
 play-test spawned. Teardown is container exit, not a checklist.
+
+By default, instances run a cheap bash stand-in. It is deliberately loud:
+the sandbox banner identifies it, and every stand-in pane prints that it is
+bash rather than an agent plus the UI behavior it cannot prove. Its prompt also
+retains a stand-in marker after command output scrolls. This keeps a captured
+pane from being mistaken for real-agent evidence.
+
+For a real agent pane, ask the harness to install Codex with its official
+standalone installer:
+
+```bash
+AF_PLAYTEST_AGENT=codex make playtest-container
+# Pin the release when evidence must be reproducible:
+AF_PLAYTEST_AGENT=codex AF_PLAYTEST_CODEX_RELEASE=0.147.0 make playtest-container
+```
+
+The real-agent path requires network access and downloads only when selected;
+the ordinary testbox image and its cheap self-tests stay unchanged. The sandbox
+banner records the installed CLI version. No host Codex home or credentials are
+mounted. An unauthenticated launch shows Codex's real sign-in UI, but af does not
+mistake that modal for a ready composer; an end-to-end session therefore needs
+explicit throwaway authentication inside the container.
 
 For scripted/agent-driven play-tests (the `tui-playtest` skill), park the
 sandbox in the background and drive it with `docker exec`. The container name
@@ -187,12 +208,16 @@ defaults to a **unique per-run value** (#1171) so concurrent runs can't
 ```bash
 export AF_PLAYTEST_NAME="af-playtest-$$"
 make playtest-container-detached
-docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'
+docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'
 docker exec "$AF_PLAYTEST_NAME" tmux new-session -d -s drive -x 80 -y 24
 docker exec "$AF_PLAYTEST_NAME" tmux send-keys -t drive 'cd ~/sandbox/mock-repo && af' Enter
 docker exec "$AF_PLAYTEST_NAME" tmux capture-pane -p -t drive
 docker rm -f "$AF_PLAYTEST_NAME"   # teardown: one command reaps everything
 ```
+
+Set `AF_PLAYTEST_AGENT=codex` (and optionally
+`AF_PLAYTEST_CODEX_RELEASE`) before the detached target to use the same real-agent
+path there.
 
 Rather than hand-rolling `send-keys`/`capture-pane`/`sleep`, drive the TUI
 through the **deterministic driver** (`scripts/tui-driver.sh`): every action
