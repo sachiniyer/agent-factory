@@ -135,6 +135,35 @@ func TestCleanupGenerationFromFile_RejectsShrinkingValue(t *testing.T) {
 	}
 }
 
+func TestCleanupGenerationFromFile_RejectsMalformedValue(t *testing.T) {
+	directory, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open cleanup directory: %v", err)
+	}
+	defer directory.Close()
+	previousRead := cleanupGenerationRead
+	t.Cleanup(func() { cleanupGenerationRead = previousRead })
+
+	for name, value := range map[string][]byte{
+		"non utf8":     {0xff, 0xfe, 0xfd},
+		"wrong length": []byte("abcdef"),
+		"non hex":      []byte("gggggggggggggggggggggggggggggggg"),
+		"uppercase":    []byte("ABCDEF0123456789ABCDEF0123456789"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cleanupGenerationRead = func(_ int, _ string, destination []byte) (int, error) {
+				if destination != nil {
+					copy(destination, value)
+				}
+				return len(value), nil
+			}
+			if generation, err := cleanupGenerationFromFile(directory); err == nil {
+				t.Fatalf("malformed cleanup generation %q was accepted", generation)
+			}
+		})
+	}
+}
+
 func TestBoundedRepoGoneOriginProbe_UnpublishesCompletedFlightBeforeWake(t *testing.T) {
 	gw := &GitWorktree{repoPath: filepath.Join(t.TempDir(), "origin")}
 	previousProbe := repoGoneOriginProbe
@@ -180,10 +209,12 @@ func TestBoundedRepoGoneOriginProbe_PublishesCompletionBeforeUnfencing(t *testin
 	previousTimeout := relocationIdentityTimeout
 	publicationGap := make(chan struct{})
 	releaseWorker := make(chan struct{})
+	workerFinished := make(chan struct{})
 	repoGoneOriginProbe = func(context.Context, *GitWorktree) error { return nil }
 	repoGoneOriginProbeAfterUnpublish = func() {
 		close(publicationGap)
 		<-releaseWorker
+		close(workerFinished)
 	}
 	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
@@ -197,6 +228,7 @@ func TestBoundedRepoGoneOriginProbe_PublishesCompletionBeforeUnfencing(t *testin
 	<-publicationGap
 	err := <-result
 	close(releaseWorker)
+	<-workerFinished
 	if err != nil {
 		t.Fatalf("a completed origin probe was discarded at its publication boundary: %v", err)
 	}
@@ -209,12 +241,14 @@ func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *t
 	previousTimeout := relocationIdentityTimeout
 	publicationGap := make(chan struct{})
 	releaseWorker := make(chan struct{})
+	workerFinished := make(chan struct{})
 	cleanupGenerationInstall = func(string, pathIdentity) (string, error) {
 		return "installed-generation", nil
 	}
 	cleanupGenerationInstallAfterUnpublish = func() {
 		close(publicationGap)
 		<-releaseWorker
+		close(workerFinished)
 	}
 	relocationIdentityTimeout = 25 * time.Millisecond
 	t.Cleanup(func() {
@@ -235,6 +269,7 @@ func TestBoundedCleanupGenerationInstall_PublishesCompletionBeforeUnfencing(t *t
 	<-publicationGap
 	observed := <-resultC
 	close(releaseWorker)
+	<-workerFinished
 	if observed.err != nil || observed.generation != "installed-generation" {
 		t.Fatalf(
 			"a completed generation install was discarded at its publication boundary: generation=%q err=%v",

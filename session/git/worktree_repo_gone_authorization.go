@@ -121,9 +121,10 @@ var repoGoneOriginProbe = probeRepoGoneOrigin
 var repoGoneOriginProbeAfterUnpublish = func() {}
 
 type repoGoneOriginProbeFlight struct {
-	done   chan struct{}
-	err    error
-	cancel context.CancelFunc
+	done           chan struct{}
+	err            error
+	cancel         context.CancelFunc
+	afterUnpublish func()
 	// timedOut distinguishes a healthy shared in-flight probe from a worker
 	// which already exceeded an outer deadline and remains fenced until exit.
 	timedOut bool
@@ -150,7 +151,10 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	flight := &repoGoneOriginProbeFlight{done: make(chan struct{}), cancel: cancel, waiters: 1}
+	flight := &repoGoneOriginProbeFlight{
+		done: make(chan struct{}), cancel: cancel, waiters: 1,
+		afterUnpublish: repoGoneOriginProbeAfterUnpublish,
+	}
 	repoGoneOriginProbeFlights.byPath[worktree.repoPath] = flight
 	repoGoneOriginProbeFlights.Unlock()
 	go func() {
@@ -162,7 +166,7 @@ func boundedRepoGoneOriginProbe(worktree *GitWorktree) error {
 		}
 		close(flight.done)
 		repoGoneOriginProbeFlights.Unlock()
-		repoGoneOriginProbeAfterUnpublish()
+		flight.afterUnpublish()
 	}()
 	return waitForRepoGoneOriginProbe(worktree.repoPath, flight)
 }
@@ -253,9 +257,10 @@ func boundedRelocationCleanupIdentity(path string) (cleanupPathInspection, error
 }
 
 type cleanupGenerationInstallFlight struct {
-	done       chan struct{}
-	generation string
-	err        error
+	done           chan struct{}
+	generation     string
+	err            error
+	afterUnpublish func()
 }
 
 var cleanupGenerationInstallFlights = struct {
@@ -274,7 +279,9 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 			path, context.DeadlineExceeded,
 		)
 	}
-	flight := &cleanupGenerationInstallFlight{done: make(chan struct{})}
+	flight := &cleanupGenerationInstallFlight{
+		done: make(chan struct{}), afterUnpublish: cleanupGenerationInstallAfterUnpublish,
+	}
 	cleanupGenerationInstallFlights.byPath[path] = flight
 	cleanupGenerationInstallFlights.Unlock()
 	go func() {
@@ -285,7 +292,7 @@ func boundedCleanupGenerationInstall(path string, expected pathIdentity) (string
 		}
 		close(flight.done)
 		cleanupGenerationInstallFlights.Unlock()
-		cleanupGenerationInstallAfterUnpublish()
+		flight.afterUnpublish()
 	}()
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
@@ -341,7 +348,7 @@ func installCleanupGeneration(path string, expected pathIdentity) (string, error
 		return "", fmt.Errorf("generate cleanup identity for %s: %w", path, err)
 	}
 	generation := hex.EncodeToString(random)
-	if err := unix.Fsetxattr(int(directory.Fd()), cleanupGenerationXattr, []byte(generation), unix.XATTR_CREATE); err != nil {
+	if err := setCleanupGenerationCreate(int(directory.Fd()), cleanupGenerationXattr, []byte(generation)); err != nil {
 		if !errors.Is(err, unix.EEXIST) {
 			return "", fmt.Errorf("store cleanup identity on %s: %w", path, err)
 		}
@@ -375,7 +382,22 @@ func cleanupGenerationFromFile(directory *os.File) (string, error) {
 			size, read,
 		)
 	}
+	if !validCleanupGeneration(value[:read]) {
+		return "", fmt.Errorf("durable cleanup generation is not a 32-character lowercase hexadecimal value")
+	}
 	return string(value[:read]), nil
+}
+
+func validCleanupGeneration(value []byte) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, digit := range value {
+		if (digit < '0' || digit > '9') && (digit < 'a' || digit > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validatedCleanupPathIdentity(path, expectedGeneration string) (pathIdentity, error) {
