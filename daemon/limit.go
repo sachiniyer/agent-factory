@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -563,15 +564,22 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// A daemon can crash after the agent starts but before setupTabs completes,
 		// so repair an incomplete pane set as one fresh credential boundary.
 		if accountSwap != nil && accountSwap.alreadySet {
+			var repairErr error
 			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
+				repairErr = paneErr
+			}
+			if accountSwap.agent == tmux.ProgramCodex && !instance.AgentConversation().HasID() {
+				repairErr = errors.Join(repairErr, errors.New("its Codex conversation id is not durable"))
+			}
+			if repairErr != nil {
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				if err := instance.StopForAccountSwap(); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				shouldRespawn = true
 			}
@@ -645,11 +653,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
+		// Account-swap preflight captured the selected account's provider store
+		// before launch. Discover Codex synchronously under this operation fence:
+		// the ordinary async writer cannot take the same op lock until this resume
+		// returns, which would let the pending crash-recovery marker retire first.
+		var accountCaptureErr error
 		if accountSwap != nil {
-			// Account-swap preflight captured the selected account's provider store
-			// before launch. Bind discovery to this freshly replaced runtime now;
-			// otherwise Codex swaps permanently lose the new conversation id.
-			m.captureAgentConversationAsync(repoID, key, instance, accountConversationCapture)
+			accountCaptureErr = captureAccountSwapConversation(instance, accountConversationCapture)
 		}
 		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
 		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
@@ -710,6 +720,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		settleErr = m.persistSettlement(repoID, key, instance)
 		if settleErr != nil {
 			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
+		}
+		if accountCaptureErr != nil {
+			captureErr := fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, accountCaptureErr)
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(captureErr, settleErr)
+			}
+			return resumeNotPerformed, captureErr
 		}
 	}
 	if accountSwap != nil {

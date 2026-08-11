@@ -301,7 +301,7 @@ func ConversationSelectorArgs(program string) []string {
 			return nil
 		}
 		idx += agentIdx + 1
-		if idx < len(tokens) && tokens[idx] == "exec" {
+		if idx < len(tokens) && (tokens[idx] == "exec" || tokens[idx] == "e") {
 			execIdx := codexExecSubcommandIndex(tokens[idx+1:])
 			if execIdx < 0 {
 				return nil

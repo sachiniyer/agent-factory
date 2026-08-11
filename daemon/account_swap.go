@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // autoAccountSwap is the identity decision frozen immediately before the
@@ -192,6 +193,30 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 		return notice + "\n\ncontinue"
 	}
 	return notice + "\n\n" + strings.TrimSpace(prompt)
+}
+
+// captureAccountSwapConversation binds Codex discovery to the replacement
+// runtime while the limit-resume operation still owns its fence. Account swaps
+// cannot use the ordinary asynchronous capture: that goroutine serializes its
+// write through the same per-session operation lock held by the caller, so the
+// pending recovery marker could otherwise be cleared and checkpointed before
+// the conversation id became durable.
+func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) error {
+	token := instance.AgentRuntimeToken()
+	if token.Agent() != tmux.ProgramCodex {
+		return nil
+	}
+	conversation, err := session.CaptureAgentConversation(token.Agent(), snap, conversationCaptureTimeout)
+	if err != nil {
+		return fmt.Errorf("capture replacement Codex conversation: %w", err)
+	}
+	if !conversation.HasID() {
+		return errors.New("replacement Codex runtime did not expose a conversation id")
+	}
+	if !instance.SetAgentConversationForRuntime(token, conversation) {
+		return errors.New("replacement Codex runtime changed before its conversation id could be recorded")
+	}
+	return nil
 }
 
 // prepareRuntimeForAccountSwap establishes that every old local pane is gone
