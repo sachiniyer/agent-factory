@@ -632,6 +632,7 @@ var (
 	repoGoneOriginProbe           = probeRepoGoneOrigin
 	repoGoneBeforeWriterReap      = func(string) {}
 	repoGoneBeforeRecursiveDelete = func(string) {}
+	removeTreeAfterEntryClaim     = func(*os.File, string, string, string) error { return nil }
 	repoGoneRemoveDirectory       = removeClaimedRepoGoneDirectory
 	repoGoneReapMatching          = reapWorktreeWritersMatching
 	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir

@@ -540,6 +540,9 @@ func removeCopiedEntryWithRestore(
 			restoreErr,
 		)
 	}
+	if err := removeTreeAfterEntryClaim(directory, path, claimedName, entry.name); err != nil {
+		return err
+	}
 	flags := 0
 	if entry.directory != nil {
 		flags = unix.AT_REMOVEDIR

@@ -460,6 +460,7 @@ var ghostCleanupWorktree = func(
 		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}
 	restoreCheckpoint := gw.SetRepoGoneFinalizationCheckpoint(func() error {
+		beforeGhostCheckpointSnapshot()
 		// A descriptor worker may outlive ghostCleanup's caller deadline. Build a
 		// detached checkpoint so that late persistence never races the manager's
 		// reads of its temporary loaded row.
@@ -496,6 +497,8 @@ var ghostCleanupWorktree = func(
 	}
 	return state, cleanupErr, nil
 }
+
+var beforeGhostCheckpointSnapshot = func() {}
 
 // projectGhostPersistenceSnapshot copies relocation ownership and archive
 // completeness from one atomic GitWorktree snapshot. The semantic in-memory

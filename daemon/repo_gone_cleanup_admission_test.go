@@ -419,6 +419,45 @@ func TestKillSession_GhostCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	oldFinalizerReleased = true
 }
 
+func TestGhostCleanupWorktree_DetachesCheckpointBaseline(t *testing.T) {
+	_, repoID := newCleanupReadyGhost(t, "ghost-detached-baseline")
+	data := *recordFor(t, repoID, "ghost-detached-baseline")
+	originalBranch := data.Worktree.BranchName
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	previousBeforeSnapshot := beforeGhostCheckpointSnapshot
+	beforeGhostCheckpointSnapshot = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() { beforeGhostCheckpointSnapshot = previousBeforeSnapshot })
+
+	type cleanupResult struct {
+		state sessiongit.CleanupState
+		err   error
+	}
+	result := make(chan cleanupResult, 1)
+	checkpoint := make(chan session.InstanceData, 1)
+	go func() {
+		state, cleanupErr, _ := ghostCleanupWorktree(&data, data.Title, func(snapshot *session.InstanceData) error {
+			checkpoint <- *snapshot
+			return errors.New("stop after checkpoint capture")
+		})
+		result <- cleanupResult{state: state, err: cleanupErr}
+	}()
+	<-entered
+	data.Worktree.BranchName = "mutated-after-cleanup-started"
+	close(release)
+
+	snapshot := <-checkpoint
+	if snapshot.Worktree.BranchName != originalBranch {
+		t.Fatalf("late checkpoint read mutable caller data: got %q want %q", snapshot.Worktree.BranchName, originalBranch)
+	}
+	completed := <-result
+	require.Error(t, completed.err)
+	assert.Equal(t, sessiongit.CleanupStateUnknown, completed.state)
+}
+
 func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath := archivedInstanceWithRecoveryClaim(t, "live-retry-crash-window")
 	require.NoError(t, os.RemoveAll(repoPath))

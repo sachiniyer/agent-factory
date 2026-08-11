@@ -696,7 +696,7 @@ func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) er
 	if err := g.revalidateRelocationClaimLocked(claim, false); err != nil {
 		return err
 	}
-	generation, err := installCleanupGeneration(claim.Path, claim.identity)
+	generation, err := cleanupGenerationInstall(claim.Path, claim.identity)
 	if err != nil {
 		g.recordStaleClaimLocked(claim)
 		return errors.Join(fmt.Errorf("cannot establish durable cleanup generation at %s: %w", claim.Path, err), ErrRelocateStateUnknown)

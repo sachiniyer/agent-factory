@@ -17,6 +17,8 @@ import (
 
 const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
 
+var cleanupGenerationInstall = installCleanupGeneration
+
 // probeRepoGoneOrigin applies restore's repository-validity rule. Its caller
 // supplies a hard outer deadline covering both the context-aware Git probe and
 // the affirmative metadata lookup needed to distinguish an absent `.git` entry
