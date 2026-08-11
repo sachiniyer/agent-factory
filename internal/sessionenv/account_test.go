@@ -306,6 +306,18 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentArguments(t *testi
 		"arguments to an ordinary non-agent process remain valid in a scoped sibling")
 }
 
+func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`command codex -c cli_auth_credentials_store="keyring"`,
+		`nice codex -c cli_auth_credentials_store="keyring"`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "launch wrapper %q must not hide a selected-agent identity override", command)
+		require.Contains(t, err.Error(), "cannot prove")
+	}
+}
+
 // The docker and ssh backends generate an ABSOLUTE af path for the agent-server
 // handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
 // rule refuses af's own launch on those backends, so account scoping would fail

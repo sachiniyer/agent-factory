@@ -326,3 +326,54 @@ func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T
 	require.ErrorContains(t, tabSpawn.TabSpawnBlocked(), "account swap",
 		"a durable identity change must fence new credential-bearing panes until replacement completes")
 }
+
+type captureAccountSwapEnvironmentPty struct {
+	cmd *exec.Cmd
+}
+
+func (p *captureAccountSwapEnvironmentPty) Start(command *exec.Cmd) (*os.File, error) {
+	p.cmd = command
+	return nil, fmt.Errorf("stop after capturing recovered launch environment")
+}
+
+func (*captureAccountSwapEnvironmentPty) Close() {}
+
+func TestSynchronizeAccountSwapRuntimeMetadataRestoresSessionEnvPassthrough(t *testing.T) {
+	const passthrough = "AF_TEST_ACCOUNT_SWAP_RECOVERY_TOKEN"
+	t.Setenv(passthrough, "recovered-value")
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	cfg.SessionEnvPassthrough = []string{passthrough}
+	require.NoError(t, config.SaveConfig(cfg))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	inst.EndLimitResume()
+	stored := inst.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: inst.Path, WorktreePath: inst.Path,
+		SessionName: inst.Title, BranchName: "main", ExternalWorktree: true,
+	}
+	restored, err := FromInstanceData(stored)
+	require.NoError(t, err)
+
+	pty := &captureAccountSwapEnvironmentPty{}
+	execu := cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return fmt.Errorf("session not found") },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	recoveredTmux := tmux.NewTmuxSessionWithDeps("recovered-account-swap", "claude", pty, execu)
+	restored.mu.Lock()
+	restored.Tabs[0].tmux = recoveredTmux
+	restored.mu.Unlock()
+
+	require.NoError(t, restored.SynchronizeAccountSwapRuntimeMetadata())
+	require.Error(t, recoveredTmux.Start(t.TempDir()))
+	require.NotNil(t, pty.cmd, "the recovered pane never reached its launch environment")
+	require.Contains(t, pty.cmd.Env, passthrough+"=recovered-value",
+		"retiring the recovery marker must not make later tabs forget configured passthrough variables")
+}
