@@ -110,10 +110,10 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		}
 		key := observation.Agent + "\x00" + observation.Account
 		prior, exists := merged[key]
-		if !exists || (!prior.ResetAt.IsZero() &&
-			(observation.ResetAt.IsZero() || observation.ResetAt.After(prior.ResetAt))) {
-			merged[key] = observation
+		if exists {
+			observation.ResetAt = session.RetainedAccountLimitReset(prior.ResetAt, observation.ResetAt)
 		}
+		merged[key] = observation
 		return nil
 	}
 	for _, observation := range current {

@@ -71,6 +71,9 @@ func TestValidatedAccountSwapFencesLazyVSCodeStartBeforeCommit(t *testing.T) {
 	require.NoError(t, inst.ValidateAccountSwap("work"))
 	require.ErrorContains(t, inst.TabSpawnBlocked(), "account swap",
 		"a preflighted swap must fence an existing VS Code tab from lazily starting its old-identity editor")
+	require.True(t, inst.EndLimitResume())
+	require.NoError(t, inst.TabSpawnBlocked(),
+		"an aborted pre-commit swap must not strand the lazy-start fence")
 }
 
 func TestSelectAccountAutomaticallyClearsPriorConversationAndCapture(t *testing.T) {
@@ -207,6 +210,9 @@ func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
 	executor := countingExec(map[string]bool{}, &newSessions)
 	inst := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix, executor)
 	inst.mu.Lock()
+	inst.Tabs[1].Kind = TabKindProcess
+	inst.Tabs[1].Command = "make"
+	inst.Tabs[1].tmux.SetProgram("make")
 	inst.Tabs = append(inst.Tabs, &Tab{
 		ID: "build", Name: "build", Kind: TabKindProcess, Command: "make",
 		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "make",
@@ -240,6 +246,11 @@ func TestRespawnForAccountSwapUsesThePreflightedProgramSnapshot(t *testing.T) {
 	var spawns []string
 	inst := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	inst.mu.Lock()
+	inst.Tabs[1].Kind = TabKindProcess
+	inst.Tabs[1].Command = "make"
+	inst.Tabs[1].tmux.SetProgram("make")
+	inst.mu.Unlock()
 	inst.Path = initTempGitRepo(t)
 	inst.SetLimitReached(time.Time{})
 	require.NoError(t, inst.BeginLimitResume())

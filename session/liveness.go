@@ -478,8 +478,8 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 	if i.inFlightOp == OpArchiving || i.inFlightOp == OpKilling {
 		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
 	}
-	if i.pendingAccountSwap != nil {
-		return fmt.Errorf("cannot add a tab while session %q has a committed account swap awaiting replacement completion", i.Title)
+	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
+		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
 	return nil
 }
@@ -548,13 +548,27 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
-			observation.ResetAt = resetAt
+			observation.ResetAt = RetainedAccountLimitReset(observation.ResetAt, resetAt)
 			return
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
 		Agent: agent, Account: account, ResetAt: resetAt,
 	})
+}
+
+// RetainedAccountLimitReset merges two negative quota observations without
+// making the account eligible sooner than either observation permits. An
+// unknown reset dominates because af has no expiry fact; otherwise the later
+// reset is the safer boundary.
+func RetainedAccountLimitReset(prior, observed time.Time) time.Time {
+	if prior.IsZero() || observed.IsZero() {
+		return time.Time{}
+	}
+	if observed.After(prior) {
+		return observed
+	}
+	return prior
 }
 
 // SetLimitResetAt records only the display-only reset time (#1146), leaving both

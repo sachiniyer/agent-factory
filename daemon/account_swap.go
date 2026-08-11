@@ -199,9 +199,13 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string) string {
 // absent agent still triggers a sibling-pane recheck for retry safety.
 func (m *Manager) prepareRuntimeForAccountSwap(repoID, key string, instance *session.Instance) error {
 	probe := probeLiveness(instance, instance.AgentServer())
-	switch probe {
-	case probeUnknown:
+	if probe == probeUnknown {
 		return fmt.Errorf("cannot switch accounts for %q: its current runtime did not answer the liveness probe; not starting another identity while the old one may still be running", instance.Title)
+	}
+	if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+		return err
+	}
+	switch probe {
 	case probeAlive, probeAnsweredDead:
 		return instance.StopForAccountSwap()
 	case probeAbsent:
@@ -209,4 +213,20 @@ func (m *Manager) prepareRuntimeForAccountSwap(repoID, key string, instance *ses
 	default:
 		return fmt.Errorf("cannot switch accounts for %q: unrecognized runtime state", instance.Title)
 	}
+}
+
+// stopVSCodeForAccountSwap brings the daemon-owned editor into the same
+// credential boundary as every tmux pane. It must be confirmed gone before the
+// account commit; a later render relaunches it from the selected account env.
+func (m *Manager) stopVSCodeForAccountSwap(key string, instance *session.Instance) error {
+	if !instanceHasVSCodeTab(instance) {
+		return nil
+	}
+	if m.vscode == nil {
+		return fmt.Errorf("cannot switch accounts for %q: daemon has no VS Code supervisor", instance.Title)
+	}
+	if err := m.stopVSCodeForInstance(key, instance.ID); err != nil {
+		return fmt.Errorf("cannot switch accounts for %q: cannot confirm its VS Code editor stopped: %w", instance.Title, err)
+	}
+	return nil
 }

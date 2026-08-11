@@ -82,7 +82,7 @@ func TestAccountEnvironmentScopeRejectsCommandLocalIdentity(t *testing.T) {
 	_, err := applyAccountEnvironmentScope(nil, "codex", "work", "CODEX_HOME=/other make")
 	require.ErrorContains(t, err, "overrides the account directory")
 
-	scoped, err := applyAccountEnvironmentScope(nil, "codex", "work", "/bin/sh")
+	scoped, err := applyAccountEnvironmentScope(nil, "codex", "work", "make")
 	require.NoError(t, err)
 	require.Contains(t, scoped, "CODEX_HOME=/accounts/codex/work")
 }

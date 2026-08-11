@@ -157,12 +157,21 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	if i.GetInFlightOp() != OpRespawning {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
 		return false
 	}
-	if err := i.Transition(ClearOp()); err != nil {
+	if err := i.transitionLocked(ClearOp()); err != nil {
 		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
 		return false
+	}
+	// A preflighted account replacement also fences lazy sibling starts. If the
+	// identity was never committed, releasing the resume owns and retires that
+	// provisional plan; a committed replacement keeps it until delivery clears
+	// pendingAccountSwap.
+	if i.pendingAccountSwap == nil {
+		i.accountSwapLaunch = nil
 	}
 	return true
 }

@@ -605,6 +605,12 @@ func (v *vscodeSupervisor) reconcilePersistedBeforeSpawn(key, instanceID string)
 // ensureServerForInstance is the production form: the stable instance id keeps
 // a same-title recreation from adopting or stopping its predecessor's editor.
 func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree string) (vscodeEndpoint, error) {
+	return v.ensureServerForInstanceWithEnvironment(key, instanceID, worktree, vscodeChildEnv())
+}
+
+func (v *vscodeSupervisor) ensureServerForInstanceWithEnvironment(
+	key, instanceID, worktree string, environ []string,
+) (vscodeEndpoint, error) {
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session has no worktree to open in VS Code")
 	}
@@ -688,7 +694,7 @@ func (v *vscodeSupervisor) ensureServerForInstance(key, instanceID, worktree str
 		return vscodeEndpoint{}, err
 	}
 
-	server, err := v.spawnLocked(key, instanceID, binary, worktree)
+	server, err := v.spawnLockedWithEnvironment(key, instanceID, binary, worktree, environ)
 	if err != nil {
 		v.failures[key] = vscodeFailure{err: err, at: v.now(), instanceID: instanceID}
 		return vscodeEndpoint{}, err
@@ -736,6 +742,12 @@ func (v *vscodeSupervisor) probeReady(s *vscodeServer) bool {
 // a socket path is chosen by the daemon inside a directory only the daemon can
 // write, so there is no race to lose and a failure here is a real failure (#1873).
 func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string) (*vscodeServer, error) {
+	return v.spawnLockedWithEnvironment(key, instanceID, binary, worktree, vscodeChildEnv())
+}
+
+func (v *vscodeSupervisor) spawnLockedWithEnvironment(
+	key, instanceID, binary, worktree string, environ []string,
+) (*vscodeServer, error) {
 	// Before the first editor of this daemon's life, clear out any left by the
 	// last one. Safe here precisely because nothing has spawned yet.
 	v.sweepAbandonedSockets()
@@ -743,7 +755,8 @@ func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string)
 	if err != nil {
 		return nil, err
 	}
-	server, err := v.startOne(key, instanceID, binary, flavorForBinary(binary), socketPath, worktree)
+	server, err := v.startOneWithEnvironment(
+		key, instanceID, binary, flavorForBinary(binary), socketPath, worktree, environ)
 	if err != nil {
 		return nil, fmt.Errorf("starting %s failed: %w", filepath.Base(binary), err)
 	}
@@ -752,6 +765,12 @@ func (v *vscodeSupervisor) spawnLocked(key, instanceID, binary, worktree string)
 
 // startOne execs one editor and waits for its socket to accept connections.
 func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscodeFlavor, socketPath, worktree string) (*vscodeServer, error) {
+	return v.startOneWithEnvironment(key, instanceID, binary, flavor, socketPath, worktree, vscodeChildEnv())
+}
+
+func (v *vscodeSupervisor) startOneWithEnvironment(
+	key, instanceID, binary string, flavor vscodeFlavor, socketPath, worktree string, environ []string,
+) (*vscodeServer, error) {
 	// Check the worktree before exec'ing. os/exec reports a missing cmd.Dir as
 	// ENOENT naming the BINARY ("fork/exec /usr/bin/code-server: no such file or
 	// directory"), which sends the user off debugging a code-server install that
@@ -778,7 +797,7 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	}
 	cmd := newGatedVSCodeCommand(binary, vscodeArgs(flavor, socketPath, worktree), gatePath)
 	cmd.Dir = worktree
-	cmd.Env = append(vscodeChildEnv(), vscodeOwnerNonceEnv+"="+processNonce)
+	cmd.Env = append(append([]string(nil), environ...), vscodeOwnerNonceEnv+"="+processNonce)
 	// Own process group so the editor's whole tree (extension host, terminal
 	// workers) can be signalled together on teardown, mirroring the watcher
 	// supervisor (#610/#769).

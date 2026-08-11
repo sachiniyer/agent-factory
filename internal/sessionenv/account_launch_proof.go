@@ -163,7 +163,7 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 		}
 		words = words[1+invocation.CommandIndex:]
 	}
-	if len(words) <= 1 {
+	if len(words) == 0 {
 		return false
 	}
 	switch filepath.Base(words[0]) {

@@ -302,7 +302,11 @@ func ConversationSelectorArgs(program string) []string {
 		}
 		idx += agentIdx + 1
 		if idx < len(tokens) && tokens[idx] == "exec" {
-			idx++
+			execIdx := codexExecSubcommandIndex(tokens[idx+1:])
+			if execIdx < 0 {
+				return nil
+			}
+			idx += execIdx + 1
 		}
 		if idx < len(tokens) && tokens[idx] == "resume" {
 			end := min(idx+2, len(tokens))
@@ -318,14 +322,28 @@ func ConversationSelectorArgs(program string) []string {
 // resume subcommand. An unknown option is ambiguous and therefore stops the
 // scan instead of guessing whether its next word is a value.
 func codexSubcommandIndex(args []string) int {
+	return codexOptionSubcommandIndex(args, codexGlobalOptionTakesValue,
+		codexGlobalOptionHasAttachedValue, codexGlobalBooleanOption)
+}
+
+// codexExecSubcommandIndex is the exec-level counterpart to
+// codexSubcommandIndex. Codex accepts another option grammar between "exec" and
+// its optional nested "resume" subcommand, so the account boundary must consume
+// those values before deciding whether a conversation selector is present.
+func codexExecSubcommandIndex(args []string) int {
+	return codexOptionSubcommandIndex(args, codexExecOptionTakesValue,
+		codexExecOptionHasAttachedValue, codexExecBooleanOption)
+}
+
+func codexOptionSubcommandIndex(args []string, takesValue, hasAttachedValue, boolean func(string) bool) int {
 	for idx := 0; idx < len(args); {
 		arg := args[idx]
 		switch {
 		case arg == "--":
 			return -1
-		case codexGlobalOptionHasAttachedValue(arg), codexGlobalBooleanOption(arg):
+		case hasAttachedValue(arg), boolean(arg):
 			idx++
-		case codexGlobalOptionTakesValue(arg):
+		case takesValue(arg):
 			idx += 2
 			if idx > len(args) {
 				return -1
@@ -337,6 +355,44 @@ func codexSubcommandIndex(args []string) int {
 		}
 	}
 	return -1
+}
+
+func codexExecOptionTakesValue(arg string) bool {
+	switch arg {
+	case "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
+		"--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+		"--output-schema", "--color", "-o", "--output-last-message":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexExecOptionHasAttachedValue(arg string) bool {
+	for _, prefix := range []string{
+		"--config=", "--enable=", "--disable=", "--image=", "--model=", "--local-provider=",
+		"--profile=", "--sandbox=", "--cd=", "--add-dir=", "--output-schema=", "--color=",
+		"--output-last-message=",
+	} {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return len(arg) > 2 && (strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-i") ||
+		strings.HasPrefix(arg, "-m") || strings.HasPrefix(arg, "-p") || strings.HasPrefix(arg, "-s") ||
+		strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-o"))
+}
+
+func codexExecBooleanOption(arg string) bool {
+	switch arg {
+	case "--strict-config", "--oss", "--approve-for-me",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+		"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--json",
+		"-h", "--help", "-V", "--version":
+		return true
+	default:
+		return false
+	}
 }
 
 func codexGlobalOptionTakesValue(arg string) bool {

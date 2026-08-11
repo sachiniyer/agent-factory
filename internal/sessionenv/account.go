@@ -193,6 +193,14 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	return applyAccount(env, command, account, true)
 }
 
+// ApplyAccountEnvironment scopes a sibling process to account without requiring
+// that process to be the agent itself. It still validates the sibling command's
+// environment-carrying shape before injecting the selected credential root and
+// removing every competing identity.
+func ApplyAccountEnvironment(env []string, command string, account Account) ([]string, error) {
+	return applyAccountEnvironment(env, command, account)
+}
+
 func applyAccountEnvironment(env []string, command string, account Account) ([]string, error) {
 	if err := ValidateAccountEnvironmentCommand(command, account); err != nil {
 		return nil, err

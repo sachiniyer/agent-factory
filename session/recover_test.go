@@ -104,6 +104,11 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 	var spawns []string
 	restored := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	restored.mu.Lock()
+	restored.Tabs[1].Kind = TabKindProcess
+	restored.Tabs[1].Command = "make"
+	restored.Tabs[1].tmux.SetProgram("make")
+	restored.mu.Unlock()
 	restored.Path = initTempGitRepo(t)
 	restored.SetLimitReached(time.Time{})
 	require.NoError(t, restored.BeginLimitResume())
@@ -119,7 +124,7 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 	require.Contains(t, agentSpawn, "--session-id",
 		"the replacement claude identity must receive an explicit fresh conversation")
 	require.Contains(t, strings.Join(spawns, "\n"), "__af-session-env-exec-account-environment",
-		"restored shell/process panes must launch inside the replacement account environment")
+		"restored process panes must launch inside the replacement account environment")
 }
 
 // A relocation probe that reaches its deadline latches the worktree as stalled

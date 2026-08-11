@@ -567,6 +567,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
 					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
 				}
+				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
+				}
 				if err := instance.StopForAccountSwap(); err != nil {
 					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, paneErr, err)
 				}
@@ -600,6 +603,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
 					return resumeNotPerformed, err
 				}
+			}
+			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+				return resumeNotPerformed, err
 			}
 			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
 				return resumeNotPerformed, err

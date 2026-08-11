@@ -8,6 +8,9 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -226,7 +229,11 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 	if strings.TrimSpace(worktree) == "" {
 		return vscodeEndpoint{}, fmt.Errorf("session %q has no worktree to open in VS Code", title)
 	}
-	endpoint, err := m.vscode.ensureServerForInstance(key, instance.ID, worktree)
+	environ, err := vscodeEnvironmentForInstance(instance)
+	if err != nil {
+		return vscodeEndpoint{}, fmt.Errorf("scope the VS Code editor for session %q: %w", title, err)
+	}
+	endpoint, err := m.vscode.ensureServerForInstanceWithEnvironment(key, instance.ID, worktree, environ)
 	// The post-spawn recheck below must run on errVSCodeStarting too, NOT just on
 	// success. ensureServer REGISTERS the server in v.servers before returning that
 	// sentinel, so a cold spawn that merely outran the start grace has left a LIVE,
@@ -251,6 +258,26 @@ func (m *Manager) ensureVSCodeServer(instance *session.Instance, repoID, title s
 		return vscodeEndpoint{}, err
 	}
 	return endpoint, nil
+}
+
+// vscodeEnvironmentForInstance gives the daemon-owned editor the same selected
+// credential boundary as the tmux panes whose integrated terminals it hosts.
+func vscodeEnvironmentForInstance(instance *session.Instance) ([]string, error) {
+	environ := vscodeChildEnv()
+	account, _ := instance.AccountSelection()
+	if strings.TrimSpace(account) == "" {
+		return environ, nil
+	}
+	agent := instance.CurrentAgentName()
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	selected, err := agentaccount.Selected(home, agent, account, "")
+	if err != nil {
+		return nil, err
+	}
+	return sessionenv.ApplyAccountEnvironment(environ, "code-server", selected)
 }
 
 // stopVSCodeIfUnwanted re-checks, AFTER a spawn, that the editor still has a
