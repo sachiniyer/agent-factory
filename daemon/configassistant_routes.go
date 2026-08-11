@@ -107,6 +107,10 @@ func (cs *controlServer) configAssistantDeleteHandler(w http.ResponseWriter, r *
 		writeHTTPError(w, r, http.StatusServiceUnavailable, fmt.Errorf("daemon has no session manager"))
 		return
 	}
+	if err := cs.requireStateMutationAdmission(); err != nil {
+		writeHTTPError(w, r, http.StatusServiceUnavailable, err)
+		return
+	}
 	if err := cs.manager.configAssistants.reap(); err != nil {
 		writeHTTPError(w, r, http.StatusInternalServerError, err)
 		return
