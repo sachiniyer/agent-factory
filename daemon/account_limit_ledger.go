@@ -67,7 +67,8 @@ func loadPersistedAccountLimitObservations() ([]session.AccountLimitObservationD
 			return nil, fmt.Errorf("decode account-limit observations for repo %s: %w", repoID, err)
 		}
 		for _, row := range rows {
-			observations = append(observations, row.AccountLimitObservations...)
+			_, rowObservations := session.AccountLimitEvidenceFromData(row)
+			observations = append(observations, rowObservations...)
 		}
 	}
 	return observations, nil

@@ -293,6 +293,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	// build restorable after an upgrade. A tombstoned record keeps its (Lost)
 	// status; the daemon finishes its teardown rather than restoring it.
 	liveness := livenessFromData(data)
+	limitAccount, accountLimitObservations := AccountLimitEvidenceFromData(data)
 	// Resolve the in-flight-op axis from the snapshot payload, falling back to
 	// the legacy status for old daemons/records. A persisted record is always
 	// settled (disk writers scrub this field and SaveInstances skips
@@ -327,8 +328,8 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// finished run from an interrupted one.
 		taskRunActive:            data.TaskRunActive,
 		limitResetAt:             data.LimitResetAt,
-		limitAccount:             data.LimitAccount,
-		accountLimitObservations: append([]AccountLimitObservationData(nil), data.AccountLimitObservations...),
+		limitAccount:             limitAccount,
+		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
@@ -352,18 +353,6 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// outage. An unrecognized value from a newer binary loads as-is and
 		// renders nothing, which is the rollforward-safe direction.
 		rootRecreateContext: data.RootRecreateContext,
-	}
-	if liveness == LiveLimitReached && instance.limitAccount == "" && data.Account != "" && !data.AccountAutoSelected {
-		// Records from before limit_account existed can only have an explicitly
-		// pinned Account, so that is the identity that produced the persisted wall.
-		instance.limitAccount = data.Account
-	}
-	if liveness == LiveLimitReached && instance.limitAccount != "" && len(instance.accountLimitObservations) == 0 {
-		// Roll forward records written before the durable per-account ledger. The
-		// current wall is still direct evidence, so seed it before a swap can clear
-		// the only old-format copy.
-		instance.recordAccountLimitObservationLocked(
-			instance.currentAgentNameLocked(), instance.limitAccount, instance.limitResetAt)
 	}
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
 	worktreeReaped := false

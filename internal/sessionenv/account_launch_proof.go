@@ -181,9 +181,10 @@ func accountEnvironmentAgentArguments(command, agent string) ([]string, bool) {
 // accountEnvironmentCommandNeedsProof identifies shell syntax that constructs
 // another command rather than merely consuming the selected environment. Plain
 // literal process commands remain valid sibling panes: af does not claim to
-// prove arbitrary application behavior. Shell programs, expansions, pipelines,
-// and compound commands are different because the command string itself is a
-// second launch mechanism where an identity assignment can be hidden.
+// prove arbitrary application behavior. Shell programs, known command-launch
+// wrappers, expansions, pipelines, and compound commands are different because
+// the command string itself is a second launch mechanism where an identity
+// assignment or selected-agent argument can be hidden.
 func accountEnvironmentCommandNeedsProof(command string) bool {
 	call, ok := singleSimpleCall(command)
 	if !ok || !callIsLiteral(call) {
@@ -214,6 +215,8 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 	}
 	switch filepath.Base(words[0]) {
 	case "sh", "bash", "dash", "ksh", "mksh", "zsh":
+		return true
+	case "command", "nice":
 		return true
 	default:
 		return false

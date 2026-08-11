@@ -441,9 +441,13 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	}
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.Unlock()
+	passthrough := sessionEnvPassthroughForInstance(i)
 	for idx, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue
+		}
+		if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
+			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}
 		if idx == 0 {
 			tab.tmux.SetAccountForAgent(agent, account)
