@@ -37,7 +37,30 @@ func NormalizeWebTabURL(raw string) (string, error) {
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("web tab URL %q has no host", raw)
 	}
+	// Browsers map these URL-standard domain separators to an ASCII dot before
+	// deciding where to navigate. Persist the same canonical hostname so both
+	// admission and the proxy classify browser-equivalent loopback spellings the
+	// same way. Rebuild only the authority: replacing across raw would also change
+	// valid path and query data containing these runes.
+	if host := normalizeBrowserDomainSeparators(u.Hostname()); host != u.Hostname() {
+		port := u.Port()
+		u.Host = host
+		if port != "" {
+			u.Host = net.JoinHostPort(host, port)
+		}
+	}
 	return u.String(), nil
+}
+
+func normalizeBrowserDomainSeparators(host string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\u3002', '\uff0e', '\uff61':
+			return '.'
+		default:
+			return r
+		}
+	}, host)
 }
 
 // WebTabURLForPort builds the loopback URL a `--port N` convenience flag targets.

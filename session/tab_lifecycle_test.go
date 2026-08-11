@@ -562,6 +562,25 @@ func TestRefuseTabKind_RejectsBrowserCanonicalLoopbackShorthands(t *testing.T) {
 	}
 }
 
+// The URL Standard maps these three domain separators to an ASCII dot before
+// browser navigation. Admission must make the same host canonicalization so a
+// loopback tab cannot be persisted as an apparently external, unusable target.
+func TestRefuseTabKind_RejectsBrowserUnicodeDotLoopback(t *testing.T) {
+	remote := Capabilities{Workspace: WorkspaceRemote}
+	for _, target := range []string{
+		"http://127。0。0。1:3000",
+		"http://127．0．0．1:3000",
+		"http://127｡0｡0｡1:3000",
+	} {
+		normalized, err := NormalizeWebTabURL(target)
+		require.NoError(t, err)
+		require.Equal(t, "http://127.0.0.1:3000", normalized,
+			"the browser and daemon must persist the same canonical host")
+		require.Errorf(t, remote.RefuseTabKind(TabKindWeb, normalized),
+			"%s is browser-canonical loopback and must not be admitted off-box", target)
+	}
+}
+
 // Staged rows are persisted OUTSIDE the ordered Tabs list. A recovery that fails
 // before Launch leaves Tabs empty, so emitting a staged web tab there would put it
 // in the agent's index-0 slot — clients would render it as the unclosable agent,
