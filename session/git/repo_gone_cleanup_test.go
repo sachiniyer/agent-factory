@@ -366,11 +366,12 @@ func TestCleanupClaimedRepoGone_RestartDoesNotTreatAbsentPathAsCompletedDelete(t
 		t.Fatalf("recreate worktree handle after restart: %v", err)
 	}
 	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
-		State:         RelocationRecoveryCleanupStalled,
-		IdentityKnown: true,
-		Device:        17,
-		Inode:         23,
-		FileType:      uint32(syscall.S_IFDIR),
+		State:             RelocationRecoveryCleanupStalled,
+		IdentityKnown:     true,
+		Device:            17,
+		Inode:             23,
+		FileType:          uint32(syscall.S_IFDIR),
+		CleanupGeneration: "0123456789abcdef0123456789abcdef",
 	}); err != nil {
 		t.Fatalf("reload identity-qualified cleanup stall: %v", err)
 	}
@@ -608,12 +609,8 @@ func TestValidateRelocationCleanupAdmission_IdentityTupleAloneFailsClosed(t *tes
 	if err := gw.RestoreRelocationRecovery(RelocationRecovery{
 		State: RelocationRecoveryCleanupReady, IdentityKnown: true,
 		Device: uint64(stat.Dev), Inode: uint64(stat.Ino), FileType: uint32(stat.Mode & syscall.S_IFMT),
-	}); err != nil {
-		t.Fatalf("restore tuple-only cleanup record: %v", err)
-	}
-
-	if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
-		t.Fatalf("a reusable inode tuple without a durable generation must fail closed, got: %v", err)
+	}); err == nil {
+		t.Fatal("a reusable inode tuple without a durable generation must fail closed while loading")
 	}
 	if _, err := os.Stat(filepath.Join(worktree, "user-work.txt")); err != nil {
 		t.Fatalf("tuple-only cleanup authority touched replacement work: %v", err)

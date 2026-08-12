@@ -34,7 +34,8 @@ func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) 
 	require.Contains(t, err.Error(), "origin repo "+repoPath+" is gone")
 	recovery := recordFor(t, repoID, "live-retry-crash-window").Worktree.RelocationRecovery
 	require.NotNil(t, recovery)
-	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 
 	// A previous explicit kill can leave this durable tombstone when pane teardown
 	// is unknown. The poll then reaches finishUserKill with the same live instance
@@ -69,7 +70,8 @@ func TestFinishUserKill_LiveCleanupPersistsFinalizationBeforeTail(t *testing.T) 
 	retained := recordFor(t, repoID, "live-retry-crash-window")
 	require.NotNil(t, retained)
 	require.NotNil(t, retained.Worktree.RelocationRecovery)
-	assert.Equal(t, sessiongit.RelocationRecoveryCleanupFinalizing, retained.Worktree.RelocationRecovery.State,
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, retained.Worktree.RelocationRecovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupFinalizing, retained.Worktree.RelocationRecovery.CleanupLifecycle,
 		"the automatic retry must durably enter the finalization fence before unlinking the archive root")
 }
 
@@ -82,7 +84,8 @@ func TestKillSession_LiveCleanupSettlesDurablyBeforeTailFailure(t *testing.T) {
 	require.Contains(t, err.Error(), "origin repo "+repoPath+" is gone")
 	recovery := recordFor(t, repoID, "live-tail").Worktree.RelocationRecovery
 	require.NotNil(t, recovery)
-	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 
 	key := daemonInstanceKey(repoID, "live-tail")
 	inst.SetBackend(&afterKillBackend{
