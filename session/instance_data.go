@@ -220,29 +220,59 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	return data
 }
 
+// RestoreRelocationRecoveryOriginals reverses the rollback-safe ownership and
+// lifecycle projection made by ForStorage before a current reader interprets a
+// recovery record. Normal instance loading and daemon ghost cleanup share this
+// boundary so neither can read compatibility fields as deletion authority.
+func (data InstanceData) RestoreRelocationRecoveryOriginals() (InstanceData, error) {
+	recovery := data.Worktree.RelocationRecovery
+	if recovery == nil {
+		return data, nil
+	}
+	recoveryClone := *recovery
+	data.Worktree.RelocationRecovery = &recoveryClone
+	recovery = &recoveryClone
+	state, err := runtimeRelocationRecoveryState(recovery)
+	if err != nil {
+		return InstanceData{}, err
+	}
+	originalExternal := recovery.OriginalExternalWorktree
+	originalBranch := recovery.OriginalBranchCreatedByUs
+	originalStartup := recovery.OriginalStartupStateUnknown
+	if recovery.CleanupLifecycle != "" {
+		originalExternal = recovery.CleanupOriginalExternalWorktree
+		originalBranch = recovery.CleanupOriginalBranchCreatedByUs
+		originalStartup = recovery.CleanupOriginalStartupStateUnknown
+	}
+	if originalExternal == nil || originalBranch == nil || originalStartup == nil {
+		return InstanceData{}, fmt.Errorf("rollback safety metadata is missing")
+	}
+	data.Worktree.ExternalWorktree = *originalExternal
+	branchCreatedByUs := *originalBranch
+	data.Worktree.BranchCreatedByUs = &branchCreatedByUs
+	data.StartupStateUnknown = *originalStartup
+
+	// Return a canonical current-reader record. Ghost checkpoint writers persist
+	// this row directly, so leaving the previous release's safe ownership values
+	// in Original* would make the next ForStorage projection forget the real owner.
+	recovery.State = state
+	recovery.CleanupLifecycle = ""
+	recovery.OriginalExternalWorktree = cloneBoolPointer(originalExternal)
+	recovery.OriginalBranchCreatedByUs = cloneBoolPointer(originalBranch)
+	recovery.OriginalStartupStateUnknown = cloneBoolPointer(originalStartup)
+	recovery.CleanupOriginalExternalWorktree = nil
+	recovery.CleanupOriginalBranchCreatedByUs = nil
+	recovery.CleanupOriginalStartupStateUnknown = nil
+	return data, nil
+}
+
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
 	data = data.RestoreArchiveRollbackFence()
-	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
-		// ForStorage projects unresolved records through v1.0.228's existing
-		// fail-closed fields. A current reader must recover the exact original
-		// ownership and startup state; missing metadata is not a zero value and
-		// must never turn the rollback fence into deletion authority.
-		originalExternal := recovery.OriginalExternalWorktree
-		originalBranch := recovery.OriginalBranchCreatedByUs
-		originalStartup := recovery.OriginalStartupStateUnknown
-		if recovery.CleanupLifecycle != "" {
-			originalExternal = recovery.CleanupOriginalExternalWorktree
-			originalBranch = recovery.CleanupOriginalBranchCreatedByUs
-			originalStartup = recovery.CleanupOriginalStartupStateUnknown
-		}
-		if originalExternal == nil || originalBranch == nil || originalStartup == nil {
-			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
-		}
-		data.Worktree.ExternalWorktree = *originalExternal
-		branchCreatedByUs := *originalBranch
-		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
-		data.StartupStateUnknown = *originalStartup
+	var err error
+	data, err = data.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 	}
 	id := data.ID
 	if id == "" {

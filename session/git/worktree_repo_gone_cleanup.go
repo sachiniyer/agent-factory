@@ -140,6 +140,16 @@ func (g *GitWorktree) CleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	return state, err
 }
 
+// CleanupClaimedRepoGoneWithLateResult is the ghost-cleanup form. On a caller
+// deadline, lateResult reports the descriptor worker's eventual result so the
+// daemon can reconcile the persisted row instead of leaving a completed delete
+// fenced forever. A nil channel means no worker outlived the call.
+func (g *GitWorktree) CleanupClaimedRepoGoneWithLateResult(
+	claim RelocationClaim,
+) (CleanupState, error, <-chan error) {
+	return g.cleanupClaimedRepoGone(claim)
+}
+
 func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupState, error, <-chan error) {
 	completed := false
 	defer func() {

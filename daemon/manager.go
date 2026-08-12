@@ -272,6 +272,11 @@ type Manager struct {
 	// (#2737). In memory on purpose: a restart re-attempts a retired record once,
 	// which is right when an operator may have fixed the cause in between.
 	killRetries map[string]*session.CleanupRetry
+	// ghostCleanupStalls is the process-epoch fence for a descriptor cleanup that
+	// outlived its caller deadline. The persisted record re-arms the exact identity
+	// after restart; this map prevents a second worker in the same daemon process.
+	// Values are stable IDs so title reuse cannot inherit an old fence.
+	ghostCleanupStalls map[string]string
 	// restoresInFlight identifies the subset of killsInFlight entries admitted
 	// by a manual restore. DeleteProject treats these as early blockers because
 	// an archived row has not necessarily changed lifecycle state yet. Keeping
@@ -485,6 +490,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		deletedRootRepos:       make(map[string]struct{}),
 		killsInFlight:          make(map[string]struct{}),
 		killRetries:            make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:     make(map[string]string),
 		restoresInFlight:       make(map[string]struct{}),
 		lostRestoreStates:      make(map[string]*lostRestoreState),
 		limitResumeStates:      make(map[string]*limitResumeState),

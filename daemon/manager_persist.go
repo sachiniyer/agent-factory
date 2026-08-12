@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -327,14 +329,102 @@ var ghostKillTmuxByName = func(sanitizedName string) (tmux.PaneState, bool, erro
 // forever (#2998 review).
 func ghostWorktreeRemovable(data *session.InstanceData) bool {
 	current := data.RestoreArchiveRollbackFence()
-	return current.Worktree.RepoPath != "" && current.Worktree.WorktreePath != "" && !current.Worktree.ExternalWorktree
+	restored, err := current.RestoreRelocationRecoveryOriginals()
+	return err == nil && ghostRestoredWorktreeRemovable(&restored)
 }
 
-var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.CleanupState, error) {
+// validateGhostWorktreeDestructionAdmission is the persisted-row twin of
+// Instance.ValidateWorktreeDestructionAdmission. A cleanup-ready ghost has no
+// live GitWorktree, so reconstruct only its recovery handle, normalize restart
+// state, and validate the exact archive plus the still-missing origin before the
+// kill tombstone is written.
+func validateGhostWorktreeDestructionAdmission(data *session.InstanceData) error {
 	current := data.RestoreArchiveRollbackFence()
-	data = &current
-	if !ghostWorktreeRemovable(data) {
-		return git.CleanupSettled, nil
+	restored, err := current.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		return fmt.Errorf("restore cleanup ownership: %w", err)
+	}
+	recovery := restored.Worktree.RelocationRecovery
+	if recovery == nil {
+		return nil
+	}
+	if recovery.State == git.RelocationRecoveryCleanupStalled && !recovery.IdentityKnown {
+		// Preserve the existing generic-cleanup retry admission. It carries no
+		// repo-gone deletion identity and is outside this specialized consumer.
+		return nil
+	}
+	if recovery.State != git.RelocationRecoveryCleanupReady &&
+		recovery.State != git.RelocationRecoveryCleanupStalled &&
+		recovery.State != git.RelocationRecoveryCleanupFinalizing {
+		return fmt.Errorf("persisted worktree recovery state %q is unresolved", recovery.State)
+	}
+	if !ghostRestoredWorktreeRemovable(&restored) {
+		return fmt.Errorf("cleanup-ready recovery does not identify an AF-owned worktree")
+	}
+	branchCreatedByUs := false
+	if restored.Worktree.BranchCreatedByUs != nil {
+		branchCreatedByUs = *restored.Worktree.BranchCreatedByUs
+	}
+	gw, err := git.NewGitWorktreeFromStorage(
+		restored.Worktree.RepoPath,
+		restored.Worktree.WorktreePath,
+		restored.Worktree.SessionName,
+		restored.Worktree.BranchName,
+		restored.Worktree.BaseCommitSHA,
+		restored.Worktree.ExternalWorktree,
+		branchCreatedByUs,
+	)
+	if err != nil {
+		return fmt.Errorf("load cleanup-ready worktree: %w", err)
+	}
+	if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:             recovery.State,
+		AlternatePath:     recovery.AlternatePath,
+		IdentityKnown:     recovery.IdentityKnown,
+		Device:            recovery.Device,
+		Inode:             recovery.Inode,
+		FileType:          recovery.FileType,
+		CleanupGeneration: recovery.CleanupGeneration,
+	}); err != nil {
+		return fmt.Errorf("restore cleanup-ready recovery: %w", err)
+	}
+	_, normalized, unresolved := gw.RelocationSnapshot()
+	if !unresolved ||
+		(normalized.State != git.RelocationRecoveryCleanupReady &&
+			normalized.State != git.RelocationRecoveryCleanupFinalizing) {
+		return fmt.Errorf("persisted cleanup recovery normalized to non-admissible state %q", normalized.State)
+	}
+	return gw.ValidateRelocationCleanupAdmission()
+}
+
+var ghostCleanupWorktree = func(
+	data *session.InstanceData,
+	title string,
+	checkpoint func(*session.InstanceData) error,
+) (git.CleanupState, error, <-chan error) {
+	current := data.RestoreArchiveRollbackFence()
+	restored, restoreErr := current.RestoreRelocationRecoveryOriginals()
+	if restoreErr != nil {
+		return git.CleanupStateUnknown, fmt.Errorf("ghost recovery ownership is invalid: %w", restoreErr), nil
+	}
+	if restored.ArchiveReport != nil {
+		report := restored.ArchiveReport.Clone()
+		report.RollbackFence = nil
+		restored.ArchiveReport = &report
+	}
+	checkpointBaseline := restored
+	if recovery := restored.Worktree.RelocationRecovery; recovery != nil {
+		clone := *recovery
+		checkpointBaseline.Worktree.RelocationRecovery = &clone
+	}
+	if restored.ArchiveReport != nil {
+		report := restored.ArchiveReport.Clone()
+		checkpointBaseline.ArchiveReport = &report
+	}
+	*data = restored
+	persisted := data
+	if !ghostRestoredWorktreeRemovable(data) {
+		return git.CleanupSettled, nil, nil
 	}
 	// Unknown provenance means KEEP (#1953): a nil flag predates 2026-04-17 and
 	// cannot establish that AF created the branch, and the only thing this
@@ -358,29 +448,217 @@ var ghostCleanupWorktree = func(data *session.InstanceData, title string) (git.C
 	if gwErr != nil {
 		// Nothing was attempted, so nothing is unknown; the record may still go.
 		log.WarningLog.Printf("ghost session %q: failed to load worktree for cleanup: %v", title, gwErr)
-		return git.CleanupSettled, nil
+		return git.CleanupSettled, nil, nil
 	}
-	if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+	recovery := data.Worktree.RelocationRecovery
+	if recovery != nil {
 		if recoveryErr := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-			State:         recovery.State,
-			AlternatePath: recovery.AlternatePath,
-			IdentityKnown: recovery.IdentityKnown,
-			Device:        recovery.Device,
-			Inode:         recovery.Inode,
-			FileType:      recovery.FileType,
+			State:             recovery.State,
+			AlternatePath:     recovery.AlternatePath,
+			IdentityKnown:     recovery.IdentityKnown,
+			Device:            recovery.Device,
+			Inode:             recovery.Inode,
+			FileType:          recovery.FileType,
+			CleanupGeneration: recovery.CleanupGeneration,
 		}); recoveryErr != nil {
 			log.WarningLog.Printf("ghost session %q: invalid relocation recovery handle: %v", title, recoveryErr)
-			return git.CleanupStateUnknown, recoveryErr
+			return git.CleanupStateUnknown, recoveryErr, nil
 		}
 	}
 	if data.ArchiveReport != nil {
 		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}
+	restoreCheckpoint := gw.SetRepoGoneFinalizationCheckpoint(func() error {
+		beforeGhostCheckpointSnapshot()
+		// A descriptor worker may outlive ghostCleanup's caller deadline. Build a
+		// detached checkpoint so late persistence never races reads of the temporary
+		// loaded row owned by the manager call.
+		checkpointData := checkpointBaseline
+		if recovery := checkpointBaseline.Worktree.RelocationRecovery; recovery != nil {
+			clone := *recovery
+			checkpointData.Worktree.RelocationRecovery = &clone
+		}
+		if checkpointBaseline.ArchiveReport != nil {
+			report := checkpointBaseline.ArchiveReport.Clone()
+			checkpointData.ArchiveReport = &report
+		}
+		projectGhostPersistenceSnapshot(&checkpointData, gw)
+		if checkpoint == nil {
+			return nil
+		}
+		return checkpoint(&checkpointData)
+	})
+	defer restoreCheckpoint()
+	_, normalized, unresolved := gw.RelocationSnapshot()
+	if unresolved && (normalized.State == git.RelocationRecoveryCleanupReady ||
+		normalized.State == git.RelocationRecoveryCleanupFinalizing) {
+		claim, claimErr := gw.ClaimRelocationSource()
+		if claimErr != nil {
+			return git.CleanupStateUnknown, claimErr, nil
+		}
+		state, cleanupErr, lateResult := gw.CleanupClaimedRepoGoneWithLateResult(claim)
+		projectGhostPersistenceSnapshot(persisted, gw)
+		return state, cleanupErr, lateResult
+	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
 	}
-	return state, cleanupErr
+	return state, cleanupErr, nil
+}
+
+var beforeGhostCheckpointSnapshot = func() {}
+
+// projectGhostPersistenceSnapshot copies relocation ownership and archive
+// completeness from one atomic GitWorktree snapshot. ForStorage rebuilds every
+// rollback projection from these canonical current-reader values before writing.
+func projectGhostPersistenceSnapshot(data *session.InstanceData, gw *git.GitWorktree) {
+	path, recovery, ok, report := gw.PersistenceSnapshot()
+	data.Worktree.WorktreePath = path
+	if !ok {
+		data.Worktree.RelocationRecovery = nil
+	} else {
+		persisted := data.Worktree.RelocationRecovery
+		if persisted == nil {
+			external := data.Worktree.ExternalWorktree
+			startupUnknown := data.StartupStateUnknown
+			persisted = &session.GitWorktreeRelocationRecoveryData{
+				OriginalExternalWorktree:    &external,
+				OriginalBranchCreatedByUs:   cloneBool(data.Worktree.BranchCreatedByUs),
+				OriginalStartupStateUnknown: &startupUnknown,
+			}
+			data.Worktree.RelocationRecovery = persisted
+		}
+		persisted.State = recovery.State
+		persisted.CleanupLifecycle = ""
+		persisted.AlternatePath = recovery.AlternatePath
+		persisted.IdentityKnown = recovery.IdentityKnown
+		persisted.Device = recovery.Device
+		persisted.Inode = recovery.Inode
+		persisted.FileType = recovery.FileType
+		persisted.CleanupGeneration = recovery.CleanupGeneration
+		persisted.CleanupOriginalExternalWorktree = nil
+		persisted.CleanupOriginalBranchCreatedByUs = nil
+		persisted.CleanupOriginalStartupStateUnknown = nil
+	}
+	if report.Empty() {
+		data.ArchiveReport = nil
+	} else {
+		report.RollbackFence = nil
+		data.ArchiveReport = &report
+	}
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func ghostRestoredWorktreeRemovable(data *session.InstanceData) bool {
+	return data.Worktree.RepoPath != "" && data.Worktree.WorktreePath != "" && !data.Worktree.ExternalWorktree
+}
+
+func (m *Manager) ghostCleanupStallActive(key, stableID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	stalledID, ok := m.ghostCleanupStalls[key]
+	if !ok {
+		return false
+	}
+	if stalledID != "" && stableID != "" && stalledID != stableID {
+		delete(m.ghostCleanupStalls, key)
+		return false
+	}
+	return true
+}
+
+func (m *Manager) markGhostCleanupStalled(key, stableID string) {
+	m.mu.Lock()
+	if m.ghostCleanupStalls == nil {
+		m.ghostCleanupStalls = make(map[string]string)
+	}
+	m.ghostCleanupStalls[key] = stableID
+	m.mu.Unlock()
+}
+
+func (m *Manager) clearGhostCleanupStall(key, stableID string) {
+	m.mu.Lock()
+	if current, ok := m.ghostCleanupStalls[key]; ok && stableIDMatchesForDaemon(current, stableID) {
+		delete(m.ghostCleanupStalls, key)
+	}
+	m.mu.Unlock()
+}
+
+// completeLateGhostKill applies the same observable tail as a synchronous ghost
+// kill after its identity-anchored worker removes the durable row. Root grace is
+// armed before publishing removal so observers cannot reinterpret it as live.
+func (m *Manager) completeLateGhostKill(repoID, title, stableID string) {
+	if session.IsReservedTitle(title) {
+		m.mu.Lock()
+		m.rootKilledAt[repoID] = nowFunc()
+		m.mu.Unlock()
+		log.InfoLog.Printf("root agent for repo %s: finished a late ghost kill; the ensure loop will re-create it in ~%s unless the repo is removed from root_agents", repoID, rootKillHealDelay)
+	}
+	m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: stableID, Title: title})
+}
+
+func (m *Manager) persistGhostCleanupStall(repoID string, data *session.InstanceData) error {
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
+	data.UserKilled = true
+	return persistInstanceData(repoID, *data)
+}
+
+var (
+	lateGhostDeleteSessionRecord  = (*Manager).deleteSessionRecord
+	lateGhostCleanupRetryInterval = 10 * time.Second
+)
+
+// reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
+// The row remains the retry handle on any error; only a successful delete plus
+// the normal editor fence may remove it.
+func (m *Manager) reconcileLateGhostCleanup(repoID, title, key, stableID string, lateResult <-chan error) {
+	go func() {
+		if err := <-lateResult; err != nil {
+			m.clearGhostCleanupStall(key, stableID)
+			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late with an error; retaining its stalled record: %v", title, err)
+			return
+		}
+		for {
+			err := m.stopVSCodeForInstance(key, stableID)
+			if err == nil {
+				var deleted bool
+				deleted, err = lateGhostDeleteSessionRecord(m, repoID, title, stableID, nil)
+				if err == nil {
+					m.clearGhostCleanupStall(key, stableID)
+					if deleted {
+						m.completeLateGhostKill(repoID, title, stableID)
+						log.InfoLog.Printf("ghost session %q: reconciled late descriptor cleanup and removed its durable row", title)
+					} else {
+						log.InfoLog.Printf("ghost session %q: late descriptor cleanup belongs to a replaced row; releasing its process fence", title)
+					}
+					return
+				}
+			}
+			log.WarningLog.Printf("ghost session %q: descriptor cleanup finished late, but final record cleanup failed; retrying in %s: %v", title, lateGhostCleanupRetryInterval, err)
+			timer := time.NewTimer(lateGhostCleanupRetryInterval)
+			<-timer.C
+		}
+	}()
+}
+
+// reconcileSettledGhostCleanup gives a synchronous descriptor success the same
+// stable-ID finalizer when a later editor or row-delete step fails. Admission
+// cannot be retried after the archive is gone; this finalizer owns only the tail.
+func (m *Manager) reconcileSettledGhostCleanup(repoID, title, key, stableID string) {
+	m.markGhostCleanupStalled(key, stableID)
+	settled := make(chan error, 1)
+	settled <- nil
+	m.reconcileLateGhostCleanup(repoID, title, key, stableID, settled)
 }
 
 // ghostTmuxNames returns the deduped, ordered set of tmux session names a ghost
@@ -449,7 +727,11 @@ func ghostTmuxNames(data *session.InstanceData) []string {
 // and cleaned the worktree regardless, so a wedged server meant deleting the
 // workspace of a session that might still be running. Found by auditing every
 // caller of the bounded teardown rather than by the review itself.
-func ghostCleanup(data *session.InstanceData, title string) error {
+func ghostCleanup(
+	data *session.InstanceData,
+	title string,
+	checkpoint func(*session.InstanceData) error,
+) (error, <-chan error) {
 	// Kill EVERY tmux session this ghost owns, not just the agent tab. The live
 	// teardown path (Instance.teardownTabs) closes every tab's tmux; the ghost
 	// path has no live Instance, so it must reconstruct the same set from the
@@ -472,7 +754,7 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 		}
 		if state != tmux.PaneStateKnown {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
-				title, session.ErrPaneMayBeLive, killErr)
+				title, session.ErrPaneMayBeLive, killErr), nil
 		}
 	}
 	// After every ghost tmux name is closed, and only if one of them was blind:
@@ -483,13 +765,13 @@ func ghostCleanup(data *session.InstanceData, title string) error {
 	if ghostBlind && ghostWorktreeRemovable(data) {
 		if err := session.CheckWorktreeOccupants(data.Worktree.WorktreePath); err != nil {
 			return fmt.Errorf("ghost session %q: %w: leaving its workspace and record intact: %v",
-				title, session.ErrPaneMayBeLive, err)
+				title, session.ErrPaneMayBeLive, err), nil
 		}
 	}
-	state, cleanupErr := ghostCleanupWorktree(data, title)
+	state, cleanupErr, lateResult := ghostCleanupWorktree(data, title, checkpoint)
 	if state != git.CleanupSettled {
 		return fmt.Errorf("ghost session %q: %w: keeping its record so the cleanup can be retried: %v",
-			title, session.ErrWorkspaceStateUnknown, cleanupErr)
+			title, session.ErrWorkspaceStateUnknown, cleanupErr), lateResult
 	}
-	return nil
+	return nil, nil
 }
