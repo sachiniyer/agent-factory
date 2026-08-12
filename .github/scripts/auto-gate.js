@@ -22,34 +22,53 @@ const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 // exist, so only the first is checked against the head (#2878).
 const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
-const READ_RETRY_DELAYS_MS = [250, 1000];
+const RETRY_DELAYS_MS = [250, 1000];
 
-// Use this only for side-effect-free GitHub reads. Merge, check-write,
-// workflow-dispatch, and GraphQL mutation calls are deliberately not replayed.
+// GitHub reads are side-effect-free, and check-run create/update calls are
+// idempotent gate writes: their stable external_id or check_run_id makes a
+// replay converge on the same logical decision. Retrying the aggregate
+// invalidation is especially important because it closes a stale-green safety
+// window. Squash merge, workflow dispatch, and GraphQL mutations are not
+// idempotent; keep those calls single-shot and never route them through these
+// helpers.
 async function retryRead(label, operation) {
+  return retryTransient(label, operation, {
+    failureName: "AutoGateReadError",
+    readFailure: true,
+  });
+}
+
+async function retryCheckWrite(label, operation) {
+  return retryTransient(label, operation, {
+    failureName: "AutoGateCheckWriteError",
+    readFailure: false,
+  });
+}
+
+async function retryTransient(label, operation, { failureName, readFailure }) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
-      if (!isRetryableReadError(error)) {
+      if (!isRetryableGitHubError(error)) {
         throw error;
       }
-      if (attempt >= READ_RETRY_DELAYS_MS.length) {
+      if (attempt >= RETRY_DELAYS_MS.length) {
         const failure = new Error(
           `${label} after ${attempt + 1} attempts: ${error.message || String(error)}`,
         );
-        failure.name = "AutoGateReadError";
-        failure.autoGateReadFailure = true;
+        failure.name = failureName;
+        failure.autoGateReadFailure = readFailure;
         failure.status = error.status;
         failure.cause = error;
         throw failure;
       }
-      await delay(READ_RETRY_DELAYS_MS[attempt]);
+      await delay(RETRY_DELAYS_MS[attempt]);
     }
   }
 }
 
-function isRetryableReadError(error) {
+function isRetryableGitHubError(error) {
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
     return status === 408 || status === 429 || status >= 500;
@@ -259,21 +278,25 @@ async function reportDecision({ github, context, core, result, manual = false })
   };
   try {
     if (priorDecision) {
-      await github.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: priorDecision.id,
-        ...decision,
-      });
+      await retryCheckWrite(`could not update Auto Gate decision for PR #${result.prNumber}`, () =>
+        github.rest.checks.update({
+          owner,
+          repo,
+          check_run_id: priorDecision.id,
+          ...decision,
+        }),
+      );
     } else {
-      await github.rest.checks.create({
-        owner,
-        repo,
-        head_sha: result.headSha,
-        name: identity.checkName,
-        external_id: identity.externalId,
-        ...decision,
-      });
+      await retryCheckWrite(`could not create Auto Gate decision for PR #${result.prNumber}`, () =>
+        github.rest.checks.create({
+          owner,
+          repo,
+          head_sha: result.headSha,
+          name: identity.checkName,
+          external_id: identity.externalId,
+          ...decision,
+        }),
+      );
     }
   } catch (error) {
     // pull_request-family events from forks can receive a read-only GITHUB_TOKEN
@@ -803,21 +826,25 @@ async function upsertAggregateCheck({
         .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   try {
     if (prior) {
-      await github.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: prior.id,
-        ...decision,
-      });
+      await retryCheckWrite(`could not update aggregate check at ${headSha}`, () =>
+        github.rest.checks.update({
+          owner,
+          repo,
+          check_run_id: prior.id,
+          ...decision,
+        }),
+      );
     } else {
-      await github.rest.checks.create({
-        owner,
-        repo,
-        head_sha: headSha,
-        name: identity.checkName,
-        external_id: identity.externalId,
-        ...decision,
-      });
+      await retryCheckWrite(`could not create aggregate check at ${headSha}`, () =>
+        github.rest.checks.create({
+          owner,
+          repo,
+          head_sha: headSha,
+          name: identity.checkName,
+          external_id: identity.externalId,
+          ...decision,
+        }),
+      );
     }
   } catch (error) {
     if (!isReadOnlyForkCheckError(error, context)) {
@@ -836,14 +863,16 @@ async function createAggregateCheck({ github, context, core, headSha, decision }
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
   try {
-    const response = await github.rest.checks.create({
-      owner,
-      repo,
-      head_sha: headSha,
-      name: identity.checkName,
-      external_id: identity.externalId,
-      ...decision,
-    });
+    const response = await retryCheckWrite(`could not invalidate aggregate ${headSha}`, () =>
+      github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: headSha,
+        name: identity.checkName,
+        external_id: identity.externalId,
+        ...decision,
+      }),
+    );
     return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
   } catch (error) {
     if (!isReadOnlyForkCheckError(error, context)) {
