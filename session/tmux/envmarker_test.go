@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	cmd2 "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -100,5 +99,5 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	require.Equal(t,
 		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_HOME=%s %s",
 			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
-		cmd2.ToString(ptyFactory.cmds[0]))
+		strings.Join(ptyFactory.cmds[0].Args, " "))
 }

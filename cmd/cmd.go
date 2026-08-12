@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"os/exec"
-	"strings"
 )
 
 type Executor interface {
@@ -22,11 +21,4 @@ func (e Exec) Output(cmd *exec.Cmd) ([]byte, error) {
 
 func MakeExecutor() Executor {
 	return Exec{}
-}
-
-func ToString(cmd *exec.Cmd) string {
-	if cmd == nil {
-		return "<nil>"
-	}
-	return strings.Join(cmd.Args, " ")
 }
