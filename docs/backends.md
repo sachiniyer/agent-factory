@@ -586,8 +586,8 @@ repo on your infra, starts an **`af agent-server`** there, and echoes that
 server's authed endpoint (`{url, token}`); the daemon then
 drives the session over that `ws://` stream — so a hook session matches a local,
 docker, or ssh one on attach, type, resize, preview, archive/restore, and kill.
-Like the other off-box backends it does not support adding or closing tabs (no
-daemon-side worktree).
+Like the other off-box backends it admits only external HTTPS web tabs; shell,
+process, and VS Code tabs need a daemon-side worktree.
 
 ```json
 {
@@ -642,8 +642,9 @@ capabilities — `Archive` and `Recover` are both supported. All four are declar
 off-box in one place (`backendProvisionsOffBox`), and all four share a single
 capability declaration, so none of them can differ from the others here without
 that being a deliberate change. Parity is not total: they declare
-`TabManagement` and `Handoff` off, which is why an off-box session carries the
-fixed single agent tab described above. A **Lost** sandbox session (one whose
+`TabManagement` and `Handoff` off, which is why an off-box session carries only
+its agent tab plus any external HTTPS web tabs (the one metadata-only kind
+admitted off-box). A **Lost** sandbox session (one whose
 sandbox answered that its agent is gone) is reachable, so recovery pushes its
 work to `origin` before replacing it (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone
