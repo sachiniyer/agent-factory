@@ -34,6 +34,19 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /invalidate-gate:[\s\S]*?await autoGate\.invalidateAggregateDecision\([\s\S]*?apply-gate:[\s\S]*?needs: \[auto-gate, invalidate-gate\]/,
   );
+  assert.match(
+    workflow,
+    /invalidate-gate:[\s\S]*?outputs:\s+invalidated_heads: \$\{\{ steps\.invalidate\.outputs\.invalidated_heads \}\}/,
+  );
+  assert.match(
+    workflow,
+    /core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)[\s\S]*?if \(failures\.length > 0\)[\s\S]*?throw new AggregateError/,
+  );
+  assert.match(
+    workflow,
+    /apply-gate:[\s\S]*?needs\.invalidate-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\) \}\}/,
+  );
+  assert.doesNotMatch(workflow, /needs\.invalidate-gate\.result == 'success'/);
   assert.match(workflow, /HEAD_SHA: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
   assert.match(workflow, /TARGETS_JSON: \$\{\{ needs\.auto-gate\.outputs\.targets \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
@@ -56,6 +69,11 @@ test("Auto Gate can be recovered manually by PR number", () => {
     workflow,
     /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha[\s\S]*?catch \(error\)[\s\S]*?const readFailure = autoGate\?\.isReadFailure\?\.\(error\) === true;[\s\S]*?core\.setOutput\("targets", "\[\]"\);[\s\S]*?JSON\.stringify\([\s\S]*?knownEventHeads\.map[\s\S]*?read_failure: readFailure \? summary : ""[\s\S]*?if \(readFailure\)[\s\S]*?core\.setFailed\(summary\);[\s\S]*?return;[\s\S]*?throw error;/,
   );
+  assert.match(
+    workflow,
+    /const knownEventHeads =[\s\S]*?payload\.pull_request\?\.head\?\.sha,\s+payload\.after,[\s\S]*?payload\.before,[\s\S]*?filter\(\(value\) => \/\^\[0-9a-f\]\{40\}\$\/\.test\(value\)\)\)\];/,
+  );
+  assert.doesNotMatch(workflow, /knownEventHeads =[\s\S]{0,500}\.sort\(\)/);
   assert.match(workflow, /READ_FAILURE: \$\{\{ matrix\.aggregate\.read_failure \|\| '' \}\}/);
   assert.match(workflow, /readFailureReason: process\.env\.READ_FAILURE/);
   assert.match(
@@ -210,10 +228,12 @@ test("a non-allowed author gets a passing manual decision without an automatic m
 });
 
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
+  const error = new Error("cannot disable native auto-merge");
+  error.status = 500;
   const github = fakeGateGithub({
     author: "outside-contributor",
     nativeAutoMergeEnabled: true,
-    nativeAutoMergeDisableError: new Error("cannot disable native auto-merge"),
+    nativeAutoMergeDisableError: error,
   });
 
   await assert.rejects(
@@ -229,6 +249,7 @@ test("a native auto-merge cancellation failure leaves the manual-only aggregate 
   );
 
   assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 1);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
   assert.equal(github.updatedChecks.length, 0);
@@ -515,7 +536,9 @@ test("one shared-head transaction merges at most one PR before master changes", 
 });
 
 test("a merge API error makes the published aggregate non-green before propagating", async () => {
-  const github = fakeGateGithub({ mergeError: new Error("merge API unavailable") });
+  const error = new Error("merge API unavailable");
+  error.status = 500;
+  const github = fakeGateGithub({ mergeError: error });
 
   await assert.rejects(
     autoGate.processAggregateHead({
@@ -530,6 +553,7 @@ test("a merge API error makes the published aggregate non-green before propagati
   );
 
   assert.equal(github.mergedWith, null);
+  assert.equal(github.mergeAttempts, 1);
   assert.equal(github.createdChecks.at(-1).conclusion, "failure");
   assert.match(github.createdChecks.at(-1).output.title, /WAITING: refreshing/);
 });
@@ -565,6 +589,163 @@ test("a stale aggregate PASS is made non-green before decisions refresh", async 
   assert.equal(github.createdChecks[0].status, "completed");
   assert.equal(github.createdChecks[0].conclusion, "failure");
   assert.match(github.createdChecks[0].output.summary, /refreshing every open master PR/);
+});
+
+test("an ambiguous aggregate create is reconciled without replaying the write", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({ checkCreateAcceptedErrors: [error] });
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.checkListReads, 1);
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+});
+
+test("a definitively rate-limited aggregate create retries the rejected write", async () => {
+  const error = new Error("API rate limit exceeded");
+  error.status = 403;
+  error.response = {
+    headers: { "retry-after": "0", "x-ratelimit-remaining": "0" },
+  };
+  const github = fakeGateGithub({ checkCreateErrors: [error, error] });
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(github.checkCreateAttempts, 3);
+  assert.equal(github.checkListReads, 0);
+  assert.equal(github.createdChecks.length, 1);
+});
+
+test("idempotent check-run updates retry transient failures", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      checkRun({
+        id: 321,
+        name: decisionName(1465, HEAD_SHA),
+        externalId: decisionExternalId(1465, HEAD_SHA),
+        conclusion: "failure",
+      }),
+    ],
+    checkUpdateErrors: [error, error],
+  });
+
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: waiting",
+    },
+  });
+
+  assert.equal(github.checkUpdateAttempts, 3);
+  assert.equal(github.updatedChecks.length, 1);
+  assert.equal(github.updatedChecks[0].check_run_id, 321);
+});
+
+test("rate-limited check-run updates retry but ordinary forbidden writes do not", async () => {
+  const rateLimitError = new Error("API rate limit exceeded");
+  rateLimitError.status = 403;
+  rateLimitError.response = {
+    headers: { "retry-after": "0", "x-ratelimit-remaining": "0" },
+  };
+  const existingDecision = checkRun({
+    id: 321,
+    name: decisionName(1465, HEAD_SHA),
+    externalId: decisionExternalId(1465, HEAD_SHA),
+    conclusion: "failure",
+  });
+  const rateLimitedGithub = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), existingDecision],
+    checkUpdateErrors: [rateLimitError],
+  });
+
+  await autoGate.reportDecision({
+    github: rateLimitedGithub,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: waiting",
+    },
+  });
+
+  assert.equal(rateLimitedGithub.checkUpdateAttempts, 2);
+
+  const forbiddenError = new Error("Resource not accessible by integration");
+  forbiddenError.status = 403;
+  const forbiddenGithub = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), existingDecision],
+    checkUpdateErrors: [forbiddenError],
+  });
+
+  await assert.rejects(
+    autoGate.reportDecision({
+      github: forbiddenGithub,
+      context: fakeContext(),
+      core: fakeCore(),
+      result: {
+        prNumber: 1465,
+        headSha: HEAD_SHA,
+        baseRefName: "master",
+        isOpen: true,
+        shouldMerge: false,
+        summary: "BLOCKED: waiting",
+      },
+    }),
+    /Resource not accessible by integration/,
+  );
+  assert.equal(forbiddenGithub.checkUpdateAttempts, 1);
+});
+
+test("exhausted aggregate invalidation prevents the transaction from merging", async () => {
+  const error = new Error("fetch failed");
+  error.status = 500;
+  const github = fakeGateGithub({ checkWriteError: error });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 3 attempts/,
+  );
+
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.checkListReads, 3);
+  assert.equal(github.mergedWith, null);
+  assert.equal(github.operations.includes("merge"), false);
 });
 
 test("a transient association read is retried without becoming an empty PR set", async () => {
@@ -720,7 +901,7 @@ test("an older transaction cannot overwrite a newer invalidation generation", as
   assert.equal(github.createdChecks.at(-1).conclusion, "failure");
 });
 
-test("aggregate resolution reevaluates the previous head after synchronization", () => {
+test("aggregate resolution invalidates the current head before the previous synchronization head", () => {
   const heads = autoGate.resolveAggregateHeads({
     context: fakeContext({
       before: HEAD_SHA,
@@ -730,7 +911,7 @@ test("aggregate resolution reevaluates the previous head after synchronization",
     targets: [{ prNumber: 1465, headSha: OTHER_SHA }],
   });
 
-  assert.deepEqual(heads, [HEAD_SHA, OTHER_SHA]);
+  assert.deepEqual(heads, [OTHER_SHA, HEAD_SHA]);
 });
 
 test("the queued legacy evaluator keeps resolved PR numbers numeric", async () => {
@@ -1182,6 +1363,28 @@ test("a post-merge invalidation error cannot suppress the docs dispatch attempt"
   assert.ok(github.operations.includes("docs:dispatch"));
 });
 
+test("a workflow dispatch failure remains single-shot after merge", async () => {
+  const error = new Error("docs dispatch unavailable");
+  error.status = 500;
+  const github = fakeGateGithub({
+    files: ["docs/auto-gate.md"],
+    workflowDispatchError: error,
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    /docs dispatch unavailable/,
+  );
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.equal(github.workflowDispatchAttempts, 1);
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -1445,6 +1648,10 @@ function fakeGateGithub({
   graphqlErrorsByNumber = {},
   mergeError = null,
   checkWriteError = null,
+  checkCreateAcceptedErrors = [],
+  checkCreateErrors = [],
+  checkUpdateErrors = [],
+  workflowDispatchError = null,
   nativeAutoMergeDisableError = null,
   associationError = null,
   associationErrorAtRead = 1,
@@ -1458,6 +1665,7 @@ function fakeGateGithub({
   const listReviewComments = function listReviewComments() {};
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
+    github.mergeAttempts += 1;
     if (mergeError) {
       throw mergeError;
     }
@@ -1466,16 +1674,26 @@ function fakeGateGithub({
     return { data: { sha: "merge-sha" } };
   };
   const createCheck = async function createCheck(options) {
-    if (checkWriteError) {
-      throw checkWriteError;
+    github.checkCreateAttempts += 1;
+    const acceptedError = checkCreateAcceptedErrors[github.checkCreateAttempts - 1];
+    if (acceptedError) {
+      github.operations.push("check:create");
+      github.createdChecks.push(options);
+      throw acceptedError;
+    }
+    const attemptError = checkCreateErrors[github.checkCreateAttempts - 1] || checkWriteError;
+    if (attemptError) {
+      throw attemptError;
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
     return { data: { id: 10000 + github.createdChecks.length - 1, ...options } };
   };
   const updateCheck = async function updateCheck(options) {
-    if (checkWriteError) {
-      throw checkWriteError;
+    github.checkUpdateAttempts += 1;
+    const attemptError = checkUpdateErrors[github.checkUpdateAttempts - 1] || checkWriteError;
+    if (attemptError) {
+      throw attemptError;
     }
     github.operations.push("check:update");
     github.updatedChecks.push(options);
@@ -1493,7 +1711,12 @@ function fakeGateGithub({
 
   const github = {
     associationReads: 0,
+    checkCreateAttempts: 0,
+    checkListReads: 0,
+    checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
+    mergeAttempts: 0,
+    nativeAutoMergeDisableAttempts: 0,
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -1501,9 +1724,14 @@ function fakeGateGithub({
     createdChecks: [],
     graphqlReadsByNumber: {},
     updatedChecks: [],
+    workflowDispatchAttempts: 0,
     rest: {
       actions: {
         createWorkflowDispatch: async () => {
+          github.workflowDispatchAttempts += 1;
+          if (workflowDispatchError) {
+            throw workflowDispatchError;
+          }
           github.operations.push("docs:dispatch");
         },
       },
@@ -1514,6 +1742,7 @@ function fakeGateGithub({
     },
     graphql: async (_query, variables) => {
       if (_query.includes("mutation DisablePullRequestAutoMerge")) {
+        github.nativeAutoMergeDisableAttempts += 1;
         if (nativeAutoMergeDisableError) {
           throw nativeAutoMergeDisableError;
         }
@@ -1562,6 +1791,7 @@ function fakeGateGithub({
       const number = options.pull_number || options.issue_number;
       const pullRequestOverride = pullRequestsByNumber[number] || {};
       if (fn === listForRef) {
+        github.checkListReads += 1;
         return [
           ...checkRuns,
           ...github.createdChecks.map((created, index) => ({

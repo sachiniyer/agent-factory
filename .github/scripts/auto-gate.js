@@ -1,3 +1,5 @@
+const { randomUUID } = require("node:crypto");
+
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
@@ -22,40 +24,171 @@ const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 // exist, so only the first is checked against the head (#2878).
 const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
-const READ_RETRY_DELAYS_MS = [250, 1000];
+const RETRY_DELAYS_MS = [250, 1000];
+const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
-// Use this only for side-effect-free GitHub reads. Merge, check-write,
-// workflow-dispatch, and GraphQL mutation calls are deliberately not replayed.
+// GitHub reads are side-effect-free, and check-run updates are idempotent when
+// replayed by check_run_id. Check-run creates are different: external_id is
+// correlation metadata, not a uniqueness key, so an ambiguous create is issued
+// once and then reconciled by a per-attempt marker instead of being replayed.
+// This is especially important for aggregate invalidation, which closes a
+// stale-green safety window. Squash merge, workflow dispatch, and GraphQL
+// mutations are also non-idempotent; keep those calls single-shot and never
+// route them through these helpers.
 async function retryRead(label, operation) {
+  return retryTransient(label, operation, {
+    failureName: "AutoGateReadError",
+    readFailure: true,
+  });
+}
+
+async function retryCheckUpdate(label, operation) {
+  return retryTransient(label, operation, {
+    failureName: "AutoGateCheckWriteError",
+    readFailure: false,
+  });
+}
+
+async function createCheckRun({ github, owner, repo, headSha, name, externalId, decision, label }) {
+  const marker = `<!-- auto-gate-check-create:${randomUUID()} -->`;
+  const markedDecision = {
+    ...decision,
+    output: {
+      ...decision.output,
+      text: [decision.output.text, marker].filter(Boolean).join("\n\n"),
+    },
+  };
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await operation();
+      return await github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: headSha,
+        name,
+        external_id: externalId,
+        ...markedDecision,
+      });
     } catch (error) {
-      if (!isRetryableReadError(error)) {
+      // An explicit rate-limit response rejected the request, so no check was
+      // created and replay is safe. Transport failures remain ambiguous and
+      // must reconcile the marker without issuing another POST.
+      if (isDefinitiveRateLimitResponse(error)) {
+        if (attempt >= RETRY_DELAYS_MS.length) {
+          throw retryFailure(label, attempt + 1, error, "AutoGateCheckWriteError", false);
+        }
+        await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+      if (!isRetryableGitHubError(error)) {
         throw error;
       }
-      if (attempt >= READ_RETRY_DELAYS_MS.length) {
-        const failure = new Error(
-          `${label} after ${attempt + 1} attempts: ${error.message || String(error)}`,
-        );
-        failure.name = "AutoGateReadError";
-        failure.autoGateReadFailure = true;
-        failure.status = error.status;
-        failure.cause = error;
-        throw failure;
-      }
-      await delay(READ_RETRY_DELAYS_MS[attempt]);
+      return retryTransient(
+        `${label} after ambiguous create failure (${error.message || String(error)})`,
+        async () => {
+          const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+            owner,
+            repo,
+            ref: headSha,
+            per_page: 100,
+          });
+          const created = checkRuns
+            .filter(
+              (run) =>
+                run.name === name &&
+                run.external_id === externalId &&
+                run.app?.id === GITHUB_ACTIONS_APP_ID &&
+                run.output?.text?.includes(marker),
+            )
+            .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+          if (!created) {
+            const missing = new Error("the matching check run is not visible yet");
+            missing.status = 503;
+            throw missing;
+          }
+          return { data: created };
+        },
+        { failureName: "AutoGateCheckWriteError", readFailure: false },
+      );
     }
   }
 }
 
-function isRetryableReadError(error) {
+async function retryTransient(label, operation, { failureName, readFailure }) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRetryableGitHubError(error)) {
+        throw error;
+      }
+      if (attempt >= RETRY_DELAYS_MS.length) {
+        throw retryFailure(label, attempt + 1, error, failureName, readFailure);
+      }
+      await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
+function retryFailure(label, attempts, error, failureName, readFailure) {
+  const failure = new Error(`${label} after ${attempts} attempts: ${error.message || String(error)}`);
+  failure.name = failureName;
+  failure.autoGateReadFailure = readFailure;
+  failure.status = error.status;
+  failure.cause = error;
+  return failure;
+}
+
+function isRetryableGitHubError(error) {
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
-    return status === 408 || status === 429 || status >= 500;
+    return status === 408 || status === 429 || status >= 500 || isRateLimitError(error);
   }
   const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
   return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+function isRateLimitError(error) {
+  const status = Number(error?.status);
+  if (status === 429) {
+    return true;
+  }
+  if (status !== 403) {
+    return false;
+  }
+  const headers = githubErrorHeaders(error);
+  return (
+    headers["x-ratelimit-remaining"] === "0" ||
+    headers["retry-after"] !== undefined ||
+    /(?:API|secondary) rate limit|abuse detection/i.test(error?.message || "")
+  );
+}
+
+function isDefinitiveRateLimitResponse(error) {
+  return Boolean(error?.response) && isRateLimitError(error);
+}
+
+function retryDelayMilliseconds(error, fallback) {
+  if (!isRateLimitError(error)) {
+    return fallback;
+  }
+  const headers = githubErrorHeaders(error);
+  const retryAfterSeconds = Number(headers["retry-after"]);
+  const resetSeconds = Number(headers["x-ratelimit-reset"]);
+  const requestedDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+    ? retryAfterSeconds * 1000
+    : Number.isFinite(resetSeconds)
+      ? Math.max(0, resetSeconds * 1000 - Date.now())
+      : fallback;
+  // Honor GitHub's throttle timing without letting a bounded retry hold the
+  // serialized merge lane indefinitely. Exhaustion still fails closed.
+  return Math.min(Math.max(fallback, requestedDelay), MAX_RATE_LIMIT_DELAY_MS);
+}
+
+function githubErrorHeaders(error) {
+  const headers = error?.response?.headers || error?.headers || {};
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [name.toLowerCase(), String(value)]),
+  );
 }
 
 function isReadFailure(error) {
@@ -259,20 +392,24 @@ async function reportDecision({ github, context, core, result, manual = false })
   };
   try {
     if (priorDecision) {
-      await github.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: priorDecision.id,
-        ...decision,
-      });
+      await retryCheckUpdate(`could not update Auto Gate decision for PR #${result.prNumber}`, () =>
+        github.rest.checks.update({
+          owner,
+          repo,
+          check_run_id: priorDecision.id,
+          ...decision,
+        }),
+      );
     } else {
-      await github.rest.checks.create({
+      await createCheckRun({
+        github,
         owner,
         repo,
-        head_sha: result.headSha,
+        headSha: result.headSha,
         name: identity.checkName,
-        external_id: identity.externalId,
-        ...decision,
+        externalId: identity.externalId,
+        decision,
+        label: `could not create Auto Gate decision for PR #${result.prNumber}`,
       });
     }
   } catch (error) {
@@ -296,15 +433,15 @@ async function reportDecision({ github, context, core, result, manual = false })
 function resolveAggregateHeads({ context, targets = [] }) {
   const payload = context.payload || {};
   const candidates = [
-    ...targets.map((target) => target.headSha),
     payload.pull_request?.head?.sha,
+    payload.after,
+    ...targets.map((target) => target.headSha),
     payload.check_suite?.head_sha,
     payload.workflow_run?.head_sha,
     payload.sha,
     payload.before,
-    payload.after,
   ];
-  return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))].sort();
+  return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
@@ -803,20 +940,24 @@ async function upsertAggregateCheck({
         .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   try {
     if (prior) {
-      await github.rest.checks.update({
-        owner,
-        repo,
-        check_run_id: prior.id,
-        ...decision,
-      });
+      await retryCheckUpdate(`could not update aggregate check at ${headSha}`, () =>
+        github.rest.checks.update({
+          owner,
+          repo,
+          check_run_id: prior.id,
+          ...decision,
+        }),
+      );
     } else {
-      await github.rest.checks.create({
+      await createCheckRun({
+        github,
         owner,
         repo,
-        head_sha: headSha,
+        headSha,
         name: identity.checkName,
-        external_id: identity.externalId,
-        ...decision,
+        externalId: identity.externalId,
+        decision,
+        label: `could not create aggregate check at ${headSha}`,
       });
     }
   } catch (error) {
@@ -836,13 +977,15 @@ async function createAggregateCheck({ github, context, core, headSha, decision }
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
   try {
-    const response = await github.rest.checks.create({
+    const response = await createCheckRun({
+      github,
       owner,
       repo,
-      head_sha: headSha,
+      headSha,
       name: identity.checkName,
-      external_id: identity.externalId,
-      ...decision,
+      externalId: identity.externalId,
+      decision,
+      label: `could not invalidate aggregate ${headSha}`,
     });
     return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
   } catch (error) {
