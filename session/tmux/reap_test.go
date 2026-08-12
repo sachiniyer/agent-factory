@@ -196,6 +196,24 @@ func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringCapture(t *te
 		"AF_SESSION/AF_HOME-marked helper survived after tmux vanished during process capture")
 }
 
+// A generic post-marker capture failure is just as incomplete as a capture
+// that reports the session vanished. Once kill-session succeeds, reset must
+// recover the process set from the durable AF_SESSION/AF_HOME markers rather
+// than reading the failed capture's nil result as "no processes".
+func TestCleanupSessionsReapsMarkedProcessAfterGenericCaptureFailure(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_failed_second_capture"
+	home := t.TempDir()
+	marked := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, CleanupSessions(failSecondPaneCaptureExecutor(t)))
+	require.False(t, proctree.AliveSame(marked),
+		"AF_SESSION/AF_HOME-marked helper survived a generic post-marker capture failure")
+}
+
 // A pane can launch a helper after the pre-marker process snapshot and before
 // marker lookup loses the session. The post-absence refresh must find that
 // newly marked process rather than treating the older snapshot as final.
@@ -376,6 +394,24 @@ func vanishOnSecondPaneCaptureExecutor(t *testing.T, name string) cmd.Executor {
 				if paneCaptures == 2 {
 					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
 					require.NoError(t, err, "kill session before second pane capture: %s", out)
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func failSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					return nil, fmt.Errorf("injected generic list-panes failure")
 				}
 			}
 			return realExec.Output(command)
