@@ -291,10 +291,11 @@ func TestCleanupSessionsReapsCompleteCaptureBeforeLaterRefusal(t *testing.T) {
 		"the incompletely captured session must retain ownership of its process")
 }
 
-// A generic capture can return verified ancestry before a strict probe proves
-// the session absent. That post-ownership evidence authorizes the unmarked
-// helper; the older pre-marker snapshot and marker scan cannot rediscover it.
-func TestCleanupSessionsReapsPartialCaptureAfterConfirmedAbsence(t *testing.T) {
+// A generic capture can return ancestry before a strict probe proves the
+// session absent, but the pathname-like tmux name does not bind that tree to
+// the earlier ownership read. An unmarked partial candidate must therefore
+// refuse rather than being signalled or treated as absent.
+func TestCleanupSessionsRefusesUnmarkedPartialCaptureAfterConfirmedAbsence(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 	if _, err := exec.LookPath("setsid"); err != nil {
@@ -307,10 +308,55 @@ func TestCleanupSessionsReapsPartialCaptureAfterConfirmedAbsence(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	var helper proctree.Process
 
-	require.NoError(t, CleanupSessions(partialCaptureThenAbsentExecutor(t, name, trigger, pidFile, &helper)))
+	err := CleanupSessions(partialCaptureThenAbsentExecutor(t, name, trigger, pidFile, &helper))
+	require.ErrorContains(t, err, "has no AF_SESSION marker")
 	require.NotZero(t, helper.PID, "partial-capture helper identity was not recorded")
-	require.False(t, proctree.AliveSame(helper),
-		"verified unmarked helper from the partial capture survived confirmed absence")
+	require.True(t, proctree.AliveSame(helper),
+		"an unmarked partial candidate must not be signalled")
+}
+
+// The owned session can exit after its AF_HOME marker is read and another home
+// can reuse the same tmux name before capture. Even if that replacement also
+// vanishes, its partial tree must not inherit the old session's authorization.
+func TestCleanupSessionsDoesNotReapForeignReplacementPartialCapture(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_reused_partial_capture"
+	home := t.TempDir()
+	foreignHome := t.TempDir()
+	original := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	var foreign proctree.Process
+
+	require.NoError(t, CleanupSessions(replaceWithForeignPartialThenAbsentExecutor(t, name, foreignHome, &foreign)))
+	require.False(t, proctree.AliveSame(original), "owned original helper was not recovered")
+	require.NotZero(t, foreign.PID, "foreign replacement identity was not recorded")
+	require.True(t, proctree.AliveSame(foreign),
+		"a reused tmux name authorized signaling another home's process")
+}
+
+// A verified marked process can fork an unmarked detached child during its
+// grace period. Recovery must refresh the verified ancestry while it is still
+// connected; once the parent exits, neither markers nor SID membership can
+// rediscover that child and a successful empty result would be false.
+func TestCleanupSessionsRefusesChildForkedDuringPartialRecoveryGrace(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("exact detached-session fixture requires setsid")
+	}
+
+	const name = "af_partial_forks_during_grace"
+	home := t.TempDir()
+	trigger, parentPIDFile, childPIDFile := spawnSessionWaitingToForkUnmarkedHelper(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	err := CleanupSessions(partialCaptureThenAbsentAfterTriggerExecutor(t, name, trigger, parentPIDFile))
+	require.ErrorContains(t, err, "has no AF_SESSION marker")
+	child := processFromPIDFile(t, childPIDFile)
+	require.True(t, proctree.AliveSame(child),
+		"an unmarked child discovered during recovery must be retained, not signalled")
 }
 
 // Recovery waits are bounded per session, but a batch must overlap them. A
@@ -697,6 +743,58 @@ func partialCaptureThenAbsentExecutor(t *testing.T, name, trigger, pidFile strin
 	}
 }
 
+func replaceWithForeignPartialThenAbsentExecutor(t *testing.T, name, foreignHome string, foreign *proctree.Process) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					*foreign = spawnMarkedSessionWithEscapee(t, name, foreignHome)
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			if len(command.Args) > 1 && command.Args[1] == "has-session" {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func partialCaptureThenAbsentAfterTriggerExecutor(t *testing.T, name, trigger, parentPIDFile string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	triggered := false
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "show-environment" && !triggered {
+				triggered = true
+				require.NoError(t, os.WriteFile(trigger, []byte("go"), 0o600))
+				waitForPIDFile(t, parentPIDFile)
+			}
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			if len(command.Args) > 1 && command.Args[1] == "has-session" {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
 func vanishDuringCaptureExecutor(t *testing.T, names ...string) cmd.Executor {
 	t.Helper()
 	realExec := cmd.MakeExecutor()
@@ -745,6 +843,35 @@ func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (
 		}
 	})
 	return trigger, pidFile
+}
+
+func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (trigger, parentPIDFile, childPIDFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	trigger = filepath.Join(dir, "start-parent")
+	parentPIDFile = filepath.Join(dir, "marked-parent.pid")
+	childPIDFile = filepath.Join(dir, "unmarked-child.pid")
+	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+		"nohup sh -c 'echo $$ > %s; sleep 0.1; "+
+		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300' "+
+		">/dev/null 2>&1 & exec sleep 300", trigger, parentPIDFile, childPIDFile)
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
+		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() {
+		for _, pidFile := range []string{parentPIDFile, childPIDFile} {
+			if data, readErr := os.ReadFile(pidFile); readErr == nil {
+				if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
+					if snap, snapErr := proctree.Snapshot(); snapErr == nil {
+						if process, ok := snap[pid]; ok {
+							_ = proctree.Signal(process, syscall.SIGKILL)
+						}
+					}
+				}
+			}
+		}
+	})
+	return trigger, parentPIDFile, childPIDFile
 }
 
 func waitForPIDFile(t *testing.T, pidFile string) {

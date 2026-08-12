@@ -739,20 +739,15 @@ type vanishedSessionRecovery struct {
 }
 
 func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome string) error {
-	var verifiedErr error
-	if len(recovery.verifiedProcesses) > 0 {
-		remaining := reapSessionProcesses(reapEscaped, recovery.match, recovery.verifiedProcesses, reapGraceWait, reapTermWait)
-		if len(remaining) > 0 {
-			pids := make([]string, 0, len(remaining))
-			for _, process := range remaining {
-				pids = append(pids, fmt.Sprintf("%d", process.PID))
-			}
-			verifiedErr = fmt.Errorf("verified processes %s are still alive after bounded teardown",
-				strings.Join(pids, ", "))
-		}
-	}
-	return errors.Join(verifiedErr, reapVanishedSessionProcesses(recovery.match, ownHome,
-		recovery.markerCandidates, recovery.markerCaptureError))
+	// The tmux name is not a session-incarnation identity: another home can
+	// reuse it after the ownership read and before this partial capture. Feed
+	// both evidence sets through the immutable AF_SESSION/AF_HOME boundary;
+	// refreshOrphanCandidates deduplicates them by process identity on every
+	// recovery pass and follows descendants that appear during bounded teardown.
+	candidates := make([]proctree.Process, 0, len(recovery.markerCandidates)+len(recovery.verifiedProcesses))
+	candidates = append(candidates, recovery.markerCandidates...)
+	candidates = append(candidates, recovery.verifiedProcesses...)
+	return reapVanishedSessionProcesses(recovery.match, ownHome, candidates, recovery.markerCaptureError)
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
@@ -764,14 +759,16 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 	// snapshot and a child it forks during the first bounded grace period. A
 	// final non-destructive refresh below is the evidence that cleanup finished.
 	for range 2 {
-		refreshed, refreshErr := refreshOrphanCandidates(candidates, match)
-		sweepErr = errors.Join(sweepErr, refreshErr)
+		refreshed, beforeErr := refreshOrphanCandidates(candidates, match)
+		observed, observeErr := observeOrphanAncestry(refreshed, match, reapGraceWait)
+		refreshed, afterErr := refreshOrphanCandidates(observed, match)
+		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
 		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
 		// contain them. This is the real leak, and the one worth a WARNING (#2765).
-		remaining := reapSessionProcesses(reapEscaped, match, marked, reapGraceWait, reapTermWait)
+		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait)
 		if len(remaining) > 0 {
 			pids := make([]string, 0, len(remaining))
 			for _, process := range remaining {
