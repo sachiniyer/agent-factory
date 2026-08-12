@@ -192,18 +192,18 @@ jobs:
   invalidate-gate:
     name: Invalidate aggregate
     needs: auto-gate
+    outputs:
+      invalidated_heads: ${{ steps.invalidate.outputs.invalidated_heads }}
     if: >-
       always() &&
       needs.auto-gate.outputs.aggregate_heads != '' &&
       needs.auto-gate.outputs.aggregate_heads != '[]'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
-    # This write deliberately happens before the serialized lane. A newer event
-    # must turn the required check red while an older transaction is still
-    # running; generation fencing prevents that older run from overwriting it.
+    # These writes deliberately happen before the per-head serialized lanes. A
+    # newer event must turn each required check red while an older transaction
+    # is still running; generation fencing prevents that older run from
+    # overwriting it. The output includes only successfully invalidated heads so
+    # one old-head failure cannot suppress a healthy current-head transaction.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -211,45 +211,67 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Make the aggregate non-green immediately
+        id: invalidate
         uses: actions/github-script@v8
         env:
-          HEAD_SHA: ${{ matrix.aggregate.head_sha }}
+          AGGREGATE_HEADS: ${{ needs.auto-gate.outputs.aggregate_heads }}
         with:
           github-token: ${{ github.token }}
           script: |
             const path = require("path");
             const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
             const autoGate = require(helperPath);
+            const aggregateHeads = JSON.parse(process.env.AGGREGATE_HEADS || "[]");
             if (typeof autoGate.invalidateAggregateDecision !== "function") {
               core.notice("Landing compatibility: fixed aggregate invalidation starts on master.");
+              core.setOutput("invalidated_heads", JSON.stringify(aggregateHeads));
               return;
             }
-            const invalidated = await autoGate.invalidateAggregateDecision({
-              github,
-              context,
-              core,
-              headSha: process.env.HEAD_SHA,
-            });
-            if (invalidated.writeState === "read-only") {
-              throw new Error(`Could not invalidate aggregate ${process.env.HEAD_SHA}.`);
+            const invalidatedHeads = [];
+            const failures = [];
+            for (const aggregate of aggregateHeads) {
+              const headSha = String(aggregate.head_sha || "");
+              try {
+                const invalidated = await autoGate.invalidateAggregateDecision({
+                  github,
+                  context,
+                  core,
+                  headSha,
+                });
+                if (invalidated.writeState === "read-only") {
+                  throw new Error(`Could not invalidate aggregate ${headSha}.`);
+                }
+                invalidatedHeads.push(aggregate);
+              } catch (error) {
+                failures.push(error);
+                core.warning(
+                  `Could not invalidate aggregate ${headSha}: ${error.message || String(error)}`,
+                );
+              }
+            }
+            core.setOutput("invalidated_heads", JSON.stringify(invalidatedHeads));
+            if (failures.length > 0) {
+              throw new AggregateError(
+                failures,
+                `${failures.length} aggregate invalidation(s) failed`,
+              );
             }
 
   apply-gate:
     name: Apply aggregate gate
     needs: [auto-gate, invalidate-gate]
-    # Keep always() so a retry-exhausted read can still publish its blocked
-    # result, but never enter the serialized merge lane unless the preceding
-    # safety-window invalidation completed successfully.
+    # Keep always() so heads whose invalidations succeeded can proceed even if a
+    # different matrix candidate failed. Failed heads are absent from the
+    # correlated output and therefore cannot enter a serialized merge lane.
     if: >-
       always() &&
-      needs.invalidate-gate.result == 'success' &&
-      needs.auto-gate.outputs.aggregate_heads != '' &&
-      needs.auto-gate.outputs.aggregate_heads != '[]'
+      needs.invalidate-gate.outputs.invalidated_heads != '' &&
+      needs.invalidate-gate.outputs.invalidated_heads != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        aggregate: ${{ fromJSON(needs.auto-gate.outputs.aggregate_heads) }}
+        aggregate: ${{ fromJSON(needs.invalidate-gate.outputs.invalidated_heads) }}
     # Refresh/report/merge owns one lane. The preceding unqueued invalidation is
     # a distinct generation; an older transaction refuses to overwrite it.
     concurrency:

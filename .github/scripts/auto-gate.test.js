@@ -36,8 +36,17 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /apply-gate:[\s\S]*?if: >-\s+always\(\) &&\s+needs\.invalidate-gate\.result == 'success'/,
+    /invalidate-gate:[\s\S]*?outputs:\s+invalidated_heads: \$\{\{ steps\.invalidate\.outputs\.invalidated_heads \}\}/,
   );
+  assert.match(
+    workflow,
+    /core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)[\s\S]*?if \(failures\.length > 0\)[\s\S]*?throw new AggregateError/,
+  );
+  assert.match(
+    workflow,
+    /apply-gate:[\s\S]*?needs\.invalidate-gate\.outputs\.invalidated_heads != ''[\s\S]*?matrix:\s+aggregate: \$\{\{ fromJSON\(needs\.invalidate-gate\.outputs\.invalidated_heads\) \}\}/,
+  );
+  assert.doesNotMatch(workflow, /needs\.invalidate-gate\.result == 'success'/);
   assert.match(workflow, /HEAD_SHA: \$\{\{ matrix\.aggregate\.head_sha \}\}/);
   assert.match(workflow, /TARGETS_JSON: \$\{\{ needs\.auto-gate\.outputs\.targets \}\}/);
   assert.match(workflow, /PR_NUMBER: \$\{\{ inputs\.pr_number \|\| '' \}\}/);
@@ -577,10 +586,10 @@ test("a stale aggregate PASS is made non-green before decisions refresh", async 
   assert.match(github.createdChecks[0].output.summary, /refreshing every open master PR/);
 });
 
-test("idempotent aggregate invalidation retries transient check-run writes", async () => {
+test("an ambiguous aggregate create is reconciled without replaying the write", async () => {
   const error = new Error("fetch failed");
   error.status = 500;
-  const github = fakeGateGithub({ checkCreateErrors: [error, error] });
+  const github = fakeGateGithub({ checkCreateAcceptedErrors: [error] });
 
   const invalidated = await autoGate.invalidateAggregateDecision({
     github,
@@ -590,7 +599,8 @@ test("idempotent aggregate invalidation retries transient check-run writes", asy
   });
 
   assert.equal(invalidated.writeState, "created");
-  assert.equal(github.checkCreateAttempts, 3);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.checkListReads, 1);
   assert.equal(github.createdChecks.length, 1);
   assert.equal(github.createdChecks[0].conclusion, "failure");
 });
@@ -644,10 +654,11 @@ test("exhausted aggregate invalidation prevents the transaction from merging", a
       targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
       mergeEnabled: true,
     }),
-    /could not invalidate aggregate .* after 3 attempts: fetch failed/,
+    /could not invalidate aggregate .* after ambiguous create failure \(fetch failed\) after 3 attempts/,
   );
 
-  assert.equal(github.checkCreateAttempts, 3);
+  assert.equal(github.checkCreateAttempts, 1);
+  assert.equal(github.checkListReads, 3);
   assert.equal(github.mergedWith, null);
   assert.equal(github.operations.includes("merge"), false);
 });
@@ -1552,6 +1563,7 @@ function fakeGateGithub({
   graphqlErrorsByNumber = {},
   mergeError = null,
   checkWriteError = null,
+  checkCreateAcceptedErrors = [],
   checkCreateErrors = [],
   checkUpdateErrors = [],
   workflowDispatchError = null,
@@ -1578,6 +1590,12 @@ function fakeGateGithub({
   };
   const createCheck = async function createCheck(options) {
     github.checkCreateAttempts += 1;
+    const acceptedError = checkCreateAcceptedErrors[github.checkCreateAttempts - 1];
+    if (acceptedError) {
+      github.operations.push("check:create");
+      github.createdChecks.push(options);
+      throw acceptedError;
+    }
     const attemptError = checkCreateErrors[github.checkCreateAttempts - 1] || checkWriteError;
     if (attemptError) {
       throw attemptError;
@@ -1609,6 +1627,7 @@ function fakeGateGithub({
   const github = {
     associationReads: 0,
     checkCreateAttempts: 0,
+    checkListReads: 0,
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
     mergeAttempts: 0,
@@ -1687,6 +1706,7 @@ function fakeGateGithub({
       const number = options.pull_number || options.issue_number;
       const pullRequestOverride = pullRequestsByNumber[number] || {};
       if (fn === listForRef) {
+        github.checkListReads += 1;
         return [
           ...checkRuns,
           ...github.createdChecks.map((created, index) => ({

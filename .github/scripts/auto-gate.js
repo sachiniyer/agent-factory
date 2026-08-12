@@ -1,3 +1,5 @@
+const { randomUUID } = require("node:crypto");
+
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
 const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
@@ -24,13 +26,14 @@ const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 const RETRY_DELAYS_MS = [250, 1000];
 
-// GitHub reads are side-effect-free, and check-run create/update calls are
-// idempotent gate writes: their stable external_id or check_run_id makes a
-// replay converge on the same logical decision. Retrying the aggregate
-// invalidation is especially important because it closes a stale-green safety
-// window. Squash merge, workflow dispatch, and GraphQL mutations are not
-// idempotent; keep those calls single-shot and never route them through these
-// helpers.
+// GitHub reads are side-effect-free, and check-run updates are idempotent when
+// replayed by check_run_id. Check-run creates are different: external_id is
+// correlation metadata, not a uniqueness key, so an ambiguous create is issued
+// once and then reconciled by a per-attempt marker instead of being replayed.
+// This is especially important for aggregate invalidation, which closes a
+// stale-green safety window. Squash merge, workflow dispatch, and GraphQL
+// mutations are also non-idempotent; keep those calls single-shot and never
+// route them through these helpers.
 async function retryRead(label, operation) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
@@ -38,11 +41,63 @@ async function retryRead(label, operation) {
   });
 }
 
-async function retryCheckWrite(label, operation) {
+async function retryCheckUpdate(label, operation) {
   return retryTransient(label, operation, {
     failureName: "AutoGateCheckWriteError",
     readFailure: false,
   });
+}
+
+async function createCheckRun({ github, owner, repo, headSha, name, externalId, decision, label }) {
+  const marker = `<!-- auto-gate-check-create:${randomUUID()} -->`;
+  const markedDecision = {
+    ...decision,
+    output: {
+      ...decision.output,
+      text: [decision.output.text, marker].filter(Boolean).join("\n\n"),
+    },
+  };
+  try {
+    return await github.rest.checks.create({
+      owner,
+      repo,
+      head_sha: headSha,
+      name,
+      external_id: externalId,
+      ...markedDecision,
+    });
+  } catch (error) {
+    if (!isRetryableGitHubError(error)) {
+      throw error;
+    }
+    return retryTransient(
+      `${label} after ambiguous create failure (${error.message || String(error)})`,
+      async () => {
+        const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+          owner,
+          repo,
+          ref: headSha,
+          per_page: 100,
+        });
+        const created = checkRuns
+          .filter(
+            (run) =>
+              run.name === name &&
+              run.external_id === externalId &&
+              run.app?.id === GITHUB_ACTIONS_APP_ID &&
+              run.output?.text?.includes(marker),
+          )
+          .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+        if (!created) {
+          const missing = new Error("the matching check run is not visible yet");
+          missing.status = 503;
+          throw missing;
+        }
+        return { data: created };
+      },
+      { failureName: "AutoGateCheckWriteError", readFailure: false },
+    );
+  }
 }
 
 async function retryTransient(label, operation, { failureName, readFailure }) {
@@ -278,7 +333,7 @@ async function reportDecision({ github, context, core, result, manual = false })
   };
   try {
     if (priorDecision) {
-      await retryCheckWrite(`could not update Auto Gate decision for PR #${result.prNumber}`, () =>
+      await retryCheckUpdate(`could not update Auto Gate decision for PR #${result.prNumber}`, () =>
         github.rest.checks.update({
           owner,
           repo,
@@ -287,16 +342,16 @@ async function reportDecision({ github, context, core, result, manual = false })
         }),
       );
     } else {
-      await retryCheckWrite(`could not create Auto Gate decision for PR #${result.prNumber}`, () =>
-        github.rest.checks.create({
-          owner,
-          repo,
-          head_sha: result.headSha,
-          name: identity.checkName,
-          external_id: identity.externalId,
-          ...decision,
-        }),
-      );
+      await createCheckRun({
+        github,
+        owner,
+        repo,
+        headSha: result.headSha,
+        name: identity.checkName,
+        externalId: identity.externalId,
+        decision,
+        label: `could not create Auto Gate decision for PR #${result.prNumber}`,
+      });
     }
   } catch (error) {
     // pull_request-family events from forks can receive a read-only GITHUB_TOKEN
@@ -826,7 +881,7 @@ async function upsertAggregateCheck({
         .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   try {
     if (prior) {
-      await retryCheckWrite(`could not update aggregate check at ${headSha}`, () =>
+      await retryCheckUpdate(`could not update aggregate check at ${headSha}`, () =>
         github.rest.checks.update({
           owner,
           repo,
@@ -835,16 +890,16 @@ async function upsertAggregateCheck({
         }),
       );
     } else {
-      await retryCheckWrite(`could not create aggregate check at ${headSha}`, () =>
-        github.rest.checks.create({
-          owner,
-          repo,
-          head_sha: headSha,
-          name: identity.checkName,
-          external_id: identity.externalId,
-          ...decision,
-        }),
-      );
+      await createCheckRun({
+        github,
+        owner,
+        repo,
+        headSha,
+        name: identity.checkName,
+        externalId: identity.externalId,
+        decision,
+        label: `could not create aggregate check at ${headSha}`,
+      });
     }
   } catch (error) {
     if (!isReadOnlyForkCheckError(error, context)) {
@@ -863,16 +918,16 @@ async function createAggregateCheck({ github, context, core, headSha, decision }
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
   try {
-    const response = await retryCheckWrite(`could not invalidate aggregate ${headSha}`, () =>
-      github.rest.checks.create({
-        owner,
-        repo,
-        head_sha: headSha,
-        name: identity.checkName,
-        external_id: identity.externalId,
-        ...decision,
-      }),
-    );
+    const response = await createCheckRun({
+      github,
+      owner,
+      repo,
+      headSha,
+      name: identity.checkName,
+      externalId: identity.externalId,
+      decision,
+      label: `could not invalidate aggregate ${headSha}`,
+    });
     return { writeState: "created", priorAggregate: false, checkRunId: response.data.id };
   } catch (error) {
     if (!isReadOnlyForkCheckError(error, context)) {
