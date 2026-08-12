@@ -190,16 +190,16 @@ func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName
 	}, nil
 }
 
-// NewGitWorktree creates a new GitWorktree instance
-func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, branchname string, err error) {
+// NewGitWorktree creates a new GitWorktree instance using the caller's resolved
+// branch-prefix snapshot. Worktree placement remains live-configured, but branch
+// naming must not independently reload a restart-required value after its caller
+// has already performed collision checks against a frozen snapshot.
+func NewGitWorktree(repoPath string, sessionName string, branchPrefix string) (tree *GitWorktree, branchname string, err error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
-	branchName := fmt.Sprintf("%s%s", cfg.BranchPrefix, sessionName)
-	// Sanitize the final branch name to handle invalid characters from any source
-	// (e.g., backslashes from Windows domain usernames like DOMAIN\user)
-	branchName = SanitizeBranchName(branchName)
+	branchName := BranchForTitle(branchPrefix, sessionName)
 
 	// Convert repoPath to absolute path
 	absPath, err := filepath.Abs(repoPath)

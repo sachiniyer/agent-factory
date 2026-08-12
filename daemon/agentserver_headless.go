@@ -228,6 +228,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	if program == "" {
 		program = cfg.DefaultProgram
 	}
+	branchPrefix := cfg.BranchPrefix
 
 	instance, err := session.NewInstance(session.InstanceOptions{
 		Title:                 opts.Title,
@@ -235,6 +236,9 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 		Program:               program,
 		ProgramResolved:       opts.ProgramResolved && opts.Program != "",
 		SessionEnvPassthrough: opts.SessionEnvPassthrough,
+		// This process's startup config is its frozen branch-naming snapshot, just
+		// like the host daemon's. NewGitWorktree must not reload a later save.
+		BranchPrefix: &branchPrefix,
 		// The in-sandbox agent-server ALWAYS runs the local runtime (tmux + git
 		// worktree against RepoPath) — it IS the sandbox (§1.2). Force it explicitly
 		// so a workspace whose repo config declares backend=docker/ssh/hook does

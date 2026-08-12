@@ -215,6 +215,11 @@ type Instance struct {
 	// setup; restored instances don't need it (the persisted
 	// external_worktree flag carries the semantics from then on).
 	inPlace bool
+	// branchPrefix is the caller-resolved snapshot for a fresh local worktree.
+	// branchPrefixResolved distinguishes an explicit empty prefix from a legacy
+	// direct constructor that should resolve the value when provisioning begins.
+	branchPrefix         string
+	branchPrefixResolved bool
 
 	// carriedConversation is a provider conversation a PREVIOUS record held that
 	// this create should come up on instead of starting a new one (#2616). It

@@ -158,7 +158,19 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			// and Cleanup()/Kill never removes the user's tree or branch.
 			gitWorktree, branchName, err = git.NewGitWorktreeInPlace(i.Path)
 		} else {
-			gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title)
+			branchPrefix := i.branchPrefix
+			if !i.branchPrefixResolved {
+				var cfg *config.Config
+				cfg, err = config.LoadConfig()
+				if err != nil {
+					err = fmt.Errorf("failed to load config: %w", err)
+				} else {
+					branchPrefix = cfg.BranchPrefix
+				}
+			}
+			if err == nil {
+				gitWorktree, branchName, err = git.NewGitWorktree(i.Path, i.Title, branchPrefix)
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)

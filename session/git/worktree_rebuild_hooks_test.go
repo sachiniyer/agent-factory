@@ -111,7 +111,7 @@ func TestRebuildFromExistingBranch_CancelsTheHookRunAlreadyInFlight(t *testing.T
 	repoRoot, startedDir, releaseFile, doneDir := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
-	gw, _, err := NewGitWorktree(repoRoot, "rebuild-hooks")
+	gw, _, err := NewGitWorktree(repoRoot, "rebuild-hooks", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 
@@ -160,7 +160,7 @@ func TestRebuildFreshFromRecordedBase_CancelsTheHookRunAlreadyInFlight(t *testin
 	repoRoot, startedDir, releaseFile, doneDir := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "fresh-rebuild-hooks")
+	gw, branchName, err := NewGitWorktree(repoRoot, "fresh-rebuild-hooks", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 
@@ -211,7 +211,7 @@ func TestRebuildAfterCleanup_StillRunsHooks(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "cleanup-then-rebuild")
+	gw, _, err := NewGitWorktree(repoRoot, "cleanup-then-rebuild", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 	require.True(t, closed(gw.HooksDone(), 20*time.Second), "the initial hook run never finished")
@@ -233,7 +233,7 @@ func TestSetupLaunchesHooksBeforeTheyFinish(t *testing.T) {
 	repoRoot, startedDir, releaseFile, _ := gatedHookRepo(t)
 	commitInitial(t, repoRoot)
 
-	gw, _, err := NewGitWorktree(repoRoot, "in-flight")
+	gw, _, err := NewGitWorktree(repoRoot, "in-flight", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 	t.Cleanup(func() { _ = os.WriteFile(releaseFile, []byte("go"), 0o644) })
@@ -273,7 +273,7 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "tree-untouched")
+	gw, _, err := NewGitWorktree(repoRoot, "tree-untouched", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 	t.Cleanup(func() { _, _ = gw.Cleanup() })

@@ -50,6 +50,13 @@ func sandboxHome(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(tempHome, ".agent-factory"))
 }
 
+func branchPrefixForTest(t *testing.T) string {
+	t.Helper()
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	return cfg.BranchPrefix
+}
+
 func TestGetWorktreeDirectoryForRepoWithConfig(t *testing.T) {
 	sandboxHome(t)
 
@@ -91,7 +98,7 @@ func TestNewGitWorktree_CleanName(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "my-feature")
+	gw, branchName, err := NewGitWorktree(repoRoot, "my-feature", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	assert.Equal(t, "test/my-feature", branchName)
@@ -104,6 +111,41 @@ func TestNewGitWorktree_CleanName(t *testing.T) {
 	assert.Equal(t, filepath.Dir(repoRoot), filepath.Dir(gw.GetWorktreePath()))
 }
 
+func TestNewGitWorktree_PendingBranchPrefixUsesFrozenSnapshot(t *testing.T) {
+	sandboxHome(t)
+
+	repoRoot := createGitRepo(t)
+	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "initial")
+	commitCmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	out, err := commitCmd.CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	frozenPrefix := ""
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = frozenPrefix
+	require.NoError(t, config.SaveConfig(cfg))
+
+	existing, _, err := NewGitWorktree(repoRoot, "a/foo", frozenPrefix)
+	require.NoError(t, err)
+	require.NoError(t, existing.Setup())
+	t.Cleanup(func() { _, _ = existing.Cleanup() })
+
+	// Saving this restart-required key does not change the daemon's frozen
+	// prefix. Worktree creation must therefore keep using that same snapshot.
+	cfg.BranchPrefix = "a/"
+	require.NoError(t, config.SaveConfig(cfg))
+	require.False(t, TitlesCollide("a/foo", "foo", frozenPrefix))
+
+	candidate, branchName, err := NewGitWorktree(repoRoot, "foo", frozenPrefix)
+	require.NoError(t, err)
+	require.Equal(t, "foo", branchName)
+	require.NoError(t, candidate.Setup())
+	t.Cleanup(func() { _, _ = candidate.Cleanup() })
+}
+
 func TestNewGitWorktree_SpaceTitleUsesSluggedSiblingPath(t *testing.T) {
 	sandboxHome(t)
 
@@ -114,7 +156,7 @@ func TestNewGitWorktree_SpaceTitleUsesSluggedSiblingPath(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "Review Threads")
+	gw, branchName, err := NewGitWorktree(repoRoot, "Review Threads", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	assert.Equal(t, "test/review-threads", branchName)
@@ -134,7 +176,7 @@ func TestNewGitWorktree_SubdirectoryCleanName(t *testing.T) {
 	cfg.WorktreeRoot = config.WorktreeRootSubdirectory
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "my-feature")
+	gw, branchName, err := NewGitWorktree(repoRoot, "my-feature", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	assert.Equal(t, "test/my-feature", branchName)
@@ -154,7 +196,7 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 	require.NoError(t, config.SaveConfig(cfg))
 
 	// Create first worktree - should get clean name
-	gw1, _, err := NewGitWorktree(repoRoot, "my-feature")
+	gw1, _, err := NewGitWorktree(repoRoot, "my-feature", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	expectedSuffix := repoName + "-my-feature"
@@ -165,7 +207,7 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 	require.NoError(t, os.MkdirAll(gw1.GetWorktreePath(), 0755))
 
 	// Create second worktree with same name - should get -2 suffix
-	gw2, _, err := NewGitWorktree(repoRoot, "my-feature")
+	gw2, _, err := NewGitWorktree(repoRoot, "my-feature", branchPrefixForTest(t))
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(gw2.GetWorktreePath(), repoName+"-my-feature-2"),
 		"second worktree should have -2 suffix, got: %s", gw2.GetWorktreePath())
@@ -174,7 +216,7 @@ func TestNewGitWorktree_CollisionSuffix(t *testing.T) {
 	require.NoError(t, os.MkdirAll(gw2.GetWorktreePath(), 0755))
 
 	// Create third worktree with same name - should get -3 suffix
-	gw3, _, err := NewGitWorktree(repoRoot, "my-feature")
+	gw3, _, err := NewGitWorktree(repoRoot, "my-feature", branchPrefixForTest(t))
 	require.NoError(t, err)
 	assert.True(t, strings.HasSuffix(gw3.GetWorktreePath(), repoName+"-my-feature-3"),
 		"third worktree should have -3 suffix, got: %s", gw3.GetWorktreePath())
@@ -204,7 +246,7 @@ func TestNewGitWorktree_StatErrorReturns(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, wErr := NewGitWorktree(repoRoot, "some-title")
+		_, _, wErr := NewGitWorktree(repoRoot, "some-title", cfg.BranchPrefix)
 		errCh <- wErr
 	}()
 
@@ -246,7 +288,7 @@ func TestSetupFromExistingBranch_SetsBaseCommitSHA(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "existing-branch")
+	gw, _, err := NewGitWorktree(repoRoot, "existing-branch", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	// Setup should detect the existing branch and call setupFromExistingBranch
@@ -299,7 +341,7 @@ func TestSetupFromExistingBranch_RecreatesAfterExternalDeletion(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "existing-branch")
+	gw, _, err := NewGitWorktree(repoRoot, "existing-branch", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	// First setup succeeds and registers the worktree.
@@ -350,7 +392,7 @@ func TestCleanup_PreservesPreExistingBranch(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "preexisting")
+	gw, _, err := NewGitWorktree(repoRoot, "preexisting", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	// Setup() should detect the existing branch and reuse it.
@@ -390,7 +432,7 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "brand-new")
+	gw, _, err := NewGitWorktree(repoRoot, "brand-new", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	// No pre-existing branch — Setup() should create a fresh one.
@@ -493,7 +535,7 @@ func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "corrupted")
+	gw, branchName, err := NewGitWorktree(repoRoot, "corrupted", branchPrefixForTest(t))
 	require.NoError(t, err)
 
 	// Setup() creates a fresh branch and worktree owned by this session.
@@ -550,7 +592,7 @@ func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "orphan")
+	gw, _, err := NewGitWorktree(repoRoot, "orphan", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 
@@ -598,7 +640,7 @@ func TestCleanup_RemovesDirWhenGitDeregistered(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, branchName, err := NewGitWorktree(repoRoot, "deregistered")
+	gw, branchName, err := NewGitWorktree(repoRoot, "deregistered", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 
@@ -655,7 +697,7 @@ func TestCleanup_SurfacesErrorWhenGitStillOwnsWorktree(t *testing.T) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gw, _, err := NewGitWorktree(repoRoot, "stillowned")
+	gw, _, err := NewGitWorktree(repoRoot, "stillowned", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 

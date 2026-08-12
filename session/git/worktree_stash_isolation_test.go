@@ -55,12 +55,12 @@ func twoSessionWorktrees(t *testing.T) (repoRoot, wtA, wtB string) {
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
 
-	gwA, _, err := NewGitWorktree(repoRoot, "stash-sess-a")
+	gwA, _, err := NewGitWorktree(repoRoot, "stash-sess-a", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gwA.Setup())
 	t.Cleanup(func() { _, _ = gwA.Cleanup() })
 
-	gwB, _, err := NewGitWorktree(repoRoot, "stash-sess-b")
+	gwB, _, err := NewGitWorktree(repoRoot, "stash-sess-b", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gwB.Setup())
 	t.Cleanup(func() { _, _ = gwB.Cleanup() })
