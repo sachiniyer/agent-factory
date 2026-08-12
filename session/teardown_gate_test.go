@@ -63,6 +63,48 @@ func TestArchiveTeardown_PaneAbortRestoresConsumedRecoveryClaim(t *testing.T) {
 	assert.Equal(t, filepath.Join(root, "old-candidate"), recovery.AlternatePath)
 }
 
+func TestLocalBackendKill_PaneAbortRestoresConsumedCleanupClaim(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(worktree, 0o755))
+	info, err := os.Stat(worktree)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	gw, err := git.NewGitWorktreeFromStorage(
+		filepath.Join(root, "missing-repo"), worktree, "cleanup-abort", "af/cleanup-abort", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:         git.RelocationRecoveryClaimStale,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	cleanupClaim, err := gw.ClaimRelocationSource()
+	require.NoError(t, err)
+	require.NoError(t, gw.PrepareRelocationClaimForCleanup(cleanupClaim))
+
+	previousClose := killCloseTab
+	killCloseTab = func(_ *tmux.TmuxSession, _, _ string) (teardownState, bool, error) {
+		// The cleanup claim must not hold relocationMu while pane teardown runs.
+		path, _, _ := gw.RelocationSnapshot()
+		require.Equal(t, worktree, path)
+		return stateUnknown, false, fmt.Errorf("pane liveness is unknown")
+	}
+	t.Cleanup(func() { killCloseTab = previousClose })
+
+	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	inst.gitWorktree = gw
+	err = (&LocalBackend{}).Kill(inst)
+	require.ErrorIs(t, err, ErrPaneMayBeLive)
+	recovery, retained := gw.GetRelocationRecovery()
+	require.True(t, retained, "pane abort must restore the consumed cleanup authorization")
+	assert.Equal(t, git.RelocationRecoveryCleanupReady, recovery.State)
+	assert.True(t, recovery.IdentityKnown)
+}
+
 // The #1917 follow-up locks: bounding the teardown's tmux commands means they can
 // now answer "I don't know" instead of blocking forever — and an unknown must STOP
 // the worktree step, not be logged and stepped over.

@@ -649,6 +649,17 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	return r.state(), nil
 }
 
+// Test seams for the repo-gone cleanup's final destructive boundary.
+var (
+	repoGoneCleanupTimeout        = localGitTimeout
+	repoGoneBeforeWriterReap      = func(string) {}
+	repoGoneBeforeRecursiveDelete = func(string) {}
+	removeTreeAfterEntryClaim     = func(*os.File, string, string, string) error { return nil }
+	repoGoneRemoveDirectory       = removeClaimedRepoGoneDirectory
+	repoGoneReapMatching          = reapWorktreeWritersMatching
+	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir
+)
+
 // shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
 // directory itself after `git worktree remove -f` returned removeErr. It is the
 // #802/#726 decision tree documented at the call site.
@@ -743,6 +754,13 @@ func reapWorktreeWriters(worktreePath string) {
 	// The path exists (callers reap only after an os.Stat succeeds), so resolving
 	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
 	root := normalizeWorktreePath(worktreePath)
+	reapWorktreeWritersMatching(worktreePath, func(pid int) bool {
+		cwd, ok := proctree.WorkingDir(pid)
+		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+	})
+}
+
+func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	snap, err := proctree.Snapshot()
 	if err != nil {
 		// Could not READ the process table — never the same fact as "no writers"
@@ -751,7 +769,7 @@ func reapWorktreeWriters(worktreePath string) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	procs := worktreeWriterProcesses(root, snap, os.Getpid(), proctree.WorkingDir, proctree.IsTmuxServer)
+	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.IsTmuxServer)
 	if len(procs) == 0 {
 		return
 	}
@@ -780,6 +798,23 @@ func worktreeWriterProcesses(
 	workingDir func(int) (string, bool),
 	isTmuxServer func(int) bool,
 ) []proctree.Process {
+	matches := func(pid int) bool {
+		cwd, ok := workingDir(pid)
+		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+	}
+	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxServer)
+}
+
+// worktreeWriterProcessesMatching applies the shared-infrastructure exclusions
+// to both pathname-based cleanup and the repo-gone cleanup's descriptor-identity
+// matcher. The latter must not lose the protections merely because it cannot
+// safely re-resolve the pathname it is about to delete.
+func worktreeWriterProcessesMatching(
+	snap map[int]proctree.Process,
+	selfPID int,
+	matches func(int) bool,
+	isTmuxServer func(int) bool,
+) []proctree.Process {
 	// The daemon can inherit a cwd inside a worktree when an af invocation
 	// auto-starts it there, and the shared tmux server inherits its cwd from the
 	// client that first started it. Neither may be a selected root or be reached
@@ -797,14 +832,7 @@ func worktreeWriterProcesses(
 		}
 	}
 	for pid := range snap {
-		cwd, ok := workingDir(pid)
-		if !ok {
-			// Foreign process (its cwd link is not readable) or already gone: it
-			// cannot be proven to be one of ours, and an unreadable cwd is never
-			// treated as a match — the honest-unknown rule this package enforces.
-			continue
-		}
-		if !pathAtOrUnder(root, filepath.Clean(cwd)) {
+		if !matches(pid) {
 			continue
 		}
 		if protectedInfrastructure(pid) {

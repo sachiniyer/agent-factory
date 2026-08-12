@@ -2,7 +2,10 @@
 
 package proctree
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
 // This file is the deliberate dead end for any platform with no process-table
 // backend, and it exists to be LOUD.
@@ -53,4 +56,8 @@ func readUID(int) (int, bool) {
 
 func readWorkingDir(int) (string, bool) {
 	return "", false
+}
+
+func openWorkingDir(int) (*os.File, string, bool) {
+	return nil, "", false
 }

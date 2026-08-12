@@ -452,21 +452,74 @@ func clearClosedTmuxRefs(i *Instance, closed []closedTab) {
 // tripped deadline (#1917): a timeout leaves the pane's liveness or the
 // worktree's removal genuinely unknown, and this mode reports those so the caller
 // keeps the record and retries rather than destroying a workspace on a guess.
-type teardownKill struct{}
+type teardownKill struct {
+	cleanupClaim *git.RelocationClaim
+	claimHandled *bool
+}
+
+// prepareKillTeardown consumes a cleanup-ready record only after the daemon's
+// pre-tombstone admission check has validated it. The returned cleanup gives
+// ownership back if pane teardown aborts before handleWorktree can revalidate
+// the claim at the deletion boundary.
+func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
+	noop := func() {}
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return teardownKill{}, noop, nil
+	}
+	if gw.CleanupRetryPending() {
+		return teardownKill{}, noop, fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
+	}
+	_, recovery, unresolved := gw.RelocationSnapshot()
+	if !unresolved {
+		return teardownKill{}, noop, nil
+	}
+	if recovery.State != git.RelocationRecoveryCleanupReady &&
+		recovery.State != git.RelocationRecoveryCleanupFinalizing {
+		return teardownKill{}, noop, fmt.Errorf(
+			"%w: kill cleanup has unresolved worktree recovery state %s",
+			ErrWorkspaceStateUnknown, recovery.State,
+		)
+	}
+	claim, err := gw.ClaimRelocationSource()
+	if err != nil {
+		return teardownKill{}, noop, fmt.Errorf("%w: cannot claim cleanup-ready worktree: %v", ErrWorkspaceStateUnknown, err)
+	}
+	handled := false
+	mode := teardownKill{cleanupClaim: &claim, claimHandled: &handled}
+	return mode, func() {
+		if !handled {
+			gw.PreserveRelocationClaim(claim)
+		}
+	}, nil
+}
 
 // closeTab waits for the pane to exit before the worktree delete in
 // handleWorktree: a process still flushing state mid-shutdown races git's
 // recursive delete and leaves a half-deleted directory ("Directory not empty",
 // #802). Best-effort for anything tmux ANSWERED with; an unknown stops the core.
-func (teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+var killCloseTab = func(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
 	return closeTabForDestructiveTeardown(ts, "kill", title, tabName)
 }
 
-func (teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
+func (teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	return killCloseTab(ts, title, tabName)
+}
+
+func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
 	if gw == nil {
 		return stateKnown, nil
 	}
-	cleanupState, err := gw.Cleanup()
+	var cleanupState git.CleanupState
+	var err error
+	if m.cleanupClaim != nil {
+		cleanupState, err = gw.CleanupClaimedRepoGone(*m.cleanupClaim)
+		*m.claimHandled = true
+	} else {
+		cleanupState, err = gw.Cleanup()
+	}
 	// Same rule as closeTab, one layer down (#1917), and read off Cleanup's own
 	// reported STATE rather than re-derived from its error here. A git command that
 	// ANSWERED with a failure leaves Cleanup's #802/#726 decision tree in charge and
