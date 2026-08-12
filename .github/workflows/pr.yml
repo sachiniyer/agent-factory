@@ -70,11 +70,46 @@ jobs:
       # foundation. What it must never become is an allowlist of permanent
       # exceptions, which is why nothing here suppresses individual symbols.
       - name: Report dead code
+        # This reporter is advisory by design. The explicit failure branches
+        # preserve "analysis unavailable" in the summary; continue-on-error is
+        # the final backstop so a reporter/tooling defect cannot fail required Lint.
+        continue-on-error: true
         run: |
+          report_unavailable() {
+            phase=$1
+            details=$2
+            if [ -n "$details" ]; then
+              printf '%s\n' "$details" >&2
+            fi
+            reason=$(printf '%s\n' "$details" | awk 'NF { line=$0 } END { print line }')
+            if [ -z "$reason" ]; then
+              reason="command exited non-zero without a diagnostic"
+            fi
+            message="$phase: $reason"
+            echo "dead-code report unavailable: $message"
+            {
+              echo "### Dead code — report unavailable"
+              echo
+              echo "dead-code report unavailable: $message"
+              echo
+              echo "The advisory analysis did not run to completion. Its absence is not a clean report."
+            } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          }
+
           # Pinned for reproducibility; v0.48.0 supports the Go 1.25 language version
           # (older x/tools cannot analyze go1.25 source).
-          go install golang.org/x/tools/cmd/deadcode@v0.48.0
-          out=$("$(go env GOPATH)/bin/deadcode" -test ./...)
+          if ! install_output=$(go install golang.org/x/tools/cmd/deadcode@v0.48.0 2>&1); then
+            report_unavailable "tool installation failed" "$install_output"
+            exit 0
+          fi
+          if ! gopath=$(go env GOPATH 2>&1); then
+            report_unavailable "tool location lookup failed" "$gopath"
+            exit 0
+          fi
+          if ! out=$("$gopath/bin/deadcode" -test ./... 2>&1); then
+            report_unavailable "analysis failed" "$out"
+            exit 0
+          fi
           if [ -n "$out" ]; then
             # A workflow command is ONE line: a bare `echo "$out"` after it is an
             # ordinary log record, not part of the annotation, so the annotation
