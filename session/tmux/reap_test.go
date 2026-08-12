@@ -196,11 +196,10 @@ func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringCapture(t *te
 		"AF_SESSION/AF_HOME-marked helper survived after tmux vanished during process capture")
 }
 
-// A generic post-marker capture failure is just as incomplete as a capture
-// that reports the session vanished. Once kill-session succeeds, reset must
-// recover the process set from the durable AF_SESSION/AF_HOME markers rather
-// than reading the failed capture's nil result as "no processes".
-func TestCleanupSessionsReapsMarkedProcessAfterGenericCaptureFailure(t *testing.T) {
+// A generic post-marker capture failure is not an empty process set. Reset must
+// refuse before kill-session, preserving the live session as the retry fence;
+// otherwise the next reset would see no session and launder the failed read.
+func TestCleanupSessionsGenericCaptureFailureRemainsRefusedAcrossRetry(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
 
@@ -209,17 +208,28 @@ func TestCleanupSessionsReapsMarkedProcessAfterGenericCaptureFailure(t *testing.
 	marked := spawnMarkedSessionWithEscapee(t, name, home)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	err := CleanupSessions(failSecondPaneCaptureExecutor(t))
+	cmdExec := failPostMarkerPaneCaptureExecutor(t)
+	err := CleanupSessions(cmdExec)
 	require.ErrorContains(t, err, "injected generic list-panes failure",
-		"a successful marker sweep cannot prove that an unmarked process was not missed")
-	require.False(t, proctree.AliveSame(marked),
-		"AF_SESSION/AF_HOME-marked helper survived a generic post-marker capture failure")
+		"a failed capture must stop cleanup before it destroys the retry fence")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "generic capture failure must leave the session alive")
+	require.True(t, proctree.AliveSame(marked),
+		"a process still owned by the retained live session must not be reaped")
+
+	err = CleanupSessions(cmdExec)
+	require.ErrorContains(t, err, "injected generic list-panes failure",
+		"retry must not launder the prior incomplete capture into an empty session set")
+	exists, known, probeErr = probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "retry must retain the session until capture succeeds")
 }
 
 // A generic capture error can accompany a verified partial process tree. The
-// verified candidates remain authorized by the owned live session, even when a
-// process sanitized away its diagnostic markers. Reap that tree as requested
-// teardown; the marker fallback only supplements what capture missed.
+// session may also own a process that sanitized away its diagnostic markers.
+// The partial tree cannot prove what capture missed, so it must remain live
+// with the session until a later complete capture authorizes teardown.
 func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T) {
 	testguard.IsolateTmux(t)
 	shrinkReapWaits(t)
@@ -238,11 +248,14 @@ func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T)
 
 	err = CleanupSessions(partiallyFailSecondPaneCaptureExecutor(t))
 	require.ErrorContains(t, err, "not-a-pane-pid",
-		"an incomplete capture must remain a refusal after the recoverable candidates are reaped")
-	require.False(t, proctree.AliveSame(escapee),
-		"verified unmarked helper from the partial capture survived requested cleanup")
+		"a partial capture must remain a refusal before session teardown")
+	require.True(t, proctree.AliveSame(escapee),
+		"a partial capture must not reap processes while their session remains live")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "partial capture failure must leave the session alive")
 	require.NotContains(t, warnings.String(), "leaked past its pane tree",
-		"a verified process from the requested teardown must not be classified as an escaped leak")
+		"a process in a retained live session must not be classified as an escaped leak")
 }
 
 // A pane can launch a helper after the pre-marker process snapshot and before
@@ -432,7 +445,7 @@ func vanishOnSecondPaneCaptureExecutor(t *testing.T, name string) cmd.Executor {
 	}
 }
 
-func failSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
+func failPostMarkerPaneCaptureExecutor(t *testing.T) cmd.Executor {
 	t.Helper()
 	realExec := cmd.MakeExecutor()
 	paneCaptures := 0
@@ -441,7 +454,7 @@ func failSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
 		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
 			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
 				paneCaptures++
-				if paneCaptures == 2 {
+				if paneCaptures%2 == 0 {
 					return nil, fmt.Errorf("injected generic list-panes failure")
 				}
 			}

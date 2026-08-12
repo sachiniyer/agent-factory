@@ -617,6 +617,24 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	for _, match := range matches {
 		leakedBySession[match], captureErrBySession[match] = captureSessionProcessTrees(cmdExec, match)
 	}
+	// Capture completeness is a precondition for killing a live session. If a
+	// generic read fails, keep every session alive and return the failure before
+	// destroying the pane ancestry that a retry needs. Killing first and merely
+	// returning an error is not fail-closed: the next reset would list no session
+	// and launder the prior unknown into an empty set. The vanished sentinel is
+	// different—the session is already gone, so the marker recovery below is the
+	// only remaining evidence path.
+	var incompleteCaptures error
+	for _, match := range matches {
+		captureErr := captureErrBySession[match]
+		if captureErr != nil && !errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
+			incompleteCaptures = errors.Join(incompleteCaptures,
+				fmt.Errorf("cannot capture tmux session %s processes before cleanup: %w", match, captureErr))
+		}
+	}
+	if incompleteCaptures != nil {
+		return fmt.Errorf("refusing to kill tmux sessions while their process set is incomplete: %w", incompleteCaptures)
+	}
 
 	// Only sessions that are actually gone get their captured trees reaped —
 	// a session that survives its kill still owns its processes.
@@ -685,28 +703,6 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			}(match, captureErr)
 			continue
 		}
-		if captureErr != nil {
-			// A generic capture error can accompany a verified partial tree. The
-			// owned session was still live when that tree was captured and its kill
-			// later succeeded, so reap every verified candidate as requested
-			// teardown. Then scan immutable markers to supplement whatever the
-			// incomplete capture missed; marker provenance is not required for the
-			// already-authorized pane descendants.
-			captured := mergeCapturedProcesses(preMarkerProcesses[match], leakedBySession[match])
-			wg.Add(1)
-			go func(match string, captureErr error, captured []proctree.Process) {
-				defer wg.Done()
-				reapSessionProcesses(reapOnRequest, match, captured, reapGraceWait, reapTermWait)
-				reapErr := reapVanishedSessionProcesses(match, ownHome, nil, nil)
-				// Marker recovery can find attributable processes that capture missed,
-				// but it cannot prove absence for a process that sanitized its launch
-				// environment. Preserve the failed read after both recovery sweeps so
-				// reset cannot spend incomplete evidence on deleting worktrees.
-				processSweepErrs <- fmt.Errorf("tmux session %s process capture was incomplete before its successful kill; refusing cleanup after verified process and marker sweeps: %w",
-					match, errors.Join(captureErr, reapErr))
-			}(match, captureErr, captured)
-			continue
-		}
 		leaked := leakedBySession[match]
 		if len(leaked) == 0 {
 			continue
@@ -727,18 +723,6 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	}
 	return errors.Join(killErr, processSweepErr)
 }
-
-func mergeCapturedProcesses(captures ...[]proctree.Process) []proctree.Process {
-	var merged []proctree.Process
-	byPID := make(map[int]int)
-	for _, capture := range captures {
-		for _, process := range capture {
-			merged = addOrReplaceOrphanCandidate(merged, byPID, process)
-		}
-	}
-	return merged
-}
-
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
 	var sweepErr error
 	if captureErr != nil {
