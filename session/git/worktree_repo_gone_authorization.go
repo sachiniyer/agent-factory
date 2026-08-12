@@ -197,9 +197,18 @@ func waitForRepoGoneOriginProbe(repoPath string, flight *repoGoneOriginProbeFlig
 type cleanupPathInspection struct {
 	identity   pathIdentity
 	generation string
+	empty      bool
 }
 
 func inspectRelocationCleanupIdentity(path string) (cleanupPathInspection, error) {
+	return inspectRelocationCleanupPath(path, false)
+}
+
+func inspectFinalizingCleanupIdentity(path string) (cleanupPathInspection, error) {
+	return inspectRelocationCleanupPath(path, true)
+}
+
+func inspectRelocationCleanupPath(path string, inspectEmpty bool) (cleanupPathInspection, error) {
 	base, err := relocationPathIdentity(path)
 	if err != nil {
 		return cleanupPathInspection{}, err
@@ -230,17 +239,36 @@ func inspectRelocationCleanupIdentity(path string) (cleanupPathInspection, error
 	if err != nil {
 		return cleanupPathInspection{}, err
 	}
-	return cleanupPathInspection{identity: opened, generation: generation}, nil
+	empty := false
+	if inspectEmpty {
+		names, err := directoryNames(directory, path)
+		if err != nil {
+			return cleanupPathInspection{}, err
+		}
+		empty = len(names) == 0
+	}
+	return cleanupPathInspection{identity: opened, generation: generation, empty: empty}, nil
 }
 
 func boundedRelocationCleanupIdentity(path string) (cleanupPathInspection, error) {
+	return boundedRelocationCleanupInspection(path, inspectRelocationCleanupIdentity)
+}
+
+func boundedFinalizingCleanupIdentity(path string) (cleanupPathInspection, error) {
+	return boundedRelocationCleanupInspection(path, inspectFinalizingCleanupIdentity)
+}
+
+func boundedRelocationCleanupInspection(
+	path string,
+	inspect func(string) (cleanupPathInspection, error),
+) (cleanupPathInspection, error) {
 	type result struct {
 		inspection cleanupPathInspection
 		err        error
 	}
 	resultC := make(chan result, 1)
 	go func() {
-		inspection, err := inspectRelocationCleanupIdentity(path)
+		inspection, err := inspect(path)
 		resultC <- result{inspection: inspection, err: err}
 	}()
 	timer := time.NewTimer(relocationIdentityTimeout)

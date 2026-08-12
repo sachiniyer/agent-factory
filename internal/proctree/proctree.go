@@ -471,6 +471,14 @@ func WorkingDir(pid int) (string, bool) {
 	return readWorkingDir(pid)
 }
 
+// OpenWorkingDir returns an opened handle to pid's exact current working
+// directory plus its display path. The handle is identity-anchored: callers may
+// walk its parents without trusting a pathname that another same-UID process can
+// rename or replace between observation and a destructive decision.
+func OpenWorkingDir(pid int) (*os.File, string, bool) {
+	return openWorkingDir(pid)
+}
+
 // LookupEnv reads key from the process's initial environment and reports which
 // of the three things happened. Callers MUST handle EnvUnknown explicitly and
 // must never collapse it into EnvAbsent.

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 	"unsafe"
@@ -329,7 +330,7 @@ func readCPUTime(pid int) (time.Duration, error) {
 // so Linux CI exercises the offset arithmetic that this file can only feed —
 // see that file for why the offsets are validated rather than trusted, and for
 // what a wrong one would cost on the destructive reap path.
-func readWorkingDir(pid int) (string, bool) {
+func readWorkingDirInfo(pid int) (path string, device, inode uint64, mode uint32, ok bool) {
 	var buf [vnodePathInfoSize]byte
 	n, _, errno := syscall.Syscall6(
 		uintptr(unix.SYS_PROC_INFO),
@@ -346,14 +347,38 @@ func readWorkingDir(pid int) (string, bool) {
 		// proc_vnodepathinfo this reports unknown and the reap goes back to
 		// no-opping — the same safe degradation it had before #2050, never a
 		// half-decoded path.
-		return "", false
+		return "", 0, 0, 0, false
 	}
 	if n != uintptr(len(buf)) {
 		// A short write means the kernel's struct is not the one vnodepathinfo.go
 		// describes, so the bytes at the cwd offset are not the cwd. Same reasoning
 		// as readCPUTime's length check, with a sharper consequence: this value is
 		// what reapWorktreeWriters signals on.
-		return "", false
+		return "", 0, 0, 0, false
 	}
-	return cwdFromVnodePathInfo(buf[:n])
+	return cwdIdentityFromVnodePathInfo(buf[:n])
+}
+
+func readWorkingDir(pid int) (string, bool) {
+	path, _, _, _, ok := readWorkingDirInfo(pid)
+	return path, ok
+}
+
+func openWorkingDir(pid int) (*os.File, string, bool) {
+	path, device, inode, mode, ok := readWorkingDirInfo(pid)
+	if !ok {
+		return nil, "", false
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, "", false
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil ||
+		uint64(stat.Dev) != device || uint64(stat.Ino) != inode ||
+		uint32(stat.Mode)&unix.S_IFMT != mode&unix.S_IFMT {
+		_ = directory.Close()
+		return nil, "", false
+	}
+	return directory, path, true
 }

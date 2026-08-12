@@ -66,12 +66,13 @@ func TestRestoreArchived_RepoGoneKeepsIdentityUntilKill(t *testing.T) {
 	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
 
+	inst.SetBackend(&session.LocalBackend{})
 	_, err = manager.KillSession(KillSessionRequest{
 		Title: "repo-gone-authorization", RepoID: repoID,
 	})
-	require.Error(t, err, "slice 1 must refuse cleanup-ready kill before pane teardown")
-	assert.False(t, inst.UserKilled(), "refusal must happen before the kill tombstone")
-	assert.True(t, exists(archivedPath), "refused kill must leave the archive intact")
+	require.NoError(t, err, "slice 2 must consume cleanup-ready through the live descriptor transaction")
+	assert.True(t, inst.UserKilled(), "successful cleanup must commit the user kill")
+	assert.False(t, exists(archivedPath), "successful cleanup must remove the exact authorized archive")
 }
 
 func TestRestoreArchived_RepoDisappearsAfterGuardKeepsCleanupIdentity(t *testing.T) {

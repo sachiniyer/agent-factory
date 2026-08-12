@@ -2,12 +2,26 @@ package proctree
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCwdIdentityFromVnodePathInfo(t *testing.T) {
+	buf := vnodePathInfoBuf("/Users/x/af/worktrees/s1")
+	binary.LittleEndian.PutUint32(buf[vnodePathInfoCwdDevOffset:], 41)
+	binary.LittleEndian.PutUint16(buf[vnodePathInfoCwdModeOffset:], 0o40755)
+	binary.LittleEndian.PutUint64(buf[vnodePathInfoCwdInoOffset:], 99)
+	path, device, inode, mode, ok := cwdIdentityFromVnodePathInfo(buf)
+	require.True(t, ok)
+	assert.Equal(t, "/Users/x/af/worktrees/s1", path)
+	assert.Equal(t, uint64(41), device)
+	assert.Equal(t, uint64(99), inode)
+	assert.Equal(t, uint32(0o40755), mode)
+}
 
 // cField is one C struct member, as size and alignment in bytes.
 type cField struct {

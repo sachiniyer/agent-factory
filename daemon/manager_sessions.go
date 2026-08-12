@@ -203,9 +203,27 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// instead of the old any-non-nil return reporting "its workspace was left
 		// intact … retried automatically" on a fully successful reap and flickering the
 		// row for one poll. Mirrors the create-cleanup gate in manager_create.go.
-		if teardownErr = instance.Kill(); session.TeardownStateUnknown(teardownErr) {
+		restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
+			return m.persistInstanceErr(repoID, instance)
+		})
+		teardownErr = instance.Kill()
+		restoreCheckpoint()
+		if session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
 			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
+		}
+		// Checkpoint the settled live teardown BEFORE either fallible tail step.
+		// CleanupClaimedRepoGone consumes its in-memory recovery record after the
+		// identity-anchored delete; if the editor fence or row delete then fails,
+		// leaving cleanup_ready on disk makes a restart reinterpret the now-absent
+		// archive as a changed identity and strand the tombstone forever. Persisting
+		// the instance's post-teardown projection (including the consumed worktree
+		// handle) makes the surviving row an accurate retry handle. This applies to
+		// every known live teardown so a failed checkpoint is retried by the poll even
+		// after the in-memory recovery handle is gone.
+		stage.set("persisting settled teardown")
+		if err := m.persistInstanceErr(repoID, instance); err != nil {
+			return session.InstanceData{}, fmt.Errorf("kill of session %q completed its live teardown but could not record that settlement; its tombstoned row was kept and will be retried automatically: %w", req.Title, err)
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")

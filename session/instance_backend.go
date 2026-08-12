@@ -298,8 +298,8 @@ func (i *Instance) PreserveWorktreeRelocationClaimAsUnresolved(claim git.Relocat
 }
 
 // PrepareWorktreeRelocationClaimForCleanup persists a resolved archived-path
-// identity as a cleanup-only obligation. Slice 1 deliberately leaves every
-// cleanup-ready kill refused; later slices add the destructive consumer.
+// identity as a cleanup-only obligation. It is the non-relocating completion
+// path used when the origin repo is gone.
 func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.RelocationClaim) error {
 	i.mu.RLock()
 	gw := i.gitWorktree
@@ -310,9 +310,23 @@ func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.Relocation
 	return gw.PrepareRelocationClaimForCleanup(claim)
 }
 
-// ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
-// before kill intent is persisted and again at the local backend boundary, so a
-// recovery record can never be consulted only after panes were destroyed.
+// SetRepoGoneFinalizationCheckpoint installs the daemon's durable writer for
+// the post-content, pre-root cleanup boundary. Kill runs backend teardown outside
+// i.mu, so the callback may safely snapshot this instance for persistence.
+func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) func() {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return func() {}
+	}
+	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
+}
+
+// ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
+// backend separately consumes and revalidates the exact cleanup identity before
+// pane teardown; it must not repeat the origin-path admission after the durable
+// kill has committed.
 func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	i.mu.RLock()
 	gw := i.gitWorktree
@@ -322,6 +336,13 @@ func (i *Instance) ValidateWorktreeDestructionAdmission() error {
 	}
 	path, recovery, unresolved := gw.RelocationSnapshot()
 	if !unresolved || recovery.State == git.RelocationRecoveryCleanupStalled {
+		return nil
+	}
+	if recovery.State == git.RelocationRecoveryCleanupReady ||
+		recovery.State == git.RelocationRecoveryCleanupFinalizing {
+		if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+			return fmt.Errorf("cleanup worktree in state %s at %s is not admissible for repo-gone kill: %w", recovery.State, path, err)
+		}
 		return nil
 	}
 	return fmt.Errorf(

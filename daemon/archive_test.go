@@ -793,7 +793,8 @@ func TestRestoreArchived_RejectsPendingKill(t *testing.T) {
 
 // TestRestoreArchived_RepoGoneLeavesArchiveIntact: when the origin repo has been
 // deleted, restore fails with an actionable message, leaves the archive intact,
-// and records cleanup authorization that this producer-only slice still refuses.
+// and records cleanup authorization that the live cleanup slice admits only
+// after revalidating the still-missing origin.
 func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
@@ -831,8 +832,8 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
 	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
 	assert.True(t, recovery.IdentityKnown)
-	assert.Error(t, inst.ValidateWorktreeDestructionAdmission(),
-		"slice 1 must leave cleanup_ready blocked until the live consumer lands")
+	assert.NoError(t, inst.ValidateWorktreeDestructionAdmission(),
+		"slice 2 must admit the exact cleanup identity while the origin remains gone")
 }
 
 // TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location

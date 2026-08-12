@@ -643,7 +643,7 @@ func projectRelocationRecoveryForPreviousRelease(recovery *GitWorktreeRelocation
 		return
 	}
 	switch recovery.State {
-	case git.RelocationRecoveryCleanupReady:
+	case git.RelocationRecoveryCleanupReady, git.RelocationRecoveryCleanupFinalizing:
 		// The immediately preceding reader understands recovery but not this
 		// additive lifecycle. Preserve the actual values for current readers, and
 		// give the old reader ownership values which remain safe even after its
@@ -674,7 +674,8 @@ func runtimeRelocationRecoveryState(
 			recovery.CleanupLifecycle, recovery.State,
 		)
 	}
-	if recovery.CleanupLifecycle != git.RelocationRecoveryCleanupReady {
+	if recovery.CleanupLifecycle != git.RelocationRecoveryCleanupReady &&
+		recovery.CleanupLifecycle != git.RelocationRecoveryCleanupFinalizing {
 		return "", fmt.Errorf("unknown cleanup relocation lifecycle %q", recovery.CleanupLifecycle)
 	}
 	return recovery.CleanupLifecycle, nil

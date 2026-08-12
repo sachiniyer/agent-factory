@@ -501,6 +501,30 @@ func retainedRouteEntries(routes []copiedDirectoryRoute) int {
 }
 
 func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, false, nil)
+}
+
+func removeCopiedEntryRestoringName(directory *os.File, path string, entry copiedEntry, protectUnexpected bool) error {
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true, nil)
+}
+
+func removeCopiedEntryRestoringNameWithCheckpoint(
+	directory *os.File,
+	path string,
+	entry copiedEntry,
+	protectUnexpected bool,
+	checkpoint func(string) error,
+) error {
+	return removeCopiedEntryWithRestore(directory, path, entry, protectUnexpected, true, checkpoint)
+}
+
+func removeCopiedEntryWithRestore(
+	directory *os.File,
+	path string,
+	entry copiedEntry,
+	protectUnexpected, restoreNameOnUnlinkFailure bool,
+	checkpoint func(string) error,
+) error {
 	if err := removeTreeBeforeEntryClaim(directory, path); err != nil {
 		return err
 	}
@@ -516,6 +540,11 @@ func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, prote
 	if err != nil {
 		return err
 	}
+	if checkpoint != nil {
+		if err := checkpoint(filepath.Join(path, claimedName)); err != nil {
+			return err
+		}
+	}
 	if err := renameAtNoReplace(int(directory.Fd()), entry.name, int(directory.Fd()), claimedName); err != nil {
 		return fmt.Errorf("failed to secure entry %s for removal: %w", filepath.Join(path, entry.name), err)
 	}
@@ -527,12 +556,30 @@ func removeCopiedEntry(directory *os.File, path string, entry copiedEntry, prote
 			restoreErr,
 		)
 	}
+	if err := removeTreeAfterEntryClaim(directory, path, claimedName, entry.name); err != nil {
+		return err
+	}
 	flags := 0
 	if entry.directory != nil {
 		flags = unix.AT_REMOVEDIR
 	}
 	if err := unix.Unlinkat(int(directory.Fd()), claimedName, flags); err != nil {
-		return fmt.Errorf("failed to remove secured entry %s: %w", filepath.Join(path, claimedName), err)
+		unlinkErr := fmt.Errorf("failed to remove secured entry %s: %w", filepath.Join(path, claimedName), err)
+		if !restoreNameOnUnlinkFailure {
+			return unlinkErr
+		}
+		if restoreErr := restoreClaimedSource(directory, claimedName, entry.name); restoreErr != nil {
+			return errors.Join(unlinkErr, fmt.Errorf(
+				"failed to restore secured entry to %s: %w", filepath.Join(path, entry.name), restoreErr,
+			))
+		}
+		restored, restoreErr := identityAt(directory, entry.name)
+		if restoreErr != nil || !entry.source.same(restored) {
+			return errors.Join(unlinkErr, changedCleanupError(
+				protectUnexpected, "restored entry %s no longer identifies the claimed source", filepath.Join(path, entry.name),
+			))
+		}
+		return unlinkErr
 	}
 	return nil
 }

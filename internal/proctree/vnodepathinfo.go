@@ -1,6 +1,9 @@
 package proctree
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // This file decodes darwin's PROC_PIDVNODEPATHINFO buffer — the kernel's answer
 // to Linux's /proc/<pid>/cwd — and like procargs2.go it carries NO build tag,
@@ -66,6 +69,12 @@ const (
 	// vnodePathInfoCwdPathOffset is offsetof(pvi_cdir.vip_path) — where the
 	// working directory's NUL-terminated path starts.
 	vnodePathInfoCwdPathOffset = 152
+	// The first fields of pvi_cdir.vip_vi.vi_stat identify the cwd vnode.
+	// Darwin uses these to reject a pathname replacement between proc_info and
+	// open(2), before the handle is trusted by a destructive caller.
+	vnodePathInfoCwdDevOffset  = 0
+	vnodePathInfoCwdModeOffset = 4
+	vnodePathInfoCwdInoOffset  = 8
 )
 
 // cwdFromVnodePathInfo extracts the working directory from a
@@ -112,4 +121,15 @@ func cwdFromVnodePathInfo(buf []byte) (string, bool) {
 		}
 	}
 	return string(path), true
+}
+
+func cwdIdentityFromVnodePathInfo(buf []byte) (path string, device, inode uint64, mode uint32, ok bool) {
+	path, ok = cwdFromVnodePathInfo(buf)
+	if !ok {
+		return "", 0, 0, 0, false
+	}
+	device = uint64(binary.LittleEndian.Uint32(buf[vnodePathInfoCwdDevOffset:]))
+	mode = uint32(binary.LittleEndian.Uint16(buf[vnodePathInfoCwdModeOffset:]))
+	inode = binary.LittleEndian.Uint64(buf[vnodePathInfoCwdInoOffset:])
+	return path, device, inode, mode, inode != 0
 }

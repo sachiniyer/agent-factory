@@ -211,6 +211,69 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 		"the current reader must restore the actual branch provenance")
 }
 
+func TestInstanceData_CleanupFinalizingIsRollbackSafeAndRoundTrips(t *testing.T) {
+	root := t.TempDir()
+	worktreePath := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(worktreePath, 0o755))
+	info, err := os.Stat(worktreePath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
+	gw, err := git.NewGitWorktreeFromStorage(
+		filepath.Join(root, "missing-repo"), worktreePath, "finalizing", "af/finalizing", "", false, true,
+	)
+	require.NoError(t, err)
+	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
+		State:             git.RelocationRecoveryCleanupFinalizing,
+		AlternatePath:     filepath.Join(root, ".af-delete-secured"),
+		IdentityKnown:     true,
+		Device:            uint64(stat.Dev),
+		Inode:             uint64(stat.Ino),
+		FileType:          uint32(stat.Mode & syscall.S_IFMT),
+		CleanupGeneration: "0123456789abcdef0123456789abcdef",
+	}))
+	inst, err := NewInstance(InstanceOptions{Title: "finalizing", Path: root, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
+	inst.SetStatusForTest(Archived)
+
+	payload, err := json.Marshal(inst.ToInstanceData().ForStorage())
+	require.NoError(t, err)
+	require.Contains(t, string(payload), `"state":"claim_stale"`)
+	require.Contains(t, string(payload), `"cleanup_lifecycle":"cleanup_finalizing"`)
+
+	var previous v10244InstanceData
+	require.NoError(t, json.Unmarshal(payload, &previous))
+	require.NotNil(t, previous.Worktree.RelocationRecovery)
+	require.Equal(t, git.RelocationRecoveryClaimStale, previous.Worktree.RelocationRecovery.State)
+	require.True(t, previous.Worktree.ExternalWorktree,
+		"v1.0.244 must keep the finalizing archive user-owned")
+	require.NotNil(t, previous.Worktree.BranchCreatedByUs)
+	require.False(t, *previous.Worktree.BranchCreatedByUs,
+		"v1.0.244 must not delete the finalizing archive branch")
+	require.True(t, previous.StartupStateUnknown,
+		"v1.0.244 must load the finalizing archive inert")
+
+	var legacy v10228InstanceData
+	require.NoError(t, json.Unmarshal(payload, &legacy))
+	require.True(t, legacy.StartupStateUnknown,
+		"v1.0.228 must load the finalizing archive inert")
+	require.True(t, legacy.Worktree.ExternalWorktree,
+		"v1.0.228 must make destructive worktree cleanup a no-op")
+	require.NotNil(t, legacy.Worktree.BranchCreatedByUs)
+	require.False(t, *legacy.Worktree.BranchCreatedByUs)
+
+	var current InstanceData
+	require.NoError(t, json.Unmarshal(payload, &current))
+	restored, err := FromInstanceData(current)
+	require.NoError(t, err)
+	recovery, retained := restored.gitWorktree.GetRelocationRecovery()
+	require.True(t, retained)
+	require.Equal(t, git.RelocationRecoveryCleanupFinalizing, recovery.State)
+	require.Equal(t, filepath.Join(root, ".af-delete-secured"), recovery.AlternatePath)
+}
+
 func TestInstanceData_ProjectsConsumedRelocationClaimUntilUse(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "worktree")
