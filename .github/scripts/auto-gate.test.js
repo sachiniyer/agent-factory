@@ -640,6 +640,65 @@ test("idempotent check-run updates retry transient failures", async () => {
   assert.equal(github.updatedChecks[0].check_run_id, 321);
 });
 
+test("rate-limited check-run updates retry but ordinary forbidden writes do not", async () => {
+  const rateLimitError = new Error("API rate limit exceeded");
+  rateLimitError.status = 403;
+  rateLimitError.response = {
+    headers: { "retry-after": "0", "x-ratelimit-remaining": "0" },
+  };
+  const existingDecision = checkRun({
+    id: 321,
+    name: decisionName(1465, HEAD_SHA),
+    externalId: decisionExternalId(1465, HEAD_SHA),
+    conclusion: "failure",
+  });
+  const rateLimitedGithub = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), existingDecision],
+    checkUpdateErrors: [rateLimitError],
+  });
+
+  await autoGate.reportDecision({
+    github: rateLimitedGithub,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: 1465,
+      headSha: HEAD_SHA,
+      baseRefName: "master",
+      isOpen: true,
+      shouldMerge: false,
+      summary: "BLOCKED: waiting",
+    },
+  });
+
+  assert.equal(rateLimitedGithub.checkUpdateAttempts, 2);
+
+  const forbiddenError = new Error("Resource not accessible by integration");
+  forbiddenError.status = 403;
+  const forbiddenGithub = fakeGateGithub({
+    checkRuns: [...happyCheckRuns(), existingDecision],
+    checkUpdateErrors: [forbiddenError],
+  });
+
+  await assert.rejects(
+    autoGate.reportDecision({
+      github: forbiddenGithub,
+      context: fakeContext(),
+      core: fakeCore(),
+      result: {
+        prNumber: 1465,
+        headSha: HEAD_SHA,
+        baseRefName: "master",
+        isOpen: true,
+        shouldMerge: false,
+        summary: "BLOCKED: waiting",
+      },
+    }),
+    /Resource not accessible by integration/,
+  );
+  assert.equal(forbiddenGithub.checkUpdateAttempts, 1);
+});
+
 test("exhausted aggregate invalidation prevents the transaction from merging", async () => {
   const error = new Error("fetch failed");
   error.status = 500;

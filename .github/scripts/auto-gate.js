@@ -25,6 +25,7 @@ const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 const RETRY_DELAYS_MS = [250, 1000];
+const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
 // GitHub reads are side-effect-free, and check-run updates are idempotent when
 // replayed by check_run_id. Check-run creates are different: external_id is
@@ -118,7 +119,7 @@ async function retryTransient(label, operation, { failureName, readFailure }) {
         failure.cause = error;
         throw failure;
       }
-      await delay(RETRY_DELAYS_MS[attempt]);
+      await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
     }
   }
 }
@@ -126,10 +127,50 @@ async function retryTransient(label, operation, { failureName, readFailure }) {
 function isRetryableGitHubError(error) {
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
-    return status === 408 || status === 429 || status >= 500;
+    return status === 408 || status === 429 || status >= 500 || isRateLimitError(error);
   }
   const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
   return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+function isRateLimitError(error) {
+  const status = Number(error?.status);
+  if (status === 429) {
+    return true;
+  }
+  if (status !== 403) {
+    return false;
+  }
+  const headers = githubErrorHeaders(error);
+  return (
+    headers["x-ratelimit-remaining"] === "0" ||
+    headers["retry-after"] !== undefined ||
+    /(?:API|secondary) rate limit|abuse detection/i.test(error?.message || "")
+  );
+}
+
+function retryDelayMilliseconds(error, fallback) {
+  if (!isRateLimitError(error)) {
+    return fallback;
+  }
+  const headers = githubErrorHeaders(error);
+  const retryAfterSeconds = Number(headers["retry-after"]);
+  const resetSeconds = Number(headers["x-ratelimit-reset"]);
+  const requestedDelay = Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+    ? retryAfterSeconds * 1000
+    : Number.isFinite(resetSeconds)
+      ? Math.max(0, resetSeconds * 1000 - Date.now())
+      : fallback;
+  // Honor GitHub's throttle timing without letting a bounded retry hold the
+  // serialized merge lane indefinitely. Exhaustion still fails closed.
+  return Math.min(Math.max(fallback, requestedDelay), MAX_RATE_LIMIT_DELAY_MS);
+}
+
+function githubErrorHeaders(error) {
+  const headers = error?.response?.headers || error?.headers || {};
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [name.toLowerCase(), String(value)]),
+  );
 }
 
 function isReadFailure(error) {
