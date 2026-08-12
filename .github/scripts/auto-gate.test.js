@@ -40,7 +40,7 @@ test("Auto Gate can be recovered manually by PR number", () => {
   );
   assert.match(
     workflow,
-    /core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)[\s\S]*?if \(failures\.length > 0\)[\s\S]*?throw new AggregateError/,
+    /core\.setOutput\("invalidated_heads", JSON\.stringify\(aggregateHeads\)\)[\s\S]*?if \(failures\.length > 0\)[\s\S]*?throw new AggregateError/,
   );
   assert.match(
     workflow,
@@ -85,6 +85,19 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.doesNotMatch(workflow, /^  pull_request:/m);
   assert.doesNotMatch(workflow, /AUTO_GATE_TOKEN/);
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
+});
+
+test("failed aggregate invalidations remain eligible for the repair lane", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+
+  assert.match(
+    workflow,
+    /for \(const aggregate of aggregateHeads\) \{[\s\S]*?core\.setOutput\("invalidated_heads", JSON\.stringify\(aggregateHeads\)\)[\s\S]*?if \(failures\.length > 0\)/,
+  );
+  assert.doesNotMatch(
+    workflow,
+    /core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)/,
+  );
 });
 
 test("manual recovery reports a previously absent gate distinctly", async () => {
