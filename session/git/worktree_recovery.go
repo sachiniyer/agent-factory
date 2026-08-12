@@ -760,6 +760,30 @@ func (g *GitWorktree) PrepareRelocationClaimForCleanup(claim RelocationClaim) er
 	return nil
 }
 
+func finalizingCleanupCandidateAdmission(path string, recovery *RelocationRecovery) (bool, error) {
+	identity, err := boundedRelocationPathIdentity(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect finalizing cleanup candidate %s: %w", path, err)
+	}
+	if !recovery.identity().same(identity) {
+		return false, nil
+	}
+	inspection, err := boundedFinalizingCleanupIdentity(path)
+	if err != nil {
+		return true, fmt.Errorf("inspect exact finalizing cleanup root %s: %w", path, err)
+	}
+	if !recovery.identity().same(inspection.identity) || inspection.generation != recovery.CleanupGeneration {
+		return true, fmt.Errorf("exact finalizing cleanup root %s changed during admission", path)
+	}
+	if !inspection.empty {
+		return true, fmt.Errorf("finalizing cleanup root %s was repopulated before the kill commit", path)
+	}
+	return true, nil
+}
+
 // ValidateRelocationCleanupAdmission rechecks a cleanup-ready record without
 // consuming it. Kill calls this before its tombstone and pane teardown; the
 // cleanup itself consumes a fresh claim and validates once more immediately
@@ -773,40 +797,32 @@ func (g *GitWorktree) ValidateRelocationCleanupAdmission() error {
 		return errors.Join(fmt.Errorf("worktree has no cleanup-ready relocation identity"), ErrRelocateStateUnknown)
 	}
 	recovery := g.relocationRecovery
-	identity, err := boundedRelocationPathIdentity(g.worktreePath)
 	if recovery.State == RelocationRecoveryCleanupFinalizing {
-		// This state was persisted only after the descriptor walk verified the
-		// claimed root empty. Exact identity means the empty marker remains;
-		// absence or replacement means there is nothing left that this row owns.
-		// Operational non-answers still fail closed because they cannot distinguish
-		// those cases from an unreadable exact marker.
-		if errors.Is(err, os.ErrNotExist) || (err == nil && !recovery.identity().same(identity)) {
-			return nil
-		}
-		if err == nil {
-			inspection, inspectionErr := boundedFinalizingCleanupIdentity(g.worktreePath)
-			if inspectionErr != nil {
-				return errors.Join(fmt.Errorf(
-					"cannot inspect exact finalizing cleanup root at %s: %w", g.worktreePath, inspectionErr,
-				), ErrRelocateStateUnknown)
-			}
-			if !recovery.identity().same(inspection.identity) ||
-				inspection.generation != recovery.CleanupGeneration {
-				return errors.Join(fmt.Errorf(
-					"exact finalizing cleanup root at %s changed during admission", g.worktreePath,
-				), ErrRelocateStateUnknown)
-			}
-			if !inspection.empty {
-				return errors.Join(fmt.Errorf(
-					"finalizing cleanup root %s was repopulated before the kill commit", g.worktreePath,
-				), ErrRelocateStateUnknown)
+		primaryMatches, primaryErr := finalizingCleanupCandidateAdmission(g.worktreePath, recovery)
+		if primaryMatches {
+			if primaryErr != nil {
+				return errors.Join(primaryErr, ErrRelocateStateUnknown)
 			}
 			return nil
 		}
-		return errors.Join(fmt.Errorf(
-			"cannot inspect finalizing cleanup root %s: %w", g.worktreePath, err,
-		), ErrRelocateStateUnknown)
+		if recovery.AlternatePath != "" {
+			alternateMatches, alternateErr := finalizingCleanupCandidateAdmission(recovery.AlternatePath, recovery)
+			if alternateMatches {
+				if alternateErr != nil {
+					return errors.Join(alternateErr, ErrRelocateStateUnknown)
+				}
+				return nil
+			}
+			if alternateErr != nil {
+				return errors.Join(alternateErr, ErrRelocateStateUnknown)
+			}
+		}
+		if primaryErr != nil {
+			return errors.Join(primaryErr, ErrRelocateStateUnknown)
+		}
+		return nil
 	}
+	identity, err := boundedRelocationPathIdentity(g.worktreePath)
 	if err != nil {
 		// A failed read is not evidence of a changed identity. Keep the exact
 		// cleanup authorization retryable unless the path is conclusively absent.

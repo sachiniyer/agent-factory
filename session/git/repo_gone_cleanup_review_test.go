@@ -44,10 +44,22 @@ func TestCleanupClaimedRepoGone_DoubleFailureRetainsSecuredRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(recovery.AlternatePath, "late-work.txt")); err != nil {
 		t.Fatalf("persisted alternate does not identify the secured archive: %v", err)
 	}
+	if err := gw.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("repopulated secured finalization root must be refused before the kill commit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "replacement.txt")); err != nil {
+		t.Fatalf("pre-commit refusal disturbed the same-path replacement: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(recovery.AlternatePath, "late-work.txt")); err != nil {
+		t.Fatalf("pre-commit refusal disturbed the secured archive: %v", err)
+	}
 
 	removeTreeAfterEntryClaim = previousAfterClaim
 	if err := os.Remove(filepath.Join(recovery.AlternatePath, "late-work.txt")); err != nil {
 		t.Fatalf("empty secured root for retry: %v", err)
+	}
+	if err := gw.ValidateRelocationCleanupAdmission(); err != nil {
+		t.Fatalf("empty secured finalization root should pass admission: %v", err)
 	}
 	retry, err := gw.ClaimRelocationSource()
 	if err != nil {
