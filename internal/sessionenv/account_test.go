@@ -357,6 +357,7 @@ func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
 		`python3 -c 'import os; os.environ["CODEX_HOME"]="/other"; os.execvp("codex", ["codex"])'`,
+		`env python3.13 -c 'import os; os.environ["CODEX_HOME"]="/other"'`,
 		`node -e 'process.env.CODEX_HOME="/other"'`,
 		`perl -e '$ENV{CODEX_HOME}="/other"'`,
 		`ruby -e 'ENV["CODEX_HOME"]="/other"'`,

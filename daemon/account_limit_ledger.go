@@ -50,15 +50,15 @@ type accountLimitEvidenceLoader func() ([]session.AccountLimitObservationData, e
 func loadAccountLimitEvidenceSnapshot(
 	loadPersisted, loadRetained accountLimitEvidenceLoader,
 ) ([]session.AccountLimitObservationData, error) {
-	retained, err := loadRetained()
-	if err != nil {
-		return nil, err
-	}
 	persisted, err := loadPersisted()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load persisted account-limit evidence: %w", err)
 	}
-	return append(retained, persisted...), nil
+	retained, err := loadRetained()
+	if err != nil {
+		return nil, fmt.Errorf("load retained account-limit evidence: %w", err)
+	}
+	return append(persisted, retained...), nil
 }
 
 // loadPersistedAccountLimitObservations reads quota evidence straight from

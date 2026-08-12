@@ -221,14 +221,52 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	switch filepath.Base(words[0]) {
+	commandName := filepath.Base(words[0])
+	switch commandName {
 	case "sh", "bash", "dash", "ksh", "mksh", "zsh":
 		return true
-	case "command", "nice":
+	case "command", "nice", "nohup", "setsid", "timeout", "chrt", "ionice", "stdbuf", "xargs":
 		return true
-	default:
+	}
+	return accountEnvironmentInterpreter(commandName)
+}
+
+// accountEnvironmentInterpreter identifies executables whose ordinary
+// arguments are program text or a program file. Their child launches and
+// environment mutations are hidden from the shell parser above, so treating
+// them like a plain process would turn an unreadable identity boundary into an
+// assumption. Versioned runtime names are accepted only when the suffix is
+// numeric (with optional dots), avoiding broad prefix matches on unrelated
+// tools such as python-config.
+func accountEnvironmentInterpreter(commandName string) bool {
+	switch commandName {
+	case "node", "nodejs", "awk", "gawk", "mawk", "nawk", "sed", "Rscript", "julia", "tclsh", "wish", "groovy":
+		return true
+	}
+	for _, stem := range []string{"python", "pypy", "perl", "ruby", "php", "lua", "luajit"} {
+		if commandName == stem || numericVersionSuffix(commandName, stem) {
+			return true
+		}
+	}
+	return false
+}
+
+func numericVersionSuffix(commandName, stem string) bool {
+	suffix := strings.TrimPrefix(commandName, stem)
+	if suffix == commandName || suffix == "" {
 		return false
 	}
+	hasDigit := false
+	for _, char := range suffix {
+		switch {
+		case char >= '0' && char <= '9':
+			hasDigit = true
+		case char == '.':
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func undeclaredAccountArguments(command string, proof commandProof) ([]string, bool) {
