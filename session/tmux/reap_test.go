@@ -226,6 +226,32 @@ func TestCleanupSessionsGenericCaptureFailureRemainsRefusedAcrossRetry(t *testin
 	require.True(t, known && exists, "retry must retain the session until capture succeeds")
 }
 
+// A generic capture refusal for one live session must not strand another
+// session that already vanished during the same capture batch. The latter has
+// no live tmux fence to preserve, so consume its saved marker evidence before
+// returning the batch refusal.
+func TestCleanupSessionsRecoversVanishedSessionBeforeGenericCaptureRefusal(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const vanishedName = "af_mixed_vanished"
+	const failedName = "af_mixed_failed"
+	home := t.TempDir()
+	vanished := spawnMarkedSessionWithEscapee(t, vanishedName, home)
+	retained := spawnMarkedSessionWithEscapee(t, failedName, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	err := CleanupSessions(mixedCaptureFailureExecutor(t, vanishedName, failedName))
+	require.ErrorContains(t, err, "injected generic list-panes failure")
+	require.False(t, proctree.AliveSame(vanished),
+		"marked helper from the already-vanished session was stranded by another session's refusal")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), failedName)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "the generically unreadable session must remain live")
+	require.True(t, proctree.AliveSame(retained),
+		"the retained live session must keep ownership of its process")
+}
+
 // A generic capture error can accompany a verified partial process tree. The
 // session may also own a process that sanitized away its diagnostic markers.
 // The partial tree cannot prove what capture missed, so it must remain live
@@ -478,6 +504,36 @@ func partiallyFailSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
 				}
 			}
 			return realExec.Output(command)
+		},
+	}
+}
+
+func mixedCaptureFailureExecutor(t *testing.T, vanishedName, failedName string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := make(map[string]int)
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) <= 1 || command.Args[1] != "list-panes" {
+				return realExec.Output(command)
+			}
+			joined := strings.Join(command.Args, " ")
+			for _, name := range []string{vanishedName, failedName} {
+				if strings.Contains(joined, name) {
+					paneCaptures[name]++
+				}
+			}
+			switch {
+			case paneCaptures[vanishedName] == 2 && strings.Contains(joined, vanishedName):
+				out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(vanishedName)).CombinedOutput()
+				require.NoError(t, err, "kill vanished fixture session: %s", out)
+				return realExec.Output(command)
+			case paneCaptures[failedName] == 2 && strings.Contains(joined, failedName):
+				return nil, fmt.Errorf("injected generic list-panes failure")
+			default:
+				return realExec.Output(command)
+			}
 		},
 	}
 }

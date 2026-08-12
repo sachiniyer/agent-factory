@@ -633,7 +633,28 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		}
 	}
 	if incompleteCaptures != nil {
-		return fmt.Errorf("refusing to kill tmux sessions while their process set is incomplete: %w", incompleteCaptures)
+		// A different session in the same batch may already have vanished. It no
+		// longer has a live tmux fence to preserve, and a retry cannot rediscover
+		// its pre-marker capture, so consume that recovery evidence before aborting
+		// the still-live sessions.
+		var vanishedRecoveryErrs error
+		for _, match := range matches {
+			captureErr := captureErrBySession[match]
+			if !errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
+				continue
+			}
+			if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
+				preMarkerCaptureErrs[match]); reapErr != nil {
+				vanishedRecoveryErrs = errors.Join(vanishedRecoveryErrs,
+					fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
+						match, errors.Join(captureErr, reapErr)))
+				continue
+			}
+			log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
+		}
+		return errors.Join(
+			fmt.Errorf("refusing to kill tmux sessions while their process set is incomplete: %w", incompleteCaptures),
+			vanishedRecoveryErrs)
 	}
 
 	// Only sessions that are actually gone get their captured trees reaped —
