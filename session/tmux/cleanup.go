@@ -667,21 +667,22 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	vanishedSweepErrs := make(chan error, len(killed))
 	for _, match := range killed {
 		captureErr := captureErrBySession[match]
-		if errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
+		if captureErr != nil {
 			wg.Add(1)
 			go func(match string, captureErr error) {
 				defer wg.Done()
 				// Ownership was proved immediately before this capture, but the
-				// session then vanished and took its pane ancestry with it. Re-check
-				// the pre-marker candidates by their immutable AF_SESSION/AF_HOME
-				// markers instead of collapsing the failed capture into "no leaks".
+				// process set could not be established. Once kill-session succeeds,
+				// re-check the pre-marker candidates by their immutable
+				// AF_SESSION/AF_HOME markers instead of collapsing any failed read
+				// into "no leaks".
 				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
 					preMarkerCaptureErrs[match]); reapErr != nil {
-					vanishedSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
+					vanishedSweepErrs <- fmt.Errorf("tmux session %s process capture failed before its successful kill, and its process cleanup is incomplete: %w",
 						match, errors.Join(captureErr, reapErr))
 					return
 				}
-				log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
+				log.InfoLog.Printf("tmux session %s process capture failed before its successful kill; marked orphan process sweep completed", match)
 			}(match, captureErr)
 			continue
 		}
