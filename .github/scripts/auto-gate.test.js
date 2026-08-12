@@ -87,6 +87,31 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
 });
 
+test("failed aggregate invalidations retry before entering the serialized lane", () => {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const invalidationBlock = workflow.match(
+    /- name: Make the aggregate non-green immediately[\s\S]*?\n  apply-gate:/,
+  )?.[0];
+
+  assert.ok(invalidationBlock, "aggregate invalidation workflow block is missing");
+  assert.match(
+    invalidationBlock,
+    /const invalidateAggregate = async \(aggregate\) => \{[\s\S]*?await autoGate\.invalidateAggregateDecision/,
+  );
+  const invalidationAttempts = [
+    ...invalidationBlock.matchAll(/await invalidateAggregate\(aggregate\)/g),
+  ];
+  assert.equal(invalidationAttempts.length, 2);
+  assert.match(
+    invalidationBlock,
+    /const invalidatedHeads = \[\][\s\S]*?core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)/,
+  );
+  assert.ok(
+    invalidationAttempts[1].index < invalidationBlock.lastIndexOf('core.setOutput("invalidated_heads"'),
+    "failed invalidations must retry before the head enters the serialized lane",
+  );
+});
+
 test("manual recovery reports a previously absent gate distinctly", async () => {
   const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
   const result = {
