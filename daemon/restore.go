@@ -230,10 +230,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		failure := fmt.Errorf(
 			"session %q was restored and its agent is running, but its recovered state could not be written to disk: %w",
 			title, settleErr)
-		if !instance.GetArchiveReport().Empty() {
-			return restoredArchiveResult(instance, instance.GetWorktreePath(), failure)
-		}
-		return instance.GetWorktreePath(), failure
+		return restoredArchiveResult(instance, instance.GetWorktreePath(), failure)
 	}
 	return restoredArchiveResult(instance, instance.GetWorktreePath())
 }

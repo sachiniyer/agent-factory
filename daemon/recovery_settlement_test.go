@@ -122,10 +122,16 @@ func TestRestoreLostOrDeadSession_SettlementPersistFailureIsRetried(t *testing.T
 	// The caller is told, unlike the automatic loop which has nobody to tell: the
 	// retry set only helps if the daemon lives long enough to drain it, and the
 	// user is the one who can free the disk.
-	_, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID})
+	worktreePath, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID})
 	if err == nil || !errors.Is(err, diskFull) {
 		t.Fatalf("RestoreSession error = %v, want the settlement write failure surfaced (%v); writes seen: %s",
 			err, diskFull, seen())
+	}
+	if !isMutationCommitted(err) {
+		t.Fatalf("RestoreSession error = %T %v, want a committed-mutation warning: the agent is running and clients must retain worktree_path", err, err)
+	}
+	if want := inst.GetWorktreePath(); worktreePath != want {
+		t.Fatalf("RestoreSession worktree path = %q, want %q on the committed-warning path", worktreePath, want)
 	}
 	if !strings.Contains(err.Error(), "agent is running") {
 		t.Fatalf("error must say the session IS restored, not just that a write failed: %v", err)
