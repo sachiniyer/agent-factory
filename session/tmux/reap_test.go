@@ -209,7 +209,9 @@ func TestCleanupSessionsReapsMarkedProcessAfterGenericCaptureFailure(t *testing.
 	marked := spawnMarkedSessionWithEscapee(t, name, home)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	require.NoError(t, CleanupSessions(failSecondPaneCaptureExecutor(t)))
+	err := CleanupSessions(failSecondPaneCaptureExecutor(t))
+	require.ErrorContains(t, err, "injected generic list-panes failure",
+		"a successful marker sweep cannot prove that an unmarked process was not missed")
 	require.False(t, proctree.AliveSame(marked),
 		"AF_SESSION/AF_HOME-marked helper survived a generic post-marker capture failure")
 }
@@ -234,7 +236,9 @@ func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T)
 	log.WarningLog.SetOutput(&warnings)
 	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarningOut) })
 
-	require.NoError(t, CleanupSessions(partiallyFailSecondPaneCaptureExecutor(t)))
+	err = CleanupSessions(partiallyFailSecondPaneCaptureExecutor(t))
+	require.ErrorContains(t, err, "not-a-pane-pid",
+		"an incomplete capture must remain a refusal after the recoverable candidates are reaped")
 	require.False(t, proctree.AliveSame(escapee),
 		"verified unmarked helper from the partial capture survived requested cleanup")
 	require.NotContains(t, warnings.String(), "leaked past its pane tree",

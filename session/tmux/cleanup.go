@@ -697,12 +697,13 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			go func(match string, captureErr error, captured []proctree.Process) {
 				defer wg.Done()
 				reapSessionProcesses(reapOnRequest, match, captured, reapGraceWait, reapTermWait)
-				if reapErr := reapVanishedSessionProcesses(match, ownHome, nil, nil); reapErr != nil {
-					processSweepErrs <- fmt.Errorf("tmux session %s process capture failed before its successful kill, and its process cleanup is incomplete: %w",
-						match, errors.Join(captureErr, reapErr))
-					return
-				}
-				log.InfoLog.Printf("tmux session %s process capture failed before its successful kill; verified process and marked orphan sweeps completed", match)
+				reapErr := reapVanishedSessionProcesses(match, ownHome, nil, nil)
+				// Marker recovery can find attributable processes that capture missed,
+				// but it cannot prove absence for a process that sanitized its launch
+				// environment. Preserve the failed read after both recovery sweeps so
+				// reset cannot spend incomplete evidence on deleting worktrees.
+				processSweepErrs <- fmt.Errorf("tmux session %s process capture was incomplete before its successful kill; refusing cleanup after verified process and marker sweeps: %w",
+					match, errors.Join(captureErr, reapErr))
 			}(match, captureErr, captured)
 			continue
 		}
