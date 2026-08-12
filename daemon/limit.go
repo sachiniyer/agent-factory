@@ -421,6 +421,18 @@ func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance 
 	return err
 }
 
+// fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
+// before identity selection: once the ordinary resume is already due, a failed
+// replacement must retain the current identity and yield to that ordinary path.
+func fallBackFromUncommittedAccountSwap(title string, swap *autoAccountSwap, cause error) bool {
+	if swap == nil || swap.alreadySet || !swap.fallbackDue {
+		return false
+	}
+	log.WarningLog.Printf("automatic account replacement for %q failed before identity commit; its ordinary resume deadline is due, so retaining the current identity: %v", title, cause)
+	swap.fellBack = true
+	return true
+}
+
 // publishSessionSnapshot pushes this session's current projection to clients while
 // holding the repo ordering lock, the same discipline the resume's completion event
 // and every tab mutation keep: session.updated replaces a client's whole session
@@ -525,11 +537,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		fallbackDue := accountSwap.fallbackDue
 		admitted, err := m.admitAccountSwap(instance, accountSwap.global)
 		if err != nil {
-			if !accountSwap.fallbackDue {
+			if !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, err) {
 				return resumeNotPerformed, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
 			}
-			log.WarningLog.Printf("no configured account can replace the limited identity for %q; its ordinary resume deadline is due, so retaining the current identity: %v", requestedTitle, err)
-			accountSwap.fellBack = true
 			accountSwap = nil
 		} else {
 			admitted.fallbackDue = fallbackDue
@@ -541,8 +551,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	if accountSwap != nil && !accountSwap.alreadySet {
 		if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
-			return resumeNotPerformed, err
+			if !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, err) {
+				return resumeNotPerformed, err
+			}
+			accountSwap = nil
 		}
+	}
+	if accountSwap != nil && !accountSwap.alreadySet {
 		previousConversation, err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to)
 		if err != nil {
 			return resumeNotPerformed, err

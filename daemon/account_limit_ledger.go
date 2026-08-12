@@ -105,7 +105,20 @@ func readAccountLimitLedger(path string) ([]session.AccountLimitObservationData,
 // record is deleted. Unknown reset times dominate (they intentionally exclude
 // indefinitely); otherwise the later reset is the safer expiry boundary.
 func retainAccountLimitObservations(observations []session.AccountLimitObservationData) error {
-	if len(observations) == 0 {
+	// A torn-down session can contain legacy or malformed observations that have
+	// no identity key. They cannot exclude any candidate, so do not let them keep
+	// an otherwise completed deletion tombstoned forever. Ledger reads and merges
+	// remain strict: corrupt evidence that was already persisted still fails closed.
+	keyed := make([]session.AccountLimitObservationData, 0, len(observations))
+	for _, observation := range observations {
+		observation.Agent = strings.TrimSpace(observation.Agent)
+		observation.Account = strings.TrimSpace(observation.Account)
+		if observation.Agent == "" || observation.Account == "" {
+			continue
+		}
+		keyed = append(keyed, observation)
+	}
+	if len(keyed) == 0 {
 		return nil
 	}
 	path, err := accountLimitLedgerPath()
@@ -117,7 +130,7 @@ func retainAccountLimitObservations(observations []session.AccountLimitObservati
 		if err != nil {
 			return err
 		}
-		merged, err := mergeAccountLimitObservations(current, observations)
+		merged, err := mergeAccountLimitObservations(current, keyed)
 		if err != nil {
 			return err
 		}
