@@ -605,6 +605,27 @@ test("an ambiguous aggregate create is reconciled without replaying the write", 
   assert.equal(github.createdChecks[0].conclusion, "failure");
 });
 
+test("a definitively rate-limited aggregate create retries the rejected write", async () => {
+  const error = new Error("API rate limit exceeded");
+  error.status = 403;
+  error.response = {
+    headers: { "retry-after": "0", "x-ratelimit-remaining": "0" },
+  };
+  const github = fakeGateGithub({ checkCreateErrors: [error, error] });
+
+  const invalidated = await autoGate.invalidateAggregateDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+  });
+
+  assert.equal(invalidated.writeState, "created");
+  assert.equal(github.checkCreateAttempts, 3);
+  assert.equal(github.checkListReads, 0);
+  assert.equal(github.createdChecks.length, 1);
+});
+
 test("idempotent check-run updates retry transient failures", async () => {
   const error = new Error("fetch failed");
   error.status = 500;
@@ -875,7 +896,7 @@ test("an older transaction cannot overwrite a newer invalidation generation", as
   assert.equal(github.createdChecks.at(-1).conclusion, "failure");
 });
 
-test("aggregate resolution reevaluates the previous head after synchronization", () => {
+test("aggregate resolution invalidates the current head before the previous synchronization head", () => {
   const heads = autoGate.resolveAggregateHeads({
     context: fakeContext({
       before: HEAD_SHA,
@@ -885,7 +906,7 @@ test("aggregate resolution reevaluates the previous head after synchronization",
     targets: [{ prNumber: 1465, headSha: OTHER_SHA }],
   });
 
-  assert.deepEqual(heads, [HEAD_SHA, OTHER_SHA]);
+  assert.deepEqual(heads, [OTHER_SHA, HEAD_SHA]);
 });
 
 test("the queued legacy evaluator keeps resolved PR numbers numeric", async () => {

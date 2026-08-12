@@ -58,46 +58,58 @@ async function createCheckRun({ github, owner, repo, headSha, name, externalId, 
       text: [decision.output.text, marker].filter(Boolean).join("\n\n"),
     },
   };
-  try {
-    return await github.rest.checks.create({
-      owner,
-      repo,
-      head_sha: headSha,
-      name,
-      external_id: externalId,
-      ...markedDecision,
-    });
-  } catch (error) {
-    if (!isRetryableGitHubError(error)) {
-      throw error;
-    }
-    return retryTransient(
-      `${label} after ambiguous create failure (${error.message || String(error)})`,
-      async () => {
-        const checkRuns = await github.paginate(github.rest.checks.listForRef, {
-          owner,
-          repo,
-          ref: headSha,
-          per_page: 100,
-        });
-        const created = checkRuns
-          .filter(
-            (run) =>
-              run.name === name &&
-              run.external_id === externalId &&
-              run.app?.id === GITHUB_ACTIONS_APP_ID &&
-              run.output?.text?.includes(marker),
-          )
-          .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
-        if (!created) {
-          const missing = new Error("the matching check run is not visible yet");
-          missing.status = 503;
-          throw missing;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await github.rest.checks.create({
+        owner,
+        repo,
+        head_sha: headSha,
+        name,
+        external_id: externalId,
+        ...markedDecision,
+      });
+    } catch (error) {
+      // An explicit rate-limit response rejected the request, so no check was
+      // created and replay is safe. Transport failures remain ambiguous and
+      // must reconcile the marker without issuing another POST.
+      if (isDefinitiveRateLimitResponse(error)) {
+        if (attempt >= RETRY_DELAYS_MS.length) {
+          throw retryFailure(label, attempt + 1, error, "AutoGateCheckWriteError", false);
         }
-        return { data: created };
-      },
-      { failureName: "AutoGateCheckWriteError", readFailure: false },
-    );
+        await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
+        continue;
+      }
+      if (!isRetryableGitHubError(error)) {
+        throw error;
+      }
+      return retryTransient(
+        `${label} after ambiguous create failure (${error.message || String(error)})`,
+        async () => {
+          const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+            owner,
+            repo,
+            ref: headSha,
+            per_page: 100,
+          });
+          const created = checkRuns
+            .filter(
+              (run) =>
+                run.name === name &&
+                run.external_id === externalId &&
+                run.app?.id === GITHUB_ACTIONS_APP_ID &&
+                run.output?.text?.includes(marker),
+            )
+            .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
+          if (!created) {
+            const missing = new Error("the matching check run is not visible yet");
+            missing.status = 503;
+            throw missing;
+          }
+          return { data: created };
+        },
+        { failureName: "AutoGateCheckWriteError", readFailure: false },
+      );
+    }
   }
 }
 
@@ -110,18 +122,20 @@ async function retryTransient(label, operation, { failureName, readFailure }) {
         throw error;
       }
       if (attempt >= RETRY_DELAYS_MS.length) {
-        const failure = new Error(
-          `${label} after ${attempt + 1} attempts: ${error.message || String(error)}`,
-        );
-        failure.name = failureName;
-        failure.autoGateReadFailure = readFailure;
-        failure.status = error.status;
-        failure.cause = error;
-        throw failure;
+        throw retryFailure(label, attempt + 1, error, failureName, readFailure);
       }
       await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
     }
   }
+}
+
+function retryFailure(label, attempts, error, failureName, readFailure) {
+  const failure = new Error(`${label} after ${attempts} attempts: ${error.message || String(error)}`);
+  failure.name = failureName;
+  failure.autoGateReadFailure = readFailure;
+  failure.status = error.status;
+  failure.cause = error;
+  return failure;
 }
 
 function isRetryableGitHubError(error) {
@@ -147,6 +161,10 @@ function isRateLimitError(error) {
     headers["retry-after"] !== undefined ||
     /(?:API|secondary) rate limit|abuse detection/i.test(error?.message || "")
   );
+}
+
+function isDefinitiveRateLimitResponse(error) {
+  return Boolean(error?.response) && isRateLimitError(error);
 }
 
 function retryDelayMilliseconds(error, fallback) {
@@ -415,15 +433,15 @@ async function reportDecision({ github, context, core, result, manual = false })
 function resolveAggregateHeads({ context, targets = [] }) {
   const payload = context.payload || {};
   const candidates = [
-    ...targets.map((target) => target.headSha),
     payload.pull_request?.head?.sha,
+    payload.after,
+    ...targets.map((target) => target.headSha),
     payload.check_suite?.head_sha,
     payload.workflow_run?.head_sha,
     payload.sha,
     payload.before,
-    payload.after,
   ];
-  return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))].sort();
+  return [...new Set(candidates.map(normalizeHeadSha).filter(Boolean))];
 }
 
 async function invalidateAggregateDecision({ github, context, core, headSha }) {
