@@ -642,18 +642,6 @@ func helpLabelFor(keyList []string) string {
 	return strings.Join(parts, "/")
 }
 
-// validKeySpec reports whether s is a key string bubbletea can produce:
-// an optional run of ctrl+/alt+/shift+ modifiers followed by a named key or
-// a single character. Modifier order is accepted flexibly, but runtime maps
-// store normalizeKeySpec's Bubble Tea spelling so override lookup compares
-// against tea.KeyMsg.String() forms. Literal whitespace in config remains
-// invalid; users spell the spacebar as "space", and normalizeKeySpec maps it
-// to Bubble Tea's runtime spelling.
-func validKeySpec(s string) bool {
-	_, ok := normalizeKeySpec(s)
-	return ok
-}
-
 func normalizeKeySpec(s string) (string, bool) {
 	if s == "" || strings.ContainsAny(s, " \t\n") {
 		return "", false
