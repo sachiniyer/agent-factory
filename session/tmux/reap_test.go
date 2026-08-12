@@ -214,6 +214,33 @@ func TestCleanupSessionsReapsMarkedProcessAfterGenericCaptureFailure(t *testing.
 		"AF_SESSION/AF_HOME-marked helper survived a generic post-marker capture failure")
 }
 
+// A generic capture error can accompany a verified partial process tree. The
+// verified candidates remain authorized by the owned live session, even when a
+// process sanitized away its diagnostic markers. Reap that tree as requested
+// teardown; the marker fallback only supplements what capture missed.
+func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_partial_failed_capture"
+	escapee := spawnSessionWithEscapee(t, name)
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	out, err := exec.Command("tmux", "set-environment", "-t", exactTarget(name), EnvMarkerHome, home).CombinedOutput()
+	require.NoError(t, err, "set ownership marker: %s", out)
+
+	var warnings bytes.Buffer
+	oldWarningOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarningOut) })
+
+	require.NoError(t, CleanupSessions(partiallyFailSecondPaneCaptureExecutor(t)))
+	require.False(t, proctree.AliveSame(escapee),
+		"verified unmarked helper from the partial capture survived requested cleanup")
+	require.NotContains(t, warnings.String(), "leaked past its pane tree",
+		"a verified process from the requested teardown must not be classified as an escaped leak")
+}
+
 // A pane can launch a helper after the pre-marker process snapshot and before
 // marker lookup loses the session. The post-absence refresh must find that
 // newly marked process rather than treating the older snapshot as final.
@@ -412,6 +439,25 @@ func failSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
 				paneCaptures++
 				if paneCaptures == 2 {
 					return nil, fmt.Errorf("injected generic list-panes failure")
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func partiallyFailSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
 				}
 			}
 			return realExec.Output(command)

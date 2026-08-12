@@ -664,26 +664,46 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// Sweep concurrently: the grace waits overlap instead of serializing,
 	// and the whole reset still blocks until every sweep finishes.
 	var wg sync.WaitGroup
-	vanishedSweepErrs := make(chan error, len(killed))
+	processSweepErrs := make(chan error, len(killed))
 	for _, match := range killed {
 		captureErr := captureErrBySession[match]
-		if captureErr != nil {
+		if errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
 			wg.Add(1)
 			go func(match string, captureErr error) {
 				defer wg.Done()
 				// Ownership was proved immediately before this capture, but the
-				// process set could not be established. Once kill-session succeeds,
-				// re-check the pre-marker candidates by their immutable
-				// AF_SESSION/AF_HOME markers instead of collapsing any failed read
-				// into "no leaks".
+				// session then vanished and took its pane ancestry with it. Re-check
+				// the pre-marker candidates by their immutable AF_SESSION/AF_HOME
+				// markers instead of collapsing the failed capture into "no leaks".
 				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
 					preMarkerCaptureErrs[match]); reapErr != nil {
-					vanishedSweepErrs <- fmt.Errorf("tmux session %s process capture failed before its successful kill, and its process cleanup is incomplete: %w",
+					processSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
 						match, errors.Join(captureErr, reapErr))
 					return
 				}
-				log.InfoLog.Printf("tmux session %s process capture failed before its successful kill; marked orphan process sweep completed", match)
+				log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
 			}(match, captureErr)
+			continue
+		}
+		if captureErr != nil {
+			// A generic capture error can accompany a verified partial tree. The
+			// owned session was still live when that tree was captured and its kill
+			// later succeeded, so reap every verified candidate as requested
+			// teardown. Then scan immutable markers to supplement whatever the
+			// incomplete capture missed; marker provenance is not required for the
+			// already-authorized pane descendants.
+			captured := mergeCapturedProcesses(preMarkerProcesses[match], leakedBySession[match])
+			wg.Add(1)
+			go func(match string, captureErr error, captured []proctree.Process) {
+				defer wg.Done()
+				reapSessionProcesses(reapOnRequest, match, captured, reapGraceWait, reapTermWait)
+				if reapErr := reapVanishedSessionProcesses(match, ownHome, nil, nil); reapErr != nil {
+					processSweepErrs <- fmt.Errorf("tmux session %s process capture failed before its successful kill, and its process cleanup is incomplete: %w",
+						match, errors.Join(captureErr, reapErr))
+					return
+				}
+				log.InfoLog.Printf("tmux session %s process capture failed before its successful kill; verified process and marked orphan sweeps completed", match)
+			}(match, captureErr, captured)
 			continue
 		}
 		leaked := leakedBySession[match]
@@ -699,12 +719,23 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		}(match, leaked)
 	}
 	wg.Wait()
-	close(vanishedSweepErrs)
-	var vanishedSweepErr error
-	for sweepErr := range vanishedSweepErrs {
-		vanishedSweepErr = errors.Join(vanishedSweepErr, sweepErr)
+	close(processSweepErrs)
+	var processSweepErr error
+	for sweepErr := range processSweepErrs {
+		processSweepErr = errors.Join(processSweepErr, sweepErr)
 	}
-	return errors.Join(killErr, vanishedSweepErr)
+	return errors.Join(killErr, processSweepErr)
+}
+
+func mergeCapturedProcesses(captures ...[]proctree.Process) []proctree.Process {
+	var merged []proctree.Process
+	byPID := make(map[int]int)
+	for _, capture := range captures {
+		for _, process := range capture {
+			merged = addOrReplaceOrphanCandidate(merged, byPID, process)
+		}
+	}
+	return merged
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
