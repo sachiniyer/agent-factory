@@ -196,6 +196,223 @@ func TestCleanupSessionsReapsMarkedProcessWhenSessionVanishesDuringCapture(t *te
 		"AF_SESSION/AF_HOME-marked helper survived after tmux vanished during process capture")
 }
 
+// A generic post-marker capture failure is not an empty process set. Reset must
+// refuse before kill-session, preserving the live session as the retry fence;
+// otherwise the next reset would see no session and launder the failed read.
+func TestCleanupSessionsGenericCaptureFailureRemainsRefusedAcrossRetry(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_failed_second_capture"
+	home := t.TempDir()
+	marked := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	cmdExec := failPostMarkerPaneCaptureExecutor(t)
+	err := CleanupSessions(cmdExec)
+	require.ErrorContains(t, err, "injected generic list-panes failure",
+		"a failed capture must stop cleanup before it destroys the retry fence")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "generic capture failure must leave the session alive")
+	require.True(t, proctree.AliveSame(marked),
+		"a process still owned by the retained live session must not be reaped")
+
+	err = CleanupSessions(cmdExec)
+	require.ErrorContains(t, err, "injected generic list-panes failure",
+		"retry must not launder the prior incomplete capture into an empty session set")
+	exists, known, probeErr = probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "retry must retain the session until capture succeeds")
+}
+
+// A generic capture refusal for one live session must not strand another
+// session that already vanished during the same capture batch. The latter has
+// no live tmux fence to preserve, so consume its saved marker evidence before
+// returning the batch refusal.
+func TestCleanupSessionsRecoversVanishedSessionBeforeGenericCaptureRefusal(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const vanishedName = "af_mixed_vanished"
+	const failedName = "af_mixed_failed"
+	home := t.TempDir()
+	vanished := spawnMarkedSessionWithEscapee(t, vanishedName, home)
+	retained := spawnMarkedSessionWithEscapee(t, failedName, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	err := CleanupSessions(mixedCaptureFailureExecutor(t, vanishedName, failedName))
+	require.ErrorContains(t, err, "injected generic list-panes failure")
+	require.False(t, proctree.AliveSame(vanished),
+		"marked helper from the already-vanished session was stranded by another session's refusal")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), failedName)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "the generically unreadable session must remain live")
+	require.True(t, proctree.AliveSame(retained),
+		"the retained live session must keep ownership of its process")
+}
+
+// list-panes can answer with a pane PID and the pane can disappear before the
+// process snapshot. That is reported as a generic capture error, so cleanup
+// must probe the session rather than assuming the generic class is still live.
+func TestCleanupSessionsRecoversGenericCaptureFailureAfterConfirmedAbsence(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_generic_then_absent"
+	home := t.TempDir()
+	marked := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, CleanupSessions(vanishAfterPaneListExecutor(t, name)))
+	require.False(t, proctree.AliveSame(marked),
+		"marked helper survived after the pane vanished between list-panes and the process snapshot")
+}
+
+// A later incomplete capture must not strand an earlier complete capture. The
+// earlier session can disappear while the refusal is being established, and a
+// retry cannot rediscover its process tree once its tmux fence is gone.
+func TestCleanupSessionsReapsCompleteCaptureBeforeLaterRefusal(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const completeName = "af_000_complete_capture"
+	const failedName = "af_999_failed_capture"
+	home := t.TempDir()
+	complete := spawnMarkedSessionWithEscapee(t, completeName, home)
+	failed := spawnMarkedSessionWithEscapee(t, failedName, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	err := CleanupSessions(vanishCompleteBeforeLaterFailureExecutor(t, completeName, failedName))
+	require.ErrorContains(t, err, "injected later capture failure")
+	require.False(t, proctree.AliveSame(complete),
+		"complete capture was stranded after its tmux fence disappeared")
+	require.True(t, proctree.AliveSame(failed),
+		"the incompletely captured session must retain ownership of its process")
+}
+
+// A generic capture can return ancestry before a strict probe proves the
+// session absent, but the pathname-like tmux name does not bind that tree to
+// the earlier ownership read. An unmarked partial candidate must therefore
+// refuse rather than being signalled or treated as absent.
+func TestCleanupSessionsRefusesUnmarkedPartialCaptureAfterConfirmedAbsence(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("exact detached-session fixture requires setsid")
+	}
+
+	const name = "af_partial_then_absent"
+	home := t.TempDir()
+	trigger, pidFile := spawnSessionWaitingToStartUnmarkedHelper(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	var helper proctree.Process
+
+	err := CleanupSessions(partialCaptureThenAbsentExecutor(t, name, trigger, pidFile, &helper))
+	require.ErrorContains(t, err, "has no AF_SESSION marker")
+	require.NotZero(t, helper.PID, "partial-capture helper identity was not recorded")
+	require.True(t, proctree.AliveSame(helper),
+		"an unmarked partial candidate must not be signalled")
+}
+
+// The owned session can exit after its AF_HOME marker is read and another home
+// can reuse the same tmux name before capture. Even if that replacement also
+// vanishes, its partial tree must not inherit the old session's authorization.
+func TestCleanupSessionsDoesNotReapForeignReplacementPartialCapture(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_reused_partial_capture"
+	home := t.TempDir()
+	foreignHome := t.TempDir()
+	original := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	var foreign proctree.Process
+
+	require.NoError(t, CleanupSessions(replaceWithForeignPartialThenAbsentExecutor(t, name, foreignHome, &foreign)))
+	require.False(t, proctree.AliveSame(original), "owned original helper was not recovered")
+	require.NotZero(t, foreign.PID, "foreign replacement identity was not recorded")
+	require.True(t, proctree.AliveSame(foreign),
+		"a reused tmux name authorized signaling another home's process")
+}
+
+// A verified marked process can fork an unmarked detached child during its
+// grace period. Recovery must refresh the verified ancestry while it is still
+// connected; once the parent exits, neither markers nor SID membership can
+// rediscover that child and a successful empty result would be false.
+func TestCleanupSessionsRefusesChildForkedDuringPartialRecoveryGrace(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("exact detached-session fixture requires setsid")
+	}
+
+	const name = "af_partial_forks_during_grace"
+	home := t.TempDir()
+	trigger, parentPIDFile, childPIDFile := spawnSessionWaitingToForkUnmarkedHelper(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	err := CleanupSessions(partialCaptureThenAbsentAfterTriggerExecutor(t, name, trigger, parentPIDFile))
+	require.ErrorContains(t, err, "has no AF_SESSION marker")
+	child := processFromPIDFile(t, childPIDFile)
+	require.True(t, proctree.AliveSame(child),
+		"an unmarked child discovered during recovery must be retained, not signalled")
+}
+
+// Recovery waits are bounded per session, but a batch must overlap them. A
+// serial loop makes reset latency grow by a full grace period per vanished
+// session and leaves unrelated live sessions mutable for the entire delay.
+func TestCleanupSessionsRecoversVanishedSessionsConcurrently(t *testing.T) {
+	testguard.IsolateTmux(t)
+	oldGrace, oldTerm := reapGraceWait, reapTermWait
+	reapGraceWait, reapTermWait = 500*time.Millisecond, 100*time.Millisecond
+	t.Cleanup(func() { reapGraceWait, reapTermWait = oldGrace, oldTerm })
+
+	home := t.TempDir()
+	names := []string{"af_concurrent_vanished_1", "af_concurrent_vanished_2", "af_concurrent_vanished_3"}
+	for _, name := range names {
+		spawnMarkedSessionWithEscapee(t, name, home)
+	}
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	started := time.Now()
+	require.NoError(t, CleanupSessions(vanishDuringCaptureExecutor(t, names...)))
+	require.Less(t, time.Since(started), 2500*time.Millisecond,
+		"vanished-session recovery waits ran serially")
+}
+
+// A generic capture error can accompany a verified partial process tree. The
+// session may also own a process that sanitized away its diagnostic markers.
+// The partial tree cannot prove what capture missed, so it must remain live
+// with the session until a later complete capture authorizes teardown.
+func TestCleanupSessionsPreservesPartialCaptureAfterGenericFailure(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_partial_failed_capture"
+	escapee := spawnSessionWithEscapee(t, name)
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	out, err := exec.Command("tmux", "set-environment", "-t", exactTarget(name), EnvMarkerHome, home).CombinedOutput()
+	require.NoError(t, err, "set ownership marker: %s", out)
+
+	var warnings bytes.Buffer
+	oldWarningOut := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(oldWarningOut) })
+
+	err = CleanupSessions(partiallyFailSecondPaneCaptureExecutor(t))
+	require.ErrorContains(t, err, "not-a-pane-pid",
+		"a partial capture must remain a refusal before session teardown")
+	require.True(t, proctree.AliveSame(escapee),
+		"a partial capture must not reap processes while their session remains live")
+	exists, known, probeErr := probeSessionStrict(cmd.MakeExecutor(), name)
+	require.NoError(t, probeErr)
+	require.True(t, known && exists, "partial capture failure must leave the session alive")
+	require.NotContains(t, warnings.String(), "leaked past its pane tree",
+		"a process in a retained live session must not be classified as an escaped leak")
+}
+
 // A pane can launch a helper after the pre-marker process snapshot and before
 // marker lookup loses the session. The post-absence refresh must find that
 // newly marked process rather than treating the older snapshot as final.
@@ -381,6 +598,305 @@ func vanishOnSecondPaneCaptureExecutor(t *testing.T, name string) cmd.Executor {
 			return realExec.Output(command)
 		},
 	}
+}
+
+func failPostMarkerPaneCaptureExecutor(t *testing.T) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures%2 == 0 {
+					return nil, fmt.Errorf("injected generic list-panes failure")
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func partiallyFailSecondPaneCaptureExecutor(t *testing.T) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func mixedCaptureFailureExecutor(t *testing.T, vanishedName, failedName string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := make(map[string]int)
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) <= 1 || command.Args[1] != "list-panes" {
+				return realExec.Output(command)
+			}
+			joined := strings.Join(command.Args, " ")
+			for _, name := range []string{vanishedName, failedName} {
+				if strings.Contains(joined, name) {
+					paneCaptures[name]++
+				}
+			}
+			switch {
+			case paneCaptures[vanishedName] == 2 && strings.Contains(joined, vanishedName):
+				out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(vanishedName)).CombinedOutput()
+				require.NoError(t, err, "kill vanished fixture session: %s", out)
+				return realExec.Output(command)
+			case paneCaptures[failedName] == 2 && strings.Contains(joined, failedName):
+				return nil, fmt.Errorf("injected generic list-panes failure")
+			default:
+				return realExec.Output(command)
+			}
+		},
+	}
+}
+
+func vanishAfterPaneListExecutor(t *testing.T, name string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					require.NoError(t, err, "kill session after pane list: %s", out)
+					// A PID that cannot exist makes the post-list snapshot report the
+					// concrete generic "pane process disappeared" capture error.
+					return []byte("99999999\n"), nil
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func vanishCompleteBeforeLaterFailureExecutor(t *testing.T, completeName, failedName string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := make(map[string]int)
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) <= 1 || command.Args[1] != "list-panes" {
+				return realExec.Output(command)
+			}
+			joined := strings.Join(command.Args, " ")
+			for _, name := range []string{completeName, failedName} {
+				if strings.Contains(joined, name) {
+					paneCaptures[name]++
+				}
+			}
+			if paneCaptures[failedName] == 2 && strings.Contains(joined, failedName) {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(completeName)).CombinedOutput()
+				return nil, fmt.Errorf("injected later capture failure")
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func partialCaptureThenAbsentExecutor(t *testing.T, name, trigger, pidFile string, helper *proctree.Process) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	helperStarted := false
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "show-environment" && !helperStarted {
+				helperStarted = true
+				require.NoError(t, os.WriteFile(trigger, []byte("go"), 0o600))
+				waitForPIDFile(t, pidFile)
+				*helper = processFromPIDFile(t, pidFile)
+			}
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			if len(command.Args) > 1 && command.Args[1] == "has-session" {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func replaceWithForeignPartialThenAbsentExecutor(t *testing.T, name, foreignHome string, foreign *proctree.Process) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					*foreign = spawnMarkedSessionWithEscapee(t, name, foreignHome)
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			if len(command.Args) > 1 && command.Args[1] == "has-session" {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func partialCaptureThenAbsentAfterTriggerExecutor(t *testing.T, name, trigger, parentPIDFile string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	triggered := false
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "show-environment" && !triggered {
+				triggered = true
+				require.NoError(t, os.WriteFile(trigger, []byte("go"), 0o600))
+				waitForPIDFile(t, parentPIDFile)
+			}
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := realExec.Output(command)
+					return append(out, []byte("not-a-pane-pid\n")...), err
+				}
+			}
+			if len(command.Args) > 1 && command.Args[1] == "has-session" {
+				_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func vanishDuringCaptureExecutor(t *testing.T, names ...string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := make(map[string]int)
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) <= 1 || command.Args[1] != "list-panes" {
+				return realExec.Output(command)
+			}
+			joined := strings.Join(command.Args, " ")
+			for _, name := range names {
+				if !strings.Contains(joined, name) {
+					continue
+				}
+				paneCaptures[name]++
+				if paneCaptures[name] == 2 {
+					_, _ = exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+				}
+			}
+			return realExec.Output(command)
+		},
+	}
+}
+
+func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (trigger, pidFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	trigger = filepath.Join(dir, "start-helper")
+	pidFile = filepath.Join(dir, "unmarked-helper.pid")
+	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300",
+		trigger, pidFile)
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
+		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() {
+		if data, readErr := os.ReadFile(pidFile); readErr == nil {
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
+				if snap, snapErr := proctree.Snapshot(); snapErr == nil {
+					if process, ok := snap[pid]; ok {
+						_ = proctree.Signal(process, syscall.SIGKILL)
+					}
+				}
+			}
+		}
+	})
+	return trigger, pidFile
+}
+
+func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (trigger, parentPIDFile, childPIDFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	trigger = filepath.Join(dir, "start-parent")
+	parentPIDFile = filepath.Join(dir, "marked-parent.pid")
+	childPIDFile = filepath.Join(dir, "unmarked-child.pid")
+	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+		"nohup sh -c 'echo $$ > %s; sleep 0.1; "+
+		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300' "+
+		">/dev/null 2>&1 & exec sleep 300", trigger, parentPIDFile, childPIDFile)
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
+		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
+	require.NoError(t, err, "tmux new-session: %s", out)
+	t.Cleanup(func() {
+		for _, pidFile := range []string{parentPIDFile, childPIDFile} {
+			if data, readErr := os.ReadFile(pidFile); readErr == nil {
+				if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
+					if snap, snapErr := proctree.Snapshot(); snapErr == nil {
+						if process, ok := snap[pid]; ok {
+							_ = proctree.Signal(process, syscall.SIGKILL)
+						}
+					}
+				}
+			}
+		}
+	})
+	return trigger, parentPIDFile, childPIDFile
+}
+
+func waitForPIDFile(t *testing.T, pidFile string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && pid > 1
+	}, 5*time.Second, 20*time.Millisecond, "helper pid file never appeared")
+}
+
+func processFromPIDFile(t *testing.T, pidFile string) proctree.Process {
+	t.Helper()
+	data, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, err)
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	process, ok := snap[pid]
+	require.True(t, ok, "helper %d not in process snapshot", pid)
+	return process
 }
 
 // TestCaptureRejectsNonTmuxPaneRoots is the safety property that keeps

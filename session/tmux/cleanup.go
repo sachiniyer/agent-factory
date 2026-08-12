@@ -609,20 +609,43 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		}
 	}
 
-	// Capture every session's pane process trees before any kill (#1104);
-	// reap synchronously at the end because `af reset` is a short-lived CLI
-	// process — a goroutine would die with it before the sweep ran.
+	// Capture and immediately close each complete session fence (#1104). A
+	// failed capture keeps a confirmed-live or unknown session untouched. A
+	// confirmed-absent session queues recovery from both its verified post-marker
+	// partial tree and its marker-validated pre-marker snapshot. Recovery waits
+	// run only after every complete session has been killed, so a still-live pane
+	// cannot launch new work during another session's bounded orphan sweep.
 	leakedBySession := make(map[string][]proctree.Process, len(matches))
-	captureErrBySession := make(map[string]error, len(matches))
-	for _, match := range matches {
-		leakedBySession[match], captureErrBySession[match] = captureSessionProcessTrees(cmdExec, match)
-	}
-
-	// Only sessions that are actually gone get their captured trees reaped —
-	// a session that survives its kill still owns its processes.
 	killed := make([]string, 0, len(matches))
+	recoveries := make([]vanishedSessionRecovery, 0, len(matches))
+	var incompleteCaptures error
 	var killErr error
 	for _, match := range matches {
+		leaked, captureErr := captureSessionProcessTrees(cmdExec, match)
+		if captureErr != nil {
+			vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
+			var probeErr error
+			if !vanished {
+				exists, known, err := probeSessionStrict(cmdExec, match)
+				probeErr = err
+				vanished = known && !exists
+			}
+			if !vanished {
+				incompleteCaptures = errors.Join(incompleteCaptures,
+					fmt.Errorf("cannot capture tmux session %s processes before cleanup: %w",
+						match, errors.Join(captureErr, probeErr)))
+				continue
+			}
+			recoveries = append(recoveries, vanishedSessionRecovery{
+				match:              match,
+				verifiedProcesses:  leaked,
+				markerCandidates:   preMarkerProcesses[match],
+				markerCaptureError: preMarkerCaptureErrs[match],
+				captureError:       captureErr,
+			})
+			continue
+		}
+
 		log.InfoLog.Printf("cleaning up session: %s", match)
 		// `=` forces an exact session match so a name extracted from `tmux ls`
 		// kills exactly that session and never a prefix-matching sibling (#1006).
@@ -639,7 +662,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				// deadline: it spawns another tmux command against the same
 				// wedged server and would hang identically, buying nothing (see
 				// tmuxTimeoutContext). Report the wedge and stop.
-				killErr = fmt.Errorf("%w: kill-session %s after %s", ErrTmuxTimeout, match, tmuxCommandTimeout)
+				killErr = errors.Join(killErr,
+					fmt.Errorf("%w: kill-session %s after %s", ErrTmuxTimeout, match, tmuxCommandTimeout))
 				break
 			}
 			// Idempotent teardown (#967): a session can vanish between the
@@ -649,42 +673,26 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// and must stop before process trees are reaped.
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if !known {
-				killErr = fmt.Errorf("failed to kill tmux session %s and cannot determine whether it survived: %w",
-					match, errors.Join(killErrRaw, probeErr))
-				break
+				killErr = errors.Join(killErr,
+					fmt.Errorf("failed to kill tmux session %s and cannot determine whether it survived: %w",
+						match, errors.Join(killErrRaw, probeErr)))
+				continue
 			}
 			if exists {
-				killErr = fmt.Errorf("failed to kill tmux session %s: %v", match, killErrRaw)
-				break
+				killErr = errors.Join(killErr, fmt.Errorf("failed to kill tmux session %s: %v", match, killErrRaw))
+				continue
 			}
 		}
+		leakedBySession[match] = leaked
 		killed = append(killed, match)
 	}
 
-	// Sweep concurrently: the grace waits overlap instead of serializing,
-	// and the whole reset still blocks until every sweep finishes.
+	// Sweep requested kills and vanished-session recoveries concurrently: their
+	// grace waits overlap, while this short-lived reset process still blocks
+	// until every sweep has finished.
 	var wg sync.WaitGroup
-	vanishedSweepErrs := make(chan error, len(killed))
+	processSweepErrs := make(chan error, len(recoveries))
 	for _, match := range killed {
-		captureErr := captureErrBySession[match]
-		if errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
-			wg.Add(1)
-			go func(match string, captureErr error) {
-				defer wg.Done()
-				// Ownership was proved immediately before this capture, but the
-				// session then vanished and took its pane ancestry with it. Re-check
-				// the pre-marker candidates by their immutable AF_SESSION/AF_HOME
-				// markers instead of collapsing the failed capture into "no leaks".
-				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
-					preMarkerCaptureErrs[match]); reapErr != nil {
-					vanishedSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
-						match, errors.Join(captureErr, reapErr))
-					return
-				}
-				log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
-			}(match, captureErr)
-			continue
-		}
 		leaked := leakedBySession[match]
 		if len(leaked) == 0 {
 			continue
@@ -697,13 +705,49 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			reapSessionProcesses(reapOnRequest, match, leaked, reapGraceWait, reapTermWait)
 		}(match, leaked)
 	}
-	wg.Wait()
-	close(vanishedSweepErrs)
-	var vanishedSweepErr error
-	for sweepErr := range vanishedSweepErrs {
-		vanishedSweepErr = errors.Join(vanishedSweepErr, sweepErr)
+	for _, recovery := range recoveries {
+		wg.Add(1)
+		go func(recovery vanishedSessionRecovery) {
+			defer wg.Done()
+			if reapErr := recoverVanishedSessionProcesses(recovery, ownHome); reapErr != nil {
+				processSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
+					recovery.match, errors.Join(recovery.captureError, reapErr))
+				return
+			}
+			log.InfoLog.Printf("tmux session %s vanished during process capture; orphan process sweep completed", recovery.match)
+		}(recovery)
 	}
-	return errors.Join(killErr, vanishedSweepErr)
+	wg.Wait()
+	close(processSweepErrs)
+	var processSweepErr error
+	for sweepErr := range processSweepErrs {
+		processSweepErr = errors.Join(processSweepErr, sweepErr)
+	}
+	var captureRefusal error
+	if incompleteCaptures != nil {
+		captureRefusal = fmt.Errorf("refusing to kill incompletely captured tmux sessions: %w", incompleteCaptures)
+	}
+	return errors.Join(killErr, captureRefusal, processSweepErr)
+}
+
+type vanishedSessionRecovery struct {
+	match              string
+	verifiedProcesses  []proctree.Process
+	markerCandidates   []proctree.Process
+	markerCaptureError error
+	captureError       error
+}
+
+func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome string) error {
+	// The tmux name is not a session-incarnation identity: another home can
+	// reuse it after the ownership read and before this partial capture. Feed
+	// both evidence sets through the immutable AF_SESSION/AF_HOME boundary;
+	// refreshOrphanCandidates deduplicates them by process identity on every
+	// recovery pass and follows descendants that appear during bounded teardown.
+	candidates := make([]proctree.Process, 0, len(recovery.markerCandidates)+len(recovery.verifiedProcesses))
+	candidates = append(candidates, recovery.markerCandidates...)
+	candidates = append(candidates, recovery.verifiedProcesses...)
+	return reapVanishedSessionProcesses(recovery.match, ownHome, candidates, recovery.markerCaptureError)
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
@@ -715,14 +759,16 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 	// snapshot and a child it forks during the first bounded grace period. A
 	// final non-destructive refresh below is the evidence that cleanup finished.
 	for range 2 {
-		refreshed, refreshErr := refreshOrphanCandidates(candidates, match)
-		sweepErr = errors.Join(sweepErr, refreshErr)
+		refreshed, beforeErr := refreshOrphanCandidates(candidates, match)
+		observed, observeErr := observeOrphanAncestry(refreshed, match, reapGraceWait)
+		refreshed, afterErr := refreshOrphanCandidates(observed, match)
+		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
 		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
 		// contain them. This is the real leak, and the one worth a WARNING (#2765).
-		remaining := reapSessionProcesses(reapEscaped, match, marked, reapGraceWait, reapTermWait)
+		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait)
 		if len(remaining) > 0 {
 			pids := make([]string, 0, len(remaining))
 			for _, process := range remaining {

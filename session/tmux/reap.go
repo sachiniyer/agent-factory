@@ -263,9 +263,68 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 // candidates remain visible when markedOrphanProcesses validates the bounded
 // set, preserving unknown without making hardened hosts globally unreadable.
 func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) ([]proctree.Process, error) {
+	refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
+	if err != nil {
+		return captured, err
+	}
+	byPID := make(map[int]int, len(refreshed))
+	for index, process := range refreshed {
+		byPID[process.PID] = index
+	}
+	for _, process := range snap {
+		environ, envErr := proctree.Environ(process.PID)
+		if envErr != nil {
+			continue
+		}
+		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName {
+			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
+		}
+	}
+	return refreshed, nil
+}
+
+// observeOrphanAncestry keeps the verified tree connected throughout its grace
+// period. A helper can fork, call setsid, remove its markers, and then outlive
+// its parent; after the parent exits no final snapshot can reconstruct that
+// relationship. Polling while the parent is still alive retains the child's
+// process identity so the later ownership check can refuse it rather than
+// collapsing an unprovable survivor into absence.
+func observeOrphanAncestry(captured []proctree.Process, sanitizedName string, wait time.Duration) ([]proctree.Process, error) {
+	deadline := time.Now().Add(wait)
+	var observeErr error
+	for {
+		refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
+		if err != nil {
+			observeErr = errors.Join(observeErr, err)
+		} else {
+			captured = refreshed
+			live := false
+			for _, process := range captured {
+				current, ok := snap[process.PID]
+				if ok && current.StartID == process.StartID {
+					live = true
+					break
+				}
+			}
+			if !live {
+				return captured, observeErr
+			}
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return captured, observeErr
+		}
+		if remaining > 50*time.Millisecond {
+			remaining = 50 * time.Millisecond
+		}
+		time.Sleep(remaining)
+	}
+}
+
+func refreshCapturedAncestry(captured []proctree.Process, sanitizedName string) ([]proctree.Process, map[int]proctree.Process, error) {
 	snap, err := proctree.Snapshot()
 	if err != nil {
-		return captured, fmt.Errorf("cannot refresh processes after tmux session %s vanished: %w", sanitizedName, err)
+		return captured, nil, fmt.Errorf("cannot refresh processes after tmux session %s vanished: %w", sanitizedName, err)
 	}
 	byPID := make(map[int]int, len(captured))
 	refreshed := make([]proctree.Process, 0, len(captured))
@@ -284,16 +343,7 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) 
 			add(member)
 		}
 	}
-	for _, process := range snap {
-		environ, envErr := proctree.Environ(process.PID)
-		if envErr != nil {
-			continue
-		}
-		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName {
-			add(process)
-		}
-	}
-	return refreshed, nil
+	return refreshed, snap, nil
 }
 
 // addOrReplaceOrphanCandidate deduplicates by PID without confusing a PID

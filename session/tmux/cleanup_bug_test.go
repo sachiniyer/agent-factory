@@ -36,6 +36,9 @@ af_real_session: 1 windows (created Wed May 20 12:01:00 2026) [179x47]`
 			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
 				return []byte("AF_HOME=/owned-home\n"), nil
 			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
+			}
 			return []byte(tmuxOutput), nil
 		},
 	}
@@ -71,6 +74,9 @@ af_a:b:c: 1 windows (created Wed May 20 12:03:00 2026) [179x47]`
 		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) {
 			if len(cmd.Args) > 1 && cmd.Args[1] == "show-environment" {
 				return []byte("AF_HOME=/owned-home\n"), nil
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
 			}
 			return []byte(tmuxOutput), nil
 		},
@@ -120,6 +126,9 @@ af_legacy: 1 windows (created Wed May 20 12:02:00 2026) [179x47]`
 					// marker by succeeding; its contents are never authorization.
 					return []byte("PATH=/usr/bin\n"), nil
 				}
+			}
+			if len(cmd.Args) > 1 && cmd.Args[1] == "list-panes" {
+				return nil, nil
 			}
 			return []byte(tmuxOutput), nil
 		},
