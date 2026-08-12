@@ -204,9 +204,9 @@ jobs:
     # These writes deliberately happen before the per-head serialized lanes. A
     # newer event must turn each required check red while an older transaction
     # is still running; generation fencing prevents that older run from
-    # overwriting it. Every candidate remains eligible for the serialized repair
-    # lane: a failed invalidation gets one more fail-closed write attempt there,
-    # while one old-head failure still cannot suppress a healthy current head.
+    # overwriting it. A failed invalidation is retried before any serialized lane
+    # wait; only heads with a confirmed newer generation enter that lane, while one
+    # old-head failure cannot suppress a healthy current head.
     steps:
       - name: Check out gate logic
         uses: actions/checkout@v6
@@ -230,43 +230,59 @@ jobs:
               core.setOutput("invalidated_heads", JSON.stringify(aggregateHeads));
               return;
             }
+            const invalidateAggregate = async (aggregate) => {
+              const headSha = String(aggregate.head_sha || "");
+              const invalidated = await autoGate.invalidateAggregateDecision({
+                github,
+                context,
+                core,
+                headSha,
+              });
+              if (invalidated.writeState === "read-only") {
+                throw new Error(`Could not invalidate aggregate ${headSha}.`);
+              }
+            };
+            const invalidatedHeads = [];
             const failures = [];
             for (const aggregate of aggregateHeads) {
               const headSha = String(aggregate.head_sha || "");
               try {
-                const invalidated = await autoGate.invalidateAggregateDecision({
-                  github,
-                  context,
-                  core,
-                  headSha,
-                });
-                if (invalidated.writeState === "read-only") {
-                  throw new Error(`Could not invalidate aggregate ${headSha}.`);
-                }
-              } catch (error) {
-                failures.push(error);
+                await invalidateAggregate(aggregate);
+              } catch (initialError) {
                 core.warning(
-                  `Could not invalidate aggregate ${headSha}: ${error.message || String(error)}`,
+                  `Initial invalidation failed for ${headSha}; retrying before the serialized lane: ${initialError.message || String(initialError)}`,
                 );
+                try {
+                  await invalidateAggregate(aggregate);
+                } catch (retryError) {
+                  failures.push(
+                    new AggregateError(
+                      [initialError, retryError],
+                      `Could not invalidate aggregate ${headSha} before the serialized lane`,
+                    ),
+                  );
+                  core.warning(
+                    `Could not invalidate aggregate ${headSha} after the pre-lane retry: ${retryError.message || String(retryError)}`,
+                  );
+                  continue;
+                }
               }
+              invalidatedHeads.push(aggregate);
             }
-            // processAggregateHead starts by publishing a fresh non-green
-            // generation. Retain failed invalidations so that the safe repair attempt
-            // still runs instead of leaving an older green aggregate authoritative.
-            core.setOutput("invalidated_heads", JSON.stringify(aggregateHeads));
+            core.setOutput("invalidated_heads", JSON.stringify(invalidatedHeads));
             if (failures.length > 0) {
               throw new AggregateError(
                 failures,
-                `${failures.length} aggregate invalidation(s) failed`,
+                `${failures.length} aggregate invalidation(s) failed after the pre-lane retry`,
               );
             }
 
   apply-gate:
     name: Apply aggregate gate
     needs: [auto-gate, invalidate-gate]
-    # Keep always() so every head gets its serialized repair attempt even when the
-    # invalidation job failed. processAggregateHead cannot merge unless its opening
-    # non-green generation write succeeds.
+    # Keep always() so successfully fenced heads proceed even if another candidate
+    # exhausts its pre-lane retry. An unfenced head is deliberately absent: it must
+    # not wait behind an older transaction that can still publish PASS.
     if: >-
       always() &&
       needs.invalidate-gate.outputs.invalidated_heads != '' &&
