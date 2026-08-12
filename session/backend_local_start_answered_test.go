@@ -43,7 +43,7 @@ func (answeredLaunchPtyFactory) Close() {}
 func TestLocalBackendAnsweredStartFailurePreservesFreshWorktree(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoRoot := initInPlaceRepo(t, "main")
-	gw, _, err := git.NewGitWorktree(repoRoot, "answered-start")
+	gw, _, err := git.NewGitWorktree(repoRoot, "answered-start", "")
 	require.NoError(t, err)
 	worktreePath := gw.GetWorktreePath()
 	t.Cleanup(func() { _, _ = gw.Cleanup() })

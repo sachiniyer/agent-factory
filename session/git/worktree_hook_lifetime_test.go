@@ -14,7 +14,7 @@ func TestCleanupJoinsHooksBeforeInspectingWorktree(t *testing.T) {
 	repoRoot := createGitRepo(t)
 	commitInitial(t, repoRoot)
 
-	gw, _, err := NewGitWorktree(repoRoot, "cleanup-joins-hooks")
+	gw, _, err := NewGitWorktree(repoRoot, "cleanup-joins-hooks", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 
@@ -80,7 +80,7 @@ func TestRebuildRefusesWhenPriorHookRunCannotBeJoined(t *testing.T) {
 	repoRoot := createGitRepo(t)
 	commitInitial(t, repoRoot)
 
-	gw, _, err := NewGitWorktree(repoRoot, "rebuild-joins-hooks")
+	gw, _, err := NewGitWorktree(repoRoot, "rebuild-joins-hooks", branchPrefixForTest(t))
 	require.NoError(t, err)
 	require.NoError(t, gw.Setup())
 

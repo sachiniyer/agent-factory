@@ -116,6 +116,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	repoStartLock := m.startLockForRepo(repo.ID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
+	// branch_prefix is EffectNextDaemonStart. Pass the same frozen snapshot
+	// used by the collision check; letting worktree creation reload the saved
+	// value here makes the guard and mutation name different branches.
+	frozenBranchPrefix := m.cfg.BranchPrefix
 
 	// Session environment grants are security-sensitive. They come from the single
 	// op-entry config snapshot (cfg) taken at the top of this create (#2480), so a
@@ -138,6 +142,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
+		BranchPrefix:                   &frozenBranchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Mints and revokes this session's credential, driven by the RUNTIME's
 		// lifetime rather than by this call site (#3068): the session runtime mints

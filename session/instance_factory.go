@@ -68,6 +68,12 @@ type InstanceOptions struct {
 	// git worktree+branch. The worktree is marked external so kill/cleanup
 	// never removes the user's tree or branch. Local backend only.
 	InPlace bool
+	// BranchPrefix is the resolved snapshot used to name a fresh local
+	// worktree's branch. The daemon supplies its frozen startup value because
+	// branch_prefix is EffectNextDaemonStart; nil preserves the direct-constructor
+	// behavior of resolving the current on-disk value when provisioning begins.
+	// A pointer distinguishes an explicitly configured empty prefix from nil.
+	BranchPrefix *string
 	// ResumeConversation asks the first launch to come up on a provider
 	// conversation a previous record held, rather than starting a new one
 	// (#2616). Set only by the daemon's root-agent heal, which replaces the
@@ -512,6 +518,10 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 			return nil, fmt.Errorf("failed to build remote agent-server client: %w", err)
 		}
 	}
+	branchPrefix := ""
+	if opts.BranchPrefix != nil {
+		branchPrefix = *opts.BranchPrefix
+	}
 
 	return &Instance{
 		ID:           id,
@@ -533,6 +543,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		preResolvedProgram:    resolvedProgramMarker(opts),
 		sessionEnvPassthrough: normalizedSessionEnv,
 		inPlace:               opts.InPlace,
+		branchPrefix:          branchPrefix,
+		branchPrefixResolved:  opts.BranchPrefix != nil,
 		carriedConversation:   opts.ResumeConversation,
 		carriedTabs:           append([]TabData(nil), opts.RestoreTabs...),
 		carriedRecreateNotice: opts.PendingRecreateNotice,

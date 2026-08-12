@@ -15,6 +15,40 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+func TestLocalBackendProvisionUsesResolvedBranchPrefixSnapshot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initInPlaceRepo(t, "main")
+
+	frozenPrefix := ""
+	cfg := config.DefaultConfig()
+	cfg.BranchPrefix = frozenPrefix
+	require.NoError(t, config.SaveConfig(cfg))
+
+	inst, err := NewInstance(InstanceOptions{
+		Title:        "foo",
+		Path:         repoRoot,
+		Program:      "claude",
+		Backend:      BackendLocal,
+		BranchPrefix: &frozenPrefix,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		inst.mu.RLock()
+		worktree := inst.gitWorktree
+		inst.mu.RUnlock()
+		if worktree != nil {
+			_, _ = worktree.Cleanup()
+		}
+	})
+
+	// A save after daemon startup is pending until restart. Provisioning must use
+	// the snapshot carried by the create rather than reload this new value.
+	cfg.BranchPrefix = "a/"
+	require.NoError(t, config.SaveConfig(cfg))
+	require.NoError(t, inst.backend.Provision(inst, true))
+	require.Equal(t, "foo", inst.Branch)
+}
+
 func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 	tests := []struct {
 		name           string

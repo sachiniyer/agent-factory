@@ -555,7 +555,7 @@ func TestRestoreWorktreePath_SubdirectoryHonorsWorktreeRoot(t *testing.T) {
 	worktreesDir := filepath.Join(configDir, "worktrees")
 
 	// Restore must match NewGitWorktree's subdirectory layout: {worktrees}/{branch}.
-	created, _, err := NewGitWorktree(repoRoot, "feature-x")
+	created, _, err := NewGitWorktree(repoRoot, "feature-x", branchPrefixForTest(t))
 	require.NoError(t, err)
 	branch := created.GetBranchName()
 	assert.Equal(t, filepath.Join(worktreesDir, branch), created.GetWorktreePath(),
