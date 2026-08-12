@@ -158,10 +158,18 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
 			continue
 		}
-		if args := tmux.ConversationSelectorArgs(tab.tmux.Program()); len(args) > 0 {
+		replacementProgram := tab.tmux.Program()
+		if tab.Kind == TabKindShell {
+			var err error
+			replacementProgram, err = sessionenv.AccountShellCommand(replacementProgram)
+			if err != nil {
+				return fmt.Errorf("cannot switch session %q to account %q because tab %q has no proven account-scoped shell replacement: %w", i.Title, name, tab.Name, err)
+			}
+		}
+		if args := tmux.ConversationSelectorArgs(replacementProgram); len(args) > 0 {
 			return fmt.Errorf("cannot switch session %q to account %q because tab %q pins an existing conversation with arguments %s; an account swap restarts that tab under a separate conversation store", i.Title, name, tab.Name, strings.Join(args, " "))
 		}
-		if err := sessionenv.ValidateAccountEnvironmentCommand(tab.tmux.Program(), accountScope); err != nil {
+		if err := sessionenv.ValidateAccountEnvironmentCommand(replacementProgram, accountScope); err != nil {
 			return fmt.Errorf("cannot switch session %q to account %q while tab %q pins another identity: %w", i.Title, name, tab.Name, err)
 		}
 	}

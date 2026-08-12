@@ -116,6 +116,17 @@ func TestValidateAccountSwapRefusesUnprovableSiblingIdentityOverride(t *testing.
 		"an interpreter wrapper must not hide an identity assignment from the swap boundary")
 }
 
+func TestValidateAccountSwapPreflightsStartupFreeShellReplacement(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "shell", Name: "shell", Kind: TabKindShell,
+		tmux: tmux.NewTmuxSession("shell", "/bin/bash"),
+	})
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"an ambient shell is replaced by af's startup-file-free account command; validating the predecessor would make that replacement unreachable")
+}
+
 func TestAutomaticAccountSwapFailsClosedForDocker(t *testing.T) {
 	inst := accountSwapTestInstance(tmux.ProgramClaude)
 	inst.SetBackend(&dockerBackend{})
