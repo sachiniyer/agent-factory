@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,5 +62,24 @@ func TestLoadPersistedAccountLimitObservationsCarriesLegacyGhostLimit(t *testing
 	got := observations[0]
 	if got.Agent != "claude" || got.Account != "work" || !got.ResetAt.Equal(resetAt) {
 		t.Fatalf("legacy observation = %+v, want claude/work reset at %v", got, resetAt)
+	}
+}
+
+func TestLoadAccountLimitEvidenceSnapshotReadsRowsBeforeLedger(t *testing.T) {
+	var reads []string
+	loadPersisted := func() ([]session.AccountLimitObservationData, error) {
+		reads = append(reads, "rows")
+		return nil, nil
+	}
+	loadRetained := func() ([]session.AccountLimitObservationData, error) {
+		reads = append(reads, "ledger")
+		return nil, nil
+	}
+
+	if _, err := loadAccountLimitEvidenceSnapshot(loadPersisted, loadRetained); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(reads, ","); got != "rows,ledger" {
+		t.Fatalf("durable evidence read order = %s, want rows,ledger so concurrent row-to-ledger transfer cannot disappear", got)
 	}
 }

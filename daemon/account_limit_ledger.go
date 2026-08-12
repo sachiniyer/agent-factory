@@ -42,6 +42,25 @@ func loadAccountLimitLedger() ([]session.AccountLimitObservationData, error) {
 	return readAccountLimitLedger(path)
 }
 
+type accountLimitEvidenceLoader func() ([]session.AccountLimitObservationData, error)
+
+// loadAccountLimitEvidenceSnapshot combines the two durable evidence sources.
+// The ordering is part of the snapshot protocol with session deletion, which
+// transfers a row's observations into the ledger before removing that row.
+func loadAccountLimitEvidenceSnapshot(
+	loadPersisted, loadRetained accountLimitEvidenceLoader,
+) ([]session.AccountLimitObservationData, error) {
+	retained, err := loadRetained()
+	if err != nil {
+		return nil, err
+	}
+	persisted, err := loadPersisted()
+	if err != nil {
+		return nil, err
+	}
+	return append(retained, persisted...), nil
+}
+
 // loadPersistedAccountLimitObservations reads quota evidence straight from
 // every durable session row. A row that fails FromInstanceData is deliberately
 // absent from Manager.instances, but that load failure is not evidence that its

@@ -97,15 +97,13 @@ func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, gl
 	m.mu.Unlock()
 	limitedSet := make(map[string]struct{})
 	now := nowFunc()
-	retained, err := loadAccountLimitLedger()
+	retained, err := loadAccountLimitEvidenceSnapshot(
+		loadPersistedAccountLimitObservations,
+		loadAccountLimitLedger,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("load retained account-limit evidence for %q: %w", instance.Title, err)
+		return nil, fmt.Errorf("load durable account-limit evidence for %q: %w", instance.Title, err)
 	}
-	persisted, err := loadPersistedAccountLimitObservations()
-	if err != nil {
-		return nil, fmt.Errorf("load persisted account-limit evidence for %q: %w", instance.Title, err)
-	}
-	retained = append(retained, persisted...)
 	for _, observation := range retained {
 		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
 			continue

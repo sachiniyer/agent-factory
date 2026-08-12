@@ -353,6 +353,20 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappe
 	}
 }
 
+func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`python3 -c 'import os; os.environ["CODEX_HOME"]="/other"; os.execvp("codex", ["codex"])'`,
+		`node -e 'process.env.CODEX_HOME="/other"'`,
+		`perl -e '$ENV{CODEX_HOME}="/other"'`,
+		`ruby -e 'ENV["CODEX_HOME"]="/other"'`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "interpreter %q can hide an identity-changing agent launch in program text", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
 // The docker and ssh backends generate an ABSOLUTE af path for the agent-server
 // handoff (`/usr/local/bin/af agent-server …`, or a staged path). A bare-name
 // rule refuses af's own launch on those backends, so account scoping would fail
