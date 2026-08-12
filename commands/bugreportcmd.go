@@ -85,10 +85,7 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 		// made the body that actually reached GitHub longer than the one that was
 		// checked. Resolving first costs nothing: the path depends on flags and
 		// the clock, never on the bundle.
-		outPath, err := resolveBugReportPath(bugReportOutput)
-		if err != nil {
-			return err
-		}
+		outPath := resolveBugReportPath(bugReportOutput)
 
 		result, err := bugreport.Build(bugreport.Inputs{
 			AFVersion:    version,
@@ -149,16 +146,16 @@ envelope) to stdout instead of writing a file or opening a draft.`,
 // the current directory when the home directory cannot be resolved. The file
 // is written 0600 because, even redacted, it may contain residual sensitive
 // context until the user reviews it.
-func resolveBugReportPath(override string) (string, error) {
+func resolveBugReportPath(override string) string {
 	if override != "" {
-		return override, nil
+		return override
 	}
 	name := fmt.Sprintf("af-bug-report-%s.txt", time.Now().Format("20060102-150405"))
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return name, nil
+		return name
 	}
-	return filepath.Join(home, name), nil
+	return filepath.Join(home, name)
 }
 
 func init() {
