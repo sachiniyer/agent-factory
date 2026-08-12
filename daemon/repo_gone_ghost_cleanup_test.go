@@ -392,8 +392,14 @@ func TestValidateGhostCleanupAdmission_RestoresArchiveRollbackRecoveryFirst(t *t
 	stored := data.ForStorage()
 	require.NotNil(t, stored.Worktree.RelocationRecovery)
 	require.Equal(t, sessiongit.RelocationRecoveryClaimStale, stored.Worktree.RelocationRecovery.State)
+	require.Empty(t, stored.Worktree.RelocationRecovery.CleanupLifecycle,
+		"the outer archive fence uses its own inert claim instead of exposing the cleanup lifecycle")
+	require.NotNil(t, stored.ArchiveReport)
+	require.NotNil(t, stored.ArchiveReport.RollbackFence)
+	require.NotNil(t, stored.ArchiveReport.RollbackFence.OriginalRelocationRecovery)
 	require.Equal(t, sessiongit.RelocationRecoveryCleanupReady,
-		stored.Worktree.RelocationRecovery.CleanupLifecycle)
+		stored.ArchiveReport.RollbackFence.OriginalRelocationRecovery.State,
+		"the archive rollback fence must retain the cleanup authorization current admission restores")
 
 	require.NoError(t, validateGhostWorktreeDestructionAdmission(&stored),
 		"current admission must decode cleanup_ready before interpreting the projected state")
