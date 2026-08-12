@@ -82,7 +82,8 @@ func TestGhostCleanup_KillsEveryTabTmux(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, ghostCleanup(data, "ghost2007"))
+	cleanupErr, _ := ghostCleanup(data, "ghost2007", nil)
+	require.NoError(t, cleanupErr)
 
 	after := liveTmuxSessions(t)
 	require.Falsef(t, after[shellName], "#2007: shell tab tmux session %q leaked after ghost kill", shellName)

@@ -90,6 +90,58 @@ func TestCleanupClaimedRepoGone_RefusesSamePathReplacementAtRecursiveDelete(t *t
 	}
 }
 
+func TestCleanupClaimedRepoGone_RetainedTreeDeletionSharesDeadline(t *testing.T) {
+	gw, claim, _ := repoGoneCleanupClaim(t)
+	previousCleanup := repoGoneCleanupRetainedTrees
+	previousTimeout := repoGoneCleanupTimeout
+	started := make(chan struct{})
+	release := make(chan struct{})
+	repoGoneCleanupTimeout = 25 * time.Millisecond
+	repoGoneCleanupRetainedTrees = func(*GitWorktree) error {
+		close(started)
+		<-release
+		return errors.New("retained tree remained unavailable")
+	}
+	t.Cleanup(func() {
+		repoGoneCleanupRetainedTrees = previousCleanup
+		repoGoneCleanupTimeout = previousTimeout
+	})
+
+	type result struct {
+		state CleanupState
+		err   error
+		late  <-chan error
+	}
+	done := make(chan result, 1)
+	go func() {
+		state, err, late := gw.CleanupClaimedRepoGoneWithLateResult(claim)
+		done <- result{state: state, err: err, late: late}
+	}()
+	<-started
+
+	var observed result
+	select {
+	case observed = <-done:
+	case <-time.After(250 * time.Millisecond):
+		close(release)
+		<-done
+		t.Fatal("retained-tree deletion ran outside the repo-gone cleanup deadline")
+	}
+	if observed.state != CleanupStateUnknown || !errors.Is(observed.err, context.DeadlineExceeded) || observed.late == nil {
+		close(release)
+		t.Fatalf("retained-tree deadline did not return a retryable late result: state=%v err=%v late=%v", observed.state, observed.err, observed.late)
+	}
+	recovery, retained := gw.GetRelocationRecovery()
+	if !retained || recovery.State != RelocationRecoveryCleanupStalled {
+		close(release)
+		t.Fatalf("retained-tree deadline lost the cleanup process fence: retained=%v recovery=%+v", retained, recovery)
+	}
+	close(release)
+	if err := <-observed.late; err == nil {
+		t.Fatal("released retained-tree failure was lost")
+	}
+}
+
 func TestCleanupClaimedRepoGone_CommittedClaimSurvivesLateOriginReturn(t *testing.T) {
 	gw, claim, worktree := repoGoneCleanupClaim(t)
 
