@@ -69,8 +69,8 @@ Three ideas carry the whole tool.
   and a local session can open more beside it in the same worktree: `t` chooses a
   terminal or VS Code editor, while `af sessions tab-create` adds a named
   long-running command or web view. Sessions on the docker, ssh, and hook
-  backends run off-box, so their tab list is fixed by the runtime; adding tabs
-  to them isn't supported yet.
+  backends run off-box, so they admit only external HTTPS web tabs — shell,
+  process, and VS Code tabs need a local worktree.
 - **Daemon — the thing that actually owns state.** A background daemon runs the
   sessions, schedules tasks, serves the web UI, and is the single source of
   truth. Opening the TUI starts one, as does any enabled task; read-only commands

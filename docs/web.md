@@ -422,10 +422,12 @@ header row with the title at every viewport width:
 
 Tabs labelled **Agent** / **Terminal** / a process name mirror the TUI's labels. A
 failed tab op surfaces as a brief toast rather than a modal. **Off-box sessions** (docker, ssh, and remote-hook) run their workspace on
-another host, so there is no daemon-side worktree to spawn a tab in — the tab bar
-explains that the runtime has a fixed tab list, its `×` affordances are withdrawn,
-and the `t` / `w` keys are disabled. Archived sessions similarly say to restore
-before creating tabs instead of leaving an unexplained blank.
+another host, so there is no daemon-side worktree to spawn a shell/process/VS Code
+tab in — `t` is disabled and the tab bar explains why. An external HTTPS web tab
+is metadata-only and is admitted (its `×` and `w` work like a local web tab's);
+see [backends.md](backends.md) for the loopback and plain-HTTP refusals. Archived
+sessions similarly say to restore before creating tabs instead of leaving an
+unexplained blank.
 
 ### Project switcher
 
