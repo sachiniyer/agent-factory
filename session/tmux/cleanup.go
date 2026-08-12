@@ -617,45 +617,53 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	for _, match := range matches {
 		leakedBySession[match], captureErrBySession[match] = captureSessionProcessTrees(cmdExec, match)
 	}
-	// Capture completeness is a precondition for killing a live session. If a
-	// generic read fails, keep every session alive and return the failure before
-	// destroying the pane ancestry that a retry needs. Killing first and merely
-	// returning an error is not fail-closed: the next reset would list no session
-	// and launder the prior unknown into an empty set. The vanished sentinel is
-	// different—the session is already gone, so the marker recovery below is the
-	// only remaining evidence path.
+	// Capture completeness is a precondition for killing a live session. Classify
+	// every failed capture before any kill: a confirmed-live or unknown session
+	// keeps its tmux fence, while a confirmed-absent session consumes the marker
+	// recovery evidence that a retry cannot rediscover. The explicit vanished
+	// sentinel is already authoritative; generic errors need a strict probe
+	// because a pane can disappear between list-panes and the process snapshot.
+	killable := make([]string, 0, len(matches))
 	var incompleteCaptures error
+	var vanishedRecoveryErrs error
 	for _, match := range matches {
 		captureErr := captureErrBySession[match]
-		if captureErr != nil && !errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
-			incompleteCaptures = errors.Join(incompleteCaptures,
-				fmt.Errorf("cannot capture tmux session %s processes before cleanup: %w", match, captureErr))
+		if captureErr == nil {
+			killable = append(killable, match)
+			continue
 		}
+
+		vanished := errors.Is(captureErr, ErrSessionVanishedBeforeCapture)
+		var probeErr error
+		if !vanished {
+			exists, known, err := probeSessionStrict(cmdExec, match)
+			probeErr = err
+			if !known || exists {
+				incompleteCaptures = errors.Join(incompleteCaptures,
+					fmt.Errorf("cannot capture tmux session %s processes before cleanup: %w",
+						match, errors.Join(captureErr, probeErr)))
+				continue
+			}
+		}
+		if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
+			preMarkerCaptureErrs[match]); reapErr != nil {
+			vanishedRecoveryErrs = errors.Join(vanishedRecoveryErrs,
+				fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
+					match, errors.Join(captureErr, reapErr)))
+			continue
+		}
+		log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
 	}
-	if incompleteCaptures != nil {
-		// A different session in the same batch may already have vanished. It no
-		// longer has a live tmux fence to preserve, and a retry cannot rediscover
-		// its pre-marker capture, so consume that recovery evidence before aborting
-		// the still-live sessions.
-		var vanishedRecoveryErrs error
-		for _, match := range matches {
-			captureErr := captureErrBySession[match]
-			if !errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
-				continue
-			}
-			if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
-				preMarkerCaptureErrs[match]); reapErr != nil {
-				vanishedRecoveryErrs = errors.Join(vanishedRecoveryErrs,
-					fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
-						match, errors.Join(captureErr, reapErr)))
-				continue
-			}
-			log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
+	if incompleteCaptures != nil || vanishedRecoveryErrs != nil {
+		var refusal error
+		if incompleteCaptures != nil {
+			refusal = fmt.Errorf("refusing to kill tmux sessions while their process set is incomplete: %w", incompleteCaptures)
 		}
 		return errors.Join(
-			fmt.Errorf("refusing to kill tmux sessions while their process set is incomplete: %w", incompleteCaptures),
+			refusal,
 			vanishedRecoveryErrs)
 	}
+	matches = killable
 
 	// Only sessions that are actually gone get their captured trees reaped —
 	// a session that survives its kill still owns its processes.
@@ -703,27 +711,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// Sweep concurrently: the grace waits overlap instead of serializing,
 	// and the whole reset still blocks until every sweep finishes.
 	var wg sync.WaitGroup
-	processSweepErrs := make(chan error, len(killed))
 	for _, match := range killed {
-		captureErr := captureErrBySession[match]
-		if errors.Is(captureErr, ErrSessionVanishedBeforeCapture) {
-			wg.Add(1)
-			go func(match string, captureErr error) {
-				defer wg.Done()
-				// Ownership was proved immediately before this capture, but the
-				// session then vanished and took its pane ancestry with it. Re-check
-				// the pre-marker candidates by their immutable AF_SESSION/AF_HOME
-				// markers instead of collapsing the failed capture into "no leaks".
-				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match],
-					preMarkerCaptureErrs[match]); reapErr != nil {
-					processSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
-						match, errors.Join(captureErr, reapErr))
-					return
-				}
-				log.InfoLog.Printf("tmux session %s vanished during process capture; marked orphan process sweep completed", match)
-			}(match, captureErr)
-			continue
-		}
 		leaked := leakedBySession[match]
 		if len(leaked) == 0 {
 			continue
@@ -737,12 +725,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		}(match, leaked)
 	}
 	wg.Wait()
-	close(processSweepErrs)
-	var processSweepErr error
-	for sweepErr := range processSweepErrs {
-		processSweepErr = errors.Join(processSweepErr, sweepErr)
-	}
-	return errors.Join(killErr, processSweepErr)
+	return killErr
 }
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
 	var sweepErr error

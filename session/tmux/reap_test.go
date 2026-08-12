@@ -252,6 +252,23 @@ func TestCleanupSessionsRecoversVanishedSessionBeforeGenericCaptureRefusal(t *te
 		"the retained live session must keep ownership of its process")
 }
 
+// list-panes can answer with a pane PID and the pane can disappear before the
+// process snapshot. That is reported as a generic capture error, so cleanup
+// must probe the session rather than assuming the generic class is still live.
+func TestCleanupSessionsRecoversGenericCaptureFailureAfterConfirmedAbsence(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_generic_then_absent"
+	home := t.TempDir()
+	marked := spawnMarkedSessionWithEscapee(t, name, home)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	require.NoError(t, CleanupSessions(vanishAfterPaneListExecutor(t, name)))
+	require.False(t, proctree.AliveSame(marked),
+		"marked helper survived after the pane vanished between list-panes and the process snapshot")
+}
+
 // A generic capture error can accompany a verified partial process tree. The
 // session may also own a process that sanitized away its diagnostic markers.
 // The partial tree cannot prove what capture missed, so it must remain live
@@ -534,6 +551,28 @@ func mixedCaptureFailureExecutor(t *testing.T, vanishedName, failedName string) 
 			default:
 				return realExec.Output(command)
 			}
+		},
+	}
+}
+
+func vanishAfterPaneListExecutor(t *testing.T, name string) cmd.Executor {
+	t.Helper()
+	realExec := cmd.MakeExecutor()
+	paneCaptures := 0
+	return cmd_test.MockCmdExec{
+		RunFunc: realExec.Run,
+		OutputFunc: func(command *exec.Cmd) ([]byte, error) {
+			if len(command.Args) > 1 && command.Args[1] == "list-panes" {
+				paneCaptures++
+				if paneCaptures == 2 {
+					out, err := exec.Command("tmux", "kill-session", "-t", exactTarget(name)).CombinedOutput()
+					require.NoError(t, err, "kill session after pane list: %s", out)
+					// A PID that cannot exist makes the post-list snapshot report the
+					// concrete generic "pane process disappeared" capture error.
+					return []byte("99999999\n"), nil
+				}
+			}
+			return realExec.Output(command)
 		},
 	}
 }
