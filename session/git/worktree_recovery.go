@@ -784,11 +784,21 @@ func (g *GitWorktree) ValidateRelocationCleanupAdmission() error {
 			return nil
 		}
 		if err == nil {
-			if generationErr := requireCleanupPathIdentity(
-				g.worktreePath, recovery.identity(), recovery.CleanupGeneration,
-			); generationErr != nil {
+			inspection, inspectionErr := boundedFinalizingCleanupIdentity(g.worktreePath)
+			if inspectionErr != nil {
 				return errors.Join(fmt.Errorf(
-					"cannot verify finalizing cleanup generation at %s: %w", g.worktreePath, generationErr,
+					"cannot inspect exact finalizing cleanup root at %s: %w", g.worktreePath, inspectionErr,
+				), ErrRelocateStateUnknown)
+			}
+			if !recovery.identity().same(inspection.identity) ||
+				inspection.generation != recovery.CleanupGeneration {
+				return errors.Join(fmt.Errorf(
+					"exact finalizing cleanup root at %s changed during admission", g.worktreePath,
+				), ErrRelocateStateUnknown)
+			}
+			if !inspection.empty {
+				return errors.Join(fmt.Errorf(
+					"finalizing cleanup root %s was repopulated before the kill commit", g.worktreePath,
 				), ErrRelocateStateUnknown)
 			}
 			return nil

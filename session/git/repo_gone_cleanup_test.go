@@ -201,6 +201,12 @@ func TestCleanupClaimedRepoGone_FinalizingRetryRetainsRepopulatedRoot(t *testing
 	if err := os.WriteFile(filepath.Join(worktree, "late-work.txt"), []byte("writer survived"), 0o644); err != nil {
 		t.Fatalf("repopulate finalizing root: %v", err)
 	}
+	if err := finalizing.ValidateRelocationCleanupAdmission(); !errors.Is(err, ErrRelocateStateUnknown) {
+		t.Fatalf("repopulated finalizing root must be refused before the kill commit: %v", err)
+	}
+	if recovery, retained := finalizing.GetRelocationRecovery(); !retained || recovery.State != RelocationRecoveryCleanupFinalizing {
+		t.Fatalf("pre-commit refusal lost finalizing ownership; retained=%v recovery=%+v", retained, recovery)
+	}
 
 	finalizingClaim, err := finalizing.ClaimRelocationSource()
 	if err != nil {
@@ -265,23 +271,53 @@ func TestCleanupClaimedRepoGone_RemovesRetainedArchiveTreesBeforePrimary(t *test
 			newArchiveSkippedEntry("private-work.txt", ArchiveSkipPermissionDenied),
 		}),
 	}})
-	hookCanceled := false
-	gw.hooksCancel = func() { hookCanceled = true }
+	hookCanceled := make(chan struct{})
+	hooksDone := make(chan struct{})
+	gw.hooksCancel = func() { close(hookCanceled) }
+	gw.hooksDone = hooksDone
 	previousClaim := removeTreeBeforeEntryClaim
+	deletionStarted := make(chan struct{}, 1)
 	removeTreeBeforeEntryClaim = func(directory *os.File, path string) error {
-		if strings.HasPrefix(path, retained) && !hookCanceled {
-			return errors.New("retained-tree deletion started before hook cancellation")
+		if strings.HasPrefix(path, retained) {
+			select {
+			case deletionStarted <- struct{}{}:
+			default:
+			}
 		}
 		return previousClaim(directory, path)
 	}
 	t.Cleanup(func() { removeTreeBeforeEntryClaim = previousClaim })
 
-	state, err := gw.CleanupClaimedRepoGone(claim)
+	type result struct {
+		state CleanupState
+		err   error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		state, err := gw.CleanupClaimedRepoGone(claim)
+		completed <- result{state: state, err: err}
+	}()
+	<-hookCanceled
+	deletedBeforeHookExit := false
+	select {
+	case <-deletionStarted:
+		deletedBeforeHookExit = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(hooksDone)
+	observed := <-completed
+	state, err := observed.state, observed.err
 	if err != nil || state != CleanupSettled {
 		t.Fatalf("cleanup with retained archive tree did not settle: state=%v err=%v", state, err)
 	}
-	if !hookCanceled {
-		t.Fatal("repo-gone cleanup did not cancel its archive hook")
+	if deletedBeforeHookExit {
+		t.Error("retained-tree deletion started before hook exit was confirmed")
+	} else {
+		select {
+		case <-deletionStarted:
+		default:
+			t.Error("repo-gone cleanup did not continue after hook exit was confirmed")
+		}
 	}
 	if _, err := os.Stat(retained); !os.IsNotExist(err) {
 		t.Fatalf("cleanup orphaned a retained archive tree after removing its durable row: %v", err)

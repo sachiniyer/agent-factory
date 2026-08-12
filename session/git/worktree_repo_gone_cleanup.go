@@ -173,8 +173,10 @@ func (g *GitWorktree) cleanupClaimedRepoGone(claim RelocationClaim) (CleanupStat
 	if err := g.RevalidateRelocationClaim(claim); err != nil {
 		return CleanupStateUnknown, fmt.Errorf("cannot authorize repo-gone cleanup: %w", err), nil
 	}
-	if g.hooksCancel != nil {
-		g.hooksCancel()
+	if err := g.cancelAndWaitHooks(); err != nil {
+		return CleanupStateUnknown, fmt.Errorf(
+			"cannot remove repo-gone worktree while post-worktree hooks may still be writing: %w", err,
+		), nil
 	}
 	deleteDone := make(chan error, 1)
 	go func() {
