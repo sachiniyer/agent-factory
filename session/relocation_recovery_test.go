@@ -46,6 +46,35 @@ type v10228GitWorktreeData struct {
 	BranchCreatedByUs *bool  `json:"branch_created_by_us,omitempty"`
 }
 
+// v10244WorktreeData is the immediately preceding release's recovery wire
+// shape. It understands relocation states, but intentionally has no additive
+// cleanup_lifecycle field and therefore must receive a recognized fail-closed
+// State when it reads a record written by this version.
+type v10244WorktreeData struct {
+	RepoPath           string                        `json:"repo_path"`
+	WorktreePath       string                        `json:"worktree_path"`
+	ExternalWorktree   bool                          `json:"external_worktree,omitempty"`
+	BranchCreatedByUs  *bool                         `json:"branch_created_by_us,omitempty"`
+	RelocationRecovery *v10244RelocationRecoveryData `json:"relocation_recovery,omitempty"`
+}
+
+type v10244RelocationRecoveryData struct {
+	State                       git.RelocationRecoveryState `json:"state,omitempty"`
+	AlternatePath               string                      `json:"alternate_path"`
+	IdentityKnown               bool                        `json:"identity_known,omitempty"`
+	Device                      uint64                      `json:"device"`
+	Inode                       uint64                      `json:"inode"`
+	FileType                    uint32                      `json:"file_type"`
+	OriginalExternalWorktree    *bool                       `json:"original_external_worktree,omitempty"`
+	OriginalBranchCreatedByUs   *bool                       `json:"original_branch_created_by_us,omitempty"`
+	OriginalStartupStateUnknown *bool                       `json:"original_startup_state_unknown,omitempty"`
+}
+
+type v10244InstanceData struct {
+	StartupStateUnknown bool               `json:"startup_state_unknown,omitempty"`
+	Worktree            v10244WorktreeData `json:"worktree"`
+}
+
 func TestInstanceData_LoadsV10228WorktreeWithoutInventingRecovery(t *testing.T) {
 	createdByUs := true
 	root := t.TempDir()
@@ -108,11 +137,12 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	)
 	require.NoError(t, err)
 	require.NoError(t, gw.RestoreRelocationRecovery(git.RelocationRecovery{
-		State:         git.RelocationRecoveryClaimStale,
-		IdentityKnown: true,
-		Device:        uint64(stat.Dev),
-		Inode:         uint64(stat.Ino),
-		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+		State:             git.RelocationRecoveryCleanupReady,
+		IdentityKnown:     true,
+		Device:            uint64(stat.Dev),
+		Inode:             uint64(stat.Ino),
+		FileType:          uint32(stat.Mode & syscall.S_IFMT),
+		CleanupGeneration: "0123456789abcdef0123456789abcdef",
 	}))
 	inst, err := NewInstance(InstanceOptions{Title: "archived", Path: root, Program: "claude"})
 	require.NoError(t, err)
@@ -123,6 +153,34 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	require.NoError(t, err)
 	require.Contains(t, string(payload), `"relocation_recovery"`,
 		"precondition: the current writer must emit the additive recovery record")
+	require.Contains(t, string(payload), `"cleanup_generation"`,
+		"precondition: the non-reusable cleanup identity must survive the rollback projection")
+	require.Contains(t, string(payload), `"cleanup_lifecycle":"cleanup_ready"`,
+		"the new lifecycle must be additive rather than an unknown State value")
+
+	var previous v10244InstanceData
+	require.NoError(t, json.Unmarshal(payload, &previous))
+	require.NotNil(t, previous.Worktree.RelocationRecovery)
+	require.Equal(t, git.RelocationRecoveryClaimStale, previous.Worktree.RelocationRecovery.State,
+		"the immediately preceding reader must receive a state its decoder accepts")
+	require.True(t, previous.Worktree.RelocationRecovery.IdentityKnown)
+	previousRecovery := previous.Worktree.RelocationRecovery
+	require.NotNil(t, previousRecovery.OriginalExternalWorktree)
+	require.NotNil(t, previousRecovery.OriginalBranchCreatedByUs)
+	require.NotNil(t, previousRecovery.OriginalStartupStateUnknown)
+	// Model v1.0.244's load and its repo-gone restore consuming claim_stale.
+	// Even after that old restore clears the record, cleanup ownership must stay
+	// inert rather than reverting to the current binary's real ownership values.
+	previous.Worktree.ExternalWorktree = *previousRecovery.OriginalExternalWorktree
+	previous.Worktree.BranchCreatedByUs = previousRecovery.OriginalBranchCreatedByUs
+	previous.StartupStateUnknown = *previousRecovery.OriginalStartupStateUnknown
+	previous.Worktree.RelocationRecovery = nil
+	require.True(t, previous.Worktree.ExternalWorktree,
+		"a downgraded retry must still treat the archive as user-owned")
+	require.False(t, *previous.Worktree.BranchCreatedByUs,
+		"a downgraded retry must not authorize branch deletion")
+	require.True(t, previous.StartupStateUnknown,
+		"a downgraded retry must remain inert after consuming the compatibility record")
 
 	var legacy v10228InstanceData
 	require.NoError(t, json.Unmarshal(payload, &legacy),
@@ -141,6 +199,10 @@ func TestInstanceData_CurrentRecoveryRecordIsReadableByV10228Shape(t *testing.T)
 	require.NoError(t, json.Unmarshal(payload, &current))
 	restored, err := FromInstanceData(current)
 	require.NoError(t, err)
+	restoredRecovery, ok := restored.gitWorktree.GetRelocationRecovery()
+	require.True(t, ok)
+	require.Equal(t, git.RelocationRecoveryCleanupReady, restoredRecovery.State,
+		"the current reader must recover the additive cleanup lifecycle")
 	require.False(t, restored.StartupStateUnknown(),
 		"the current reader must remove the rollback-only inert fence")
 	require.False(t, restored.IsExternalWorktree(),

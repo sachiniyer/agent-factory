@@ -198,6 +198,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 				Device:                      recovery.Device,
 				Inode:                       recovery.Inode,
 				FileType:                    recovery.FileType,
+				CleanupGeneration:           recovery.CleanupGeneration,
 				OriginalExternalWorktree:    &externalWorktree,
 				OriginalBranchCreatedByUs:   &branchCreatedByUs,
 				OriginalStartupStateUnknown: &startupStateUnknown,
@@ -227,15 +228,21 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		// fail-closed fields. A current reader must recover the exact original
 		// ownership and startup state; missing metadata is not a zero value and
 		// must never turn the rollback fence into deletion authority.
-		if recovery.OriginalExternalWorktree == nil ||
-			recovery.OriginalBranchCreatedByUs == nil ||
-			recovery.OriginalStartupStateUnknown == nil {
+		originalExternal := recovery.OriginalExternalWorktree
+		originalBranch := recovery.OriginalBranchCreatedByUs
+		originalStartup := recovery.OriginalStartupStateUnknown
+		if recovery.CleanupLifecycle != "" {
+			originalExternal = recovery.CleanupOriginalExternalWorktree
+			originalBranch = recovery.CleanupOriginalBranchCreatedByUs
+			originalStartup = recovery.CleanupOriginalStartupStateUnknown
+		}
+		if originalExternal == nil || originalBranch == nil || originalStartup == nil {
 			return nil, fmt.Errorf("failed to restore worktree relocation recovery: rollback safety metadata is missing")
 		}
-		data.Worktree.ExternalWorktree = *recovery.OriginalExternalWorktree
-		branchCreatedByUs := *recovery.OriginalBranchCreatedByUs
+		data.Worktree.ExternalWorktree = *originalExternal
+		branchCreatedByUs := *originalBranch
 		data.Worktree.BranchCreatedByUs = &branchCreatedByUs
-		data.StartupStateUnknown = *recovery.OriginalStartupStateUnknown
+		data.StartupStateUnknown = *originalStartup
 	}
 	id := data.ID
 	if id == "" {
@@ -400,13 +407,18 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 				return nil, fmt.Errorf("failed to restore git worktree: %w", err)
 			}
 			if recovery := data.Worktree.RelocationRecovery; recovery != nil {
+				recoveryState, stateErr := runtimeRelocationRecoveryState(recovery)
+				if stateErr != nil {
+					return nil, fmt.Errorf("failed to decode worktree relocation recovery: %w", stateErr)
+				}
 				if err := gw.RestoreRelocationRecovery(git.RelocationRecovery{
-					State:         recovery.State,
-					AlternatePath: recovery.AlternatePath,
-					IdentityKnown: recovery.IdentityKnown,
-					Device:        recovery.Device,
-					Inode:         recovery.Inode,
-					FileType:      recovery.FileType,
+					State:             recoveryState,
+					AlternatePath:     recovery.AlternatePath,
+					IdentityKnown:     recovery.IdentityKnown,
+					Device:            recovery.Device,
+					Inode:             recovery.Inode,
+					FileType:          recovery.FileType,
+					CleanupGeneration: recovery.CleanupGeneration,
 				}); err != nil {
 					return nil, fmt.Errorf("failed to restore worktree relocation recovery: %w", err)
 				}

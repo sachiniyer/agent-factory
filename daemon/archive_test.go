@@ -792,8 +792,8 @@ func TestRestoreArchived_RejectsPendingKill(t *testing.T) {
 }
 
 // TestRestoreArchived_RepoGoneLeavesArchiveIntact: when the origin repo has been
-// deleted, restore fails with an actionable message and leaves the archived
-// worktree and the Archived status untouched.
+// deleted, restore fails with an actionable message, leaves the archive intact,
+// and records cleanup authorization that this producer-only slice still refuses.
 func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
@@ -825,10 +825,14 @@ func TestRestoreArchived_RepoGoneLeavesArchiveIntact(t *testing.T) {
 	assert.Contains(t, err.Error(), "gone")
 	assert.True(t, exists(archivedPath), "the archived worktree must be left intact when the repo is gone")
 	assert.Equal(t, session.Archived, inst.GetStatus(), "a failed restore must leave the session Archived")
-	assert.Nil(t, recordFor(t, repoID, "worker").Worktree.RelocationRecovery,
-		"bounded identity resolution must clear the recovery guard so repo-gone archives remain disposable")
-	assert.NoError(t, inst.ValidateWorktreeDestructionAdmission(),
-		"the user must still be able to kill a repo-gone archive after its path identity is established")
+	recovery := recordFor(t, repoID, "worker").Worktree.RelocationRecovery
+	require.NotNil(t, recovery,
+		"repo-gone resolution must persist the selected identity until cleanup consumes it")
+	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
+	assert.Equal(t, sessiongit.RelocationRecoveryCleanupReady, recovery.CleanupLifecycle)
+	assert.True(t, recovery.IdentityKnown)
+	assert.Error(t, inst.ValidateWorktreeDestructionAdmission(),
+		"slice 1 must leave cleanup_ready blocked until the live consumer lands")
 }
 
 // TestRestoreArchived_CollisionSuffixesPath: when the standard sibling location

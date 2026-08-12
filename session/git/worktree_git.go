@@ -136,11 +136,21 @@ func (g *GitWorktree) runGitNetworkCommand(path string, args ...string) (string,
 // on an interactive credential/passphrase prompt (another way a fetch hangs
 // forever under the daemon, which has no terminal attached).
 func (g *GitWorktree) runGitCommandContext(ctx context.Context, path string, args ...string) (string, error) {
+	return g.runGitCommandContextWithEnvironment(ctx, path, g.gitCommandEnvironment(), args...)
+}
+
+func (g *GitWorktree) runGitCommandContextWithEnvironment(
+	ctx context.Context,
+	path string,
+	environment []string,
+	args ...string,
+) (string, error) {
 	baseArgs := []string{"-C", path}
 	cmd := exec.CommandContext(ctx, "git", append(baseArgs, args...)...)
 	// Fail fast instead of blocking on a credential/passphrase prompt when a
-	// remote needs auth and no terminal is attached.
-	cmd.Env = append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough), "GIT_TERMINAL_PROMPT=0")
+	// remote needs auth and no terminal is attached. Force stable diagnostics so
+	// repository classification is fail-closed and locale-independent.
+	cmd.Env = environment
 	// Own process group so the deadline kills git AND its transport child
 	// together. exec.CommandContext's default Cancel SIGKILLs only the git
 	// process, leaving ssh / git-remote-https orphaned and still holding the
@@ -188,4 +198,14 @@ func (g *GitWorktree) runGitCommandContext(ctx context.Context, path string, arg
 	}
 
 	return string(output), nil
+}
+
+func (g *GitWorktree) gitCommandEnvironment() []string {
+	return append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough),
+		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+}
+
+func repoGoneGitCommandEnvironment() []string {
+	return append(sessionenv.Filter(os.Environ(), "", nil),
+		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }

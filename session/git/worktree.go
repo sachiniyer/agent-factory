@@ -115,12 +115,13 @@ type GitWorktree struct {
 // the move and therefore follows an on-filesystem rename to either candidate.
 // Exported so session storage can round-trip the recovery proof across restart.
 type RelocationRecovery struct {
-	State         RelocationRecoveryState
-	AlternatePath string
-	IdentityKnown bool
-	Device        uint64
-	Inode         uint64
-	FileType      uint32
+	State             RelocationRecoveryState
+	AlternatePath     string
+	IdentityKnown     bool
+	Device            uint64
+	Inode             uint64
+	FileType          uint32
+	CleanupGeneration string
 }
 
 func (r RelocationRecovery) identity() pathIdentity {

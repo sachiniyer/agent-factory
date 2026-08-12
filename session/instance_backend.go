@@ -285,17 +285,29 @@ func (i *Instance) PreserveWorktreeRelocationClaimForRetry(claim git.RelocationC
 	}
 }
 
-// SettleWorktreeRelocationClaimForRetry establishes that a consumed recovery
-// claim still names the archived directory, then releases it atomically. This is
-// the non-relocating completion path used when the origin repo is gone.
-func (i *Instance) SettleWorktreeRelocationClaimForRetry(claim git.RelocationClaim) error {
+// PreserveWorktreeRelocationClaimAsUnresolved fences a resolved archive when a
+// later read-only gate cannot answer. Unlike the ordinary abort helper, it also
+// materializes record-free claims so kill cannot read absence as permission.
+func (i *Instance) PreserveWorktreeRelocationClaimAsUnresolved(claim git.RelocationClaim) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		gw.PreserveRelocationClaimAsUnresolved(claim)
+	}
+}
+
+// PrepareWorktreeRelocationClaimForCleanup persists a resolved archived-path
+// identity as a cleanup-only obligation. Slice 1 deliberately leaves every
+// cleanup-ready kill refused; later slices add the destructive consumer.
+func (i *Instance) PrepareWorktreeRelocationClaimForCleanup(claim git.RelocationClaim) error {
 	i.mu.RLock()
 	gw := i.gitWorktree
 	i.mu.RUnlock()
 	if gw == nil {
-		return fmt.Errorf("cannot settle worktree relocation for %q: instance has no worktree", i.Title)
+		return fmt.Errorf("cannot prepare worktree cleanup for %q: instance has no worktree", i.Title)
 	}
-	return gw.SettleRelocationClaim(claim)
+	return gw.PrepareRelocationClaimForCleanup(claim)
 }
 
 // ValidateWorktreeDestructionAdmission is the pre-teardown guard. It is called
