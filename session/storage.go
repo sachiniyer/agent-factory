@@ -276,45 +276,6 @@ type InstanceData struct {
 	archiveReportPending bool
 }
 
-// AccountSwapData is the durable identity boundary for an automatic swap.
-// From may be empty for the ambient identity; the pointer's presence, rather
-// than either string, is the recovery obligation.
-type AccountSwapData struct {
-	From                    string `json:"from,omitempty"`
-	To                      string `json:"to"`
-	ConversationID          string `json:"conversation_id,omitempty"`
-	ReplacementPanesStarted bool   `json:"replacement_panes_started,omitempty"`
-}
-
-// AccountLimitObservationData is durable evidence that one named identity hit
-// a provider quota wall. Agent is part of the key because equal account labels
-// name unrelated credential stores for different providers.
-type AccountLimitObservationData struct {
-	Agent   string    `json:"agent"`
-	Account string    `json:"account"`
-	ResetAt time.Time `json:"reset_at,omitempty"`
-}
-
-// IsRemoteHook reports whether this serialized record is a remote hook session,
-// reading the persisted BackendType discriminator. It centralizes the raw-data
-// remote check (#1592 Phase 1 PR3) so daemon logic that iterates []InstanceData
-// — where no backend is reconstructed and Capabilities() is unavailable — never
-// hard-codes the "remote" magic string. The load-time factory
-// (NewInstanceFromData) remains the one place that maps the discriminator to a
-// concrete backend.
-func (d InstanceData) IsRemoteHook() bool {
-	return d.BackendType == "remote"
-}
-
-// UsesLocalTmux reports whether this persisted row belongs to the in-process
-// local backend and therefore claims a repo-scoped tmux name. Empty is the
-// pre-backend-discriminator legacy encoding and also means local. Keeping this
-// decoding beside BackendType prevents daemon admission from growing its own
-// backend-name list.
-func (d InstanceData) UsesLocalTmux() bool {
-	return d.BackendType == "" || d.BackendType == "local"
-}
-
 // RestoreArchiveRollbackFence removes the previous-release safety projection
 // from a persisted row. FromInstanceData uses it before reconstructing an
 // Instance; storage-only cleanup paths use it before manually reconstructing a
