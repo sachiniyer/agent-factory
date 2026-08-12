@@ -388,6 +388,21 @@ func TestValidateOverridesLeavesGlobalsUntouched(t *testing.T) {
 	}
 }
 
+func TestNormalizeKeySpec(t *testing.T) {
+	valid := []string{"q", "Q", "?", "/", "[", "å", "ctrl+a", "alt+x", "shift+up", "shift+ctrl+up", "ctrl+shift+up", "f5", "space", "pgup", "ctrl+enter"}
+	for _, s := range valid {
+		if _, ok := normalizeKeySpec(s); !ok {
+			t.Fatalf("normalizeKeySpec(%q) = _, false, want _, true", s)
+		}
+	}
+	invalid := []string{"", " ", "space bar", "qq", "ctrl+", "ctrl+alt+", "ctrl+ctrl+a", "control+a", "\t"}
+	for _, s := range invalid {
+		if _, ok := normalizeKeySpec(s); ok {
+			t.Fatalf("normalizeKeySpec(%q) = _, true, want _, false", s)
+		}
+	}
+}
+
 func TestEffectiveBindings(t *testing.T) {
 	infos, err := EffectiveBindings(map[string][]string{"quit": {"Q"}})
 	if err != nil {
