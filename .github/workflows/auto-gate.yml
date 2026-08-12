@@ -84,16 +84,18 @@ jobs:
             // resolution. If the resolver fails, apply-gate can still make a
             // previously green aggregate non-green for every known head.
             const payload = context.payload || {};
+            // Order is safety-critical because invalidation is sequential: the
+            // current/after head must turn red before the historical before head.
             const knownEventHeads = [...new Set([
               payload.pull_request?.head?.sha,
+              payload.after,
               payload.check_suite?.head_sha,
               payload.workflow_run?.head_sha,
               payload.sha,
               payload.before,
-              payload.after,
             ]
               .map((value) => String(value || "").toLowerCase())
-              .filter((value) => /^[0-9a-f]{40}$/.test(value)))].sort();
+              .filter((value) => /^[0-9a-f]{40}$/.test(value)))];
 
             let autoGate;
             try {
