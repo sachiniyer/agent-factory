@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	cmd2 "github.com/sachiniyer/agent-factory/cmd"
-
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -223,7 +221,7 @@ func TestRestoreRespawnsWhenSessionMissing(t *testing.T) {
 	require.Equal(t,
 		fmt.Sprintf("tmux new-session -d -s af_missing -c %s %s", workdir,
 			wrappedProgramForTest(t, "/test/af", "claude --continue")),
-		cmd2.ToString(ptyFactory.cmds[0]))
+		strings.Join(ptyFactory.cmds[0].Args, " "))
 }
 
 // TestRestoreReturnsErrorWhenSessionMissingAndNoWorkDir guards the contract
@@ -285,7 +283,7 @@ func TestStartTmuxSession(t *testing.T) {
 	require.Equal(t, 1, len(ptyFactory.cmds))
 	require.Equal(t, fmt.Sprintf("tmux new-session -d -s af_test-session -c %s %s", workdir,
 		wrappedProgramForTest(t, "/test/af", "claude")),
-		cmd2.ToString(ptyFactory.cmds[0]))
+		strings.Join(ptyFactory.cmds[0].Args, " "))
 
 	require.Equal(t, 1, len(ptyFactory.files))
 

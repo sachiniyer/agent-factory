@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -223,7 +222,7 @@ func TestLocalBackendStartRestoreReinjectsSystemPrompt(t *testing.T) {
 
 	require.GreaterOrEqual(t, len(ptyFactory.cmds), 1,
 		"expected at least one PTY command from the respawn path")
-	newSessionCmd := cmd.ToString(ptyFactory.cmds[0])
+	newSessionCmd := strings.Join(ptyFactory.cmds[0].Args, " ")
 	require.Contains(t, newSessionCmd, "new-session",
 		"first PTY command must be the lazy-respawn new-session (not an attach)")
 	require.Contains(t, newSessionCmd, "--plugin-dir",
