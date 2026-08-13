@@ -7,11 +7,15 @@
 #   .venv-docs/bin/mkdocs serve      # live preview at http://127.0.0.1:8000
 #   .venv-docs/bin/mkdocs build --strict
 mkdocs==1.6.1
-mkdocs-material==9.6.14
-# pymdown-extensions: kept current (within mkdocs-material's ~=10.2 range) so it
-# stays clear of the 10.14.x snippets path-traversal (GHSA-62q4-447f-wv8h) and
-# Figure Capture ReDoS (GHSA-r6h4-mm7h-8pmq) advisories.
-pymdown-extensions==10.21.3
+# mkdocs-material: 9.6.x capped pymdown-extensions at ~=10.x; 9.7.x relaxes the
+# requirement to >=10.2, which the security pin below needs.
+mkdocs-material==9.7.7
+# pymdown-extensions: 11.0.1 is the first release clear of both advisories open
+# against the 10.x line — the b64 path traversal (GHSA-9xwg-3r6f-jcx2, fixed in
+# 11.0.0) and the caret/tilde/betterem/magiclink ReDoS (GHSA-gm37-52c6-37mw,
+# fixed in 11.0.1). Earlier advisories (GHSA-62q4-447f-wv8h, GHSA-r6h4-mm7h-8pmq)
+# stay cleared.
+pymdown-extensions==11.0.1
 # Pygments: 2.20.0 clears the 2.18.x GUID-regex ReDoS and renders cleanly. (The
 # older anchor_linenums crash on 2.19+ was a pymdownx bug, fixed by the
 # pymdown-extensions bump above — the two must move together.)

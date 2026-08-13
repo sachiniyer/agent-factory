@@ -427,6 +427,14 @@ func (s *TaskPane) deleteSelectedTask() {
 		return
 	}
 	deleted := s.tasks[s.selectedIdx]
+	// Queue the record as LOADED, not the pane copy: an unsaved edit (which the
+	// delete below discards) may have retargeted ProjectPath, and the deletion's
+	// project CAS must pin the binding the daemon actually stores — pinning a
+	// never-persisted path would falsely refuse the delete (#3230). The pane
+	// copy is the fallback only for a record SetTasks never snapshotted.
+	if original, ok := s.originals[deleted.ID]; ok {
+		deleted = original
+	}
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

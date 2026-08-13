@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -172,6 +175,138 @@ func TestEnsureRootAgentsPersonalDisablesLegacyRoot(t *testing.T) {
 	}
 	if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
 		t.Fatalf("repoRootAgentWillMaterialize must be false for a personal-disabled root — a send-prompt must not wait for a root that will never come")
+	}
+}
+
+// makePersonalRootAgentUnreadable revokes read permission on a registered
+// project's personal config file, so LoadProjectConfig fails with EACCES
+// instead of reporting an absent layer. It skips — never silently passes —
+// where the fixture cannot exist: under root, and on mounts that do not
+// enforce permission bits, both proven by an actual probe read after the
+// chmod (the worktree_copy_link_unreadable_test.go idiom). Without the probe
+// the fixture would be a readable enabled=false, which produces the same
+// assertions' outcome through the ordinary personal-disable path and turns
+// the regression test into a silent no-op.
+func makePersonalRootAgentUnreadable(t *testing.T, projectID string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not make a file unreadable")
+	}
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod personal config unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0o644)
+	})
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("environment does not enforce file permission bits; the unreadable fixture cannot exist here")
+	}
+}
+
+// breakPersonalRootAgentToml overwrites a registered project's personal config
+// with syntactically invalid TOML, so LoadProjectConfig fails at parse — the
+// portable member of the #3241 failure class: no chmod, no skips, it runs on
+// every platform and runner.
+func breakPersonalRootAgentToml(t *testing.T, projectID string) {
+	t.Helper()
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("[root_agent]\nenabled = tru\n"), 0o644); err != nil {
+		t.Fatalf("write malformed personal config: %v", err)
+	}
+}
+
+// TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed is the #3241
+// regression, across the LoadProjectConfig failure class and both
+// lower-precedence enables. In every case the personal config held
+// `enabled = false` and then became unloadable — unreadable permissions, or
+// TOML that no longer parses — and the daemon must fail CLOSED: collapsing the
+// failed load into "no personal layer" let the lower enable start a root the
+// user deliberately disabled. The decision is unknown, and unknown is not
+// permission. (Commit 1 of this PR carried the unreadable cases standalone;
+// CI showed them red against the unfixed code with `got 1 creates`.)
+func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		// corrupt makes the personal config unloadable after the disable was
+		// written (it may skip where its fixture cannot exist).
+		corrupt func(t *testing.T, projectID string)
+		// managerConfig supplies the lower-precedence enable that must not win.
+		managerConfig func(t *testing.T, repoPath string) *config.Config
+	}{
+		{
+			name:    "unreadable file under a legacy enable",
+			corrupt: makePersonalRootAgentUnreadable,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			name:    "unreadable file under a global enable",
+			corrupt: makePersonalRootAgentUnreadable,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return loadGlobalConfigWithRootAgent(t, "enabled = true")
+			},
+		},
+		{
+			name:    "unparseable TOML under a legacy enable",
+			corrupt: breakPersonalRootAgentToml,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			// The portable case for the SINGLETON sweep: on root runners both
+			// chmod cases skip, and without this row the
+			// ensureSingletonRootAgent arm of the gate would go untested there.
+			name:    "unparseable TOML under a global enable",
+			corrupt: breakPersonalRootAgentToml,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return loadGlobalConfigWithRootAgent(t, "enabled = true")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			project := registerTestProject(t, repoPath)
+			writePersonalRootAgent(t, project.ID, "enabled = false")
+			tc.corrupt(t, project.ID)
+
+			// The fail-closed WARNING fires from the snapshot inside NewManager,
+			// so the capture goes in first (httpserver_test.go idiom).
+			var warnings bytes.Buffer
+			prevWarning := log.WarningLog.Writer()
+			log.WarningLog.SetOutput(&warnings)
+			t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+
+			manager, err := NewManager(tc.managerConfig(t, repoPath))
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != 0 {
+				t.Fatalf("an unloadable personal config must fail closed, got %d creates — a failed load is not an absent enabled=false", len(*seen))
+			}
+			if findRootInstance(t, manager, repoPath) != nil {
+				t.Fatalf("no root instance may exist while the personal config is unloadable")
+			}
+			if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+				t.Fatalf("repoRootAgentWillMaterialize must be false while the personal config is unloadable — a delivery must not wait for a root the ensure loop will not create")
+			}
+			if got := warnings.String(); !strings.Contains(got, "failing closed") || !strings.Contains(got, project.ID) {
+				t.Fatalf("the snapshot must warn that project %s fails closed; warnings were:\n%s", project.ID, got)
+			}
+		})
 	}
 }
 

@@ -5,11 +5,12 @@ package config
 // root-agent profile and ResolveRootAgent — the single authority on how every
 // root-agent source combines, so no consumer re-implements precedence.
 //
-// PR1 shipped the built-in + legacy layers as a config-only adapter with the
-// daemon untouched. PR2 adds the global and personal-project singleton layers and
-// wires the daemon (EnsureRootAgents and repoRootAgentWillMaterialize) onto this
-// function; the legacy path-keyed map is kept forever as a read-only source, so
-// existing configs never stop working.
+// Every layer is live: built-in, the global [root_agent] singleton
+// (GlobalRootAgentLayer), the legacy path-keyed map, and the personal
+// per-project singleton, with the daemon (EnsureRootAgents and
+// repoRootAgentWillMaterialize) resolving through this function. The legacy
+// path-keyed map is kept forever as a read-only source, so existing configs
+// never stop working.
 
 // RootAgent is the canonical root-agent profile: whether a project keeps an
 // always-ensured "root" session, and the command it runs. It is the singular
@@ -102,9 +103,13 @@ type RootAgentCandidate struct {
 type RootAgentResolution struct {
 	RootAgent
 	// EnabledSource / ProgramSource name the layer that supplied each effective
-	// field, for the --explain surface. EnabledSource is always set (the built-in
-	// base sets `enabled`); ProgramSource is empty when no layer supplied a
-	// program and the default profile applies.
+	// field, for the --explain surface. ResolveRootAgent always sets
+	// EnabledSource (the built-in base sets `enabled`); ProgramSource is empty
+	// when no layer supplied a program and the default profile applies. The one
+	// producer outside ResolveRootAgent is the daemon's fail-closed gate for an
+	// unloadable personal config (#3241), which returns a zero resolution —
+	// disabled, no provenance, no candidates — because no config source decided
+	// it.
 	EnabledSource RootAgentSource      `json:"enabled_source"`
 	ProgramSource RootAgentSource      `json:"program_source,omitempty"`
 	Candidates    []RootAgentCandidate `json:"candidates"`

@@ -79,6 +79,7 @@ var auditedRequests = map[string]reflect.Type{
 	"ResumeFromLimitRequest":  reflect.TypeOf(daemon.ResumeFromLimitRequest{}),
 	"ResumeStatusPollRequest": reflect.TypeOf(daemon.ResumeStatusPollRequest{}),
 	"SendPromptRequest":       reflect.TypeOf(daemon.SendPromptRequest{}),
+	"SetConfigValueRequest":   reflect.TypeOf(daemon.SetConfigValueRequest{}),
 	"SetPRInfoRequest":        reflect.TypeOf(daemon.SetPRInfoRequest{}),
 	"RemoveTaskRequest":       reflect.TypeOf(daemon.RemoveTaskRequest{}),
 	"SnapshotRequest":         reflect.TypeOf(daemon.SnapshotRequest{}),

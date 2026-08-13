@@ -154,7 +154,7 @@ func TestCaptureReaderCloseAfterAbortCleanup(t *testing.T) {
 // width differs from the pane's.
 //
 // The pane (20 wide) holds a line that WRAPS (25 chars → two physical rows) above a
-// prompt carrying a unique marker where the pane cursor sits. Under the pre-fix
+// final row carrying a unique marker where the pane cursor sits. Under the pre-fix
 // `capture-pane -J` + CRLF-join repaint, that wrapped line collapses to one row in a
 // 40-wide emulator and shifts the marker up, so the absolute cursor move named the
 // wrong line. The grid capture (`capture-pane` without -J) + per-row positioning
@@ -181,14 +181,22 @@ func TestTmuxSnapshotRepaintCursorRealTmux(t *testing.T) {
 	}
 	time.Sleep(150 * time.Millisecond)
 
-	// Print a wrapping line, then leave the cursor after a unique marker on the live
-	// prompt line (no Enter) so the pane cursor sits at a known row/col.
-	if err := ts.SendKeysCommand("printf '%s\\n' AAAAAAAAAAAAAAAAAAAABBBBB"); err != nil {
-		t.Fatalf("send wrapping line: %v", err)
-	}
+	// Print a wrapping line, then a unique marker with NO trailing newline, as ONE
+	// submitted command, so the cursor comes to rest on the marker's row.
+	//
+	// One command on purpose (#3270): the marker used to be typed via SendRawKeys
+	// after this returned, but SendKeysCommand only proves DELIVERY, not that the
+	// shell has finished executing — and the tty echoes type-ahead input the moment
+	// it arrives, even mid-execution. On a slow runner the marker's echo therefore
+	// entered the pane stream BEFORE printf's output, the wait below saw the marker
+	// and captured a screen with no output rows on it, and the split assertion
+	// failed. Emitted by the command itself, the marker is the LAST thing the pane
+	// renders, so its visibility implies every row above it is already there. It is
+	// spelled 'ZZ%s' MARK so the echoed command line can never contain the
+	// contiguous marker and satisfy the wait early.
 	const marker = "ZZMARK"
-	if err := ts.SendRawKeys([]byte(marker)); err != nil {
-		t.Fatalf("send marker: %v", err)
+	if err := ts.SendKeysCommand("printf '%s\\n' AAAAAAAAAAAAAAAAAAAABBBBB; printf 'ZZ%s' MARK"); err != nil {
+		t.Fatalf("send wrapping line: %v", err)
 	}
 
 	ch := newTmuxClientlessChannel(ts)

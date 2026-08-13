@@ -291,16 +291,44 @@ func (m *home) handleCloseTab() (tea.Model, tea.Cmd) {
 }
 
 // handleTabJump jumps to a 1-based tab number (the 1-9 number keys). With a
-// pane focused, the pane's own binding changes tab; with tree focus, the
-// sidebar selection's active tab changes. Out-of-range numbers are a no-op
-// (#930 PR 4). When the sidebar cursor rests on one of the selected instance's
-// tab rows, it follows the tree-focus jump so the tree and active tab agree.
+// pane focused, the pane's own binding changes tab — unless the target tab is
+// already open in another pane, in which case THAT pane is focused instead
+// (#3267). With tree focus, the sidebar selection's active tab changes.
+// Out-of-range numbers are a no-op (#930 PR 4). When the sidebar cursor rests
+// on one of the selected instance's tab rows, it follows the tree-focus jump so
+// the tree and active tab agree.
 func (m *home) handleTabJump(oneBased int) (tea.Model, tea.Cmd) {
 	idx := oneBased - 1
 	if p := m.focusedOpenPane(); p != nil {
 		w := m.paneWindows[p.ID()]
 		if m.panePreviewTxn != nil && m.panePreviewTxn.ownerPaneID == p.ID() {
 			m.cancelPanePreview(false)
+		}
+		// A jump to a tab ALREADY OPEN in another pane focuses that pane instead
+		// of rebinding this one — the same open-or-focus contract every other
+		// open/commit path applies (#1493, §2.3). Rebinding here bound one
+		// terminal into two panes, and the view-state file then persisted the
+		// duplicate (#3267). The gesture is not swallowed: focus lands on the
+		// pane already showing the target, exactly like `s` on an open tab. A
+		// pane bound to idx also proves idx names a real tab, so no separate
+		// range check is owed on this branch.
+		if existing := m.store.FindOpenPane(p.Instance(), idx); existing != nil && existing != p {
+			m.cancelPanePreview(false)
+			// Pin jump intent on the pane being focused, mirroring the rebind
+			// branch below: the tree cursor still points at a DIVERGENT tab —
+			// typically the one the pane the user just left is showing — and
+			// without a pin for the current epoch the trailing selectionChanged's
+			// own already-open gate would focus that pane right back, eating the
+			// gesture. Seed the epoch first for the same restored-pane reason as
+			// below.
+			m.bumpSelectionEpochIfMoved(m.sidebar.GetSelection())
+			m.pinPaneJumpIntent(existing.ID())
+			m.focusOpenPane(existing)
+			selectionCmd := m.selectionChanged()
+			// Consume AFTER selectionChanged, as openOrFocusPane does, so the
+			// catch-all drains an auto-hide status produced by ANY relayout in
+			// this focus move (#1685).
+			return m, tea.Batch(selectionCmd, m.consumePaneAutoHideStatus())
 		}
 		if w == nil || !w.JumpToTab(idx) {
 			return m, nil

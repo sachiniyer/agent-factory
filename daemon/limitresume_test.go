@@ -1,11 +1,26 @@
 package daemon
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
+
+// captureInfoLog routes log.InfoLog into a buffer for the test's lifetime, so a
+// test can assert what the daemon claims in its own success log (#3240).
+func captureInfoLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := aflog.InfoLog.Writer()
+	aflog.InfoLog.SetOutput(&buf)
+	t.Cleanup(func() { aflog.InfoLog.SetOutput(prev) })
+	return &buf
+}
 
 // The usage-limit auto-resume scheduler tests (#1146 PR3). Every test drives the
 // injected clock (withFrozenClock swaps nowFunc) rather than the wall clock, so
@@ -38,7 +53,8 @@ func TestResumeLimitedSessions_ResumesAfterWindow(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
 	resetAt := base.Add(time.Hour)
-	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+	infoLog := captureInfoLog(t)
 
 	// Before the window elapses: no resume, still parked.
 	manager.ResumeLimitedSessions()
@@ -71,6 +87,13 @@ func TestResumeLimitedSessions_ResumesAfterWindow(t *testing.T) {
 	}
 	if inst.LimitReached() {
 		t.Fatal("limit liveness must be cleared after auto-resume")
+	}
+	// The success log states the trigger the daemon observed: on this path it
+	// scheduled against the banner's parsed reset time, and that time passing is
+	// what it actually knows (#3240).
+	want := fmt.Sprintf("auto-resumed limit-blocked session %q (repo %s) after its parsed usage-limit reset time passed (attempt 1)", inst.Title, repoID)
+	if logged := infoLog.String(); !strings.Contains(logged, want) {
+		t.Fatalf("resume log = %q, want it to contain %q", logged, want)
 	}
 }
 
@@ -174,7 +197,8 @@ func TestResumeLimitedSessions_ArchivedClearsTimer(t *testing.T) {
 // before the interval elapses, then a resume.
 func TestResumeLimitedSessions_NoResetTimeFallback(t *testing.T) {
 	advance := withFrozenClock(t)
-	manager, _, _, backend := newAutoResumeManager(t, "30m", true, "no reset work", time.Time{}) // zero reset
+	manager, repoID, inst, backend := newAutoResumeManager(t, "30m", true, "no reset work", time.Time{}) // zero reset
+	infoLog := captureInfoLog(t)
 
 	// First pass anchors parkedAt = now; nothing is due for a full interval.
 	manager.ResumeLimitedSessions()
@@ -188,6 +212,18 @@ func TestResumeLimitedSessions_NoResetTimeFallback(t *testing.T) {
 	manager.ResumeLimitedSessions()
 	if _, _, prompts := backend.snapshot(); len(prompts) != 1 || prompts[0] != "no reset work" {
 		t.Fatalf("re-delivered prompts = %v, want [\"no reset work\"] after the fallback interval", prompts)
+	}
+	// No reset time was ever parsed here: the resume proves only that the fallback
+	// interval fired and the retry succeeded. The log must state that trigger and
+	// must not claim a usage-limit window elapsed — a fact about the provider the
+	// daemon never observed (#3240).
+	logged := infoLog.String()
+	want := fmt.Sprintf("auto-resumed limit-blocked session %q (repo %s) after the limit_retry_interval fallback elapsed (no reset time was parsed) (attempt 1)", inst.Title, repoID)
+	if !strings.Contains(logged, want) {
+		t.Fatalf("fallback resume log = %q, want it to contain %q", logged, want)
+	}
+	if strings.Contains(logged, "window elapsed") {
+		t.Fatalf("fallback resume log asserts a usage-limit window elapsed, which the daemon cannot know: %q", logged)
 	}
 }
 

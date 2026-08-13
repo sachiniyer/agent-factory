@@ -143,11 +143,16 @@ func (m *home) handleTaskTrigger() tea.Cmd {
 
 	taskID := tsk.ID
 	taskTitle := task.TaskRunBaseTitle(*tsk)
+	// Pin the project binding of the record the user fired from (#3230): the
+	// daemon re-verifies it against the same load that produces the fired
+	// record, so a "run now" on a stale row cannot fire a task another client
+	// rebound to a different project.
+	expect := task.ExpectProject(*tsk)
 	// Capture the trigger seam on the event loop before the goroutine reads it, so
 	// a concurrent test-seam swap can't race the read (#960 PR 4 race-fix class).
 	trigger := triggerTaskThroughDaemon
 	triggerCmd := func() tea.Msg {
-		if err := trigger(taskID); err != nil {
+		if err := trigger(taskID, expect); err != nil {
 			return taskTriggeredMsg{title: taskTitle, err: err}
 		}
 		return taskTriggeredMsg{title: taskTitle}

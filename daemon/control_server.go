@@ -200,13 +200,17 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 
 // SetConfigValue writes one config key on the caller's behalf, through
 // config.SetGlobalConfigValue — the identical validated, file-locked, atomic
-// path `af config set` and the TUI editor use. The daemon adds nothing: no
-// second validator, no second writer, no reordering.
+// path a daemonless `af config set` uses. The daemon adds nothing: no second
+// validator, no second writer, no reordering.
 //
-// It exists because a browser cannot write the user's disk, not because the
-// daemon owns config.toml (it does not — see the control_types.go note). The
-// file lock is what makes this safe against a concurrent hand-edit or CLI write,
-// and it is taken inside SetGlobalConfigValue, so this method must not
+// Since #3231 this is the one write path every first-class surface routes
+// through while a daemon is running — the web form posts it, and `af config
+// set` and the TUI editor call it over the control socket — so the mutation
+// admission gate above answers "is a config write admissible right now"
+// identically for all of them, and a refusal lands before anything reaches
+// disk. The daemon does not own config.toml (see the control_types.go note);
+// the file lock inside SetGlobalConfigValue is what makes this safe against a
+// concurrent hand-edit or daemonless CLI write, so this method must not
 // pre-read, cache, or merge anything around it.
 //
 // Errors (unknown key, invalid value) propagate verbatim so the web form shows
@@ -248,11 +252,21 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 }
 
 // ApplyConfig makes the running daemon reflect the on-disk global config in place
-// (#2480), so `af config set` (which writes the file itself) does not require a
-// manual restart to take effect. Reports which changed keys are live vs pending.
-// Not gated on mutation admission: it reloads config, touches no session state,
-// and is safe during warmup.
+// (#2480), so a config write does not require a manual restart to take effect.
+// Reports which changed keys are live vs pending. Since #3231 the first-class
+// clients route their writes through SetConfigValue, which applies internally;
+// this remains for older CLIs that write the file themselves and poke it after.
+//
+// Gated on mutation admission like SetConfigValue (#3231): an apply is not
+// inert — it swaps the live config, rebinds listeners, and changes auth
+// posture — so during upgrade probation it would mutate the very posture the
+// supervisor is validating, and during quiescing it would race the hand-off.
+// Ordinary warm-up is still admitted (mutationAdmissionError allows it), so a
+// write during a normal start keeps applying live.
 func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if s.manager == nil {
 		return nil
 	}

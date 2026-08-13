@@ -25,19 +25,19 @@ import (
 // piece of the update path the daemon owns rather than borrowing from an
 // interactive launch.
 //
-// It DOES NOT INSTALL ANYTHING. It resolves the newest release on the configured
-// channel and reports it. Activation — handing candidate bytes to
-// triggerUpgradeActivation, which the transaction engine (R1/R2a/R2b) already
-// implements and nothing yet calls — is deliberately a later slice, because
-// switching it on requires resolving which of the two installers owns the binary
-// (`af upgrade` / launch-time swap in place; the daemon would go through the
-// journal + probation + rollback transaction). Two mechanisms racing to replace
-// the same executable is a worse outcome than a box that is merely behind, and
-// that reconciliation is an open product decision on #2212.
+// It resolves the newest release on the configured channel and reports it, and —
+// only behind the explicit AGENT_FACTORY_DAEMON_UPGRADE opt-in (default off; see
+// daemonUpgradeActivationEnabled) — stages the candidate and hands its bytes to
+// triggerUpgradeActivation for the journal + probation + rollback transaction.
+// Without the opt-in it installs nothing: two mechanisms racing to replace the
+// same executable (`af upgrade` / launch-time swap in place vs the daemon's
+// transaction) is a worse outcome than a box that is merely behind, and the
+// upgrade interlock (commands/upgrade_interlock.go) is what keeps the in-place
+// writers off a live transaction.
 //
-// The one property this slice must not break is the launch-path updater, which
-// is still the only thing that installs. See windowOpen: this driver reads the
-// shared throttle cache and never writes it.
+// The one property this driver must not break is the launch-path updater, which
+// remains the default installer. See windowOpen: this driver reads the shared
+// throttle cache and never writes it.
 
 var (
 	// updateDriverWakeInterval is how often the loop re-evaluates. It is
@@ -596,17 +596,17 @@ func (d *updateDriver) rejectTag(tag string) {
 // whether the update lock was free.
 //
 // It is a strictly read-only use of the throttle cache, and that is the load-
-// bearing decision in this slice. Recording a check closes the window for every
-// other update trigger on the box — including the launch path, which is still
-// the only thing that installs. A daemon that consumed the window without
-// installing would leave a box whose af launches stop updating (the daemon wins
-// the window on its own cadence; the interactive launch arrives to find it
-// closed) in exchange for a driver that installs nothing: strictly worse than
-// today, and exactly the "a window where neither upgrades" outcome #2212 rules
-// out. So the invariant is: never close a window on behalf of an install you did
-// not perform. When this driver gains activation it installs, and it becomes a
-// full Due/Record participant under the same lock, failure closing the window
-// included.
+// bearing decision in this driver. Recording a check closes the window for every
+// other update trigger on the box — including the launch path, which is the
+// only installer on a box that has not opted into daemon activation. A daemon
+// that consumed the window without installing would leave a box whose af
+// launches stop updating (the daemon wins the window on its own cadence; the
+// interactive launch arrives to find it closed) in exchange for a driver that
+// installed nothing: exactly the "a window where neither upgrades" outcome
+// #2212 rules out. So the invariant is: never close a window on behalf of an
+// install you did not perform. That holds even on the activation path —
+// activateRelease exits at the hand-off and cannot observe whether the install
+// committed or rolled back, so it too records nothing (see its comment).
 //
 // Reading under the same non-blocking lock still buys the coordination that
 // matters: the daemon defers to a check another af just made, and stands down

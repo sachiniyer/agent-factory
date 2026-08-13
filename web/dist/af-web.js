@@ -6431,17 +6431,20 @@ function requireTaskID(id, action) {
 async function addTask(task, token2) {
   await af("AddTask", { task }, token2);
 }
-async function updateTask(id, update, token2) {
-  requireTaskID(id, "update a task");
-  await af("UpdateTask", { id, update }, token2);
+function projectExpectation(task) {
+  return { enforce: true, project_path: task.project_path ?? "" };
 }
-async function triggerTask(id, token2) {
-  requireTaskID(id, "trigger a task");
-  await af("TriggerTask", { id }, token2);
+async function updateTask(task, update, token2) {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token2);
 }
-async function removeTask(id, token2) {
-  requireTaskID(id, "remove a task");
-  await af("RemoveTask", { id }, token2);
+async function triggerTask(task, token2) {
+  requireTaskID(task.id, "trigger a task");
+  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+}
+async function removeTask(task, token2) {
+  requireTaskID(task.id, "remove a task");
+  await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token2);
 }
 async function getConfig(token2) {
   const resp = await af("GetConfig", {}, token2);
@@ -6671,7 +6674,14 @@ var ConfigPane = class {
         sections.push(this.renderRow(e));
       }
     }
-    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...sections));
+    const content = sections.length > 0 ? sections : [
+      h(
+        "p",
+        { class: "af-config-empty" },
+        "No settings are available \u2014 use Configure with assistant or check the daemon connection."
+      )
+    ];
+    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...content));
   }
   /** One key: its name, purpose, control, and — when it is the row just written
    *  or just refused — the echo or the error. */
@@ -6689,7 +6699,7 @@ var ConfigPane = class {
     const status = this.status;
     if (status && status.key === e.key) {
       if (status.error !== "") {
-        row.append(h("div", { class: "af-config-error" }, status.error));
+        row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
       } else {
         row.append(h("div", { class: "af-config-echo" }, `set ${status.key} = ${status.value}`));
         if (status.notice !== "") {
@@ -8604,14 +8614,9 @@ var AttachTerminal = class {
   execCommandCopy(text) {
     try {
       const ta = document.createElement("textarea");
+      ta.className = "af-clipboard-fallback";
       ta.value = text;
       ta.setAttribute("readonly", "");
-      ta.style.position = "fixed";
-      ta.style.top = "0";
-      ta.style.left = "0";
-      ta.style.width = "1px";
-      ta.style.height = "1px";
-      ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
       ta.setSelectionRange(0, text.length);
@@ -8628,8 +8633,8 @@ var AttachTerminal = class {
    *  pane-specific), so it is a viewport-fixed toast appended to document.body —
    *  matching the app's own af-toast pattern and, by living outside the pane tree,
    *  never clipped by a split pane's overflow:hidden or anchored to a transformed
-   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
-   *  element under the CSP. */
+   *  ancestor. Its component class resolves entirely through the app's semantic
+   *  tokens, so it follows the active light/dark/custom theme. */
   flashCopyHint() {
     this.flashNotice("Copy failed \u2014 clipboard unavailable");
   }
@@ -8637,18 +8642,9 @@ var AttachTerminal = class {
   flashNotice(message) {
     try {
       const hint = document.createElement("div");
+      hint.className = "af-copy-hint";
       hint.textContent = message;
       hint.setAttribute("role", "alert");
-      hint.style.position = "fixed";
-      hint.style.bottom = "12px";
-      hint.style.right = "12px";
-      hint.style.zIndex = "9999";
-      hint.style.padding = "4px 10px";
-      hint.style.borderRadius = "4px";
-      hint.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-      hint.style.background = "rgba(0, 0, 0, 0.82)";
-      hint.style.color = "#fff";
-      hint.style.pointerEvents = "none";
       document.body.appendChild(hint);
       window.setTimeout(() => hint.remove(), 2500);
     } catch {
@@ -8662,6 +8658,21 @@ var SPAWN_RETRY_DELAY_MS = 250;
 var CLOSED = Symbol("config-assistant-closed");
 function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+function spawnFailureCopy(e) {
+  if (e instanceof ApiError && e.status === 503) {
+    return {
+      status: "Unavailable",
+      error: e.message !== "" ? e.message : "The daemon reported the config assistant unavailable. Close and try again."
+    };
+  }
+  if (e instanceof ApiError && e.status === 0) {
+    return { status: "Offline", error: "Could not reach the daemon. Close and try again." };
+  }
+  return {
+    status: "Failed to start",
+    error: e instanceof Error && e.message !== "" ? e.message : "Could not start the config assistant."
+  };
 }
 function openConfigAssistant(opts) {
   const { token: token2, mountHost, onClosed } = opts;
@@ -8777,17 +8788,9 @@ function openConfigAssistant(opts) {
     if (e === CLOSED || closed) {
       return;
     }
-    const httpStatus = e instanceof ApiError ? e.status : -1;
-    if (httpStatus === 503) {
-      setStatus("Unavailable");
-      setError("The config assistant is not available in this daemon build.");
-    } else if (httpStatus === 0) {
-      setStatus("Offline");
-      setError("Could not reach the daemon. Close and try again.");
-    } else {
-      setStatus("Failed to start");
-      setError(e instanceof Error ? e.message : "Could not start the config assistant.");
-    }
+    const copy = spawnFailureCopy(e);
+    setStatus(copy.status);
+    setError(copy.error);
   });
   return { close };
 }
@@ -9209,7 +9212,11 @@ function directoryPicker(callbacks) {
   errorLine.hidden = true;
   const list = h("div", { class: "af-dirpicker-list" });
   list.setAttribute("role", "list");
-  const emptyLine = h("p", { class: "af-dirpicker-empty" }, "No subdirectories here.");
+  const emptyLine = h(
+    "p",
+    { class: "af-dirpicker-empty" },
+    "No subdirectories here \u2014 go up or enter another path."
+  );
   emptyLine.hidden = true;
   const note = h("p", { class: "af-dirpicker-note" });
   const el2 = h("div", { class: "af-dirpicker" }, head, errorLine, list, emptyLine, note);
@@ -9949,6 +9956,13 @@ var Status = {
 };
 
 // src/status.ts
+var OPERATOR_KIND_LABELS = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived"
+};
 var ROW_KIND_LABELS = {
   ready: "Ready",
   working: "Working",
@@ -10015,6 +10029,22 @@ function isCreating(s) {
 }
 function rowKind(s) {
   return rowStatus(s).kind ?? "working";
+}
+function operatorKind(s) {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (displayed === "lost" || displayed === "dead" || s.idle_reason === "process-exited" || s.idle_reason === "prompt-not-delivered") {
+    return "broken";
+  }
+  return "needs-you";
 }
 function livenessOf(s) {
   const lv = s.liveness ?? Liveness.Unset;
@@ -10151,31 +10181,36 @@ function formatLimitReset(reset, now) {
 
 // src/filter.ts
 var FILTER_KEY = "af-status-filter";
-var FILTER_KINDS = ["working", "ready", "lost", "dead", "limit", "archived"];
+var FILTER_KINDS = ["needs-you", "working", "waiting-limit", "broken", "archived"];
 var DEFAULTS = {
+  "needs-you": true,
   working: true,
-  ready: true,
-  lost: true,
-  dead: true,
-  limit: true,
+  "waiting-limit": true,
+  broken: true,
   archived: false
 };
 function defaultFilter() {
   return { ...DEFAULTS };
 }
 function filterLabel(kind) {
-  return ROW_KIND_LABELS[kind];
+  return OPERATOR_KIND_LABELS[kind];
 }
 function filterSessions(list, filter) {
-  return list.filter((s) => filter[rowKind(s)]);
+  return list.filter((s) => filter[operatorKind(s)]);
 }
 function withKind(filter, kind, on) {
   return { ...filter, [kind]: on };
 }
 function kindCounts(list) {
-  const counts = { working: 0, ready: 0, lost: 0, dead: 0, limit: 0, archived: 0 };
+  const counts = {
+    "needs-you": 0,
+    working: 0,
+    "waiting-limit": 0,
+    broken: 0,
+    archived: 0
+  };
   for (const s of list) {
-    counts[rowKind(s)]++;
+    counts[operatorKind(s)]++;
   }
   return counts;
 }
@@ -10210,6 +10245,15 @@ function loadFilter() {
     if (typeof rec[kind] === "boolean") {
       filter[kind] = rec[kind];
     }
+  }
+  if (typeof rec["needs-you"] !== "boolean" && typeof rec.ready === "boolean") {
+    filter["needs-you"] = rec.ready;
+  }
+  if (typeof rec["waiting-limit"] !== "boolean" && typeof rec.limit === "boolean") {
+    filter["waiting-limit"] = rec.limit;
+  }
+  if (typeof rec.broken !== "boolean" && typeof rec.ready === "boolean" && typeof rec.lost === "boolean" && typeof rec.dead === "boolean") {
+    filter.broken = rec.ready || rec.lost || rec.dead;
   }
   return filter;
 }
@@ -13591,7 +13635,7 @@ var AppShell = class {
     this.filterMenu.replaceChildren(...children);
   }
   /** One state's checkbox in the filter menu: a check when shown, the state's label
-   *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
+   *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
   filterItem(kind, on, count) {
     const check = h2("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
@@ -14429,13 +14473,17 @@ function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
 }
 function sessionRow(s, selected, openSession, buildActions) {
   const status = rowStatus(s);
+  const operator = operatorKind(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
   const killable = isKillableSession(s);
   const managed = actionable || killable;
   const title = h2("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts = [icon("git-branch", "af-branch-icon")];
+  const branchParts = [
+    h2("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
+    " \xB7 "
+  ];
   if (idleDetail) {
     const idle = h2("span", { class: "af-idle-reason" }, `${idleDetail} \xB7 `);
     idle.dataset.idleReason = s.idle_reason ?? "";
@@ -14444,16 +14492,25 @@ function sessionRow(s, selected, openSession, buildActions) {
     }
     branchParts.push(idle);
   }
-  branchParts.push(s.branch || "\u2014");
+  branchParts.push(
+    h2(
+      "span",
+      { class: "af-row-branch-name" },
+      icon("git-branch", "af-branch-icon"),
+      s.branch || "\u2014"
+    )
+  );
   const branch = h2("div", { class: "af-row-branch" }, ...branchParts);
   const main = h2("div", { class: "af-row-main" }, title, branch);
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
+  const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${actionable ? "" : " af-row-inert"}${creating ? " af-row-creating" : ""}`;
   const row = h2("li", { class: cls });
+  const statusSlot = h2("span", { class: "af-row-status" });
+  statusSlot.setAttribute("aria-hidden", "true");
   if (status.kind && status.icon) {
     const dot = h2("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    dot.setAttribute("aria-hidden", "true");
-    row.append(dot);
+    statusSlot.append(dot);
   }
+  row.append(statusSlot);
   row.append(main);
   if (managed) {
     row.append(buildActions(s));
@@ -14463,7 +14520,7 @@ function sessionRow(s, selected, openSession, buildActions) {
   const modelChange = s.model_change ? `; model changed from ${s.model_change.before} to ${s.model_change.after}` : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
-  row.dataset.idleTitleBase = `${s.title} \u2014 ${status.label}`;
+  row.dataset.idleTitleBase = `${s.title} \u2014 ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.setAttribute(
@@ -15208,7 +15265,7 @@ function openEditTask(task) {
         const m = modal;
         m.setBusy(true);
         void updateTask(
-          task.id,
+          task,
           {
             name: input.name,
             prompt: input.prompt,
@@ -15242,7 +15299,7 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
-  void updateTask(task.id, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
+  void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
     if (isMutationCommittedError(e)) {
       refreshTasks();
     }
@@ -15254,7 +15311,7 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -15295,7 +15352,7 @@ function doRemoveTask(task) {
   if (tok === null) {
     return;
   }
-  void removeTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void removeTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
 function setTheme(choice) {
   if (store.get().themeChoice === choice) {

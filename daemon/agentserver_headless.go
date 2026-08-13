@@ -285,7 +285,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 
 	// Clean teardown: stop accepting connections, then kill the workspace so no
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
-	// driving daemon's job (archive = push branch, epic §5), not this dark PR's.
+	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP()
 	if err := hs.as.Kill(); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)

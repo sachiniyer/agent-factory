@@ -154,6 +154,117 @@ func TestCaptureAgentConversation_CodexRetriesIncompleteConcurrentMetadata(t *te
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }
 
+func writeEmptyCodexRolloutFile(t *testing.T, codexHome, name string) string {
+	t.Helper()
+	// Same directory as writeCodexRolloutFile so a later write to the same name
+	// settles THIS file rather than creating a sibling.
+	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+	require.NoError(t, os.WriteFile(path, nil, 0644))
+	return path
+}
+
+type captureResult struct {
+	conv AgentConversationData
+	err  error
+}
+
+// TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline is the
+// #3266 production failure: the rollout file appears inside the capture window,
+// but Codex writes its session_meta header ~2.6–2.8s after process start, past
+// the base timeout. Expiry while a concrete candidate is still unclassifiable
+// is not absence; capture must keep polling until the header settles.
+func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	const name = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
+	writeEmptyCodexRolloutFile(t, codexHome, name)
+
+	done := make(chan captureResult, 1)
+	go func() {
+		conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 200*time.Millisecond)
+		done <- captureResult{conv, err}
+	}()
+
+	time.Sleep(800 * time.Millisecond)
+	select {
+	case r := <-done:
+		t.Fatalf("capture gave up while the sole rollout header was still settling: conv=%+v err=%v", r.conv, r.err)
+	default:
+	}
+
+	writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		require.Equal(t, "019ffa56-4ff5-7f81-b31f-36d3fc702b3e", r.conv.ID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture did not resolve after the rollout header settled")
+	}
+}
+
+// TestCaptureAgentConversation_CodexUndecidedSettleWindowIsBounded: the settle
+// extension waits for evidence that already exists, not forever. A header that
+// never becomes classifiable still ends in the undecided refusal.
+func TestCaptureAgentConversation_CodexUndecidedSettleWindowIsBounded(t *testing.T) {
+	oldSettle := codexSessionMetaSettleTimeout
+	codexSessionMetaSettleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { codexSessionMetaSettleTimeout = oldSettle })
+
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	writeEmptyCodexRolloutFile(t, codexHome,
+		"rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl")
+
+	start := time.Now()
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 50*time.Millisecond)
+	require.ErrorContains(t, err, "uncorrelatable session metadata")
+	require.False(t, conv.HasID(), "a header that never settled cannot be correlated")
+	require.Less(t, time.Since(start), 5*time.Second, "the settle extension must stay bounded")
+}
+
+// TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal: evidence
+// that settles DURING the extension is classified by the same fail-closed rules.
+// Two rollouts naming the launch cwd refuse, exactly as inside the base window.
+func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	const first = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
+	writeEmptyCodexRolloutFile(t, codexHome, first)
+
+	done := make(chan captureResult, 1)
+	go func() {
+		conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 100*time.Millisecond)
+		done <- captureResult{conv, err}
+	}()
+
+	time.Sleep(400 * time.Millisecond)
+	// A same-cwd sibling settles first; the poll must stay undecided while the
+	// first header is still unclassifiable rather than capture the sibling.
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-13T01-56-29-019ffa5a-ddb3-7941-8cad-7c688ceb97d4.jsonl", workDir)
+	time.Sleep(200 * time.Millisecond)
+	select {
+	case r := <-done:
+		t.Fatalf("capture must not decide while a candidate header is still settling: conv=%+v err=%v", r.conv, r.err)
+	default:
+	}
+	writeCodexRolloutFileWithCwd(t, codexHome, first, workDir)
+
+	select {
+	case r := <-done:
+		require.ErrorContains(t, r.err, "matched launch working directory")
+		require.False(t, r.conv.HasID(), "same-cwd rollouts cannot be distinguished safely")
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture did not resolve after both headers settled")
+	}
+}
+
 func TestCaptureAgentConversation_UnsupportedAgentGracefullyNoID(t *testing.T) {
 	snap := BeginConversationCapture()
 	for _, agent := range []string{tmux.ProgramGemini, tmux.ProgramAmp} {

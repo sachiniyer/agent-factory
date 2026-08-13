@@ -74,7 +74,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, type RowKind } from "./status.js";
+import { canHandoff, isArchived, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -537,7 +537,7 @@ function switchView(view: View): void {
  * filtered to "Ready" and then typed into one. The row leaves the rail; the pane
  * keeps streaming, and the rail re-highlights it when its state is shown again.
  */
-function setStatusFilter(kind: RowKind, on: boolean): void {
+function setStatusFilter(kind: OperatorKind, on: boolean): void {
   const next = withKind(store.get().statusFilter, kind, on);
   persistFilter(next);
   store.set({ statusFilter: next });
@@ -1397,7 +1397,7 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         void updateTask(
-          task.id,
+          task,
           {
             name: input.name,
             prompt: input.prompt,
@@ -1440,7 +1440,7 @@ function toggleTask(task: TaskData): void {
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
-  void updateTask(task.id, { enabled: !task.enabled }, tok)
+  void updateTask(task, { enabled: !task.enabled }, tok)
     .then(refreshTasks)
     .catch((e) => {
       if (isMutationCommittedError(e)) {
@@ -1458,7 +1458,7 @@ function doTriggerTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void triggerTask(task.id, tok)
+  void triggerTask(task, tok)
     .then(refreshTasks)
     .catch((e) => surfaceTabError(e));
 }
@@ -1538,7 +1538,7 @@ function doRemoveTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void removeTask(task.id, tok)
+  void removeTask(task, tok)
     .then(refreshTasks)
     .catch((e) => surfaceTabError(e));
 }

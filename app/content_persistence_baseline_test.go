@@ -16,7 +16,7 @@ import (
 func TestSaveContentPaneStateAdvancesSuccessfulEditWhenReloadFails(t *testing.T) {
 	h, pane := taskPaneWithEnabledTask(t)
 	var updates []task.TaskUpdate
-	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate) error {
+	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate, _ task.ProjectExpectation) error {
 		updates = append(updates, update)
 		return nil
 	}))
@@ -46,7 +46,7 @@ func TestSaveContentPaneStateAdvancesSuccessfulEditWhenReloadFails(t *testing.T)
 func TestSaveContentPaneStateKeepsFailedEditDirtyWhenReloadFails(t *testing.T) {
 	h, pane := taskPaneWithEnabledTask(t)
 	attempts := 0
-	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate) error {
+	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate, _ task.ProjectExpectation) error {
 		attempts++
 		require.NotNil(t, update.Enabled)
 		assert.False(t, *update.Enabled)
@@ -71,7 +71,7 @@ func TestSaveContentPaneStateKeepsFailedEditDirtyWhenReloadFails(t *testing.T) {
 func TestSaveContentPaneStateAdvancesPostCommitErrorWhenReloadFails(t *testing.T) {
 	h, pane := taskPaneWithEnabledTask(t)
 	var updates []task.TaskUpdate
-	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate) error {
+	t.Cleanup(SetTaskUpdaterForTest(func(_ string, update task.TaskUpdate, _ task.ProjectExpectation) error {
 		updates = append(updates, update)
 		return committedUpdateTestError{}
 	}))

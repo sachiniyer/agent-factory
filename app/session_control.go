@@ -262,9 +262,9 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, erro
 // unconditionally spawned a new session and orphaned the target (#1169). It is a
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
-var triggerTaskThroughDaemon = func(taskID string) error {
+var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.TriggerTask(taskID)
+		return c.TriggerTask(taskID, expect)
 	})
 }
 
@@ -294,14 +294,14 @@ var (
 	addTaskThroughDaemon = func(t task.Task) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
 	}
-	updateTaskThroughDaemon = func(id string, update task.TaskUpdate) error {
+	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update)
+			_, err := c.UpdateTask(id, update, expect)
 			return err
 		})
 	}
-	removeTaskThroughDaemon = func(id string) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id) })
+	removeTaskThroughDaemon = func(id string, expect task.ProjectExpectation) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
 	}
 )
 
@@ -443,8 +443,9 @@ func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*s
 }
 
 // SetTaskTriggerForTest swaps the task-trigger seam (#1169) so a test can assert
-// which task ID the TUI "run now" routes to the daemon, without a real daemon.
-func SetTaskTriggerForTest(f func(taskID string) error) func() {
+// which task ID — and which project expectation (#3230) — the TUI "run now"
+// routes to the daemon, without a real daemon.
+func SetTaskTriggerForTest(f func(taskID string, expect task.ProjectExpectation) error) func() {
 	prev := triggerTaskThroughDaemon
 	triggerTaskThroughDaemon = f
 	return func() { triggerTaskThroughDaemon = prev }
@@ -460,13 +461,13 @@ func SetTaskAdderForTest(f func(task.Task) error) func() {
 	return func() { addTaskThroughDaemon = prev }
 }
 
-func SetTaskUpdaterForTest(f func(id string, update task.TaskUpdate) error) func() {
+func SetTaskUpdaterForTest(f func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error) func() {
 	prev := updateTaskThroughDaemon
 	updateTaskThroughDaemon = f
 	return func() { updateTaskThroughDaemon = prev }
 }
 
-func SetTaskRemoverForTest(f func(id string) error) func() {
+func SetTaskRemoverForTest(f func(id string, expect task.ProjectExpectation) error) func() {
 	prev := removeTaskThroughDaemon
 	removeTaskThroughDaemon = f
 	return func() { removeTaskThroughDaemon = prev }

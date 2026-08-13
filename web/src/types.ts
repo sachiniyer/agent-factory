@@ -279,6 +279,36 @@ export interface TaskUpdate {
   enabled?: boolean;
 }
 
+/**
+ * The project compare-and-swap every task mutation carries (#3230): the Go
+ * task.ProjectExpectation, field names/JSON tags matched EXACTLY. The daemon
+ * re-checks — under the same locked operation that mutates the task — that the
+ * task is still bound to the project the pane displayed it under, and refuses
+ * the action if another client rebound it meanwhile. `enforce` distinguishes
+ * "expected to be unbound" (project_path "") from "no expectation" — an absent
+ * or zero-value expect disables the check, which is why the api layer builds
+ * this from the displayed record itself rather than letting callers pass one.
+ */
+export interface ProjectExpectation {
+  enforce: boolean;
+  project_path: string;
+}
+
+/**
+ * The slice of a displayed task record a mutation needs: the stable id to
+ * target and the project binding to pin (#3230). The api.ts mutation helpers
+ * take this instead of the full TaskData both because it is all they read and
+ * because the surface-parity audit (parity/derive_test.go webNestedValueReach)
+ * derives AddTask's reachable payload from every TaskData-typed parameter in
+ * api.ts — typing the mutations TaskData would make their pass-through call
+ * sites unanalyzable. Callers still hand over the full displayed TaskData;
+ * structural typing narrows it here.
+ */
+export interface TaskMutationRef {
+  id: string;
+  project_path: string;
+}
+
 /** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
 export interface TasksResponse {
   tasks: TaskData[] | null;

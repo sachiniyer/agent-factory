@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -13,33 +12,30 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// applyingConfigSet writes a global config key and then asks a running daemon to
-// apply it in place (#2480), so a TUI config edit takes effect without a restart.
-// The apply is best-effort and never spawns a daemon (RequestApplyConfig uses the
-// no-ensure path): the write already succeeded, so its result is what the pane
-// echoes regardless of whether a daemon was reachable to apply it live.
+// applyingConfigSet writes a global config key through a running daemon's
+// admission-gated SetConfigValue (#3231) — the same handler the web form posts —
+// so a daemon that is quiescing or validating an upgrade refuses BEFORE the
+// file changes, instead of the pane writing first and live-applying through an
+// ungated poke. The daemon applies an accepted write to itself in place
+// (#2480), so a TUI config edit still takes effect without a restart; with no
+// daemon reachable the write lands locally, as before. Never spawns a daemon.
 //
-// It returns the per-key effect notice (config.EffectNotice) so the pane shows the
-// honest outcome — live now, next daemon start, or next af launch — rather than one
-// canned sentence. daemonApplied is whether the apply reached a running daemon.
+// It returns the per-key effect notice so the pane shows the honest outcome —
+// live now, deferred rebind, next daemon start, or next af launch — computed by
+// the write path itself rather than one canned sentence. Any warnings (the
+// exposure notice, or a rebind's actionable reason) are folded into the one
+// line the pane shows so a TUI edit that exposes the API or could not rebind
+// still tells the user.
 func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
-	res, err := config.SetGlobalConfigValue(key, value)
+	resp, err := daemon.SetGlobalConfigValue(key, value)
 	if err != nil {
-		return res, "", err
+		return nil, "", err
 	}
-	applyResp, applyErr := daemon.RequestApplyConfig()
-	notice := config.EffectNotice(res.Key, applyErr == nil)
-	// A socket key whose live rebind failed (#2480 PR2) is reported deferred, not
-	// applied. Any warnings (the exposure notice, or the rebind's actionable reason)
-	// are folded into the one line the pane shows so a TUI edit that exposes the API
-	// or could not rebind still tells the user.
-	if applyErr == nil && slices.Contains(applyResp.FailedListenerKeys, res.Key) {
-		notice = config.ListenerRebindDeferredNotice(res.Key)
+	notice := resp.RestartNotice
+	if len(resp.Warnings) > 0 {
+		notice = notice + " " + strings.Join(resp.Warnings, " ")
 	}
-	if len(applyResp.Warnings) > 0 {
-		notice = notice + " " + strings.Join(applyResp.Warnings, " ")
-	}
-	return res, notice, nil
+	return resp.Result, notice, nil
 }
 
 // ConfigPane is the direct config editor: a form over the config manifest,
@@ -50,11 +46,12 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 // description of config — config.ManifestWithValues — so neither can drift from
 // config_types.go or from each other. This pane holds NO key list, no per-key
 // type switch, and no copy of the defaults or validation rules: every row it
-// renders comes from the manifest, and every write goes to
-// config.SetGlobalConfigValue, the same validated/locked/atomic call
-// `af config set` makes. Adding a key to config_types.go surfaces it here with
-// no edit to this file, which is what TestConfigPaneRendersEveryManifestKey
-// pins.
+// renders comes from the manifest, and every write goes through
+// daemon.SetGlobalConfigValue — the daemon's admission-gated SetConfigValue
+// when one is running, the same validated/locked/atomic
+// config.SetGlobalConfigValue write otherwise — exactly as `af config set`
+// does. Adding a key to config_types.go surfaces it here with no edit to this
+// file, which is what TestConfigPaneRendersEveryManifestKey pins.
 //
 // What this pane must never do is misstate WHEN an edit takes effect. Since #2480
 // most keys reach a running daemon in place, but not all do, so the pane shows the
@@ -94,10 +91,10 @@ type ConfigPane struct {
 	hasFocus bool
 
 	// save is the write path, injected so tests drive the REAL
-	// config.SetGlobalConfigValue against a temp AGENT_FACTORY_HOME while
-	// staying a plain unit test. It is never nil in production
-	// (NewConfigPane wires it); a test that swaps it is testing the pane's
-	// plumbing, not inventing a second writer.
+	// applyingConfigSet against a temp AGENT_FACTORY_HOME while staying a
+	// plain unit test. It is never nil in production (NewConfigPane wires
+	// it); a test that swaps it is testing the pane's plumbing, not
+	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
 	// assistantRequested is set when the user presses the assistant key in normal
@@ -393,8 +390,8 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 // commitEdit writes the edited value through the real path and reports the
 // outcome.
 //
-// Validation is NOT done here. The value goes straight to
-// config.SetGlobalConfigValue, which applies the loader's own rules and refuses
+// Validation is NOT done here. The value goes straight to the write path,
+// where config.SetGlobalConfigValue applies the loader's own rules and refuses
 // before writing; a rejection surfaces the validator's message verbatim. A
 // second copy of the rules in this pane is exactly how a UI comes to accept a
 // value the loader rejects at the next startup — the user then meets it as a

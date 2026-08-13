@@ -821,8 +821,9 @@
         "status": "no",
         "pointer": ""
       },
-      "verdict": "unclear",
-      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
+      "verdict": "real-gap",
+      "issue": "#3285",
+      "notes": "The dependency is resolved: discovery is daemon-side since #3232, so every surface receives pr_info. Web rendering of the badge and an open link is #3285; the CLI already exposes the URL through the sessions JSON."
     },
     {
       "id": "session.pr.set",
@@ -839,8 +840,8 @@
         "status": "no",
         "pointer": "no PR verb in the cobra tree (derived)"
       },
-      "verdict": "unclear",
-      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
+      "verdict": "deliberate",
+      "notes": "Discovery is daemon-side since #3232 (daemon/pr_info_refresh.go): the daemon sweeps every local session and records through the same SetPRInfo write path, so web/CLI-only use gets pr_info with no client producer. The TUI's faster selected-session fetch remains as an accelerator over the same route; the web and CLI need no set verb."
     },
     {
       "id": "session.preview",
@@ -1992,43 +1993,58 @@
           "update.max_concurrent_runs": {
             "gap": "task.max-concurrent-runs"
           },
-          "expect": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-          },
           "expect.enforce": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "update.on_complete": {
             "gap": "task.on-complete"
+          }
+        },
+        "cli": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
       "RemoveTaskRequest": {
         "tui": {
-          "expect": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-          },
           "expect.enforce": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+          }
+        },
+        "cli": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
       "TriggerTaskRequest": {
         "tui": {
-          "expect": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-          },
           "expect.enforce": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+          }
+        },
+        "cli": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
@@ -2076,6 +2092,16 @@
             "ok": "Deliberate. The TUI handoff is pick-agent-then-confirm; the mission defaults to the session's stored prompt, which the TUI can now set at create time (session.create.opt.prompt, shipped in #2075) and change any time via send-prompt. Putting a free-text field inside a confirmation dialog is a different interaction from a form field, and the confirm is deliberately one decision. `af sessions handoff --brief` is the surface for overriding the mission inline."
           }
         }
+      },
+      "RestartTaskRequest": {
+        "cli": {
+          "expect.enforce": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          },
+          "expect.project_path": {
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks.go enforceTaskScope and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+          }
+        }
       }
     },
     "web_rpcs": {
@@ -2110,15 +2136,6 @@
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
         },
-        "expect": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.enforce": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.project_path": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
         "update.on_complete": {
           "gap": "task.on-complete"
         }
@@ -2138,28 +2155,6 @@
         },
         "task.on_complete": {
           "gap": "task.on-complete"
-        }
-      },
-      "RemoveTask": {
-        "expect": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.enforce": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.project_path": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        }
-      },
-      "TriggerTask": {
-        "expect": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.enforce": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
-        },
-        "expect.project_path": {
-          "ok": "A CLI-side compare-and-swap guard (#1891): api/tasks.go enforceTaskScope authorizes a task mutation against the project the CLI resolved via --repo, so a stale id cannot hit a task that moved projects. The TUI and web operate within an already-selected project and set no expectation — it is the stateless CLI's safety mechanism, not a user option."
         }
       },
       "RenameTab": {

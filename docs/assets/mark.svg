@@ -1,0 +1,19 @@
+<!--
+  Standalone repository asset: GitHub Markdown and PNG consumers have no access
+  to the app's CSS token cascade, so the fixed field/ink use #3220's default
+  accent and background swatches. UI components must continue to use semantic
+  tokens.
+
+  The glyph coordinates sit on the 16 px pixel grid (32 viewBox units per pixel)
+  so the prompt and three worktree nodes stay crisp at favicon size. The derived
+  PNG exports are 16, 32, 180, 192, and 512 px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Factory</title>
+  <desc id="desc">A terminal prompt branching into three worktrees</desc>
+  <rect width="512" height="512" rx="112" fill="#8CD0D3"/>
+  <path
+    fill="#3F3F3F"
+    d="M96 96 224 256 96 416v-96l64-64-64-64V96Zm128 128h96V96h32v320h-32V288h-96v-64Zm96-128h64V64h64v96h-64v-32h-64V96Zm0 128h64v-32h64v96h-64v-32h-64v-32Zm0 128h64v-32h64v96h-64v-32h-64v-32Z"
+  />
+</svg>

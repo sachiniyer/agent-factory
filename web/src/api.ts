@@ -30,9 +30,11 @@ import type { ProgramCatalog } from "./programs.js";
 import type {
   ConfigResponse,
   ConfigSetResponse,
+  ProjectExpectation,
   SessionData,
   SnapshotResponse,
   TaskData,
+  TaskMutationRef,
   TasksResponse,
   TaskUpdate,
 } from "./types.js";
@@ -940,31 +942,48 @@ export async function addTask(task: TaskData, token: string): Promise<void> {
   await af("AddTask", { task }, token);
 }
 
+/** Builds the project compare-and-swap from the record the caller displayed —
+ *  the web's mirror of Go's task.ExpectProject, and the ONE place the web builds
+ *  admission for a task mutation (#3230, the #3190 one-predicate rule). Always
+ *  enforced: a caller holding a record always has a binding to pin, including
+ *  the unbound one (project_path ""), which `enforce` distinguishes from "no
+ *  expectation". The mutations below take the displayed record (TaskMutationRef)
+ *  rather than a bare id precisely so no call site can send an id without its
+ *  binding. */
+function projectExpectation(task: TaskMutationRef): ProjectExpectation {
+  return { enforce: true, project_path: task.project_path ?? "" };
+}
+
 /** Updates a task (mirrors `af tasks update`) — the edit + enable/disable path.
  *  Sends a FIELD-LEVEL patch (#1700): only the fields in `update` are changed, so
  *  a toggle shipping just `{ enabled }` can never clobber a concurrent edit another
  *  client made to a different field. The daemon merges the patch onto the
  *  freshly-loaded record under its file lock and leaves scheduler-owned fields
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
- *  issuing the request. */
-export async function updateTask(id: string, update: TaskUpdate, token: string): Promise<void> {
-  requireTaskID(id, "update a task");
-  await af("UpdateTask", { id, update }, token);
+ *  issuing the request. Takes the DISPLAYED record: the request pins its project
+ *  binding, so a task rebound by another client while this pane was stale is
+ *  refused rather than patched (#3230). */
+export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same
  *  scheduler path it uses for a scheduled fire, and refuses disabled + watch tasks.
- *  Refuses a task with no stable id, before issuing the request. */
-export async function triggerTask(id: string, token: string): Promise<void> {
-  requireTaskID(id, "trigger a task");
-  await af("TriggerTask", { id }, token);
+ *  Refuses a task with no stable id, before issuing the request. Takes the
+ *  DISPLAYED record and pins its project binding (#3230). */
+export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
+  requireTaskID(task.id, "trigger a task");
+  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
 
-/** Removes a task by id (mirrors `af tasks remove`). Refuses a task with no stable
- *  id, before issuing the request. */
-export async function removeTask(id: string, token: string): Promise<void> {
-  requireTaskID(id, "remove a task");
-  await af("RemoveTask", { id }, token);
+/** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
+ *  id, before issuing the request. Takes the DISPLAYED record and pins its
+ *  project binding — the destructive verb the CAS most exists for: a stale
+ *  project-A delete must not land on a task rebound to project B (#3230). */
+export async function removeTask(task: TaskMutationRef, token: string): Promise<void> {
+  requireTaskID(task.id, "remove a task");
+  await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
 
 /** Fetches the config manifest zipped with the user's live values: every

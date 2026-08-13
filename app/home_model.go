@@ -200,7 +200,7 @@ type home struct {
 	lastPaneCapture map[int]time.Time
 	// panePreviewTxn is a transient #1321 preview binding owned by the most
 	// recently focused content pane. It never mutates the pane's committed
-	// store.OpenPane binding; commit/cancel semantics land in later PRs.
+	// store.OpenPane binding; commit/cancel semantics live in pane_preview.go.
 	panePreviewTxn *panePreviewTxn
 	// lastFocusedPaneID remembers the focused pane before sidebar navigation
 	// re-homes focus to the tree (#1233/#1236). Preview-on-scroll uses it as
@@ -307,7 +307,7 @@ type home struct {
 	hooksPane *ui.HooksPane
 	// configPane is the global config editor, hosted as an overlay
 	// (stateConfigEditor). It renders from the config manifest and writes
-	// through config.SetGlobalConfigValue — the same path `af config set` uses.
+	// through daemon.SetGlobalConfigValue — the same path `af config set` uses.
 	configPane *ui.ConfigPane
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)
