@@ -1,0 +1,198 @@
+package git
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// branchRepo builds a THROWAWAY repo in t.TempDir() with one commit and one
+// extra local branch, and returns its root. Like resetRepoWithWorktree, it uses
+// the git CLI directly: these tests exercise the factory reset's free-function
+// branch-deletion path, which takes only a repo root and a branch name.
+func branchRepo(t *testing.T, branch string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %s: %s", strings.Join(args, " "), string(out))
+	}
+	git("init", "-q", "-b", "master", ".")
+	git("commit", "-q", "--allow-empty", "-m", "initial")
+	git("branch", branch)
+	return root
+}
+
+// refExists asks git directly (bypassing the code under test) whether the local
+// branch resolves in the repo at root.
+func refExists(t *testing.T, root, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", root, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+// TestDeleteLocalBranch_ExistingBranchIsDeleted is the happy-path guard: the
+// #3243 disambiguation must not turn a normal deletion into a refusal.
+func TestDeleteLocalBranch_ExistingBranchIsDeleted(t *testing.T) {
+	root := branchRepo(t, "af-normal")
+
+	deleted, err := DeleteLocalBranch(root, "af-normal")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExists(t, root, "af-normal"))
+}
+
+// TestDeleteLocalBranch_MissingBranchIsCleanNoOp keeps the idempotence
+// contract: a determinately absent ref is a silent no-op, not an error.
+func TestDeleteLocalBranch_MissingBranchIsCleanNoOp(t *testing.T) {
+	root := branchRepo(t, "af-once")
+
+	deleted, err := DeleteLocalBranch(root, "af-once")
+	require.NoError(t, err)
+	require.True(t, deleted)
+
+	deleted, err = DeleteLocalBranch(root, "af-once")
+	require.NoError(t, err, "a second deletion must be a clean no-op")
+	assert.False(t, deleted)
+}
+
+// TestDeleteLocalBranch_MissingRepoIsCleanNoOp pins determinate absence at the
+// repo level: a repo the user deleted holds no local branches, so `af reset`
+// over a stale record stays idempotent (same rule as
+// TestRemoveWorktreeDir_DeletedRepoStillRemovesOrphanDir).
+func TestDeleteLocalBranch_MissingRepoIsCleanNoOp(t *testing.T) {
+	root := branchRepo(t, "af-orphan")
+	require.NoError(t, os.RemoveAll(root))
+
+	deleted, err := DeleteLocalBranch(root, "af-orphan")
+	require.NoError(t, err, "a deleted repo is determinate absence, not a failed probe")
+	assert.False(t, deleted)
+}
+
+// TestDeleteLocalBranch_DeGittedRepoIsCleanNoOp pins the de-git'd edge the same
+// way RemoveWorktreeDir settles it (#2110): the directory survives but .git is
+// gone, so no repo is left to hold the ref. Treating this as a probe failure
+// would retain a session record no re-run could ever clear.
+func TestDeleteLocalBranch_DeGittedRepoIsCleanNoOp(t *testing.T) {
+	root := branchRepo(t, "af-degitted")
+	require.NoError(t, os.RemoveAll(filepath.Join(root, ".git")))
+
+	deleted, err := DeleteLocalBranch(root, "af-degitted")
+	require.NoError(t, err, "a repo with no .git is determinate absence, not a failed probe")
+	assert.False(t, deleted)
+}
+
+// TestDeleteLocalBranch_UnreadableRefsStorageIsErrorNotAbsence is the #3243
+// regression lock. `git show-ref --verify --quiet` exits non-zero both for a
+// missing ref (exit 1) and for an operational failure reading the refs storage
+// (exit 128, e.g. EACCES on packed-refs), and the old `Run() == nil` collapsed
+// the two. The factory reset then read "probe failed" as "branch absent",
+// recorded no error, and deleted the session records that were the only durable
+// pointer to the branch — orphaning a branch that still exists.
+func TestDeleteLocalBranch_UnreadableRefsStorageIsErrorNotAbsence(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	root := branchRepo(t, "af-kept")
+	// Pack the refs so the probe must read packed-refs, then make that file
+	// unreadable: the branch still exists, but no ref in this repo can be read.
+	pack := exec.Command("git", "-C", root, "pack-refs", "--all")
+	out, err := pack.CombinedOutput()
+	require.NoError(t, err, string(out))
+	packed := filepath.Join(root, ".git", "packed-refs")
+	require.NoError(t, os.Chmod(packed, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(packed, 0o644) })
+
+	deleted, err := DeleteLocalBranch(root, "af-kept")
+	require.Error(t, err,
+		"a failed existence probe is UNKNOWN, not absent — it must surface as an error (#3243)")
+	assert.False(t, deleted)
+	assert.Contains(t, err.Error(), "af-kept", "the error must name the branch it could not check")
+	assert.Contains(t, err.Error(), root, "the error must name the repo it could not check")
+
+	// The branch is still there — the silent "absent" reading would have been a
+	// fabricated negative.
+	require.NoError(t, os.Chmod(packed, 0o644))
+	assert.True(t, refExists(t, root, "af-kept"),
+		"sanity: the branch the old code reported absent exists the whole time")
+}
+
+// TestDeleteLocalBranch_UnreadableGitDirIsErrorNotAbsence covers the discovery
+// half of the same class: .git is present but unreadable, so git cannot even
+// find the repo ("not a git repository", exit 128). Present-but-unreadable is a
+// probe failure, not evidence of absence.
+func TestDeleteLocalBranch_UnreadableGitDirIsErrorNotAbsence(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	root := branchRepo(t, "af-hidden")
+	gitDir := filepath.Join(root, ".git")
+	require.NoError(t, os.Chmod(gitDir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(gitDir, 0o755) })
+
+	deleted, err := DeleteLocalBranch(root, "af-hidden")
+	require.Error(t, err, "an unreadable .git is a failed probe, not a missing branch (#3243)")
+	assert.False(t, deleted)
+
+	require.NoError(t, os.Chmod(gitDir, 0o755))
+	assert.True(t, refExists(t, root, "af-hidden"),
+		"sanity: the branch exists the whole time")
+}
+
+// TestLocalBranchExists_DeterminateVersusUnknown pins the probe's contract
+// directly: err == nil is the ONLY determinate surface, and a probe that could
+// not run returns an error rather than a fabricated "false".
+func TestLocalBranchExists_DeterminateVersusUnknown(t *testing.T) {
+	root := branchRepo(t, "af-probe")
+
+	exists, err := LocalBranchExists(root, "af-probe")
+	require.NoError(t, err)
+	assert.True(t, exists)
+
+	exists, err = LocalBranchExists(root, "no-such-branch")
+	require.NoError(t, err, "a silent show-ref exit 1 is determinate absence")
+	assert.False(t, exists)
+
+	exists, err = LocalBranchExists("", "af-probe")
+	require.NoError(t, err, "empty arguments name no branch to act on")
+	assert.False(t, exists)
+
+	if os.Geteuid() != 0 {
+		gitDir := filepath.Join(root, ".git")
+		require.NoError(t, os.Chmod(gitDir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(gitDir, 0o755) })
+		_, err = LocalBranchExists(root, "af-probe")
+		require.Error(t, err, "an unrunnable probe must not answer (#3243)")
+		require.NoError(t, os.Chmod(gitDir, 0o755))
+	}
+}
+
+// TestDeleteLocalBranch_NestedDeGittedRootNeverTouchesEnclosingRepo pins the
+// sharpest consequence of probing with `git -C`: discovery walks UPWARD, so a
+// record whose de-git'd root sits inside another repo would resolve — and then
+// delete — a same-named branch in the ENCLOSING repo, which AF never created.
+// Settling "no .git at the recorded root" as determinate absence before any git
+// command runs is what keeps the parent repo out of reach.
+func TestDeleteLocalBranch_NestedDeGittedRootNeverTouchesEnclosingRepo(t *testing.T) {
+	parent := branchRepo(t, "af-shared-name")
+	sub := filepath.Join(parent, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+
+	deleted, err := DeleteLocalBranch(sub, "af-shared-name")
+	require.NoError(t, err, "a root with no repo is determinate absence")
+	assert.False(t, deleted)
+	assert.True(t, refExists(t, parent, "af-shared-name"),
+		"the enclosing repo's branch must never be deleted through a nested record root")
+}
