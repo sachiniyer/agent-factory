@@ -118,6 +118,12 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			if err != nil {
 				return err
 			}
+			// A direct config.toml edit has no save surface to notify the daemon.
+			// This launch is the advertised apply boundary for TUI-owned config, so
+			// ask an already-running daemon to advance its live palette before either
+			// renderer mounts. Best-effort and non-spawning: no daemon means a later
+			// daemon start will read the same file directly.
+			_, _ = daemon.RequestApplyConfig()
 			// Bring the binary up to date as soon as the configured channel
 			// and opt-out are known, and before anything owns the terminal.
 			// Throttled to one check every few hours, so the common launch

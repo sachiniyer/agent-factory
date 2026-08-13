@@ -326,6 +326,13 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     mix(background, accent, tintAlpha),
   ]);
   const accentText = semanticFillText(accent, accentFillSurfaces);
+  const selectedText = semanticFillText(text, accentFillSurfaces);
+  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
+  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
   const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
   const dangerText = semanticFillText(danger, dangerFillSurfaces);
   // Elevation effects must follow the surface system that survived validation.
@@ -375,6 +382,13 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-status-waiting": danger,
     "--af-status-broken": danger,
     "--af-status-inactive": text2,
+    "--af-selected-text": selectedText,
+    "--af-selected-text-muted": selectedTextMuted,
+    "--af-selected-status-needs-you": selectedStatusNeedsYou,
+    "--af-selected-status-working": selectedStatusWorking,
+    "--af-selected-status-waiting": selectedStatusWaiting,
+    "--af-selected-status-broken": selectedStatusBroken,
+    "--af-selected-status-inactive": selectedStatusInactive,
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,
@@ -390,7 +404,18 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42),
   };
 
-  const bright = (color: string): string => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
+  const bright = (color: string): string => {
+    // Preserve the ANSI intensity bit after enforcing readability. The preferred
+    // endpoint makes bright roles lighter on dark canvases and darker on light
+    // canvases; the opposite endpoint covers an already-saturated endpoint.
+    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
+      for (let step = 18; step <= 100; step++) {
+        const candidate = mix(color, endpoint, step / 100);
+        if (candidate !== color.toUpperCase() && passes(candidate, [canvas], 4.5)) return candidate;
+      }
+    }
+    return color.toUpperCase();
+  };
   // ANSI names describe terminal roles, not permission to disappear into the
   // canvas. Use the already-accepted primary/tertiary text endpoints, swapping
   // their intensity by mode so black and white both remain AA on the terminal.
@@ -418,7 +443,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: ansiWhite,
+    brightWhite: bright(ansiWhite),
   };
   return { tokens, xterm };
 }

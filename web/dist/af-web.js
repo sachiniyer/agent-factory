@@ -7573,6 +7573,13 @@ function deriveTheme(input, mode) {
     mix(background, accent, tintAlpha)
   ]);
   const accentText = semanticFillText(accent, accentFillSurfaces);
+  const selectedText = semanticFillText(text, accentFillSurfaces);
+  const selectedTextMuted = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusNeedsYou = semanticFillText(statusNeedsYou, accentFillSurfaces);
+  const selectedStatusWorking = semanticFillText(text2, accentFillSurfaces);
+  const selectedStatusWaiting = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusBroken = semanticFillText(danger, accentFillSurfaces);
+  const selectedStatusInactive = semanticFillText(text2, accentFillSurfaces);
   const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
   const dangerText = semanticFillText(danger, dangerFillSurfaces);
   const effectBase = dark ? canvas : text;
@@ -7616,6 +7623,13 @@ function deriveTheme(input, mode) {
     "--af-status-waiting": danger,
     "--af-status-broken": danger,
     "--af-status-inactive": text2,
+    "--af-selected-text": selectedText,
+    "--af-selected-text-muted": selectedTextMuted,
+    "--af-selected-status-needs-you": selectedStatusNeedsYou,
+    "--af-selected-status-working": selectedStatusWorking,
+    "--af-selected-status-waiting": selectedStatusWaiting,
+    "--af-selected-status-broken": selectedStatusBroken,
+    "--af-selected-status-inactive": selectedStatusInactive,
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,
@@ -7630,7 +7644,15 @@ function deriveTheme(input, mode) {
     "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
     "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
   };
-  const bright = (color) => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
+  const bright = (color) => {
+    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
+      for (let step = 18; step <= 100; step++) {
+        const candidate = mix(color, endpoint, step / 100);
+        if (candidate !== color.toUpperCase() && passes(candidate, [canvas], 4.5)) return candidate;
+      }
+    }
+    return color.toUpperCase();
+  };
   const ansiBlack = dark ? text3 : text;
   const ansiWhite = dark ? text : text3;
   const xterm = {
@@ -7655,7 +7677,7 @@ function deriveTheme(input, mode) {
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: ansiWhite
+    brightWhite: bright(ansiWhite)
   };
   return { tokens, xterm };
 }

@@ -66,6 +66,13 @@
   --af-status-waiting: #944049;
   --af-status-broken: #944049;
   --af-status-inactive: #3b4252;
+  --af-selected-text: #2e3440;
+  --af-selected-text-muted: #3b4252;
+  --af-selected-status-needs-you: #405430;
+  --af-selected-status-working: #3b4252;
+  --af-selected-status-waiting: #7f373f;
+  --af-selected-status-broken: #7f373f;
+  --af-selected-status-inactive: #3b4252;
   --af-dot-ready: #617e48;
   --af-dot-lost: #996f1a;
   --af-dot-dead: #3b4252;
@@ -117,6 +124,13 @@
     --af-status-waiting: #d9b2b9;
     --af-status-broken: #d9b2b9;
     --af-status-inactive: #c3cbd6;
+    --af-selected-text: #d8dee9;
+    --af-selected-text-muted: #d9dee5;
+    --af-selected-status-needs-you: #d5e2cc;
+    --af-selected-status-working: #d9dee5;
+    --af-selected-status-waiting: #ecd9dd;
+    --af-selected-status-broken: #ecd9dd;
+    --af-selected-status-inactive: #d9dee5;
     --af-dot-ready: #a3be8c;
     --af-dot-lost: #ebcb8b;
     --af-dot-dead: #c3cbd6;
@@ -164,6 +178,13 @@
   --af-status-waiting: #944049;
   --af-status-broken: #944049;
   --af-status-inactive: #3b4252;
+  --af-selected-text: #2e3440;
+  --af-selected-text-muted: #3b4252;
+  --af-selected-status-needs-you: #405430;
+  --af-selected-status-working: #3b4252;
+  --af-selected-status-waiting: #7f373f;
+  --af-selected-status-broken: #7f373f;
+  --af-selected-status-inactive: #3b4252;
   --af-dot-ready: #617e48;
   --af-dot-lost: #996f1a;
   --af-dot-dead: #3b4252;
@@ -210,6 +231,13 @@
   --af-status-waiting: #d9b2b9;
   --af-status-broken: #d9b2b9;
   --af-status-inactive: #c3cbd6;
+  --af-selected-text: #d8dee9;
+  --af-selected-text-muted: #d9dee5;
+  --af-selected-status-needs-you: #d5e2cc;
+  --af-selected-status-working: #d9dee5;
+  --af-selected-status-waiting: #ecd9dd;
+  --af-selected-status-broken: #ecd9dd;
+  --af-selected-status-inactive: #d9dee5;
   --af-dot-ready: #a3be8c;
   --af-dot-lost: #ebcb8b;
   --af-dot-dead: #c3cbd6;
@@ -879,12 +907,17 @@ button:disabled,
 }
 .af-row-selected {
   background: var(--af-accent-subtle);
+  color: var(--af-selected-text);
 }
 .af-row-selected:hover {
   background: var(--af-accent-tint);
 }
 .af-row-archived {
   color: var(--af-text-muted);
+}
+.af-row-selected.af-row-archived,
+.af-row-selected .af-row-branch {
+  color: var(--af-selected-text-muted);
 }
 .af-row-main {
   min-width: 0;
@@ -932,6 +965,15 @@ button:disabled,
 .af-rail-kill:hover {
   color: var(--af-danger);
   border-color: var(--af-border-strong);
+}
+.af-row-selected .af-rail-action {
+  color: var(--af-selected-text-muted);
+}
+.af-row-selected .af-rail-action:hover {
+  color: var(--af-selected-text);
+}
+.af-row-selected .af-rail-kill:hover {
+  color: var(--af-selected-status-broken);
 }
 .af-row-title {
   font-size: var(--af-fs-md);
@@ -1011,6 +1053,21 @@ button:disabled,
 }
 .af-row-operator-archived :is(.af-dot, .af-operator-state) {
   color: var(--af-status-inactive);
+}
+.af-row-selected.af-row-operator-needs-you :is(.af-dot, .af-operator-state) {
+  color: var(--af-selected-status-needs-you);
+}
+.af-row-selected.af-row-operator-working .af-operator-state {
+  color: var(--af-selected-status-working);
+}
+.af-row-selected.af-row-operator-waiting-limit :is(.af-dot, .af-operator-state) {
+  color: var(--af-selected-status-waiting);
+}
+.af-row-selected.af-row-operator-broken :is(.af-dot, .af-operator-state) {
+  color: var(--af-selected-status-broken);
+}
+.af-row-selected.af-row-operator-archived :is(.af-dot, .af-operator-state) {
+  color: var(--af-selected-status-inactive);
 }
 .af-main {
   flex: 1;

@@ -126,10 +126,10 @@ func TestHTTP_GetTheme_ReadRoute(t *testing.T) {
 	assert.Equal(t, "#8CD0D3", resp.Theme.Accent)
 }
 
-// A theme edit is classified next-af-launch. ApplyConfig may still swap that
-// on-disk value into its live snapshot while applying an unrelated daemon key;
-// GetTheme must keep serving the palette this daemon generation started with.
-func TestHTTP_GetTheme_KeepsStartupGenerationAfterApplyConfig(t *testing.T) {
+// A TUI launch applies the on-disk config to an already-running daemon before it
+// mounts. GetTheme must therefore read the same live generation so a newly loaded
+// browser cannot stay on the daemon's startup palette while that TUI uses the edit.
+func TestHTTP_GetTheme_FollowsAppliedLaunchGeneration(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	startup := config.DefaultConfig()
 	m, err := NewManager(startup)
@@ -140,8 +140,9 @@ func TestHTTP_GetTheme_KeepsStartupGenerationAfterApplyConfig(t *testing.T) {
 	require.NoError(t, config.SaveConfig(onDisk))
 	_, err = config.SetGlobalConfigValue("default_program", "codex")
 	require.NoError(t, err)
-	_, err = m.ApplyConfig()
+	result, err := m.ApplyConfig()
 	require.NoError(t, err)
+	require.Contains(t, result.Applied, "theme", "the palette projection must be reported as live")
 	require.Equal(t, "#010203", m.Config().Theme.Accent,
 		"anti-vacuous: ApplyConfig must have loaded the hand-edited palette")
 
@@ -149,7 +150,7 @@ func TestHTTP_GetTheme_KeepsStartupGenerationAfterApplyConfig(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp GetThemeResponse
 	dataInto(t, decodeEnvelope(t, rec), &resp)
-	assert.Equal(t, startup.Theme.Accent, resp.Theme.Accent)
+	assert.Equal(t, onDisk.Theme.Accent, resp.Theme.Accent)
 }
 
 // TestHTTP_AddTask_MutationRoute covers a create/mutation route: POST /v1/AddTask

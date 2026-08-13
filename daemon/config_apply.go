@@ -16,8 +16,8 @@ import (
 // swap and observe two config generations, producing an inconsistent result (a
 // branch derived from one generation, a worktree path from the next). The frozen
 // startup config m.cfg is deliberately separate — it backs only the keys that do
-// NOT hot-reload: root_agents/root_agent, branch_prefix (title-reservation
-// helpers), and GetTheme's renderer generation. The network listener keys used to read m.cfg too; #2480 PR2 made them
+// NOT hot-reload: root_agents/root_agent and branch_prefix (title-reservation
+// helpers). The network listener keys used to read m.cfg too; #2480 PR2 made them
 // applied-live (livePosture per request; listen_addr/preview_listen_addr rebind in
 // place), so they no longer do.
 func (m *Manager) Config() *config.Config {
@@ -60,7 +60,7 @@ type ApplyConfigResult struct {
 // (live now) versus Pending (next daemon start) — is NOT decided here: it is
 // config.KeyEffectClass, the single source of truth the save-surface notice reads
 // too (config/effect.go). So a key cannot be bucketed one way for the daemon and
-// described another way to the user. Client-side keys (update_channel, theme, …)
+// described another way to the user. Client-only keys (update_channel, keys, …)
 // are absent because the daemon never reads them; their notice is class-driven.
 var keyDiff = map[string]func(a, b *config.Config) bool{
 	// EffectAppliedLive keys.
@@ -81,6 +81,7 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },
 	"docker_mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
 	"ssh_host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
+	"theme":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Theme, b.Theme) },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
 	// read per request (livePosture); listen_addr / preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
@@ -152,9 +153,9 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
 	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
-	// branch_prefix and theme ride along in the swapped config but their runtime
-	// consumers read frozen m.cfg, so an unrelated apply cannot advance either
-	// generation behind the next-start/next-launch notice.
+	// branch_prefix rides along in the swapped config, but its runtime consumers
+	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
+	// the next-start notice. GetTheme deliberately reads this live snapshot.
 	m.live.Store(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent

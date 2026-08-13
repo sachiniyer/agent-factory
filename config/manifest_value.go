@@ -147,10 +147,10 @@ type ConfigEntry struct {
 	//
 	// It no longer answers WHEN the change takes effect: #2480 made that per-key and
 	// honest (config.EffectClass / EffectNotice in effect.go), because the answer is
-	// not uniform — a running daemon applies most keys in place, the listener keys
-	// and root_agents wait for the next daemon start, and the client-side keys
-	// (update_channel, theme, …) are picked up by af's own next launch. The old
-	// per-key boolean could not express those three outcomes; the notice does.
+	// not uniform — a running daemon applies most keys (including theme) in place,
+	// root_agents and branch_prefix wait for the next daemon start, and client-only
+	// keys such as update_channel are picked up by af's own next launch. The old
+	// per-key boolean could not express those outcomes; the notice does.
 	RequiresRestart bool `json:"requires_restart"`
 }
 
@@ -232,9 +232,10 @@ func editability(e ManifestEntry) (editable bool, hint string) {
 // constant: #2480 made it PER-KEY (config.EffectNotice / KeyEffectClass in
 // effect.go), because the honest answer differs by key — a running daemon applies
 // some in place (the network listener keys among them since #2480 PR2), root_agents
-// and branch_prefix wait for the next daemon start, and the client-side keys
-// (update_channel, theme, …) are picked up by af's own next launch and never touch
-// the daemon at all. It deliberately never tells the user to run a command (#2479).
+// and branch_prefix wait for the next daemon start, and client-only keys such as
+// update_channel are picked up by af's own next launch. Theme is applied live to
+// the daemon palette projection so browser and TUI renderers do not diverge. It
+// deliberately never tells the user to run a command (#2479).
 
 // editorValue renders one config field in the editor form. It deliberately does
 // NOT share renderConfigValue's briefing decorations (`""`, "none") — see the

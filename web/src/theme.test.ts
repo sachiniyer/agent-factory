@@ -121,6 +121,8 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   for (const selector of [".af-tab-close:hover", ".af-pane-close:hover", ".af-danger:hover"]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-danger-text\\)`, "s"));
   }
+  assert.match(css, /\.af-row-selected\s*\{[^}]*color:\s*var\(--af-selected-text\)/s);
+  assert.match(css, /\.af-row-selected \.af-row-branch\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s);
 });
 
 for (const mode of ["light", "dark"] as const) {
@@ -209,18 +211,64 @@ test("transient palette failures retain the last good palette and retry", () => 
 });
 
 for (const mode of ["light", "dark"] as const) {
-  test(`${mode} ANSI endpoints remain readable on the terminal canvas`, () => {
+  test(`${mode} ANSI normal and bright roles remain readable and distinct`, () => {
     const { xterm } = deriveTheme(NORD_THEME, mode);
     const canvas = xterm.background!;
 
-    for (const name of ["black", "brightBlack", "white", "brightWhite"] as const) {
-      assert.ok(
-        contrastRatio(xterm[name]!, canvas) >= 4.5,
-        `${name} ${xterm[name]} must be readable on terminal canvas ${canvas}`,
-      );
+    for (const [normal, bright] of [
+      ["black", "brightBlack"],
+      ["red", "brightRed"],
+      ["green", "brightGreen"],
+      ["yellow", "brightYellow"],
+      ["blue", "brightBlue"],
+      ["magenta", "brightMagenta"],
+      ["cyan", "brightCyan"],
+      ["white", "brightWhite"],
+    ] as const) {
+      for (const name of [normal, bright]) {
+        assert.ok(
+          contrastRatio(xterm[name]!, canvas) >= 4.5,
+          `${name} ${xterm[name]} must be readable on terminal canvas ${canvas}`,
+        );
+      }
+      assert.notEqual(xterm[normal], xterm[bright], `${normal} and ${bright} must preserve intensity`);
     }
   });
 }
+
+test("selected-row foregrounds remain AA on both accent fill strengths", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#777777",
+      background_subtle: "#777777",
+      background_panel: "#777777",
+      foreground: "#000000",
+      foreground_muted: "#000000",
+      foreground_dim: "#000000",
+      accent: "#000000",
+    },
+    "dark",
+  );
+  const fills = [
+    composite(tokens["--af-accent"], tokens["--af-bg-surface"], 0.12),
+    composite(tokens["--af-accent"], tokens["--af-bg-surface"], 0.2),
+  ];
+
+  for (const name of [
+    "--af-selected-text",
+    "--af-selected-text-muted",
+    "--af-selected-status-needs-you",
+    "--af-selected-status-working",
+    "--af-selected-status-waiting",
+    "--af-selected-status-broken",
+    "--af-selected-status-inactive",
+  ] as const) {
+    for (const fill of fills) {
+      assert.ok(contrastRatio(tokens[name], fill) >= 4.5, `${name} ${tokens[name]} must be AA on ${fill}`);
+    }
+  }
+});
 
 test("an unreadable or malformed custom slot falls back independently", () => {
   const custom = {
