@@ -10,9 +10,33 @@ import (
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// ghostFor turns an archived record-free fixture into a ghost: the tracked
+// instance is dropped and record materialization is forced to fail, so
+// KillSession resolves the persisted row instead of a live Instance.
+func ghostFor(t *testing.T, manager *Manager, repoID, title string) {
+	t.Helper()
+	manager.mu.Lock()
+	delete(manager.instances, daemonInstanceKey(repoID, title))
+	manager.mu.Unlock()
+	previousRestore := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+		if data.Title == title {
+			return nil, errors.New("forced ghost: record cannot be materialized")
+		}
+		return previousRestore(data)
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })
+	previousTmux := ghostKillTmuxByName
+	ghostKillTmuxByName = func(string) (tmux.PaneState, bool, error) {
+		return tmux.PaneStateKnown, false, nil
+	}
+	t.Cleanup(func() { ghostKillTmuxByName = previousTmux })
+}
 
 // archivedRecordFreeInstance builds the #3176 precondition: an archived session
 // with no relocation record, because no restore was ever attempted against it.
@@ -223,20 +247,7 @@ func TestKillSession_ArchivedGhostRepoGoneRefused(t *testing.T) {
 	manager, repoID, repoPath, inst, archivedPath :=
 		archivedRecordFreeInstance(t, "direct-ghost-gone")
 	require.NoError(t, os.RemoveAll(repoPath))
-
-	// Make the row a ghost: drop the tracked instance and refuse to rebuild it.
-	key := daemonInstanceKey(repoID, "direct-ghost-gone")
-	manager.mu.Lock()
-	delete(manager.instances, key)
-	manager.mu.Unlock()
-	previousRestore := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
-		if data.Title == "direct-ghost-gone" {
-			return nil, errors.New("forced ghost: record cannot be materialized")
-		}
-		return previousRestore(data)
-	}
-	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })
+	ghostFor(t, manager, repoID, "direct-ghost-gone")
 
 	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-gone", RepoID: repoID})
 	require.Error(t, err, "an archived record-free ghost with a gone origin must be refused")
@@ -245,6 +256,61 @@ func TestKillSession_ArchivedGhostRepoGoneRefused(t *testing.T) {
 	assert.True(t, exists(archivedPath), "the refused ghost kill must leave the archive intact")
 	require.NotNil(t, recordFor(t, repoID, "direct-ghost-gone"),
 		"the refused ghost kill must keep the row as the archive's handle")
+}
+
+// TestKillSession_ArchivedGhostDirectoryAlreadyGoneStaysKillable: with both
+// the archived directory and the origin gone, there is nothing to orphan and
+// the ghost guard must step aside (#3278 review) — ordinary ghost cleanup
+// settles the absent path and the stale row is cleared instead of becoming
+// permanently undeletable.
+func TestKillSession_ArchivedGhostDirectoryAlreadyGoneStaysKillable(t *testing.T) {
+	manager, repoID, repoPath, _, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-ghost-archive-gone")
+	require.NoError(t, os.RemoveAll(repoPath))
+	require.NoError(t, os.RemoveAll(archivedPath))
+	ghostFor(t, manager, repoID, "direct-ghost-archive-gone")
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-archive-gone", RepoID: repoID})
+	require.NoError(t, err,
+		"an absent archived directory has nothing to orphan; the stale ghost row must stay killable")
+	assert.Nil(t, recordFor(t, repoID, "direct-ghost-archive-gone"),
+		"the settled ghost kill must delete the session row")
+}
+
+// TestKillSession_ArchivedGhostOriginVanishesAfterAdmissionRetained: the ghost
+// guard's admission probe is point-in-time, so an origin deleted between
+// admission and the worktree-cleanup boundary must be caught by the boundary
+// re-probe (#3278 review): the teardown reports unknown, the tombstoned row is
+// retained, and the follow-up kill is refused by the guard with the archive
+// intact — never settled over answered missing-origin failures.
+func TestKillSession_ArchivedGhostOriginVanishesAfterAdmissionRetained(t *testing.T) {
+	manager, repoID, repoPath, _, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-ghost-vanishes")
+	ghostFor(t, manager, repoID, "direct-ghost-vanishes")
+	previousCleanup := ghostCleanupWorktree
+	ghostCleanupWorktree = func(
+		data *session.InstanceData, title string, checkpoint func(*session.InstanceData) error,
+	) (sessiongit.CleanupState, error, <-chan error) {
+		if title == "direct-ghost-vanishes" {
+			require.NoError(t, os.RemoveAll(repoPath),
+				"delete the origin between ghost admission and the cleanup boundary")
+		}
+		return previousCleanup(data, title, checkpoint)
+	}
+	t.Cleanup(func() { ghostCleanupWorktree = previousCleanup })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-vanishes", RepoID: repoID})
+	require.Error(t, err,
+		"an origin that vanishes after ghost admission must not settle an ordinary cleanup")
+	assert.ErrorContains(t, err, "cleanup boundary")
+	assert.True(t, exists(archivedPath), "the archive must survive the refused ghost cleanup")
+	require.NotNil(t, recordFor(t, repoID, "direct-ghost-vanishes"),
+		"the tombstoned ghost row must be retained")
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-ghost-vanishes", RepoID: repoID})
+	require.Error(t, err, "the follow-up kill must be refused by the ghost admission guard")
+	assert.ErrorContains(t, err, "identity-qualified cleanup cannot be authorized")
+	assert.True(t, exists(archivedPath), "the archive must remain intact after the refused retry")
 }
 
 // TestKillSession_DirectRepoGoneForeignWorktreeRefused: a still-live linked

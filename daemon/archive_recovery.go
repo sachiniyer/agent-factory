@@ -247,28 +247,31 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 			// ordinary kill proceeds untouched.
 			return nil
 		}
-		// The claim consumed the stalled record with a fresh identity answer.
-		// Settle and persist that resolution so the ordinary kill below is
-		// admitted instead of refused over a stall the origin has outlived.
-		if settleErr := instance.SettleWorktreeRelocationClaim(claim); settleErr != nil {
-			return fmt.Errorf(
-				"origin repo %s answered present but the stalled archived worktree identity for session %q could not be settled: %w",
-				repoPath, title, settleErr,
-			)
-		}
-		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
-			return fmt.Errorf(
-				"origin repo %s answered present but the settled archived worktree identity for session %q could not be persisted — retry the kill: %w",
-				repoPath, title, persistErr,
-			)
+		if err := m.settleReclaimedStalledIdentity(repoID, title, repoPath, instance, claim); err != nil {
+			return err
 		}
 		return nil
 	case !errors.Is(probeErr, sessiongit.ErrRepoGone):
-		instance.PreserveWorktreeRelocationClaimForRetry(claim)
-		return fmt.Errorf(
+		refusal := fmt.Errorf(
 			"cannot establish origin repo state for %s before killing archived session %q — retry once the origin can be probed: %w",
 			repoPath, title, probeErr,
 		)
+		if !unresolved {
+			// Record-free claims own nothing; the preserve below is a no-op
+			// for them and the refusal changes no state.
+			instance.PreserveWorktreeRelocationClaimForRetry(claim)
+			return refusal
+		}
+		// The reclaim just resolved the stalled record's identity, so settle
+		// it rather than downgrading it to claim_stale — a stale fence would
+		// make every later kill skip this producer and the refusal's "retry"
+		// impossible without a restore (#3278 review). The next kill then
+		// re-derives from record-free state. A failed settle falls back to
+		// the conservative stale fence on its own.
+		if settleErr := m.settleReclaimedStalledIdentity(repoID, title, repoPath, instance, claim); settleErr != nil {
+			return errors.Join(refusal, settleErr)
+		}
+		return refusal
 	}
 	// The origin is conclusively gone. Require the archive's own creation-time
 	// evidence — its linked-worktree pointer — before authorizing deletion of
@@ -277,11 +280,35 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(archivedPath); pointerErr != nil {
 		instance.PreserveWorktreeRelocationClaimForRetry(claim)
 		return fmt.Errorf(
-			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually before killing it",
+			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually, or run a restore first: a failed repo-gone restore installs the cleanup authorization kill needs",
 			title, pointerErr, archivedPath,
 		)
 	}
 	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)
+}
+
+// settleReclaimedStalledIdentity releases a claim that consumed a stalled
+// record after its identity was freshly resolved, and persists the cleared
+// state so later kills re-derive from record-free scratch instead of skipping
+// the admission producer over a fence the reclaim already answered.
+func (m *Manager) settleReclaimedStalledIdentity(
+	repoID, title, repoPath string,
+	instance *session.Instance,
+	claim sessiongit.RelocationClaim,
+) error {
+	if settleErr := instance.SettleWorktreeRelocationClaim(claim); settleErr != nil {
+		return fmt.Errorf(
+			"the reclaimed stalled archived worktree identity for session %q could not be settled against origin %s: %w",
+			title, repoPath, settleErr,
+		)
+	}
+	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+		return fmt.Errorf(
+			"the settled archived worktree identity for session %q could not be persisted — retry the kill: %w",
+			title, persistErr,
+		)
+	}
+	return nil
 }
 
 // ghostDirectRepoGoneKillGuard is the ghost twin of the admission producer
@@ -301,6 +328,12 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 	}
 	if restored.Status != session.Archived || restored.Worktree.RelocationRecovery != nil ||
 		!ghostRestoredWorktreeRemovable(&restored) {
+		return nil
+	}
+	if _, statErr := os.Lstat(restored.Worktree.WorktreePath); errors.Is(statErr, os.ErrNotExist) {
+		// An absent archived directory has nothing to orphan: ghost cleanup
+		// settles the missing path and clears the stale row (#3278 review).
+		// Refusing here would make the row permanently undeletable.
 		return nil
 	}
 	probeErr := sessiongit.CheckRepoPresentForRelocation(restored.Worktree.RepoPath)

@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -499,6 +501,22 @@ var ghostCleanupWorktree = func(
 		state, cleanupErr, lateResult := gw.CleanupClaimedRepoGoneWithLateResult(claim)
 		projectGhostPersistenceSnapshot(persisted, gw)
 		return state, cleanupErr, lateResult
+	}
+	// Ghost twin of the live deletion-boundary recheck (#3278 review). The
+	// admission probe was point-in-time; re-establish the origin immediately
+	// before ordinary cleanup while the archived directory still exists, or
+	// answered missing-origin failures would settle the teardown and the row
+	// delete would orphan an archive a ghost can never re-authorize.
+	if data.Status == session.Archived && data.Worktree.RelocationRecovery == nil &&
+		ghostRestoredWorktreeRemovable(data) {
+		if _, statErr := os.Lstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
+			if originErr := git.CheckRepoPresentForRelocation(data.Worktree.RepoPath); originErr != nil {
+				return git.CleanupStateUnknown, fmt.Errorf(
+					"origin repo state for this archived ghost could not be proven present at its cleanup boundary; the archived worktree was left intact — kill again once the origin state settles: %w",
+					originErr,
+				), nil
+			}
+		}
 	}
 	state, cleanupErr := gw.Cleanup()
 	if cleanupErr != nil {
