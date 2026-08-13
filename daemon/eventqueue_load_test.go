@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Regression tests for #3242: a failed queue load is an UNKNOWN state, not an
@@ -148,6 +149,58 @@ func TestEventQueue_LoadFailurePeekReportsErrorNotEmpty(t *testing.T) {
 	if _, _, ok, err := q.peek(); err == nil {
 		t.Fatalf("peek answered ok=%v err=nil on a queue it could not read; a failed load must surface an error, not an empty queue", ok)
 	}
+}
+
+// TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents pins the recovery
+// path for #3242 against the #1128 never-a-permanent-give-up discipline: a
+// backlog behind an unreadable queue file must replay once storage heals, even
+// though the script emits nothing new — the drainer itself must keep
+// re-attempting recovery instead of parking forever after its first failed
+// peek (a backlog stranded until the next daemon reload is a silent outage).
+func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
+	dir := t.TempDir()
+
+	// First daemon lifetime: deliveries fail, three events queue, then stop.
+	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab324205", `echo e1; echo e2; echo e3; sleep 60`, dir)))
+	fd1 := &flakyDeliver{}
+	s1.deliver = fd1.deliver
+	queueDir, _ := s1.queueDir()
+	if err := s1.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "backlog to persist", func() bool {
+		return newEventQueue(queueDir, "ab324205").pendingCount() == 3
+	})
+	s1.Stop()
+
+	// Second daemon lifetime starts while the queue file is unreadable. The
+	// script emits nothing and touches a sentinel, so "sentinel exists" proves
+	// the watcher's run loop — and its backlog gate — already ran with the
+	// load still failing.
+	queuePath := filepath.Join(queueDir, "ab324205.jsonl")
+	denyAccess(t, queuePath, queuePath, 0o644)
+	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab324205", `touch "`+dir+`/started"; sleep 60`, dir)))
+	fd2 := &flakyDeliver{}
+	fd2.healed.Store(true)
+	s2.deliver = fd2.deliver
+	s2.queueDir = func() (string, error) { return queueDir, nil }
+	if err := s2.Reload(); err != nil {
+		t.Fatalf("Reload second lifetime: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watch script to start", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "started"))
+		return err == nil
+	})
+
+	// Storage heals. No live event will ever arrive to trigger a retry — the
+	// drainer must recover the backlog on its own cadence and replay in order.
+	if err := os.Chmod(queuePath, 0o644); err != nil {
+		t.Fatalf("restore queue file mode: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "recovered backlog to replay after storage heals", func() bool {
+		got := fd2.delivered()
+		return len(got) == 3 && got[0] == "e1" && got[1] == "e2" && got[2] == "e3"
+	})
 }
 
 // TestEventQueue_LoadFailureAdvanceRefuses pins the consume-side guard: a
