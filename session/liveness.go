@@ -17,10 +17,12 @@ import (
 //
 // This file holds the two axes as separate fields and keeps the legacy Status
 // enum readable through a thin DERIVATION SHIM: GetStatus composes the old value
-// from (liveness, inFlightOp). Writers are fully migrated — every production
-// (liveness, inFlightOp) mutation goes through the Transition chokepoint, and
-// SetStatusForTest is the only legacy-shaped writer left. The composed read and
-// the legacy Status enum itself remain pending a separate retirement (1e).
+// from (liveness, inFlightOp). Writers are migrated off the legacy enum —
+// SetStatusForTest is the only legacy-shaped writer left. Most production
+// mutations go through the Transition chokepoint; a few daemon single-writer
+// paths set the axes directly (SetLimitReached/ClearLimitReached, SetArchived).
+// The composed read and the legacy Status enum itself remain pending a separate
+// retirement (1e).
 
 // Liveness is the daemon-owned health axis: what state the backing tmux/worktree
 // is actually in, independent of any client operation in flight. It is the
@@ -311,8 +313,9 @@ func (i *Instance) setStatusLocked(s Status) {
 // SetStatusForTest sets the status under the instance mutex by decomposing the
 // legacy composed Status onto the two axes — TEST scaffolding only (#1195 Phase
 // 2e), for establishing a precondition state via the familiar single-value API.
-// Production code never writes lifecycle state through the legacy Status: every
-// (liveness, inFlightOp) mutation goes through the Transition chokepoint. Mirrors
+// Production code never writes lifecycle state through the legacy Status: it
+// writes through the Transition chokepoint or the daemon single-writer's direct
+// axis setters (SetLimitReached, SetArchived). Mirrors
 // the SetInFlightOpForTest / SetStartedForTest scaffolding pattern. (GetStatus
 // stays — the composed value is still a legitimate read for rendering and test
 // assertions, pending a separate retirement of the legacy Status enum.)

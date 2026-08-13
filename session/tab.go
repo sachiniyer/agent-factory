@@ -186,8 +186,9 @@ func TabKindRequires(kind TabKind) TabKindNeed {
 
 // Tab is one process running in an instance's worktree, backed by a single tmux
 // session (#930): an instance holds its Agent tab at Tabs[0] plus any shell,
-// process, or web tabs, and the instance's tmux-touching methods route through
-// it. Lifecycle lives in tab_spawn.go (create) and tab_close.go (close), and
+// process, web, or VS Code tabs, and the instance's tmux-touching methods
+// route through it. Lifecycle lives in tab_spawn.go (create) and tab_close.go
+// (close), and
 // each tab persists as a TabData record (storage.go).
 type Tab struct {
 	// ID is the tab's stable identity (#1738), minted at creation and persisted.

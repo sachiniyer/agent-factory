@@ -98,8 +98,8 @@ type InstanceOptions struct {
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
-	// or a malformed URL fails there). The off-box runtimes (docker, sandbox, hook)
-	// do not use this field — backendFactory hands their endpoint back directly
+	// or a malformed URL fails there). The off-box runtimes (docker, sandbox, ssh,
+	// hook) do not use this field — backendFactory hands their endpoint back directly
 	// (res.Endpoint); this is the explicit-caller seam, exercised by the
 	// out-of-process round-trip test.
 	RemoteAgentServer *AgentServerEndpoint
