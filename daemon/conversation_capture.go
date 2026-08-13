@@ -9,6 +9,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// conversationCaptureTimeout bounds how long capture waits for a new provider
+// conversation to APPEAR. It is not the whole capture budget: a rollout that
+// appeared but whose session_meta is still being written gets the session
+// layer's settle extension on top (#3266), so a capture goroutine can outlive
+// this window — consumers of pendingConversationCaptures already tolerate that.
 var conversationCaptureTimeout = 2 * time.Second
 
 func (m *Manager) captureAgentConversationAsync(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot) {
