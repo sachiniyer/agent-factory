@@ -247,7 +247,15 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
 		return
 	}
-	log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) after its usage-limit window elapsed (attempt %d)", inst.Title, repoID, attempts)
+	// State the trigger that was actually observed (#3240): with a parsed reset
+	// time the daemon scheduled against it and that time passing is known; with
+	// none, only the fallback interval fired — a success there says nothing about
+	// when or why any provider usage window changed.
+	trigger := "after the limit_retry_interval fallback elapsed (no reset time was parsed)"
+	if hadReset {
+		trigger = "after its parsed usage-limit reset time passed"
+	}
+	log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
 }
 
 // limitResumeAttempted records one auto-resume attempt and sets the gate for the
