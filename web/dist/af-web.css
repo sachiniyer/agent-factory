@@ -541,6 +541,11 @@ button:disabled,
   font-size: var(--af-fs-sm);
   cursor: pointer;
 }
+.af-pr-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
 .af-ghost:hover:not(:disabled) {
   color: var(--af-text);
   border-color: var(--af-border-strong);

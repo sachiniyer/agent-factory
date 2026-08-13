@@ -12712,6 +12712,22 @@ function editTaskModal(projects, task, callbacks) {
   });
 }
 
+// src/prlink.ts
+var hidden = { visible: false, text: "", href: "", title: "", sig: "" };
+function prLinkView(pr) {
+  if (!pr || !pr.number || !pr.url) {
+    return hidden;
+  }
+  const state = (pr.state ?? "").toLowerCase();
+  return {
+    visible: true,
+    text: state ? `PR #${pr.number} \xB7 ${state}` : `PR #${pr.number}`,
+    href: pr.url,
+    title: pr.title ?? "",
+    sig: `${pr.number}|${state}|${pr.url}|${pr.title ?? ""}`
+  };
+}
+
 // src/tabreorder.ts
 var PINNED_TABS = 1;
 function insertionIndexAt(centers, x) {
@@ -13247,6 +13263,12 @@ var AppShell = class {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   handoffBtn = null;
   handoffVisible = false;
+  // The selected session's PR link (#3285) and its content signature. Same
+  // in-place treatment again, and here it is the whole point: the daemon
+  // discovers PR info on its own cadence (#3232), so the badge's normal way of
+  // appearing is on an already-selected session with no selection change at all.
+  prLink = null;
+  prLinkSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -13871,6 +13893,8 @@ var AppShell = class {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryVisible = false;
+      this.prLink = null;
+      this.prLinkSig = "";
       this.tabBar = null;
       this.main.className = "af-main af-main-empty";
       delete this.main.dataset.termStatus;
@@ -13894,6 +13918,11 @@ var AppShell = class {
     this.handoffBtn = handoffBtn;
     this.handoffVisible = canHandoff(selected);
     handoffBtn.hidden = !this.handoffVisible;
+    const prLink = h2("a", { class: "af-ghost af-term-action af-pr-link", target: "_blank", rel: "noopener noreferrer" });
+    prLink.hidden = true;
+    this.prLink = prLink;
+    this.prLinkSig = "";
+    this.applyPRLink(selected);
     const headActions = h2("div", { class: "af-term-actions" });
     headActions.hidden = true;
     this.headActions = headActions;
@@ -13909,7 +13938,7 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, prLink, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h2("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -14324,6 +14353,27 @@ var AppShell = class {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
     }
+    this.applyPRLink(selected);
+  }
+  /** Applies prLinkView's decision for the selected session to the header's PR
+   *  link — visibility, text, target, and hover title — skipping all DOM writes
+   *  while the content signature is unchanged. */
+  applyPRLink(selected) {
+    if (!this.prLink) {
+      return;
+    }
+    const view = prLinkView(selected.pr_info);
+    if (view.sig === this.prLinkSig) {
+      return;
+    }
+    this.prLinkSig = view.sig;
+    this.prLink.hidden = !view.visible;
+    if (!view.visible) {
+      return;
+    }
+    this.prLink.href = view.href;
+    this.prLink.textContent = view.text;
+    this.prLink.title = view.title;
   }
   /** Keeps management reachable when the selected session's rail row is filtered
    *  out, and only then. Capability and row visibility are both positive evidence:

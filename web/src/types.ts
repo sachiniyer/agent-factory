@@ -94,6 +94,17 @@ export const Status = {
  * `liveness`/`in_flight_op` are dropped when zero, `limit_reset_at` only present
  * for a LimitReached row.
  */
+/** session.PRInfoData (session/storage.go): the daemon-recorded PR projection.
+ *  Field names match the Go JSON tags; every field is omitempty. */
+export interface PRInfoData {
+  number?: number;
+  title?: string;
+  url?: string;
+  state?: string;
+  /** The exact branch the lookup ran for (#921 provenance). */
+  branch?: string;
+}
+
 export interface SessionData {
   id?: string;
   title: string;
@@ -154,6 +165,11 @@ export interface SessionData {
   limit_reset_at?: string;
   /** Backend discriminator; "remote" marks a remote-hook session (→ [remote]). */
   backend_type?: string;
+  /** The session's GitHub PR, discovered and kept current by the daemon itself
+   *  since #3232 (a sweep over every local session, recorded through the same
+   *  SetPRInfo write path the TUI uses) — so this is present on web/CLI-only
+   *  workflows too, with no TUI involved. Absent when no PR is known. */
+  pr_info?: PRInfoData;
   /** The daemon's OWN answer, per tab kind, to "may this session gain one of
    *  these" — session.Capabilities.RefuseTabKind projected onto the snapshot
    *  (#3060).

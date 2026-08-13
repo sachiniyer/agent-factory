@@ -814,16 +814,15 @@
         "pointer": "keys/keys.go:169-170 (p, y)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/prlink.ts + ui.ts applyPRLink (#3285): a pane-header link to pr_info.url"
       },
       "cli": {
         "status": "no",
         "pointer": ""
       },
-      "verdict": "real-gap",
-      "issue": "#3285",
-      "notes": "The dependency is resolved: discovery is daemon-side since #3232, so every surface receives pr_info. Web rendering of the badge and an open link is #3285; the CLI already exposes the URL through the sessions JSON."
+      "verdict": "deliberate",
+      "notes": "Discovery is daemon-side since #3232, so every surface receives pr_info. The TUI opens/copies with p/y; the web renders a pane-header link (#3285) — opening is the browser's own gesture and copy comes free with a link. The CLI deliberately gets no open verb: it is a scripting surface, and `af sessions list --json` already exposes pr_info.url to one jq."
     },
     {
       "id": "session.pr.set",

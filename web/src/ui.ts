@@ -49,6 +49,7 @@ import {
   rowTitle,
 } from "./status.js";
 import { ConfigPane, type ConfigStatus } from "./config.js";
+import { prLinkView } from "./prlink.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
 import { pressDistance, TAB_PRESS_LIMITS, tabPressVerdict } from "./tabtouch.js";
@@ -816,6 +817,12 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
+  // The selected session's PR link (#3285) and its content signature. Same
+  // in-place treatment again, and here it is the whole point: the daemon
+  // discovers PR info on its own cadence (#3232), so the badge's normal way of
+  // appearing is on an already-selected session with no selection change at all.
+  private prLink: HTMLAnchorElement | null = null;
+  private prLinkSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1886,6 +1893,8 @@ export class AppShell {
       this.headActionSig = "";
       this.retryBtn = null;
       this.retryVisible = false;
+      this.prLink = null;
+      this.prLinkSig = "";
       this.tabBar = null;
       // Detaches the terminal host if it was mounted; index.ts disposes the terminal.
       this.main.className = "af-main af-main-empty";
@@ -1939,6 +1948,21 @@ export class AppShell {
     this.handoffVisible = canHandoff(selected);
     handoffBtn.hidden = !this.handoffVisible;
 
+    // The session's PR, as a plain link to its page (#3285) — the web reading of
+    // the pr_info projection the daemon keeps current itself (#3232). A link
+    // rather than a button: opening the PR is the browser's own gesture, and
+    // copy comes free with it. Content is applied by applyPRLink here and on
+    // every snapshot (patchMainHead), since the badge's normal way of appearing
+    // is on the already-selected session.
+    const prLink = h("a", { class: "af-ghost af-term-action af-pr-link", target: "_blank", rel: "noopener noreferrer" }) as HTMLAnchorElement;
+    // Hidden is the built-in state, matching prLinkView's empty signature — so
+    // the sig gate below can safely skip the no-PR case without ever having
+    // shown an empty link.
+    prLink.hidden = true;
+    this.prLink = prLink;
+    this.prLinkSig = "";
+    this.applyPRLink(selected);
+
     // Empty while the selected row is visible; patchMainHead fills it only when the
     // shared rail derivation says filtering/scoping removed that row. Keeping the
     // container stable avoids touching the terminal host as that condition flips.
@@ -1978,7 +2002,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, prLink, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2554,6 +2578,33 @@ export class AppShell {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
     }
+
+    // Apply the PR link on every snapshot (#3285): the daemon's sweep (#3232)
+    // discovers or updates pr_info while the session stays selected — the same
+    // no-selection-change reality Retry and Handoff patch around. applyPRLink
+    // is signature-gated, so an unchanged badge costs no DOM write.
+    this.applyPRLink(selected);
+  }
+
+  /** Applies prLinkView's decision for the selected session to the header's PR
+   *  link — visibility, text, target, and hover title — skipping all DOM writes
+   *  while the content signature is unchanged. */
+  private applyPRLink(selected: SessionData): void {
+    if (!this.prLink) {
+      return;
+    }
+    const view = prLinkView(selected.pr_info);
+    if (view.sig === this.prLinkSig) {
+      return;
+    }
+    this.prLinkSig = view.sig;
+    this.prLink.hidden = !view.visible;
+    if (!view.visible) {
+      return;
+    }
+    this.prLink.href = view.href;
+    this.prLink.textContent = view.text;
+    this.prLink.title = view.title;
   }
 
   /** Keeps management reachable when the selected session's rail row is filtered

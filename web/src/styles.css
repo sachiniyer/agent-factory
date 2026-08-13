@@ -684,6 +684,15 @@ button:disabled,
   cursor: pointer;
 }
 
+/* The pane header's PR link (#3285) is an anchor wearing the ghost-action
+ * clothes: browser link styling off, so it sits beside Retry/Handoff as a peer
+ * control rather than underlined prose. */
+.af-pr-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
 .af-ghost:hover:not(:disabled) {
   color: var(--af-text);
   border-color: var(--af-border-strong);
