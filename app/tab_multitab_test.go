@@ -100,6 +100,90 @@ func TestPaneJump_StaysPut_NoPreviewRepaint(t *testing.T) {
 	require.False(t, h.paneJumpIntentPinned(pane.ID()), "the pin stales once the user navigates")
 }
 
+// TestPaneJump_AlreadyOpenTabFocusesExistingPane is the #3267 repro: with two
+// panes open on one session, a pane-focused number jump to the tab the OTHER
+// pane already shows must focus that pane — the open-or-focus contract every
+// other open/commit path applies (#1493, §2.3) — never rebind the focused pane
+// onto it, which rendered one terminal in two panes and persisted the
+// duplicate. The gesture must not be swallowed either: focus lands on the
+// target pane, and the #1885 pin keeps the trailing tree-cursor preview (still
+// pointing at the tab the focused pane shows) from bouncing focus straight
+// back — the invariant-eats-the-gesture class.
+func TestPaneJump_AlreadyOpenTabFocusesExistingPane(t *testing.T) {
+	h, alpha := multiTabHome(t)
+
+	// The #3267 shape: agent pane + shell pane, tree active tab on agent (0),
+	// cursor on the agent TAB ROW — the state right after a tree-focus `1` — so
+	// the selection is tab-specific and diverges from the shell pane's binding.
+	agentPane := openTestPane(t, h, alpha, 0)
+	shellPane := openTestPane(t, h, alpha, 1)
+	h.store.SetActiveTab(0)
+	h.sidebar.SelectTabRow(alpha.Title, 0)
+	h.focusRegion(layout.PaneRegion(agentPane.ID()))
+	_ = h.selectionChanged()
+	require.Equal(t, agentPane, h.focusedOpenPane(), "precondition: the agent pane holds focus")
+	require.Equal(t, 0, agentPane.Tab())
+	require.Equal(t, 1, shellPane.Tab())
+
+	_, _ = h.handleTabJump(2) // slot 1 — already open in shellPane
+
+	require.Equal(t, 0, agentPane.Tab(),
+		"the focused pane must keep its own tab: rebinding onto an already-open tab renders one terminal in two panes (#3267)")
+	require.Equal(t, shellPane, h.focusedOpenPane(),
+		"the jump must focus the pane already showing the target tab (#1493), not be swallowed")
+	require.Equal(t, 1, shellPane.Tab())
+	require.Nil(t, h.panePreviewTxn, "no preview overlay may sit over the jump result")
+	assert.True(t, h.paneJumpIntentPinned(shellPane.ID()),
+		"the jump pins intent on the newly focused pane so the divergent tree cursor cannot repaint or re-focus away from it (#1885)")
+
+	// A background preview tick re-derives from the tree selection (the agent
+	// tab), which is open in the OTHER pane. It must neither yank focus back
+	// (#1558 class) nor move any binding.
+	_, _ = h.Update(previewTickMsg{})
+	require.Equal(t, shellPane, h.focusedOpenPane(), "a background tick must not bounce focus back to the agent pane")
+	require.Equal(t, 0, agentPane.Tab())
+	require.Equal(t, 1, shellPane.Tab())
+
+	// The dedupe must not eat ordinary jumps: a NOT-open tab still rebinds the
+	// focused pane in place.
+	_, _ = h.handleTabJump(3) // slot 2 (shell-2) — open nowhere
+	require.Equal(t, 2, shellPane.Tab(), "a jump to a not-open tab still rebinds the focused pane")
+	require.Equal(t, shellPane, h.focusedOpenPane())
+	require.Equal(t, 0, agentPane.Tab())
+}
+
+// TestPaneJump_AlreadyOpenPinSurvivesUnseededEpoch mirrors
+// TestPaneJump_PinSurvivesUnseededEpoch for the focus-existing branch: on a
+// restored pane the FIRST keypress can be a jump to an already-open tab, before
+// any selectionChanged has primed the epoch. The pin on the target pane must be
+// seeded exactly like the rebind branch's, or the jump's own trailing
+// selectionChanged reads the unchanged cursor as a move, stales the pin, and
+// the already-open gate bounces focus straight back to the pane the user just
+// left.
+func TestPaneJump_AlreadyOpenPinSurvivesUnseededEpoch(t *testing.T) {
+	h, alpha := multiTabHome(t)
+	agentPane := openTestPane(t, h, alpha, 0)
+	shellPane := openTestPane(t, h, alpha, 1)
+	h.store.SetActiveTab(0)
+	h.sidebar.SelectTabRow(alpha.Title, 0)
+	h.focusRegion(layout.PaneRegion(agentPane.ID()))
+
+	// Simulate the startup / restored-pane window: no selectionChanged has
+	// primed the epoch yet.
+	h.lastSelectionKey = ""
+	h.selectionEpoch = 0
+	h.paneJumpIntent = map[int]uint64{}
+
+	_, _ = h.handleTabJump(2)
+
+	require.Equal(t, shellPane, h.focusedOpenPane(),
+		"the jump focuses the already-open pane even from an unseeded epoch")
+	require.Equal(t, 0, agentPane.Tab())
+	assert.True(t, h.paneJumpIntentPinned(shellPane.ID()),
+		"the pin must still be current after the jump's own selectionChanged (seed before pinning)")
+	assert.Nil(t, h.panePreviewTxn)
+}
+
 // TestCloseTab_ActsOnFocusedPaneTab is the #1884 destructive corollary (Repro
 // B): with the tree's active tab a *closable* tab and the focused pane jumped to
 // a DIFFERENT tab, w must close the tab the user is LOOKING at (the pane's),

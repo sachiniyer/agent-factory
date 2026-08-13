@@ -153,6 +153,53 @@ func TestTUIViewStateRestoredPanesAutoHideShowsStatus(t *testing.T) {
 		"a pane hidden on the first post-restore relayout must still surface the status (#1535)")
 }
 
+// TestTUIViewStateRestoreHealsDuplicatePaneEntries pins the relaunch half of
+// #3267: a TUI that ran the buggy pane-focused jump persisted TWO open-pane
+// entries bound to the same (instance, tab). Restore must collapse them to one
+// pane — the seen-key dedupe plus openPaneWindow's unconditional #1557 gate —
+// so a relaunch heals an already-persisted duplicate instead of resurrecting
+// it. The stale-name variant covers an entry whose persisted key/name predates
+// a rename: it resolves to the same tab by stable ID and must fold into the
+// existing pane rather than open a second one.
+func TestTUIViewStateRestoreHealsDuplicatePaneEntries(t *testing.T) {
+	h := newTestHome(t)
+	h.initialPaneOpened = false
+	alpha := tuiStateTestInstance(t, "alpha")
+	for i, tab := range alpha.GetTabs() {
+		tab.ID = []string{"id-agent", "id-shell"}[i]
+	}
+	h.store.AddInstance(alpha)
+
+	shellEntry := config.TUIStateOpenPane{
+		Key:        tuiPaneKeyForInstance(alpha, "shell"),
+		InstanceID: alpha.ID,
+		Title:      alpha.Title,
+		TabID:      "id-shell",
+		TabName:    "shell",
+		FocusRank:  2,
+	}
+	dup := shellEntry
+	dup.FocusRank = 3
+	staleName := shellEntry
+	staleName.Key = "title:alpha:tab:old-shell"
+	staleName.TabName = "old-shell" // resolves to the same tab by TabID
+	staleName.FocusRank = 4
+	state := config.TUIRepoViewState{
+		OpenPanes: []config.TUIStateOpenPane{shellEntry, dup, staleName},
+	}
+	require.NoError(t, config.SaveTUIRepoViewState(h.repoID, state))
+
+	require.NotZero(t, h.restoreTUIViewStateOnLaunch())
+	resizeHome(h, 200, 40)
+
+	require.Equal(t, 1, h.store.NumOpenPanes(),
+		"restore must heal persisted duplicates to one pane per (instance, tab) (#3267/#1557)")
+	pane := h.store.OpenPanes()[0]
+	assert.Same(t, alpha, pane.Instance())
+	assert.Equal(t, 1, pane.Tab())
+	assert.Equal(t, 1, h.lastLayout.PaneCount(), "the workspace lays out exactly one pane")
+}
+
 func TestTUIViewStateNoValidPanesKeepsAutoOpenFallback(t *testing.T) {
 	h := newTestHome(t)
 	h.initialPaneOpened = false
