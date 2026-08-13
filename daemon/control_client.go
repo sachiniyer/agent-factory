@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/rpc"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -366,6 +367,73 @@ func RequestApplyConfig() (ApplyConfigResponse, error) {
 	var resp ApplyConfigResponse
 	err := callDaemonNoEnsure("ApplyConfig", ApplyConfigRequest{}, &resp)
 	return resp, err
+}
+
+// SetGlobalConfigValue writes one global config key through a running daemon's
+// SetConfigValue — the same admission-gated handler the web form posts to — so
+// every first-class save surface consults the same lifecycle predicate
+// (upgrade probation, quiescing) and a refusal lands BEFORE anything reaches
+// disk (#3231). The daemon applies an accepted write to itself in place and
+// reports the per-key effect notice, so callers echo its answer rather than
+// computing their own.
+//
+// With no daemon answering the control socket it falls back to the direct
+// local write (config.SetGlobalConfigValue) — `af config set` must keep
+// working with the daemon stopped. The fallback is decided by the DIAL, never
+// by the daemon's answer: once a daemon has answered, an error (validation or
+// admission refusal) is final, because writing locally after a refusal would
+// reopen exactly the split #3231 closes. It never STARTS a daemon, like
+// RequestApplyConfig.
+func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
+	var resp SetConfigValueResponse
+	if socketPath, err := DaemonSocketPath(); err == nil {
+		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
+			client := rpc.NewClient(conn)
+			defer client.Close()
+			callErr := client.Call(controlServiceName+".SetConfigValue",
+				SetConfigValueRequest{Key: key, Value: value}, &resp)
+			if callErr == nil || !isRPCMethodMissing(callErr) {
+				return resp, callErr
+			}
+			// A daemon old enough to lack SetConfigValue (pre-#1960) expects its
+			// clients to write locally and poke ApplyConfig; fall through to that
+			// sequence. Skew-only — delete once the oldest supported daemon
+			// serves SetConfigValue.
+		}
+	}
+	result, err := config.SetGlobalConfigValue(key, value)
+	if err != nil {
+		return SetConfigValueResponse{}, err
+	}
+	resp = SetConfigValueResponse{Result: result}
+	applyResp, applyErr := RequestApplyConfig()
+	applied := applyErr == nil
+	if applied {
+		resp.Applied = applyResp.Applied
+		resp.Pending = applyResp.Pending
+		resp.Warnings = applyResp.Warnings
+	}
+	// Mirror the notice logic of controlServer.SetConfigValue: a socket key whose
+	// live rebind failed did not apply, so it reports deferred, not applied.
+	if applied && slices.Contains(applyResp.FailedListenerKeys, result.Key) {
+		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
+	} else {
+		resp.RestartNotice = config.EffectNotice(result.Key, applied)
+	}
+	return resp, nil
+}
+
+// isRPCMethodMissing reports whether a net/rpc call failed because the serving
+// daemon does not register the method at all — the version-skew case, distinct
+// from a handler that ran and refused. net/rpc flattens both into
+// rpc.ServerError, so the stable "can't find" prefixes are the only signal.
+func isRPCMethodMissing(err error) bool {
+	var srv rpc.ServerError
+	if !errors.As(err, &srv) {
+		return false
+	}
+	return strings.HasPrefix(string(srv), "rpc: can't find method") ||
+		strings.HasPrefix(string(srv), "rpc: can't find service")
 }
 
 // CreateSession asks the daemon to create, start, and persist a session.
