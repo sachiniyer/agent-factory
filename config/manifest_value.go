@@ -102,12 +102,13 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 //     renders" (web/src/config.test.ts) — the web control is chosen from the
 //     entry's own description, so a key the bundle predates still renders.
 type ConfigEntry struct {
-	Key      string `json:"key"`
-	Type     string `json:"type"`
-	Default  string `json:"default"`
-	Purpose  string `json:"purpose"`
-	Tier     int    `json:"tier"`
-	TierName string `json:"tier_name"`
+	Key           string   `json:"key"`
+	Type          string   `json:"type"`
+	AcceptedTypes []string `json:"accepted_types,omitempty"`
+	Default       string   `json:"default"`
+	Purpose       string   `json:"purpose"`
+	Tier          int      `json:"tier"`
+	TierName      string   `json:"tier_name"`
 	// Settable is the MANIFEST's claim: `af config set` accepts this key — or,
 	// for a dynamic family, its LEAVES (`af config set program_overrides.claude
 	// …`). It is pinned against the real allowlist by
@@ -167,17 +168,18 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 		value, _ := CurrentValue(cfg, e.Key)
 		editable, hint := editability(e)
 		out = append(out, ConfigEntry{
-			Key:      e.Key,
-			Type:     e.Type,
-			Default:  e.Default,
-			Purpose:  e.Purpose,
-			Tier:     int(e.Tier),
-			TierName: TierName(e.Tier),
-			Settable: e.Settable,
-			Editable: editable,
-			EditHint: hint,
-			Enum:     e.Enum,
-			Value:    value,
+			Key:           e.Key,
+			Type:          e.Type,
+			AcceptedTypes: e.AcceptedTypes,
+			Default:       e.Default,
+			Purpose:       e.Purpose,
+			Tier:          int(e.Tier),
+			TierName:      TierName(e.Tier),
+			Settable:      e.Settable,
+			Editable:      editable,
+			EditHint:      hint,
+			Enum:          e.Enum,
+			Value:         value,
 			// Uniformly true — see the field's comment.
 			RequiresRestart: true,
 		})

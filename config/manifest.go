@@ -2,6 +2,7 @@ package config
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -63,6 +64,11 @@ type ManifestEntry struct {
 	// "table", or "list". It describes what a user writes, which can be more
 	// specific than the Go field used for the normalized in-memory value.
 	Type string
+	// AcceptedTypes lists every config shape the decoder accepts when Type alone
+	// is incomplete. It includes Type itself and is nil for ordinary one-shape
+	// keys. Theme uses this to describe its named string presets and custom table
+	// without weakening Type's lock to the normalized Go struct.
+	AcceptedTypes []string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
 	// DefaultConfig(); the rest (a username-derived prefix, a detected binary
@@ -202,8 +208,12 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 2 ----
 	{
-		Key:        "theme",
-		Type:       "table",
+		Key:  "theme",
+		Type: "table",
+		AcceptedTypes: []string{
+			"string",
+			"table",
+		},
 		Default:    "nord",
 		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
 		Tier:       TierCommon,
@@ -577,6 +587,11 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 	out := make([]ManifestEntry, len(entries))
 	copy(out, entries)
 	for i := range out {
+		if out[i].AcceptedTypes != nil {
+			acceptedTypes := make([]string, len(out[i].AcceptedTypes))
+			copy(acceptedTypes, out[i].AcceptedTypes)
+			out[i].AcceptedTypes = acceptedTypes
+		}
 		if out[i].Enum != nil {
 			enum := make([]string, len(out[i].Enum))
 			copy(enum, out[i].Enum)
@@ -589,6 +604,17 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 		}
 	}
 	return out
+}
+
+func (e ManifestEntry) acceptedTypes() []string {
+	if len(e.AcceptedTypes) == 0 {
+		return []string{e.Type}
+	}
+	return e.AcceptedTypes
+}
+
+func (e ManifestEntry) typeLabel() string {
+	return strings.Join(e.acceptedTypes(), " or ")
 }
 
 // manifestKeysForSource is the sorted key projection used by source-specific

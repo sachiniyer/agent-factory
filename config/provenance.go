@@ -237,6 +237,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
 	materialized := false
+	var themeIdentity *ThemeConfig
 	for i := range candidates {
 		candidate := &candidates[i]
 		trace := &result.Candidates[candidate.traceIndex]
@@ -246,6 +247,11 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 
 		configured, _ := candidate.document.metadata.topLevel(entry.Key)
+		if entry.Key == "theme" {
+			if theme, ok := reflectedThemeConfig(candidate.typed); ok {
+				themeIdentity = &theme
+			}
+		}
 		leaves, configuredCount, normalizedCount, candidateMaterialized, err := compositeLeaves(
 			candidate.typed, configured, candidate.document.isBuiltIn())
 		if err != nil {
@@ -352,7 +358,26 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if len(origins) > 0 {
 		result.Origins = origins
 	}
+	if entry.Key == "theme" && themeIdentity != nil {
+		theme := value.Interface().(ThemeConfig)
+		theme.preset = themeIdentity.preset
+		theme.explicitPreset = themeIdentity.explicitPreset
+		value = reflect.ValueOf(theme)
+	}
 	return computedValue{resolved: result, value: value}, nil
+}
+
+func reflectedThemeConfig(value reflect.Value) (ThemeConfig, bool) {
+	for value.IsValid() && value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return ThemeConfig{}, false
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Type() != reflect.TypeOf(ThemeConfig{}) {
+		return ThemeConfig{}, false
+	}
+	return value.Interface().(ThemeConfig), true
 }
 
 func setNonParticipantResult(trace *CandidateTrace) {

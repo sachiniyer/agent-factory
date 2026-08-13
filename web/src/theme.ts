@@ -189,6 +189,20 @@ export interface LatestRequestGate {
   invalidate(): void;
 }
 
+export interface PaletteFetchFailurePlan {
+  reset: boolean;
+  retry: boolean;
+}
+
+/** Keeps a last-good daemon palette across transient additive-read failures. */
+export function paletteFetchFailurePlan(status: number, hasLoadedPalette: boolean): PaletteFetchFailurePlan {
+  const unsupported = status === 404 || status === 405 || status === 501;
+  return {
+    reset: unsupported || !hasLoadedPalette,
+    retry: !unsupported,
+  };
+}
+
 /** Fences asynchronous palette reads that share the same login token. */
 export function createLatestRequestGate(): LatestRequestGate {
   let generation = 0;
@@ -277,6 +291,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
   const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
   const ready = modeSemantic(source.success, NORD_THEME.success, 3);
+  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
   const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
   const limit = modeSemantic(source.error, NORD_THEME.error, 3);
   const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
@@ -348,6 +363,13 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-danger": danger,
     "--af-danger-text": dangerText,
     "--af-danger-subtle": rgba(danger, subtleAlpha),
+    "--af-focus-ring": accent,
+    "--af-text-muted": text2,
+    "--af-status-needs-you": statusNeedsYou,
+    "--af-status-working": text2,
+    "--af-status-waiting": danger,
+    "--af-status-broken": danger,
+    "--af-status-inactive": text2,
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,
@@ -364,6 +386,12 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   };
 
   const bright = (color: string): string => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
+  let ansiBlack = source.background;
+  let ansiWhite = source.foreground_strong;
+  if (contrastRatio(ansiBlack, ansiWhite) < 4.5) {
+    ansiBlack = NORD_THEME.background;
+    ansiWhite = NORD_THEME.foreground_strong;
+  }
   const xterm: ITheme = {
     background: tokens["--af-bg-term"],
     foreground: text,
@@ -371,22 +399,22 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     cursorAccent: canvas,
     selectionBackground: rgba(source.selection_background, selectionAlpha),
     selectionForeground,
-    black: text3,
+    black: ansiBlack,
     red: danger,
     green: termGreen,
     yellow: termAmber,
     blue: termBlue,
     magenta: termColor(source.purple, NORD_THEME.purple),
     cyan: accent,
-    white: text2,
-    brightBlack: bright(text3),
+    white: ansiWhite,
+    brightBlack: bright(ansiBlack),
     brightRed: bright(danger),
     brightGreen: bright(termGreen),
     brightYellow: bright(termAmber),
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: text,
+    brightWhite: ansiWhite,
   };
   return { tokens, xterm };
 }

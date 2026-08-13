@@ -319,8 +319,13 @@ func TestResolveConfigTreatsNamedThemePresetAsConfiguredPalette(t *testing.T) {
 		t.Run(resolve.name, func(t *testing.T) {
 			resolved, err := resolve.fn()
 			require.NoError(t, err)
+			assert.Equal(t, "zenburn", resolved.Theme.Preset())
 			assert.Equal(t, "#3F3F3F", resolved.Theme.Background)
 			assert.Equal(t, "#8CD0D3", resolved.Theme.Accent)
+			written, err := marshalConfigTOML(&resolved.Config)
+			require.NoError(t, err)
+			assert.Contains(t, string(written), "theme = 'zenburn'")
+			assert.NotContains(t, string(written), "[theme]")
 
 			value := requireResolvedValue(t, resolved, "theme")
 			for _, leaf := range []string{"background", "accent", "selection_background"} {

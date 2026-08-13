@@ -6288,6 +6288,7 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // named legacy palette, reload, and prove the same web tokens now follow it.
   let servedPalette: "zenburn" | "nord" = "zenburn";
   let themeRequestCount = 0;
+  let themeFailuresRemaining = 0;
   let holdNextTheme = false;
   let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
   await page.addInitScript(() => {
@@ -6337,6 +6338,14 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await page.route("**/v1/GetTheme", (route) => {
     themeRequestCount += 1;
     const palette = servedPalette;
+    if (themeFailuresRemaining > 0) {
+      themeFailuresRemaining -= 1;
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "temporary palette read failure" } }),
+      });
+    }
     if (holdNextTheme) {
       holdNextTheme = false;
       heldTheme = { route, palette };
@@ -6391,6 +6400,33 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await fulfillTheme(staleTheme.route, staleTheme.palette);
   await page.waitForTimeout(100);
   expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+
+  // Establish Zenburn as the last good palette, then prove a healthy socket can
+  // outlive one failed additive HTTP read. The failure must not reset to Nord;
+  // retry without another socket reconnect and apply Nord only on real success.
+  servedPalette = "zenburn";
+  const requestsBeforeZenburn = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry setup");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeZenburn);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+
+  themeFailuresRemaining = 1;
+  servedPalette = "nord";
+  const requestsBeforeTransientFailure = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry check");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure + 1);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
   await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.
@@ -8220,6 +8256,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             await expect(p.locator(".af-rail")).toBeVisible();
           }
 
+          // Exercise a deterministic set of live placements. Session status icons
+          // legitimately come and go as the seeded agent moves between Needs you and
+          // Working, so they cannot be the reason this coverage happens to exceed its
+          // floor. The default filter always exposes four checked semantic groups.
+          await p.getByRole("button", { name: "Filter sessions" }).click();
+          await expect(p.locator(".af-filter-menu")).toBeVisible();
+          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
           const projectIcon = p.locator(".af-project-glyph");
           const filterIcon = p.locator(".af-rail-filter-glyph");
           await expect(projectIcon).toBeVisible();
@@ -8266,6 +8310,13 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             }).length;
             return {
               count: visible.length,
+              placements: visible.map(
+                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
+              ),
+              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+                className: row.className,
+                text: (row.innerText ?? "").trim(),
+              })),
               allHiddenFromAT: visible.every(
                 (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
               ),
@@ -8278,7 +8329,11 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
                 .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
             };
           });
-          expect(audit.count, "the live shell must exercise several real icon placements").toBeGreaterThan(5);
+          expect(
+            audit.count,
+            `the live shell must exercise several real icon placements; ` +
+              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
+          ).toBeGreaterThan(5);
           expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
           expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
           expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);

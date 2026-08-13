@@ -7474,6 +7474,13 @@ function normalizeTheme(value) {
   }
   return out;
 }
+function paletteFetchFailurePlan(status, hasLoadedPalette) {
+  const unsupported = status === 404 || status === 405 || status === 501;
+  return {
+    reset: unsupported || !hasLoadedPalette,
+    retry: !unsupported
+  };
+}
 function createLatestRequestGate() {
   let generation = 0;
   return {
@@ -7538,6 +7545,7 @@ function deriveTheme(input, mode) {
   const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
   const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
   const ready = modeSemantic(source.success, NORD_THEME.success, 3);
+  const statusNeedsYou = modeSemantic(source.success, NORD_THEME.success, 4.5);
   const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
   const limit = modeSemantic(source.error, NORD_THEME.error, 3);
   const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
@@ -7600,6 +7608,13 @@ function deriveTheme(input, mode) {
     "--af-danger": danger,
     "--af-danger-text": dangerText,
     "--af-danger-subtle": rgba(danger, subtleAlpha),
+    "--af-focus-ring": accent,
+    "--af-text-muted": text2,
+    "--af-status-needs-you": statusNeedsYou,
+    "--af-status-working": text2,
+    "--af-status-waiting": danger,
+    "--af-status-broken": danger,
+    "--af-status-inactive": text2,
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,
@@ -7615,6 +7630,12 @@ function deriveTheme(input, mode) {
     "--af-backdrop": rgba(source.background, dark ? 0.66 : 0.42)
   };
   const bright = (color) => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
+  let ansiBlack = source.background;
+  let ansiWhite = source.foreground_strong;
+  if (contrastRatio(ansiBlack, ansiWhite) < 4.5) {
+    ansiBlack = NORD_THEME.background;
+    ansiWhite = NORD_THEME.foreground_strong;
+  }
   const xterm = {
     background: tokens["--af-bg-term"],
     foreground: text,
@@ -7622,22 +7643,22 @@ function deriveTheme(input, mode) {
     cursorAccent: canvas,
     selectionBackground: rgba(source.selection_background, selectionAlpha),
     selectionForeground,
-    black: text3,
+    black: ansiBlack,
     red: danger,
     green: termGreen,
     yellow: termAmber,
     blue: termBlue,
     magenta: termColor(source.purple, NORD_THEME.purple),
     cyan: accent,
-    white: text2,
-    brightBlack: bright(text3),
+    white: ansiWhite,
+    brightBlack: bright(ansiBlack),
     brightRed: bright(danger),
     brightGreen: bright(termGreen),
     brightYellow: bright(termAmber),
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: text
+    brightWhite: ansiWhite
   };
   return { tokens, xterm };
 }
@@ -14894,6 +14915,9 @@ var store = new Store({
 var token = null;
 var stream = null;
 var paletteRefreshGate = createLatestRequestGate();
+var PALETTE_RETRY_MS = 1e3;
+var paletteRetryTimer = null;
+var hasDaemonPalette = false;
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var resyncTimer = null;
 var sessionEventGeneration = 0;
@@ -15031,6 +15055,7 @@ function disconnect() {
   token = null;
   clearToken();
   resetDaemonTheme();
+  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -15763,21 +15788,43 @@ function startStream(tok) {
   });
   stream.start();
 }
+function clearPaletteRetry() {
+  if (paletteRetryTimer === null) return;
+  window.clearTimeout(paletteRetryTimer);
+  paletteRetryTimer = null;
+}
 async function refreshDaemonPalette(tok) {
+  clearPaletteRetry();
   const request = paletteRefreshGate.begin();
+  let paletteChanged = false;
   try {
     const theme = await getTheme(tok);
     if (token !== tok || !request.isCurrent()) return;
     applyDaemonTheme(theme);
-  } catch {
+    hasDaemonPalette = true;
+    paletteChanged = true;
+  } catch (error) {
     if (token !== tok || !request.isCurrent()) return;
-    resetDaemonTheme();
+    const status = error instanceof ApiError ? error.status : 0;
+    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
+    if (plan.reset) {
+      resetDaemonTheme();
+      hasDaemonPalette = false;
+      paletteChanged = true;
+    }
+    if (plan.retry) {
+      paletteRetryTimer = window.setTimeout(() => {
+        paletteRetryTimer = null;
+        if (token === tok) void refreshDaemonPalette(tok);
+      }, PALETTE_RETRY_MS);
+    }
   }
-  splitView.applyTheme();
+  if (paletteChanged) splitView.applyTheme();
 }
 function stopStream() {
   resyncRequestGeneration += 1;
   paletteRefreshGate.invalidate();
+  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

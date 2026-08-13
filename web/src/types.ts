@@ -405,6 +405,9 @@ export interface WireEvent {
 export interface ConfigEntry {
   key: string;
   type: string;
+  /** Every accepted config shape when the normalized `type` alone is
+   *  incomplete, such as theme's named string preset or custom table. */
+  accepted_types?: string[];
   default: string;
   purpose: string;
   tier: number;

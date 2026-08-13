@@ -15,6 +15,7 @@ import {
   createLatestRequestGate,
   deriveTheme,
   NORD_THEME,
+  paletteFetchFailurePlan,
   themeColorMetaContents,
 } from "./theme.js";
 
@@ -131,7 +132,20 @@ for (const mode of ["light", "dark"] as const) {
       tokens["--af-bg-inset"],
       tokens["--af-bg-raised"],
     ];
-    for (const name of ["--af-text", "--af-text-2", "--af-text-3", "--af-accent", "--af-danger"] as const) {
+    for (const name of [
+      "--af-text",
+      "--af-text-2",
+      "--af-text-3",
+      "--af-accent",
+      "--af-danger",
+      "--af-text-muted",
+      "--af-status-needs-you",
+      "--af-status-working",
+      "--af-status-waiting",
+      "--af-status-broken",
+      "--af-status-inactive",
+    ] as const) {
+      assert.match(tokens[name], /^#[0-9A-F]{6}$/, `${name} must be a concrete derived color`);
       for (const surface of surfaces) {
         assert.ok(
           contrastRatio(tokens[name], surface) >= 4.5,
@@ -187,6 +201,22 @@ test("palette refresh generations reject an older completion for the same token"
   assert.equal(older.isCurrent(), false);
   assert.equal(newer.isCurrent(), true);
 });
+
+test("transient palette failures retain the last good palette and retry", () => {
+  assert.deepEqual(paletteFetchFailurePlan(503, true), { reset: false, retry: true });
+  assert.deepEqual(paletteFetchFailurePlan(0, false), { reset: true, retry: true });
+  assert.deepEqual(paletteFetchFailurePlan(404, true), { reset: true, retry: false });
+});
+
+for (const mode of ["light", "dark"] as const) {
+  test(`${mode} ANSI black and white remain a readable pair`, () => {
+    const { xterm } = deriveTheme(NORD_THEME, mode);
+
+    assert.equal(xterm.black, NORD_THEME.background);
+    assert.equal(xterm.white, NORD_THEME.foreground_strong);
+    assert.ok(contrastRatio(xterm.black!, xterm.white!) >= 4.5, `${xterm.black} must be readable on ${xterm.white}`);
+  });
+}
 
 test("an unreadable or malformed custom slot falls back independently", () => {
   const custom = {

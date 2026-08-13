@@ -83,6 +83,7 @@ import {
   applyDaemonTheme,
   bootStampTheme,
   createLatestRequestGate,
+  paletteFetchFailurePlan,
   persistThemeChoice,
   refreshThemeMode,
   resetDaemonTheme,
@@ -168,6 +169,9 @@ const store = new Store<AppState>({
 let token: string | null = null;
 let stream: EventStream | null = null;
 const paletteRefreshGate = createLatestRequestGate();
+const PALETTE_RETRY_MS = 1000;
+let paletteRetryTimer: number | null = null;
+let hasDaemonPalette = false;
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -420,6 +424,7 @@ function disconnect(): void {
   token = null;
   clearToken();
   resetDaemonTheme();
+  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
@@ -1718,20 +1723,42 @@ function startStream(tok: string): void {
   stream.start();
 }
 
+function clearPaletteRetry(): void {
+  if (paletteRetryTimer === null) return;
+  window.clearTimeout(paletteRetryTimer);
+  paletteRetryTimer = null;
+}
+
 /** Refreshes the daemon-owned palette for both CSS chrome and every open xterm.
  *  Called during login and on every events-stream open, including reconnects after
- *  a daemon restart. A failed additive read restores the built-in readable floor. */
+ *  a daemon restart. Transient failures retain the last good palette and retry. */
 async function refreshDaemonPalette(tok: string): Promise<void> {
+  clearPaletteRetry();
   const request = paletteRefreshGate.begin();
+  let paletteChanged = false;
   try {
     const theme = await getTheme(tok);
     if (token !== tok || !request.isCurrent()) return;
     applyDaemonTheme(theme);
-  } catch {
+    hasDaemonPalette = true;
+    paletteChanged = true;
+  } catch (error) {
     if (token !== tok || !request.isCurrent()) return;
-    resetDaemonTheme();
+    const status = error instanceof ApiError ? error.status : 0;
+    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
+    if (plan.reset) {
+      resetDaemonTheme();
+      hasDaemonPalette = false;
+      paletteChanged = true;
+    }
+    if (plan.retry) {
+      paletteRetryTimer = window.setTimeout(() => {
+        paletteRetryTimer = null;
+        if (token === tok) void refreshDaemonPalette(tok);
+      }, PALETTE_RETRY_MS);
+    }
   }
-  splitView.applyTheme();
+  if (paletteChanged) splitView.applyTheme();
 }
 
 function stopStream(): void {
@@ -1740,6 +1767,7 @@ function stopStream(): void {
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
   paletteRefreshGate.invalidate();
+  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

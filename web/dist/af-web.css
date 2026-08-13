@@ -59,6 +59,13 @@
   --af-danger: #944049;
   --af-danger-text: #883b43;
   --af-danger-subtle: rgba(148, 64, 73, 0.09);
+  --af-focus-ring: #2d6271;
+  --af-text-muted: #3b4252;
+  --af-status-needs-you: #4a6137;
+  --af-status-working: #3b4252;
+  --af-status-waiting: #944049;
+  --af-status-broken: #944049;
+  --af-status-inactive: #3b4252;
   --af-dot-ready: #617e48;
   --af-dot-lost: #996f1a;
   --af-dot-dead: #3b4252;
@@ -103,6 +110,13 @@
     --af-danger: #d9b2b9;
     --af-danger-text: #e4c8cd;
     --af-danger-subtle: rgba(217, 178, 185, 0.12);
+    --af-focus-ring: #90c4d3;
+    --af-text-muted: #c3cbd6;
+    --af-status-needs-you: #aac396;
+    --af-status-working: #c3cbd6;
+    --af-status-waiting: #d9b2b9;
+    --af-status-broken: #d9b2b9;
+    --af-status-inactive: #c3cbd6;
     --af-dot-ready: #a3be8c;
     --af-dot-lost: #ebcb8b;
     --af-dot-dead: #c3cbd6;
@@ -143,6 +157,13 @@
   --af-danger: #944049;
   --af-danger-text: #883b43;
   --af-danger-subtle: rgba(148, 64, 73, 0.09);
+  --af-focus-ring: #2d6271;
+  --af-text-muted: #3b4252;
+  --af-status-needs-you: #4a6137;
+  --af-status-working: #3b4252;
+  --af-status-waiting: #944049;
+  --af-status-broken: #944049;
+  --af-status-inactive: #3b4252;
   --af-dot-ready: #617e48;
   --af-dot-lost: #996f1a;
   --af-dot-dead: #3b4252;
@@ -182,6 +203,13 @@
   --af-danger: #d9b2b9;
   --af-danger-text: #e4c8cd;
   --af-danger-subtle: rgba(217, 178, 185, 0.12);
+  --af-focus-ring: #90c4d3;
+  --af-text-muted: #c3cbd6;
+  --af-status-needs-you: #aac396;
+  --af-status-working: #c3cbd6;
+  --af-status-waiting: #d9b2b9;
+  --af-status-broken: #d9b2b9;
+  --af-status-inactive: #c3cbd6;
   --af-dot-ready: #a3be8c;
   --af-dot-lost: #ebcb8b;
   --af-dot-dead: #c3cbd6;
@@ -197,13 +225,6 @@
   --af-backdrop: rgba(46, 52, 64, 0.66);
 }
 :root {
-  --af-focus-ring: var(--af-accent);
-  --af-text-muted: var(--af-text-2);
-  --af-status-needs-you: var(--af-dot-ready);
-  --af-status-working: var(--af-text-2);
-  --af-status-waiting: var(--af-dot-limit);
-  --af-status-broken: var(--af-danger);
-  --af-status-inactive: var(--af-text-2);
   --af-disabled-opacity: 0.58;
 }
 :root {
