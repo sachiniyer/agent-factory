@@ -77,8 +77,10 @@ const shellTmuxSuffix = tmuxTabSeparator + shellTabName
 // Anything that renders a roster therefore has to cope with an arbitrary count
 // rather than assume it fits — see the web tab bar, which scrolls.
 
-// TabKind enumerates the kinds of process a Tab can host within an instance's
-// worktree (the #930 ephemeral-tabs epic).
+// TabKind enumerates the categories of roster entry a Tab can be (the #930
+// ephemeral-tabs epic). Not every kind owns a process: web tabs have none, and
+// a VS Code tab references a session-shared daemon-managed one — see HasTmux
+// and TabKindRequires.
 type TabKind int
 
 const (
