@@ -205,7 +205,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   let inset = dark
     ? mix(source.background, source.background_subtle, 0.22)
     : mix(source.foreground, source.background, 0.06);
-  let surfaces = [canvas, surface, raised];
+  let surfaces = [canvas, surface, inset, raised];
 
   // A custom table can make its three elevations mutually incompatible with
   // one shared text colour (for example black, white, black). In that case the
@@ -222,7 +222,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     inset = dark
       ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22)
       : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
-    surfaces = [canvas, surface, raised];
+    surfaces = [canvas, surface, inset, raised];
   }
   const toward = dark ? source.foreground_strong : source.background;
   const text = readable(
@@ -277,7 +277,19 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
 
   const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
   const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
-  const accentHover = mix(accent, onAccent, 0.12);
+  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
+  const hoverCandidate = mix(accent, hoverToward, 0.12);
+  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
+
+  const selectionAlpha = dark ? 0.72 : 0.45;
+  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
+  const selectionForeground = readable(
+    source.selection_foreground,
+    [selectionSurface],
+    4.5,
+    NORD_THEME.selection_foreground,
+    text,
+  );
 
   const tokens: Record<string, string> = {
     "--af-bg-canvas": canvas,
@@ -322,7 +334,8 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     foreground: text,
     cursor: text,
     cursorAccent: canvas,
-    selectionBackground: rgba(source.selection_background, dark ? 0.72 : 0.45),
+    selectionBackground: rgba(source.selection_background, selectionAlpha),
+    selectionForeground,
     black: text3,
     red: danger,
     green: termGreen,

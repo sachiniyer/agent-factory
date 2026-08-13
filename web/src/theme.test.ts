@@ -52,7 +52,7 @@ test("Nord drives both modes from one semantic source", () => {
   assert.equal(dark.tokens["--af-bg-raised"], NORD_THEME.background_panel);
   assert.equal(light.tokens["--af-bg-canvas"], NORD_THEME.foreground);
   assert.equal(light.tokens["--af-text"], NORD_THEME.background);
-  assert.equal(light.tokens["--af-accent"], "#306979", "the light derivation keeps Nord's frost-cyan hue");
+  assert.equal(light.tokens["--af-accent"], "#2D6271", "the light derivation keeps Nord's frost-cyan hue");
   assert.notEqual(light.tokens["--af-accent"], dark.tokens["--af-accent"]);
 
   assert.equal(dark.xterm.cyan, dark.tokens["--af-accent"]);
@@ -93,7 +93,12 @@ test("pane states consume their corresponding semantic border tokens", () => {
 for (const mode of ["light", "dark"] as const) {
   test(`${mode} derived tokens meet the contrast floor`, () => {
     const { tokens } = deriveTheme(NORD_THEME, mode);
-    const surfaces = [tokens["--af-bg-canvas"], tokens["--af-bg-surface"], tokens["--af-bg-raised"]];
+    const surfaces = [
+      tokens["--af-bg-canvas"],
+      tokens["--af-bg-surface"],
+      tokens["--af-bg-inset"],
+      tokens["--af-bg-raised"],
+    ];
     for (const name of ["--af-text", "--af-text-2", "--af-text-3", "--af-accent", "--af-danger"] as const) {
       for (const surface of surfaces) {
         assert.ok(
@@ -103,6 +108,7 @@ for (const mode of ["light", "dark"] as const) {
       }
     }
     assert.ok(contrastRatio(tokens["--af-on-accent"], tokens["--af-accent"]) >= 4.5);
+    assert.ok(contrastRatio(tokens["--af-on-accent"], tokens["--af-accent-hover"]) >= 4.5);
     for (const name of ["--af-dot-ready", "--af-dot-lost", "--af-dot-limit", "--af-border-selected"] as const) {
       for (const surface of surfaces) {
         assert.ok(
@@ -149,6 +155,35 @@ test("an incoherent custom elevation system falls back as a readable unit", () =
   for (const surface of [tokens["--af-bg-canvas"], tokens["--af-bg-surface"], tokens["--af-bg-raised"]]) {
     assert.ok(contrastRatio(tokens["--af-text"], surface) >= 4.5);
   }
+});
+
+test("inset participates in the coherent surface and text contrast checks", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#000000",
+      background_subtle: "#FFFFFF",
+      background_panel: "#000000",
+      foreground: "#757575",
+    },
+    "dark",
+  );
+
+  assert.equal(tokens["--af-bg-inset"], "#313744");
+  assert.ok(contrastRatio(tokens["--af-text"], tokens["--af-bg-inset"]) >= 4.5);
+});
+
+test("xterm applies a readable configured terminal selection foreground", () => {
+  const { xterm } = deriveTheme(
+    {
+      ...NORD_THEME,
+      selection_background: "#000000",
+      selection_foreground: "#FFFFFF",
+    },
+    "dark",
+  );
+
+  assert.equal(xterm.selectionForeground, "#FFFFFF");
 });
 
 test("the final light semantic fallback is verified against every surface", () => {

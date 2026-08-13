@@ -6286,13 +6286,26 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
 
   // The palette comes from the daemon, not this toggle. Replace GetTheme with the
   // named legacy palette, reload, and prove the same web tokens now follow it.
-  await page.route("**/v1/GetTheme", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        data: {
-          theme: {
+  let servedPalette: "zenburn" | "nord" = "zenburn";
+  let themeRequestCount = 0;
+  await page.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    const TrackingWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket = socket;
+        }
+        return socket;
+      },
+    });
+    window.WebSocket = TrackingWebSocket;
+  });
+  await page.route("**/v1/GetTheme", (route) => {
+    themeRequestCount += 1;
+    const theme =
+      servedPalette === "zenburn"
+        ? {
             name: "zenburn",
             foreground: "#DCDCCC",
             foreground_strong: "#FFFFEF",
@@ -6302,17 +6315,48 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
             background_subtle: "#494949",
             background_panel: "#4F4F4F",
             accent: "#8CD0D3",
-          },
-        },
+          }
+        : {
+            name: "nord",
+            foreground: "#D8DEE9",
+            foreground_strong: "#ECEFF4",
+            foreground_muted: "#C3CBD6",
+            foreground_dim: "#A7B0BE",
+            background: "#2E3440",
+            background_subtle: "#3B4252",
+            background_panel: "#434C5E",
+            accent: "#88C0D0",
+          };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: { theme },
         error: null,
       }),
-    }),
-  );
+    });
+  });
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
   await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
   expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
+
+  // A daemon restart can change config without reloading this page. Force the
+  // self-healing events socket through its real reconnect path, switch the mocked
+  // daemon palette meanwhile, and require both chrome and open xterms to be
+  // refreshed by the reconnect's resync callback.
+  const requestsBeforeReconnect = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeReconnect);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  // Frost cyan is lifted just enough to stay AA on every Nord elevation.
+  await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
   await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.

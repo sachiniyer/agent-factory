@@ -7484,7 +7484,7 @@ function deriveTheme(input, mode) {
   let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
   let raised = dark ? source.background_panel : source.foreground_strong;
   let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
-  let surfaces = [canvas, surface, raised];
+  let surfaces = [canvas, surface, inset, raised];
   const sourceSurfaceText = dark ? source.foreground : source.background;
   const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
   if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
@@ -7492,7 +7492,7 @@ function deriveTheme(input, mode) {
     surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
     raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
     inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
-    surfaces = [canvas, surface, raised];
+    surfaces = [canvas, surface, inset, raised];
   }
   const toward = dark ? source.foreground_strong : source.background;
   const text = readable(
@@ -7539,7 +7539,18 @@ function deriveTheme(input, mode) {
   const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
   const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
   const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
-  const accentHover = mix(accent, onAccent, 0.12);
+  const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
+  const hoverCandidate = mix(accent, hoverToward, 0.12);
+  const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
+  const selectionAlpha = dark ? 0.72 : 0.45;
+  const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
+  const selectionForeground = readable(
+    source.selection_foreground,
+    [selectionSurface],
+    4.5,
+    NORD_THEME.selection_foreground,
+    text
+  );
   const tokens = {
     "--af-bg-canvas": canvas,
     "--af-bg-surface": surface,
@@ -7582,7 +7593,8 @@ function deriveTheme(input, mode) {
     foreground: text,
     cursor: text,
     cursorAccent: canvas,
-    selectionBackground: rgba(source.selection_background, dark ? 0.72 : 0.45),
+    selectionBackground: rgba(source.selection_background, selectionAlpha),
+    selectionForeground,
     black: text3,
     red: danger,
     green: termGreen,
@@ -14950,12 +14962,7 @@ async function connect(candidate) {
   }
   token = candidate;
   storeToken(candidate);
-  try {
-    applyDaemonTheme(await getTheme(candidate));
-  } catch {
-    resetDaemonTheme();
-  }
-  splitView.applyTheme();
+  await refreshDaemonPalette(candidate);
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
@@ -15720,10 +15727,24 @@ function startStream(tok) {
   stopStream();
   stream = new EventStream(tok, {
     onEvent,
-    onResync: requestResync,
+    onResync: () => {
+      requestResync();
+      void refreshDaemonPalette(tok);
+    },
     onStatus: (s) => store.set({ live: s })
   });
   stream.start();
+}
+async function refreshDaemonPalette(tok) {
+  try {
+    const theme = await getTheme(tok);
+    if (token !== tok) return;
+    applyDaemonTheme(theme);
+  } catch {
+    if (token !== tok) return;
+    resetDaemonTheme();
+  }
+  splitView.applyTheme();
 }
 function stopStream() {
   resyncRequestGeneration += 1;

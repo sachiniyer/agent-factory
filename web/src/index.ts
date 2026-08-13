@@ -354,12 +354,7 @@ async function connect(candidate: string): Promise<void> {
   // Apply before mounting the app phase so the first authenticated paint and a
   // newly constructed xterm use the same palette. A failed additive read keeps
   // the built-in Nord floor rather than blocking an otherwise valid login.
-  try {
-    applyDaemonTheme(await getTheme(candidate));
-  } catch {
-    resetDaemonTheme();
-  }
-  splitView.applyTheme();
+  await refreshDaemonPalette(candidate);
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -1712,10 +1707,28 @@ function startStream(tok: string): void {
   stopStream();
   stream = new EventStream(tok, {
     onEvent,
-    onResync: requestResync,
+    onResync: () => {
+      requestResync();
+      void refreshDaemonPalette(tok);
+    },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
   });
   stream.start();
+}
+
+/** Refreshes the daemon-owned palette for both CSS chrome and every open xterm.
+ *  Called during login and on every events-stream open, including reconnects after
+ *  a daemon restart. A failed additive read restores the built-in readable floor. */
+async function refreshDaemonPalette(tok: string): Promise<void> {
+  try {
+    const theme = await getTheme(tok);
+    if (token !== tok) return;
+    applyDaemonTheme(theme);
+  } catch {
+    if (token !== tok) return;
+    resetDaemonTheme();
+  }
+  splitView.applyTheme();
 }
 
 function stopStream(): void {
