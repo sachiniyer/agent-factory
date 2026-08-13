@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // quiescingControlStub answers the daemon control socket the way a real daemon
@@ -66,7 +67,9 @@ func serveQuiescingControl(t *testing.T) {
 // BEFORE the file write — instead of writing config.toml and live-applying it
 // through the ungated path.
 func TestConfigPaneSaveRefusedByQuiescingDaemonWritesNothing(t *testing.T) {
-	home := t.TempDir()
+	// SocketTempDir, not t.TempDir: the home hosts a unix socket, and macOS's
+	// $TMPDIR plus this test's name would blow the 107-byte socket path limit.
+	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	tomlPath := filepath.Join(home, "config.toml")
 	orig := "# hand-written\ndefault_program = 'claude'\n"
