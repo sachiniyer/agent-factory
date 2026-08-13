@@ -114,6 +114,17 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
 	// retain a record, but it cannot undo teardown that already happened.
 	if instance != nil {
+		// A direct kill of an archived session may be the first operation to
+		// learn its origin repo is gone (#3176). Nothing failed before this
+		// kill, so no relocation record exists and the admission below would
+		// read that absence as permission. Establish and persist the
+		// identity-qualified cleanup authorization first — the same record a
+		// failed restore leaves — or refuse while nothing has been changed.
+		stage.set("checking archived origin state")
+		if prepErr := m.prepareDirectRepoGoneKillCleanup(repoID, req.Title, instance); prepErr != nil {
+			return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: %w", req.Title, prepErr)
+		}
+		stage.set("validating destruction admission")
 		if admissionErr := instance.ValidateWorktreeDestructionAdmission(); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of session %q was not started because its worktree relocation is unresolved; nothing was changed: %w",

@@ -323,6 +323,17 @@ func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) fu
 	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
 }
 
+// HasUnresolvedWorktreeRelocation reports whether a durable relocation
+// lifecycle — a recovery record or an active consumed claim — exists for this
+// instance's worktree. Deliberately not gated on started: destruction
+// admission runs against archived instances, whose runtime is inert.
+func (i *Instance) HasUnresolvedWorktreeRelocation() bool {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	return gw != nil && gw.HasUnresolvedRelocation()
+}
+
 // ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
 // backend separately consumes and revalidates the exact cleanup identity before
 // pane teardown; it must not repeat the origin-path admission after the durable

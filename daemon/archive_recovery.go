@@ -34,7 +34,7 @@ func (m *Manager) guardRepoGoneRestore(
 		}
 		return false, probeErr
 	}
-	if err := m.prepareRepoGoneCleanup(repoID, title, repoPath, instance, claim); err != nil {
+	if err := m.prepareRepoGoneCleanup("restore", repoID, title, repoPath, instance, claim); err != nil {
 		return false, err
 	}
 	return true, fmt.Errorf(
@@ -103,9 +103,10 @@ func (m *Manager) claimRestoreRelocation(
 // prepareRepoGoneCleanup is the non-moving completion path. Establish the
 // selected directory identity once more, replace its active ownership with a
 // cleanup-only durable record, and persist both facts so a later kill must
-// revalidate the same directory before deleting it.
+// revalidate the same directory before deleting it. operation names the caller
+// ("restore" or "kill") in every failure message.
 func (m *Manager) prepareRepoGoneCleanup(
-	repoID, title, repoPath string,
+	operation, repoID, title, repoPath string,
 	instance *session.Instance,
 	claim sessiongit.RelocationClaim,
 ) error {
@@ -113,33 +114,33 @@ func (m *Manager) prepareRepoGoneCleanup(
 	// later cleanup_ready write fails, restart sees claim_stale rather than the
 	// record-free archive that this transaction began with.
 	instance.PreserveWorktreeRelocationClaimAsUnresolved(claim)
-	return m.persistAndInstallRepoGoneCleanup(repoID, title, repoPath, instance)
+	return m.persistAndInstallRepoGoneCleanup(operation, repoID, title, repoPath, instance)
 }
 
 // persistAndInstallRepoGoneCleanup commits the two-phase cleanup transition.
 // Its caller has already removed destructive authority by staging claim_stale;
 // only after that fence is durable may cleanup_ready be installed and written.
 func (m *Manager) persistAndInstallRepoGoneCleanup(
-	repoID, title, repoPath string,
+	operation, repoID, title, repoPath string,
 	instance *session.Instance,
 ) error {
 	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
 		return fmt.Errorf(
-			"cannot restore session %q because its origin repo %s is gone, and could not persist an unresolved archived worktree identity: %w",
-			title, repoPath, persistErr,
+			"cannot %s session %q because its origin repo %s is gone, and could not persist an unresolved archived worktree identity: %w",
+			operation, title, repoPath, persistErr,
 		)
 	}
 	stagedClaim, err := instance.ClaimWorktreeRelocationForRetry()
 	if err != nil {
 		return fmt.Errorf(
-			"cannot restore session %q because its origin repo is gone and the staged archived worktree identity could not be reclaimed: %w",
-			title, err,
+			"cannot %s session %q because its origin repo is gone and the staged archived worktree identity could not be reclaimed: %w",
+			operation, title, err,
 		)
 	}
 	if err := instance.PrepareWorktreeRelocationClaimForCleanup(stagedClaim); err != nil {
 		prepareErr := fmt.Errorf(
-			"cannot restore session %q because its origin repo is gone and the archived worktree identity could not be established: %w",
-			title, err,
+			"cannot %s session %q because its origin repo is gone and the archived worktree identity could not be established: %w",
+			operation, title, err,
 		)
 		// Preparation replaces a consumed point-in-time claim with durable stale
 		// evidence when the cleanup generation cannot be established. Persist that
@@ -156,11 +157,72 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 		// The in-memory cleanup-ready record remains fail-closed. The previous
 		// on-disk recovery record is conservative too.
 		return fmt.Errorf(
-			"cannot restore session %q because its origin repo %s is gone, and could not persist the resolved archived worktree identity: %w",
-			title, repoPath, err,
+			"cannot %s session %q because its origin repo %s is gone, and could not persist the resolved archived worktree identity: %w",
+			operation, title, repoPath, err,
 		)
 	}
 	return nil
+}
+
+// prepareDirectRepoGoneKillCleanup is the admission producer for a kill that
+// never went through a failed restore (#3176). The failed-restore route leaves
+// a durable cleanup authorization behind for the destruction admission to
+// validate; a direct kill of an archived session starts record-free, and the
+// admission's "is a relocation unresolved?" question reads that absence as
+// permission. Ordinary teardown then runs git cleanup against an origin that
+// may be gone, its answered failures settle the kill, the row is deleted, and
+// the archived directory — the only remaining handle to the user's work — is
+// orphaned. Ask the positive question here, before the kill commits to
+// anything: probe the origin once, and on a conclusive repo-gone answer capture
+// and persist the same identity-qualified authorization a failed restore would
+// have left, so teardown consumes the exact archived directory through the
+// claimed repo-gone transaction. A probe that cannot answer refuses the kill; a
+// present origin admits the ordinary kill untouched.
+func (m *Manager) prepareDirectRepoGoneKillCleanup(
+	repoID, title string, instance *session.Instance,
+) error {
+	if instance.GetLiveness() != session.LiveArchived || instance.IsExternalWorktree() ||
+		instance.Capabilities().Workspace == session.WorkspaceRemote {
+		return nil
+	}
+	if instance.GetWorktreePath() == "" {
+		// No local worktree means no archived directory to authorize; the
+		// ordinary admission owns whatever remains. GetGitWorktree is not
+		// usable here — it refuses while started is false, which an archived
+		// instance always is.
+		return nil
+	}
+	if instance.HasUnresolvedWorktreeRelocation() {
+		// A relocation lifecycle already exists, so this kill is not the
+		// record-free direct path: the destruction admission validates a
+		// cleanup-ready record and refuses every other state.
+		return nil
+	}
+	repoPath := instance.GetRepoPath()
+	if repoPath == "" {
+		return fmt.Errorf(
+			"cannot kill archived session %q: it has no repo path on record to establish its origin state; nothing was changed",
+			title,
+		)
+	}
+	probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath)
+	if probeErr == nil {
+		return nil
+	}
+	if !errors.Is(probeErr, sessiongit.ErrRepoGone) {
+		return fmt.Errorf(
+			"cannot establish origin repo state for %s before killing archived session %q; nothing was changed — retry once the origin can be probed: %w",
+			repoPath, title, probeErr,
+		)
+	}
+	claim, claimErr := instance.ClaimWorktreeRelocationForRetry()
+	if claimErr != nil {
+		return fmt.Errorf(
+			"origin repo %s is gone, and the archived worktree identity for session %q could not be resolved for cleanup authorization: %w",
+			repoPath, title, claimErr,
+		)
+	}
+	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)
 }
 
 // persistRepoGoneAtRestoreUse handles the authoritative repo check immediately
@@ -169,7 +231,7 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 func (m *Manager) persistRepoGoneAtRestoreUse(
 	repoID, title, repoPath string, instance *session.Instance, restoreErr error,
 ) error {
-	if err := m.persistAndInstallRepoGoneCleanup(repoID, title, repoPath, instance); err != nil {
+	if err := m.persistAndInstallRepoGoneCleanup("restore", repoID, title, repoPath, instance); err != nil {
 		return errors.Join(err, restoreErr)
 	}
 	return fmt.Errorf(
