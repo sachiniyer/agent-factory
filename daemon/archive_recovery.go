@@ -173,11 +173,14 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 // may be gone, its answered failures settle the kill, the row is deleted, and
 // the archived directory — the only remaining handle to the user's work — is
 // orphaned. Ask the positive question here, before the kill commits to
-// anything: probe the origin once, and on a conclusive repo-gone answer capture
-// and persist the same identity-qualified authorization a failed restore would
-// have left, so teardown consumes the exact archived directory through the
-// claimed repo-gone transaction. A probe that cannot answer refuses the kill; a
-// present origin admits the ordinary kill untouched.
+// anything: resolve the archived directory identity, probe the origin, and on a
+// conclusive repo-gone answer — with the archive's own worktree pointer as
+// creation-time evidence — capture and persist the same identity-qualified
+// authorization a failed restore would have left, so teardown consumes the
+// exact archived directory through the claimed repo-gone transaction. A probe
+// that cannot answer refuses the kill; a present origin admits the ordinary
+// kill untouched. A stalled identity fence from an earlier attempt is durable
+// and reclaimed here on retry, so a transient stall never strands the session.
 func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	repoID, title string, instance *session.Instance,
 ) error {
@@ -185,17 +188,22 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 		instance.Capabilities().Workspace == session.WorkspaceRemote {
 		return nil
 	}
-	if instance.GetWorktreePath() == "" {
+	archivedPath := instance.GetWorktreePath()
+	if archivedPath == "" {
 		// No local worktree means no archived directory to authorize; the
 		// ordinary admission owns whatever remains. GetGitWorktree is not
 		// usable here — it refuses while started is false, which an archived
 		// instance always is.
 		return nil
 	}
-	if instance.HasUnresolvedWorktreeRelocation() {
-		// A relocation lifecycle already exists, so this kill is not the
-		// record-free direct path: the destruction admission validates a
-		// cleanup-ready record and refuses every other state.
+	recovery, unresolved := instance.WorktreeRelocationRecovery()
+	if unresolved && recovery.State != sessiongit.RelocationRecoveryStalled {
+		// Any other lifecycle is owned by the destruction admission below: it
+		// validates cleanup-ready records and refuses the rest. A stalled probe
+		// record is this gate's own residue (or restore's), carries no
+		// authority in either direction, and is exactly what a retry claim may
+		// re-resolve — so fall through and reclaim it rather than leaving the
+		// session unkillable in this process (#3278 review).
 		return nil
 	}
 	repoPath := instance.GetRepoPath()
@@ -205,21 +213,64 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 			title,
 		)
 	}
-	probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath)
-	if probeErr == nil {
-		return nil
+	claim, claimErr := instance.ClaimWorktreeRelocationForRetry()
+	if claimErr != nil {
+		wrapped := fmt.Errorf(
+			"the archived worktree identity for session %q could not be resolved for cleanup authorization: %w",
+			title, claimErr,
+		)
+		if errors.Is(claimErr, sessiongit.ErrRelocateStateUnknown) {
+			// The failed bounded probe installed a stalled fence in memory.
+			// Persist it so a crash cannot forget the evidence and a later
+			// kill can reclaim it through the branch above (#3278 review).
+			if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+				return errors.Join(wrapped, fmt.Errorf(
+					"could not persist the stalled archived worktree identity: %w", persistErr,
+				))
+			}
+		}
+		return wrapped
 	}
-	if !errors.Is(probeErr, sessiongit.ErrRepoGone) {
+	probeErr := sessiongit.CheckRepoPresentForRelocation(repoPath)
+	switch {
+	case probeErr == nil:
+		if !unresolved {
+			// The claim came from record-free state and owns nothing; the
+			// ordinary kill proceeds untouched.
+			return nil
+		}
+		// The claim consumed the stalled record with a fresh identity answer.
+		// Settle and persist that resolution so the ordinary kill below is
+		// admitted instead of refused over a stall the origin has outlived.
+		if settleErr := instance.SettleWorktreeRelocationClaim(claim); settleErr != nil {
+			return fmt.Errorf(
+				"origin repo %s answered present but the stalled archived worktree identity for session %q could not be settled: %w",
+				repoPath, title, settleErr,
+			)
+		}
+		if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+			return fmt.Errorf(
+				"origin repo %s answered present but the settled archived worktree identity for session %q could not be persisted — retry the kill: %w",
+				repoPath, title, persistErr,
+			)
+		}
+		return nil
+	case !errors.Is(probeErr, sessiongit.ErrRepoGone):
+		instance.PreserveWorktreeRelocationClaimForRetry(claim)
 		return fmt.Errorf(
-			"cannot establish origin repo state for %s before killing archived session %q; nothing was changed — retry once the origin can be probed: %w",
+			"cannot establish origin repo state for %s before killing archived session %q — retry once the origin can be probed: %w",
 			repoPath, title, probeErr,
 		)
 	}
-	claim, claimErr := instance.ClaimWorktreeRelocationForRetry()
-	if claimErr != nil {
+	// The origin is conclusively gone. Require the archive's own creation-time
+	// evidence — its linked-worktree pointer — before authorizing deletion of
+	// the current pathname occupant (#3278 review): a directory that replaced
+	// the archive at the same path does not carry it.
+	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(archivedPath); pointerErr != nil {
+		instance.PreserveWorktreeRelocationClaimForRetry(claim)
 		return fmt.Errorf(
-			"origin repo %s is gone, and the archived worktree identity for session %q could not be resolved for cleanup authorization: %w",
-			repoPath, title, claimErr,
+			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually before killing it",
+			title, pointerErr, archivedPath,
 		)
 	}
 	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)

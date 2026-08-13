@@ -457,6 +457,24 @@ type teardownKill struct {
 	claimHandled *bool
 }
 
+// beforeKillTeardownOriginRecheck runs between the daemon's pre-tombstone
+// admission and the teardown-boundary origin recheck below. Tests use it to
+// change the origin's state inside that interval deterministically; production
+// never reassigns it.
+var beforeKillTeardownOriginRecheck = func() {}
+
+// SetBeforeKillTeardownOriginRecheckForTest installs a hook in the interval
+// between kill admission and the archived-origin teardown recheck, returning a
+// restore function. Mirrors the git layer's restore-boundary seams.
+func SetBeforeKillTeardownOriginRecheckForTest(hook func()) func() {
+	previous := beforeKillTeardownOriginRecheck
+	if hook == nil {
+		hook = func() {}
+	}
+	beforeKillTeardownOriginRecheck = hook
+	return func() { beforeKillTeardownOriginRecheck = previous }
+}
+
 // prepareKillTeardown consumes a cleanup-ready record only after the daemon's
 // pre-tombstone admission check has validated it. The returned cleanup gives
 // ownership back if pane teardown aborts before handleWorktree can revalidate
@@ -465,6 +483,7 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 	noop := func() {}
 	i.mu.RLock()
 	gw := i.gitWorktree
+	archived := i.liveness == LiveArchived
 	i.mu.RUnlock()
 	if gw == nil {
 		return teardownKill{}, noop, nil
@@ -474,6 +493,26 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 	}
 	_, recovery, unresolved := gw.RelocationSnapshot()
 	if !unresolved {
+		// Record-free archived teardown re-establishes the origin at the point
+		// of no return (#3278 review). Admission proved the origin PRESENT
+		// before the tombstone, but a repository deleted in this interval
+		// would send the archived worktree through ordinary git cleanup, whose
+		// answered failures against the missing origin settle the kill and let
+		// the record delete orphan the archive — the same interval restore's
+		// authoritative pre-move recheck exists for. Reporting unknown keeps
+		// the tombstoned record as the retry handle; killing again re-enters
+		// the daemon's admission producer, which authorizes identity-qualified
+		// cleanup against the now-gone origin.
+		if archived && !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
+			i.Capabilities().Workspace == WorkspaceLocalWorktree {
+			beforeKillTeardownOriginRecheck()
+			if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {
+				return teardownKill{}, noop, fmt.Errorf(
+					"%w: origin repo state for this archived worktree changed or could not be established after kill admission — kill the session again to re-establish cleanup authorization: %v",
+					ErrWorkspaceStateUnknown, err,
+				)
+			}
+		}
 		return teardownKill{}, noop, nil
 	}
 	if recovery.State != git.RelocationRecoveryCleanupReady &&

@@ -119,7 +119,8 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// kill, so no relocation record exists and the admission below would
 		// read that absence as permission. Establish and persist the
 		// identity-qualified cleanup authorization first — the same record a
-		// failed restore leaves — or refuse while nothing has been changed.
+		// failed restore leaves — or refuse before the tombstone, leaving at
+		// most a conservative, non-destructive fence.
 		stage.set("checking archived origin state")
 		if prepErr := m.prepareDirectRepoGoneKillCleanup(repoID, req.Title, instance); prepErr != nil {
 			return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: %w", req.Title, prepErr)
@@ -157,7 +158,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// because the failure stops here.
 	stage.set("persisting kill tombstone")
 	if err := m.persistKillTombstone(repoID, instance, data); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; nothing was changed — retry the kill: %w", req.Title, err)
+		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; the session was not torn down — retry the kill: %w", req.Title, err)
 	}
 
 	// Revoke this session's sandbox callback credential (#2999), anchored to the

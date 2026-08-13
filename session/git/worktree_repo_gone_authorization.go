@@ -462,3 +462,56 @@ func requireCleanupPathIdentity(path string, expected pathIdentity, expectedGene
 func CheckRepoPresentForRelocation(repoPath string) error {
 	return boundedRepoGoneOriginProbe(&GitWorktree{repoPath: repoPath})
 }
+
+// archivedWorktreePointerMaxSize bounds the .git pointer read. A linked
+// worktree's pointer file is one short line; anything larger is not one.
+const archivedWorktreePointerMaxSize = 1 << 16
+
+// VerifyArchivedWorktreePointer checks that the directory occupying
+// worktreePath carries a linked-worktree `.git` pointer file — the identity
+// evidence the archive itself wrote at creation time and both archive move
+// variants preserve. A record-free direct kill authorizes deletion from the
+// current pathname occupant, so this is what separates the archived worktree
+// from an unrelated directory later created at the same path (#3278 review).
+//
+// The pointer's repository half is deliberately not compared against the
+// recorded origin: the origin is conclusively gone when this runs, so its
+// canonical form cannot be resolved, and the recorded path and git's stored
+// gitdir may differ only by symlink resolution (macOS TMPDIR). The check binds
+// to the pointer's structure — a gitdir line naming a `.git/worktrees/<name>`
+// metadata directory — which an unrelated replacement directory does not have.
+// Absence, unreadability, or any other shape refuses: deletion authority must
+// not fall back to pathname trust.
+func VerifyArchivedWorktreePointer(worktreePath string) error {
+	pointerPath := filepath.Join(worktreePath, ".git")
+	info, err := os.Lstat(pointerPath)
+	if err != nil {
+		return fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("archived worktree pointer %s is not a regular file", pointerPath)
+	}
+	if info.Size() > archivedWorktreePointerMaxSize {
+		return fmt.Errorf("archived worktree pointer %s is too large (%d bytes) to be a worktree pointer", pointerPath, info.Size())
+	}
+	content, err := os.ReadFile(pointerPath)
+	if err != nil {
+		return fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+	}
+	line, _, _ := strings.Cut(string(content), "\n")
+	target, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return fmt.Errorf("archived worktree pointer %s does not begin with a gitdir line", pointerPath)
+	}
+	target = filepath.Clean(strings.TrimSpace(target))
+	name := filepath.Base(target)
+	if name == "" || name == "." || name == string(filepath.Separator) ||
+		filepath.Base(filepath.Dir(target)) != "worktrees" ||
+		filepath.Base(filepath.Dir(filepath.Dir(target))) != ".git" {
+		return fmt.Errorf(
+			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
+			pointerPath, target,
+		)
+	}
+	return nil
+}
