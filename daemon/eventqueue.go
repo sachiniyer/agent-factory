@@ -62,6 +62,15 @@ const (
 // grow without limit. Package var so tests can shrink it.
 var watcherQueueCompactBytes = int64(1024 * 1024)
 
+// eventQueueLoadRetryInterval bounds how often a failed load is re-attempted.
+// Retries are driven by hot callers — pendingCount on every stdout line, the
+// snapshot RPC's alarm projection on every TUI poll — and each attempt is real
+// disk I/O under q.mu, where a Stat against a hung mount would stall every
+// queue entry point behind it. One attempt per interval bounds that cost
+// while keeping recovery latency small; the drainer's own backoff paces its
+// retries beyond it. Package var so tests can shrink it.
+var eventQueueLoadRetryInterval = 5 * time.Second
+
 // queuedEvent is the on-disk record: the raw stdout line plus a per-queue
 // sequence number and enqueue timestamp for diagnostics (and the PR-4
 // age-based retention).
@@ -112,7 +121,9 @@ type eventQueue struct {
 	// first retry the load (healing once storage recovers), advance refuses
 	// outright. Trusting a fabricated zero here once let a single replayed
 	// event "drain" the queue and unlink the file with its backlog inside.
-	loadErr error
+	// lastLoadRetry throttles re-attempts to eventQueueLoadRetryInterval.
+	loadErr       error
+	lastLoadRetry time.Time
 
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
@@ -171,27 +182,46 @@ func (q *eventQueue) load() {
 
 // loadLocked runs one load attempt, zeroing the recovered state first so a
 // failure can never leave a half-populated count behind. q.seq is deliberately
-// not reset: sequence numbers must never move backward. Logs only the
-// transition into failure — retries happen per enqueue/peek while storage
-// stays broken, and their callers already log the refusal. Callers hold q.mu.
+// not reset: sequence numbers must never move backward. Logging is gated on
+// transitions (#1910 discipline — retries repeat per enqueue/peek/stdout line
+// while storage stays broken, and unbounded repetition of a known state is a
+// flood): the ERROR logs once on entering failure, and the scan's cursor and
+// boundary notices are emitted only when the attempt succeeded (they describe
+// a reset that really happens) or alongside that first failure. Callers hold
+// q.mu.
 func (q *eventQueue) loadLocked() {
 	prevErr := q.loadErr
 	q.offset, q.size, q.pending, q.loadErr = 0, 0, 0, nil
-	if err := q.scanDiskStateLocked(); err != nil {
+	var warns []string
+	err := q.scanDiskStateLocked(&warns)
+	if err != nil {
 		q.offset, q.size, q.pending = 0, 0, 0
 		q.loadErr = err
-		if prevErr == nil {
-			log.ErrorLog.Printf("watch task %s: failed to load event queue; treating its state as unknown, not empty: %v", q.taskID, err)
+	}
+	if err == nil || prevErr == nil {
+		for _, w := range warns {
+			log.WarningLog.Printf("watch task %s: %s", q.taskID, w)
 		}
+	}
+	if err != nil && prevErr == nil {
+		log.ErrorLog.Printf("watch task %s: failed to load event queue; treating its state as unknown, not empty: %v", q.taskID, err)
 	}
 }
 
 // retryLoadLocked re-attempts recovery after a failed load and reports the
-// still-unknown state; a no-op once a load has succeeded. Callers hold q.mu.
+// still-unknown state; a no-op once a load has succeeded. At most one disk
+// attempt per eventQueueLoadRetryInterval — between attempts it answers with
+// the recorded error, so hot callers stay cheap during an outage. Callers
+// hold q.mu.
 func (q *eventQueue) retryLoadLocked() error {
 	if q.loadErr == nil {
 		return nil
 	}
+	now := time.Now()
+	if now.Sub(q.lastLoadRetry) < eventQueueLoadRetryInterval {
+		return q.loadErr
+	}
+	q.lastLoadRetry = now
 	q.loadLocked()
 	if q.loadErr == nil {
 		log.InfoLog.Printf("watch task %s: event-queue storage recovered; %d pending event(s) restored", q.taskID, q.pending)
@@ -200,8 +230,11 @@ func (q *eventQueue) retryLoadLocked() error {
 }
 
 // scanDiskStateLocked reads the on-disk queue state into memory, returning an
-// error whenever the state could not be fully enumerated. Callers hold q.mu.
-func (q *eventQueue) scanDiskStateLocked() error {
+// error whenever the state could not be fully enumerated. Cursor/boundary
+// notices are appended to warns rather than logged, so loadLocked can gate
+// them on transitions instead of repeating them every retry. Callers hold
+// q.mu.
+func (q *eventQueue) scanDiskStateLocked(warns *[]string) error {
 	info, err := os.Stat(q.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -215,14 +248,14 @@ func (q *eventQueue) scanDiskStateLocked() error {
 		if off, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil && off >= 0 && off <= q.size {
 			q.offset = off
 		} else {
-			log.WarningLog.Printf("watch task %s: corrupt event-queue cursor; replaying the queue from the start", q.taskID)
+			*warns = append(*warns, "corrupt event-queue cursor; replaying the queue from the start")
 		}
 	} else if !os.IsNotExist(err) {
 		// An unreadable cursor gets the corrupt-cursor treatment, not loadErr:
 		// replaying from 0 redelivers the delivered prefix (at-least-once, never
 		// loss), while parking the queue on a single bad cursor inode would
 		// wedge it — the next persist rewrites the cursor via rename anyway.
-		log.WarningLog.Printf("watch task %s: cannot read event-queue cursor (%v); replaying the queue from the start", q.taskID, err)
+		*warns = append(*warns, fmt.Sprintf("cannot read event-queue cursor (%v); replaying the queue from the start", err))
 	}
 
 	// Count the pending events and recover the sequence counter. The pending
@@ -254,7 +287,7 @@ func (q *eventQueue) scanDiskStateLocked() error {
 		return fmt.Errorf("check event-queue record boundary at offset %d: %w", q.offset, err)
 	}
 	if !boundary {
-		log.WarningLog.Printf("watch task %s: event-queue cursor %d is not on a record boundary; replaying the queue from the start", q.taskID, q.offset)
+		*warns = append(*warns, fmt.Sprintf("event-queue cursor %d is not on a record boundary; replaying the queue from the start", q.offset))
 		q.offset = 0
 	}
 	if _, err := f.Seek(q.offset, 0); err != nil {
@@ -537,9 +570,13 @@ func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, e
 func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	// No retry here, unlike enqueue/peek: any cursor predates the failed load,
-	// so consuming through it against a freshly recovered state is never right.
-	// Refuse; the drainer parks and the next peek re-establishes the head.
+	// Belt-and-braces, not a live path today: loadErr is only ever set before
+	// the first successful load, and every real cursor comes from a successful
+	// peek on this same instance, so a production advance cannot currently see
+	// it. The guard stays because advance is the method that consumes and
+	// deletes — the #3242 invariant is that nothing may remove state that was
+	// never enumerated, and a future change to the load lifecycle must land on
+	// this refusal, not on a silent (false, nil) "re-peek" answer.
 	if q.loadErr != nil {
 		return false, fmt.Errorf("event-queue state unknown after a failed load; refusing to advance: %w", q.loadErr)
 	}

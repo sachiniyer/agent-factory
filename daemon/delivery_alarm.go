@@ -91,17 +91,23 @@ func (s *watcherSupervisor) deliveryAlarms(repoID string, now time.Time) []Deliv
 			continue
 		}
 		pending := 0
+		pendingUnknown := false
 		if w.queue != nil {
+			// pendingCount's throttled retry heals a failed load when storage
+			// has recovered; if the state stays unknown, say so instead of
+			// projecting a fabricated zero (#3242).
 			pending = w.queue.pendingCount()
+			pendingUnknown = w.queue.loadFailed()
 		}
 		alarms = append(alarms, DeliveryAlarm{
-			TaskID:        w.taskID,
-			TaskName:      w.name,
-			TargetSession: w.targetSession,
-			Pending:       pending,
-			Consecutive:   count,
-			Since:         since,
-			LastError:     lastErr,
+			TaskID:         w.taskID,
+			TaskName:       w.name,
+			TargetSession:  w.targetSession,
+			Pending:        pending,
+			PendingUnknown: pendingUnknown,
+			Consecutive:    count,
+			Since:          since,
+			LastError:      lastErr,
 		})
 	}
 	sort.Slice(alarms, func(i, j int) bool { return alarms[i].TaskID < alarms[j].TaskID })

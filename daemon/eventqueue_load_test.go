@@ -159,6 +159,11 @@ func TestEventQueue_LoadFailurePeekReportsErrorNotEmpty(t *testing.T) {
 // peek (a backlog stranded until the next daemon reload is a silent outage).
 func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
 	dir := t.TempDir()
+	// Shrink the load-retry throttle to the harness's fast drain cadence so
+	// recovery latency is test-speed, not the production 5s.
+	oldInterval := eventQueueLoadRetryInterval
+	eventQueueLoadRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() { eventQueueLoadRetryInterval = oldInterval })
 
 	// First daemon lifetime: deliveries fail, three events queue, then stop.
 	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab324205", `echo e1; echo e2; echo e3; sleep 60`, dir)))

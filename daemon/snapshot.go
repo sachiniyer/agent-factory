@@ -57,6 +57,12 @@ type DeliveryAlarm struct {
 	TargetSession string `json:"target_session"`
 	// Pending is the number of undelivered events queued behind the failure.
 	Pending int `json:"pending"`
+	// PendingUnknown marks a queue whose on-disk state could not be loaded
+	// (#3242): Pending is 0 because the backlog could not be enumerated, not
+	// because it is empty. The banner says "unknown" instead of "0 pending" —
+	// a fabricated zero here would tell the operator nothing is stuck while an
+	// unreadable file holds the backlog.
+	PendingUnknown bool `json:"pending_unknown,omitempty"`
 	// Consecutive is the count of back-to-back failed delivery attempts.
 	Consecutive int `json:"consecutive"`
 	// Since is when the current run of failures began (first consecutive

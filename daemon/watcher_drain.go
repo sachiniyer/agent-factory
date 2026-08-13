@@ -91,6 +91,28 @@ func (w *taskWatcher) drainLoop() {
 		}
 		ev, cursor, ok, err := w.queue.peek()
 		if err != nil {
+			if w.queue.loadFailed() {
+				// The queue's state is unknown, not corrupt (#3242): peek's
+				// load retry could not read the file. Unlike corruption —
+				// which survives every retry, so parking until reload is
+				// honest — this is the transient-outage shape, and #1128's
+				// never-a-permanent-give-up discipline applies: keep retrying
+				// on the failure cadence so a backlog behind a healed
+				// filesystem replays without waiting for a reload or a live
+				// event. peek re-attempts the load each round.
+				if parkLog.allow("load-failed", time.Now()) {
+					log.ErrorLog.Printf("watch task %s: cannot load the event queue; retrying while the storage failure lasts — repeats at most every %s while this holds: %v", w.taskID, watcherParkLogInterval, err)
+				}
+				if !w.sleepStopAware(backoff) {
+					w.stopDraining()
+					return
+				}
+				backoff *= 2
+				if backoff > w.sup.drainMaxBackoff {
+					backoff = w.sup.drainMaxBackoff
+				}
+				continue
+			}
 			log.ErrorLog.Printf("watch task %s: cannot read queued event; replay parked until the next reload: %v", w.taskID, err)
 			w.stopDraining()
 			return

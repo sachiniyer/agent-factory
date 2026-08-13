@@ -763,6 +763,11 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	// queue until it drains. Backlogged enqueues bypass the rate limiter —
 	// the limiter gates deliveries to the target (the drainer reserves a slot
 	// per replayed event); the queue's own count/byte caps bound the backlog.
+	// While the queue's load has FAILED (#3242), pendingCount's retry heals it
+	// here once storage recovers; if it stays unreadable this reads 0 and falls
+	// through to direct delivery ON PURPOSE: enqueue refuses unknown state, so
+	// queue-routing would only drop the event, and delivering something beats
+	// strict FIFO against a backlog nobody can read. Cost: ordering, not loss.
 	if w.queue != nil && w.queue.pendingCount() > 0 {
 		w.enqueueEvent(line, tail)
 		return

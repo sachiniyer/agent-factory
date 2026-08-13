@@ -68,6 +68,7 @@ func TestDeliveryAlarms_ThresholdScopingAndClear(t *testing.T) {
 	require.Equal(t, "root", got.TargetSession)
 	require.Equal(t, 7, got.Consecutive)
 	require.Equal(t, 5, got.Pending, "Pending must surface the queued backlog")
+	require.False(t, got.PendingUnknown, "a loaded queue's count is known")
 	require.Equal(t, since, got.Since)
 	require.Equal(t, "target session down", got.LastError)
 
@@ -82,6 +83,32 @@ func TestDeliveryAlarms_ThresholdScopingAndClear(t *testing.T) {
 	w.recordDeliveryResult(now, nil)
 	require.Empty(t, s.deliveryAlarms("repo1", now),
 		"a successful delivery must clear the alarm")
+}
+
+// TestDeliveryAlarms_LoadFailedQueueReportsPendingUnknown pins the #3242
+// projection: while the queue's on-disk state cannot be loaded, the alarm must
+// say the count is unknown rather than assert "0 pending" — a fabricated zero
+// tells the operator nothing is stuck while an unreadable file holds the
+// backlog.
+func TestDeliveryAlarms_LoadFailedQueueReportsPendingUnknown(t *testing.T) {
+	s := newWatcherSupervisor()
+	now := time.Now()
+	since := now.Add(-watcherDeliveryAlarmThreshold - time.Minute)
+	w := registerFailingWatcher(s, "unread", "repo1", "root", since, 3, "target session down")
+
+	// Seed a real backlog, then reconstruct the queue while its file is
+	// unreadable — the restart-during-storage-failure shape.
+	queueDir := t.TempDir()
+	seed := newEventQueue(queueDir, "unread")
+	require.NoError(t, seed.enqueue("event"))
+	denyAccess(t, seed.path, seed.path, 0o644)
+	w.queue = newEventQueue(queueDir, "unread")
+
+	alarms := s.deliveryAlarms("repo1", now)
+	require.Len(t, alarms, 1)
+	require.True(t, alarms[0].PendingUnknown,
+		"an unloadable queue must project pending-unknown, not a fabricated zero")
+	require.Zero(t, alarms[0].Pending)
 }
 
 // TestRecordDeliveryResult_FailureRunLifecycle pins the failure-run bookkeeping
