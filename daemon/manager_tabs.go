@@ -421,6 +421,12 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 			Title:  req.PRInfo.Title,
 			URL:    req.PRInfo.URL,
 			State:  req.PRInfo.State,
+			// Branch is the #921 provenance — the exact ref the lookup ran for.
+			// Dropping it here (as this rebuild did before #3232) persisted every
+			// record branchless, which both demoted it to never-trusted for
+			// destructive decisions (the storage comment's legacy case) and made
+			// any recorded-vs-fetched comparison see a phantom diff forever.
+			Branch: req.PRInfo.Branch,
 		}
 	}
 	prev := instance.GetPRInfo()

@@ -94,6 +94,8 @@ func TestPRInfoSweepDiscoversWithoutAnyClient(t *testing.T) {
 	persisted := readPersistedPRInfo(t, f.repoID)
 	require.Equal(t, 41, persisted.Number, "the discovery must persist, not just sit in memory")
 	require.Equal(t, "OPEN", persisted.State)
+	require.Equal(t, "af/pr-sweep", persisted.Branch,
+		"the #921 provenance must survive the write path — a branchless record is never trusted for destructive decisions")
 }
 
 // TestPRInfoSweepSkipsFreshEntries pins the debounce that keeps the sweep from
