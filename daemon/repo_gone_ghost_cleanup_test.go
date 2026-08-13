@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
@@ -90,6 +91,34 @@ func TestKillSession_GhostCleanupReadyRevalidatesBeforeTombstone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, *cleanupCalls, "an admitted cleanup-ready ghost must reach its claimed cleanup")
 	assert.Nil(t, recordFor(t, repoID, "ghost-ready"), "successful ghost cleanup must consume the durable row")
+}
+
+// The #3206 companion the success-path test above cannot provide (#3225): the
+// pre-tombstone revalidation must actually refuse when the origin has returned.
+// A persisted cleanup-ready row can outlive its authorization — the origin path
+// can be recreated as a valid repository before the user retries kill — and
+// without the ghost admission guard the kill would write its tombstone and
+// consume the archive anyway. Every inverse consequence is pinned so removing
+// the guard cannot stay green: no tombstone, no cleanup call, row and archive
+// both retained.
+func TestKillSession_GhostCleanupReadyRefusesReturnedOrigin(t *testing.T) {
+	manager, repoID := newCleanupReadyGhost(t, "ghost-origin-back")
+	cleanupCalls := stubGhostWorktree(t, sessiongit.CleanupSettled, nil)
+	record := recordFor(t, repoID, "ghost-origin-back")
+	require.NotNil(t, record)
+	archivePath := record.Worktree.WorktreePath
+	require.NoError(t, exec.Command("git", "init", record.Worktree.RepoPath).Run(),
+		"bring a valid origin repository back before the kill retry")
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "ghost-origin-back", RepoID: repoID})
+	require.Error(t, err, "a returned origin must refuse the destructive ghost kill")
+	assert.ErrorContains(t, err, "exists again",
+		"the refusal must come from the returned-origin revalidation, not an unrelated admission failure")
+	assert.Equal(t, 0, *cleanupCalls, "a refused admission must never reach the claimed cleanup")
+	record = recordFor(t, repoID, "ghost-origin-back")
+	require.NotNil(t, record, "a refused kill must retain the durable row")
+	assert.False(t, record.UserKilled, "the refusal must come before the kill tombstone")
+	assert.True(t, exists(archivePath), "a refused kill must leave the authorized archive intact")
 }
 
 func TestKillSession_GhostCleanupTimeoutPersistsStallAndBlocksSameProcessRetry(t *testing.T) {
