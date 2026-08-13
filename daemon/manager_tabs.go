@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
@@ -361,7 +364,7 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // fetch (#921); admission for this unconditional form is the RPC gate in front
 // of it.
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
-	return m.setPRInfoGuarded(req, nil)
+	return m.setPRInfoGuarded(context.Background(), req, nil)
 }
 
 // prInfoWriteGuard is the condition set for a DIRECT (non-RPC) producer — the
@@ -387,7 +390,27 @@ type prInfoWriteGuard struct {
 // producer recorded first. An expected outcome for the sweep, not a failure.
 var errPRInfoResultRaced = errors.New("newer PR info landed while this lookup was in flight")
 
-func (m *Manager) setPRInfoGuarded(req SetPRInfoRequest, guard *prInfoWriteGuard) error {
+// acquireLockCancellable takes mu, abandoning the wait when ctx ends. A
+// background producer must never block shutdown on a lock a kill/archive/
+// restore can hold for many seconds — runDaemon waits in wg.Wait() ahead of
+// its final persistence, and the stop path escalates after five seconds
+// (#3287 review). Polling TryLock trades mutex fairness for cancellability,
+// which is acceptable exactly here: the sweep is the lowest-priority writer
+// these locks have.
+func acquireLockCancellable(ctx context.Context, mu *sync.Mutex) error {
+	for {
+		if mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func (m *Manager) setPRInfoGuarded(ctx context.Context, req SetPRInfoRequest, guard *prInfoWriteGuard) error {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
@@ -401,9 +424,17 @@ func (m *Manager) setPRInfoGuarded(req SetPRInfoRequest, guard *prInfoWriteGuard
 	// current one — a kill/recreate can replace it (same title, DIFFERENT stable
 	// id) in the window between identity resolution and this lock. Take the
 	// op-lock before the per-repo start lock, matching kill/archive ordering.
+	// The guarded (background) form waits cancellably: a teardown can hold this
+	// lock for many seconds, and shutdown must not wait behind it.
 	key := daemonInstanceKey(repoID, title)
 	opLock := m.opLockFor(key)
-	opLock.Lock()
+	if guard != nil {
+		if err := acquireLockCancellable(ctx, opLock); err != nil {
+			return err
+		}
+	} else {
+		opLock.Lock()
+	}
 	defer opLock.Unlock()
 
 	m.mu.Lock()
@@ -440,21 +471,14 @@ func (m *Manager) setPRInfoGuarded(req SetPRInfoRequest, guard *prInfoWriteGuard
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	defer repoStartLock.Unlock()
-
-	// The guarded (direct-producer) conditions, under the same locks that
-	// serialize every recording producer — see prInfoWriteGuard.
 	if guard != nil {
-		if m.lifecycle != nil {
-			if admissionErr := m.lifecycle.mutationAdmissionError(); admissionErr != nil {
-				return admissionErr
-			}
+		if err := acquireLockCancellable(ctx, repoStartLock); err != nil {
+			return err
 		}
-		if instance.PRInfoGeneration() != guard.expectGeneration {
-			return errPRInfoResultRaced
-		}
+	} else {
+		repoStartLock.Lock()
 	}
+	defer repoStartLock.Unlock()
 
 	var info *git.PRInfo
 	if req.PRInfo.Number != 0 {
@@ -469,6 +493,29 @@ func (m *Manager) setPRInfoGuarded(req SetPRInfoRequest, guard *prInfoWriteGuard
 			// destructive decisions (the storage comment's legacy case) and made
 			// any recorded-vs-fetched comparison see a phantom diff forever.
 			Branch: req.PRInfo.Branch,
+		}
+	}
+
+	// The guarded (direct-producer) conditions, under the same locks that
+	// serialize every recording producer — see prInfoWriteGuard.
+	if guard != nil {
+		if m.lifecycle != nil {
+			if admissionErr := m.lifecycle.mutationAdmissionError(); admissionErr != nil {
+				return admissionErr
+			}
+		}
+		if instance.PRInfoGeneration() != guard.expectGeneration {
+			return errPRInfoResultRaced
+		}
+		// The unchanged-result decision lives HERE, not as a caller preflight:
+		// under this op-lock the instance value is always COMMITTED state — a
+		// racing writer serializes on the same lock and rolls a failed persist
+		// back before releasing it — so an uncommitted in-memory value can
+		// never masquerade as durable and swallow the sweep's result (#3287
+		// review). Writing nothing on equality is what keeps a sweep from
+		// emitting a session.updated per session per pass.
+		if prInfoEqual(instance.GetPRInfo(), info) {
+			return nil
 		}
 	}
 	prev := instance.GetPRInfo()

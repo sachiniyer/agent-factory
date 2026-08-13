@@ -169,11 +169,6 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 		bound.Branch = branch
 		info = &bound
 	}
-	// An unchanged result writes nothing: persisting and publishing it anyway
-	// would emit a session.updated per session per sweep with zero information.
-	if prInfoEqual(inst.GetPRInfo(), info) {
-		return
-	}
 	// The branch can move while `gh` runs; a result for the old ref must not be
 	// recorded against the new one (the TUI drops this case too).
 	if _, current := inst.FetchPRInfoSnapshot(); current != branch {
@@ -189,16 +184,26 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 			Branch: info.Branch,
 		}
 	}
-	// The guarded write is the one write path (#2437) plus the sweep's two
+	// The guarded write is the one write path (#2437) plus the sweep's
 	// conditions evaluated UNDER its locks (#3287 review): the generation CAS
-	// (a newer producer's result outranks this fetch) and lifecycle admission
-	// (a quiesce that began while `gh` ran refuses the record). Both refusals
-	// are expected outcomes, not failures.
-	err = m.setPRInfoGuarded(
+	// (a newer producer's result outranks this fetch), lifecycle admission (a
+	// quiesce that began while `gh` ran refuses the record), the
+	// unchanged-result skip (decided against committed state only), and a
+	// cancellable lock wait (shutdown never blocks behind a teardown holding
+	// the op-lock). The refusals are expected outcomes, not failures.
+	err = m.setPRInfoGuarded(ctx,
 		SetPRInfoRequest{RepoID: repoID, Title: inst.Title, ID: inst.ID, PRInfo: data},
 		&prInfoWriteGuard{expectGeneration: fetchGeneration},
 	)
-	if err != nil && !errors.Is(err, errPRInfoResultRaced) && !IsDaemonQuiescingErr(err) && !IsDaemonUpgradeProbationErr(err) {
+	switch {
+	case err == nil:
+	case errors.Is(err, errPRInfoResultRaced),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded),
+		IsDaemonQuiescingErr(err),
+		IsDaemonUpgradeProbationErr(err):
+		// Expected refusals: raced by a newer producer, shutdown, or admission.
+	default:
 		log.WarningLog.Printf("PR info sweep: record for %q failed: %v", inst.Title, err)
 	}
 }

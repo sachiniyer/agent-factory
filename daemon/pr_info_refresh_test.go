@@ -306,6 +306,35 @@ func TestPRInfoSweepStopsOnCancel(t *testing.T) {
 	require.Nil(t, second.GetPRInfo())
 }
 
+// TestPRInfoSweepAbandonsLockWaitOnCancel pins the round-three shutdown hole
+// (#3287 review): with a teardown holding the session's op-lock, the guarded
+// write must abandon its lock wait when the sweep's context ends instead of
+// blocking wg.Wait past the stop path's kill escalation.
+func TestPRInfoSweepAbandonsLockWaitOnCancel(t *testing.T) {
+	f := newPRSweepFixture(t)
+	stubPRFetch(t, &sessiongit.PRInfo{Number: 41, State: "OPEN"}, nil)
+
+	opLock := f.manager.opLockFor(daemonInstanceKey(f.repoID, "pr-sweep"))
+	opLock.Lock() // a kill/archive/restore owns the session for many seconds
+	defer opLock.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		f.manager.refreshStalePRInfo(ctx)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled guarded write must abandon its lock wait promptly")
+	}
+	require.Nil(t, f.instance.GetPRInfo(), "an abandoned write must record nothing")
+}
+
 // readPersistedPRInfo loads the repo's persisted instance list and returns the
 // pr-sweep session's stored PR projection.
 func readPersistedPRInfo(t *testing.T, repoID string) session.PRInfoData {
