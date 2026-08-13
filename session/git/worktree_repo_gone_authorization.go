@@ -503,7 +503,14 @@ func VerifyArchivedWorktreePointer(worktreePath string) error {
 	if !ok {
 		return fmt.Errorf("archived worktree pointer %s does not begin with a gitdir line", pointerPath)
 	}
-	target = filepath.Clean(strings.TrimSpace(target))
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("archived worktree pointer %s names no gitdir", pointerPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(worktreePath, target)
+	}
+	target = filepath.Clean(target)
 	name := filepath.Base(target)
 	if name == "" || name == "." || name == string(filepath.Separator) ||
 		filepath.Base(filepath.Dir(target)) != "worktrees" ||
@@ -511,6 +518,23 @@ func VerifyArchivedWorktreePointer(worktreePath string) error {
 		return fmt.Errorf(
 			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
 			pointerPath, target,
+		)
+	}
+	// A gitdir that still exists cannot belong to the gone origin: when the
+	// origin probed conclusively absent or non-Git, its .git/worktrees metadata
+	// went with it — recorded and resolved forms of the same directory vanish
+	// together, symlinked prefixes included. A live target therefore means the
+	// pathname occupant is a worktree of some OTHER, still-present repository,
+	// and deleting it would corrupt that repository's checkout (#3278 review).
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf(
+			"archived worktree pointer %s names gitdir %s, which still exists — the directory belongs to a live repository, not the gone origin",
+			pointerPath, target,
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf(
+			"archived worktree pointer %s: could not establish the state of gitdir %s: %w",
+			pointerPath, target, err,
 		)
 	}
 	return nil

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -506,11 +507,17 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 		if archived && !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
 			i.Capabilities().Workspace == WorkspaceLocalWorktree {
 			beforeKillTeardownOriginRecheck()
-			if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {
-				return teardownKill{}, noop, fmt.Errorf(
-					"%w: origin repo state for this archived worktree changed or could not be established after kill admission — kill the session again to re-establish cleanup authorization: %v",
-					ErrWorkspaceStateUnknown, err,
-				)
+			// An already-absent archived directory has nothing to orphan, and
+			// ordinary cleanup settles the missing path and clears the stale
+			// record — recheck only while the directory still exists (#3278
+			// review), or a gone origin would strand an empty record forever.
+			if _, statErr := os.Lstat(gw.GetWorktreePath()); !errors.Is(statErr, os.ErrNotExist) {
+				if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {
+					return teardownKill{}, noop, fmt.Errorf(
+						"%w: origin repo state for this archived worktree changed or could not be established after kill admission — kill the session again to re-establish cleanup authorization: %v",
+						ErrWorkspaceStateUnknown, err,
+					)
+				}
 			}
 		}
 		return teardownKill{}, noop, nil

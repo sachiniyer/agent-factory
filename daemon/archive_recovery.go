@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -215,6 +216,13 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	}
 	claim, claimErr := instance.ClaimWorktreeRelocationForRetry()
 	if claimErr != nil {
+		if !unresolved && errors.Is(claimErr, os.ErrNotExist) {
+			// The archived directory is already absent, so there is nothing to
+			// authorize and nothing to orphan (#3278 review): ordinary cleanup
+			// treats the missing path as settled and clears the stale record.
+			// Refusing here would make the row permanently undeletable.
+			return nil
+		}
 		wrapped := fmt.Errorf(
 			"the archived worktree identity for session %q could not be resolved for cleanup authorization: %w",
 			title, claimErr,
@@ -274,6 +282,41 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 		)
 	}
 	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)
+}
+
+// ghostDirectRepoGoneKillGuard is the ghost twin of the admission producer
+// above (#3278 review). A row that cannot be materialized into an Instance has
+// no worktree runtime to build cleanup authorization with, so an archived,
+// record-free ghost whose origin cannot be proven present is refused rather
+// than admitted: ordinary ghost cleanup would settle its answered
+// missing-origin failures and orphan the archived directory exactly like the
+// live path this change fixes. Refusal keeps the row — the archive's only
+// remaining handle — and names the way out.
+func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
+	current := data.RestoreArchiveRollbackFence()
+	restored, err := current.RestoreRelocationRecoveryOriginals()
+	if err != nil {
+		// The dedicated ghost admission below reports decode failures itself.
+		return nil
+	}
+	if restored.Status != session.Archived || restored.Worktree.RelocationRecovery != nil ||
+		!ghostRestoredWorktreeRemovable(&restored) {
+		return nil
+	}
+	probeErr := sessiongit.CheckRepoPresentForRelocation(restored.Worktree.RepoPath)
+	if probeErr == nil {
+		return nil
+	}
+	if errors.Is(probeErr, sessiongit.ErrRepoGone) {
+		return fmt.Errorf(
+			"its origin repo %s is gone and its record could not be loaded as a live session, so identity-qualified cleanup cannot be authorized; nothing was changed — the archived worktree is intact at %s, recover it manually with git: %w",
+			restored.Worktree.RepoPath, restored.Worktree.WorktreePath, probeErr,
+		)
+	}
+	return fmt.Errorf(
+		"origin repo state for %s could not be established; nothing was changed — retry once it can be probed: %w",
+		restored.Worktree.RepoPath, probeErr,
+	)
 }
 
 // persistRepoGoneAtRestoreUse handles the authoritative repo check immediately

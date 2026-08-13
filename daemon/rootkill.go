@@ -213,6 +213,18 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	}
 
 	log.WarningLog.Printf("finishing interrupted kill of session %q (tombstoned record survived its teardown)", instance.Title)
+	// Re-establish missing repo-gone cleanup authorization before retrying the
+	// teardown (#3278 review). The tombstone may have committed while the
+	// origin was present and the origin deleted before this retry; the
+	// explicit-kill path re-derives authorization on entry, and without the
+	// same step here the archived-origin teardown recheck refuses every poll
+	// and this retry loop can never converge. A no-op for everything but an
+	// archived, local, record-free instance.
+	if err := m.prepareDirectRepoGoneKillCleanup(repoID, instance.Title, instance); err != nil {
+		m.noteKillRetryFailure(key, instance.Title,
+			fmt.Errorf("could not re-establish repo-gone cleanup authorization: %w", err))
+		return
+	}
 	// Kill's own best-effort handling already swallows every failure tmux or git
 	// ANSWERED with, so anything that reaches here is a teardown that could not be
 	// completed SAFELY — a pane whose liveness is unknown, or a worktree whose

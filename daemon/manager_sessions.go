@@ -133,6 +133,16 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			)
 		}
 	} else if data != nil {
+		// The ghost twin of the producer above (#3278 review): an archived,
+		// record-free ghost cannot have cleanup authorization built for it, so
+		// an origin that cannot be proven present refuses the kill instead of
+		// letting ordinary ghost cleanup settle against it and orphan the
+		// archive.
+		if ghostErr := ghostDirectRepoGoneKillGuard(data); ghostErr != nil {
+			return session.InstanceData{}, fmt.Errorf(
+				"kill of ghost session %q was not started: %w", req.Title, ghostErr,
+			)
+		}
 		if admissionErr := validateGhostWorktreeDestructionAdmission(data); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of ghost session %q was not started because its persisted worktree recovery is not safe to consume; nothing was changed — retry archive or restore before destructive cleanup: %w",

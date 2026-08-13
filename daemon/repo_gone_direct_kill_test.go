@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -152,6 +154,132 @@ func TestKillSession_DirectRepoGoneReplacedArchiveRefused(t *testing.T) {
 	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
 	assert.True(t, exists(filepath.Join(replacement, "important.txt")),
 		"the replacement directory must be left untouched")
+}
+
+// TestKillSession_ArchivedDirectoryAlreadyGoneStaysKillable: a user who
+// manually deleted the archived directory must still be able to kill the stale
+// row (#3278 review). There is nothing to authorize and nothing to orphan, so
+// the gate steps aside and ordinary cleanup settles the absent path — with the
+// origin present, and with the origin gone too.
+func TestKillSession_ArchivedDirectoryAlreadyGoneStaysKillable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		removeRepo bool
+	}{
+		{name: "origin present", removeRepo: false},
+		{name: "origin gone", removeRepo: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			title := "direct-archive-gone-" + map[bool]string{false: "present", true: "gone"}[tc.removeRepo]
+			manager, repoID, repoPath, inst, archivedPath := archivedRecordFreeInstance(t, title)
+			require.NoError(t, os.RemoveAll(archivedPath))
+			if tc.removeRepo {
+				require.NoError(t, os.RemoveAll(repoPath))
+			}
+
+			inst.SetBackend(&session.LocalBackend{})
+			_, err := manager.KillSession(KillSessionRequest{Title: title, RepoID: repoID})
+			require.NoError(t, err,
+				"an absent archived directory has nothing to orphan; the stale row must stay killable")
+			assert.Nil(t, recordFor(t, repoID, title), "the settled kill must delete the session row")
+		})
+	}
+}
+
+// TestFinishUserKill_RepoGoneAfterTombstoneConverges: a tombstoned kill whose
+// origin disappeared after commit must converge through the automatic retry
+// (#3278 review). finishUserKill re-derives the missing cleanup authorization
+// exactly like an explicit kill, so the poll's retry consumes the archive
+// instead of repeating the teardown-boundary refusal forever.
+func TestFinishUserKill_RepoGoneAfterTombstoneConverges(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-finish-kill")
+	restoreSeam := session.SetBeforeKillTeardownOriginRecheckForTest(func() {
+		require.NoError(t, os.RemoveAll(repoPath),
+			"delete the origin between admission and the teardown boundary")
+	})
+	t.Cleanup(restoreSeam)
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-finish-kill", RepoID: repoID})
+	require.Error(t, err, "the vanished origin must refuse the first teardown")
+	require.True(t, inst.UserKilled(), "the kill must be committed for the retry loop to own")
+	require.True(t, exists(archivedPath))
+	restoreSeam()
+
+	manager.finishUserKill(repoID, inst)
+	assert.False(t, exists(archivedPath),
+		"the automatic retry must authorize identity-qualified cleanup and consume the archive")
+	assert.Nil(t, recordFor(t, repoID, "direct-finish-kill"),
+		"the converged retry must delete the session row")
+}
+
+// TestKillSession_ArchivedGhostRepoGoneRefused: an archived row that cannot be
+// materialized into an Instance has no runtime to build cleanup authorization
+// with, so a record-free ghost with a gone origin must be refused before the
+// tombstone (#3278 review) — ordinary ghost cleanup would settle its answered
+// missing-origin failures and orphan the archive.
+func TestKillSession_ArchivedGhostRepoGoneRefused(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-ghost-gone")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	// Make the row a ghost: drop the tracked instance and refuse to rebuild it.
+	key := daemonInstanceKey(repoID, "direct-ghost-gone")
+	manager.mu.Lock()
+	delete(manager.instances, key)
+	manager.mu.Unlock()
+	previousRestore := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(data session.InstanceData) (*session.Instance, error) {
+		if data.Title == "direct-ghost-gone" {
+			return nil, errors.New("forced ghost: record cannot be materialized")
+		}
+		return previousRestore(data)
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = previousRestore })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-gone", RepoID: repoID})
+	require.Error(t, err, "an archived record-free ghost with a gone origin must be refused")
+	assert.ErrorContains(t, err, "identity-qualified cleanup cannot be authorized")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(archivedPath), "the refused ghost kill must leave the archive intact")
+	require.NotNil(t, recordFor(t, repoID, "direct-ghost-gone"),
+		"the refused ghost kill must keep the row as the archive's handle")
+}
+
+// TestKillSession_DirectRepoGoneForeignWorktreeRefused: a still-live linked
+// worktree of another repository parked at the archived path must never be
+// deleted on the strength of this session's record (#3278 review): its gitdir
+// pointer resolves to metadata that still exists, which the gone origin's
+// archive cannot have.
+func TestKillSession_DirectRepoGoneForeignWorktreeRefused(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-foreign-worktree")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	// Build a second, still-live repository with a linked worktree and park
+	// that worktree at the archived path.
+	foreignRepo := filepath.Join(t.TempDir(), "foreign-repo")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", foreignRepo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(foreignRepo, "keep.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", foreignRepo, "add", "keep.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+	foreignWorktree := filepath.Join(t.TempDir(), "foreign-wt")
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "add", "-b", "wt", foreignWorktree).Run())
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "move", foreignWorktree, archivedPath).Run())
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-foreign-worktree", RepoID: repoID})
+	require.Error(t, err,
+		"a live foreign worktree at the archived path must not be authorized for deletion")
+	assert.ErrorContains(t, err, "belongs to a live repository")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(filepath.Join(archivedPath, "keep.txt")),
+		"the foreign worktree must be left untouched")
 }
 
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
