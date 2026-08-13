@@ -82,7 +82,9 @@ import { registerServiceWorker } from "./serviceworker.js";
 import {
   applyDaemonTheme,
   bootStampTheme,
+  connectionAttemptMayCommit,
   createLatestRequestGate,
+  hasConnectedToken,
   paletteFetchFailurePlan,
   persistThemeChoice,
   refreshThemeMode,
@@ -168,6 +170,7 @@ const store = new Store<AppState>({
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
+const connectionGate = createLatestRequestGate();
 const paletteRefreshGate = createLatestRequestGate();
 const PALETTE_RETRY_MS = 1000;
 let paletteRetryTimer: number | null = null;
@@ -335,11 +338,13 @@ function rerender(): void {
  *  failure surfaces an actionable error on the login view — forgetting the stored
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
+  const attempt = connectionGate.begin();
   store.set({ connecting: true, loginError: null });
   let sessions: SessionData[];
   try {
     sessions = await probeToken(candidate);
   } catch (e) {
+    if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
     // retrying a dead token forever; a transport failure keeps it, because "the
     // daemon is down" is not evidence the token is bad (see shouldForgetToken).
@@ -350,6 +355,7 @@ async function connect(candidate: string): Promise<void> {
     store.set({ phase: "login", connecting: false, loginError: describeError(e) });
     return;
   }
+  if (!attempt.isCurrent()) return;
   token = candidate;
   // Persist only a REAL token so the next visit can resume it; the empty-token
   // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
@@ -364,7 +370,7 @@ async function connect(candidate: string): Promise<void> {
   // A token can rotate after Snapshot accepted it but before GetTheme returns.
   // That rejection routes through disconnect(), which clears token and returns to
   // login; do not let this older connect continue mounting the authenticated app.
-  if (token !== candidate) return;
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -377,11 +383,15 @@ async function connect(candidate: string): Promise<void> {
   } catch {
     tasks = [];
   }
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the registered projects too (the #2456 union): the reconcile must see a
   // registered-but-sessionless project as a real, restorable selection, or a persisted
   // choice on an empty registered repo would fall back on connect. Degrades to none on
   // a transport failure — the projects.changed resync refetches it.
   const registeredProjects = await fetchRegisteredProjects(candidate);
+  // A delayed palette retry can reject the credential while tasks/projects are
+  // loading. Fence the FINAL app commit, not only the first palette response.
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
@@ -422,6 +432,7 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
 function disconnect(loginError: string | null = null): void {
+  connectionGate.invalidate();
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -1807,7 +1818,7 @@ function stopStream(): void {
  */
 function onEvent(ev: WireEvent): void {
   if (eventRequestsPaletteRefresh(ev)) {
-    if (token) void refreshDaemonPalette(token);
+    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
     return;
   }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns

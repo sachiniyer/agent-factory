@@ -7474,6 +7474,12 @@ function normalizeTheme(value) {
   }
   return out;
 }
+function hasConnectedToken(token2) {
+  return token2 !== null;
+}
+function connectionAttemptMayCommit(request, installedToken, candidate) {
+  return request.isCurrent() && installedToken === candidate;
+}
 function paletteFetchFailurePlan(status, hasLoadedPalette) {
   const unsupported = status === 404 || status === 405 || status === 501;
   const rejectedCredential = status === 401 || status === 403;
@@ -7506,16 +7512,42 @@ function deriveTheme(input, mode) {
   let raised = dark ? source.background_panel : source.foreground_strong;
   let inset = dark ? mix(source.background, source.background_subtle, 0.22) : mix(source.foreground, source.background, 0.06);
   let surfaces = [canvas, surface, inset, raised];
-  const sourceSurfaceText = dark ? source.foreground : source.background;
-  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+  const resetSurfaceSystem = () => {
     canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
     surface = dark ? NORD_THEME.background_subtle : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
     raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
     inset = dark ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22) : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
     surfaces = [canvas, surface, inset, raised];
+  };
+  const sourceSurfaceText = dark ? source.foreground : source.background;
+  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
+  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+    resetSurfaceSystem();
   }
   const toward = dark ? source.foreground_strong : source.background;
+  const subtleAlpha = dark ? 0.12 : 0.09;
+  const tintAlpha = dark ? 0.2 : 0.16;
+  const provisionalText = readable(
+    dark ? source.foreground : source.background,
+    surfaces,
+    4.5,
+    fallbackSurfaceText,
+    toward
+  );
+  const provisionalSemantic = (candidate, fallback) => {
+    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
+    if (passes(candidate, surfaces, 4.5)) return candidate.toUpperCase();
+    return adjustLightnessToContrast(fallback, surfaces, 4.5) ?? readable(fallback, surfaces, 4.5, provisionalText, provisionalText);
+  };
+  const hasSharedFillText = (color, alphas) => {
+    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
+    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
+  };
+  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
+  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
+  if (!hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) || !hasSharedFillText(provisionalDanger, [subtleAlpha])) {
+    resetSurfaceSystem();
+  }
   const text = readable(
     dark ? source.foreground : source.background,
     surfaces,
@@ -7564,8 +7596,6 @@ function deriveTheme(input, mode) {
   const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
   const hoverCandidate = mix(accent, hoverToward, 0.12);
   const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
-  const subtleAlpha = dark ? 0.12 : 0.09;
-  const tintAlpha = dark ? 0.2 : 0.16;
   const semanticFillText = (candidate, fillSurfaces) => {
     const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
     return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
@@ -14965,6 +14995,7 @@ var store = new Store({
 });
 var token = null;
 var stream = null;
+var connectionGate = createLatestRequestGate();
 var paletteRefreshGate = createLatestRequestGate();
 var PALETTE_RETRY_MS = 1e3;
 var paletteRetryTimer = null;
@@ -15052,28 +15083,33 @@ function rerender() {
   syncSplit(state);
 }
 async function connect(candidate) {
+  const attempt = connectionGate.begin();
   store.set({ connecting: true, loginError: null });
   let sessions;
   try {
     sessions = await probeToken(candidate);
   } catch (e) {
+    if (!attempt.isCurrent()) return;
     if (shouldForgetToken(e)) {
       clearToken();
     }
     store.set({ phase: "login", connecting: false, loginError: describeError(e) });
     return;
   }
+  if (!attempt.isCurrent()) return;
   token = candidate;
   storeToken(candidate);
   await refreshDaemonPalette(candidate);
-  if (token !== candidate) return;
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
   } catch {
     tasks = [];
   }
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const registeredProjects = await fetchRegisteredProjects(candidate);
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
   store.set({
     phase: "app",
@@ -15101,6 +15137,7 @@ async function fetchRegisteredProjects(tok) {
   }
 }
 function disconnect(loginError = null) {
+  connectionGate.invalidate();
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -15901,7 +15938,7 @@ function stopStream() {
 }
 function onEvent(ev) {
   if (eventRequestsPaletteRefresh(ev)) {
-    if (token) void refreshDaemonPalette(token);
+    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
     return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {

@@ -11,9 +11,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  connectionAttemptMayCommit,
   contrastRatio,
   createLatestRequestGate,
   deriveTheme,
+  hasConnectedToken,
   NORD_THEME,
   paletteFetchFailurePlan,
   themeColorMetaContents,
@@ -209,6 +211,17 @@ test("palette refresh generations reject an older completion for the same token"
   assert.equal(newer.isCurrent(), true);
 });
 
+test("connection fences admit tokenless clients and reject invalidated attempts", () => {
+  const gate = createLatestRequestGate();
+  const attempt = gate.begin();
+
+  assert.equal(hasConnectedToken(""), true, "the empty token is an authorized tokenless connection");
+  assert.equal(hasConnectedToken(null), false);
+  assert.equal(connectionAttemptMayCommit(attempt, "", ""), true);
+  gate.invalidate();
+  assert.equal(connectionAttemptMayCommit(attempt, "", ""), false);
+});
+
 test("transient palette failures retain the last good palette and retry", () => {
   assert.deepEqual(paletteFetchFailurePlan(503, true), { reset: false, retry: true, reauthenticate: false });
   assert.deepEqual(paletteFetchFailurePlan(0, false), { reset: true, retry: true, reauthenticate: false });
@@ -281,6 +294,35 @@ test("selected-row foregrounds remain AA on both accent fill strengths", () => {
   ] as const) {
     for (const fill of fills) {
       assert.ok(contrastRatio(tokens[name], fill) >= 4.5, `${name} ${tokens[name]} must be AA on ${fill}`);
+    }
+  }
+});
+
+test("a surface system with no shared fill foreground falls back coherently", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#000000",
+      background_subtle: "#000000",
+      background_panel: "#FFFFFF",
+      foreground: "#757575",
+      foreground_muted: "#757575",
+      foreground_dim: "#757575",
+      accent: "#757575",
+    },
+    "dark",
+  );
+  const surfaces = [
+    tokens["--af-bg-canvas"],
+    tokens["--af-bg-surface"],
+    tokens["--af-bg-inset"],
+    tokens["--af-bg-raised"],
+  ];
+  assert.deepEqual(surfaces.slice(0, 2), [NORD_THEME.background, NORD_THEME.background_subtle]);
+  for (const surface of surfaces) {
+    for (const alpha of [0.12, 0.2]) {
+      const fill = composite(tokens["--af-accent"], surface, alpha);
+      assert.ok(contrastRatio(tokens["--af-accent-text"], fill) >= 4.5, `${tokens["--af-accent-text"]} on ${fill}`);
     }
   }
 });

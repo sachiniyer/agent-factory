@@ -185,8 +185,26 @@ export interface DerivedTheme {
 }
 
 export interface LatestRequestGate {
-  begin(): { isCurrent(): boolean };
+  begin(): LatestRequest;
   invalidate(): void;
+}
+
+export interface LatestRequest {
+  isCurrent(): boolean;
+}
+
+/** Empty string is the authorized tokenless sentinel; only null is disconnected. */
+export function hasConnectedToken(token: string | null): token is string {
+  return token !== null;
+}
+
+/** An async login may commit only while both its generation and credential remain installed. */
+export function connectionAttemptMayCommit(
+  request: LatestRequest,
+  installedToken: string | null,
+  candidate: string,
+): boolean {
+  return request.isCurrent() && installedToken === candidate;
 }
 
 export interface PaletteFetchFailurePlan {
@@ -242,14 +260,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     ? mix(source.background, source.background_subtle, 0.22)
     : mix(source.foreground, source.background, 0.06);
   let surfaces = [canvas, surface, inset, raised];
-
-  // A custom table can make its three elevations mutually incompatible with
-  // one shared text colour (for example black, white, black). In that case the
-  // safe unit is the surface SYSTEM, not an arbitrary single slot: retain the
-  // user's chromatic roles but restore Nord's coherent elevation floor.
-  const sourceSurfaceText = dark ? source.foreground : source.background;
-  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+  const resetSurfaceSystem = (): void => {
     canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
     surface = dark
       ? NORD_THEME.background_subtle
@@ -259,8 +270,49 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
       ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22)
       : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
     surfaces = [canvas, surface, inset, raised];
+  };
+
+  // A custom table can make its three elevations mutually incompatible with
+  // one shared text colour (for example black, white, black). In that case the
+  // safe unit is the surface SYSTEM, not an arbitrary single slot: retain the
+  // user's chromatic roles but restore Nord's coherent elevation floor.
+  const sourceSurfaceText = dark ? source.foreground : source.background;
+  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
+  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+    resetSurfaceSystem();
   }
   const toward = dark ? source.foreground_strong : source.background;
+  const subtleAlpha = dark ? 0.12 : 0.09;
+  const tintAlpha = dark ? 0.2 : 0.16;
+  const provisionalText = readable(
+    dark ? source.foreground : source.background,
+    surfaces,
+    4.5,
+    fallbackSurfaceText,
+    toward,
+  );
+  const provisionalSemantic = (candidate: string, fallback: string): string => {
+    if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
+    if (passes(candidate, surfaces, 4.5)) return candidate.toUpperCase();
+    return (
+      adjustLightnessToContrast(fallback, surfaces, 4.5) ??
+      readable(fallback, surfaces, 4.5, provisionalText, provisionalText)
+    );
+  };
+  const hasSharedFillText = (color: string, alphas: readonly number[]): boolean => {
+    const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
+    // WCAG contrast depends only on relative luminance. If neither luminance
+    // endpoint can cover every fill, no intermediate foreground can do so.
+    return passes(BLACK, fills, 4.5) || passes(WHITE, fills, 4.5);
+  };
+  const provisionalAccent = provisionalSemantic(source.accent, NORD_THEME.accent);
+  const provisionalDanger = provisionalSemantic(source.error, NORD_THEME.error);
+  if (
+    !hasSharedFillText(provisionalAccent, [subtleAlpha, tintAlpha]) ||
+    !hasSharedFillText(provisionalDanger, [subtleAlpha])
+  ) {
+    resetSurfaceSystem();
+  }
   const text = readable(
     dark ? source.foreground : source.background,
     surfaces,
@@ -318,8 +370,6 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const hoverCandidate = mix(accent, hoverToward, 0.12);
   const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
 
-  const subtleAlpha = dark ? 0.12 : 0.09;
-  const tintAlpha = dark ? 0.2 : 0.16;
   const semanticFillText = (candidate: string, fillSurfaces: readonly string[]): string => {
     const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
     return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
