@@ -175,6 +175,12 @@ export interface SessionData {
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
   worktree?: WorktreeData;
+  /** The daemon-discovered PR projection (session/storage.go PRInfoData; #3232
+   *  made discovery daemon-side, so every surface receives it). Go's `omitempty`
+   *  cannot drop a struct field, so a session with no discovered PR arrives as
+   *  `pr_info: {}` — consumers treat a record without a number and url as "no
+   *  PR" (fail closed) rather than keying on the field's presence. */
+  pr_info?: PRInfoData;
   /** The session's tabs (session/storage.go InstanceData.Tabs): index 0 is the
    *  agent tab, followed by up to 9 user-created shell/process tabs (#930). The
    *  web tab bar renders these and streams a selected tab via /stream?tab=<idx>.
@@ -185,6 +191,21 @@ export interface SessionData {
 /** The subset of session.TabData (session/storage.go) the web tab bar reads: the
  *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
  *  tab). Field names match the Go JSON tags so this decodes the projection as-is. */
+/** The wire shape of session/storage.go PRInfoData: the daemon's cached answer to
+ *  "which PR belongs to this session's branch". Field names match the Go JSON tags
+ *  (all `omitempty`), and `state` carries gh's uppercase vocabulary (OPEN / MERGED /
+ *  CLOSED) verbatim — display code lowercases it rather than mapping through a
+ *  table, so an unrecognized future state still renders honestly. */
+export interface PRInfoData {
+  number?: number;
+  title?: string;
+  url?: string;
+  state?: string;
+  /** The exact ref the lookup ran against; consumers making destructive decisions
+   *  must match it, but display code does not read it. */
+  branch?: string;
+}
+
 export interface TabData {
   /** The tab's stable id (session/storage.go TabData.ID, #1738): minted at
    *  creation and never reused, so the web addresses a tab's stream (?tab_id=) and

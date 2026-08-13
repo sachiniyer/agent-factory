@@ -814,16 +814,15 @@
         "pointer": "keys/keys.go:169-170 (p, y)"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/status.ts prBadgeContent + web/src/ui.ts patchMainHead (PR badge link, #3285)"
       },
       "cli": {
-        "status": "no",
-        "pointer": ""
+        "status": "partial",
+        "pointer": "session/storage.go:190 (pr_info in the sessions JSON)"
       },
-      "verdict": "real-gap",
-      "issue": "#3285",
-      "notes": "The dependency is resolved: discovery is daemon-side since #3232, so every surface receives pr_info. Web rendering of the badge and an open link is #3285; the CLI already exposes the URL through the sessions JSON."
+      "verdict": "deliberate",
+      "notes": "Discovery is daemon-side since #3232, so every surface receives pr_info. The web renders it as a badge that is a plain link (#3285) — the browser's native open/copy. The CLI deliberately stops at exposing number/state/url in the sessions JSON: composition (jq + xdg-open) is its native interface, and a dedicated browser-opening verb is not owed."
     },
     {
       "id": "session.pr.set",

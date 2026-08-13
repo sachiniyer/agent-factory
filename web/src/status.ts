@@ -283,6 +283,31 @@ export function canHandoff(s: SessionData): boolean {
   return s.can_handoff === true;
 }
 
+/** The pane header's PR badge (#3285), or null when the session has no usable PR.
+ *
+ *  The web CONSUMES the daemon-discovered pr_info projection (#3232/#3287) — the
+ *  same discipline as can_kill/can_handoff: no gh call, no derivation, just the
+ *  snapshot field every surface receives. Fails closed twice over: the wire
+ *  carries `pr_info: {}` when nothing is known (Go omitempty cannot drop a
+ *  struct), and a record without both a number and a url renders nothing — the
+ *  badge exists to be FOLLOWED, so the link target is part of the minimum, not
+ *  an extra.
+ *
+ *  Copy: sentence case, ` · ` separator, static text (#1766). gh reports state
+ *  uppercase (OPEN/MERGED/CLOSED); it is lowercased for display rather than
+ *  mapped through a table so an unrecognized future state renders honestly
+ *  instead of vanishing. */
+export function prBadgeContent(s: SessionData): { label: string; url: string; tooltip: string } | null {
+  const pr = s.pr_info;
+  if (!pr || !pr.number || pr.number <= 0 || !pr.url) {
+    return null;
+  }
+  const state = (pr.state ?? "").toLowerCase();
+  const label = state === "" ? `PR #${pr.number}` : `PR #${pr.number} · ${state}`;
+  const tooltip = pr.title ? `${pr.title} — open on GitHub` : `Open PR #${pr.number} on GitHub`;
+  return { label, url: pr.url, tooltip };
+}
+
 /**
  * Whether a session is the reserved root agent (#2513). The web CONSUMES the
  * daemon-projected `is_root` decision (InstanceData.IsRoot — the daemon's own
