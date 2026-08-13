@@ -207,6 +207,14 @@ func startDriverWithInput(t *testing.T, in io.Reader) (srvConn *websocket.Conn, 
 	// MakeRaw; this stands in for that here.
 	handback := beginTerminalHandback(out, nil)
 	go func() { defer close(d); driveAttachStream(sc.Conn, handback, input) }()
+	// Join the driver BEFORE any other cleanup touches state it reads (#3265).
+	// Registered last so it runs first; CloseNow ends the driver's read loop, so
+	// the join terminates even when the test bailed before the driver exited on
+	// its own.
+	t.Cleanup(func() {
+		_ = server.CloseNow()
+		<-d
+	})
 	return server, out, d
 }
 

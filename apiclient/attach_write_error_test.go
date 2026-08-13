@@ -78,10 +78,17 @@ func TestAttachStream_StopsOnTheFirstRefusedWrite(t *testing.T) {
 	out := &failingWriter{}
 	server, done := startDriverWithFailingStdout(t, out)
 
-	// Several frames back to back. Only the first may be attempted.
+	// Several frames back to back. Only the first may be attempted. A later
+	// write may fail outright: the driver stops on the first refusal and tears
+	// the conn down while these are still being queued, so the same outcome —
+	// the attach ended — can surface here as a transport error (broken pipe)
+	// instead of at the client layer. Both spellings are the success condition;
+	// the refusalCount assertion below is what carries the claim (#3265).
 	for i := 0; i < 5; i++ {
-		require.NoError(t, agentproto.WriteFrame(context.Background(), server,
-			agentproto.Frame{Op: agentproto.OpPTYOut, Data: []byte("x")}))
+		if err := agentproto.WriteFrame(context.Background(), server,
+			agentproto.Frame{Op: agentproto.OpPTYOut, Data: []byte("x")}); err != nil {
+			break
+		}
 	}
 	select {
 	case <-done:
@@ -90,6 +97,23 @@ func TestAttachStream_StopsOnTheFirstRefusedWrite(t *testing.T) {
 	}
 	require.Equal(t, 1, out.refusalCount(),
 		"the loop must return on the first refusal, not keep writing to a destination that said no")
+}
+
+// A test that fails an assertion returns WITHOUT waiting for the driver, and
+// its Cleanup then restores the attachStdin/attachStdout/attachTermSize seams
+// while the driver goroutine may still be reading them (#3265). The pass-path
+// ordering — driver reads, close(done), test receives, cleanup writes — only
+// exists when the test reaches its <-done, so the harness itself must join the
+// driver before any other cleanup runs. These two tests model the early exit
+// (start the driver, return immediately) so that join is exercised under -race
+// on every run, for each harness.
+func TestAttachStream_EarlyTestExitDoesNotRaceTheDriver(t *testing.T) {
+	out := &failingWriter{}
+	_, _ = startDriverWithFailingStdout(t, out)
+}
+
+func TestAttachStream_EarlyTestExitDoesNotRaceTheDriver_SharedHarness(t *testing.T) {
+	_, _, _, _ = startDriver(t)
 }
 
 // startDriverWithFailingStdout mirrors startDriverWithInput with stdout swapped
@@ -131,5 +155,13 @@ func startDriverWithFailingStdout(t *testing.T, out io.Writer) (*websocket.Conn,
 	// isolate the loop.
 	handback := beginTerminalHandback(io.Discard, nil)
 	go func() { defer close(d); driveAttachStream(sc.Conn, handback, input) }()
+	// Join the driver BEFORE any other cleanup touches state it reads (#3265).
+	// Registered last so it runs first; CloseNow ends the driver's read loop, so
+	// the join terminates even when the test bailed before the driver exited on
+	// its own.
+	t.Cleanup(func() {
+		_ = server.CloseNow()
+		<-d
+	})
 	return server, d
 }
