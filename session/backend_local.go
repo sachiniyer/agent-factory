@@ -99,9 +99,8 @@ func (e *WorktreeUnavailableError) Unwrap() error {
 // disk and spawning/reconnecting the agent process and its tabs). The split is
 // behavior-preserving: Start = provision then launch is exactly the monolithic
 // Start it replaced (same order, side effects, and errors), and it is the same
-// split the agent-server "provision-and-expose" model follows in the off-box
-// runtimes, where provision spins up an off-box workspace and launch exposes
-// the agent stream.
+// split the off-box runtimes follow, where Provision spins up the remote
+// workspace (and its agent-server endpoint) and Launch starts the agent in it.
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if err := b.Provision(i, firstTimeSetup); err != nil {
 		return err

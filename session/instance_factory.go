@@ -99,9 +99,8 @@ type InstanceOptions struct {
 	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
 	// or a malformed URL fails there). The off-box runtimes (docker, sandbox, ssh,
-	// hook) do not use this field — backendFactory hands their endpoint back directly
-	// (res.Endpoint); this is the explicit-caller seam, exercised by the
-	// out-of-process round-trip test.
+	// hook) do not use this field — backendFactory hands their endpoint back
+	// directly (res.Endpoint); this is the explicit-caller seam.
 	RemoteAgentServer *AgentServerEndpoint
 	// SessionEnvPassthrough carries durable exact-name grants delegated by an
 	// outer agent-server. Ordinary daemon/local callers leave it empty and read
