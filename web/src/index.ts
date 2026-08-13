@@ -74,7 +74,7 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, type RowKind } from "./status.js";
+import { canHandoff, isArchived, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
@@ -537,7 +537,7 @@ function switchView(view: View): void {
  * filtered to "Ready" and then typed into one. The row leaves the rail; the pane
  * keeps streaming, and the rail re-highlights it when its state is shown again.
  */
-function setStatusFilter(kind: RowKind, on: boolean): void {
+function setStatusFilter(kind: OperatorKind, on: boolean): void {
   const next = withKind(store.get().statusFilter, kind, on);
   persistFilter(next);
   store.set({ statusFilter: next });

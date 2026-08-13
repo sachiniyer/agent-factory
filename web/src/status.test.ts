@@ -17,6 +17,8 @@ import {
   isCreating,
   isLimitReached,
   isWorking,
+  type OperatorKind,
+  operatorKind,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -41,6 +43,38 @@ test("idle detail renders only mechanical reason values and observed churn age",
   assert.equal(
     idleReasonDetail(sess({ idle_reason: "something-later" as never, last_pane_churn_at: "bad" }), now),
     "",
+  );
+});
+
+test("operator status groups every mechanical idle reason by the action it needs", () => {
+  const cases: Array<[string, Partial<SessionData>, OperatorKind]> = [
+    ["running", { liveness: Liveness.Running }, "working"],
+    ["in-flight", { liveness: Liveness.Ready, in_flight_op: InFlightOp.Restoring }, "working"],
+    ["usage limit", { liveness: Liveness.LimitReached, idle_reason: "usage-limit" }, "waiting-limit"],
+    ["process exited", { liveness: Liveness.Lost, idle_reason: "process-exited" }, "broken"],
+    ["prompt absent", { liveness: Liveness.Ready, idle_reason: "prompt-not-delivered" }, "broken"],
+    ["recreate notice", { liveness: Liveness.Ready, idle_reason: "recreate-pending" }, "needs-you"],
+    ["delivery unknown", { liveness: Liveness.Ready, idle_reason: "delivery-unconfirmed" }, "needs-you"],
+    ["no pane change", { liveness: Liveness.Ready, idle_reason: "no-pane-change-since-delivery" }, "needs-you"],
+    ["settled after churn", { liveness: Liveness.Ready, idle_reason: "settled-after-pane-change" }, "needs-you"],
+    ["ready without evidence", { liveness: Liveness.Ready }, "needs-you"],
+    ["archived history", { liveness: Liveness.Archived }, "archived"],
+  ];
+  for (const [name, data, want] of cases) {
+    assert.equal(operatorKind(sess(data)), want, name);
+  }
+});
+
+test("an in-flight operation wins over stale idle evidence", () => {
+  assert.equal(
+    operatorKind(
+      sess({
+        liveness: Liveness.Ready,
+        in_flight_op: InFlightOp.Restoring,
+        idle_reason: "prompt-not-delivered",
+      }),
+    ),
+    "working",
   );
 });
 

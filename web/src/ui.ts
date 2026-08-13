@@ -42,7 +42,9 @@ import {
   idleReasonDetail,
   isLimitReached,
   isRootSession,
-  type RowKind,
+  OPERATOR_KIND_LABELS,
+  type OperatorKind,
+  operatorKind,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -298,7 +300,7 @@ export interface Actions {
   /** Shows/hides one session state in the rail (feat: hide archived by default): the
    *  filter menu's checkboxes and the empty state's inline "Show archived" route
    *  here; index.ts flips the store and persists the whole filter. */
-  setStatusFilter(kind: RowKind, on: boolean): void;
+  setStatusFilter(kind: OperatorKind, on: boolean): void;
   /** Restores the default filter — every state but archived. */
   resetStatusFilter(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
@@ -1592,9 +1594,9 @@ export class AppShell {
   }
 
   /** One state's checkbox in the filter menu: a check when shown, the state's label
-   *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
+   *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
-  private filterItem(kind: RowKind, on: boolean, count: number): HTMLElement {
+  private filterItem(kind: OperatorKind, on: boolean, count: number): HTMLElement {
     const check = h("span", { class: "af-filter-check" }, ...(on ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
     const item = h(
@@ -2910,6 +2912,7 @@ function sessionRow(
   buildActions: (session: ManagedSession) => HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
+  const operator = operatorKind(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
   const killable = isKillableSession(s);
@@ -2917,7 +2920,10 @@ function sessionRow(
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts: Array<Node | string> = [icon("git-branch", "af-branch-icon")];
+  const branchParts: Array<Node | string> = [
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
+    " · ",
+  ];
   if (idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} · `);
     idle.dataset.idleReason = s.idle_reason ?? "";
@@ -2926,22 +2932,31 @@ function sessionRow(
     }
     branchParts.push(idle);
   }
-  branchParts.push(s.branch || "—");
+  branchParts.push(
+    h(
+      "span",
+      { class: "af-row-branch-name" },
+      icon("git-branch", "af-branch-icon"),
+      s.branch || "—",
+    ),
+  );
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
 
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
+  const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
   }${creating ? " af-row-creating" : ""}`;
   const row = h("li", { class: cls });
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
-  // one. When there is no dot the span is omitted entirely (kind is null), matching
-  // the TUI's blank status cell.
+  // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
+  // every title aligned without inventing a working indicator.
+  const statusSlot = h("span", { class: "af-row-status" });
+  statusSlot.setAttribute("aria-hidden", "true");
   if (status.kind && status.icon) {
     const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    dot.setAttribute("aria-hidden", "true");
-    row.append(dot);
+    statusSlot.append(dot);
   }
+  row.append(statusSlot);
   row.append(main);
   if (managed) {
     row.append(buildActions(s));
@@ -2953,7 +2968,7 @@ function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
-  row.dataset.idleTitleBase = `${s.title} — ${status.label}`;
+  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.setAttribute(

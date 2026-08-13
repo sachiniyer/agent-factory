@@ -200,6 +200,19 @@
   --af-backdrop: rgba(4, 7, 12, 0.66);
 }
 
+/* Semantic aliases used at component call sites. Deliverable 1 may replace the
+ * palette values above from daemon theme data; these roles follow automatically. */
+:root {
+  --af-focus-ring: var(--af-accent);
+  --af-text-muted: var(--af-text-2);
+  --af-status-needs-you: var(--af-dot-ready);
+  --af-status-working: var(--af-text-2);
+  --af-status-waiting: var(--af-dot-limit);
+  --af-status-broken: var(--af-danger);
+  --af-status-inactive: var(--af-text-2);
+  --af-disabled-opacity: 0.58;
+}
+
 :root {
   font-family: var(--af-font-ui);
 }
@@ -257,24 +270,20 @@ body {
  * ring when focused via the keyboard, so keyboard nav is never invisible.
  * :focus-visible (not :focus) keeps a plain mouse click from drawing it. This is the
  * per-CONTROL complement to the pane-level #1694 outline. */
-.af-primary:focus-visible,
-.af-ghost:focus-visible,
-.af-danger:focus-visible,
-.af-rail-new:focus-visible,
-.af-tasks-add:focus-visible,
-.af-tab:focus-visible,
-.af-tab-new:focus-visible,
-.af-viewtab:focus-visible,
-.af-theme-opt:focus-visible,
-.af-appbar-more:focus-visible,
-.af-project-switch:focus-visible,
-.af-project-item:focus-visible,
-.af-rail-filter:focus-visible,
-.af-rail-action:focus-visible,
-.af-filter-item:focus-visible,
-.af-task-action:focus-visible {
-  outline: 2px solid var(--af-accent);
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:not(.xterm-helper-textarea, .af-clipboard-fallback):focus-visible,
+a[href]:focus-visible,
+[tabindex]:not([tabindex="-1"]):not(.xterm-helper-textarea):not(.af-clipboard-fallback):focus-visible {
+  outline: 2px solid var(--af-focus-ring);
   outline-offset: 2px;
+}
+
+button:disabled,
+.af-input:disabled {
+  opacity: var(--af-disabled-opacity);
+  cursor: default;
 }
 
 #app {
@@ -353,8 +362,7 @@ body {
 .af-field-label {
   font-size: var(--af-fs-xs);
   color: var(--af-text-2);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
+  font-weight: 600;
 }
 
 .af-login-form input {
@@ -368,8 +376,8 @@ body {
   font-size: var(--af-fs-md);
 }
 
-.af-login-form input:focus {
-  outline: none;
+.af-login-form input:focus-visible {
+  outline-color: var(--af-focus-ring);
   border-color: var(--af-accent);
 }
 
@@ -385,13 +393,12 @@ body {
   cursor: pointer;
 }
 
-.af-primary:hover {
+.af-primary:hover:not(:disabled) {
   background: var(--af-accent-hover);
 }
 
 .af-primary:disabled {
-  opacity: 0.6;
-  cursor: default;
+  opacity: var(--af-disabled-opacity);
 }
 
 .af-error {
@@ -497,7 +504,7 @@ body {
 
 .af-project-switch:disabled {
   cursor: default;
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
 }
 
 .af-project-glyph {
@@ -514,7 +521,7 @@ body {
 
 .af-project-caret {
   flex: 0 0 auto;
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   font-size: 0.6em;
 }
 
@@ -535,9 +542,8 @@ body {
 .af-project-menu-label {
   padding: 0.35rem 0.6rem 0.25rem;
   font-size: var(--af-fs-2xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
+  font-weight: 600;
 }
 
 .af-project-menu-empty {
@@ -596,7 +602,7 @@ body {
 
 .af-project-item-path {
   font-size: var(--af-fs-2xs);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -605,7 +611,7 @@ body {
 .af-project-item-meta {
   margin-left: auto;
   flex: 0 0 auto;
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   font-size: var(--af-fs-2xs);
   white-space: nowrap;
 }
@@ -678,7 +684,7 @@ body {
   cursor: pointer;
 }
 
-.af-ghost:hover {
+.af-ghost:hover:not(:disabled) {
   color: var(--af-text);
   border-color: var(--af-border-strong);
 }
@@ -706,7 +712,7 @@ body {
   justify-content: center;
   padding: 0 0.3rem;
   background: transparent;
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   border: none;
   border-radius: var(--af-r-sm);
   font: inherit;
@@ -806,9 +812,8 @@ body {
 
 .af-rail-title {
   font-size: var(--af-fs-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
   color: var(--af-text-2);
+  font-weight: 600;
 }
 
 .af-rail-count {
@@ -902,9 +907,8 @@ body {
 .af-filter-menu-label {
   padding: 0.35rem 0.6rem 0.25rem;
   font-size: var(--af-fs-2xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
+  font-weight: 600;
 }
 
 .af-filter-item {
@@ -951,7 +955,7 @@ body {
 .af-filter-item-count {
   flex: 0 0 auto;
   font-size: var(--af-fs-2xs);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -969,13 +973,13 @@ body {
 }
 
 .af-filter-reset:disabled {
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   border-color: var(--af-border-subtle);
   cursor: default;
 }
 
 .af-filter-reset:disabled:hover {
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   border-color: var(--af-border-subtle);
 }
 
@@ -1022,7 +1026,7 @@ body {
   flex-wrap: wrap;
   gap: 0.35rem;
   padding: var(--af-sp-3) var(--af-sp-3);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   font-size: var(--af-fs-xs);
   line-height: 1.5;
 }
@@ -1081,7 +1085,7 @@ body {
 }
 
 .af-row-archived {
-  opacity: 0.55;
+  color: var(--af-text-muted);
 }
 
 .af-row-main {
@@ -1134,7 +1138,7 @@ body {
 }
 
 .af-rail-kill {
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   border-color: transparent;
 }
 
@@ -1145,6 +1149,7 @@ body {
 
 .af-row-title {
   font-size: var(--af-fs-md);
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1153,10 +1158,21 @@ body {
 .af-row-branch {
   margin-top: 0.15rem;
   font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
+  color: var(--af-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.af-operator-state {
+  font-weight: 600;
+}
+
+.af-row-branch-name {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  font-family: var(--af-font-mono);
 }
 
 .af-branch-icon {
@@ -1168,8 +1184,18 @@ body {
   opacity: 0.8;
 }
 
-/* Status icon: shape carries the state so it survives color-blindness; the class
- * carries the matching TUI color. Every shape is static (#1766). */
+/* A fixed status cell aligns every title even though Working intentionally has no
+ * glyph (#1766). Shape + visible operator label carry state beyond color. */
+.af-row-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.875rem;
+  min-height: 1.2rem;
+  flex: 0 0 0.875rem;
+}
+
+/* Status icon: every shape is static (#1766). */
 .af-dot {
   flex: 0 0 auto;
   line-height: 1.4;
@@ -1199,6 +1225,26 @@ body {
 
 .af-dot-limit {
   color: var(--af-dot-limit);
+}
+
+.af-row-operator-needs-you :is(.af-dot, .af-operator-state) {
+  color: var(--af-status-needs-you);
+}
+
+.af-row-operator-working .af-operator-state {
+  color: var(--af-status-working);
+}
+
+.af-row-operator-waiting-limit :is(.af-dot, .af-operator-state) {
+  color: var(--af-status-waiting);
+}
+
+.af-row-operator-broken :is(.af-dot, .af-operator-state) {
+  color: var(--af-status-broken);
+}
+
+.af-row-operator-archived :is(.af-dot, .af-operator-state) {
+  color: var(--af-status-inactive);
 }
 
 /* af-pulse is gone with its last consumer. It survived #1766's "no animated
@@ -1400,7 +1446,7 @@ body {
   flex: 0 0 auto;
   width: 0.8rem;
   height: 0.8rem;
-  color: var(--af-text-3, var(--af-text-2));
+  color: var(--af-text-muted);
 }
 
 .af-tab-label {
@@ -1589,6 +1635,34 @@ body {
 .af-toast.af-toast-show {
   opacity: 1;
   transform: translateY(0);
+}
+
+/* Off-screen clipboard fallback: selectable without flashing a mobile keyboard. */
+.af-clipboard-fallback {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+/* Clipboard fallback feedback is app chrome, not terminal content. Keeping its
+ * colors here makes it follow both the local mode and the daemon-derived palette. */
+.af-copy-hint {
+  position: fixed;
+  right: var(--af-sp-3);
+  bottom: var(--af-sp-3);
+  z-index: var(--af-z-modal);
+  padding: var(--af-sp-1) var(--af-sp-3);
+  background: var(--af-bg-raised);
+  color: var(--af-text);
+  border: 1px solid var(--af-danger);
+  border-left-width: 3px;
+  border-radius: var(--af-r-sm);
+  font-family: var(--af-font-mono);
+  font-size: var(--af-fs-xs);
+  pointer-events: none;
 }
 
 /* The persistent split host (feat: drag-and-drop split tabs): a flex container that
@@ -2033,13 +2107,12 @@ body {
   cursor: pointer;
 }
 
-.af-danger:hover {
+.af-danger:hover:not(:disabled) {
   background: var(--af-danger-subtle);
 }
 
 .af-danger:disabled {
-  opacity: 0.6;
-  cursor: default;
+  opacity: var(--af-disabled-opacity);
 }
 
 /* Modal overlay layer (#1592 Phase 5 PR5): a dimmed backdrop centering a surface
@@ -2104,8 +2177,7 @@ body {
 .af-modal-label {
   font-size: var(--af-fs-xs);
   color: var(--af-text-2);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
+  font-weight: 600;
 }
 
 .af-input {
@@ -2119,8 +2191,8 @@ body {
   font-size: var(--af-fs-md);
 }
 
-.af-input:focus {
-  outline: none;
+.af-input:focus-visible {
+  outline-color: var(--af-focus-ring);
   border-color: var(--af-accent);
 }
 
@@ -2348,7 +2420,7 @@ body {
 .af-dirpicker-use-here:disabled,
 .af-dirpicker-home:disabled,
 .af-dirpicker-up:disabled {
-  opacity: 0.5;
+  opacity: var(--af-disabled-opacity);
   cursor: default;
 }
 
@@ -2357,7 +2429,7 @@ body {
 .af-dirpicker-use-here:focus-visible,
 .af-dirpicker-home:focus-visible,
 .af-dirpicker-up:focus-visible {
-  outline: 2px solid var(--af-accent);
+  outline: 2px solid var(--af-focus-ring);
   outline-offset: -2px;
 }
 
@@ -2511,8 +2583,7 @@ body {
 
 .af-tasks-title {
   font-size: var(--af-fs-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
+  font-weight: 600;
   color: var(--af-text-2);
 }
 
@@ -3012,9 +3083,8 @@ body {
 
 .af-config-title {
   font-size: var(--af-fs-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
   color: var(--af-text-2);
+  font-weight: 600;
 }
 
 /* The file being edited. Truncates rather than wrapping the header onto a second
@@ -3023,7 +3093,7 @@ body {
   margin-left: auto;
   font-family: var(--af-font-mono);
   font-size: var(--af-fs-2xs);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3037,6 +3107,13 @@ body {
   gap: var(--af-sp-2);
 }
 
+.af-config-empty {
+  margin: 0;
+  color: var(--af-text-muted);
+  font-size: var(--af-fs-sm);
+  line-height: 1.5;
+}
+
 .af-config-tier {
   display: flex;
   align-items: center;
@@ -3048,9 +3125,8 @@ body {
 
 .af-config-tier-name {
   font-size: var(--af-fs-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--af-track);
   color: var(--af-text-2);
+  font-weight: 600;
 }
 
 .af-config-toggle {
@@ -3146,7 +3222,7 @@ body {
 
 .af-config-purpose {
   font-size: var(--af-fs-xs);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
 }
 
 .af-config-control {
@@ -3188,7 +3264,7 @@ body {
 
 .af-config-readonly {
   font-size: var(--af-fs-2xs);
-  color: var(--af-text-3);
+  color: var(--af-text-muted);
   white-space: nowrap;
 }
 
