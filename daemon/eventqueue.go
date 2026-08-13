@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -103,6 +104,16 @@ type eventQueue struct {
 	pending int   // undelivered event count
 	seq     int64 // last sequence number handed out
 
+	// loadErr records a failed load (#3242). A Stat/Open/Seek/scan failure
+	// leaves the on-disk state UNKNOWN, which is not the same as empty: the
+	// file may still hold undelivered records that were never enumerated.
+	// While set, offset/size/pending are zeroed and meaningless, and every
+	// entry point refuses to trust or mutate the queue — enqueue and peek
+	// first retry the load (healing once storage recovers), advance refuses
+	// outright. Trusting a fabricated zero here once let a single replayed
+	// event "drain" the queue and unlink the file with its backlog inside.
+	loadErr error
+
 	dropped     int // events dropped to the overflow caps, for the drop log
 	lastDropLog time.Time
 
@@ -127,7 +138,9 @@ func eventQueueDir() (string, error) {
 
 // newEventQueue opens (or initializes) the queue for taskID under dir,
 // recovering offset/pending from any files a previous daemon left behind —
-// which is what lets a backlog survive a daemon restart or reload.
+// which is what lets a backlog survive a daemon restart or reload. A failed
+// recovery still returns a queue, but one that knows its state is unknown
+// (loadFailed) and refuses to act until a retried load succeeds (#3242).
 func newEventQueue(dir, taskID string) *eventQueue {
 	q := &eventQueue{
 		taskID:         taskID,
@@ -145,15 +158,56 @@ func newEventQueue(dir, taskID string) *eventQueue {
 }
 
 // load recovers the queue state from disk. A missing file is an empty queue; a
-// corrupt cursor resets to 0 (redelivering pending events — at-least-once,
-// never silent loss).
+// corrupt or unreadable cursor resets to 0 (redelivering pending events —
+// at-least-once, never silent loss). Any other failure marks the state UNKNOWN
+// via loadErr (#3242): unlike a missing file, an unreadable one may hold
+// undelivered records, so nothing may treat the queue as empty or mutate it
+// until a later load succeeds.
 func (q *eventQueue) load() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.loadLocked()
+}
 
+// loadLocked runs one load attempt, zeroing the recovered state first so a
+// failure can never leave a half-populated count behind. q.seq is deliberately
+// not reset: sequence numbers must never move backward. Logs only the
+// transition into failure — retries happen per enqueue/peek while storage
+// stays broken, and their callers already log the refusal. Callers hold q.mu.
+func (q *eventQueue) loadLocked() {
+	prevErr := q.loadErr
+	q.offset, q.size, q.pending, q.loadErr = 0, 0, 0, nil
+	if err := q.scanDiskStateLocked(); err != nil {
+		q.offset, q.size, q.pending = 0, 0, 0
+		q.loadErr = err
+		if prevErr == nil {
+			log.ErrorLog.Printf("watch task %s: failed to load event queue; treating its state as unknown, not empty: %v", q.taskID, err)
+		}
+	}
+}
+
+// retryLoadLocked re-attempts recovery after a failed load and reports the
+// still-unknown state; a no-op once a load has succeeded. Callers hold q.mu.
+func (q *eventQueue) retryLoadLocked() error {
+	if q.loadErr == nil {
+		return nil
+	}
+	q.loadLocked()
+	if q.loadErr == nil {
+		log.InfoLog.Printf("watch task %s: event-queue storage recovered; %d pending event(s) restored", q.taskID, q.pending)
+	}
+	return q.loadErr
+}
+
+// scanDiskStateLocked reads the on-disk queue state into memory, returning an
+// error whenever the state could not be fully enumerated. Callers hold q.mu.
+func (q *eventQueue) scanDiskStateLocked() error {
 	info, err := os.Stat(q.path)
 	if err != nil {
-		return // no queue file: empty queue
+		if os.IsNotExist(err) {
+			return nil // no queue file: empty queue
+		}
+		return fmt.Errorf("stat event queue: %w", err)
 	}
 	q.size = info.Size()
 
@@ -163,6 +217,12 @@ func (q *eventQueue) load() {
 		} else {
 			log.WarningLog.Printf("watch task %s: corrupt event-queue cursor; replaying the queue from the start", q.taskID)
 		}
+	} else if !os.IsNotExist(err) {
+		// An unreadable cursor gets the corrupt-cursor treatment, not loadErr:
+		// replaying from 0 redelivers the delivered prefix (at-least-once, never
+		// loss), while parking the queue on a single bad cursor inode would
+		// wedge it — the next persist rewrites the cursor via rename anyway.
+		log.WarningLog.Printf("watch task %s: cannot read event-queue cursor (%v); replaying the queue from the start", q.taskID, err)
 	}
 
 	// Count the pending events and recover the sequence counter. The pending
@@ -173,7 +233,12 @@ func (q *eventQueue) load() {
 	// the events durability promised to keep.
 	f, err := os.Open(q.path)
 	if err != nil {
-		return
+		if os.IsNotExist(err) {
+			// Removed between Stat and Open: an empty queue after all.
+			q.offset, q.size = 0, 0
+			return nil
+		}
+		return fmt.Errorf("open event queue: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -184,18 +249,28 @@ func (q *eventQueue) load() {
 	// before it; if q.offset isn't one, replay from the start rather than
 	// parking the drainer forever on an unreadable head (redelivering a few
 	// already-delivered events is at-least-once, a wedged queue is not).
-	if !q.offsetIsRecordBoundaryLocked(f) {
+	boundary, err := q.offsetIsRecordBoundaryLocked(f)
+	if err != nil {
+		return fmt.Errorf("check event-queue record boundary at offset %d: %w", q.offset, err)
+	}
+	if !boundary {
 		log.WarningLog.Printf("watch task %s: event-queue cursor %d is not on a record boundary; replaying the queue from the start", q.taskID, q.offset)
 		q.offset = 0
 	}
 	if _, err := f.Seek(q.offset, 0); err != nil {
-		return
+		return fmt.Errorf("seek event queue to offset %d: %w", q.offset, err)
 	}
 	br := bufio.NewReaderSize(f, 64*1024)
 	scanned := q.offset
 	for {
 		raw, err := br.ReadBytes('\n')
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				// A mid-scan read error is NOT a torn tail: the bytes past this
+				// point exist but could not be enumerated, and the torn-tail
+				// truncate below would delete them (#3242). Unknown state.
+				return fmt.Errorf("scan event queue at offset %d: %w", scanned, err)
+			}
 			if len(raw) > 0 {
 				// A trailing record with no newline is a torn append (daemon
 				// died mid-write). It was never fully enqueued; truncate it
@@ -210,7 +285,7 @@ func (q *eventQueue) load() {
 					q.size = scanned
 				}
 			}
-			return
+			return nil
 		}
 		scanned += int64(len(raw))
 		q.pending++
@@ -221,11 +296,24 @@ func (q *eventQueue) load() {
 	}
 }
 
-// pendingCount reports how many undelivered events the queue holds.
+// pendingCount reports how many undelivered events the queue holds. After a
+// failed load it first retries recovery, so a healed filesystem restores the
+// real count (and FIFO routing) on the next live event; while storage stays
+// unreadable it reports 0, and callers that must distinguish empty from
+// unknown check loadFailed — the mutating entry points never trust this zero.
 func (q *eventQueue) pendingCount() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	_ = q.retryLoadLocked()
 	return q.pending
+}
+
+// loadFailed reports whether the queue's on-disk state is currently unknown
+// because its last load attempt failed (#3242).
+func (q *eventQueue) loadFailed() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.loadErr != nil
 }
 
 // enqueue appends one event and enforces the overflow caps by dropping oldest
@@ -234,6 +322,14 @@ func (q *eventQueue) enqueue(line string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// Unknown state admits no safe mutation (#3242): the in-memory size/offset
+	// are fabricated zeros, so the fresh-queue cursor reset below could destroy
+	// a live cursor, and a torn-write recovery would truncate to the wrong
+	// boundary. Retry the load; refuse (caller drops the event, logged) only
+	// while the state stays unknown.
+	if err := q.retryLoadLocked(); err != nil {
+		return fmt.Errorf("event-queue state unknown after a failed load; refusing to append: %w", err)
+	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
 		return err
 	}
@@ -401,6 +497,12 @@ func (q *eventQueue) dropOldestOverCapsLocked() error {
 func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	// A failed load must surface as an ERROR here, never as a drained-empty
+	// queue (#3242): the drainer parks on it and retries via the next
+	// enqueue/reload, instead of concluding there is nothing to replay.
+	if err := q.retryLoadLocked(); err != nil {
+		return queuedEvent{}, eventQueueCursor{}, false, fmt.Errorf("event-queue state unknown after a failed load: %w", err)
+	}
 	for q.pending > 0 {
 		ev, n, rerr := q.readEventAtLocked(q.offset)
 		if rerr == nil {
@@ -435,6 +537,12 @@ func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, e
 func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	// No retry here, unlike enqueue/peek: any cursor predates the failed load,
+	// so consuming through it against a freshly recovered state is never right.
+	// Refuse; the drainer parks and the next peek re-establishes the head.
+	if q.loadErr != nil {
+		return false, fmt.Errorf("event-queue state unknown after a failed load; refusing to advance: %w", q.loadErr)
+	}
 	if q.pending == 0 {
 		return false, nil
 	}
@@ -583,16 +691,19 @@ func syncEventQueueDirectory(dir string) error {
 // offsetIsRecordBoundaryLocked reports whether q.offset begins a record in the
 // open queue file f. Offset 0 and offset>=size are boundaries by definition;
 // any interior offset is a boundary iff the byte before it is the record
-// terminator '\n'. ReadAt leaves f's seek position untouched. Callers hold q.mu.
-func (q *eventQueue) offsetIsRecordBoundaryLocked(f *os.File) bool {
+// terminator '\n'. A ReadAt failure is an error, not "not a boundary" (#3242):
+// conflating them would reset a valid cursor over a transient read fault and
+// redeliver the whole delivered prefix. ReadAt leaves f's seek position
+// untouched. Callers hold q.mu.
+func (q *eventQueue) offsetIsRecordBoundaryLocked(f *os.File) (bool, error) {
 	if q.offset <= 0 || q.offset >= q.size {
-		return true
+		return true, nil
 	}
 	var b [1]byte
 	if _, err := f.ReadAt(b[:], q.offset-1); err != nil {
-		return false
+		return false, err
 	}
-	return b[0] == '\n'
+	return b[0] == '\n', nil
 }
 
 // readEventAtLocked reads and parses one JSONL record at the given offset,
