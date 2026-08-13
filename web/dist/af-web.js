@@ -10239,8 +10239,8 @@ function loadFilter() {
   if (typeof rec["waiting-limit"] !== "boolean" && typeof rec.limit === "boolean") {
     filter["waiting-limit"] = rec.limit;
   }
-  if (typeof rec.broken !== "boolean" && typeof rec.lost === "boolean" && typeof rec.dead === "boolean") {
-    filter.broken = rec.lost || rec.dead;
+  if (typeof rec.broken !== "boolean" && typeof rec.ready === "boolean" && typeof rec.lost === "boolean" && typeof rec.dead === "boolean") {
+    filter.broken = rec.ready || rec.lost || rec.dead;
   }
   return filter;
 }

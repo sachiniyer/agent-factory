@@ -235,6 +235,22 @@ test("the pre-grouping filter migrates without silently hiding a combined group"
   }
 });
 
+test("the pre-grouping Ready choice keeps newly Broken ready sessions visible", () => {
+  const restore = stubStorage({
+    "af-status-filter": JSON.stringify({ working: true, ready: true, lost: false, dead: false, limit: true, archived: false }),
+  });
+  try {
+    const f = loadFilter();
+    assert.equal(
+      f.broken,
+      true,
+      "Ready previously included prompt-not-delivered, so its visible choice must carry into Broken",
+    );
+  } finally {
+    restore();
+  }
+});
+
 test("non-boolean flags are ignored, so a truthy 'false' can't hide a group", () => {
   const restore = stubStorage({
     "af-status-filter": JSON.stringify({ working: "false", "needs-you": 0, broken: null, archived: true }),

@@ -139,7 +139,8 @@ export function loadFilter(): StatusFilter {
     }
   }
   // Migrate the pre-#3220 liveness buckets without silently hiding a newly grouped
-  // state. Broken stays shown unless BOTH old degraded buckets were explicitly off.
+  // state. Ready used to include prompt-not-delivered, which is now Broken, so the
+  // combined group stays shown unless ALL THREE contributing buckets were off.
   if (typeof rec["needs-you"] !== "boolean" && typeof rec.ready === "boolean") {
     filter["needs-you"] = rec.ready;
   }
@@ -148,10 +149,11 @@ export function loadFilter(): StatusFilter {
   }
   if (
     typeof rec.broken !== "boolean" &&
+    typeof rec.ready === "boolean" &&
     typeof rec.lost === "boolean" &&
     typeof rec.dead === "boolean"
   ) {
-    filter.broken = rec.lost || rec.dead;
+    filter.broken = rec.ready || rec.lost || rec.dead;
   }
   return filter;
 }
