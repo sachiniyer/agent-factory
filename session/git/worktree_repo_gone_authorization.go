@@ -59,7 +59,7 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 				return errors.Join(err, fmt.Errorf("inspect repository metadata: %w", metadataErr))
 			}
 		}
-		return err
+		return fmt.Errorf("%w: %s: %v", ErrRepoGone, worktree.repoPath, err)
 	}
 	recorded, err := os.Stat(worktree.repoPath)
 	if err != nil {
