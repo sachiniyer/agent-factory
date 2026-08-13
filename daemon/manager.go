@@ -228,6 +228,15 @@ type Manager struct {
 	// override are absent). It is the highest-precedence root-agent source,
 	// merged over global and legacy in config.ResolveRootAgent.
 	rootAgentPersonal map[string]*config.RootAgentLayer
+	// rootAgentPersonalUnreadable is the set of repo IDs whose registered
+	// project's personal config existed but could not be LOADED at daemon start
+	// (#3241). These repos fail closed: resolvedRootAgentFor resolves them to
+	// disabled without consulting lower layers, because the unloadable file may
+	// hold the highest-precedence enabled=false. Kept as its own set rather than
+	// a synthesized personal layer so consumers can distinguish "the user
+	// disabled this" from "af could not tell" — the deletedRootRepos shape for
+	// out-of-band suppression. Restart-to-apply, like the rest of the snapshot.
+	rootAgentPersonalUnreadable map[string]bool
 	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
 	// root path, snapshotted at daemon start. It is the candidate set the ensure
 	// loop visits for a root enabled purely by the global/personal singleton — a
@@ -458,51 +467,52 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	raGlobal, raPersonal, raProjectRoots, raLegacyIDs := buildRootAgentSnapshot(cfg)
+	raGlobal, raPersonal, raUnreadable, raProjectRoots, raLegacyIDs := buildRootAgentSnapshot(cfg)
 	mgr := &Manager{
-		cfg:                    cfg,
-		previewSecret:          previewSecret,
-		previewOrigins:         newPreviewOriginRegistry(),
-		editorOriginSecret:     editorSecret,
-		editorLabels:           newEditorLabelIndex(),
-		pollReloadCh:           make(chan struct{}, 1),
-		ready:                  make(chan struct{}),
-		lifecycle:              lifecycle,
-		storage:                storage,
-		instances:              make(map[string]*session.Instance),
-		pendingCreates:         make(map[string]session.InstanceData),
-		reservedTitles:         make(map[string]struct{}),
-		projectDeletes:         make(map[string]struct{}),
-		projectDeleteLastSeq:   make(map[string]uint64),
-		reservedTmuxNames:      make(map[string]string),
-		reservedRemoteNames:    make(map[string]struct{}),
-		reservedTaskRuns:       make(map[string]int),
-		ghostTaskRuns:          make(map[string]int),
-		repoStartLocks:         make(map[string]*sync.Mutex),
-		aliveObservations:      make(map[string]uint64),
-		targetLocks:            make(map[string]*sync.Mutex),
-		rootEnsureStates:       make(map[string]*rootEnsureState),
-		rootAgentGlobal:        raGlobal,
-		rootAgentPersonal:      raPersonal,
-		rootAgentProjectRoots:  raProjectRoots,
-		rootAgentLegacyRepoIDs: raLegacyIDs,
-		rootKilledAt:           make(map[string]time.Time),
-		deletedRootRepos:       make(map[string]struct{}),
-		killsInFlight:          make(map[string]struct{}),
-		killRetries:            make(map[string]*session.CleanupRetry),
-		ghostCleanupStalls:     make(map[string]string),
-		restoresInFlight:       make(map[string]struct{}),
-		lostRestoreStates:      make(map[string]*lostRestoreState),
-		limitResumeStates:      make(map[string]*limitResumeState),
-		handoffRetryDue:        make(map[string]time.Time),
-		settleOwed:             make(map[string]settleOwedEntry),
-		remoteLossStates:       make(map[string]*remoteLossState),
-		instanceOpLocks:        make(map[string]*sync.Mutex),
-		pausedPolls:            make(map[string]map[string]time.Time),
-		taskRunProbeDue:        make(map[string]time.Time),
-		events:                 newEventsHub(),
-		vscode:                 vscode,
-		configAgents:           configAgents,
+		cfg:                         cfg,
+		previewSecret:               previewSecret,
+		previewOrigins:              newPreviewOriginRegistry(),
+		editorOriginSecret:          editorSecret,
+		editorLabels:                newEditorLabelIndex(),
+		pollReloadCh:                make(chan struct{}, 1),
+		ready:                       make(chan struct{}),
+		lifecycle:                   lifecycle,
+		storage:                     storage,
+		instances:                   make(map[string]*session.Instance),
+		pendingCreates:              make(map[string]session.InstanceData),
+		reservedTitles:              make(map[string]struct{}),
+		projectDeletes:              make(map[string]struct{}),
+		projectDeleteLastSeq:        make(map[string]uint64),
+		reservedTmuxNames:           make(map[string]string),
+		reservedRemoteNames:         make(map[string]struct{}),
+		reservedTaskRuns:            make(map[string]int),
+		ghostTaskRuns:               make(map[string]int),
+		repoStartLocks:              make(map[string]*sync.Mutex),
+		aliveObservations:           make(map[string]uint64),
+		targetLocks:                 make(map[string]*sync.Mutex),
+		rootEnsureStates:            make(map[string]*rootEnsureState),
+		rootAgentGlobal:             raGlobal,
+		rootAgentPersonal:           raPersonal,
+		rootAgentPersonalUnreadable: raUnreadable,
+		rootAgentProjectRoots:       raProjectRoots,
+		rootAgentLegacyRepoIDs:      raLegacyIDs,
+		rootKilledAt:                make(map[string]time.Time),
+		deletedRootRepos:            make(map[string]struct{}),
+		killsInFlight:               make(map[string]struct{}),
+		killRetries:                 make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:          make(map[string]string),
+		restoresInFlight:            make(map[string]struct{}),
+		lostRestoreStates:           make(map[string]*lostRestoreState),
+		limitResumeStates:           make(map[string]*limitResumeState),
+		handoffRetryDue:             make(map[string]time.Time),
+		settleOwed:                  make(map[string]settleOwedEntry),
+		remoteLossStates:            make(map[string]*remoteLossState),
+		instanceOpLocks:             make(map[string]*sync.Mutex),
+		pausedPolls:                 make(map[string]map[string]time.Time),
+		taskRunProbeDue:             make(map[string]time.Time),
+		events:                      newEventsHub(),
+		vscode:                      vscode,
+		configAgents:                configAgents,
 	}
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
