@@ -661,7 +661,14 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 		return err
 	}
 	resp.OK = true
-	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
+	// Publish only when the kill actually completed. A committed-but-unfinished
+	// kill (err recorded above) retains its tombstoned row, and session.killed
+	// means the durable row and authoritative map entry disappeared — that event
+	// is published by finishUserKill/the late ghost worker when the row actually
+	// goes (#3234).
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
+	}
 	return nil
 }
 

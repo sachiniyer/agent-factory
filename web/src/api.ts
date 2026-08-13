@@ -417,9 +417,15 @@ export async function pauseStatusPoll(id: string, token: string): Promise<void> 
 }
 
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
- *  its row from the rail live. */
+ *  its row from the rail live. A committed-but-unfinished kill (the daemon
+ *  durably recorded the kill but retained the row for its teardown retry)
+ *  answers ok with a warning; surface it as the shared mutation-committed
+ *  outcome so the caller resyncs instead of treating the row as untouched. */
 export async function killSession(id: string, title: string, token: string): Promise<void> {
-  await af("KillSession", { id, title, repo_id: "" }, token);
+  const result = await af<{ warning?: string }>("KillSession", { id, title, repo_id: "" }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it

@@ -6285,7 +6285,10 @@ async function pauseStatusPoll(id, token2) {
   await af("PauseStatusPoll", { id, title: "", repo_id: "" }, token2);
 }
 async function killSession(id, title, token2) {
-  await af("KillSession", { id, title, repo_id: "" }, token2);
+  const result = await af("KillSession", { id, title, repo_id: "" }, token2);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 async function archiveSession(id, title, token2) {
   const result = await af("ArchiveSession", { id, title, repo_id: "" }, token2);
