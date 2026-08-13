@@ -822,7 +822,7 @@
         "pointer": "session/storage.go:190 (pr_info in the sessions JSON)"
       },
       "verdict": "deliberate",
-      "notes": "Discovery is daemon-side since #3232, so every surface receives pr_info. The web renders it as a badge that is a plain link (#3285) — the browser's native open/copy. The CLI deliberately stops at exposing number/state/url in the sessions JSON: composition (jq + xdg-open) is its native interface, and a dedicated browser-opening verb is not owed."
+      "notes": "Discovery is daemon-side since #3232, so every surface receives pr_info. The web renders it as a badge that is a plain link (#3285): opening is the browser's own gesture and copy comes free with a link. The CLI deliberately gets no open verb — it is a scripting surface, and `af sessions list --json` already exposes pr_info.url to one jq."
     },
     {
       "id": "session.pr.set",
