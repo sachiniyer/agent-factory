@@ -307,7 +307,7 @@ type home struct {
 	hooksPane *ui.HooksPane
 	// configPane is the global config editor, hosted as an overlay
 	// (stateConfigEditor). It renders from the config manifest and writes
-	// through config.SetGlobalConfigValue — the same path `af config set` uses.
+	// through daemon.SetGlobalConfigValue — the same path `af config set` uses.
 	configPane *ui.ConfigPane
 	// menu displays the key hints inside the status bar (shared handle for
 	// SetState/keydown callers)

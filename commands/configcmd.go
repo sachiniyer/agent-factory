@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -19,25 +18,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// reportConfigApply prints how a saved global config key took effect (#2480),
-// per the #2479 principle — it never tells the user to run a command. The honest
-// per-key answer comes from config.EffectNotice, the same one the daemon hands the
-// web form and the TUI pane uses, so all three surfaces say the same thing. A
-// socket key (listen_addr / preview_listen_addr, #2480 PR2) whose live rebind FAILED
-// is reported deferred instead of applied, and the actionable reason plus any
-// exposure notice are printed after it (on stderr). applyErr is non-nil when no
-// daemon was running to apply the change.
-func reportConfigApply(cmd *cobra.Command, key string, resp daemon.ApplyConfigResponse, applyErr error) {
-	if applyErr == nil && slices.Contains(resp.FailedListenerKeys, key) {
-		fmt.Fprintln(cmd.OutOrStdout(), config.ListenerRebindDeferredNotice(key))
-	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), config.EffectNotice(key, applyErr == nil))
-	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintln(cmd.ErrOrStderr(), w)
-	}
-}
 
 // jsonWrapError honors the --json contract for the CLI commands in this
 // package: when jsonMode is set, a failure is emitted as the shared {data,error}
@@ -486,15 +466,17 @@ Examples:
 			return nil
 		}
 
-		res, err := config.SetGlobalConfigValue(args[0], args[1])
+		// The write goes through a running daemon's admission-gated SetConfigValue
+		// (#3231) — the same handler the web form posts — so a daemon that is
+		// quiescing or validating an upgrade refuses BEFORE the file changes,
+		// instead of the CLI writing first and live-applying through an ungated
+		// poke. With no daemon running it writes locally, as before (#2480: the
+		// value then takes effect on the next start). Never spawns a daemon.
+		resp, err := daemon.SetGlobalConfigValue(args[0], args[1])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
-		// Apply the write to a running daemon in place (#2480) so a config change
-		// takes effect without a manual `af daemon restart` (the #2479 principle).
-		// Best-effort and non-spawning: with no daemon running there is nothing to
-		// apply live and the value takes effect on the next start.
-		applyResp, applyErr := daemon.RequestApplyConfig()
+		res := resp.Result
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
@@ -504,7 +486,12 @@ Examples:
 		for _, w := range res.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
-		reportConfigApply(cmd, res.Key, applyResp, applyErr)
+		// The per-key effect notice (#2480), computed by the write path itself:
+		// live now, deferred rebind, or next daemon start.
+		fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+		for _, w := range resp.Warnings {
+			fmt.Fprintln(cmd.ErrOrStderr(), w)
+		}
 		return nil
 	},
 }

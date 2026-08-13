@@ -857,10 +857,13 @@ type ReapConfigAgentResponse struct{}
 // config.toml is NOT daemon-owned state. Unlike instances.json (the #960
 // single-writer model), it is a file the README tells users to hand-edit, read
 // by af and the daemon at startup and guarded by a file lock rather than by
-// daemon ownership. These RPCs therefore exist for REACH, not for arbitration:
+// daemon ownership. These RPCs originally existed for REACH, not arbitration:
 // the web UI is a browser and cannot touch the user's disk, so it asks the
-// daemon to run the same config.SetGlobalConfigValue call the TUI and
-// `af config set` run in their own process. There is no daemon-side copy of
+// daemon to run the config.SetGlobalConfigValue call other clients ran in their
+// own process. Since #3231 the TUI and `af config set` route through the same
+// RPC while a daemon is running — not for ownership, but so the lifecycle
+// admission gate answers identically for every surface — and write locally only
+// when no daemon answers the socket. There is still no daemon-side copy of
 // config, no cache to invalidate, and no writer to serialize against beyond the
 // lock every writer already takes.
 
@@ -921,7 +924,8 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so `af config set` (which applies via RequestApplyConfig) can print them.
+	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
 	// whose live rebind failed, so the CLI can report THAT key's change as deferred
