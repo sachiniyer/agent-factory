@@ -120,13 +120,6 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 				req.Title, admissionErr,
 			)
 		}
-	} else if data != nil {
-		if admissionErr := validateGhostWorktreeDestructionAdmission(data); admissionErr != nil {
-			return session.InstanceData{}, fmt.Errorf(
-				"kill of ghost session %q was not started because its persisted worktree recovery is not safe to consume; nothing was changed — retry archive or restore before destructive cleanup: %w",
-				req.Title, admissionErr,
-			)
-		}
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
