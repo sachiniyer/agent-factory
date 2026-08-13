@@ -916,22 +916,24 @@ _af_tab_count() {
 # own menu line, never arbitrary visible pane text that happens to contain the
 # substring `r run` (Greptile, PR #1769):
 #   * LEFT — `(^|[^[:alnum:]])`: the `r` must start a token (line start, or a
-#     non-alphanumeric like the frame padding / a `• ` separator before it), so
-#     the trailing `r` of a word does NOT count ("serve`r run` •", "you`r run`").
-#   * RIGHT — ` •` (U+2022): the run action is ALWAYS followed by the TASK
-#     OVERLAY's space-and-bullet separator (`r run now • …` / `r run • …`), which
-#     no shell output line ("no longe`r run`ning.", "you`r run` finished")
+#     non-alphanumeric like the frame padding / a `· ` separator before it), so
+#     the trailing `r` of a word does NOT count ("serve`r run` ·", "you`r run`").
+#   * RIGHT — ` ·` (U+00B7): the run action is ALWAYS followed by the TASK
+#     OVERLAY's space-and-middle-dot separator (`r run now · …` / `r run · …`),
+#     which no shell output line ("no longe`r run`ning.", "you`r run` finished")
 #     carries.
-# The bullet is matched as a literal byte sequence, not a bracket expression, so
-# it works under the sandbox's C/POSIX locale (cf. _af_tab_count).
+# The middle dot is matched as a literal byte sequence, not a bracket
+# expression, so it works under the sandbox's C/POSIX locale (cf.
+# _af_tab_count).
 #
-# This bullet is the TASK OVERLAY's (ui/task_pane.go), NOT the root status
-# menu's. Those are different rows built by different renderers, and the status
-# menu moved to the repo-standard ` · ` in #2399 while the overlay hints did not
-# — so do not "fix" this to a middle dot to match the status bar. If the overlay
-# hints are converted later, this anchor moves with them, and the tests in
-# ui/menu_test.go are what pin the status menu's own separator.
-: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? •}"
+# This separator is the TASK OVERLAY's (ui/task_pane.go / ui/task_pane_edit.go).
+# The overlay hints historically kept the old bullet (`•`) after the status menu
+# moved to the repo-standard ` · ` in #2399, and this anchor pinned the bullet —
+# until the overlay itself converted to ` · ` and the stale anchor made the
+# self-test time out on a visibly open overlay (#3268). The anchor tracks the
+# overlay renderers, nothing else: if their separator ever changes again, change
+# this with it.
+: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
 
 # af_open_tasks — open the task-manager overlay (`m`). Syncs on the overlay's
 # `r run` run-action hint, present whether it opens in list or edit mode.
