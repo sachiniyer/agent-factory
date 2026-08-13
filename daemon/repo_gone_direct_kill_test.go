@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -379,6 +380,54 @@ func TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims(t *testing
 		"a later kill must reclaim the stalled fence and authorize repo-gone cleanup")
 	assert.False(t, exists(archivedPath))
 	assert.Nil(t, recordFor(t, repoID, "direct-stalled-identity"))
+}
+
+// TestKillSession_StalledAlternateReclaimVerifiesSelectedPath: a stalled
+// record can carry an identity-qualified alternate from an interrupted
+// relocation. When the reclaim selects that alternate — the primary is gone —
+// the pointer verification and the authorization must follow the path the
+// claim actually chose, not the pre-claim snapshot (#3278 review), or a valid
+// archive at the alternate is refused over the obsolete primary's absence.
+func TestKillSession_StalledAlternateReclaimVerifiesSelectedPath(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "direct-stalled-alternate")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	gw, err := inst.GetGitWorktree()
+	require.NoError(t, err)
+	_, _, err = manager.ArchiveSession(ArchiveSessionRequest{
+		Title: "direct-stalled-alternate", RepoID: repoID,
+	})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	// Model an interrupted move: the archive now lives at the alternate and
+	// the recorded primary is gone; the stalled record carries the alternate's
+	// identity.
+	movedPath := archivedPath + "-moved"
+	require.NoError(t, os.Rename(archivedPath, movedPath))
+	info, err := os.Stat(movedPath)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.NoError(t, gw.RestoreRelocationRecovery(sessiongit.RelocationRecovery{
+		State:         sessiongit.RelocationRecoveryStalled,
+		AlternatePath: movedPath,
+		IdentityKnown: true,
+		Device:        uint64(stat.Dev),
+		Inode:         uint64(stat.Ino),
+		FileType:      uint32(stat.Mode & syscall.S_IFMT),
+	}))
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-stalled-alternate", RepoID: repoID})
+	require.NoError(t, err,
+		"the reclaim selects the alternate, and authorization must follow that path")
+	assert.False(t, exists(movedPath),
+		"the kill must consume the archive at the path the claim selected")
+	assert.Nil(t, recordFor(t, repoID, "direct-stalled-alternate"),
+		"the settled kill must delete the session row")
 }
 
 // TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles: an

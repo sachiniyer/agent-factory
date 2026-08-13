@@ -483,7 +483,28 @@ const archivedWorktreePointerMaxSize = 1 << 16
 // metadata directory — which an unrelated replacement directory does not have.
 // Absence, unreadability, or any other shape refuses: deletion authority must
 // not fall back to pathname trust.
+//
+// Bounded like every other filesystem probe on this path (#3278 review): the
+// caller holds the session operation lock, and a stalled FUSE/NFS mount would
+// otherwise hang the kill on a plain open, fstat, read, or lstat. A tripped
+// deadline is an unknown, fail-closed answer.
 func VerifyArchivedWorktreePointer(worktreePath string) error {
+	resultC := make(chan error, 1)
+	go func() { resultC <- verifyArchivedWorktreePointer(worktreePath) }()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-resultC:
+		return err
+	case <-timer.C:
+		return fmt.Errorf(
+			"timed out after %s while verifying archived worktree pointer under %s: %w",
+			relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+		)
+	}
+}
+
+func verifyArchivedWorktreePointer(worktreePath string) error {
 	pointerPath := filepath.Join(worktreePath, ".git")
 	// One descriptor, opened without following links, carries every check and
 	// the read (#3278 review): a separate stat-then-read pair could be raced

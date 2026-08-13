@@ -292,12 +292,15 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	// The origin is conclusively gone. Require the archive's own creation-time
 	// evidence — its linked-worktree pointer — before authorizing deletion of
 	// the current pathname occupant (#3278 review): a directory that replaced
-	// the archive at the same path does not carry it.
-	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(archivedPath); pointerErr != nil {
+	// the archive at the same path does not carry it. Verified against the
+	// path the claim actually selected, not the pre-claim snapshot: resolving
+	// a stalled record may have chosen its identity-qualified alternate and
+	// moved the worktree location there.
+	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(claim.Path); pointerErr != nil {
 		instance.PreserveWorktreeRelocationClaimForRetry(claim)
 		return fmt.Errorf(
 			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually, or run a restore first: a failed repo-gone restore installs the cleanup authorization kill needs",
-			title, pointerErr, archivedPath,
+			title, pointerErr, claim.Path,
 		)
 	}
 	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)
