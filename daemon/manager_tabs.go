@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -357,8 +358,36 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // persisted identity (#1723). It also refuses an archived session under that
 // same lock, which the stale-instance check cannot substitute for (#2437 — see
 // the gate below). This is the daemon-side write used by the TUI's async PR-info
-// fetch (#921).
+// fetch (#921); admission for this unconditional form is the RPC gate in front
+// of it.
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
+	return m.setPRInfoGuarded(req, nil)
+}
+
+// prInfoWriteGuard is the condition set for a DIRECT (non-RPC) producer — the
+// PR-info sweep (#3232). Both conditions are evaluated under the write's own
+// op-lock, not as caller-side preflights, because a preflight leaves the whole
+// fetch-to-write gap open (#3287 review):
+//
+//   - expectGeneration is a compare-and-swap on the instance's PR-info
+//     generation: every recording producer serializes on the same op-lock and
+//     bumps the generation, so a sweep result that raced a newer write is
+//     refused HERE, where the newer write became visible.
+//   - lifecycle admission is checked at the same boundary every admitted RPC
+//     mutation checks it — immediately before the mutation, under the lock —
+//     so a quiesce that began while `gh` ran refuses the record. (A quiesce
+//     landing strictly mid-persist tolerates the in-flight completion, exactly
+//     as it does for any RPC mutation already past its gate; that is the
+//     daemon-wide admission semantic, not a gap unique to this path.)
+type prInfoWriteGuard struct {
+	expectGeneration uint64
+}
+
+// errPRInfoResultRaced reports a guarded PR-info write refused because a newer
+// producer recorded first. An expected outcome for the sweep, not a failure.
+var errPRInfoResultRaced = errors.New("newer PR info landed while this lookup was in flight")
+
+func (m *Manager) setPRInfoGuarded(req SetPRInfoRequest, guard *prInfoWriteGuard) error {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
@@ -413,6 +442,19 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	defer repoStartLock.Unlock()
+
+	// The guarded (direct-producer) conditions, under the same locks that
+	// serialize every recording producer — see prInfoWriteGuard.
+	if guard != nil {
+		if m.lifecycle != nil {
+			if admissionErr := m.lifecycle.mutationAdmissionError(); admissionErr != nil {
+				return admissionErr
+			}
+		}
+		if instance.PRInfoGeneration() != guard.expectGeneration {
+			return errPRInfoResultRaced
+		}
+	}
 
 	var info *git.PRInfo
 	if req.PRInfo.Number != 0 {

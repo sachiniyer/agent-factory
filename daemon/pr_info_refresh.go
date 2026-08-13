@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"sync"
 	"time"
@@ -178,19 +179,6 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 	if _, current := inst.FetchPRInfoSnapshot(); current != branch {
 		return
 	}
-	// A newer producer landed while this fetch ran — its result outranks ours.
-	if inst.PRInfoGeneration() != fetchGeneration {
-		return
-	}
-	// Quiescing can begin while `gh` runs (upgrade activation marks it before
-	// requesting shutdown), and Manager.SetPRInfo below is the direct write
-	// path with no RPC admission gate in front of it — recheck immediately
-	// before recording so the sweep cannot persist a mutation after admission
-	// closed (#3287 review; the sweep-entry check alone leaves the whole fetch
-	// duration as a window).
-	if m.lifecycle != nil && m.lifecycle.mutationAdmissionError() != nil {
-		return
-	}
 	var data session.PRInfoData
 	if info != nil {
 		data = session.PRInfoData{
@@ -201,10 +189,16 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 			Branch: info.Branch,
 		}
 	}
-	// SetPRInfo is the one write path (#2437): identity re-resolution by stable
-	// id, op-lock against archive/kill teardown, archived-row refusal, persist,
-	// then publish — the sweep gets every guard the client write path has.
-	if err := m.SetPRInfo(SetPRInfoRequest{RepoID: repoID, Title: inst.Title, ID: inst.ID, PRInfo: data}); err != nil {
+	// The guarded write is the one write path (#2437) plus the sweep's two
+	// conditions evaluated UNDER its locks (#3287 review): the generation CAS
+	// (a newer producer's result outranks this fetch) and lifecycle admission
+	// (a quiesce that began while `gh` ran refuses the record). Both refusals
+	// are expected outcomes, not failures.
+	err = m.setPRInfoGuarded(
+		SetPRInfoRequest{RepoID: repoID, Title: inst.Title, ID: inst.ID, PRInfo: data},
+		&prInfoWriteGuard{expectGeneration: fetchGeneration},
+	)
+	if err != nil && !errors.Is(err, errPRInfoResultRaced) && !IsDaemonQuiescingErr(err) && !IsDaemonUpgradeProbationErr(err) {
 		log.WarningLog.Printf("PR info sweep: record for %q failed: %v", inst.Title, err)
 	}
 }
