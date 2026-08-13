@@ -71,22 +71,15 @@ func newTestHome(t *testing.T) *home {
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
-	// Stub the seams with safe defaults so tests that incidentally trigger them
-	// never dial — or spawn — a real daemon. Tests exercising these paths
-	// override the relevant seam. createTab/closeTab default to an error so an
-	// unstubbed mutation fails loudly rather than reaching the daemon; setPRInfo
-	// defaults to a no-op so the in-memory PR-badge path stays exercisable.
+	// Tab mutations route through daemon RPCs (#960 PR 2). Stub the seams with
+	// safe defaults so tests that incidentally trigger them never dial — or spawn
+	// — a real daemon. Tests exercising these paths override the relevant seam.
 	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return daemon.CreateTabResponse{}, fmt.Errorf("createTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
-	t.Cleanup(SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
-		return nil
-	}))
-
 	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default
 	// the factory to an inert fake so a test that incidentally reaches a bind
 	// (mock-backed instances answer has-session) binds harmlessly instead of

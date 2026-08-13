@@ -12,7 +12,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // ----------------------------------------------------------------------------
@@ -149,8 +148,7 @@ func TestRealLocalBackend_FullLifecycle(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 // newRealE2EHarness is like newE2EHarness but does NOT swap the backend
-// factory — NewInstance produces a real LocalBackend. It still swaps the
-// PR fetcher so we don't shell out to `gh` (which needs auth).
+// factory — NewInstance produces a real LocalBackend.
 //
 // The caller must have set up a real git repo and chdir'd to it before
 // calling start(), because startNewInstance uses Path: ".".
@@ -164,13 +162,6 @@ func newRealE2EHarness(t *testing.T) *e2eHarness {
 	}
 	eh := &e2eHarness{t: t, home: h}
 	installDirectSessionStarter(t)
-
-	// Stub PR fetcher: return no PR, zero log noise. Don't count calls —
-	// we don't care here, the PR behaviour is covered by the faked tests.
-	restoreFetcher := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
-		return nil, nil
-	})
-	t.Cleanup(restoreFetcher)
 
 	// Stub program: `cat` hangs on stdin, so the tmux session stays alive
 	// indefinitely (until we kill it) without needing Claude installed.

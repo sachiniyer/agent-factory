@@ -2,7 +2,6 @@ package app
 
 import (
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,20 +12,16 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // ----------------------------------------------------------------------------
-// teatest harness for end-to-end UI tests of the async creation flow (#310)
-// and lazy PR fetching (#311).
+// teatest harness for end-to-end UI tests of the async creation flow (#310).
 //
-// The harness swaps two seams:
+// The harness swaps one seam:
 //   session.SetBackendFactoryForTest — so NewInstance returns a FakeBackend
 //     whose Start blocks until the test signals completion
-//   app.SetPRInfoFetcherForTest    — so fetchPRInfoCmd routes to a counter
-//     that returns canned PRInfo instead of shelling out to `gh`
 //
-// Both seams are restored via t.Cleanup, so each test is isolated.
+// The seam is restored via t.Cleanup, so each test is isolated.
 // ----------------------------------------------------------------------------
 
 type e2eHarness struct {
@@ -36,10 +31,6 @@ type e2eHarness struct {
 
 	bmu      sync.Mutex
 	backends []*session.FakeBackend
-
-	fmu         sync.Mutex
-	prFetchLog  []prFetchCall
-	prFetchResp *git.PRInfo
 }
 
 // e2eAsyncTimeout is the ceiling every E2E poll-until-condition waits before
@@ -56,11 +47,6 @@ const e2eAsyncTimeout = 30 * time.Second
 // the waitUntil poll loops, so it must not false-fail before the outer wait does
 // when the event loop is merely slow rather than wedged.
 const e2eQueryTimeout = e2eAsyncTimeout
-
-type prFetchCall struct {
-	repoPath string
-	branch   string
-}
 
 // newE2EHarness constructs the home and installs the seams, but does NOT
 // start the tea.Program. Tests should preload any instances via
@@ -92,15 +78,6 @@ func newE2EHarness(t *testing.T) *e2eHarness {
 	})
 	t.Cleanup(restoreBackend)
 	installDirectSessionStarter(t)
-
-	restoreFetcher := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
-		eh.fmu.Lock()
-		eh.prFetchLog = append(eh.prFetchLog, prFetchCall{repoPath, branch})
-		resp := eh.prFetchResp
-		eh.fmu.Unlock()
-		return resp, nil
-	})
-	t.Cleanup(restoreFetcher)
 
 	return eh
 }
@@ -164,29 +141,6 @@ func (eh *e2eHarness) addStartedInstance(title string) *session.Instance {
 	return inst
 }
 
-// addStartedInstanceWithWorktree is addStartedInstance + a fake GitWorktree
-// attached, so fetchPRInfoCmd's FetchPRInfoSnapshot guard passes. Use for
-// PR-info tests that need the async fetch to actually dispatch.
-func (eh *e2eHarness) addStartedInstanceWithWorktree(title, branch string) *session.Instance {
-	eh.t.Helper()
-	inst := eh.addStartedInstance(title)
-	inst.Branch = branch
-	gw, err := git.NewGitWorktreeFromStorage(
-		eh.t.TempDir(), // repoPath — not read by fake fetcher
-		filepath.Join(eh.t.TempDir(), "worktree"), // worktreePath — ditto
-		title,
-		branch,
-		"deadbeef",
-		false,
-		true,
-	)
-	if err != nil {
-		eh.t.Fatal(err)
-	}
-	inst.SetGitWorktreeForTest(gw)
-	return inst
-}
-
 // latestBackend returns the most recently created FakeBackend, blocking up
 // to d for the factory to fire at least once. Useful when a test triggers
 // instance creation via keystrokes and needs the backend handle to unblock
@@ -219,25 +173,6 @@ func (eh *e2eHarness) waitForStart(fb *session.FakeBackend, d time.Duration) {
 	case <-time.After(d):
 		eh.t.Fatalf("FakeBackend.Start was not invoked within %s", d)
 	}
-}
-
-// prFetchCount returns how many times the fake PR fetcher has been called.
-func (eh *e2eHarness) prFetchCount() int {
-	eh.fmu.Lock()
-	defer eh.fmu.Unlock()
-	return len(eh.prFetchLog)
-}
-
-// prFetchBranches returns the branches requested so far (for assertions
-// that the right instance's PR was fetched).
-func (eh *e2eHarness) prFetchBranches() []string {
-	eh.fmu.Lock()
-	defer eh.fmu.Unlock()
-	out := make([]string, 0, len(eh.prFetchLog))
-	for _, c := range eh.prFetchLog {
-		out = append(out, c.branch)
-	}
-	return out
 }
 
 // waitUntil polls fn every 10ms until it returns true or d elapses, then
@@ -515,90 +450,4 @@ func TestE2E_310_Failure_DoesNotTouchOtherInstance(t *testing.T) {
 		"user's selection must remain on 'other'")
 	assert.Equal(t, stateDefault, eh.homeState(),
 		"failure should not put the app into a modal state")
-}
-
-// ----------------------------------------------------------------------------
-// #311 — PR info should be async and lazy.
-//
-// Scenario 3: selecting an instance with stale PR info triggers exactly one
-// fake-fetcher call. A second selection-change within the freshness window
-// must be debounced (no second call).
-// ----------------------------------------------------------------------------
-
-func TestE2E_311_LazyDebounce_OnSelectionChange(t *testing.T) {
-	eh := newE2EHarness(t)
-	a := eh.addStartedInstanceWithWorktree("egg", "branch-a")
-	b := eh.addStartedInstanceWithWorktree("fig", "branch-b")
-	eh.home.sidebar.SetSelectedInstance(0) // start on A
-	eh.start()
-
-	// Wait for the initial selection-triggered fetch. Freshness age is
-	// sentinel-infinite on process start, so the first selection dispatches.
-	eh.waitUntil(e2eAsyncTimeout, "first fetch (for 'egg') dispatches", func() bool {
-		return eh.prFetchCount() >= 1
-	})
-	require.Equal(t, []string{"branch-a"}, eh.prFetchBranches(),
-		"first fetch must target the selected instance's branch")
-
-	// Navigate down to B — through A's two expanded tab rows first (#1024
-	// PR 3: the selected instance auto-expands and j walks into its children;
-	// tab rows keep the selection on A, so they must not dispatch a fetch) —
-	// which triggers a second selectionChanged and fetch on landing.
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	eh.waitUntil(e2eAsyncTimeout, "second fetch (for 'fig') dispatches", func() bool {
-		return eh.prFetchCount() >= 2
-	})
-	assert.Equal(t, []string{"branch-a", "branch-b"}, eh.prFetchBranches())
-
-	// Navigate back to A — freshness window is 60s, so no new fetch should
-	// fire. Give the event loop a chance to do the wrong thing if it's going to.
-	eh.tm.Send(tea.KeyMsg{Type: tea.KeyUp})
-	time.Sleep(300 * time.Millisecond)
-	assert.Equal(t, 2, eh.prFetchCount(),
-		"debounce must suppress a re-fetch for an instance whose PR info is still fresh")
-
-	assert.NotNil(t, eh.findInstance("egg"))
-	assert.NotNil(t, eh.findInstance("fig"))
-	_ = a
-	_ = b
-}
-
-// ----------------------------------------------------------------------------
-// Scenario 4: the PR info tick refreshes the selected instance ONLY,
-// not every instance in the sidebar (the pre-#311 behavior).
-// ----------------------------------------------------------------------------
-
-func TestE2E_311_TickRefresh_OnlySelectedInstance(t *testing.T) {
-	eh := newE2EHarness(t)
-	eh.addStartedInstanceWithWorktree("egg", "branch-a")
-	b := eh.addStartedInstanceWithWorktree("fig", "branch-b")
-	eh.home.sidebar.SetSelectedInstance(1) // select B
-	eh.start()
-
-	// Let the initial selection-triggered fetch complete.
-	eh.waitUntil(e2eAsyncTimeout, "initial fetch for selected instance", func() bool {
-		return eh.prFetchCount() >= 1
-	})
-	initial := eh.prFetchCount()
-	require.Equal(t, []string{"branch-b"}, eh.prFetchBranches(),
-		"initial fetch must be for the selected instance only")
-
-	// Send the PR info tick message synthetically — the real ticker waits
-	// 60s, too long for a unit test. The handler forces a fetch for the
-	// selected instance regardless of freshness.
-	eh.tm.Send(tickUpdatePRInfoMessage{})
-	eh.waitUntil(e2eAsyncTimeout, "tick triggers another fetch", func() bool {
-		return eh.prFetchCount() > initial
-	})
-
-	// Every fetch should have targeted B's branch — the tick must not
-	// iterate over every instance the way the pre-#311 code did.
-	branches := eh.prFetchBranches()
-	for _, br := range branches {
-		assert.Equal(t, "branch-b", br,
-			"every fetch must target the selected instance's branch; got %v", branches)
-	}
-	_ = b
 }

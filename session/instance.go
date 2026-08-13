@@ -283,8 +283,8 @@ type Instance struct {
 	prInfo *git.PRInfo
 	// prInfoLastFetched is the wall-clock time of the most recent PR info
 	// fetch. Not persisted — restored instances start with a zero value so
-	// the first lazy fetch on selection always runs. Used to debounce
-	// repeated fetches when the user cycles the sidebar.
+	// the daemon's first refresh always runs. Used to debounce its background
+	// GitHub lookups.
 	prInfoLastFetched time.Time
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).

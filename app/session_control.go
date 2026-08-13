@@ -354,16 +354,6 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 	})
 }
 
-// setPRInfoThroughDaemon routes the TUI's PR-info write (prInfoUpdatedMsg) to the
-// daemon for persistence (#921 write moved daemon-side, #960 PR 2). The gh fetch
-// stays TUI-side; only the persisted write moves. The TUI keeps its in-memory
-// SetPRInfo for instant UI feedback.
-var setPRInfoThroughDaemon = func(request daemon.SetPRInfoRequest) error {
-	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.SetPRInfo(request)
-	})
-}
-
 // snapshotThroughDaemon fetches the daemon's authoritative session list for a
 // repo (#960 PR 3). It is the TUI's read path under the single-writer model: the
 // sidebar mirrors this projection instead of re-reading instances.json.
@@ -491,12 +481,6 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	prev := closeTabThroughDaemon
 	closeTabThroughDaemon = f
 	return func() { closeTabThroughDaemon = prev }
-}
-
-func SetPRInfoSetterForTest(f func(daemon.SetPRInfoRequest) error) func() {
-	prev := setPRInfoThroughDaemon
-	setPRInfoThroughDaemon = f
-	return func() { setPRInfoThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {

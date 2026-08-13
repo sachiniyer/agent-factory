@@ -12,9 +12,9 @@ import (
 )
 
 // TestPRInfoAge_NeverFetched_IsVeryLarge — the sentinel behavior that
-// fetchPRInfoCmd relies on to always dispatch the first fetch after process
-// start (or after an instance is restored from disk — prInfoLastFetched is
-// not persisted).
+// the daemon PR refresh relies on to always dispatch the first fetch after
+// process start (or after an instance is restored from disk —
+// prInfoLastFetched is not persisted).
 func TestPRInfoAge_NeverFetched_IsVeryLarge(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
@@ -27,7 +27,7 @@ func TestPRInfoAge_NeverFetched_IsVeryLarge(t *testing.T) {
 }
 
 // TestPRInfoAge_AfterSetPRInfo_IsFresh verifies SetPRInfo bumps the age
-// clock — otherwise the debounce in fetchPRInfoCmd would never engage.
+// clock — otherwise the daemon refresh debounce would never engage.
 func TestPRInfoAge_AfterSetPRInfo_IsFresh(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
@@ -61,8 +61,8 @@ func TestMarkPRInfoFetched_BumpsAgeWithoutMutatingInfo(t *testing.T) {
 		"MarkPRInfoFetched must reset the fetch timestamp")
 }
 
-// TestFetchPRInfoSnapshot_NotStarted returns empty values — the guard used
-// by fetchPRInfoCmd to avoid firing during the Loading→Running transition.
+// TestFetchPRInfoSnapshot_NotStarted returns empty values — the guard used by
+// daemon refresh to avoid firing during the Loading→Running transition.
 func TestFetchPRInfoSnapshot_NotStarted(t *testing.T) {
 	i, err := NewInstance(InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)

@@ -84,10 +84,6 @@ func (target sessionActionTarget) restoreRequest() daemon.RestoreSessionRequest 
 	return daemon.RestoreSessionRequest{ID: target.id, Title: target.title, RepoID: target.repoID}
 }
 
-func (target sessionActionTarget) setPRInfoRequest(info session.PRInfoData) daemon.SetPRInfoRequest {
-	return daemon.SetPRInfoRequest{ID: target.id, Title: target.title, RepoID: target.repoID, PRInfo: info}
-}
-
 // newStatusPollHolder mints an identity for one HOLDER of the daemon's pause
 // lease (#3027). The daemon keys the lease by holder so a release only lifts the
 // pause when the last holder leaves; a holder that is not unique per lifecycle

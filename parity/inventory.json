@@ -822,25 +822,25 @@
         "pointer": ""
       },
       "verdict": "unclear",
-      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
+      "notes": "The session.pr.set dependency is now closed by daemon-owned discovery (#3232), so every client can receive PR metadata without opening the TUI. Web/CLI open-copy affordances are still absent and remain a separate owner call; this run deliberately did not widen from metadata discovery into a second capability."
     },
     {
       "id": "session.pr.set",
       "title": "Record a session's GitHub PR info",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_control.go:308 (auto-fetched on sync, not a user verb)"
+        "pointer": "daemon/pr_info_refresh.go refreshPRInfos -> Manager.SetPRInfo; app/sync.go reconcileSnapshot projects the result"
       },
       "web": {
-        "status": "no",
-        "pointer": "no SetPRInfo call in web/src"
+        "status": "yes",
+        "pointer": "daemon/pr_info_refresh.go refreshPRInfos -> Manager.SetPRInfo -> session.updated / web/src/sessions.ts upsertSession"
       },
       "cli": {
-        "status": "no",
-        "pointer": "no PR verb in the cobra tree (derived)"
+        "status": "yes",
+        "pointer": "daemon/pr_info_refresh.go refreshPRInfos -> Manager.SetPRInfo; api/sessions.go listSessions/getSessionByTitle read InstanceData"
       },
-      "verdict": "unclear",
-      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
+      "verdict": "parity",
+      "notes": "Closed by #3232: PR discovery moved out of the TUI's selected-row loop and into one daemon-owned, cancellable, debounced refresh over every eligible local-worktree session. It reuses session/git.FetchPRInfoContext for lookup and Manager.SetPRInfo for stable-id/branch validation, persistence, and session.updated publication; the TUI's private fetch/write path was removed, so web- or CLI-only use no longer depends on opening the TUI. The public SetPRInfo route remains as a compatibility mutation, but no current surface needs to call it to populate metadata. Open/copy controls are the distinct session.pr.open row and remain out of scope for this one-gap run."
     },
     {
       "id": "session.preview",

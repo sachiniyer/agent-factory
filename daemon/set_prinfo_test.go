@@ -29,7 +29,9 @@ func TestSetPRInfo_SetsAndPersists(t *testing.T) {
 	const title = "worker"
 	inst := startedLocalTabInstance(t, manager, repo.ID, repoPath, title, "af_"+title+"_agent")
 
-	want := session.PRInfoData{Number: 42, Title: "feat: thing", URL: "https://example/pr/42", State: "OPEN"}
+	want := session.PRInfoData{
+		Number: 42, Title: "feat: thing", URL: "https://example/pr/42", State: "OPEN", Branch: title + "-branch",
+	}
 	if err := manager.SetPRInfo(SetPRInfoRequest{Title: title, RepoID: repo.ID, PRInfo: want}); err != nil {
 		t.Fatalf("SetPRInfo: %v", err)
 	}
@@ -57,6 +59,20 @@ func TestSetPRInfo_SetsAndPersists(t *testing.T) {
 	}
 	if data[0].PRInfo != want {
 		t.Fatalf("persisted PR info = %+v, want %+v", data[0].PRInfo, want)
+	}
+}
+
+func TestSetPRInfo_RejectsAStaleBranchResult(t *testing.T) {
+	manager, repo := tabEventSession(t, "branch-race")
+	err := manager.SetPRInfo(SetPRInfoRequest{
+		Title: "branch-race", RepoID: repo.ID,
+		PRInfo: session.PRInfoData{Number: 9, State: "OPEN", Branch: "old-branch"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed branch") {
+		t.Fatalf("SetPRInfo stale branch: want rejection, got %v", err)
+	}
+	if got := snapshotTabs(t, manager, repo.ID, "branch-race").PRInfo; got.Number != 0 {
+		t.Fatalf("stale PR info was applied: %+v", got)
 	}
 }
 
@@ -134,11 +150,9 @@ func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {
 }
 
 // TestSetPRInfo_PublishesSessionUpdated pins the multi-client half of the
-// mutation (#2769). SetPRInfo is how the TUI's async `gh pr view` fetch lands, so
-// the PR badge it records is state every OTHER connected client — a second TUI
-// window, an open web rail — has to repaint from. A client only re-Snapshots
-// after its OWN mutation, so without this event the badge stays invisible
-// everywhere else until something unrelated happens to republish the session.
+// mutation (#2769). The daemon's background PR lookup lands here, so the badge
+// it records is state every connected client has to repaint from. Without this
+// event a client waits for its next Snapshot or an unrelated session update.
 //
 // The assertion is on the event payload rather than on a later Snapshot on
 // purpose: a Snapshot passes with no event published at all, which is exactly the

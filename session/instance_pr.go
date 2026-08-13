@@ -33,8 +33,8 @@ func (i *Instance) PRInfoAge() time.Duration {
 }
 
 // MarkPRInfoFetched bumps the fetch timestamp without touching the cached
-// value. Used after a transient fetch error so we don't re-try on every
-// subsequent selection change.
+// value. Used after a transient fetch error so the daemon does not retry on
+// every refresh tick.
 func (i *Instance) MarkPRInfoFetched() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -42,7 +42,7 @@ func (i *Instance) MarkPRInfoFetched() {
 }
 
 // FetchPRInfoSnapshot returns the data needed to fetch PR info for this
-// instance off the main event loop. The returned repoPath is empty when the
+// instance outside its locked maps. The returned repoPath is empty when the
 // instance is not ready for fetching (not started, no worktree, or remote).
 func (i *Instance) FetchPRInfoSnapshot() (repoPath, branch string) {
 	i.mu.RLock()

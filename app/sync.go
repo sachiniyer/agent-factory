@@ -14,13 +14,8 @@ import (
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
-// prInfoStaleAfter is how long a fetched PR info entry is considered fresh.
-// Selection changes within this window do not re-trigger a fetch.
-const prInfoStaleAfter = 60 * time.Second
-
 // -- Ticker message types --
 
-type tickUpdatePRInfoMessage struct{}
 type tickRefreshExternalMessage struct{}
 
 // snapshotFetchedMsg carries the result of an off-loop daemon Snapshot fetch
@@ -62,33 +57,9 @@ type snapshotFetchedMsg struct {
 	allReposErr error
 }
 
-// prInfoUpdatedMsg is returned by an async PR info fetch.
-// info is nil when the fetch resolved to "no PR for this branch".
-// err is set for transient errors — the handler keeps the cached value.
-// branch is the worktree branch captured at fetch kickoff (the same value
-// passed to prInfoFetcher). target captures the session identity and repo at
-// the same moment; the handler drops the update if either identity is gone, the
-// active project changed, or the resolved session is no longer on that branch.
-type prInfoUpdatedMsg struct {
-	target sessionActionTarget
-	branch string
-	// target.repoID is the repo the fetch was scoped to, captured at kickoff. The
-	// handler drops the message when it no longer matches m.repoID: an in-place
-	// project switch (#1461) resets the store and swaps the active repo while a
-	// fetch launched for the previous one is still in flight. Mirrors
-	// snapshotFetchedMsg's guard (#1780).
-	info *git.PRInfo
-	err  error
-}
-
 // -- Ticker commands --
 // Each ticker sleeps for a fixed interval, then returns its message type to
 // re-enter Update(). The ticker is re-scheduled at the end of its handler.
-
-var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(60 * time.Second)
-	return tickUpdatePRInfoMessage{}
-}
 
 // snapshotRefreshInterval is how often the TUI polls the daemon for the
 // authoritative session snapshot and reconciles its sidebar to it (#960 PR 3).
@@ -224,74 +195,6 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, er
 			return nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
 		}
 		time.Sleep(coldStartWarmupPoll)
-	}
-}
-
-// prInfoFetcher is the function used by fetchPRInfoCmd to retrieve PR info.
-// It's a package-level variable (not a direct git.FetchPRInfo call) so
-// e2e tests can swap in a fake that returns canned data and counts calls —
-// the real fetcher shells out to `gh`, which we don't want in unit tests.
-var prInfoFetcher = git.FetchPRInfo
-
-// SetPRInfoFetcherForTest replaces prInfoFetcher with f and returns a
-// restore function. Test-only.
-func SetPRInfoFetcherForTest(f func(repoPath, branch string) (*git.PRInfo, error)) func() {
-	prev := prInfoFetcher
-	prInfoFetcher = f
-	return func() { prInfoFetcher = prev }
-}
-
-// fetchPRInfoCmd returns a tea.Cmd that fetches PR info for inst in a
-// background goroutine and emits a prInfoUpdatedMsg. Returns nil when the
-// instance is not eligible for a fetch (nil / not started / remote / already
-// fresh / fetch already in flight). Using force=true ignores the freshness
-// check — for tick-driven refreshes of the selected instance. repoID is the
-// caller's active repo, read on the event loop and carried on the result so the
-// handler can drop a fetch that outlived a project switch (#1780).
-func fetchPRInfoCmd(inst *session.Instance, repoID string, force bool) tea.Cmd {
-	// PR info comes from a local git branch (`gh pr view`), so it only applies to
-	// a backend with a local worktree.
-	if inst == nil || inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
-		return nil
-	}
-	if !force && inst.PRInfoAge() < prInfoStaleAfter {
-		return nil
-	}
-	repoPath, branch := inst.FetchPRInfoSnapshot()
-	// An empty branch means a detached-HEAD worktree: there is no branch to
-	// look up, so skip the fetch entirely rather than spawning `gh pr view ""`
-	// on every tick. FetchPRInfo defends against this too, but stopping here
-	// avoids the goroutine and subprocess churn for the selected instance.
-	if repoPath == "" || branch == "" {
-		return nil
-	}
-	// Mark as fetched at kickoff so concurrent callers observe the debounce
-	// window while this fetch is in flight. selectionChanged is re-entered
-	// every 100ms by the preview tick; without this, restored instances
-	// (whose prInfoLastFetched is zero until the first fetch completes)
-	// would spawn a new `gh pr view` subprocess on every tick until one
-	// returned. The completion handler bumps the timestamp again with the
-	// real result, so the fresh window starts from fetch completion.
-	inst.MarkPRInfoFetched()
-	target := captureSessionActionTarget(inst, repoID)
-	// Capture the fetch seam on the event loop, before the goroutine reads it: it
-	// is a package var swapped by test seams, so reading it inside the cmd
-	// goroutine would race a sibling parallel test's swap (#960 PR 4 race-fix
-	// class). Reading it here pins the value for this fetch.
-	fetch := prInfoFetcher
-	return func() tea.Msg {
-		fetchStart := time.Now()
-		detachTraceMark("fetchPRInfoCmd-goroutine-entry")
-		info, err := fetch(repoPath, branch)
-		if info != nil {
-			// Bind even test/custom fetchers to the captured lookup ref. A PR state
-			// without provenance must never authorize a destructive shortcut.
-			bound := *info
-			bound.Branch = branch
-			info = &bound
-		}
-		detachTrace(fetchStart, "fetchPRInfoCmd-prInfoFetcher-returned")
-		return prInfoUpdatedMsg{target: target, branch: branch, info: info, err: err}
 	}
 }
 
@@ -788,9 +691,8 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 			}
 		}
 	}
-	// PR info mirrors the daemon's recorded value. This runs on the event loop,
-	// serialized with prInfoUpdatedMsg, so it never races the TUI's own
-	// fetch-then-write of the same badge.
+	// PR info mirrors the daemon's recorded value. Discovery, persistence, and
+	// publication are daemon-owned (#3232); the TUI only projects the snapshot.
 	if prInfoDiffersFromData(inst, d.PRInfo) {
 		inst.SetPRInfo(prInfoFromData(d.PRInfo))
 		changed = true

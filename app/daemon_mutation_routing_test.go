@@ -7,7 +7,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // TestHandleNewTab_RoutesThroughDaemon_NoLocalSave proves the `t` mutation goes
@@ -170,64 +169,4 @@ func TestHandleCloseTab_AgentTabSkipsDaemon(t *testing.T) {
 
 	require.False(t, called, "the agent tab must not round-trip to the daemon")
 	require.Equal(t, 2, inst.TabCount(), "the agent tab must never be closed")
-}
-
-// TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon proves the PR-info write goes
-// through the daemon SetPRInfo RPC (the gh fetch stays TUI-side, #960 PR 2 §6)
-// and applies the badge in-memory for instant UX.
-func TestPrInfoUpdatedMsg_RoutesWriteThroughDaemon(t *testing.T) {
-	h := newTestHome(t)
-	inst := newLoadingInstance(t, "pr-target")
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	var gotRequest daemon.SetPRInfoRequest
-	restore := SetPRInfoSetterForTest(func(request daemon.SetPRInfoRequest) error {
-		gotRequest = request
-		return nil
-	})
-	defer restore()
-
-	info := &sessiongit.PRInfo{Number: 42, Title: "add feature", URL: "https://x/42", State: "OPEN"}
-	_, _ = h.Update(prInfoUpdatedMsg{target: captureSessionActionTarget(inst, h.repoID), info: info})
-
-	require.Equal(t, inst.ID, gotRequest.ID, "SetPRInfo must retain the selected session identity")
-	require.Equal(t, inst.Title, gotRequest.Title, "SetPRInfo must carry display context")
-	require.Equal(t, h.repoID, gotRequest.RepoID, "SetPRInfo must be scoped to the TUI's repo")
-	require.Equal(t, 42, gotRequest.PRInfo.Number, "SetPRInfo must carry the fetched PR number")
-	require.Equal(t, "add feature", gotRequest.PRInfo.Title)
-
-	got := inst.GetPRInfo()
-	require.NotNil(t, got, "the badge must be applied in-memory for instant UX")
-	require.Equal(t, 42, got.Number)
-
-	// The daemon owns the persist; the TUI writes nothing to instances.json.
-	requireTUIInstancesEmpty(t, h)
-}
-
-// TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon proves the #921 branch guard
-// still holds: when the captured fetch branch no longer matches the resolved
-// instance's branch, neither the in-memory badge nor the daemon write is applied.
-func TestPrInfoUpdatedMsg_BranchMismatchSkipsDaemon(t *testing.T) {
-	h := newTestHome(t)
-	inst := newLoadingInstance(t, "pr-branch")
-	inst.Branch = "feature-x"
-	h.store.AddInstance(inst)
-	h.sidebar.SetSelectedInstance(0)
-
-	called := false
-	restore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
-		called = true
-		return nil
-	})
-	defer restore()
-
-	info := &sessiongit.PRInfo{Number: 99, Title: "wrong branch", State: "OPEN"}
-	// The fetch was kicked off for a different branch than the instance now has.
-	_, _ = h.Update(prInfoUpdatedMsg{
-		target: captureSessionActionTarget(inst, h.repoID), branch: "feature-y", info: info,
-	})
-
-	require.False(t, called, "a branch mismatch must not write PR info to the daemon")
-	require.Nil(t, inst.GetPRInfo(), "a branch mismatch must not apply the badge")
 }

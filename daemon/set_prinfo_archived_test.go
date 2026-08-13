@@ -26,7 +26,7 @@ import (
 // CloseTab/RenameTab/ReorderTab (see its doc comment, and
 // TestCloseTab_ArchiveWinningOpLockRaceKeepsWebTab, which this mirrors).
 //
-// The window is real rather than theoretical: the TUI kicks off `gh pr view`
+// The window is real rather than theoretical: the daemon kicks off `gh pr list`
 // against a target captured before an archive can begin and sends SetPRInfo when
 // that async result lands, so the request routinely outlives the state it was
 // resolved against.

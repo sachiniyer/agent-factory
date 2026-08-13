@@ -7,7 +7,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -68,126 +67,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case keyupMsg:
 		m.menu.ClearKeydownIfMatch(msg.name)
-		return m, nil
-	case tickUpdatePRInfoMessage:
-		// Lazy: only refresh PR info for the currently selected instance. Other
-		// instances keep whatever was last fetched (or restored from disk) —
-		// they'll refresh when the user actually looks at them. The fetch
-		// itself runs in a background goroutine so the UI stays responsive.
-		// Skip the fetch while attached: gh pr view is a network call and
-		// the sidebar PR badge is hidden behind the tmux client (#598).
-		if m.attached.Load() {
-			return m, tickUpdatePRInfoCmd
-		}
-		selected := m.sidebar.GetSelectedInstance()
-		return m, tea.Batch(tickUpdatePRInfoCmd, fetchPRInfoCmd(selected, m.repoID, true))
-	case prInfoUpdatedMsg:
-		detachTraceMark("prInfoUpdatedMsg-handler-entry")
-		// Drop PR info fetched for a repo we have since switched away from
-		// (#1780). An in-place project switch (#1461) resets the store and swaps
-		// m.repoID. Gate on the captured repo before stable-ID resolution, mirroring
-		// snapshotFetchedMsg. No tick re-arm
-		// here: the PR-info tick re-arms itself in tickUpdatePRInfoMessage.
-		if msg.target.repoID != m.repoID {
-			return m, nil
-		}
-		// Resolve the immutable identity captured before the async gh fetch. A
-		// snapshot may rebuild the pointer for the same stable ID (#862), but a
-		// killed/recreated row may reuse both title AND branch. Title/branch is
-		// therefore a content check, never identity (#2358).
-		target := m.resolveSessionActionTarget(msg.target)
-		if target == nil {
-			return m, nil
-		}
-		// PR info is branch-specific too, so a same-ID row whose branch changed
-		// while gh was running must still reject the old result (#921).
-		if target.GetWorktreeBranch() != msg.branch {
-			return m, nil
-		}
-		// Drop a result for a session that is archived, or on its way to being
-		// archived or killed. The fetch is kicked off from a target captured before
-		// any of that could begin, so it routinely outlives the state it was
-		// resolved against.
-		//
-		// Both halves are needed, and neither covers the other:
-		//
-		//   - IsArchived is the settled case, which the daemon now refuses outright
-		//     (#2437/#1809). Sending it would only earn a logged "failure" for
-		//     ordinary, correct behaviour.
-		//   - IsTearingDown is the in-flight case, and it is the one that actually
-		//     fires. IsArchived reads the liveness axis ALONE and is settled-state
-		//     only, while a TUI archive raises OpArchiving OPTIMISTICALLY and does
-		//     not flip liveness until the RPC returns — so for the whole
-		//     teardown+move the session is invisible to a liveness check. OpKilling
-		//     rides along for its own reason: a record about to be deleted has no
-		//     use for PR info.
-		//
-		// Deliberately NOT the wider HasInFlightOp: that would also suppress the
-		// badge for a session that is merely CREATING, and a loading session getting
-		// its PR badge is normal. The pre-existing
-		// TestPrInfoUpdatedMsg_Success_AppliesInfoAndBumpsTimestamp drives exactly
-		// that (newLoadingInstance is OpCreating) and fails if the predicate is
-		// widened.
-		//
-		// Restore is deliberately NOT in the predicate, and it is worth being exact
-		// about why, because it is the residual below. MarkRestoring (the optimistic
-		// overlay) keeps whatever liveness it entered with — tkMarkRestoring's target
-		// is {s.liveness, OpRestoring}, not a fixed Archived. On an Archived row that
-		// is Archived, so IsArchived drops the result; but `r`/handleRestore is
-		// offered on Lost and Dead rows too (lifecycleActionFor), so the SAME edge
-		// routinely lands on {LiveLost, OpRestoring} — as does the daemon's
-		// BeginRestore, and as does adoptSnapshotOp reconciling a daemon-side
-		// restore. In those windows neither IsArchived nor IsTearingDown fires and
-		// the result is still applied. That is intended: a restoring session is
-		// coming back live and wants its badge.
-		//
-		// Which is the honest residual: setPRInfoThroughDaemon below runs INLINE on
-		// the Update goroutine, and every long daemon op holds this session's
-		// op-lock — so a result arriving during ANY restore (the TUI's own `r` on a
-		// Lost row included, not just a daemon-side one) still parks the event loop
-		// until that restore finishes. This guard narrows the freeze window to the
-		// ops whose results are worthless anyway; it does not close it. Closing it
-		// means not making a blocking RPC from the event loop at all, a different
-		// change.
-		//
-		// Dropping costs at most a stale badge: fetchPRInfoCmd already called
-		// MarkPRInfoFetched at kickoff, so nothing retries in a tight loop, and the
-		// next tick re-fetches with force.
-		if target.IsArchived() || target.IsTearingDown() {
-			return m, nil
-		}
-		if msg.err != nil {
-			log.WarningLog.Printf("PR info fetch failed for %q: %v", msg.target.title, msg.err)
-			// Mark as fetched anyway so we don't thrash retries on every
-			// selection change when the network is unreachable.
-			target.MarkPRInfoFetched()
-			return m, nil
-		}
-		// Apply the fetched PR info to the in-memory instance immediately so the
-		// sidebar badge updates without waiting on the daemon round-trip. The
-		// gh-pr-view fetch stays TUI-side (#921, per-selection, debounced); only
-		// the persisted WRITE goes to the daemon (#960) — the single writer owns
-		// it, so the TUI never originates an instances.json write (#959).
-		target.SetPRInfo(msg.info)
-		var prData session.PRInfoData
-		if msg.info != nil {
-			prData = session.PRInfoData{
-				Number: msg.info.Number,
-				Title:  msg.info.Title,
-				URL:    msg.info.URL,
-				State:  msg.info.State,
-				Branch: msg.info.Branch,
-			}
-		}
-		saveStart := time.Now()
-		if err := setPRInfoThroughDaemon(msg.target.setPRInfoRequest(prData)); err != nil {
-			// In-memory update already applied for the UI; surface the persist
-			// failure but don't drop the badge. callDaemon already waited out the
-			// daemon warm-up window (#829), so a residual error is a real failure,
-			// not version skew — there is no TUI write path to fall back to.
-			log.WarningLog.Printf("failed to persist PR info for %q via daemon: %v", target.Title, err)
-		}
-		detachTrace(saveStart, "prInfoUpdatedMsg-setPRInfoThroughDaemon-returned")
 		return m, nil
 	case tickRefreshExternalMessage:
 		// The tick only PACES the loop; the actual Snapshot fetch runs off the

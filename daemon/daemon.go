@@ -306,6 +306,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+	startPRInfoRefreshLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an

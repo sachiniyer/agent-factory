@@ -356,8 +356,8 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // its stale stable id) over the new instance's disk record, corrupting the
 // persisted identity (#1723). It also refuses an archived session under that
 // same lock, which the stale-instance check cannot substitute for (#2437 — see
-// the gate below). This is the daemon-side write used by the TUI's async PR-info
-// fetch (#921).
+// the gate below). The daemon's background discovery loop and compatibility RPC
+// both converge here (#3232).
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
@@ -396,9 +396,9 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	// same record with no op-lock at all, so it can interleave INSIDE an archive
 	// rather than merely queue behind one — a different shape, tracked in #2451.
 	//
-	// The window is not theoretical: the TUI starts `gh pr view` against a target
-	// captured before an archive can begin and sends the result whenever it lands,
-	// so the request routinely outlives the state it was resolved against.
+	// The window is not theoretical: the daemon starts `gh pr list` against a
+	// target captured before an archive can begin and records the result whenever
+	// it lands, so the lookup routinely outlives the state it was resolved against.
 	//
 	// It deliberately reuses the tab verbs' refusal so a user who archived a
 	// session gets ONE consistent message and remedy no matter which mutation lost
@@ -408,6 +408,9 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	// post-lock gate does not already do correctly.
 	if instance.IsArchived() {
 		return errTabMutationArchived("record PR info", title)
+	}
+	if branch := req.PRInfo.Branch; branch != "" && instance.GetWorktreeBranch() != branch {
+		return fmt.Errorf("session %q changed branch before PR info could be recorded", title)
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)
@@ -421,9 +424,14 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 			Title:  req.PRInfo.Title,
 			URL:    req.PRInfo.URL,
 			State:  req.PRInfo.State,
+			Branch: req.PRInfo.Branch,
 		}
 	}
 	prev := instance.GetPRInfo()
+	if samePRInfo(prev, info) {
+		instance.MarkPRInfoFetched()
+		return nil
+	}
 	instance.SetPRInfo(info)
 
 	data := instance.ToInstanceData()
@@ -435,10 +443,9 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 
 	// Announce the recorded badge (#2769). This is the same class of mutation as
 	// the tab verbs — a durable metadata change one client makes on behalf of every
-	// client — and it was the last one still persisting silently. Only the TUI
-	// window that ran `gh pr view` knew the PR existed; a second window and the web
-	// rail kept rendering no badge (or a stale state, after a merge) until some
-	// unrelated update happened to republish the session.
+	// client — and it was the last one still persisting silently. The background
+	// refresh now learns the PR once for every client, and this event repaints
+	// already-connected projections without waiting for another snapshot.
 	//
 	// Published after the persist so no client can observe a badge that isn't
 	// durable yet, and while the repo start lock is still held so this announcement
@@ -448,4 +455,12 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	// discipline and same reasoning as CreateTab's publish.
 	m.publishEvent(agentproto.EventSessionUpdated, data)
 	return nil
+}
+
+func samePRInfo(a, b *git.PRInfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Number == b.Number && a.Title == b.Title && a.URL == b.URL &&
+		a.State == b.State && a.Branch == b.Branch
 }

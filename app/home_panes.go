@@ -35,13 +35,13 @@ func (m *home) selectionChanged() tea.Cmd {
 
 	// While attached, the workspace is hidden behind the tmux client and the
 	// panes will be repainted by repaintAfterDetachMsg as soon as the user
-	// detaches. Skip the refresh + PR fetch dispatches so they don't queue
-	// capture-pane / gh pr view work behind the user's detach key (#598). The
+	// detaches. Skip refresh dispatches so they don't queue capture-pane work
+	// behind the user's detach key (#598). The
 	// synchronous mutations (binding, menu state) still run so sidebar nav
 	// that happens between attach failures is consistent.
 	attachedNow := m.attached.Load()
 
-	var prFetch, previewCmd tea.Cmd
+	var previewCmd tea.Cmd
 	if sel.Kind == ui.SectionInstances && !sel.IsHeader {
 		selected := m.sidebar.GetSelectedInstance()
 		// Track the cursor's instance in the store's display selection — what
@@ -59,12 +59,6 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 		previewCmd = m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
-		// Lazily refresh PR info when the user lands on an instance that
-		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
-		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
-		if !attachedNow && selected != nil && selected.Started() {
-			prFetch = fetchPRInfoCmd(selected, m.repoID, false)
-		}
 	} else {
 		// Header row: the menu drops the instance-specific hints; the open
 		// panes are untouched (they are explicit bindings, not
@@ -94,7 +88,7 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(prFetch, previewCmd, m.panesRefresh(attachedNow))
+	return tea.Batch(previewCmd, m.panesRefresh(attachedNow))
 }
 
 // clampSelectionTab bounds the selection's active tab index against the

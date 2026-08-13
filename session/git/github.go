@@ -59,6 +59,14 @@ type PRInfo struct {
 // error or malformed output) so callers can preserve previously cached PR
 // info instead of clearing it.
 func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
+	return FetchPRInfoContext(context.Background(), repoPath, branchName)
+}
+
+// FetchPRInfoContext is FetchPRInfo with caller-owned cancellation. The daemon
+// uses it for its background PR refresh loop so shutdown never waits for the
+// network timeout. Direct callers keep the bounded background-context behavior
+// through FetchPRInfo.
+func FetchPRInfoContext(parent context.Context, repoPath, branchName string) (*PRInfo, error) {
 	if branchName == "" {
 		return nil, nil
 	}
@@ -67,7 +75,7 @@ func FetchPRInfo(repoPath, branchName string) (*PRInfo, error) {
 		return nil, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), ghNetworkTimeout)
+	ctx, cancel := context.WithTimeout(parent, ghNetworkTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list", "--head", branchName, "--state", "all",
 		"--json", "number,title,url,state", "--limit", "10")
