@@ -7575,6 +7575,7 @@ function deriveTheme(input, mode) {
   const accentText = semanticFillText(accent, accentFillSurfaces);
   const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
   const dangerText = semanticFillText(danger, dangerFillSurfaces);
+  const effectBase = dark ? canvas : text;
   const selectionAlpha = dark ? 0.72 : 0.45;
   const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
   const selectionForeground = readable(
@@ -7624,18 +7625,14 @@ function deriveTheme(input, mode) {
     "--af-term-amber": termAmber,
     "--af-term-blue": termBlue,
     "--af-term-dim": text3,
-    "--af-shadow-1": `0 1px 2px ${rgba(source.background, dark ? 0.4 : 0.08)}`,
-    "--af-shadow-2": `0 4px 10px ${rgba(source.background, dark ? 0.45 : 0.12)}`,
-    "--af-shadow-overlay": `0 16px 48px ${rgba(source.background, dark ? 0.6 : 0.22)}`,
-    "--af-backdrop": rgba(source.background, dark ? 0.66 : 0.42)
+    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
+    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
+    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
+    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
   };
   const bright = (color) => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
-  let ansiBlack = source.background;
-  let ansiWhite = source.foreground_strong;
-  if (contrastRatio(ansiBlack, ansiWhite) < 4.5) {
-    ansiBlack = NORD_THEME.background;
-    ansiWhite = NORD_THEME.foreground_strong;
-  }
+  const ansiBlack = dark ? text3 : text;
+  const ansiWhite = dark ? text : text3;
   const xterm = {
     background: tokens["--af-bg-term"],
     foreground: text,

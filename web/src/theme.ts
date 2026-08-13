@@ -328,6 +328,11 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const accentText = semanticFillText(accent, accentFillSurfaces);
   const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
   const dangerText = semanticFillText(danger, dangerFillSurfaces);
+  // Elevation effects must follow the surface system that survived validation.
+  // Dark shadows use the accepted canvas; light shadows use its accepted dark text
+  // endpoint. Reading source.background here would reintroduce a rejected custom
+  // surface after the coherent-system fallback above.
+  const effectBase = dark ? canvas : text;
 
   const selectionAlpha = dark ? 0.72 : 0.45;
   const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
@@ -379,19 +384,18 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-term-amber": termAmber,
     "--af-term-blue": termBlue,
     "--af-term-dim": text3,
-    "--af-shadow-1": `0 1px 2px ${rgba(source.background, dark ? 0.4 : 0.08)}`,
-    "--af-shadow-2": `0 4px 10px ${rgba(source.background, dark ? 0.45 : 0.12)}`,
-    "--af-shadow-overlay": `0 16px 48px ${rgba(source.background, dark ? 0.6 : 0.22)}`,
-    "--af-backdrop": rgba(source.background, dark ? 0.66 : 0.42),
+    "--af-shadow-1": `0 1px 2px ${rgba(effectBase, dark ? 0.4 : 0.08)}`,
+    "--af-shadow-2": `0 4px 10px ${rgba(effectBase, dark ? 0.45 : 0.12)}`,
+    "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
+    "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42),
   };
 
   const bright = (color: string): string => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
-  let ansiBlack = source.background;
-  let ansiWhite = source.foreground_strong;
-  if (contrastRatio(ansiBlack, ansiWhite) < 4.5) {
-    ansiBlack = NORD_THEME.background;
-    ansiWhite = NORD_THEME.foreground_strong;
-  }
+  // ANSI names describe terminal roles, not permission to disappear into the
+  // canvas. Use the already-accepted primary/tertiary text endpoints, swapping
+  // their intensity by mode so black and white both remain AA on the terminal.
+  const ansiBlack = dark ? text3 : text;
+  const ansiWhite = dark ? text : text3;
   const xterm: ITheme = {
     background: tokens["--af-bg-term"],
     foreground: text,

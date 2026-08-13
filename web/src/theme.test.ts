@@ -209,12 +209,16 @@ test("transient palette failures retain the last good palette and retry", () => 
 });
 
 for (const mode of ["light", "dark"] as const) {
-  test(`${mode} ANSI black and white remain a readable pair`, () => {
+  test(`${mode} ANSI endpoints remain readable on the terminal canvas`, () => {
     const { xterm } = deriveTheme(NORD_THEME, mode);
+    const canvas = xterm.background!;
 
-    assert.equal(xterm.black, NORD_THEME.background);
-    assert.equal(xterm.white, NORD_THEME.foreground_strong);
-    assert.ok(contrastRatio(xterm.black!, xterm.white!) >= 4.5, `${xterm.black} must be readable on ${xterm.white}`);
+    for (const name of ["black", "brightBlack", "white", "brightWhite"] as const) {
+      assert.ok(
+        contrastRatio(xterm[name]!, canvas) >= 4.5,
+        `${name} ${xterm[name]} must be readable on terminal canvas ${canvas}`,
+      );
+    }
   });
 }
 
@@ -253,6 +257,25 @@ test("an incoherent custom elevation system falls back as a readable unit", () =
   for (const surface of [tokens["--af-bg-canvas"], tokens["--af-bg-surface"], tokens["--af-bg-raised"]]) {
     assert.ok(contrastRatio(tokens["--af-text"], surface) >= 4.5);
   }
+});
+
+test("surface fallback also replaces rejected shadow and backdrop endpoints", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#FFFFFF",
+      background_subtle: "#000000",
+      background_panel: "#FFFFFF",
+      foreground: "#777777",
+    },
+    "dark",
+  );
+
+  assert.equal(tokens["--af-bg-canvas"], NORD_THEME.background);
+  assert.equal(tokens["--af-shadow-1"], "0 1px 2px rgba(46, 52, 64, 0.4)");
+  assert.equal(tokens["--af-shadow-2"], "0 4px 10px rgba(46, 52, 64, 0.45)");
+  assert.equal(tokens["--af-shadow-overlay"], "0 16px 48px rgba(46, 52, 64, 0.6)");
+  assert.equal(tokens["--af-backdrop"], "rgba(46, 52, 64, 0.66)");
 });
 
 test("inset participates in the coherent surface and text contrast checks", () => {
