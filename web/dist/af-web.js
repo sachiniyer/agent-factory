@@ -8656,6 +8656,21 @@ var CLOSED = Symbol("config-assistant-closed");
 function delay(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
+function spawnFailureCopy(e) {
+  if (e instanceof ApiError && e.status === 503) {
+    return {
+      status: "Unavailable",
+      error: e.message !== "" ? e.message : "The daemon reported the config assistant unavailable. Close and try again."
+    };
+  }
+  if (e instanceof ApiError && e.status === 0) {
+    return { status: "Offline", error: "Could not reach the daemon. Close and try again." };
+  }
+  return {
+    status: "Failed to start",
+    error: e instanceof Error && e.message !== "" ? e.message : "Could not start the config assistant."
+  };
+}
 function openConfigAssistant(opts) {
   const { token: token2, mountHost, onClosed } = opts;
   let closed = false;
@@ -8770,17 +8785,9 @@ function openConfigAssistant(opts) {
     if (e === CLOSED || closed) {
       return;
     }
-    const httpStatus = e instanceof ApiError ? e.status : -1;
-    if (httpStatus === 503) {
-      setStatus("Unavailable");
-      setError("The config assistant is not available in this daemon build.");
-    } else if (httpStatus === 0) {
-      setStatus("Offline");
-      setError("Could not reach the daemon. Close and try again.");
-    } else {
-      setStatus("Failed to start");
-      setError(e instanceof Error ? e.message : "Could not start the config assistant.");
-    }
+    const copy = spawnFailureCopy(e);
+    setStatus(copy.status);
+    setError(copy.error);
   });
   return { close };
 }
