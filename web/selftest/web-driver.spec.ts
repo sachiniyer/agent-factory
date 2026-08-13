@@ -6288,6 +6288,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // named legacy palette, reload, and prove the same web tokens now follow it.
   let servedPalette: "zenburn" | "nord" = "zenburn";
   let themeRequestCount = 0;
+  let holdNextTheme = false;
+  let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
   await page.addInitScript(() => {
     const NativeWebSocket = window.WebSocket;
     const TrackingWebSocket = new Proxy(NativeWebSocket, {
@@ -6301,10 +6303,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     });
     window.WebSocket = TrackingWebSocket;
   });
-  await page.route("**/v1/GetTheme", (route) => {
-    themeRequestCount += 1;
+  const fulfillTheme = (route: Route, palette: "zenburn" | "nord"): Promise<void> => {
     const theme =
-      servedPalette === "zenburn"
+      palette === "zenburn"
         ? {
             name: "zenburn",
             foreground: "#DCDCCC",
@@ -6330,11 +6331,18 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({
-        data: { theme },
-        error: null,
-      }),
+      body: JSON.stringify({ data: { theme }, error: null }),
     });
+  };
+  await page.route("**/v1/GetTheme", (route) => {
+    themeRequestCount += 1;
+    const palette = servedPalette;
+    if (holdNextTheme) {
+      holdNextTheme = false;
+      heldTheme = { route, palette };
+      return;
+    }
+    return fulfillTheme(route, palette);
   });
   await page.reload();
   await expect(page.locator(".af-app")).toBeVisible();
@@ -6357,6 +6365,32 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
   // Frost cyan is lifted just enough to stay AA on every Nord elevation.
   await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
+
+  // Two quick reconnects can overlap GetTheme reads under the same credential.
+  // Hold the older Zenburn response, let a newer Nord response win, then release
+  // the stale response and prove it cannot rewind the palette generation.
+  holdNextTheme = true;
+  servedPalette = "zenburn";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => heldTheme !== null).toBe(true);
+  const requestsBeforeNewerRefresh = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("reconnected events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeNewerRefresh);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  const staleTheme = heldTheme;
+  if (!staleTheme) throw new Error("older GetTheme request was not held");
+  await fulfillTheme(staleTheme.route, staleTheme.palette);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
   await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.

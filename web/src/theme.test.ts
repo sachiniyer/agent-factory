@@ -10,7 +10,22 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { contrastRatio, deriveTheme, NORD_THEME, themeColorMetaContents } from "./theme.js";
+import {
+  contrastRatio,
+  createLatestRequestGate,
+  deriveTheme,
+  NORD_THEME,
+  themeColorMetaContents,
+} from "./theme.js";
+
+function composite(foreground: string, background: string, alpha: number): string {
+  const channels = (color: string): number[] => [1, 3, 5].map((start) => Number.parseInt(color.slice(start, start + 2), 16));
+  const fg = channels(foreground);
+  const bg = channels(background);
+  return `#${fg
+    .map((value, index) => Math.round(value * alpha + bg[index]! * (1 - alpha)).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
 
 // The --af-bg-surface pair from styles.css: the appbar fill the browser chrome abuts.
 const LIGHT = deriveTheme(NORD_THEME, "light").tokens["--af-bg-surface"];
@@ -90,6 +105,23 @@ test("pane states consume their corresponding semantic border tokens", () => {
   assert.match(css, /\.af-drop-overlay\s*\{[^}]*border:\s*1px solid var\(--af-border-preview\)/s);
 });
 
+test("tinted semantic states consume their contrast-safe text tokens", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+
+  for (const selector of [
+    ".af-project-item-current .af-project-item-name",
+    ".af-theme-opt-active",
+    ".af-rail-empty-new",
+    ".af-rail-new:hover",
+    ".af-tasks-add:hover",
+  ]) {
+    assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-accent-text\\)`, "s"));
+  }
+  for (const selector of [".af-tab-close:hover", ".af-pane-close:hover", ".af-danger:hover"]) {
+    assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-danger-text\\)`, "s"));
+  }
+});
+
 for (const mode of ["light", "dark"] as const) {
   test(`${mode} derived tokens meet the contrast floor`, () => {
     const { tokens } = deriveTheme(NORD_THEME, mode);
@@ -118,7 +150,43 @@ for (const mode of ["light", "dark"] as const) {
       }
     }
   });
+
+  test(`${mode} semantic text stays AA on its translucent state fills`, () => {
+    const { tokens } = deriveTheme(NORD_THEME, mode);
+    const surfaces = [
+      tokens["--af-bg-canvas"],
+      tokens["--af-bg-surface"],
+      tokens["--af-bg-inset"],
+      tokens["--af-bg-raised"],
+    ];
+    const subtleAlpha = mode === "dark" ? 0.12 : 0.09;
+    const tintAlpha = mode === "dark" ? 0.2 : 0.16;
+
+    for (const surface of surfaces) {
+      for (const alpha of [subtleAlpha, tintAlpha]) {
+        const fill = composite(tokens["--af-accent"], surface, alpha);
+        assert.ok(
+          contrastRatio(tokens["--af-accent-text"], fill) >= 4.5,
+          `${tokens["--af-accent-text"]} must be AA on accent fill ${fill}`,
+        );
+      }
+      const dangerFill = composite(tokens["--af-danger"], surface, subtleAlpha);
+      assert.ok(
+        contrastRatio(tokens["--af-danger-text"], dangerFill) >= 4.5,
+        `${tokens["--af-danger-text"]} must be AA on danger fill ${dangerFill}`,
+      );
+    }
+  });
 }
+
+test("palette refresh generations reject an older completion for the same token", () => {
+  const gate = createLatestRequestGate();
+  const older = gate.begin();
+  const newer = gate.begin();
+
+  assert.equal(older.isCurrent(), false);
+  assert.equal(newer.isCurrent(), true);
+});
 
 test("an unreadable or malformed custom slot falls back independently", () => {
   const custom = {

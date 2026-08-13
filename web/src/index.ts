@@ -82,6 +82,7 @@ import { registerServiceWorker } from "./serviceworker.js";
 import {
   applyDaemonTheme,
   bootStampTheme,
+  createLatestRequestGate,
   persistThemeChoice,
   refreshThemeMode,
   resetDaemonTheme,
@@ -166,6 +167,7 @@ const store = new Store<AppState>({
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
+const paletteRefreshGate = createLatestRequestGate();
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -1720,12 +1722,13 @@ function startStream(tok: string): void {
  *  Called during login and on every events-stream open, including reconnects after
  *  a daemon restart. A failed additive read restores the built-in readable floor. */
 async function refreshDaemonPalette(tok: string): Promise<void> {
+  const request = paletteRefreshGate.begin();
   try {
     const theme = await getTheme(tok);
-    if (token !== tok) return;
+    if (token !== tok || !request.isCurrent()) return;
     applyDaemonTheme(theme);
   } catch {
-    if (token !== tok) return;
+    if (token !== tok || !request.isCurrent()) return;
     resetDaemonTheme();
   }
   splitView.applyTheme();
@@ -1736,6 +1739,7 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
+  paletteRefreshGate.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

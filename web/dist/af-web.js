@@ -7474,6 +7474,18 @@ function normalizeTheme(value) {
   }
   return out;
 }
+function createLatestRequestGate() {
+  let generation = 0;
+  return {
+    begin() {
+      const requestGeneration = ++generation;
+      return { isCurrent: () => requestGeneration === generation };
+    },
+    invalidate() {
+      generation += 1;
+    }
+  };
+}
 function semantic(candidate, fallback, surfaces, minimum, toward) {
   return readable(candidate, surfaces, minimum, fallback, toward);
 }
@@ -7542,6 +7554,19 @@ function deriveTheme(input, mode) {
   const hoverToward = luminance(onAccent) > luminance(accent) ? BLACK : WHITE;
   const hoverCandidate = mix(accent, hoverToward, 0.12);
   const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
+  const subtleAlpha = dark ? 0.12 : 0.09;
+  const tintAlpha = dark ? 0.2 : 0.16;
+  const semanticFillText = (candidate, fillSurfaces) => {
+    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
+    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
+  };
+  const accentFillSurfaces = surfaces.flatMap((background) => [
+    mix(background, accent, subtleAlpha),
+    mix(background, accent, tintAlpha)
+  ]);
+  const accentText = semanticFillText(accent, accentFillSurfaces);
+  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
+  const dangerText = semanticFillText(danger, dangerFillSurfaces);
   const selectionAlpha = dark ? 0.72 : 0.45;
   const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
   const selectionForeground = readable(
@@ -7567,12 +7592,14 @@ function deriveTheme(input, mode) {
     "--af-text-2": text2,
     "--af-text-3": text3,
     "--af-accent": accent,
+    "--af-accent-text": accentText,
     "--af-accent-hover": accentHover,
-    "--af-accent-subtle": rgba(accent, dark ? 0.12 : 0.09),
-    "--af-accent-tint": rgba(accent, dark ? 0.2 : 0.16),
+    "--af-accent-subtle": rgba(accent, subtleAlpha),
+    "--af-accent-tint": rgba(accent, tintAlpha),
     "--af-on-accent": onAccent,
     "--af-danger": danger,
-    "--af-danger-subtle": rgba(danger, dark ? 0.12 : 0.09),
+    "--af-danger-text": dangerText,
+    "--af-danger-subtle": rgba(danger, subtleAlpha),
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,
@@ -14866,6 +14893,7 @@ var store = new Store({
 });
 var token = null;
 var stream = null;
+var paletteRefreshGate = createLatestRequestGate();
 var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listPrograms(repoPath, token);
 var resyncTimer = null;
 var sessionEventGeneration = 0;
@@ -15736,18 +15764,20 @@ function startStream(tok) {
   stream.start();
 }
 async function refreshDaemonPalette(tok) {
+  const request = paletteRefreshGate.begin();
   try {
     const theme = await getTheme(tok);
-    if (token !== tok) return;
+    if (token !== tok || !request.isCurrent()) return;
     applyDaemonTheme(theme);
   } catch {
-    if (token !== tok) return;
+    if (token !== tok || !request.isCurrent()) return;
     resetDaemonTheme();
   }
   splitView.applyTheme();
 }
 function stopStream() {
   resyncRequestGeneration += 1;
+  paletteRefreshGate.invalidate();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);

@@ -13,7 +13,16 @@ func (s *controlServer) GetTheme(_ GetThemeRequest, resp *GetThemeResponse) erro
 	if s.manager == nil {
 		return fmt.Errorf("daemon config is unavailable")
 	}
-	cfg := s.manager.Config()
+	// Theme is EffectNextAfLaunch, so ApplyConfig must not advance this runtime
+	// projection as a side effect of applying an unrelated daemon key. cfg is the
+	// immutable generation captured when this daemon started; a restarted daemon
+	// receives the newly saved palette and browsers refetch it on reconnect.
+	cfg := s.manager.cfg
+	if cfg == nil {
+		// Preserve the small direct-Manager test construction fallback that Config()
+		// supports. Real managers always carry the frozen startup snapshot.
+		cfg = s.manager.Config()
+	}
 	if cfg == nil {
 		return fmt.Errorf("daemon config is unavailable")
 	}

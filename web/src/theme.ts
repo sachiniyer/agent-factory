@@ -184,6 +184,25 @@ export interface DerivedTheme {
   xterm: ITheme;
 }
 
+export interface LatestRequestGate {
+  begin(): { isCurrent(): boolean };
+  invalidate(): void;
+}
+
+/** Fences asynchronous palette reads that share the same login token. */
+export function createLatestRequestGate(): LatestRequestGate {
+  let generation = 0;
+  return {
+    begin() {
+      const requestGeneration = ++generation;
+      return { isCurrent: () => requestGeneration === generation };
+    },
+    invalidate() {
+      generation += 1;
+    },
+  };
+}
+
 function semantic(
   candidate: string,
   fallback: string,
@@ -281,6 +300,20 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const hoverCandidate = mix(accent, hoverToward, 0.12);
   const accentHover = passes(onAccent, [hoverCandidate], 4.5) ? hoverCandidate : accent;
 
+  const subtleAlpha = dark ? 0.12 : 0.09;
+  const tintAlpha = dark ? 0.2 : 0.16;
+  const semanticFillText = (candidate: string, fillSurfaces: readonly string[]): string => {
+    const adjusted = adjustLightnessToContrast(candidate, fillSurfaces, 4.5);
+    return adjusted ?? readable(candidate, fillSurfaces, 4.5, text, toward);
+  };
+  const accentFillSurfaces = surfaces.flatMap((background) => [
+    mix(background, accent, subtleAlpha),
+    mix(background, accent, tintAlpha),
+  ]);
+  const accentText = semanticFillText(accent, accentFillSurfaces);
+  const dangerFillSurfaces = surfaces.map((background) => mix(background, danger, subtleAlpha));
+  const dangerText = semanticFillText(danger, dangerFillSurfaces);
+
   const selectionAlpha = dark ? 0.72 : 0.45;
   const selectionSurface = mix(canvas, source.selection_background, selectionAlpha);
   const selectionForeground = readable(
@@ -307,12 +340,14 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-text-2": text2,
     "--af-text-3": text3,
     "--af-accent": accent,
+    "--af-accent-text": accentText,
     "--af-accent-hover": accentHover,
-    "--af-accent-subtle": rgba(accent, dark ? 0.12 : 0.09),
-    "--af-accent-tint": rgba(accent, dark ? 0.2 : 0.16),
+    "--af-accent-subtle": rgba(accent, subtleAlpha),
+    "--af-accent-tint": rgba(accent, tintAlpha),
     "--af-on-accent": onAccent,
     "--af-danger": danger,
-    "--af-danger-subtle": rgba(danger, dark ? 0.12 : 0.09),
+    "--af-danger-text": dangerText,
+    "--af-danger-subtle": rgba(danger, subtleAlpha),
     "--af-dot-ready": ready,
     "--af-dot-lost": lost,
     "--af-dot-dead": dead,

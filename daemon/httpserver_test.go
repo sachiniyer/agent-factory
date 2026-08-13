@@ -126,6 +126,32 @@ func TestHTTP_GetTheme_ReadRoute(t *testing.T) {
 	assert.Equal(t, "#8CD0D3", resp.Theme.Accent)
 }
 
+// A theme edit is classified next-af-launch. ApplyConfig may still swap that
+// on-disk value into its live snapshot while applying an unrelated daemon key;
+// GetTheme must keep serving the palette this daemon generation started with.
+func TestHTTP_GetTheme_KeepsStartupGenerationAfterApplyConfig(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	startup := config.DefaultConfig()
+	m, err := NewManager(startup)
+	require.NoError(t, err)
+
+	onDisk := config.DefaultConfig()
+	onDisk.Theme.Accent = "#010203"
+	require.NoError(t, config.SaveConfig(onDisk))
+	_, err = config.SetGlobalConfigValue("default_program", "codex")
+	require.NoError(t, err)
+	_, err = m.ApplyConfig()
+	require.NoError(t, err)
+	require.Equal(t, "#010203", m.Config().Theme.Accent,
+		"anti-vacuous: ApplyConfig must have loaded the hand-edited palette")
+
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/GetTheme", `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp GetThemeResponse
+	dataInto(t, decodeEnvelope(t, rec), &resp)
+	assert.Equal(t, startup.Theme.Accent, resp.Theme.Accent)
+}
+
 // TestHTTP_AddTask_MutationRoute covers a create/mutation route: POST /v1/AddTask
 // persists the task through the shared core and re-arms the scheduler.
 func TestHTTP_AddTask_MutationRoute(t *testing.T) {

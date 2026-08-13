@@ -18,7 +18,8 @@ type Manager struct {
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
-	// branch_prefix (the title-reservation helpers). The network listener keys
+	// branch_prefix (the title-reservation helpers), and theme (GetTheme must serve
+	// one coherent renderer generation until the daemon restarts). The network listener keys
 	// used to read it too; #2480 PR2 made them applied-live (livePosture per
 	// request; listen_addr/preview_listen_addr rebind in place). Everything
 	// hot-reloadable reads live via Config() instead.

@@ -16,8 +16,8 @@ import (
 // swap and observe two config generations, producing an inconsistent result (a
 // branch derived from one generation, a worktree path from the next). The frozen
 // startup config m.cfg is deliberately separate — it backs only the keys that do
-// NOT hot-reload: root_agents/root_agent and branch_prefix (title-reservation
-// helpers). The network listener keys used to read m.cfg too; #2480 PR2 made them
+// NOT hot-reload: root_agents/root_agent, branch_prefix (title-reservation
+// helpers), and GetTheme's renderer generation. The network listener keys used to read m.cfg too; #2480 PR2 made them
 // applied-live (livePosture per request; listen_addr/preview_listen_addr rebind in
 // place), so they no longer do.
 func (m *Manager) Config() *config.Config {
@@ -152,8 +152,9 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
 	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
-	// branch_prefix rides along in the swapped config but is read from the frozen
-	// m.cfg in the title-reservation helpers, so it stays Pending, not Applied.
+	// branch_prefix and theme ride along in the swapped config but their runtime
+	// consumers read frozen m.cfg, so an unrelated apply cannot advance either
+	// generation behind the next-start/next-launch notice.
 	m.live.Store(newCfg)
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent

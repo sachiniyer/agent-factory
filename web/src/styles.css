@@ -59,11 +59,13 @@
   --af-text-2: #3b4252;
   --af-text-3: #434c5e;
   --af-accent: #2d6271;
+  --af-accent-text: #275562;
   --af-accent-hover: #285663;
   --af-accent-subtle: rgba(45, 98, 113, 0.09);
   --af-accent-tint: rgba(45, 98, 113, 0.16);
   --af-on-accent: #eceff4;
   --af-danger: #944049;
+  --af-danger-text: #883b43;
   --af-danger-subtle: rgba(148, 64, 73, 0.09);
 
   /* Status dots */
@@ -112,11 +114,13 @@
     --af-text-2: #c3cbd6;
     --af-text-3: #b4bcc8;
     --af-accent: #90c4d3;
+    --af-accent-text: #c7e2e9;
     --af-accent-hover: #9dcbd8;
     --af-accent-subtle: rgba(144, 196, 211, 0.12);
     --af-accent-tint: rgba(144, 196, 211, 0.2);
     --af-on-accent: #2e3440;
     --af-danger: #d9b2b9;
+    --af-danger-text: #e4c8cd;
     --af-danger-subtle: rgba(217, 178, 185, 0.12);
     --af-dot-ready: #a3be8c;
     --af-dot-lost: #ebcb8b;
@@ -152,11 +156,13 @@
   --af-text-2: #3b4252;
   --af-text-3: #434c5e;
   --af-accent: #2d6271;
+  --af-accent-text: #275562;
   --af-accent-hover: #285663;
   --af-accent-subtle: rgba(45, 98, 113, 0.09);
   --af-accent-tint: rgba(45, 98, 113, 0.16);
   --af-on-accent: #eceff4;
   --af-danger: #944049;
+  --af-danger-text: #883b43;
   --af-danger-subtle: rgba(148, 64, 73, 0.09);
   --af-dot-ready: #617e48;
   --af-dot-lost: #996f1a;
@@ -191,11 +197,13 @@
   --af-text-2: #c3cbd6;
   --af-text-3: #b4bcc8;
   --af-accent: #90c4d3;
+  --af-accent-text: #c7e2e9;
   --af-accent-hover: #9dcbd8;
   --af-accent-subtle: rgba(144, 196, 211, 0.12);
   --af-accent-tint: rgba(144, 196, 211, 0.2);
   --af-on-accent: #2e3440;
   --af-danger: #d9b2b9;
+  --af-danger-text: #e4c8cd;
   --af-danger-subtle: rgba(217, 178, 185, 0.12);
   --af-dot-ready: #a3be8c;
   --af-dot-lost: #ebcb8b;
@@ -589,6 +597,11 @@ button:disabled,
   background: var(--af-accent-subtle);
 }
 
+.af-project-item-current .af-project-check,
+.af-project-item-current .af-project-item-name {
+  color: var(--af-accent-text);
+}
+
 .af-project-check {
   flex: 0 0 auto;
   width: 0.8rem;
@@ -606,10 +619,6 @@ button:disabled,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.af-project-item-current .af-project-item-name {
-  color: var(--af-accent);
 }
 
 .af-project-item-path {
@@ -768,7 +777,7 @@ button:disabled,
 
 .af-theme-opt-active {
   background: var(--af-accent-subtle);
-  color: var(--af-accent);
+  color: var(--af-accent-text);
   font-weight: 600;
 }
 
@@ -1049,7 +1058,7 @@ button:disabled,
   gap: 0.25rem;
   padding: 0.1rem 0.5rem;
   background: var(--af-accent-subtle);
-  color: var(--af-accent);
+  color: var(--af-accent-text);
   border: none;
   border-radius: var(--af-r-md);
   font: inherit;
@@ -1547,7 +1556,7 @@ button:disabled,
 }
 
 .af-tab-close:hover {
-  color: var(--af-danger);
+  color: var(--af-danger-text);
   background: var(--af-danger-subtle);
 }
 
@@ -1852,7 +1861,7 @@ button:disabled,
 }
 
 .af-pane-close:hover {
-  color: var(--af-danger);
+  color: var(--af-danger-text);
   background: var(--af-danger-subtle);
 }
 
@@ -2129,6 +2138,7 @@ button:disabled,
 
 .af-rail-new:hover {
   background: var(--af-accent-subtle);
+  color: var(--af-accent-text);
 }
 
 /* Destructive action button (kill/confirm-kill): outlined in the error color, and
@@ -2147,6 +2157,7 @@ button:disabled,
 
 .af-danger:hover:not(:disabled) {
   background: var(--af-danger-subtle);
+  color: var(--af-danger-text);
 }
 
 .af-danger:disabled {
@@ -2656,6 +2667,7 @@ button:disabled,
 
 .af-tasks-add:hover {
   background: var(--af-accent-subtle);
+  color: var(--af-accent-text);
 }
 
 .af-tasks-empty {
