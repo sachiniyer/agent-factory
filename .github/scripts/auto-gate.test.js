@@ -87,29 +87,42 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
 });
 
-test("failed aggregate invalidations retry before entering the serialized lane", () => {
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
-  const invalidationBlock = workflow.match(
-    /- name: Make the aggregate non-green immediately[\s\S]*?\n  apply-gate:/,
-  )?.[0];
+test("failed aggregate invalidations retry before entering the serialized lane", async () => {
+  const exhausted = { head_sha: HEAD_SHA };
+  const fenced = { head_sha: OTHER_SHA };
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [exhausted, fenced],
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "read-only" }, { writeState: "read-only" }],
+      [OTHER_SHA]: [{ writeState: "created" }],
+    },
+  });
 
-  assert.ok(invalidationBlock, "aggregate invalidation workflow block is missing");
-  assert.match(
-    invalidationBlock,
-    /const invalidateAggregate = async \(aggregate\) => \{[\s\S]*?await autoGate\.invalidateAggregateDecision/,
+  assert.deepEqual(
+    run.attempts,
+    [HEAD_SHA, HEAD_SHA, OTHER_SHA],
+    "a failed invalidation must retry exactly once before the serialized lane",
   );
-  const invalidationAttempts = [
-    ...invalidationBlock.matchAll(/await invalidateAggregate\(aggregate\)/g),
-  ];
-  assert.equal(invalidationAttempts.length, 2);
-  assert.match(
-    invalidationBlock,
-    /const invalidatedHeads = \[\][\s\S]*?core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)/,
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads),
+    [fenced],
+    "a head whose invalidation exhausted its retry must not enter the serialized lane",
   );
-  assert.ok(
-    invalidationAttempts[1].index < invalidationBlock.lastIndexOf('core.setOutput("invalidated_heads"'),
-    "failed invalidations must retry before the head enters the serialized lane",
-  );
+  assert.ok(run.error, "an exhausted invalidation must still fail the invalidate step");
+  assert.match(run.error.message, /1 aggregate invalidation\(s\) failed after the pre-lane retry/);
+});
+
+test("a retried invalidation that succeeds admits its head to the serialized lane", async () => {
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }],
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "read-only" }, { writeState: "created" }],
+    },
+  });
+
+  assert.deepEqual(run.attempts, [HEAD_SHA, HEAD_SHA]);
+  assert.deepEqual(JSON.parse(run.outputs.invalidated_heads), [{ head_sha: HEAD_SHA }]);
+  assert.equal(run.error, null, "a rescued head must not fail the invalidate step");
 });
 
 test("manual recovery reports a previously absent gate distinctly", async () => {
@@ -1643,6 +1656,75 @@ async function evaluateGate(options = {}) {
     prNumber: 1465,
     setOutputs: false,
   });
+}
+
+// invalidateGateScript extracts the invalidate-gate step's inline script from
+// the workflow and compiles it the way actions/github-script does: an async
+// function receiving github/context/core/require, with process reachable in
+// scope. Executing the real step body is the point — a text-level assertion on
+// the YAML stays green when the control flow inverts (#3224).
+function invalidateGateScript() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const step = workflow.match(
+    /- name: Make the aggregate non-green immediately[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S)/,
+  );
+  assert.ok(step, "the aggregate invalidation step script is missing from auto-gate.yml");
+  const indent = step[1].match(/^( +)\S/m);
+  assert.ok(indent, "the aggregate invalidation step script is empty");
+  const body = step[1]
+    .split("\n")
+    .map((line) => line.slice(indent[1].length))
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  return new AsyncFunction("github", "context", "core", "require", "process", body);
+}
+
+// runInvalidateGateStep executes the extracted step against a scripted helper:
+// invalidateResults maps each head SHA to the sequence of results its
+// invalidateAggregateDecision calls return, and attempts records the real call
+// order the step made.
+async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
+  const script = invalidateGateScript();
+  const attempts = [];
+  const helper = {
+    invalidateAggregateDecision: async ({ headSha }) => {
+      attempts.push(headSha);
+      const remaining = invalidateResults[headSha];
+      assert.ok(
+        remaining && remaining.length > 0,
+        `unexpected extra invalidation attempt for ${headSha}`,
+      );
+      return remaining.shift();
+    },
+  };
+  const workspace = "/workspace";
+  const helperPath = path.join(workspace, ".github/scripts/auto-gate.js");
+  const requireStub = (id) => {
+    if (id === "path") {
+      return path;
+    }
+    if (id === helperPath) {
+      return helper;
+    }
+    throw new Error(`unexpected require(${JSON.stringify(id)}) in the invalidate-gate step`);
+  };
+  const outputs = {};
+  const warnings = [];
+  const core = {
+    ...fakeCore(),
+    setOutput: (name, value) => {
+      outputs[name] = value;
+    },
+    warning: (message) => warnings.push(message),
+  };
+  const env = { GITHUB_WORKSPACE: workspace, AGGREGATE_HEADS: JSON.stringify(aggregateHeads) };
+  let error = null;
+  try {
+    await script({}, {}, core, requireStub, { env });
+  } catch (stepError) {
+    error = stepError;
+  }
+  return { attempts, outputs, warnings, error };
 }
 
 function fakeGateGithub({
