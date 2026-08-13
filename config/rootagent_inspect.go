@@ -59,15 +59,40 @@ func (locs rootAgentLocations) forSource(source RootAgentSource) (path, keyPath 
 // layers by, so those layers resolve as absent. The command normally supplies
 // the cwd's repository and reaches global scope only outside git.
 func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup bool) (ResolvedValue, error) {
-	inputs, locs, ignoredGlobal, ignoredReason, err := assembleRootAgentInspectionInputs(projectSelector, strictProjectLookup)
+	assembly, err := assembleRootAgentInspectionInputs(projectSelector, strictProjectLookup)
 	if err != nil {
 		return ResolvedValue{}, err
 	}
-	resolved := rootAgentResolvedValue(ResolveRootAgent(inputs), locs, projectSelector != "")
-	if ignoredGlobal != nil {
-		markRootAgentGlobalIneligible(&resolved, *ignoredGlobal, ignoredReason, locs)
+	if assembly.failClosed != "" {
+		return rootAgentFailClosedValue(assembly.inputs, assembly.locs, assembly.failClosed), nil
+	}
+	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelector != "")
+	if assembly.ignoredGlobal != nil {
+		markRootAgentGlobalIneligible(&resolved, *assembly.ignoredGlobal, assembly.ignoredReason, assembly.locs)
 	}
 	return resolved, nil
+}
+
+// rootAgentInspectionAssembly is what assembleRootAgentInspectionInputs hands
+// the renderer: the layer inputs and their locations, plus at most one of two
+// degraded verdicts — an ignored global layer (the project is simply not
+// registered), or a fail-closed cause that overrides the layers entirely.
+type rootAgentInspectionAssembly struct {
+	inputs RootAgentInputs
+	locs   rootAgentLocations
+	// ignoredGlobal/ignoredReason render the global layer as present but
+	// inapplicable, without failing the trace.
+	ignoredGlobal *RootAgentCandidate
+	ignoredReason string
+	// failClosed, when non-empty, is the cause the daemon fails this repo's
+	// root agent closed with at its next start: the registry cannot be listed
+	// (#3247) or the personal config cannot be loaded (#3241). The explain
+	// must then mirror the daemon — disabled, with every present layer shown
+	// ignored for this reason — because this surface is documented as "the
+	// decision the daemon makes at its NEXT start", and rendering the layer
+	// merge would confidently explain a decision the failed read already
+	// overrode (#3264).
+	failClosed string
 }
 
 // assembleRootAgentInspectionInputs builds the RootAgentInputs the --explain
@@ -86,72 +111,102 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 // why TestRootAgentInspectionInputsPopulateEveryLayer reflects over the assembled
 // inputs and fails when any layer is left unset: keep this in step with
 // RootAgentInputs and the guard, not with a comment.
-func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLookup bool) (
-	RootAgentInputs,
-	rootAgentLocations,
-	*RootAgentCandidate,
-	string,
-	error,
-) {
+func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLookup bool) (rootAgentInspectionAssembly, error) {
 	global, err := LoadConfig()
 	if err != nil {
-		return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
+		return rootAgentInspectionAssembly{}, err
 	}
-	locs := rootAgentLocations{globalPath: global.source.path}
-	if locs.globalPath == "" {
+	out := rootAgentInspectionAssembly{
+		locs:   rootAgentLocations{globalPath: global.source.path},
+		inputs: RootAgentInputs{Global: GlobalRootAgentLayer(global)},
+	}
+	if out.locs.globalPath == "" {
 		if path, err := globalConfigTomlPath(); err == nil {
-			locs.globalPath = path
+			out.locs.globalPath = path
 		}
 	}
-	inputs := RootAgentInputs{Global: GlobalRootAgentLayer(global)}
 
 	if projectSelector != "" {
 		abs, err := ResolveUserPath(projectSelector)
 		if err != nil {
-			return RootAgentInputs{}, rootAgentLocations{}, nil, "", fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
+			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
 		repo, err := RepoFromPath(abs)
 		if err != nil {
-			return RootAgentInputs{}, rootAgentLocations{}, nil, "", fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
+			return rootAgentInspectionAssembly{}, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 		}
 		legacy, key := LegacyRootAgentForRepo(global, repo.ID)
 		if legacy != nil {
-			inputs.Legacy = legacy
-			locs.legacyKey = key
+			out.inputs.Legacy = legacy
+			out.locs.legacyKey = key
 		}
 		project, found, err := projectForRoot(repo.Root)
 		if err != nil {
 			if strictProjectLookup {
-				return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
+				return rootAgentInspectionAssembly{}, err
 			}
-			if legacy == nil {
-				ignored := rootAgentCandidateForLayer(inputs, RootAgentSourceGlobal)
-				inputs.Global = nil
-				return inputs, locs, ignored,
-					"project registry is unreadable, so singleton activation cannot be confirmed", nil
+			// Fail CLOSED, like the daemon (#3247): an unlistable registry means
+			// no repo can be proven un-disabled, legacy entries included. The
+			// pre-#3247 rendering here — the legacy layer winning, or only the
+			// global layer dropped — described the daemon's old fail-open
+			// behavior and would misdirect the operator away from the registry.
+			registry := ProjectRegistryDirName
+			if dir, dirErr := ProjectRegistryDir(); dirErr == nil {
+				registry = dir
 			}
-			return inputs, locs, nil, "", nil
+			out.failClosed = fmt.Sprintf("the project registry %s could not be listed, so the daemon fails every root agent closed at its next start (a personal config it cannot enumerate may hold enabled=false); repair the registry", registry)
+			return out, nil
 		}
 		if found {
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {
-				return RootAgentInputs{}, rootAgentLocations{}, nil, "", err
+				// Fail CLOSED, like the daemon (#3241) — and explain rather than
+				// error out: the decision at the next daemon start is known
+				// (disabled), and the operator running --explain is exactly the
+				// person who needs the cause and the file named (#3264).
+				path := "its personal config"
+				if p, pathErr := ProjectConfigTomlPath(project.ID); pathErr == nil {
+					path = p
+					out.locs.personalPath = p
+				}
+				out.failClosed = fmt.Sprintf("personal config %s exists but cannot be loaded, so the daemon fails this project's root agent closed at its next start; fix or remove that file", path)
+				return out, nil
 			}
 			if layer := pc.RootAgentLayer(); layer != nil {
-				inputs.Personal = layer
+				out.inputs.Personal = layer
 				if path, err := ProjectConfigTomlPath(project.ID); err == nil {
-					locs.personalPath = path
+					out.locs.personalPath = path
 				}
 			}
 		} else if legacy == nil {
-			ignored := rootAgentCandidateForLayer(inputs, RootAgentSourceGlobal)
-			inputs.Global = nil
-			return inputs, locs, ignored,
-				"project is not registered and has no legacy root_agents entry", nil
+			out.ignoredGlobal = rootAgentCandidateForLayer(out.inputs, RootAgentSourceGlobal)
+			out.ignoredReason = "project is not registered and has no legacy root_agents entry"
+			out.inputs.Global = nil
+			return out, nil
 		}
 	}
 
-	return inputs, locs, nil, "", nil
+	return out, nil
+}
+
+// rootAgentFailClosedValue renders the daemon's fail-closed verdict (#3241,
+// #3247): the effective profile is disabled regardless of what the layers say,
+// every present layer is shown ignored with the cause, and no field claims a
+// config origin — no config source decided this, the failed read did (the same
+// zero-provenance rule as the daemon's resolvedRootAgentFor).
+func rootAgentFailClosedValue(inputs RootAgentInputs, locs rootAgentLocations, cause string) ResolvedValue {
+	rv := rootAgentResolvedValue(ResolveRootAgent(inputs), locs, true)
+	rv.Value = RootAgent{}
+	for i := range rv.Candidates {
+		if !rv.Candidates[i].Present {
+			continue
+		}
+		rv.Candidates[i].Allowed = false
+		rv.Candidates[i].Result = "ignored"
+		rv.Candidates[i].Reason = cause
+	}
+	rv.Origins = nil
+	return rv
 }
 
 // LegacyRootAgentForRepo returns the root_agents entry whose path resolves to

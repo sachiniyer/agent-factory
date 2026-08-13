@@ -120,10 +120,10 @@ func TestRootAgentInspectionInputsPopulateEveryLayer(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName), []byte(globalTOML), 0o644))
 	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\n")
 
-	inputs, _, _, _, err := assembleRootAgentInspectionInputs(repoRoot, true)
+	assembly, err := assembleRootAgentInspectionInputs(repoRoot, true)
 	require.NoError(t, err)
 
-	v := reflect.ValueOf(inputs)
+	v := reflect.ValueOf(assembly.inputs)
 	require.NotZero(t, v.NumField(), "RootAgentInputs must have layer fields")
 	for i := 0; i < v.NumField(); i++ {
 		name := v.Type().Field(i).Name
