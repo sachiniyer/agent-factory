@@ -335,6 +335,30 @@ func TestPRInfoSweepAbandonsLockWaitOnCancel(t *testing.T) {
 	require.Nil(t, f.instance.GetPRInfo(), "an abandoned write must record nothing")
 }
 
+// TestSetPRInfoFailedPersistLeavesGenerationUntouched pins the daemon half of
+// the rollback contract (#3287 review): an RPC write whose persist fails must
+// leave the instance's PR-info generation exactly as it found it, so a sweep
+// waiting on the op-lock does not discard its still-valid result over a write
+// that committed nothing.
+func TestSetPRInfoFailedPersistLeavesGenerationUntouched(t *testing.T) {
+	f := newPRSweepFixture(t)
+	prevHook := testHookPersistInstanceData
+	testHookPersistInstanceData = func(string, session.InstanceData) error {
+		return fmt.Errorf("persist refused by test")
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = prevHook })
+
+	genBefore := f.instance.PRInfoGeneration()
+	err := f.manager.SetPRInfo(SetPRInfoRequest{
+		RepoID: f.repoID, Title: "pr-sweep", ID: f.instance.ID,
+		PRInfo: session.PRInfoData{Number: 7, State: "OPEN", Branch: "af/pr-sweep"},
+	})
+	require.Error(t, err, "the failed persist must surface")
+	require.Nil(t, f.instance.GetPRInfo(), "the rolled-back value must not remain in memory")
+	require.Equal(t, genBefore, f.instance.PRInfoGeneration(),
+		"a write that committed nothing must not advance the generation")
+}
+
 // readPersistedPRInfo loads the repo's persisted instance list and returns the
 // pr-sweep session's stored PR projection.
 func readPersistedPRInfo(t *testing.T, repoID string) session.PRInfoData {

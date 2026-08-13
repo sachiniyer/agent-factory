@@ -34,6 +34,42 @@ func (i *Instance) PRInfoGeneration() uint64 {
 	return i.prInfoGeneration
 }
 
+// PRInfoRollback captures the complete pre-write PR-info state — value,
+// freshness clock, and generation — so a write whose durable half failed can
+// be undone without trace. Opaque on purpose: the fields only mean anything
+// restored together.
+type PRInfoRollback struct {
+	info       *git.PRInfo
+	fetchedAt  time.Time
+	generation uint64
+}
+
+// BeginPRInfoWrite applies info exactly as SetPRInfo does and returns the
+// rollback point for the state it replaced.
+func (i *Instance) BeginPRInfoWrite(info *git.PRInfo) PRInfoRollback {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	rollback := PRInfoRollback{info: i.prInfo, fetchedAt: i.prInfoLastFetched, generation: i.prInfoGeneration}
+	i.prInfo = info
+	i.prInfoLastFetched = time.Now()
+	i.prInfoGeneration++
+	return rollback
+}
+
+// RollbackPRInfoWrite reinstates the state BeginPRInfoWrite replaced — the
+// generation and freshness clock included, not just the value. A failed
+// persist committed nothing, so it must leave no trace: a generation left
+// advanced would spuriously fail a concurrent producer's CAS and make it
+// discard a still-valid result, and a refreshed clock would keep the old value
+// looking fresh for another staleness window (#3287 review).
+func (i *Instance) RollbackPRInfoWrite(rollback PRInfoRollback) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.prInfo = rollback.info
+	i.prInfoLastFetched = rollback.fetchedAt
+	i.prInfoGeneration = rollback.generation
+}
+
 // PRInfoAge returns how long ago PR info was last fetched. Returns a very
 // large duration if PR info has never been fetched in this process.
 func (i *Instance) PRInfoAge() time.Duration {

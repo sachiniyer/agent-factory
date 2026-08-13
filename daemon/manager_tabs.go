@@ -518,13 +518,15 @@ func (m *Manager) setPRInfoGuarded(ctx context.Context, req SetPRInfoRequest, gu
 			return nil
 		}
 	}
-	prev := instance.GetPRInfo()
-	instance.SetPRInfo(info)
+	rollback := instance.BeginPRInfoWrite(info)
 
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
-		// Keep memory consistent with disk on a persist failure.
-		instance.SetPRInfo(prev)
+		// Keep memory consistent with disk on a persist failure — generation
+		// and freshness clock included: a failed write committed nothing, so it
+		// must not fail a concurrent producer's generation CAS or extend the
+		// old value's freshness (#3287 review).
+		instance.RollbackPRInfoWrite(rollback)
 		return fmt.Errorf("failed to persist PR info: %w", err)
 	}
 
