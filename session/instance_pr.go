@@ -41,6 +41,15 @@ func (i *Instance) MarkPRInfoFetched() {
 	i.prInfoLastFetched = time.Now()
 }
 
+// SetPRInfoFetchedAtForTest backdates the freshness clock so staleness-window
+// tests can age an entry without sleeping. Test-only; nothing is derived from
+// the timestamp beyond PRInfoAge itself.
+func (i *Instance) SetPRInfoFetchedAtForTest(at time.Time) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.prInfoLastFetched = at
+}
+
 // FetchPRInfoSnapshot returns the data needed to fetch PR info for this
 // instance off the main event loop. The returned repoPath is empty when the
 // instance is not ready for fetching (not started, no worktree, or remote).

@@ -307,6 +307,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
 
+	// The daemon discovers each session's PR info itself (#3232), so a session
+	// used only from the web or the CLI still gets its pr_info projection
+	// populated — before this loop the TUI was the only producer.
+	startPRInfoRefreshLoop(manager, stopCh, wg)
+
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
 	// abandoned temp/test home, or a user rm -rf'ing the install — nothing

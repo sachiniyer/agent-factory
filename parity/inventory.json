@@ -821,8 +821,9 @@
         "status": "no",
         "pointer": ""
       },
-      "verdict": "unclear",
-      "notes": "Depends on session.pr.set: no other surface records PR info, so there is nothing for them to open. Triage together."
+      "verdict": "real-gap",
+      "issue": "#3285",
+      "notes": "The dependency is resolved: discovery is daemon-side since #3232, so every surface receives pr_info. Web rendering of the badge and an open link is #3285; the CLI already exposes the URL through the sessions JSON."
     },
     {
       "id": "session.pr.set",
@@ -839,8 +840,8 @@
         "status": "no",
         "pointer": "no PR verb in the cobra tree (derived)"
       },
-      "verdict": "unclear",
-      "notes": "Public route, but the TUI's use is background sync (it fetches PR info from git and records it) rather than a user action. Whether the web should also sync PR info — or whether this should be daemon-side for every client — is an owner call, not a filed gap."
+      "verdict": "deliberate",
+      "notes": "Discovery is daemon-side since #3232 (daemon/pr_info_refresh.go): the daemon sweeps every local session and records through the same SetPRInfo write path, so web/CLI-only use gets pr_info with no client producer. The TUI's faster selected-session fetch remains as an accelerator over the same route; the web and CLI need no set verb."
     },
     {
       "id": "session.preview",
