@@ -57,6 +57,7 @@ var goSurfaces = map[string][]string{
 var auditedRequests = map[string]reflect.Type{
 	"AddTaskRequest":          reflect.TypeOf(daemon.AddTaskRequest{}),
 	"ApplyConfigRequest":      reflect.TypeOf(daemon.ApplyConfigRequest{}),
+	"ApplyThemeRequest":       reflect.TypeOf(daemon.ApplyThemeRequest{}),
 	"ArchiveSessionRequest":   reflect.TypeOf(daemon.ArchiveSessionRequest{}),
 	"CloseTabRequest":         reflect.TypeOf(daemon.CloseTabRequest{}),
 	"CreateSessionRequest":    reflect.TypeOf(daemon.CreateSessionRequest{}),

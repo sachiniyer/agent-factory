@@ -52,7 +52,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
-import { EventStream, type EventStreamStatus } from "./events.js";
+import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
   confirmDeleteProjectModal,
@@ -1806,6 +1806,10 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
+  if (eventRequestsPaletteRefresh(ev)) {
+    if (token) void refreshDaemonPalette(token);
+    return;
+  }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
   // tasks.json, so a task.created/updated/removed event just triggers a debounced
   // ListTasks refetch (the authoritative task projection). The session reducer

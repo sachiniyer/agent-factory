@@ -455,6 +455,14 @@ func isRPCMethodMissing(err error) bool {
 		strings.HasPrefix(string(srv), "rpc: can't find service")
 }
 
+// RequestApplyTheme asks a RUNNING daemon to reload only the palette. Like the
+// full apply path it never starts a daemon; a later daemon start reads the file.
+func RequestApplyTheme() (ApplyThemeResponse, error) {
+	var resp ApplyThemeResponse
+	err := callDaemonNoEnsure("ApplyTheme", ApplyThemeRequest{}, &resp)
+	return resp, err
+}
+
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	var resp CreateSessionResponse

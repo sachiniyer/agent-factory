@@ -3433,7 +3433,7 @@ button:disabled,
 /* The restart notice is deliberately not styled as an error — nothing went wrong;
  * the edit simply is not live yet. */
 .af-config-notice {
-  color: var(--af-text-2);
+  color: var(--af-accent-text);
   background: var(--af-accent-subtle);
   border-radius: var(--af-r-sm);
   padding: 0.3rem 0.45rem;

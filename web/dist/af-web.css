@@ -2583,7 +2583,7 @@ button:disabled,
   color: var(--af-danger);
 }
 .af-config-notice {
-  color: var(--af-text-2);
+  color: var(--af-accent-text);
   background: var(--af-accent-subtle);
   border-radius: var(--af-r-sm);
   padding: 0.3rem 0.45rem;

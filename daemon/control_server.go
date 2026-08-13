@@ -281,6 +281,24 @@ func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigRespo
 	return nil
 }
 
+// ApplyTheme is the narrow launch-boundary counterpart to ApplyConfig. A TUI
+// launch may advance the shared palette, but must never silently apply unrelated
+// listener/auth edits whose failures require an operator-facing save response.
+func (s *controlServer) ApplyTheme(_ ApplyThemeRequest, resp *ApplyThemeResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
+	if s.manager == nil {
+		return nil
+	}
+	changed, err := s.manager.ApplyTheme()
+	if err != nil {
+		return err
+	}
+	resp.Changed = changed
+	return nil
+}
+
 // ListTasks returns the full task list read from tasks.json (#1029 PR 3).
 // Deliberately NOT gated on requireManagerReady: task state lives on disk,
 // independent of the instance restore, so a read is always safe and always

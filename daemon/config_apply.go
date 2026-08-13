@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -126,12 +127,44 @@ func withoutKeys(keys, drop []string) []string {
 	return kept
 }
 
+// ApplyTheme advances only the daemon-owned palette from the global config. A
+// plain `af` launch calls this after resolving a hand edit: applying the complete
+// file there would also mutate listeners/auth and could hide a failed rebind from
+// the user who merely opened the TUI. The event is an invalidation signal; open
+// web clients fetch GetTheme after receiving it.
+func (m *Manager) ApplyTheme() (bool, error) {
+	m.configApplyMu.Lock()
+	defer m.configApplyMu.Unlock()
+
+	newCfg, err := config.LoadConfig()
+	if err != nil {
+		return false, fmt.Errorf("reload config theme: %w", err)
+	}
+	old := m.Config()
+	if old == nil {
+		return false, fmt.Errorf("reload config theme: daemon config is unavailable")
+	}
+	if old.Theme == newCfg.Theme {
+		return false, nil
+	}
+
+	next := *old
+	next.Theme = newCfg.Theme
+	m.live.Store(&next)
+	m.publishEvent(agentproto.EventThemeChanged, nil)
+	return true, nil
+}
+
 func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
+	m.configApplyMu.Lock()
+	defer m.configApplyMu.Unlock()
+
 	newCfg, err := config.LoadConfig()
 	if err != nil {
 		return ApplyConfigResult{}, fmt.Errorf("reload config: %w", err)
 	}
 	old := m.Config()
+	themeChanged := old != nil && old.Theme != newCfg.Theme
 
 	// Bucket every changed key by its effect class (config.KeyEffectClass, the same
 	// source the save-surface notice reads). Sorted so the reported order is stable
@@ -157,6 +190,9 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
 	// the next-start notice. GetTheme deliberately reads this live snapshot.
 	m.live.Store(newCfg)
+	if themeChanged {
+		m.publishEvent(agentproto.EventThemeChanged, nil)
+	}
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.

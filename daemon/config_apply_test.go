@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -20,6 +23,37 @@ func applyConfigTestManager(t *testing.T) *Manager {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	return m
+}
+
+// A plain `af` launch is the apply boundary for a hand-edited global theme. It
+// must not apply an unrelated listener/auth/program edit as a side effect, and an
+// already-open web client needs an events-plane signal to fetch the new palette.
+func TestApplyThemeChangesOnlyThemeAndPublishes(t *testing.T) {
+	m := applyConfigTestManager(t)
+	_, events := m.events.subscribe()
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	require.NotEmpty(t, home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(`schema_version = 1
+default_program = "codex"
+listen_addr = "127.0.0.1:9999"
+theme = "zenburn"
+`), 0o600))
+
+	changed, err := m.ApplyTheme()
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, "zenburn", m.Config().Theme.Preset())
+	assert.Equal(t, config.DefaultConfig().DefaultProgram, m.Config().DefaultProgram,
+		"theme-only launch apply must not advance unrelated config")
+	assert.Equal(t, config.DefaultConfig().ListenAddr, m.Config().ListenAddr,
+		"theme-only launch apply must never attempt a listener rebind")
+
+	select {
+	case event := <-events:
+		assert.Equal(t, agentproto.EventThemeChanged, event.Type)
+	default:
+		t.Fatal("theme apply did not notify connected event subscribers")
+	}
 }
 
 // TestApplyConfigSwapsLiveConfig: a hot-reloadable key written to disk is live via

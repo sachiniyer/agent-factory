@@ -941,3 +941,12 @@ type ApplyConfigResponse struct {
 	// rather than falsely applied.
 	FailedListenerKeys []string `json:"failed_listener_keys,omitempty"`
 }
+
+// ApplyThemeRequest asks a running daemon to reload only the global palette.
+// Unlike ApplyConfig, it cannot change auth, listeners, or any other live key.
+type ApplyThemeRequest struct{}
+
+// ApplyThemeResponse reports whether the live palette generation advanced.
+type ApplyThemeResponse struct {
+	Changed bool `json:"changed"`
+}

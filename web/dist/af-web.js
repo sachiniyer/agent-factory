@@ -7646,6 +7646,31 @@ function deriveTheme(input, mode) {
     "--af-shadow-overlay": `0 16px 48px ${rgba(effectBase, dark ? 0.6 : 0.22)}`,
     "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42)
   };
+  const ansiDistinct = (color, avoid) => {
+    const normalized = color.toUpperCase();
+    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
+    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
+    let best = normalized;
+    let bestDistance = -1;
+    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
+      for (let step = 1; step <= 255; step++) {
+        const candidate = mix(normalized, endpoint, step / 255);
+        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
+        const value = rgb(candidate);
+        const distance = Math.min(
+          ...avoid.map((occupied) => {
+            const other = rgb(occupied);
+            return value.reduce((sum, channel, index) => sum + (channel - other[index]) ** 2, 0);
+          })
+        );
+        if (distance > bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  };
   const bright = (color) => {
     for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
       for (let step = 18; step <= 100; step++) {
@@ -7656,7 +7681,9 @@ function deriveTheme(input, mode) {
     return color.toUpperCase();
   };
   const ansiBlack = dark ? text3 : text;
-  const ansiWhite = dark ? text : text3;
+  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
+  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
+  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
   const xterm = {
     background: tokens["--af-bg-term"],
     foreground: text,
@@ -7672,14 +7699,14 @@ function deriveTheme(input, mode) {
     magenta: termColor(source.purple, NORD_THEME.purple),
     cyan: accent,
     white: ansiWhite,
-    brightBlack: bright(ansiBlack),
+    brightBlack,
     brightRed: bright(danger),
     brightGreen: bright(termGreen),
     brightYellow: bright(termAmber),
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: bright(ansiWhite)
+    brightWhite
   };
   return { tokens, xterm };
 }
@@ -9106,6 +9133,9 @@ function openConfigAssistant(opts) {
 }
 
 // src/events.ts
+function eventRequestsPaletteRefresh(event) {
+  return event.type === "theme.changed";
+}
 var BACKOFF_BASE_MS2 = 500;
 var BACKOFF_MAX_MS2 = 1e4;
 function wsScheme2() {
@@ -15870,6 +15900,10 @@ function stopStream() {
   }
 }
 function onEvent(ev) {
+  if (eventRequestsPaletteRefresh(ev)) {
+    if (token) void refreshDaemonPalette(token);
+    return;
+  }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
     return;

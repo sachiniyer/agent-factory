@@ -121,6 +121,7 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   for (const selector of [".af-tab-close:hover", ".af-pane-close:hover", ".af-danger:hover"]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-danger-text\\)`, "s"));
   }
+  assert.match(css, /\.af-config-notice\s*\{[^}]*color:\s*var\(--af-accent-text\)/s);
   assert.match(
     css,
     /\.af-project-item-current \.af-project-item-path\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s,
@@ -281,6 +282,28 @@ test("selected-row foregrounds remain AA on both accent fill strengths", () => {
     for (const fill of fills) {
       assert.ok(contrastRatio(tokens[name], fill) >= 4.5, `${name} ${tokens[name]} must be AA on ${fill}`);
     }
+  }
+});
+
+test("custom ANSI black and white endpoints remain readable and distinct", () => {
+  const { xterm } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#777777",
+      background_subtle: "#777777",
+      background_panel: "#777777",
+      foreground: "#000000",
+      foreground_muted: "#000000",
+      foreground_dim: "#000000",
+      accent: "#000000",
+    },
+    "dark",
+  );
+  const endpoints = [xterm.black!, xterm.brightBlack!, xterm.white!, xterm.brightWhite!];
+
+  assert.equal(new Set(endpoints).size, endpoints.length, `ANSI endpoints collapsed: ${endpoints.join(", ")}`);
+  for (const endpoint of endpoints) {
+    assert.ok(contrastRatio(endpoint, xterm.background!) >= 4.5, `${endpoint} must be AA on ${xterm.background}`);
   }
 });
 

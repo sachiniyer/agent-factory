@@ -407,10 +407,37 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     "--af-backdrop": rgba(effectBase, dark ? 0.66 : 0.42),
   };
 
+  const ansiDistinct = (color: string, avoid: readonly string[]): string => {
+    const normalized = color.toUpperCase();
+    const rejected = new Set(avoid.map((value) => value.toUpperCase()));
+    if (!rejected.has(normalized) && passes(normalized, [canvas], 4.5)) return normalized;
+
+    // A canvas near the WCAG midpoint can leave only a narrow readable band at
+    // one endpoint. Choose the candidate with the largest minimum RGB distance
+    // from every occupied role, so that narrow band is used rather than taking
+    // the first one-codepoint difference and calling it distinct.
+    let best = normalized;
+    let bestDistance = -1;
+    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
+      for (let step = 1; step <= 255; step++) {
+        const candidate = mix(normalized, endpoint, step / 255);
+        if (rejected.has(candidate) || !passes(candidate, [canvas], 4.5)) continue;
+        const value = rgb(candidate)!;
+        const distance = Math.min(
+          ...avoid.map((occupied) => {
+            const other = rgb(occupied)!;
+            return value.reduce((sum, channel, index) => sum + (channel - other[index]!) ** 2, 0);
+          }),
+        );
+        if (distance > bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  };
   const bright = (color: string): string => {
-    // Preserve the ANSI intensity bit after enforcing readability. The preferred
-    // endpoint makes bright roles lighter on dark canvases and darker on light
-    // canvases; the opposite endpoint covers an already-saturated endpoint.
     for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
       for (let step = 18; step <= 100; step++) {
         const candidate = mix(color, endpoint, step / 100);
@@ -423,7 +450,9 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   // canvas. Use the already-accepted primary/tertiary text endpoints, swapping
   // their intensity by mode so black and white both remain AA on the terminal.
   const ansiBlack = dark ? text3 : text;
-  const ansiWhite = dark ? text : text3;
+  const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
+  const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
+  const brightWhite = ansiDistinct(ansiWhite, [ansiWhite, ansiBlack, brightBlack]);
   const xterm: ITheme = {
     background: tokens["--af-bg-term"],
     foreground: text,
@@ -439,14 +468,14 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     magenta: termColor(source.purple, NORD_THEME.purple),
     cyan: accent,
     white: ansiWhite,
-    brightBlack: bright(ansiBlack),
+    brightBlack,
     brightRed: bright(danger),
     brightGreen: bright(termGreen),
     brightYellow: bright(termAmber),
     brightBlue: bright(termBlue),
     brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
     brightCyan: bright(accent),
-    brightWhite: bright(ansiWhite),
+    brightWhite,
   };
   return { tokens, xterm };
 }

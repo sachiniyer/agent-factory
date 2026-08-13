@@ -31,6 +31,9 @@ type Manager struct {
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
 	live atomic.Pointer[config.Config]
+	// configApplyMu serializes full and theme-only live-config swaps so a launch
+	// cannot restore unrelated fields from a generation an ApplyConfig just replaced.
+	configApplyMu sync.Mutex
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
