@@ -175,6 +175,95 @@ func TestEnsureRootAgentsPersonalDisablesLegacyRoot(t *testing.T) {
 	}
 }
 
+// makePersonalRootAgentUnreadable revokes read permission on a registered
+// project's personal config file, so LoadProjectConfig fails with EACCES
+// instead of reporting an absent layer. Callers must skip under root first —
+// root reads straight through a 0o000 mode.
+func makePersonalRootAgentUnreadable(t *testing.T, projectID string) {
+	t.Helper()
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod personal config unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0o644)
+	})
+}
+
+// TestEnsureRootAgentsUnreadablePersonalConfigFailsClosed is the #3241
+// regression: the personal config says enabled=false, but the FILE cannot be
+// read (EACCES here; EIO and ESTALE are the same class). Collapsing the failed
+// read into "no personal layer" let the ubiquitous empty legacy entry
+// re-enable the root — an unreadable file silently bypassing a switch the user
+// set deliberately. A failed read is not an absent layer: the decision is
+// unknown, and unknown must fail CLOSED — no root may start for this project.
+func TestEnsureRootAgentsUnreadablePersonalConfigFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not make a file unreadable")
+	}
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	makePersonalRootAgentUnreadable(t, project.ID)
+
+	// The same ubiquitous empty legacy entry the readable-disable test above
+	// uses: it must not win while the personal layer is unreadable either.
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("an unreadable personal config must fail closed over a legacy enable, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatalf("no root instance may exist while the personal config is unreadable")
+	}
+	if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+		t.Fatalf("repoRootAgentWillMaterialize must be false while the personal config is unreadable — a delivery must not wait for a root the ensure loop will not create")
+	}
+}
+
+// TestEnsureRootAgentsUnreadablePersonalConfigFailsClosedGlobal covers the
+// singleton half of #3241: a global [root_agent] enabled=true fanning out to a
+// registered project must equally not start a root while that project's
+// personal config — which may say enabled=false, and here does — is
+// unreadable.
+func TestEnsureRootAgentsUnreadablePersonalConfigFailsClosedGlobal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not make a file unreadable")
+	}
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	makePersonalRootAgentUnreadable(t, project.ID)
+	cfg := loadGlobalConfigWithRootAgent(t, "enabled = true")
+
+	manager, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("an unreadable personal config must fail closed over a global enable, got %d creates", len(*seen))
+	}
+	if findRootInstance(t, manager, repoPath) != nil {
+		t.Fatalf("no root instance may exist while the personal config is unreadable")
+	}
+	if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+		t.Fatalf("repoRootAgentWillMaterialize must fail closed alongside the ensure loop")
+	}
+}
+
 // TestEnsureRootAgentsLegacyOnlyUnchangedThroughResolver: a plain legacy entry
 // with no project registration and no global/personal layer still ensures a
 // root, exactly as before PR2 — proving the resolver rewrite preserved the
