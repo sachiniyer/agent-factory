@@ -7476,9 +7476,11 @@ function normalizeTheme(value) {
 }
 function paletteFetchFailurePlan(status, hasLoadedPalette) {
   const unsupported = status === 404 || status === 405 || status === 501;
+  const rejectedCredential = status === 401 || status === 403;
   return {
     reset: unsupported || !hasLoadedPalette,
-    retry: !unsupported
+    retry: !unsupported && !rejectedCredential,
+    reauthenticate: rejectedCredential
   };
 }
 function createLatestRequestGate() {
@@ -15034,6 +15036,7 @@ async function connect(candidate) {
   token = candidate;
   storeToken(candidate);
   await refreshDaemonPalette(candidate);
+  if (token !== candidate) return;
   let tasks = [];
   try {
     tasks = await listTasks(candidate);
@@ -15067,7 +15070,7 @@ async function fetchRegisteredProjects(tok) {
     return [];
   }
 }
-function disconnect() {
+function disconnect(loginError = null) {
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -15080,7 +15083,7 @@ function disconnect() {
     view: "sessions",
     selectedProject: null,
     connecting: false,
-    loginError: null,
+    loginError,
     sessions: [],
     selectedId: null,
     live: "connecting",
@@ -15826,6 +15829,10 @@ async function refreshDaemonPalette(tok) {
     if (token !== tok || !request.isCurrent()) return;
     const status = error instanceof ApiError ? error.status : 0;
     const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
+    if (plan.reauthenticate) {
+      disconnect(describeError(error));
+      return;
+    }
     if (plan.reset) {
       resetDaemonTheme();
       hasDaemonPalette = false;

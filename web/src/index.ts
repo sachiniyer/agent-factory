@@ -361,6 +361,10 @@ async function connect(candidate: string): Promise<void> {
   // newly constructed xterm use the same palette. A failed additive read keeps
   // the built-in Nord floor rather than blocking an otherwise valid login.
   await refreshDaemonPalette(candidate);
+  // A token can rotate after Snapshot accepted it but before GetTheme returns.
+  // That rejection routes through disconnect(), which clears token and returns to
+  // login; do not let this older connect continue mounting the authenticated app.
+  if (token !== candidate) return;
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -417,7 +421,7 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  terminal, and returns to login. This is the "forget the saved token" affordance
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
-function disconnect(): void {
+function disconnect(loginError: string | null = null): void {
   stopStream();
   closeModal();
   closeConfigAssistant();
@@ -430,7 +434,7 @@ function disconnect(): void {
     view: "sessions",
     selectedProject: null,
     connecting: false,
-    loginError: null,
+    loginError,
     sessions: [],
     selectedId: null,
     live: "connecting",
@@ -1746,6 +1750,13 @@ async function refreshDaemonPalette(tok: string): Promise<void> {
     if (token !== tok || !request.isCurrent()) return;
     const status = error instanceof ApiError ? error.status : 0;
     const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
+    if (plan.reauthenticate) {
+      // Reuse the one credential-rejection path: stop every authenticated stream,
+      // forget the stored bearer, reset the palette, and show the login surface.
+      // Retrying the same rejected token once a second can never recover.
+      disconnect(describeError(error));
+      return;
+    }
     if (plan.reset) {
       resetDaemonTheme();
       hasDaemonPalette = false;

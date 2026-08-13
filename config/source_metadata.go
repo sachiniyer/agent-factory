@@ -66,16 +66,19 @@ func attachConfigSource(cfg *Config, data []byte, path string, format ConfigForm
 	return nil
 }
 
-// snapshotConfig copies every exported value recursively and deliberately
-// drops loader-only metadata. The reflection walk means a future map, slice,
-// pointer, or table default cannot accidentally alias the value that decoding
-// mutates; adding such a field needs no second hand-maintained copy list.
+// snapshotConfig copies every exported value recursively and deliberately drops
+// loader-only metadata. Theme preset identity is private implementation state but
+// semantic user data — it controls Preset() and scalar-vs-table serialization — so
+// it is restored explicitly after the reflection walk. A future map, slice,
+// pointer, or table default still cannot alias the value that decoding mutates.
 func snapshotConfig(cfg *Config) *Config {
 	if cfg == nil {
 		return nil
 	}
 	copyValue := cloneExportedValue(reflect.ValueOf(*cfg))
 	copyConfig := copyValue.Interface().(Config)
+	copyConfig.Theme.preset = cfg.Theme.preset
+	copyConfig.Theme.explicitPreset = cfg.Theme.explicitPreset
 	return &copyConfig
 }
 

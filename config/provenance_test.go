@@ -340,6 +340,15 @@ func TestResolveConfigTreatsNamedThemePresetAsConfiguredPalette(t *testing.T) {
 	}
 }
 
+func TestResolveGlobalConfigPreservesBuiltInThemePresetIdentity(t *testing.T) {
+	setupProvenanceTest(t, "schema_version = 1\n")
+
+	resolved, err := ResolveGlobalConfig()
+	require.NoError(t, err)
+	assert.Equal(t, DefaultThemePreset, resolved.Theme.Preset())
+	assert.Equal(t, DefaultThemeConfig(), resolved.Theme)
+}
+
 func TestResolveGlobalConfigExplainsNormalizedKeyBindingLeaves(t *testing.T) {
 	setupProvenanceTest(t, "schema_version = 1\n[keys]\nquit = \"Q\"\n")
 

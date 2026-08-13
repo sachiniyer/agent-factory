@@ -651,6 +651,10 @@ button:disabled,
   color: var(--af-accent-text);
 }
 
+.af-project-item-current .af-project-item-path {
+  color: var(--af-selected-text-muted);
+}
+
 .af-project-check {
   flex: 0 0 auto;
   width: 0.8rem;

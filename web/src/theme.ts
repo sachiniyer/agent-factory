@@ -192,14 +192,17 @@ export interface LatestRequestGate {
 export interface PaletteFetchFailurePlan {
   reset: boolean;
   retry: boolean;
+  reauthenticate: boolean;
 }
 
 /** Keeps a last-good daemon palette across transient additive-read failures. */
 export function paletteFetchFailurePlan(status: number, hasLoadedPalette: boolean): PaletteFetchFailurePlan {
   const unsupported = status === 404 || status === 405 || status === 501;
+  const rejectedCredential = status === 401 || status === 403;
   return {
     reset: unsupported || !hasLoadedPalette,
-    retry: !unsupported,
+    retry: !unsupported && !rejectedCredential,
+    reauthenticate: rejectedCredential,
   };
 }
 

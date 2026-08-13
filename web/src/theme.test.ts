@@ -121,6 +121,10 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   for (const selector of [".af-tab-close:hover", ".af-pane-close:hover", ".af-danger:hover"]) {
     assert.match(css, new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^}]*color:\\s*var\\(--af-danger-text\\)`, "s"));
   }
+  assert.match(
+    css,
+    /\.af-project-item-current \.af-project-item-path\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s,
+  );
   assert.match(css, /\.af-row-selected\s*\{[^}]*color:\s*var\(--af-selected-text\)/s);
   assert.match(css, /\.af-row-selected \.af-row-branch\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s);
 });
@@ -205,9 +209,19 @@ test("palette refresh generations reject an older completion for the same token"
 });
 
 test("transient palette failures retain the last good palette and retry", () => {
-  assert.deepEqual(paletteFetchFailurePlan(503, true), { reset: false, retry: true });
-  assert.deepEqual(paletteFetchFailurePlan(0, false), { reset: true, retry: true });
-  assert.deepEqual(paletteFetchFailurePlan(404, true), { reset: true, retry: false });
+  assert.deepEqual(paletteFetchFailurePlan(503, true), { reset: false, retry: true, reauthenticate: false });
+  assert.deepEqual(paletteFetchFailurePlan(0, false), { reset: true, retry: true, reauthenticate: false });
+  assert.deepEqual(paletteFetchFailurePlan(404, true), { reset: true, retry: false, reauthenticate: false });
+});
+
+test("rejected palette credentials stop retrying and require authentication", () => {
+  for (const status of [401, 403]) {
+    assert.deepEqual(paletteFetchFailurePlan(status, true), {
+      reset: false,
+      retry: false,
+      reauthenticate: true,
+    });
+  }
 });
 
 for (const mode of ["light", "dark"] as const) {
