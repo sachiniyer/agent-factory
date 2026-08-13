@@ -25,6 +25,21 @@ export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
  *  what makes it the key the status filter (filter.ts) partitions the rail by. */
 export type RowKind = DotKind | "working";
 
+/** The operator-level vocabulary for scanning the rail. It deliberately groups the
+ * daemon's finer mechanical reasons by the next action, while keeping Archived as a
+ * separate inactive-history bucket outside the four live-work groups. */
+export type OperatorKind = "needs-you" | "working" | "waiting-limit" | "broken" | "archived";
+
+/** Human labels shared by the rail rows and their filter. The visible words carry
+ * the state independently of color, and stay sentence case per #3220. */
+export const OPERATOR_KIND_LABELS: Record<OperatorKind, string> = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived",
+};
+
 /** The one-word state labels, keyed by RowKind. Single source of truth: the row's
  *  own aria/title label (rowStatus) and the filter menu's checkbox labels both read
  *  this map, so the two surfaces cannot drift into calling the same state different
@@ -148,6 +163,34 @@ export function isCreating(s: SessionData): boolean {
  */
 export function rowKind(s: SessionData): RowKind {
   return rowStatus(s).kind ?? "working";
+}
+
+/** Groups liveness + idle_reason by what the operator should do next.
+ *
+ * In-flight work wins over stale evidence because rowStatus applies that daemon
+ * overlay first. A positive non-delivery result is broken even though its process
+ * is Ready; uncertainty remains Needs you rather than being mislabeled as failure.
+ * Unknown future idle reasons fall back to the mechanically established liveness. */
+export function operatorKind(s: SessionData): OperatorKind {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (
+    displayed === "lost" ||
+    displayed === "dead" ||
+    s.idle_reason === "process-exited" ||
+    s.idle_reason === "prompt-not-delivered"
+  ) {
+    return "broken";
+  }
+  return "needs-you";
 }
 
 /** The daemon always emits `liveness`; this only guards a pre-#1195 record by

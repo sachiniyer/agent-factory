@@ -1351,7 +1351,7 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", REAL_FI
   await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 });
 
-test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", REAL_FIXTURE, async ({
+test("status semantics (#1766, #3220): action groups are legible and glyphs stay static", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
@@ -1388,20 +1388,22 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
     // distinct branch so its rendered branch line never contains another row's name
     // (the row() locator matches row text by substring).
     const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    const synth = (title: string, liveness: number) => ({
+    const synth = (title: string, liveness: number, idleReason = "") => ({
       ...proto,
       id: `synth-${title}`,
       title,
       branch: `synth-${title}`,
       liveness,
       in_flight_op: 0,
+      idle_reason: idleReason,
     });
     list.push(
       synth("probe-working", 1), // Running → working → no dot
-      synth("probe-waiting", 2), // Ready → waiting → green dot
-      synth("probe-lost", 3),
-      synth("probe-dead", 4),
-      synth("probe-limit", 6),
+      synth("probe-needs-you", 2, "settled-after-pane-change"),
+      synth("probe-broken-prompt", 2, "prompt-not-delivered"),
+      synth("probe-lost", 3, "process-exited"),
+      synth("probe-dead", 4, "process-exited"),
+      synth("probe-limit", 6, "usage-limit"),
     );
     if (snap) {
       snap.instances = list;
@@ -1416,16 +1418,28 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   // would pass for the wrong reason.
   await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
   await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
-  // Waiting row: the static filled circle, in the ready color bucket, never spinning.
-  const readyDot = row(p, "probe-waiting").locator(".af-dot");
+  await expect(row(p, "probe-working").locator(".af-row-status")).toHaveCount(1);
+  await expect(row(p, "probe-working").locator(".af-operator-state")).toHaveText("Working");
+  // Needs-you row: the static filled circle, in the ready color bucket, never spinning.
+  const readyDot = row(p, "probe-needs-you").locator(".af-dot");
   await expect(readyDot).toHaveClass(/af-dot-ready/);
   await expect(readyDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
+  await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
+  await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
+  // Positive non-delivery is Broken even though the underlying process is Ready.
+  const promptBroken = row(p, "probe-broken-prompt");
+  await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
+  await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
+  await expect(row(p, "probe-lost").locator(".af-operator-state")).toHaveText("Broken");
   await expect(row(p, "probe-dead").locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(row(p, "probe-limit").locator('.af-icon[data-icon="diamond"]')).toHaveCount(1);
+  await expect(row(p, "probe-limit").locator(".af-operator-state")).toHaveText("Waiting on a limit");
   // The animation class is gone from every status row, and the removed "working" dot
   // kind never renders anywhere.
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
@@ -1438,7 +1452,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   const retry = p.locator(".af-term-head button", { hasText: "Retry" });
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
-  const waitingActions = row(p, "probe-waiting").locator(".af-row-actions");
+  const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
   await expect(selectedActions).toHaveCSS("opacity", "1");
   await expect(waitingActions).toHaveCount(1);
   await expect(waitingActions).toHaveCSS("opacity", "0");
@@ -1450,13 +1464,13 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await expect(selectedActions).toHaveCSS("opacity", "1");
   await p.mouse.move(0, 0);
   const geometry = () =>
-    row(p, "probe-waiting").evaluate((el) => {
+    row(p, "probe-needs-you").evaluate((el) => {
       const main = el.querySelector(".af-row-main")!.getBoundingClientRect();
       const actions = el.querySelector(".af-row-actions")!.getBoundingClientRect();
       return { mainLeft: main.left, mainWidth: main.width, actionsLeft: actions.left, actionsWidth: actions.width };
     });
   const beforeHover = await geometry();
-  await row(p, "probe-waiting").hover();
+  await row(p, "probe-needs-you").hover();
   await expect(waitingActions).toHaveCSS("opacity", "1");
   expect(await geometry(), "hover reveal keeps the reserved row geometry").toEqual(beforeHover);
   await p.mouse.move(0, 0);
@@ -1465,7 +1479,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
   // enter this row. The opacity-zero action remains tabbable and :focus-within makes
   // it visible as soon as focus arrives.
-  const keyboardTarget = railAction(p, "probe-waiting", "Archive session");
+  const keyboardTarget = railAction(p, "probe-needs-you", "Archive session");
   await keyboardTarget.evaluate((target) => {
     const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
     const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
@@ -1478,7 +1492,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await expect(keyboardTarget).toBeFocused();
   await expect(waitingActions).toHaveCSS("opacity", "1");
   await keyboardTarget.evaluate((el) => el.blur());
-  await row(p, "probe-waiting").click();
+  await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
 
   await ctx.close();
@@ -5264,7 +5278,7 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   // user actually reads, so a default that drifts in filter.ts is caught here too.
   await page.locator(".af-rail-filter").click();
   await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "false");
-  for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+  for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
     await expect(filterItem(page, kind), `${kind} must be shown by default`).toHaveAttribute("aria-checked", "true");
   }
   // The default is NOT a "narrowed" state — it must not nag with an indicator the
@@ -5282,17 +5296,15 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   await expect(page.locator(".af-rail-count")).toHaveText(String(shown));
 });
 
-test("filter (feat): Show archived reveals the archived row, muted, and hides it again", REAL_FIXTURE, async () => {
+test("filter (feat): Show archived reveals the archived row as inactive, and hides it again", REAL_FIXTURE, async () => {
   await setFilter(page, "archived", true);
-  // The archived row is back and reads as inactive: it reuses the dimmed archived
-  // styling rather than looking like live work.
+  // The archived row is back and reads as inactive through words + a static glyph.
+  // It keeps full opacity so informative text does not fall below contrast.
   const archived = row(page, SESSION_B);
   await expect(archived).toBeVisible();
-  await expect(archived).toHaveClass(/af-row-archived/);
-  expect(
-    Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity))),
-    "the archived row must render de-emphasized",
-  ).toBeLessThan(1);
+  await expect(archived).toHaveClass(/af-row-archived.*af-row-operator-archived|af-row-operator-archived.*af-row-archived/);
+  await expect(archived.locator(".af-operator-state")).toHaveText("Archived");
+  expect(Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity)))).toBe(1);
   // Revealing the archive IS a departure from the default, so the control says so.
   await expect(page.locator(".af-rail-filter")).toHaveClass(/af-rail-filter-narrowed/);
   await expect(page.locator(".af-rail-filter-dot")).toHaveClass(/af-rail-filter-dot-on/);
@@ -5352,21 +5364,22 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     // and vary only what the filter reads. Distinct branches keep each row's text
     // free of another's name (row() matches by substring).
     const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    const synth = (title: string, liveness: number) => ({
+    const synth = (title: string, liveness: number, idleReason = "") => ({
       ...proto,
       id: `synth-filter-${title}`,
       title,
       branch: `synth-filter-${title}`,
       liveness,
       in_flight_op: 0,
+      idle_reason: idleReason,
     });
     list.push(
       synth("filt-working", 1), // LiveRunning
-      synth("filt-ready", 2), // LiveReady
-      synth("filt-lost", 3), // LiveLost
-      synth("filt-dead", 4), // LiveDead
+      synth("filt-needs-you", 2, "settled-after-pane-change"),
+      synth("filt-broken-lost", 3, "process-exited"),
+      synth("filt-broken-prompt", 2, "prompt-not-delivered"),
       synth("filt-archived", 5), // LiveArchived
-      synth("filt-limit", 6), // LiveLimitReached
+      synth("filt-waiting-limit", 6, "usage-limit"),
     );
     if (snap) {
       snap.instances = list;
@@ -5376,38 +5389,45 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   await openTokenless(p);
 
   // Each state's row and the checkbox that governs it, in the menu's own order.
-  const states: Array<{ kind: string; title: string }> = [
-    { kind: "working", title: "filt-working" },
-    { kind: "ready", title: "filt-ready" },
-    { kind: "lost", title: "filt-lost" },
-    { kind: "dead", title: "filt-dead" },
-    { kind: "limit", title: "filt-limit" },
-    { kind: "archived", title: "filt-archived" },
+  const states: Array<{ kind: string; titles: string[] }> = [
+    { kind: "needs-you", titles: ["filt-needs-you"] },
+    { kind: "working", titles: ["filt-working"] },
+    { kind: "waiting-limit", titles: ["filt-waiting-limit"] },
+    { kind: "broken", titles: ["filt-broken-lost", "filt-broken-prompt"] },
+    { kind: "archived", titles: ["filt-archived"] },
   ];
 
   // THE DEFAULT: every state but archived. Asserted per state against a real row, so
   // a default that hides more than the archive is caught here, not by a user.
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     const shown = kind !== "archived";
-    await expect(row(p, title), `${title} default visibility`).toHaveCount(shown ? 1 : 0, { timeout: 15_000 });
+    for (const title of titles) {
+      await expect(row(p, title), `${title} default visibility`).toHaveCount(shown ? 1 : 0, { timeout: 15_000 });
+    }
   }
 
   // Each box hides exactly its own group: uncheck it, that row goes and EVERY other
   // state stays — then recheck and it comes back.
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     if (kind === "archived") {
       continue; // already off by default; its reveal is covered above
     }
     await setFilter(p, kind, false);
-    await expect(row(p, title), `${kind} unchecked ⇒ its row goes`).toHaveCount(0);
+    for (const title of titles) {
+      await expect(row(p, title), `${kind} unchecked ⇒ its row goes`).toHaveCount(0);
+    }
     for (const other of states) {
       if (other.kind === kind || other.kind === "archived") {
         continue;
       }
-      await expect(row(p, other.title), `${kind} unchecked must not disturb ${other.kind}`).toHaveCount(1);
+      for (const title of other.titles) {
+        await expect(row(p, title), `${kind} unchecked must not disturb ${other.kind}`).toHaveCount(1);
+      }
     }
     await setFilter(p, kind, true);
-    await expect(row(p, title), `${kind} rechecked ⇒ its row is back`).toHaveCount(1);
+    for (const title of titles) {
+      await expect(row(p, title), `${kind} rechecked ⇒ its row is back`).toHaveCount(1);
+    }
   }
 
   // Narrowing to a SINGLE state is the "show me only what's working" case: uncheck
@@ -5419,9 +5439,11 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   }
   await expect(row(p, "filt-working")).toHaveCount(1);
   await expect(p.locator(".af-rail-list .af-row-archived")).toHaveCount(0);
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     if (kind !== "working") {
-      await expect(row(p, title), `${title} must be filtered out`).toHaveCount(0);
+      for (const title of titles) {
+        await expect(row(p, title), `${title} must be filtered out`).toHaveCount(0);
+      }
     }
   }
 
@@ -5453,7 +5475,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     // Hide every non-archived state. Selection and the terminal pane intentionally
     // survive this display filter, so management must move with them instead of
     // disappearing with the row.
-    for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
       await setFilter(p, kind, false);
     }
     await expect(row(p, title)).toHaveCount(0);
@@ -6074,6 +6096,40 @@ async function cssVar(p: Page, name: string): Promise<string> {
   return p.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
 }
 
+/** WCAG contrast of one semantic foreground token against the surface token. */
+async function tokenContrast(p: Page, foreground: string): Promise<number> {
+  return p.evaluate((fg) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${fg})`;
+    probe.style.backgroundColor = "var(--af-bg-surface)";
+    document.body.append(probe);
+    const parse = (value: string): number[] => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const [fr = 0, fgChannel = 0, fb = 0] = parse(getComputedStyle(probe).color);
+    const [br = 0, bg = 0, bb = 0] = parse(getComputedStyle(probe).backgroundColor);
+    probe.remove();
+    const luminance = (rgb: number[]): number => {
+      const [r = 0, g = 0, b = 0] = rgb.map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const front = luminance([fr, fgChannel, fb]);
+    const back = luminance([br, bg, bb]);
+    return (Math.max(front, back) + 0.05) / (Math.min(front, back) + 0.05);
+  }, foreground);
+}
+
+const CONTRAST_TOKENS = [
+  "--af-text-muted",
+  "--af-status-needs-you",
+  "--af-status-working",
+  "--af-status-waiting",
+  "--af-status-broken",
+  "--af-status-inactive",
+  "--af-focus-ring",
+] as const;
+
 test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
   // Persist a dark choice, then install a document-start trap on #app.replaceChildren
   // (how index.ts mounts its content into #app) that records data-theme AT THE EXACT
@@ -6120,6 +6176,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // to their dark values.
   const darkTerm = await cssVar(page, "--af-bg-term");
   const darkBorderSubtle = await cssVar(page, "--af-border-subtle");
+  for (const token of CONTRAST_TOKENS) {
+    expect(await tokenContrast(page, token), `${token} must hold contrast in dark mode`).toBeGreaterThanOrEqual(4.5);
+  }
 
   // Toggle to Light: the SAME selectors resolve to different token values, proving the
   // chrome is driven by the CSS custom properties, not hardcoded colors.
@@ -6129,6 +6188,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   const lightBody = await bgColor(page, "body");
   const lightTerm = await cssVar(page, "--af-bg-term");
   const lightBorderSubtle = await cssVar(page, "--af-border-subtle");
+  for (const token of CONTRAST_TOKENS) {
+    expect(await tokenContrast(page, token), `${token} must hold contrast in light mode`).toBeGreaterThanOrEqual(4.5);
+  }
 
   expect(lightRail).not.toBe(darkRail);
   expect(lightBody).not.toBe(darkBody);

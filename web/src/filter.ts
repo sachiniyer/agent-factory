@@ -10,10 +10,10 @@
 // helpers, so the partition + persistence rules are unit-tested (filter.test.ts)
 // independently of the shell wiring, exactly as sessions.ts / project.ts / nav.ts are.
 //
-// The filter keys on RowKind — the status a row DISPLAYS (status.ts rowKind), not the
-// raw liveness — so what the checkbox hides is exactly what the eye sees.
+// The filter keys on OperatorKind — the action group a row DISPLAYS, not raw
+// liveness — so what the checkbox hides is exactly what the eye sees.
 
-import { ROW_KIND_LABELS, type RowKind, rowKind } from "./status.js";
+import { OPERATOR_KIND_LABELS, type OperatorKind, operatorKind } from "./status.js";
 import type { SessionData } from "./types.js";
 
 /** localStorage key for the persisted filter. localStorage (not sessionStorage) so
@@ -21,26 +21,25 @@ import type { SessionData } from "./types.js";
  *  (theme.ts) and the selected project (project.ts). */
 const FILTER_KEY = "af-status-filter";
 
-/** Which states the rail shows, one flag per RowKind. A total record (never a
- *  partial/Set) so every state is an explicit yes/no: adding a RowKind is then a
+/** Which states the rail shows, one flag per OperatorKind. A total record (never a
+ *  partial/Set) so every state is an explicit yes/no: adding an OperatorKind is then a
  *  type error here rather than a silently-hidden group. */
-export type StatusFilter = Record<RowKind, boolean>;
+export type StatusFilter = Record<OperatorKind, boolean>;
 
 /** The filter menu's display order: live states first (the ones you act on), then
  *  the degraded ones, then the archive last — mirroring the rail's own live-then-
  *  archived partition (status.ts compareSessionsForRail). */
-export const FILTER_KINDS: readonly RowKind[] = ["working", "ready", "lost", "dead", "limit", "archived"];
+export const FILTER_KINDS: readonly OperatorKind[] = ["needs-you", "working", "waiting-limit", "broken", "archived"];
 
 /** The default: every state EXCEPT archived. Archived sessions are history — they
  *  accumulate without bound (a long-lived project carries hundreds) and burying the
  *  handful of live rows under them is what this feature exists to fix. Every other
  *  state is a session you might still act on, so it stays visible. */
 const DEFAULTS: StatusFilter = {
+  "needs-you": true,
   working: true,
-  ready: true,
-  lost: true,
-  dead: true,
-  limit: true,
+  "waiting-limit": true,
+  broken: true,
   archived: false,
 };
 
@@ -50,31 +49,37 @@ export function defaultFilter(): StatusFilter {
   return { ...DEFAULTS };
 }
 
-/** The label for one filter checkbox — the SAME word the row's own status label uses
- *  (status.ts ROW_KIND_LABELS), so a checkbox and the rows it governs always agree. */
-export function filterLabel(kind: RowKind): string {
-  return ROW_KIND_LABELS[kind];
+/** The label for one filter checkbox — the SAME words the row's operator label uses,
+ *  so a checkbox and the rows it governs always agree. */
+export function filterLabel(kind: OperatorKind): string {
+  return OPERATOR_KIND_LABELS[kind];
 }
 
 /** The sessions the rail should show: those whose DISPLAYED status is checked.
  *  Returns a new array and preserves input order, so callers stay free to sort
  *  (orderedSessions) before or after filtering. */
 export function filterSessions(list: SessionData[], filter: StatusFilter): SessionData[] {
-  return list.filter((s) => filter[rowKind(s)]);
+  return list.filter((s) => filter[operatorKind(s)]);
 }
 
 /** A copy of `filter` with one state flipped — the checkbox's update. */
-export function withKind(filter: StatusFilter, kind: RowKind, on: boolean): StatusFilter {
+export function withKind(filter: StatusFilter, kind: OperatorKind, on: boolean): StatusFilter {
   return { ...filter, [kind]: on };
 }
 
 /** How many of `list` each state accounts for, for the menu's per-state glance
  *  counts. Every kind is present (0 when none), so the menu renders a stable set of
  *  rows rather than shuffling as sessions come and go. */
-export function kindCounts(list: SessionData[]): Record<RowKind, number> {
-  const counts: Record<RowKind, number> = { working: 0, ready: 0, lost: 0, dead: 0, limit: 0, archived: 0 };
+export function kindCounts(list: SessionData[]): Record<OperatorKind, number> {
+  const counts: Record<OperatorKind, number> = {
+    "needs-you": 0,
+    working: 0,
+    "waiting-limit": 0,
+    broken: 0,
+    archived: 0,
+  };
   for (const s of list) {
-    counts[rowKind(s)]++;
+    counts[operatorKind(s)]++;
   }
   return counts;
 }
@@ -132,6 +137,21 @@ export function loadFilter(): StatusFilter {
     if (typeof rec[kind] === "boolean") {
       filter[kind] = rec[kind] as boolean;
     }
+  }
+  // Migrate the pre-#3220 liveness buckets without silently hiding a newly grouped
+  // state. Broken stays shown unless BOTH old degraded buckets were explicitly off.
+  if (typeof rec["needs-you"] !== "boolean" && typeof rec.ready === "boolean") {
+    filter["needs-you"] = rec.ready;
+  }
+  if (typeof rec["waiting-limit"] !== "boolean" && typeof rec.limit === "boolean") {
+    filter["waiting-limit"] = rec.limit;
+  }
+  if (
+    typeof rec.broken !== "boolean" &&
+    typeof rec.lost === "boolean" &&
+    typeof rec.dead === "boolean"
+  ) {
+    filter.broken = rec.lost || rec.dead;
   }
   return filter;
 }

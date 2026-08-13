@@ -19,20 +19,19 @@ import {
   persistFilter,
   withKind,
 } from "./filter.js";
-import { ROW_KIND_LABELS, type RowKind } from "./status.js";
+import { OPERATOR_KIND_LABELS, type OperatorKind } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
 function sess(over: Partial<SessionData> = {}): SessionData {
   return { title: "s", branch: "b", ...over };
 }
 
-/** A session per row kind, so a filter can be exercised against every state at once. */
-const ROWS: Record<RowKind, SessionData> = {
+/** A session per operator kind, so a filter can exercise every action group at once. */
+const ROWS: Record<OperatorKind, SessionData> = {
+  "needs-you": sess({ title: "needs-you", liveness: Liveness.Ready, idle_reason: "settled-after-pane-change" }),
   working: sess({ title: "working", liveness: Liveness.Running }),
-  ready: sess({ title: "ready", liveness: Liveness.Ready }),
-  lost: sess({ title: "lost", liveness: Liveness.Lost }),
-  dead: sess({ title: "dead", liveness: Liveness.Dead }),
-  limit: sess({ title: "limit", liveness: Liveness.LimitReached }),
+  "waiting-limit": sess({ title: "waiting-limit", liveness: Liveness.LimitReached }),
+  broken: sess({ title: "broken", liveness: Liveness.Lost }),
   archived: sess({ title: "archived", liveness: Liveness.Archived }),
 };
 
@@ -76,7 +75,7 @@ test("by default the rail shows the live states and hides only the archived row"
   const shown = filterSessions(ALL, defaultFilter());
   assert.deepEqual(
     shown.map((s) => s.title),
-    ["working", "ready", "lost", "dead", "limit"],
+    ["needs-you", "working", "waiting-limit", "broken"],
   );
   assert.equal(hiddenCount(ALL, defaultFilter()), 1);
 });
@@ -96,14 +95,20 @@ test("unchecking one state hides exactly that group", () => {
   const f = withKind(defaultFilter(), "working", false);
   assert.deepEqual(
     filterSessions(ALL, f).map((s) => s.title),
-    ["ready", "lost", "dead", "limit"],
+    ["needs-you", "waiting-limit", "broken"],
   );
   // withKind is pure — the caller's filter is untouched (the store swaps references).
   assert.equal(defaultFilter().working, true);
 });
 
 test("narrowing to a single state shows only it (the only-working case)", () => {
-  const only: StatusFilter = { working: true, ready: false, lost: false, dead: false, limit: false, archived: false };
+  const only: StatusFilter = {
+    "needs-you": false,
+    working: true,
+    "waiting-limit": false,
+    broken: false,
+    archived: false,
+  };
   assert.deepEqual(
     filterSessions(ALL, only).map((s) => s.title),
     ["working"],
@@ -113,7 +118,13 @@ test("narrowing to a single state shows only it (the only-working case)", () => 
 test("an all-off filter empties the rail rather than falling back to showing everything", () => {
   // The empty-state copy depends on this being an honest zero: renderRail reports
   // "no sessions match" instead of quietly ignoring the user's filter.
-  const none: StatusFilter = { working: false, ready: false, lost: false, dead: false, limit: false, archived: false };
+  const none: StatusFilter = {
+    "needs-you": false,
+    working: false,
+    "waiting-limit": false,
+    broken: false,
+    archived: false,
+  };
   assert.deepEqual(filterSessions(ALL, none), []);
   assert.equal(hiddenCount(ALL, none), ALL.length);
 });
@@ -126,7 +137,7 @@ test("the filter partitions by the DISPLAYED status: an in-flight op filters as 
   const list = [archiving];
   assert.deepEqual(filterSessions(list, withKind(defaultFilter(), "working", false)), []);
   assert.deepEqual(
-    filterSessions(list, withKind(defaultFilter(), "ready", false)).map((s) => s.title),
+    filterSessions(list, withKind(defaultFilter(), "needs-you", false)).map((s) => s.title),
     ["archiving"],
     "it is NOT governed by the Ready checkbox",
   );
@@ -152,26 +163,26 @@ test("the legacy status fallback is filtered too (a pre-#1195 archived record)",
 });
 
 test("kindCounts reports every kind, zeros included, for the menu's glance", () => {
-  const counts = kindCounts([ROWS.archived, ROWS.archived, ROWS.ready]);
+  const counts = kindCounts([ROWS.archived, ROWS.archived, ROWS["needs-you"]]);
   assert.equal(counts.archived, 2);
-  assert.equal(counts.ready, 1);
-  assert.equal(counts.dead, 0, "a kind with no sessions still reports 0, so the menu is stable");
+  assert.equal(counts["needs-you"], 1);
+  assert.equal(counts.broken, 0, "a kind with no sessions still reports 0, so the menu is stable");
   for (const k of FILTER_KINDS) {
     assert.equal(typeof counts[k], "number");
   }
 });
 
-test("filter labels are the row's own status words — the two surfaces cannot drift", () => {
+test("filter labels are the row's own operator words — the two surfaces cannot drift", () => {
   for (const k of FILTER_KINDS) {
-    assert.equal(filterLabel(k), ROW_KIND_LABELS[k]);
+    assert.equal(filterLabel(k), OPERATOR_KIND_LABELS[k]);
   }
-  assert.equal(filterLabel("limit"), "Limit reached", "sentence case, per the copy convention");
+  assert.equal(filterLabel("waiting-limit"), "Waiting on a limit", "sentence case, per the copy convention");
 });
 
 test("a filter round-trips through localStorage", () => {
   const restore = stubStorage();
   try {
-    const f = withKind(withKind(defaultFilter(), "archived", true), "dead", false);
+    const f = withKind(withKind(defaultFilter(), "archived", true), "broken", false);
     persistFilter(f);
     assert.deepEqual(loadFilter(), f);
   } finally {
@@ -208,15 +219,31 @@ test("corrupt / hostile stored values fall back to the default instead of blanki
   }
 });
 
+test("the pre-grouping filter migrates without silently hiding a combined group", () => {
+  const restore = stubStorage({
+    "af-status-filter": JSON.stringify({ working: false, ready: false, lost: false, dead: true, limit: false, archived: true }),
+  });
+  try {
+    const f = loadFilter();
+    assert.equal(f.working, false);
+    assert.equal(f["needs-you"], false);
+    assert.equal(f["waiting-limit"], false);
+    assert.equal(f.broken, true, "either old degraded bucket shown keeps the combined Broken group shown");
+    assert.equal(f.archived, true);
+  } finally {
+    restore();
+  }
+});
+
 test("non-boolean flags are ignored, so a truthy 'false' can't hide a group", () => {
   const restore = stubStorage({
-    "af-status-filter": JSON.stringify({ working: "false", ready: 0, dead: null, archived: true }),
+    "af-status-filter": JSON.stringify({ working: "false", "needs-you": 0, broken: null, archived: true }),
   });
   try {
     const f = loadFilter();
     assert.equal(f.working, true, "the string 'false' is not a boolean ⇒ default wins");
-    assert.equal(f.ready, true);
-    assert.equal(f.dead, true);
+    assert.equal(f["needs-you"], true);
+    assert.equal(f.broken, true);
     assert.equal(f.archived, true);
   } finally {
     restore();

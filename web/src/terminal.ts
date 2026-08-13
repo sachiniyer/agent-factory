@@ -1622,15 +1622,10 @@ export class AttachTerminal {
   private execCommandCopy(text: string): boolean {
     try {
       const ta = document.createElement("textarea");
+      ta.className = "af-clipboard-fallback";
       ta.value = text;
       // Off-screen but still selectable; readonly stops a mobile keyboard popping up.
       ta.setAttribute("readonly", "");
-      ta.style.position = "fixed";
-      ta.style.top = "0";
-      ta.style.left = "0";
-      ta.style.width = "1px";
-      ta.style.height = "1px";
-      ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
       ta.setSelectionRange(0, text.length);
@@ -1648,8 +1643,8 @@ export class AttachTerminal {
    *  pane-specific), so it is a viewport-fixed toast appended to document.body —
    *  matching the app's own af-toast pattern and, by living outside the pane tree,
    *  never clipped by a split pane's overflow:hidden or anchored to a transformed
-   *  ancestor. Styled inline so it needs no stylesheet plumbing and no <style>
-   *  element under the CSP. */
+   *  ancestor. Its component class resolves entirely through the app's semantic
+   *  tokens, so it follows the active light/dark/custom theme. */
   private flashCopyHint(): void {
     this.flashNotice("Copy failed — clipboard unavailable");
   }
@@ -1658,18 +1653,9 @@ export class AttachTerminal {
   private flashNotice(message: string): void {
     try {
       const hint = document.createElement("div");
+      hint.className = "af-copy-hint";
       hint.textContent = message;
       hint.setAttribute("role", "alert");
-      hint.style.position = "fixed";
-      hint.style.bottom = "12px";
-      hint.style.right = "12px";
-      hint.style.zIndex = "9999";
-      hint.style.padding = "4px 10px";
-      hint.style.borderRadius = "4px";
-      hint.style.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-      hint.style.background = "rgba(0, 0, 0, 0.82)";
-      hint.style.color = "#fff";
-      hint.style.pointerEvents = "none";
       document.body.appendChild(hint);
       window.setTimeout(() => hint.remove(), 2500);
     } catch {

@@ -317,7 +317,17 @@ export class ConfigPane {
       }
     }
 
-    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...sections));
+    const content =
+      sections.length > 0
+        ? sections
+        : [
+            h(
+              "p",
+              { class: "af-config-empty" },
+              "No settings are available — use Configure with assistant or check the daemon connection.",
+            ),
+          ];
+    this.el.replaceChildren(head, h("div", { class: "af-config-list" }, ...content));
   }
 
   /** One key: its name, purpose, control, and — when it is the row just written
@@ -339,7 +349,7 @@ export class ConfigPane {
     if (status && status.key === e.key) {
       if (status.error !== "") {
         // The validator's message, verbatim — never reworded here.
-        row.append(h("div", { class: "af-config-error" }, status.error));
+        row.append(h("div", { class: "af-config-error", role: "alert" }, status.error));
       } else {
         row.append(h("div", { class: "af-config-echo" }, `set ${status.key} = ${status.value}`));
         if (status.notice !== "") {
