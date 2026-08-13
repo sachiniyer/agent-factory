@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -72,26 +73,38 @@ type rootEnsureState struct {
 	suppressLogged bool
 }
 
-// buildRootAgentSnapshot captures the start-of-day root-agent configuration the
-// ensure loop resolves against (#2216 Phase 6): the global [root_agent]
-// singleton, every registered project's personal [root_agent] layer and resolved
-// root (both keyed by repo ID), and the repo IDs the legacy root_agents map
-// already covers (so the singleton sweep can dedupe against it). It is
-// best-effort — a project whose checkout no longer resolves is logged and
-// skipped, never fatal, so one bad project never keeps the daemon from starting.
-// The one exception to skip-and-continue is a personal config that exists but
-// cannot be LOADED — read, parsed, or validated (#3241): that file may hold the
-// highest-precedence enabled=false, so the project fails closed rather than
-// open, recorded in personalUnreadable and enforced by resolvedRootAgentFor.
-// Reading the registry once at start matches the RootAgents map's
-// restart-to-apply contract: registering a project or editing its personal
-// root_agent takes effect on the next daemon start.
-func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, personalUnreadable map[string]bool, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
-	global = config.GlobalRootAgentLayer(cfg)
-	personal = map[string]*config.RootAgentLayer{}
-	personalUnreadable = map[string]bool{}
-	projectRoots = map[string]string{}
-	legacyRepoIDs = map[string]bool{}
+// rootAgentSnapshot is the start-of-day root-agent configuration the ensure
+// loop resolves against (#2216 Phase 6): the global [root_agent] singleton,
+// every registered project's personal [root_agent] layer (keyed by repo ID),
+// the repos whose root-agent decision is unknowable (personalUnreadable,
+// registryUnreadable — the #3241/#3247 fail-closed causes), the resolved roots
+// the singleton sweep visits, and the repo IDs the legacy root_agents map
+// already covers (so the singleton sweep can dedupe against it).
+type rootAgentSnapshot struct {
+	global             *config.RootAgentLayer
+	personal           map[string]*config.RootAgentLayer
+	personalUnreadable map[string]bool
+	projectRoots       map[string]string
+	legacyRepoIDs      map[string]bool
+	registryUnreadable bool
+}
+
+// buildRootAgentSnapshot reads the registry once at daemon start, matching the
+// RootAgents map's restart-to-apply contract: registering a project or editing
+// its personal root_agent takes effect on the next daemon start. It is
+// best-effort for the parts a failure provably cannot hide a disable in, and
+// fail-closed for the rest (#3241, #3247): a personal config that exists but
+// cannot be LOADED, a project registry that cannot be LISTED, and a recorded
+// project root that does not resolve may each conceal the highest-precedence
+// enabled=false, so none of them may quietly become "no personal layer".
+func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
+	snap := rootAgentSnapshot{
+		global:             config.GlobalRootAgentLayer(cfg),
+		personal:           map[string]*config.RootAgentLayer{},
+		personalUnreadable: map[string]bool{},
+		projectRoots:       map[string]string{},
+		legacyRepoIDs:      map[string]bool{},
+	}
 
 	for path := range cfg.RootAgents {
 		repo, err := config.RepoFromPath(config.ExpandTilde(path))
@@ -102,21 +115,53 @@ func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, 
 			// registered project (which did resolve at start).
 			continue
 		}
-		legacyRepoIDs[repo.ID] = true
+		snap.legacyRepoIDs[repo.ID] = true
 	}
 
 	projects, err := config.ListProjects()
 	if err != nil {
-		log.WarningLog.Printf("root agent snapshot: could not list registered projects; singleton root agents are disabled until the next daemon start: %v", err)
-		return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
+		// Fail CLOSED (#3247): the registry is the only index of the personal
+		// configs that may hold the highest-precedence enabled=false, so with it
+		// unlistable NO repo — including one named only by a legacy root_agents
+		// entry — can be proven un-disabled, and none may start or heal.
+		// Returning with only the singleton layers missing was fail-open for
+		// singleton-DISABLED roots: the legacy sweep kept ensuring them with no
+		// personal layer at all. An absent registry is not this branch —
+		// ListProjects reports that as zero projects — so this is always a real
+		// read or parse failure, never plain absence (the home-gone vs
+		// unreadable distinction #3246 keeps).
+		registry := config.ProjectRegistryDirName
+		if home, homeErr := config.GetConfigDir(); homeErr == nil {
+			registry = filepath.Join(home, config.ProjectRegistryDirName)
+		}
+		log.ErrorLog.Printf("root agent snapshot: cannot list registered projects (registry %s); failing closed — no root agents will be started or healed until the registry is readable at a daemon start: %v", registry, err)
+		snap.registryUnreadable = true
+		return snap
 	}
 	for _, p := range projects {
-		repo, err := config.RepoFromPath(p.Root)
-		if err != nil {
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; skipping it until the next daemon start: %v", p.ID, p.Root, err)
-			continue
+		var repoID, repoRoot string
+		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
+			repoID, repoRoot = repo.ID, repo.Root
+			snap.projectRoots[repoID] = repo.Root
+		} else {
+			// The recorded root does not resolve right now — an absent mount, a
+			// checkout deleted or no longer a git repository. The singleton sweep
+			// cannot visit it (there is nothing to create a session at, so it
+			// stays out of projectRoots), but the personal config still lives in
+			// the AF home under p.ID, and repo identity is a pure function of the
+			// main-root path (RepoIDFromRoot), so the layer is attributed to the
+			// ID a checkout resolving at the recorded path gets. Skipping the
+			// project instead is fail-open (#3247): the legacy sweep's per-tick
+			// retry (#1122) resolves the repo the moment the path returns and
+			// would ensure it with no personal layer, starting a root whose
+			// enabled=false sat readable in the AF home the whole time. The
+			// residue is a project registered at a linked worktree: its recorded
+			// root is not the main root, so the derived ID cannot match and its
+			// layer applies only at a daemon start after the path returns.
+			repoID = config.RepoIDFromRoot(filepath.Clean(p.Root))
+			repoRoot = p.Root
+			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; no root agent starts for it until the next daemon start, but its personal [root_agent] layer still applies to that path: %v", p.ID, p.Root, repoErr)
 		}
-		projectRoots[repo.ID] = repo.Root
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
 			// Fail CLOSED (#3241): this file may hold the highest-precedence
@@ -131,15 +176,15 @@ func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, 
 			// already-live root is left alone (adopt-first); only creation and
 			// healing stop, until the config loads at a daemon start — the same
 			// restart-to-apply contract as the rest of this snapshot.
-			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads at a daemon start: %v", p.ID, repo.Root, err)
-			personalUnreadable[repo.ID] = true
+			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads at a daemon start: %v", p.ID, repoRoot, err)
+			snap.personalUnreadable[repoID] = true
 			continue
 		}
 		if layer := pc.RootAgentLayer(); layer != nil {
-			personal[repo.ID] = layer
+			snap.personal[repoID] = layer
 		}
 	}
-	return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
+	return snap
 }
 
 // rootAgentInputsFor assembles the resolver inputs for one repo from the
@@ -159,19 +204,30 @@ func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConf
 // through it, so they can never disagree on whether a root should run or what
 // it runs.
 //
-// It applies the daemon's fail-closed policy for an unloadable personal config
-// (#3241) before layering: a repo in rootAgentPersonalUnreadable resolves to
-// disabled without consulting lower layers, because the file that could not be
-// loaded may hold the highest-precedence enabled=false — absence of proof is
-// not permission to start an agent. The returned zero resolution carries no
+// It applies the daemon's fail-closed policy (#3241, #3247) before layering: a
+// repo whose decision rootAgentDecisionUnknown reports unknowable resolves to
+// disabled without consulting lower layers — absence of proof is not
+// permission to start an agent. The returned zero resolution carries no
 // provenance on purpose: no config source decided this, the daemon's read
 // failure did, and the cause stays available to consumers in
-// rootAgentPersonalUnreadable.
+// rootAgentRegistryUnreadable and rootAgentPersonalUnreadable.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
-	if m.rootAgentPersonalUnreadable[repoID] {
+	if m.rootAgentDecisionUnknown(repoID) {
 		return config.RootAgentResolution{}
 	}
 	return config.ResolveRootAgent(m.rootAgentInputsFor(repoID, legacy))
+}
+
+// rootAgentDecisionUnknown is the daemon's one fail-closed predicate for root
+// agents: it reports that no layered resolution for this repo can be trusted,
+// because a config source that may hold the highest-precedence enabled=false
+// could not be read at daemon start — the project registry itself (#3247,
+// which hides every personal layer at once), or this repo's personal config
+// (#3241, including one attributed by recorded path while its project root
+// does not resolve). Both sets are snapshot-built and immutable, so the answer
+// is stable for the daemon run, restart-to-apply like the snapshot itself.
+func (m *Manager) rootAgentDecisionUnknown(repoID string) bool {
+	return m.rootAgentRegistryUnreadable || m.rootAgentPersonalUnreadable[repoID]
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path

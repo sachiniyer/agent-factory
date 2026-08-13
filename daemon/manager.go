@@ -239,6 +239,15 @@ type Manager struct {
 	// discipline, not the runtime-mutated, mu-guarded deletedRootRepos one.
 	// Restart-to-apply, like the rest of the snapshot.
 	rootAgentPersonalUnreadable map[string]bool
+	// rootAgentRegistryUnreadable records that the project registry itself
+	// could not be listed at daemon start (#3247). The registry is the only
+	// index of the personal configs that may hold the highest-precedence
+	// enabled=false, so while it is unreadable NO repo — including one named
+	// only by a legacy root_agents entry — can be proven un-disabled, and
+	// rootAgentDecisionUnknown fails every repo closed for this daemon run.
+	// Same immutability and restart-to-apply discipline as
+	// rootAgentPersonalUnreadable.
+	rootAgentRegistryUnreadable bool
 	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
 	// root path, snapshotted at daemon start. It is the candidate set the ensure
 	// loop visits for a root enabled purely by the global/personal singleton — a
@@ -469,7 +478,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	raGlobal, raPersonal, raUnreadable, raProjectRoots, raLegacyIDs := buildRootAgentSnapshot(cfg)
+	rootAgents := buildRootAgentSnapshot(cfg)
 	mgr := &Manager{
 		cfg:                         cfg,
 		previewSecret:               previewSecret,
@@ -493,11 +502,12 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		aliveObservations:           make(map[string]uint64),
 		targetLocks:                 make(map[string]*sync.Mutex),
 		rootEnsureStates:            make(map[string]*rootEnsureState),
-		rootAgentGlobal:             raGlobal,
-		rootAgentPersonal:           raPersonal,
-		rootAgentPersonalUnreadable: raUnreadable,
-		rootAgentProjectRoots:       raProjectRoots,
-		rootAgentLegacyRepoIDs:      raLegacyIDs,
+		rootAgentGlobal:             rootAgents.global,
+		rootAgentPersonal:           rootAgents.personal,
+		rootAgentPersonalUnreadable: rootAgents.personalUnreadable,
+		rootAgentRegistryUnreadable: rootAgents.registryUnreadable,
+		rootAgentProjectRoots:       rootAgents.projectRoots,
+		rootAgentLegacyRepoIDs:      rootAgents.legacyRepoIDs,
 		rootKilledAt:                make(map[string]time.Time),
 		deletedRootRepos:            make(map[string]struct{}),
 		killsInFlight:               make(map[string]struct{}),
