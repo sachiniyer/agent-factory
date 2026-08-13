@@ -1,8 +1,12 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
@@ -357,8 +361,56 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // persisted identity (#1723). It also refuses an archived session under that
 // same lock, which the stale-instance check cannot substitute for (#2437 — see
 // the gate below). This is the daemon-side write used by the TUI's async PR-info
-// fetch (#921).
+// fetch (#921); admission for this unconditional form is the RPC gate in front
+// of it.
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
+	return m.setPRInfoGuarded(context.Background(), req, nil)
+}
+
+// prInfoWriteGuard is the condition set for a DIRECT (non-RPC) producer — the
+// PR-info sweep (#3232). Both conditions are evaluated under the write's own
+// op-lock, not as caller-side preflights, because a preflight leaves the whole
+// fetch-to-write gap open (#3287 review):
+//
+//   - expectGeneration is a compare-and-swap on the instance's PR-info
+//     generation: every recording producer serializes on the same op-lock and
+//     bumps the generation, so a sweep result that raced a newer write is
+//     refused HERE, where the newer write became visible.
+//   - lifecycle admission is checked at the same boundary every admitted RPC
+//     mutation checks it — immediately before the mutation, under the lock —
+//     so a quiesce that began while `gh` ran refuses the record. (A quiesce
+//     landing strictly mid-persist tolerates the in-flight completion, exactly
+//     as it does for any RPC mutation already past its gate; that is the
+//     daemon-wide admission semantic, not a gap unique to this path.)
+type prInfoWriteGuard struct {
+	expectGeneration uint64
+}
+
+// errPRInfoResultRaced reports a guarded PR-info write refused because a newer
+// producer recorded first. An expected outcome for the sweep, not a failure.
+var errPRInfoResultRaced = errors.New("newer PR info landed while this lookup was in flight")
+
+// acquireLockCancellable takes mu, abandoning the wait when ctx ends. A
+// background producer must never block shutdown on a lock a kill/archive/
+// restore can hold for many seconds — runDaemon waits in wg.Wait() ahead of
+// its final persistence, and the stop path escalates after five seconds
+// (#3287 review). Polling TryLock trades mutex fairness for cancellability,
+// which is acceptable exactly here: the sweep is the lowest-priority writer
+// these locks have.
+func acquireLockCancellable(ctx context.Context, mu *sync.Mutex) error {
+	for {
+		if mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func (m *Manager) setPRInfoGuarded(ctx context.Context, req SetPRInfoRequest, guard *prInfoWriteGuard) error {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return err
@@ -372,9 +424,17 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	// current one — a kill/recreate can replace it (same title, DIFFERENT stable
 	// id) in the window between identity resolution and this lock. Take the
 	// op-lock before the per-repo start lock, matching kill/archive ordering.
+	// The guarded (background) form waits cancellably: a teardown can hold this
+	// lock for many seconds, and shutdown must not wait behind it.
 	key := daemonInstanceKey(repoID, title)
 	opLock := m.opLockFor(key)
-	opLock.Lock()
+	if guard != nil {
+		if err := acquireLockCancellable(ctx, opLock); err != nil {
+			return err
+		}
+	} else {
+		opLock.Lock()
+	}
 	defer opLock.Unlock()
 
 	m.mu.Lock()
@@ -411,7 +471,13 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	}
 
 	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
+	if guard != nil {
+		if err := acquireLockCancellable(ctx, repoStartLock); err != nil {
+			return err
+		}
+	} else {
+		repoStartLock.Lock()
+	}
 	defer repoStartLock.Unlock()
 
 	var info *git.PRInfo
@@ -421,15 +487,46 @@ func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 			Title:  req.PRInfo.Title,
 			URL:    req.PRInfo.URL,
 			State:  req.PRInfo.State,
+			// Branch is the #921 provenance — the exact ref the lookup ran for.
+			// Dropping it here (as this rebuild did before #3232) persisted every
+			// record branchless, which both demoted it to never-trusted for
+			// destructive decisions (the storage comment's legacy case) and made
+			// any recorded-vs-fetched comparison see a phantom diff forever.
+			Branch: req.PRInfo.Branch,
 		}
 	}
-	prev := instance.GetPRInfo()
-	instance.SetPRInfo(info)
+
+	// The guarded (direct-producer) conditions, under the same locks that
+	// serialize every recording producer — see prInfoWriteGuard.
+	if guard != nil {
+		if m.lifecycle != nil {
+			if admissionErr := m.lifecycle.mutationAdmissionError(); admissionErr != nil {
+				return admissionErr
+			}
+		}
+		if instance.PRInfoGeneration() != guard.expectGeneration {
+			return errPRInfoResultRaced
+		}
+		// The unchanged-result decision lives HERE, not as a caller preflight:
+		// under this op-lock the instance value is always COMMITTED state — a
+		// racing writer serializes on the same lock and rolls a failed persist
+		// back before releasing it — so an uncommitted in-memory value can
+		// never masquerade as durable and swallow the sweep's result (#3287
+		// review). Writing nothing on equality is what keeps a sweep from
+		// emitting a session.updated per session per pass.
+		if prInfoEqual(instance.GetPRInfo(), info) {
+			return nil
+		}
+	}
+	rollback := instance.BeginPRInfoWrite(info)
 
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
-		// Keep memory consistent with disk on a persist failure.
-		instance.SetPRInfo(prev)
+		// Keep memory consistent with disk on a persist failure — generation
+		// and freshness clock included: a failed write committed nothing, so it
+		// must not fail a concurrent producer's generation CAS or extend the
+		// old value's freshness (#3287 review).
+		instance.RollbackPRInfoWrite(rollback)
 		return fmt.Errorf("failed to persist PR info: %w", err)
 	}
 

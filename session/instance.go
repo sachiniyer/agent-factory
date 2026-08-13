@@ -286,6 +286,10 @@ type Instance struct {
 	// the first lazy fetch on selection always runs. Used to debounce
 	// repeated fetches when the user cycles the sidebar.
 	prInfoLastFetched time.Time
+	// prInfoGeneration counts PR-info writes and freshness bumps, so a slow
+	// producer can detect that a newer one landed while it was fetching and
+	// discard its stale result (#3287 review). In-memory only, like the clock.
+	prInfoGeneration uint64
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend
