@@ -6,7 +6,7 @@
 
 **Run a fleet of AI coding agents at once — each in its own git worktree, all on one screen.**
 
-[![Agent Factory demo video preview: multiple AI coding agents running in isolated git worktrees, with live Agent tabs, scheduled automations, helper tabs, and full-screen attach](docs/assets/demo.gif)](docs/assets/demo.mp4)
+[![Agent Factory demo video preview: three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run tests](docs/assets/demo.gif)](docs/assets/demo.mp4)
 
 **Demo video:** [MP4](docs/assets/demo.mp4) · [WebM](docs/assets/demo.webm) · [GIF fallback](docs/assets/demo.gif)
 

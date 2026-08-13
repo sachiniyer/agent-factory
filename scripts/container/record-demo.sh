@@ -1,290 +1,300 @@
 #!/usr/bin/env bash
-# record-demo.sh — regenerate the site/README demo assets (docs/assets/demo.*).
-# entirely inside a throwaway container. Never runs af, tmux, or a recorder on
-# the host.
+# record-demo.sh — regenerate docs/assets/demo.* from real Agent Factory use.
 #
-#   Regenerate the demo assets (one command):
-#       scripts/container/record-demo.sh
+# The recording runs in the same isolated sandbox as `make
+# playtest-container`: a disposable mock repository, throwaway AF home, and
+# private tmux server. The source checkout is mounted read-only. Three genuine
+# Codex sessions work concurrently in AF-owned worktrees while the deterministic
+# TUI driver moves between them; a final Terminal tab runs one worktree's real
+# tests. Nothing in the recorded panes is a transcript or mockup.
 #
-# What it does, all inside an `agent-factory-demo` container (built from
-# scripts/container/Dockerfile.demo):
-#   1. build af + the play-test sandbox (scripts/container/playtest-entry.sh);
-#   2. point the sandbox's fake agent at docs/assets/demo-agent.sh so every
-#      instance's pane streams a realistic "agent working" transcript;
-#   3. drive the real af TUI through scripts/tui-driver.sh — marker-synchronized,
-#      so it never mis-drives af's stateful focus model the way blind key-timing
-#      would (that is why this uses the driver, not a blind vhs .tape);
-#   4. record a read-only tmux mirror of the driven session with asciinema, at a
-#      pinned wide geometry, so the .cast is exactly what the TUI showed;
-#   5. render the .cast to GIF with agg, optimize with gifsicle, derive WebM/MP4
-#      video assets, and pull sample frames with ffmpeg.
+# The play-test harness intentionally never mounts host credentials. Recording
+# therefore requires an explicit auth file, copied into only the throwaway
+# container and removed with it:
 #
-# The demo assets and frames are copied back to the host under docs/assets/
-# (and, if DEMO_FRAMES_DIR is set, sample PNG frames there too).
+#   AF_DEMO_CODEX_AUTH_FILE="$HOME/.codex/auth.json" \
+#     scripts/container/record-demo.sh
 set -euo pipefail
 
-# ---- geometry / render knobs (override via env) ----------------------------
 COLS="${DEMO_COLS:-168}"
 ROWS="${DEMO_ROWS:-32}"
 AGG_FONT_SIZE="${DEMO_FONT_SIZE:-14}"
 AGG_THEME="${DEMO_THEME:-dracula}"
-AGG_FPS="${DEMO_FPS:-15}"
-# idle-time-limit caps *static* gaps. It must stay ABOVE the scenario's
-# deliberate "hold" beats (the automations overlay, the full-screen attach, the
-# finale) — those are held on a still screen, so a lower cap would trim the very
-# shots the demo is meant to linger on (e.g. the overlay collapsing to a
-# ~0.3s flash). 3.0 preserves every hold; --speed then does the global compress.
-AGG_IDLE="${DEMO_IDLE:-3.0}"           # preserve deliberate holds; still trims dead air
-AGG_SPEED="${DEMO_SPEED:-2.2}"         # playback speed-up (keeps the richer flow ~22-28s)
-GIFSICLE_LOSSY="${DEMO_LOSSY:-80}"
-GIFSICLE_COLORS="${DEMO_COLORS:-64}"
+AGG_FPS="${DEMO_FPS:-12}"
+AGG_IDLE="${DEMO_IDLE:-3.0}"
+AGG_SPEED="${DEMO_SPEED:-1.8}"
+TARGET_DURATION="${DEMO_TARGET_DURATION:-24}"
+GIFSICLE_LOSSY="${DEMO_LOSSY:-110}"
+GIFSICLE_COLORS="${DEMO_COLORS:-48}"
+MAX_GIF_BYTES="${DEMO_MAX_GIF_BYTES:-2000000}"
 
-# ===========================================================================
-# CONTAINER SIDE — runs inside the demo container (re-exec of this same file).
-# ===========================================================================
-if [ "${AF_DEMO_INNER:-}" = "1" ]; then
-    export AF_DRIVER_COLS="$COLS" AF_DRIVER_ROWS="$ROWS" AF_DRIVER_BIN=/home/dev/bin/af
-    SANDBOX="$HOME/sandbox"
-    export AGENT_FACTORY_HOME="$SANDBOX/home"
-    OUT=/home/dev/out
-    CAST=/tmp/demo.cast
-    RAW_GIF=/tmp/demo-raw.gif
-    OUT_GIF="$OUT/demo.gif"
-    OUT_WEBM="$OUT/demo.webm"
-    OUT_MP4="$OUT/demo.mp4"
-    OUT_POSTER="$OUT/demo-poster.png"
-    mkdir -p "$OUT/frames"
+# ---------------------------------------------------------------------------
+# Container side — invoked after the real-agent play-test sandbox is ready.
+# ---------------------------------------------------------------------------
+if [ "${AF_DEMO_INNER:-}" = 1 ]; then
+    export AF_DRIVER_COLS="$COLS" AF_DRIVER_ROWS="$ROWS"
+    export AF_DRIVER_BIN=/home/dev/bin/af
+    export AGENT_FACTORY_HOME="$HOME/sandbox/home"
 
-    # Fake coding-agent transcript in place of a bare shell (see demo-agent.sh).
-    cp /src/docs/assets/demo-agent.sh "$SANDBOX/demo-agent.sh"
-    chmod +x "$SANDBOX/demo-agent.sh"
-    cat >"$AGENT_FACTORY_HOME/config.toml" <<EOF
-default_program = "claude"
-update_channel = "stable"
+    sandbox="$HOME/sandbox"
+    out="$HOME/out"
+    cast=/tmp/demo.cast
+    raw_gif=/tmp/demo-raw.gif
+    out_gif="$out/demo.gif"
+    out_webm="$out/demo.webm"
+    out_mp4="$out/demo.mp4"
+    out_poster="$out/demo-poster.png"
+    codex_wrapper="$HOME/bin/codex"
+    real_codex="$HOME/bin/codex-real"
+    tab_command="$HOME/bin/demo-tab"
+    mkdir -p "$out/frames"
 
-[program_overrides]
-claude = "$SANDBOX/demo-agent.sh"
-EOF
-    date -u +"%Y-%m-%dT%H:%M:%SZ" >"$AGENT_FACTORY_HOME/last_update_check"
+    if [ "$(cat "$sandbox/playtest-agent-kind" 2>/dev/null || true)" != real ]; then
+        echo "record-demo: play-test sandbox is not using a real agent" >&2
+        exit 1
+    fi
+    "$codex_wrapper" login status >/dev/null
 
-    # A tab is a real process in the agent's worktree, not another agent. Put a
-    # fake dev-server (demo-tab.sh) on PATH as `dev` so the demo can open a
-    # second tab beside an agent and stream `npm run dev`-style output; and a
-    # long-lived `watch-ci` stub so the seeded watch task shows [watching], not
-    # a "command not found" error (see the Automations seed below).
-    DEV_BIN=/home/dev/bin
-    mkdir -p "$DEV_BIN"
-    cp /src/docs/assets/demo-tab.sh "$DEV_BIN/dev"
-    chmod +x "$DEV_BIN/dev"
-    printf '#!/usr/bin/env bash\nexec sleep infinity\n' >"$DEV_BIN/watch-ci"
-    chmod +x "$DEV_BIN/watch-ci"
+    # AF recognizes agents from the configured command's executable basename.
+    # Keep `codex` as the wrapper name so prompt readiness uses Codex-specific
+    # composer/trust handling, and move the installed CLI behind that wrapper.
+    mv "$codex_wrapper" "$real_codex"
+    cp /src/docs/assets/demo-agent.sh "$codex_wrapper"
+    cp /src/docs/assets/demo-tab.sh "$tab_command"
+    chmod +x "$codex_wrapper" "$real_codex" "$tab_command"
+
+    # Use the real Codex wrapper without hand-editing the sandbox config. These
+    # are ordinary AF settings and take effect when af_boot starts the daemon.
+    "$AF_DRIVER_BIN" config set default_program codex >/dev/null
+    "$AF_DRIVER_BIN" config set program_overrides.codex "$codex_wrapper" >/dev/null
 
     # shellcheck disable=SC1091
     source /src/scripts/tui-driver.sh
     af_reset_sandbox
-
-    # Seed the Automations rail with a believable schedule (a cron "triage every
-    # morning", a nightly test run, and a watch task) so the demo shows real
-    # scheduling, not an empty section. Written AFTER af_reset_sandbox (which
-    # wipes the sandbox home) and BEFORE af_boot (the TUI reads tasks.json from
-    # disk at startup — #960 the daemon is the only *writer*, but reads are from
-    # disk, and the demo runs no daemon). ProjectPath must equal the mock-repo
-    # root so LoadTasksForCurrentRepo() surfaces them.
-    REPO_ROOT="$(git -C "$AF_DRIVER_REPO" rev-parse --show-toplevel 2>/dev/null || echo "$AF_DRIVER_REPO")"
-    cat >"$AGENT_FACTORY_HOME/tasks.json" <<EOF
-[
- {"id":"a1a1a1a1","name":"Triage new issues","prompt":"Triage new GitHub issues: label, dedupe, and reply","cron_expr":"0 9 * * *","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"},
- {"id":"b2b2b2b2","name":"Nightly test + coverage","prompt":"Run the full suite and post the coverage delta","cron_expr":"0 2 * * *","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"},
- {"id":"c3c3c3c3","name":"Rerun failing CI","prompt":"A CI run failed: {{line}} — reproduce and fix","watch_cmd":"watch-ci","project_path":"$REPO_ROOT","program":"claude","enabled":true,"created_at":"2026-07-01T09:00:00Z"}
-]
-EOF
-
-    af_boot                                   # af, empty TUI, in tmux session 'drive'
-    # Hide every tmux status bar (the driver's 'drive' session AND each
-    # instance's own af_* session) so the recording shows only af's chrome, not
-    # a leaking green tmux bar. Global default -> new instance sessions inherit.
+    af_boot
     tmux set-option -g status off
 
-    beat() { sleep "$1"; }
+    create_session() {
+        local name="$1" prompt="$2"
+        (
+            cd "$AF_DRIVER_REPO"
+            "$AF_DRIVER_BIN" sessions create "$name" --prompt "$prompt" >/dev/null
+        )
+    }
 
-    # Seed the first session before recording starts. The site hero's poster and
-    # first video frame should show the real populated TUI, not an empty shell.
-    af_new_instance fix-auth-timeout
-    beat 1.0
+    # Each command creates a real AF session, branch, and isolated worktree. The
+    # prompts are deliberately small enough to finish during a README demo while
+    # still requiring genuine repository inspection, edits, and verification.
+    create_session validate-add \
+        "Fix todo.sh so ./todo.sh add with no text exits nonzero and prints a concise usage message. Add regression coverage to test.sh, run ./test.sh, and summarize the result."
+    create_session json-output \
+        "Add a json command to todo.sh that prints the todo items as a valid JSON array without adding dependencies. Add focused coverage to test.sh, run it, and summarize the result."
+    create_session document-cli \
+        "Improve README.md with concise examples for list, add, and done, including the behavior for an invalid item number. Keep it accurate to todo.sh, inspect the script first, and summarize the documentation change."
 
-    # ---- start the recorder: a read-only mirror of 'drive' inside a pinned
-    # ---- wide 'rec' session, so asciinema's pty matches the TUI exactly.
+    af_wait_for 'Sessions \(3\)' 15 'three real sessions in the rail'
+    af_wait_for 'OpenAI Codex|gpt-5' 30 'real Codex pane output'
+
+    # Record a read-only mirror. The geometry belongs to this container's tmux
+    # server; the maintainer's tmux socket is never visible here.
     tmux kill-session -t rec 2>/dev/null || true
     tmux new-session -d -s rec -x "$COLS" -y "$ROWS"
     tmux set-option -t rec window-size manual >/dev/null 2>&1 || true
     tmux resize-window -t rec -x "$COLS" -y "$ROWS" 2>/dev/null || true
     tmux send-keys -t rec \
-        "asciinema rec --overwrite -c 'env TMUX= tmux attach -t drive -r' $CAST" Enter
-    # Wait until the mirror client is actually attached to 'drive'.
+        "asciinema rec --overwrite -c 'env TMUX= tmux attach -t drive -r' $cast" Enter
     for _ in $(seq 1 50); do
         tmux list-clients -t drive 2>/dev/null | grep -q read-only && break
         sleep 0.2
     done
-    sleep 0.6                                  # a beat of populated TUI on screen
+    if ! tmux list-clients -t drive 2>/dev/null | grep -q read-only; then
+        echo "record-demo: recorder did not attach to the isolated TUI" >&2
+        exit 1
+    fi
 
-    # ---- the demo scenario -------------------------------------------------
-    # Surface-width note: an agent's transcript is pre-streamed at native
-    # (full-preview / full-screen) width, so re-opening it in a narrower tiled
-    # pane reflows and mangles it. The scenario therefore only ever shows the
-    # AGENT transcript on those two native surfaces — and reserves the tiled
-    # split (Act 4) for a *tab* whose content (the dev-server) is generated
-    # live at the pane's current width, so it renders clean.
-    #
-    # Act 1 — start from the real, populated supervision view.
+    beat() { sleep "$1"; }
+
+    # The operator moves across three agents while their real turns continue in
+    # parallel. The rail keeps each branch/worktree visible, and every selection
+    # shows that agent's own live Codex pane.
     beat 1.2
-    # Act 2 — spin up the fleet; the sidebar fills with agents, a running
-    # spinner on the newest and ● ready dots on the rest, while the live
-    # preview keeps streaming. The Automations rail sits seeded below.
-    af_new_instance add-dark-mode;            beat 0.9
-    af_new_instance refactor-api-client;      beat 1.4
-    # Act 3 — spotlight the Automations: open the task manager (m) over the
-    # fleet to show the cron/watch schedule ("triage every morning", nightly
-    # tests, rerun-failing-CI), then dismiss it (a modal overlay: clean open +
-    # Escape close, no pane-focus state to strand).
-    af_open_tasks
-    beat 2.6
-    af_close_tasks
-    beat 0.6
-    # Act 4 — create the last agent, let its (fuller) transcript finish
-    # streaming while the fleet sits ready, then dive full-screen into it (o).
-    # Attaching only AFTER it settles matters: a settled pane renders clean and
-    # fills the screen, where mid-stream would strand a reflowing pane. No
-    # typing, so no interactive-mode toggle strands the menu bar; af_attach
-    # syncs on the TUI chrome vanishing, so the recording lands on the fully-
-    # attached state.
-    af_new_instance write-integration-tests
-    beat 3.0                                     # fleet-ready beat + transcript settles
-    af_attach
-    beat 2.2                                     # hold on the clean, full agent session
-    af_detach
-    beat 0.9
-    # Act 5 (finale) — a tab is a real process in the worktree, not another
-    # agent. Open a second tab on the first agent (t auto-tiles a
-    # Agent | Terminal split), step in (Enter → interact in-pane, no full-
-    # screen), and run the dev server — it streams live beside the agent's own
-    # transcript. This is the closing shot: an agent and a running dev-server
-    # side by side in one worktree. Ending here (rather than tearing the split
-    # back down) keeps the scenario to only the clean surfaces — the fragile
-    # part was collapsing a two-tab pane back to the tree, which we now avoid.
-    af_select fix-auth-timeout
-    af_new_tab                                  # auto-opens the tiled Terminal split
-    af_enter_interactive
-    af_send_literal "clear; dev"
-    af_send Enter
-    af_wait_for 'VITE' 8 'dev-server output' || return 1
-    beat 3.6                                     # dev-server boots + serves requests
-    af_exit_interactive                          # both panes back to the calm single border
-    beat 1.6
+    af_select validate-add
+    beat 3.0
+    af_select json-output
+    beat 4.0
+    af_select document-cli
+    beat 4.0
 
-    # ---- stop recording cleanly: kill asciinema (which saves the cast). Do
-    # NOT `tmux detach-client`, which would paint a "[detached]" frame into the
-    # final GIF.
+    # Let the agents reach their mechanically observed idle state while the
+    # selected pane continues repainting. This waits on real AF state, not a
+    # scripted transcript duration.
+    for name in validate-add json-output document-cli; do
+        (
+            cd "$AF_DRIVER_REPO"
+            timeout 180 "$AF_DRIVER_BIN" sessions watch "$name" >/dev/null
+        )
+    done
+
+    # Briefly review each completed result, then open a genuine Terminal tab in
+    # one worktree and run that branch's tests beside its Agent pane.
+    af_select validate-add
+    beat 2.4
+    af_select json-output
+    beat 2.4
+    af_select document-cli
+    beat 2.4
+    af_select validate-add
+    af_new_tab
+    af_enter_interactive
+    af_send_literal "clear; $tab_command"
+    af_send Enter
+    af_wait_for 'Demo worktree tests pass' 20 'real worktree tests'
+    beat 4.0
+    af_exit_interactive
+    beat 2.0
+
+    # Interrupt only the recorder so asciinema saves the cast without painting a
+    # detached banner into the last frame.
     pkill -INT -f 'asciinema rec' 2>/dev/null || true
     for _ in $(seq 1 50); do
         pgrep -f 'asciinema rec' >/dev/null || break
         sleep 0.3
     done
-    [ -s "$CAST" ] || { echo "record-demo: cast not written" >&2; exit 1; }
-
-    # ---- render + optimize -------------------------------------------------
-    # --speed compresses the wall-clock pacing (a constantly-animating sidebar
-    # spinner means there are no idle gaps for --idle-time-limit to trim, so
-    # speed is what keeps the GIF in the ~15-20s README range).
-    agg --font-family "JetBrains Mono" --font-size "$AGG_FONT_SIZE" \
-        --theme "$AGG_THEME" --fps-cap "$AGG_FPS" --idle-time-limit "$AGG_IDLE" \
-        --speed "$AGG_SPEED" \
-        "$CAST" "$RAW_GIF"
-    gifsicle -O3 --lossy="$GIFSICLE_LOSSY" --colors "$GIFSICLE_COLORS" \
-        "$RAW_GIF" -o "$OUT_GIF"
-
-    # Site hero video variants. GIF remains the README/fallback asset; WebM and
-    # MP4 give browsers a real autoplaying video path with better decode costs.
-    ffmpeg -y -loglevel error -i "$OUT_GIF" \
-        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
-        -c:v libvpx-vp9 -b:v 0 -crf 34 -an "$OUT_WEBM"
-    ffmpeg -y -loglevel error -i "$OUT_GIF" \
-        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
-        -movflags +faststart -pix_fmt yuv420p -c:v libx264 -crf 28 -an "$OUT_MP4"
-    ffmpeg -y -loglevel error -ss 4.0 -i "$OUT_GIF" -frames:v 1 "$OUT_POSTER"
-
-    # ---- sample frames for review -----------------------------------------
-    ffmpeg -y -loglevel error -i "$OUT_GIF" \
-        -vf "select='not(mod(n\,(max(1\,floor(t/1))+0)))'" -vsync vfr /dev/null 2>/dev/null || true
-    # 6 evenly spaced frames.
-    total="$(ffmpeg -i "$OUT_GIF" -map 0:v:0 -c copy -f null /dev/null 2>&1 | grep -oE 'frame= *[0-9]+' | tail -1 | grep -oE '[0-9]+')"
-    total="${total:-60}"
-    i=1
-    for f in $(seq 1 9); do
-        n=$(( (total * f) / 10 ))
-        [ "$n" -lt 1 ] && n=1
-        ffmpeg -y -loglevel error -i "$OUT_GIF" -vf "select=eq(n\,$n)" -vframes 1 \
-            "$(printf "%s/frames/frame-%02d.png" "$OUT" "$i")"
-        i=$((i+1))
-    done
-    if [ -s "$OUT/frames/frame-04.png" ]; then
-        cp "$OUT/frames/frame-04.png" "$OUT_POSTER"
+    if [ ! -s "$cast" ]; then
+        echo "record-demo: cast was not written" >&2
+        exit 1
     fi
 
-    ls -l "$OUT_GIF" "$OUT_WEBM" "$OUT_MP4" "$OUT_POSTER"
-    echo "record-demo(inner): done"
+    # Treat DEMO_SPEED as a floor and adapt upward when real agents take longer.
+    # Targeting 24s leaves six seconds of headroom below the README limit even
+    # before agg trims static gaps with --idle-time-limit.
+    cast_duration="$(tail -n 1 "$cast" | jq -r '.[0]')"
+    if ! render_speed="$(awk \
+        -v floor="$AGG_SPEED" -v duration="$cast_duration" -v target="$TARGET_DURATION" \
+        'BEGIN {
+            if (floor <= 0 || duration <= 0 || target <= 0) exit 1
+            adaptive = duration / target
+            printf "%.3f", (adaptive > floor ? adaptive : floor)
+        }')"; then
+        echo "record-demo: render speed and target duration must be positive" >&2
+        exit 2
+    fi
+
+    agg --font-family "JetBrains Mono" --font-size "$AGG_FONT_SIZE" \
+        --theme "$AGG_THEME" --fps-cap "$AGG_FPS" \
+        --idle-time-limit "$AGG_IDLE" --speed "$render_speed" \
+        "$cast" "$raw_gif"
+    gifsicle -O3 --lossy="$GIFSICLE_LOSSY" --colors "$GIFSICLE_COLORS" \
+        "$raw_gif" -o "$out_gif"
+
+    ffmpeg -y -loglevel error -i "$out_gif" \
+        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+        -c:v libvpx-vp9 -b:v 0 -crf 34 -an "$out_webm"
+    ffmpeg -y -loglevel error -i "$out_gif" \
+        -vf "fps=$AGG_FPS,scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+        -movflags +faststart -pix_fmt yuv420p -c:v libx264 -crf 28 -an "$out_mp4"
+
+    duration="$(ffprobe -v error -show_entries format=duration \
+        -of default=nw=1:nk=1 "$out_gif")"
+    if ! awk -v value="$duration" 'BEGIN { exit !(value < 30) }'; then
+        echo "record-demo: GIF is ${duration}s; README hero must stay under 30s" >&2
+        exit 1
+    fi
+    gif_bytes="$(wc -c <"$out_gif" | tr -d ' ')"
+    if [ "$gif_bytes" -gt "$MAX_GIF_BYTES" ]; then
+        echo "record-demo: GIF is $gif_bytes bytes; limit is $MAX_GIF_BYTES" >&2
+        exit 1
+    fi
+
+    # Nine review frames plus an information-dense poster from the middle of the
+    # real recording. Dividing by 11 keeps the last sample away from container
+    # duration padding, where ffmpeg can succeed without emitting a frame.
+    for i in $(seq 1 9); do
+        timestamp="$(awk -v d="$duration" -v n="$i" 'BEGIN { printf "%.3f", d * n / 11 }')"
+        ffmpeg -y -loglevel error -ss "$timestamp" -i "$out_gif" -frames:v 1 \
+            "$(printf '%s/frames/frame-%02d.png' "$out" "$i")"
+    done
+    cp "$out/frames/frame-05.png" "$out_poster"
+
+    ls -lh "$out_gif" "$out_webm" "$out_mp4" "$out_poster"
+    printf 'record-demo: %.2fs · %s-byte GIF · real Codex in three AF worktrees\n' \
+        "$duration" "$gif_bytes"
     exit 0
 fi
 
-# ===========================================================================
-# HOST SIDE — orchestrate the container.
-# ===========================================================================
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${AF_DEMO_IMAGE:-agent-factory-demo}"
-NAME="${AF_DEMO_NAME:-af-demo-$$}"
-OUT_GIF="$REPO_ROOT/docs/assets/demo.gif"
-OUT_WEBM="$REPO_ROOT/docs/assets/demo.webm"
-OUT_MP4="$REPO_ROOT/docs/assets/demo.mp4"
-OUT_POSTER="$REPO_ROOT/docs/assets/demo-poster.png"
-FRAMES_DIR="${DEMO_FRAMES_DIR:-}"
+# ---------------------------------------------------------------------------
+# Host side — start the sanctioned play-test sandbox and copy only media out.
+# ---------------------------------------------------------------------------
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+container_name="${AF_DEMO_NAME:-af-demo-$$}"
+codex_release="${AF_PLAYTEST_CODEX_RELEASE:-0.147.0}"
+auth_file="${AF_DEMO_CODEX_AUTH_FILE:-}"
+frames_dir="${DEMO_FRAMES_DIR:-}"
 
-engine() { docker "$@"; }
-cleanup() { engine rm -f "$NAME" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-
-if ! engine image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo ">>> building $IMAGE ..."
-    engine build -t "$IMAGE" - <"$REPO_ROOT/scripts/container/Dockerfile.demo"
+if [ -z "$auth_file" ] || [ ! -f "$auth_file" ]; then
+    echo "record-demo: set AF_DEMO_CODEX_AUTH_FILE to a readable Codex auth.json" >&2
+    exit 2
 fi
 
-echo ">>> starting container $NAME ..."
-engine run -d --rm --init \
-    -v "$REPO_ROOT":/src:ro \
-    --pids-limit 1024 --memory 8g \
-    --name "$NAME" \
-    -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
-    "$IMAGE" bash /src/scripts/container/playtest-entry.sh hold >/dev/null
-engine exec "$NAME" sh -c \
+cleanup() {
+    docker rm -f "$container_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+if docker container inspect "$container_name" >/dev/null 2>&1; then
+    echo "record-demo: container '$container_name' already exists" >&2
+    exit 2
+fi
+
+printf '>>> starting isolated real-agent play-test sandbox …\n'
+AF_PLAYTEST_NAME="$container_name" \
+AF_PLAYTEST_AGENT=codex \
+AF_PLAYTEST_CODEX_RELEASE="$codex_release" \
+    make -C "$repo_root" playtest-container-detached
+docker exec "$container_name" sh -c \
     'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'
 
-echo ">>> recording ..."
-engine exec \
+# Recording tools live only in the throwaway container. Installing them here
+# keeps the recording on the exact `make playtest-container` path instead of a
+# parallel demo harness.
+printf '>>> installing the recording stack in the sandbox …\n'
+docker exec --user root -e DEBIAN_FRONTEND=noninteractive "$container_name" \
+    sh -c 'apt-get update >/dev/null && apt-get install -y --no-install-recommends asciinema ffmpeg gifsicle fonts-jetbrains-mono >/dev/null && rm -rf /var/lib/apt/lists/*'
+docker exec --user root "$container_name" sh -c \
+    'curl -fsSL -o /usr/local/bin/agg https://github.com/asciinema/agg/releases/download/v1.9.0/agg-x86_64-unknown-linux-musl && chmod +x /usr/local/bin/agg'
+
+# Copy one credential file after the sandbox is fully scaffolded. It is never
+# mounted into /src, copied back out, or retained after the container teardown.
+docker exec --user root "$container_name" mkdir -p /home/dev/.codex
+docker cp "$auth_file" "$container_name:/home/dev/.codex/auth.json" >/dev/null
+docker exec --user root "$container_name" chown -R dev:dev /home/dev/.codex
+docker exec "$container_name" codex login status >/dev/null
+
+printf '>>> recording three real Codex sessions …\n'
+docker exec \
     -e AF_DEMO_INNER=1 \
     -e "DEMO_COLS=$COLS" -e "DEMO_ROWS=$ROWS" \
     -e "DEMO_FONT_SIZE=$AGG_FONT_SIZE" -e "DEMO_THEME=$AGG_THEME" \
-    -e "DEMO_FPS=$AGG_FPS" -e "DEMO_IDLE=$AGG_IDLE" -e "DEMO_SPEED=$AGG_SPEED" \
-    -e "DEMO_LOSSY=$GIFSICLE_LOSSY" -e "DEMO_COLORS=$GIFSICLE_COLORS" \
-    "$NAME" bash /src/scripts/container/record-demo.sh
+    -e "DEMO_FPS=$AGG_FPS" -e "DEMO_IDLE=$AGG_IDLE" \
+    -e "DEMO_SPEED=$AGG_SPEED" -e "DEMO_TARGET_DURATION=$TARGET_DURATION" \
+    -e "DEMO_LOSSY=$GIFSICLE_LOSSY" \
+    -e "DEMO_COLORS=$GIFSICLE_COLORS" \
+    -e "DEMO_MAX_GIF_BYTES=$MAX_GIF_BYTES" \
+    "$container_name" bash /src/scripts/container/record-demo.sh
 
-echo ">>> copying artifacts out ..."
-mkdir -p "$(dirname "$OUT_GIF")"
-engine cp "$NAME:/home/dev/out/demo.gif" "$OUT_GIF"
-engine cp "$NAME:/home/dev/out/demo.webm" "$OUT_WEBM"
-engine cp "$NAME:/home/dev/out/demo.mp4" "$OUT_MP4"
-engine cp "$NAME:/home/dev/out/demo-poster.png" "$OUT_POSTER"
-if [ -n "$FRAMES_DIR" ]; then
-    mkdir -p "$FRAMES_DIR"
-    engine cp "$NAME:/home/dev/out/frames/." "$FRAMES_DIR/"
+printf '>>> copying generated media …\n'
+docker cp "$container_name:/home/dev/out/demo.gif" "$repo_root/docs/assets/demo.gif"
+docker cp "$container_name:/home/dev/out/demo.webm" "$repo_root/docs/assets/demo.webm"
+docker cp "$container_name:/home/dev/out/demo.mp4" "$repo_root/docs/assets/demo.mp4"
+docker cp "$container_name:/home/dev/out/demo-poster.png" "$repo_root/docs/assets/demo-poster.png"
+if [ -n "$frames_dir" ]; then
+    mkdir -p "$frames_dir"
+    docker cp "$container_name:/home/dev/out/frames/." "$frames_dir/"
 fi
 
-ls -lh "$OUT_GIF" "$OUT_WEBM" "$OUT_MP4" "$OUT_POSTER"
-echo ">>> done: $OUT_GIF $OUT_WEBM $OUT_MP4 $OUT_POSTER"
+ls -lh \
+    "$repo_root/docs/assets/demo.gif" \
+    "$repo_root/docs/assets/demo.webm" \
+    "$repo_root/docs/assets/demo.mp4" \
+    "$repo_root/docs/assets/demo-poster.png"
+printf '>>> done · container teardown removes the copied auth and sandbox\n'

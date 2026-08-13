@@ -6411,7 +6411,10 @@ async function probeWebTab(path, token2, timeoutMs) {
     }
     return resp.headers.get(WEBTAB_ERROR_HEADER) !== null ? "dead" : "ok";
   } catch {
-    return "dead";
+    if (controller.signal.aborted) {
+      return "dead";
+    }
+    return "unreachable";
   } finally {
     clearTimeout(timer);
   }
@@ -10823,6 +10826,9 @@ function hostLabel(target) {
     return target;
   }
 }
+function probeFallbackMsg(health, host) {
+  return health === "unreachable" ? `Could not reach the daemon to check ${host}.` : `No dev server is answering at ${host} yet.`;
+}
 var SplitView = class {
   constructor(host, cb) {
     this.host = host;
@@ -11393,9 +11399,9 @@ var SplitView = class {
     const probePath = webProxied ? webProxyPath(sessionId, realId, target, null) : "";
     let disposed = false;
     let probeSeq = 0;
-    const showDead = () => {
+    const showProbeFailure = (health) => {
       fallback.classList.add("af-webpane-dead");
-      fbMsg.textContent = `No dev server is answering at ${hostLabel(target)} yet.`;
+      fbMsg.textContent = probeFallbackMsg(health, hostLabel(target));
       fbLink.hidden = true;
       open.hidden = true;
       fbRetry.hidden = false;
@@ -11443,8 +11449,8 @@ var SplitView = class {
         if (disposed || seq !== probeSeq) {
           return;
         }
-        if (health === "dead") {
-          showDead();
+        if (health === "dead" || health === "unreachable") {
+          showProbeFailure(health);
           return;
         }
       }
