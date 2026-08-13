@@ -1,7 +1,5 @@
 package config
 
-import "path/filepath"
-
 // RegisterRootAgent opts repoRoot into the global root_agents list with the
 // default agent profile, unless it is already present. It is the persistence
 // side of the TUI's in-place "+ Add project…" flow (#1461): root_agents is the
@@ -116,5 +114,5 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	if repo, err := RepoFromPath(expanded); err == nil {
 		return repo.ID == repoID
 	}
-	return RepoIDFromRoot(filepath.Clean(expanded)) == repoID
+	return RepoIDForRecordedRoot(expanded) == repoID
 }

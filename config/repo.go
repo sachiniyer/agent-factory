@@ -187,6 +187,18 @@ func RepoIDFromRoot(root string) string {
 	return hex.EncodeToString(hash[:6])
 }
 
+// RepoIDForRecordedRoot is the identity fallback for a RECORDED repo root
+// whose path does not currently resolve through git: the ID a checkout at that
+// recorded spelling gets. Every consumer that matches or attributes state
+// against a possibly-absent recorded root must derive the fallback here —
+// attribution (the daemon's root-agent snapshot) and matching
+// (rootAgentKeyMatchesRepo, delete-project normalization) only agree while
+// their fallbacks stay bit-identical, so strengthening the canonicalization in
+// one copy would silently split identity between them.
+func RepoIDForRecordedRoot(recorded string) string {
+	return RepoIDFromRoot(filepath.Clean(recorded))
+}
+
 func repoContextFromRoot(root string) *RepoContext {
 	return &RepoContext{
 		Root: root,

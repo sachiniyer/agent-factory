@@ -112,7 +112,7 @@ func normalizeDeleteProjectPath(path string) (string, string) {
 		return repo.Root, repo.ID
 	}
 	root = filepath.Clean(root)
-	return root, config.RepoIDFromRoot(root)
+	return root, config.RepoIDForRecordedRoot(root)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -127,7 +127,7 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 	}
 	var root string
 	for _, project := range projects {
-		if config.RepoIDFromRoot(project.Root) != repoID {
+		if config.RepoIDForRecordedRoot(project.Root) != repoID {
 			continue
 		}
 		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {
