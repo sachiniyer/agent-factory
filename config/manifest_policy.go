@@ -20,9 +20,9 @@ const (
 	SourceLegacyRepo
 	// SourceRepoShared is <repo-root>/.agent-factory/config.{toml,json}.
 	SourceRepoShared
-	// SourceProjectPersonal is the approved future machine-local project layer.
-	// Stage one defines the vocabulary but no entry admits it until that schema
-	// and its read/write paths exist.
+	// SourceProjectPersonal is the machine-local per-project layer
+	// (project_config.go); entries admit it through the manifest's
+	// personal-capable precedence chains.
 	SourceProjectPersonal
 	// SourceInvocation is an explicit value supplied by the operation being
 	// resolved. There is no universal CLI/environment layer today, so no entry

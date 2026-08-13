@@ -10,14 +10,14 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-// This file is the usage-limit detection + reset-time parsing layer (#1146,
-// PR1/4). It is the sibling of isReadyContent in runner.go: a pure per-agent
-// matcher over captured tmux pane content, with no I/O and no daemon/TUI
-// wiring. Later PRs consume it — PR2 wires isLimitContent into the daemon's
-// single-writer status refresh and adds a LimitReached status; PR3 schedules
-// an auto-resume off the parsed reset time; PR4 parks (not fails) a task run
+// This file is the usage-limit detection + reset-time parsing layer (#1146).
+// It is the sibling of isReadyContent in runner.go: a pure per-agent matcher
+// over captured tmux pane content, with no I/O and no daemon/TUI wiring. Its
+// consumers are live — the daemon's single-writer status refresh flips
+// LiveLimitReached off it, daemon/limitresume.go schedules the auto-resume off
+// the parsed reset time, and daemon/taskrun.go parks (not fails) a task run
 // that hits a limit mid-flight. Keeping this layer pure and table-tested is
-// what lets those PRs build on a trusted detector.
+// what those consumers build on.
 //
 // Scope of what we schedule against: the subscription-plan agents (claude,
 // codex) stall at a dead prompt with a parseable reset window, so they get a

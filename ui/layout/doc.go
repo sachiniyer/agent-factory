@@ -7,7 +7,7 @@
 // (§2.3), and the shared exact-Rect ClampToRect sizing helper. Mouse
 // hit-testing lives in the zones subpackage (§2.5).
 //
-// Nothing here is wired into app/ yet — that happens in the later PRs of
-// the phased plan (§4). Until then the package is kept alive by its own
-// tests.
+// app/ consumes it: tui_state.go drives the region focus Ring and the
+// Grid solver, and the overlay/mouse handlers hit-test through the zones
+// subpackage.
 package layout

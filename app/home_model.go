@@ -200,7 +200,7 @@ type home struct {
 	lastPaneCapture map[int]time.Time
 	// panePreviewTxn is a transient #1321 preview binding owned by the most
 	// recently focused content pane. It never mutates the pane's committed
-	// store.OpenPane binding; commit/cancel semantics land in later PRs.
+	// store.OpenPane binding; commit/cancel semantics live in pane_preview.go.
 	panePreviewTxn *panePreviewTxn
 	// lastFocusedPaneID remembers the focused pane before sidebar navigation
 	// re-homes focus to the tree (#1233/#1236). Preview-on-scroll uses it as

@@ -96,11 +96,12 @@ type InstanceOptions struct {
 	// caller as the two fields above. Empty for every ordinary create.
 	PendingRecreateNotice RootRecreateContext
 	// RemoteAgentServer, when set, points the instance's AgentServer() at a REMOTE
-	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4 PR2)
+	// `af agent-server` reachable at the endpoint's authed URL (#1592 Phase 4)
 	// instead of the local in-process runtime. Validated at NewInstance (a bad URL
-	// or a malformed URL fails there). DARK in PR2: no runtime provisions a sandbox to
-	// fill this in yet (PR3-PR5); it is exercised by the out-of-process round-trip
-	// test.
+	// or a malformed URL fails there). The off-box runtimes (docker, sandbox, hook)
+	// do not use this field — backendFactory hands their endpoint back directly
+	// (res.Endpoint); this is the explicit-caller seam, exercised by the
+	// out-of-process round-trip test.
 	RemoteAgentServer *AgentServerEndpoint
 	// SessionEnvPassthrough carries durable exact-name grants delegated by an
 	// outer agent-server. Ordinary daemon/local callers leave it empty and read

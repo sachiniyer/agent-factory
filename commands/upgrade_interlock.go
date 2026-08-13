@@ -29,16 +29,13 @@ import (
 // to guarantee — the failure #2212 calls the worst on the whole upgrade path,
 // and strictly worse than not having a daemon-owned upgrade at all.
 //
-// WHICH mechanism wins is still an open product decision on the issue (A: the
-// transactional path is the single writer whenever a daemon owns the home;
-// B: the daemon defers to the in-place installer; C: leave both and add mutual
-// exclusion). This file does not pick one. It builds the floor ALL THREE need
-// and that none of them can be safe without: the in-place writer never clobbers
-// a live transaction. Landing it before activation means the reconciliation
-// slice gets to be about policy rather than about safety.
-//
-// Nothing creates a transaction yet, so on every real box today this resolves to
-// "no journal → proceed" and behaviour is unchanged. That is pinned by a test.
+// Both mechanisms ship today: the daemon's update driver creates real
+// transactions (daemon/update_driver.go → triggerUpgradeActivation →
+// upgradetxn.Prepare) behind the explicit AGENT_FACTORY_DAEMON_UPGRADE opt-in,
+// and the in-place installers remain the default. This file is the floor that
+// coexistence cannot be safe without: the in-place writer never clobbers a live
+// transaction. On a box that never opts in, no transaction exists and this
+// resolves to "no journal → proceed" — pinned by a test.
 
 // ignoreActiveUpgradeFlag is the `af upgrade` escape hatch. Named for what it
 // ignores rather than a bare --force, so the thing being overridden is visible

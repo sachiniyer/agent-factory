@@ -13,7 +13,8 @@ import (
 // maintained; the design's recommended choice, §9.5). The codec (frame.go) and the
 // message types (message.go) stay transport-agnostic; these helpers move them over
 // a *websocket.Conn so the daemon broker and every client share one read/write
-// seam. No connection is opened here — Phase 2 PR1 wires nothing.
+// seam. No connection is opened here — dialing is the callers' job (the daemon
+// broker and apiclient).
 
 // WriteFrame sends a binary PTY frame (PTY_OUT/INPUT/RESIZE) as a WS binary
 // message.

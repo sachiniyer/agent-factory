@@ -25,19 +25,19 @@ import (
 // piece of the update path the daemon owns rather than borrowing from an
 // interactive launch.
 //
-// It DOES NOT INSTALL ANYTHING. It resolves the newest release on the configured
-// channel and reports it. Activation — handing candidate bytes to
-// triggerUpgradeActivation, which the transaction engine (R1/R2a/R2b) already
-// implements and nothing yet calls — is deliberately a later slice, because
-// switching it on requires resolving which of the two installers owns the binary
-// (`af upgrade` / launch-time swap in place; the daemon would go through the
-// journal + probation + rollback transaction). Two mechanisms racing to replace
-// the same executable is a worse outcome than a box that is merely behind, and
-// that reconciliation is an open product decision on #2212.
+// It resolves the newest release on the configured channel and reports it, and —
+// only behind the explicit AGENT_FACTORY_DAEMON_UPGRADE opt-in (default off; see
+// daemonUpgradeActivationEnabled) — stages the candidate and hands its bytes to
+// triggerUpgradeActivation for the journal + probation + rollback transaction.
+// Without the opt-in it installs nothing: two mechanisms racing to replace the
+// same executable (`af upgrade` / launch-time swap in place vs the daemon's
+// transaction) is a worse outcome than a box that is merely behind, and the
+// upgrade interlock (commands/upgrade_interlock.go) is what keeps the in-place
+// writers off a live transaction.
 //
-// The one property this slice must not break is the launch-path updater, which
-// is still the only thing that installs. See windowOpen: this driver reads the
-// shared throttle cache and never writes it.
+// The one property this driver must not break is the launch-path updater, which
+// remains the default installer. See windowOpen: this driver reads the shared
+// throttle cache and never writes it.
 
 var (
 	// updateDriverWakeInterval is how often the loop re-evaluates. It is

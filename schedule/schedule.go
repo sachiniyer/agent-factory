@@ -5,7 +5,7 @@
 // Describe() for the picker preview. The TUI form and the phase-2 web modal
 // both drive this model, so the two surfaces cannot disagree about what a
 // picker state means — the shared test vectors in testdata/vectors.json (loaded
-// by both the Go and the future web tests) pin that contract.
+// by both the Go and the web tests) pin that contract.
 //
 // Cron generation is the only exhaustive direction: ParseCron is best-effort
 // and recognizes just the shapes Cron emits (so an existing task re-opens as

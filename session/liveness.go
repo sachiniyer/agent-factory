@@ -15,12 +15,12 @@ import (
 // reconstructs the split at read time, and the #1187 collision (Deleting meaning
 // both "TUI kill" and "daemon archive fence").
 //
-// This file introduces the two axes as separate fields and keeps the legacy
-// Status enum working as a thin DERIVATION SHIM: GetStatus composes the old value
-// from (liveness, inFlightOp) and SetStatus decomposes a legacy write back onto
-// them. Phase 1b is deliberately INERT — no behavior changes — so later PRs can
-// migrate writers (1c: daemon poll → SetLiveness) and readers (1d: reconcile →
-// inFlightOp) onto the axes incrementally, then delete the shim (1e).
+// This file holds the two axes as separate fields and keeps the legacy Status
+// enum readable through a thin DERIVATION SHIM: GetStatus composes the old value
+// from (liveness, inFlightOp). Writers are fully migrated — every production
+// (liveness, inFlightOp) mutation goes through the Transition chokepoint, and
+// SetStatusForTest is the only legacy-shaped writer left. The composed read and
+// the legacy Status enum itself remain pending a separate retirement (1e).
 
 // Liveness is the daemon-owned health axis: what state the backing tmux/worktree
 // is actually in, independent of any client operation in flight. It is the
@@ -43,7 +43,8 @@ const (
 	LiveLost
 	// LiveDead: legacy observed-death. Write-never since #1108 (deaths record
 	// Lost); FromInstanceData maps persisted Dead→Lost. Retained so the shim
-	// round-trips and a later PR can retire it (1e).
+	// round-trips; it goes away with the legacy Status enum's retirement (1e,
+	// still open).
 	LiveDead
 	// LiveArchived: deliberately shelved, worktree moved out, inert (#1028).
 	LiveArchived

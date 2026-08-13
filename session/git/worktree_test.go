@@ -457,7 +457,7 @@ func TestCleanup_DeletesBranchWeCreated(t *testing.T) {
 // NewGitWorktreeFromStorage and later killed, Cleanup() must remain a no-op:
 // it must NOT remove the user's worktree directory or delete their branch.
 // Removing the legacy field handling now would destroy user data on kill — so
-// it stays until a future PR confirms no persisted instance carries it.
+// it stays until it is confirmed that no persisted instance still carries it.
 func TestCleanup_LegacyExternalWorktreeIsPreserved(t *testing.T) {
 	sandboxHome(t)
 

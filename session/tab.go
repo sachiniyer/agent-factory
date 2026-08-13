@@ -78,10 +78,7 @@ const shellTmuxSuffix = tmuxTabSeparator + shellTabName
 // rather than assume it fits — see the web tab bar, which scrolls.
 
 // TabKind enumerates the kinds of process a Tab can host within an instance's
-// worktree. PR 1 of the #930 ephemeral-tabs epic only materializes the Agent
-// kind (the single per-instance agent session); Shell and Process are defined
-// here so later PRs can add the human-spawned terminal tab and CLI-spawned
-// process tabs without reshaping the type. See issue #930.
+// worktree (the #930 ephemeral-tabs epic).
 type TabKind int
 
 const (
@@ -89,11 +86,11 @@ const (
 	// system-prompt injection and trust-prompt handling. Exactly one
 	// per instance today, at Tabs[0].
 	TabKindAgent TabKind = iota
-	// TabKindShell is a plain $SHELL session in the worktree (the future
-	// human-spawned terminal tab). Not created in PR 1.
+	// TabKindShell is a plain $SHELL session in the worktree — the
+	// human-spawned terminal tab (spawned via tab_spawn.go).
 	TabKindShell
-	// TabKindProcess runs an arbitrary command in the worktree (the future
-	// CLI-spawned tab). Not created in PR 1.
+	// TabKindProcess runs an arbitrary command in the worktree — the
+	// CLI-spawned tab (spawned via tab_spawn.go).
 	TabKindProcess
 	// TabKindWeb is a URL/iframe tab: it has NO tmux PTY and no process. It
 	// carries a target URL (a loopback dev-server address the daemon
@@ -188,11 +185,10 @@ func TabKindRequires(kind TabKind) TabKindNeed {
 }
 
 // Tab is one process running in an instance's worktree, backed by a single tmux
-// session. It is an internal wrapper introduced in PR 1 of #930: an instance
-// holds exactly one Agent tab that wraps today's single tmux session, and the
-// instance's tmux-touching methods route through it. Tab lifecycle
-// (create/close) and per-tab persistence land in later PRs; PR 1 keeps the
-// on-disk format and all behavior unchanged.
+// session (#930): an instance holds its Agent tab at Tabs[0] plus any shell,
+// process, or web tabs, and the instance's tmux-touching methods route through
+// it. Lifecycle lives in tab_spawn.go (create) and tab_close.go (close), and
+// each tab persists as a TabData record (storage.go).
 type Tab struct {
 	// ID is the tab's stable identity (#1738), minted at creation and persisted.
 	// It is the collision-proof key streams and pane bindings address the tab by —
