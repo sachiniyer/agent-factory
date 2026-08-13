@@ -25,6 +25,12 @@ var (
 	// where there is no text to positively confirm. It keeps the ORIGINAL 500ms
 	// drain rather than silently shortening it.
 	emptyPromptDrain = 500 * time.Millisecond
+	// redeliverAfterAbsentDelay is how long SendKeysCommandObserved waits before
+	// its one automatic redelivery of an observed-absent prompt (#3293).
+	// Seconds-scale on purpose: observed-absent clusters on a pane that was busy
+	// mid-render (#1982), so a millisecond-scale retry re-enters the very render
+	// that just stranded the first paste. A package var so tests can tighten it.
+	redeliverAfterAbsentDelay = 5 * time.Second
 )
 
 // minDistinctiveFragment is the shortest payload fragment treated as
