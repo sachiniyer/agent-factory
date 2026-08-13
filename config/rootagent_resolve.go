@@ -102,9 +102,13 @@ type RootAgentCandidate struct {
 type RootAgentResolution struct {
 	RootAgent
 	// EnabledSource / ProgramSource name the layer that supplied each effective
-	// field, for the --explain surface. EnabledSource is always set (the built-in
-	// base sets `enabled`); ProgramSource is empty when no layer supplied a
-	// program and the default profile applies.
+	// field, for the --explain surface. ResolveRootAgent always sets
+	// EnabledSource (the built-in base sets `enabled`); ProgramSource is empty
+	// when no layer supplied a program and the default profile applies. The one
+	// producer outside ResolveRootAgent is the daemon's fail-closed gate for an
+	// unloadable personal config (#3241), which returns a zero resolution —
+	// disabled, no provenance, no candidates — because no config source decided
+	// it.
 	EnabledSource RootAgentSource      `json:"enabled_source"`
 	ProgramSource RootAgentSource      `json:"program_source,omitempty"`
 	Candidates    []RootAgentCandidate `json:"candidates"`

@@ -77,14 +77,19 @@ type rootEnsureState struct {
 // singleton, every registered project's personal [root_agent] layer and resolved
 // root (both keyed by repo ID), and the repo IDs the legacy root_agents map
 // already covers (so the singleton sweep can dedupe against it). It is
-// best-effort — a project whose checkout no longer resolves, or whose personal
-// config cannot be read, is logged and skipped, never fatal, so one bad project
-// never keeps the daemon from starting. Reading the registry once at start
-// matches the RootAgents map's restart-to-apply contract: registering a project
-// or editing its personal root_agent takes effect on the next daemon start.
-func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
+// best-effort — a project whose checkout no longer resolves is logged and
+// skipped, never fatal, so one bad project never keeps the daemon from starting.
+// The one exception to skip-and-continue is a personal config that exists but
+// cannot be LOADED — read, parsed, or validated (#3241): that file may hold the
+// highest-precedence enabled=false, so the project fails closed rather than
+// open, recorded in personalUnreadable and enforced by resolvedRootAgentFor.
+// Reading the registry once at start matches the RootAgents map's
+// restart-to-apply contract: registering a project or editing its personal
+// root_agent takes effect on the next daemon start.
+func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, personalUnreadable map[string]bool, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
 	global = config.GlobalRootAgentLayer(cfg)
 	personal = map[string]*config.RootAgentLayer{}
+	personalUnreadable = map[string]bool{}
 	projectRoots = map[string]string{}
 	legacyRepoIDs = map[string]bool{}
 
@@ -103,7 +108,7 @@ func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, 
 	projects, err := config.ListProjects()
 	if err != nil {
 		log.WarningLog.Printf("root agent snapshot: could not list registered projects; singleton root agents are disabled until the next daemon start: %v", err)
-		return global, personal, projectRoots, legacyRepoIDs
+		return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
 	}
 	for _, p := range projects {
 		repo, err := config.RepoFromPath(p.Root)
@@ -114,26 +119,59 @@ func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, 
 		projectRoots[repo.ID] = repo.Root
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
-			log.WarningLog.Printf("root agent snapshot: project %s personal config is unreadable; ignoring its root_agent override until the next daemon start: %v", p.ID, err)
+			// Fail CLOSED (#3241): this file may hold the highest-precedence
+			// `enabled = false` — for a parse or read failure we provably cannot
+			// know — so the failed load makes the project's root-agent decision
+			// unknown. It must not become "absent", or a lower-precedence enable
+			// (the ubiquitous empty legacy root_agents entry, or a global
+			// enabled=true) starts a root the user explicitly disabled. Recording
+			// the repo in personalUnreadable makes resolvedRootAgentFor — the one
+			// resolution choke point both ensure sweeps and
+			// repoRootAgentWillMaterialize share — resolve it to disabled. An
+			// already-live root is left alone (adopt-first); only creation and
+			// healing stop, until the config loads at a daemon start — the same
+			// restart-to-apply contract as the rest of this snapshot.
+			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads at a daemon start: %v", p.ID, repo.Root, err)
+			personalUnreadable[repo.ID] = true
 			continue
 		}
 		if layer := pc.RootAgentLayer(); layer != nil {
 			personal[repo.ID] = layer
 		}
 	}
-	return global, personal, projectRoots, legacyRepoIDs
+	return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
 }
 
 // rootAgentInputsFor assembles the resolver inputs for one repo from the
-// start-of-day snapshot plus its (optional) legacy entry, so every caller — the
-// ensure sweep and repoRootAgentWillMaterialize — layers the same sources and
-// can never disagree on whether a root should run or what it runs.
+// start-of-day snapshot plus its (optional) legacy entry. Callers resolve
+// through resolvedRootAgentFor, never through config.ResolveRootAgent directly,
+// so the fail-closed gate below cannot be bypassed.
 func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentInputs {
 	return config.RootAgentInputs{
 		Global:   m.rootAgentGlobal,
 		Legacy:   legacy,
 		Personal: m.rootAgentPersonal[repoID],
 	}
+}
+
+// resolvedRootAgentFor is the single resolution choke point for one repo: every
+// caller — both ensure sweeps and repoRootAgentWillMaterialize — resolves
+// through it, so they can never disagree on whether a root should run or what
+// it runs.
+//
+// It applies the daemon's fail-closed policy for an unloadable personal config
+// (#3241) before layering: a repo in rootAgentPersonalUnreadable resolves to
+// disabled without consulting lower layers, because the file that could not be
+// loaded may hold the highest-precedence enabled=false — absence of proof is
+// not permission to start an agent. The returned zero resolution carries no
+// provenance on purpose: no config source decided this, the daemon's read
+// failure did, and the cause stays available to consumers in
+// rootAgentPersonalUnreadable.
+func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
+	if m.rootAgentPersonalUnreadable[repoID] {
+		return config.RootAgentResolution{}
+	}
+	return config.ResolveRootAgent(m.rootAgentInputsFor(repoID, legacy))
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
@@ -157,7 +195,7 @@ func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentRes
 	if legacy == nil && !isProject {
 		return config.RootAgentResolution{}, false
 	}
-	return config.ResolveRootAgent(m.rootAgentInputsFor(repoID, legacy)), true
+	return m.resolvedRootAgentFor(repoID, legacy), true
 }
 
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an
@@ -221,7 +259,7 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 		m.rootEnsureFailed(path, st, fmt.Errorf("root_agents entry %q does not resolve to a git repository: %w", path, err))
 		return
 	}
-	resolution := config.ResolveRootAgent(m.rootAgentInputsFor(repo.ID, &rc))
+	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
 	m.ensureResolvedRoot(path, st, repo, resolution)
 }
 
@@ -240,7 +278,7 @@ func (m *Manager) ensureSingletonRootAgent(repoID string) {
 		return
 	}
 	repo := &config.RepoContext{Root: root, ID: repoID}
-	resolution := config.ResolveRootAgent(m.rootAgentInputsFor(repoID, nil))
+	resolution := m.resolvedRootAgentFor(repoID, nil)
 	m.ensureResolvedRoot(root, st, repo, resolution)
 }
 
