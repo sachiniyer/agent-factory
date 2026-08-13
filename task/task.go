@@ -173,6 +173,18 @@ func describeProjectPath(path string) string {
 	return path
 }
 
+// ExpectProject returns the expectation a mutating caller must attach when it
+// authorized the task from a loaded record: "act only if this is still bound
+// where I saw it". It is the ONE constructor every surface shares — the CLI's
+// scope check, the TUI's pane/trigger paths, and (mirrored in web/src/api.ts)
+// the web client — so the admission predicate is defined here once rather than
+// re-derived per surface (#3190, #3230). Enforce is always true: a caller
+// holding a record always has a binding to pin, including the unbound one
+// (ProjectPath == ""), which Enforce distinguishes from "no expectation".
+func ExpectProject(t Task) ProjectExpectation {
+	return ProjectExpectation{Enforce: true, ProjectPath: t.ProjectPath}
+}
+
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
 // time-triggered (CronExpr).
 func (t Task) IsWatch() bool {
@@ -825,9 +837,14 @@ func (t *Task) canonicalizeTargetSession() {
 // TaskEdit pairs a task ID with the field-level patch to apply to it. The TUI's
 // task pane emits one per edited task (see DiffTask) so a save sends only the
 // fields the user actually changed.
+//
+// Expect pins the project binding of the record the pane LOADED (not the
+// edited copy — an edit may itself move the task), so the daemon refuses the
+// patch if another client rebound the task while the pane was open (#3230).
 type TaskEdit struct {
 	ID     string
 	Update TaskUpdate
+	Expect ProjectExpectation
 }
 
 // DiffTask returns a TaskUpdate holding exactly the user-editable fields that

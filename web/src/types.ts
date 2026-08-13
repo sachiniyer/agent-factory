@@ -279,6 +279,21 @@ export interface TaskUpdate {
   enabled?: boolean;
 }
 
+/**
+ * The project compare-and-swap every task mutation carries (#3230): the Go
+ * task.ProjectExpectation, field names/JSON tags matched EXACTLY. The daemon
+ * re-checks — under the same locked operation that mutates the task — that the
+ * task is still bound to the project the pane displayed it under, and refuses
+ * the action if another client rebound it meanwhile. `enforce` distinguishes
+ * "expected to be unbound" (project_path "") from "no expectation" — an absent
+ * or zero-value expect disables the check, which is why the api layer builds
+ * this from the displayed record itself rather than letting callers pass one.
+ */
+export interface ProjectExpectation {
+  enforce: boolean;
+  project_path: string;
+}
+
 /** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
 export interface TasksResponse {
   tasks: TaskData[] | null;

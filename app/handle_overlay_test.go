@@ -435,7 +435,7 @@ func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testi
 	require.Len(t, tp.GetTasks(), 1)
 	require.Equal(t, "task-b-1474", tp.GetTasks()[0].ID)
 
-	t.Cleanup(SetTaskRemoverForTest(func(string) error {
+	t.Cleanup(SetTaskRemoverForTest(func(string, task.ProjectExpectation) error {
 		return fmt.Errorf("daemon RPC failure")
 	}))
 
@@ -448,7 +448,7 @@ func TestHandleStateTasks_PendingTriggerSurvivesDeleteFailureReloadByID(t *testi
 	require.Equal(t, "task-b-1474", tp.GetTasks()[1].ID)
 
 	var triggeredID string
-	t.Cleanup(SetTaskTriggerForTest(func(id string) error {
+	t.Cleanup(SetTaskTriggerForTest(func(id string, _ task.ProjectExpectation) error {
 		triggeredID = id
 		return nil
 	}))
@@ -511,7 +511,7 @@ func TestHandleStateTasks_FailedCreateDoesNotDuplicateOnReopen(t *testing.T) {
 
 	// Force the pre-create flush to fail, so the create is submitted but
 	// handleTaskCreate never runs and pendingCreate is stranded.
-	restoreUpdater := SetTaskUpdaterForTest(func(string, task.TaskUpdate) error {
+	restoreUpdater := SetTaskUpdaterForTest(func(string, task.TaskUpdate, task.ProjectExpectation) error {
 		return fmt.Errorf("daemon RPC failure")
 	})
 
@@ -680,8 +680,8 @@ func TestSaveContentPaneState_CommittedRemovalRefreshesAndWarns(t *testing.T) {
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyEsc})
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
 
-	t.Cleanup(SetTaskRemoverForTest(func(id string) error {
-		require.NoError(t, task.RemoveTask(id, task.ProjectExpectation{}))
+	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
+		require.NoError(t, task.RemoveTask(id, expect))
 		return committedTaskMutationTestError{}
 	}))
 	err = h.saveContentPaneState()
@@ -738,12 +738,15 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	// Swap the write seams for recorders AFTER seeding (the seed used the direct
 	// writer); the save-on-close must now dispatch through these instead of disk.
 	var updated []task.TaskEdit
-	var removed []string
-	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
-		updated = append(updated, task.TaskEdit{ID: id, Update: update})
+	var removed []task.TaskEdit
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		updated = append(updated, task.TaskEdit{ID: id, Update: update, Expect: expect})
 		return nil
 	}))
-	t.Cleanup(SetTaskRemoverForTest(func(id string) error { removed = append(removed, id); return nil }))
+	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
+		removed = append(removed, task.TaskEdit{ID: id, Expect: expect})
+		return nil
+	}))
 
 	// Toggle the first task (keep) off — dirty, not yet persisted.
 	_, _ = h.handleStateTasks(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
@@ -759,13 +762,20 @@ func TestSaveContentPaneState_RoutesThroughDaemonRPC(t *testing.T) {
 	// The remaining task's update and the deleted task's remove both routed
 	// through the daemon seams.
 	require.Len(t, removed, 1, "delete must route through the remove RPC")
-	assert.Equal(t, "gone-1029", removed[0])
+	assert.Equal(t, "gone-1029", removed[0].ID)
+	// The dispatch must carry the project CAS pinning the binding the pane
+	// displayed (#3230): a zero-value expectation disables the daemon-side
+	// check and lets a stale delete land on a task rebound to another project.
+	assert.Equal(t, task.ProjectExpectation{Enforce: true, ProjectPath: repo.Root}, removed[0].Expect,
+		"the remove RPC must carry the displayed record's project expectation")
 	var sawToggledKeep bool
 	for _, edit := range updated {
 		if edit.ID == "keep-1029" {
 			sawToggledKeep = true
 			require.NotNil(t, edit.Update.Enabled, "the toggle must ship the Enabled field")
 			assert.False(t, *edit.Update.Enabled, "the toggled state must be dispatched to the update RPC")
+			assert.Equal(t, task.ProjectExpectation{Enforce: true, ProjectPath: repo.Root}, edit.Expect,
+				"the update RPC must carry the displayed record's project expectation (#3230)")
 		}
 	}
 	assert.True(t, sawToggledKeep, "the surviving task must route through the update RPC")

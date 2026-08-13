@@ -59,15 +59,15 @@ func newTestHome(t *testing.T) *home {
 	// unchanged. Tests asserting the daemon-dispatch itself swap in a recorder.
 	t.Cleanup(SetTaskAdderForTest(task.AddTask))
 	// task.UpdateTask returns the merged record; the seam only needs the error,
-	// so adapt it to the field-level updater signature (#1700).
-	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
-		_, err := task.UpdateTask(id, update, task.ProjectExpectation{})
+	// so adapt it to the field-level updater signature (#1700). The expectation
+	// is passed through, exactly as the daemon's handler does (#3230), so these
+	// disk-assertion tests exercise the same CAS a real save runs under.
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		_, err := task.UpdateTask(id, update, expect)
 		return err
 	}))
-	// The TUI's remove seam takes no project expectation: the CLI's client-side
-	// scope check is what an expectation re-verifies, and the TUI has none.
-	t.Cleanup(SetTaskRemoverForTest(func(id string) error {
-		return task.RemoveTask(id, task.ProjectExpectation{})
+	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
+		return task.RemoveTask(id, expect)
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 

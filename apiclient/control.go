@@ -158,23 +158,32 @@ func (c *Client) AddTask(t task.Task) error {
 // given id and re-arm its schedule, returning the merged record (#1700). Only
 // the patch's non-nil fields are written, so a single-field edit never clobbers
 // a concurrent edit another client made to a different field.
-func (c *Client) UpdateTask(id string, update task.TaskUpdate) (task.Task, error) {
+//
+// expect carries the project binding the caller authorized the id against
+// (task.ExpectProject on the record it displayed), re-verified by the daemon
+// atomically with the write — see task.ProjectExpectation (#3230). It is a
+// required parameter, not an option: dropping it silently reopens the
+// stale-authorization race the CAS exists to close.
+func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
 }
 
-// RemoveTask asks the daemon to delete a task and re-arm its schedule.
-func (c *Client) RemoveTask(id string) error {
-	return c.call("RemoveTask", daemon.RemoveTaskRequest{ID: id}, &daemon.RemoveTaskResponse{})
+// RemoveTask asks the daemon to delete a task and re-arm its schedule. expect
+// is the same required project compare-and-swap as UpdateTask's — this is the
+// destructive verb the CAS most exists for (#3230).
+func (c *Client) RemoveTask(id string, expect task.ProjectExpectation) error {
+	return c.call("RemoveTask", daemon.RemoveTaskRequest{ID: id, Expect: expect}, &daemon.RemoveTaskResponse{})
 }
 
 // TriggerTask asks the daemon to fire a task now through the shared RunTask
-// firing path (the same entrypoint the scheduler uses).
-func (c *Client) TriggerTask(id string) error {
-	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id}, &daemon.TriggerTaskResponse{})
+// firing path (the same entrypoint the scheduler uses). expect is the same
+// required project compare-and-swap as UpdateTask's (#3230).
+func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
+	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect}, &daemon.TriggerTaskResponse{})
 }
 
 // SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms
