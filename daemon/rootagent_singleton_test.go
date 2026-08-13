@@ -261,6 +261,16 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 				return rootTestConfig(repoPath, config.RootAgentConfig{})
 			},
 		},
+		{
+			// The portable case for the SINGLETON sweep: on root runners both
+			// chmod cases skip, and without this row the
+			// ensureSingletonRootAgent arm of the gate would go untested there.
+			name:    "unparseable TOML under a global enable",
+			corrupt: breakPersonalRootAgentToml,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return loadGlobalConfigWithRootAgent(t, "enabled = true")
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

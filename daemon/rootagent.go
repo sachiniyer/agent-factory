@@ -83,9 +83,9 @@ type rootEnsureState struct {
 // cannot be LOADED — read, parsed, or validated (#3241): that file may hold the
 // highest-precedence enabled=false, so the project fails closed rather than
 // open, recorded in personalUnreadable and enforced by resolvedRootAgentFor.
-// Reading the registry once at start
-// matches the RootAgents map's restart-to-apply contract: registering a project
-// or editing its personal root_agent takes effect on the next daemon start.
+// Reading the registry once at start matches the RootAgents map's
+// restart-to-apply contract: registering a project or editing its personal
+// root_agent takes effect on the next daemon start.
 func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, personalUnreadable map[string]bool, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
 	global = config.GlobalRootAgentLayer(cfg)
 	personal = map[string]*config.RootAgentLayer{}

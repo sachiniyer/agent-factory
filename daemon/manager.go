@@ -234,8 +234,10 @@ type Manager struct {
 	// disabled without consulting lower layers, because the unloadable file may
 	// hold the highest-precedence enabled=false. Kept as its own set rather than
 	// a synthesized personal layer so consumers can distinguish "the user
-	// disabled this" from "af could not tell" — the deletedRootRepos shape for
-	// out-of-band suppression. Restart-to-apply, like the rest of the snapshot.
+	// disabled this" from "af could not tell". Snapshot-built and immutable
+	// after construction, read without a lock — the rootAgentLegacyRepoIDs
+	// discipline, not the runtime-mutated, mu-guarded deletedRootRepos one.
+	// Restart-to-apply, like the rest of the snapshot.
 	rootAgentPersonalUnreadable map[string]bool
 	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
 	// root path, snapshotted at daemon start. It is the candidate set the ensure
