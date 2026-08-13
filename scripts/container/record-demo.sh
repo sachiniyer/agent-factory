@@ -23,6 +23,7 @@ AGG_THEME="${DEMO_THEME:-dracula}"
 AGG_FPS="${DEMO_FPS:-12}"
 AGG_IDLE="${DEMO_IDLE:-3.0}"
 AGG_SPEED="${DEMO_SPEED:-1.8}"
+TARGET_DURATION="${DEMO_TARGET_DURATION:-24}"
 GIFSICLE_LOSSY="${DEMO_LOSSY:-110}"
 GIFSICLE_COLORS="${DEMO_COLORS:-48}"
 MAX_GIF_BYTES="${DEMO_MAX_GIF_BYTES:-2000000}"
@@ -43,7 +44,8 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     out_webm="$out/demo.webm"
     out_mp4="$out/demo.mp4"
     out_poster="$out/demo-poster.png"
-    agent_wrapper="$HOME/bin/demo-agent"
+    codex_wrapper="$HOME/bin/codex"
+    real_codex="$HOME/bin/codex-real"
     tab_command="$HOME/bin/demo-tab"
     mkdir -p "$out/frames"
 
@@ -51,16 +53,20 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
         echo "record-demo: play-test sandbox is not using a real agent" >&2
         exit 1
     fi
-    codex login status >/dev/null
+    "$codex_wrapper" login status >/dev/null
 
-    cp /src/docs/assets/demo-agent.sh "$agent_wrapper"
+    # AF recognizes agents from the configured command's executable basename.
+    # Keep `codex` as the wrapper name so prompt readiness uses Codex-specific
+    # composer/trust handling, and move the installed CLI behind that wrapper.
+    mv "$codex_wrapper" "$real_codex"
+    cp /src/docs/assets/demo-agent.sh "$codex_wrapper"
     cp /src/docs/assets/demo-tab.sh "$tab_command"
-    chmod +x "$agent_wrapper" "$tab_command"
+    chmod +x "$codex_wrapper" "$real_codex" "$tab_command"
 
     # Use the real Codex wrapper without hand-editing the sandbox config. These
     # are ordinary AF settings and take effect when af_boot starts the daemon.
     "$AF_DRIVER_BIN" config set default_program codex >/dev/null
-    "$AF_DRIVER_BIN" config set program_overrides.codex "$agent_wrapper" >/dev/null
+    "$AF_DRIVER_BIN" config set program_overrides.codex "$codex_wrapper" >/dev/null
 
     # shellcheck disable=SC1091
     source /src/scripts/tui-driver.sh
@@ -142,7 +148,7 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
     af_enter_interactive
     af_send_literal "clear; $tab_command"
     af_send Enter
-    af_wait_for 'Tests pass' 20 'real worktree tests'
+    af_wait_for 'Demo worktree tests pass' 20 'real worktree tests'
     beat 4.0
     af_exit_interactive
     beat 2.0
@@ -159,9 +165,24 @@ if [ "${AF_DEMO_INNER:-}" = 1 ]; then
         exit 1
     fi
 
+    # Treat DEMO_SPEED as a floor and adapt upward when real agents take longer.
+    # Targeting 24s leaves six seconds of headroom below the README limit even
+    # before agg trims static gaps with --idle-time-limit.
+    cast_duration="$(tail -n 1 "$cast" | jq -r '.[0]')"
+    if ! render_speed="$(awk \
+        -v floor="$AGG_SPEED" -v duration="$cast_duration" -v target="$TARGET_DURATION" \
+        'BEGIN {
+            if (floor <= 0 || duration <= 0 || target <= 0) exit 1
+            adaptive = duration / target
+            printf "%.3f", (adaptive > floor ? adaptive : floor)
+        }')"; then
+        echo "record-demo: render speed and target duration must be positive" >&2
+        exit 2
+    fi
+
     agg --font-family "JetBrains Mono" --font-size "$AGG_FONT_SIZE" \
         --theme "$AGG_THEME" --fps-cap "$AGG_FPS" \
-        --idle-time-limit "$AGG_IDLE" --speed "$AGG_SPEED" \
+        --idle-time-limit "$AGG_IDLE" --speed "$render_speed" \
         "$cast" "$raw_gif"
     gifsicle -O3 --lossy="$GIFSICLE_LOSSY" --colors "$GIFSICLE_COLORS" \
         "$raw_gif" -o "$out_gif"
@@ -255,7 +276,8 @@ docker exec \
     -e "DEMO_COLS=$COLS" -e "DEMO_ROWS=$ROWS" \
     -e "DEMO_FONT_SIZE=$AGG_FONT_SIZE" -e "DEMO_THEME=$AGG_THEME" \
     -e "DEMO_FPS=$AGG_FPS" -e "DEMO_IDLE=$AGG_IDLE" \
-    -e "DEMO_SPEED=$AGG_SPEED" -e "DEMO_LOSSY=$GIFSICLE_LOSSY" \
+    -e "DEMO_SPEED=$AGG_SPEED" -e "DEMO_TARGET_DURATION=$TARGET_DURATION" \
+    -e "DEMO_LOSSY=$GIFSICLE_LOSSY" \
     -e "DEMO_COLORS=$GIFSICLE_COLORS" \
     -e "DEMO_MAX_GIF_BYTES=$MAX_GIF_BYTES" \
     "$container_name" bash /src/scripts/container/record-demo.sh

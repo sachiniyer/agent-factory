@@ -7,9 +7,9 @@
 # comes from Codex working in the session's real AF-owned worktree.
 set -euo pipefail
 
-codex_bin="$(command -v codex || true)"
+codex_bin="${AF_DEMO_CODEX_BIN:-$(command -v codex-real || true)}"
 if [ -z "$codex_bin" ]; then
-    echo "demo-agent: Codex is not installed in the play-test sandbox" >&2
+    echo "demo-agent: codex-real is not installed in the play-test sandbox" >&2
     exit 1
 fi
 

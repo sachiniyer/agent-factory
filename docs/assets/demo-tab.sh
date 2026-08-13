@@ -9,9 +9,9 @@ set -euo pipefail
 run_tests() {
     printf 'Running ./test.sh …\n'
     if ./test.sh; then
-        printf '✓ Tests pass · watching this worktree\n'
+        printf '✓ Demo worktree tests pass · watching this worktree\n'
     else
-        printf '✕ Tests failed · watching this worktree\n'
+        printf '✕ Demo worktree tests failed · watching this worktree\n'
     fi
 }
 
