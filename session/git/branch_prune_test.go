@@ -179,6 +179,60 @@ func TestLocalBranchExists_DeterminateVersusUnknown(t *testing.T) {
 	}
 }
 
+// TestDeleteLocalBranch_UnreadableLooseRefIsErrorNotAbsence closes the hole the
+// PR review caught: git itself folds an EACCES on a LOOSE ref file into the
+// same silent exit 1 as "no such ref" (git 2.43; git ≥2.45 grew
+// `show-ref --exists` to tell them apart), so trusting the exit code alone
+// still reports determinate absence while the branch sits unreadable on disk.
+// Determinate absence must also be confirmed by direct observation: no loose
+// ref file at the branch's path.
+func TestDeleteLocalBranch_UnreadableLooseRefIsErrorNotAbsence(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	root := branchRepo(t, "af-kept")
+	loose := filepath.Join(root, ".git", "refs", "heads", "af-kept")
+	require.NoError(t, os.Chmod(loose, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(loose, 0o644) })
+
+	deleted, err := DeleteLocalBranch(root, "af-kept")
+	require.Error(t, err,
+		"an unreadable loose ref is a failed probe, not a missing branch — git's silent exit 1 must not be trusted alone")
+	assert.False(t, deleted)
+	assert.Contains(t, err.Error(), "af-kept", "the error must name the branch it could not check")
+
+	require.NoError(t, os.Chmod(loose, 0o644))
+	assert.True(t, refExists(t, root, "af-kept"),
+		"sanity: the branch exists the whole time")
+}
+
+// TestDeleteLocalBranch_CorruptLooseRefIsErrorNotAbsence pins the same
+// direct-observation rule for a loose ref file git cannot parse: a file is
+// present that git reports as no ref, which is a contradiction to surface, not
+// an absence to act on.
+func TestDeleteLocalBranch_CorruptLooseRefIsErrorNotAbsence(t *testing.T) {
+	root := branchRepo(t, "af-normal")
+	loose := filepath.Join(root, ".git", "refs", "heads", "af-broken")
+	require.NoError(t, os.WriteFile(loose, []byte("not-a-sha\n"), 0o644))
+
+	deleted, err := DeleteLocalBranch(root, "af-broken")
+	require.Error(t, err, "a present-but-unparseable loose ref file must not read as absence")
+	assert.False(t, deleted)
+}
+
+// TestDeleteLocalBranch_StaleRefHierarchyDirIsCleanNoOp guards the refinement
+// against over-retaining: deleting a hierarchical branch (a/b) can leave an
+// empty directory at refs/heads/a, and a DIRECTORY at the branch path can never
+// be a loose ref — probing branch "a" must stay a clean, determinate no-op.
+func TestDeleteLocalBranch_StaleRefHierarchyDirIsCleanNoOp(t *testing.T) {
+	root := branchRepo(t, "af-normal")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git", "refs", "heads", "stale"), 0o755))
+
+	deleted, err := DeleteLocalBranch(root, "stale")
+	require.NoError(t, err, "a stale ref-hierarchy directory is not evidence of a branch")
+	assert.False(t, deleted)
+}
+
 // TestDeleteLocalBranch_NestedDeGittedRootNeverTouchesEnclosingRepo pins the
 // sharpest consequence of probing with `git -C`: discovery walks UPWARD, so a
 // record whose de-git'd root sits inside another repo would resolve — and then

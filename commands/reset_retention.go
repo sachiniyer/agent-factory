@@ -133,7 +133,7 @@ func retainIncompleteInstances(repoID string, blockedPaths, unverifiedBranches [
 			return nil, fmt.Errorf("read instances: %w", err)
 		}
 		keptCounts = resetSessionCounts{}
-		kept := make([]session.InstanceData, 0, len(blockedPaths)+len(unverifiedBranches))
+		kept := make([]session.InstanceData, 0, len(recs))
 		for _, r := range recs {
 			retain := false
 			if r.Worktree.WorktreePath != "" {

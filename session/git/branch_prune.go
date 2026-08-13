@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // LocalBranchExists reports whether `branch` exists as a local ref in the repo
@@ -34,10 +35,18 @@ import (
 //     same-named branch AF never created.
 //
 // Everything else is probed with `git show-ref --verify --quiet`, whose exit
-// surface git does keep distinct: exit 0 is "exists", a silent exit 1 is "no
-// such ref", and operational failures (unreadable refs storage, corrupt
-// metadata) die loudly with another status. Only the first two are answers; the
-// rest return the error, stderr included.
+// surface git keeps MOSTLY distinct: exit 0 is "exists", a silent exit 1 is
+// "no such ref", and operational failures (unreadable packed-refs, corrupt
+// metadata, failed discovery) die loudly with another status. The one known
+// fold is an unreadable LOOSE ref file, which some git versions report with
+// the same silent exit 1 as a missing ref (git ≥2.45 grew `show-ref --exists`
+// to separate them, but AF must hold on older gits too) — so a silent exit 1
+// is confirmed by direct observation before it counts as absence: no loose
+// ref file may exist at the branch's path. A directory there is fine (a stale
+// hierarchy dir left by deleting a/b can never be a loose ref), and a path
+// that cannot exist (ENOENT/ENOTDIR, e.g. under a linked worktree's .git
+// file) is consistent with absence; a present file, or a failed stat, returns
+// the error.
 func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	if repoRoot == "" || branch == "" {
 		return false, nil
@@ -66,7 +75,18 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
-		return false, nil
+		loose := filepath.Join(gitPath, "refs", "heads", filepath.FromSlash(branch))
+		fi, statErr := os.Lstat(loose)
+		switch {
+		case statErr == nil && fi.IsDir():
+			return false, nil
+		case statErr == nil:
+			return false, fmt.Errorf("git reports no ref refs/heads/%s in %s, but a loose ref file is present at %s and could not be read as a ref", branch, repoRoot, loose)
+		case os.IsNotExist(statErr) || errors.Is(statErr, syscall.ENOTDIR):
+			return false, nil
+		default:
+			return false, fmt.Errorf("stat %s: %w", loose, statErr)
+		}
 	}
 	return false, fmt.Errorf("git show-ref refs/heads/%s in %s: %w: %s",
 		branch, repoRoot, err, strings.TrimSpace(stderr.String()))
