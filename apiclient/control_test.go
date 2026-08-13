@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // routeServer stands up a real Unix-socket HTTP server that answers a single
@@ -189,6 +190,59 @@ func TestControlRoundTrips(t *testing.T) {
 		})
 		if err := c.PauseStatusPoll(daemon.PauseStatusPollRequest{Title: "alpha"}); err != nil {
 			t.Fatalf("PauseStatusPoll: %v", err)
+		}
+	})
+}
+
+// TestTaskMutationsCarryProjectExpectation is the client-side guard for #3230:
+// the TUI's task mutations must put the caller's project compare-and-swap on
+// the wire. A request whose expect decodes as the zero value silently disables
+// the daemon-side admission check (task.ProjectExpectation's zero value means
+// "no expectation") — exactly the request shape the TUI sent before this fix,
+// which let a stale action delete or run a task another client had rebound.
+func TestTaskMutationsCarryProjectExpectation(t *testing.T) {
+	expect := task.ProjectExpectation{Enforce: true, ProjectPath: "/repo/one"}
+
+	t.Run("UpdateTask", func(t *testing.T) {
+		var got daemon.UpdateTaskRequest
+		c := routeServer(t, "UpdateTask", func(b []byte) apiproto.Envelope {
+			_ = json.Unmarshal(b, &got)
+			return apiproto.Success(daemon.UpdateTaskResponse{OK: true})
+		})
+		enabled := false
+		if _, err := c.UpdateTask("t-1", task.TaskUpdate{Enabled: &enabled}, expect); err != nil {
+			t.Fatalf("UpdateTask: %v", err)
+		}
+		if got.ID != "t-1" || got.Expect != expect {
+			t.Fatalf("daemon saw id=%q expect=%+v; want id=t-1 expect=%+v", got.ID, got.Expect, expect)
+		}
+	})
+
+	t.Run("RemoveTask", func(t *testing.T) {
+		var got daemon.RemoveTaskRequest
+		c := routeServer(t, "RemoveTask", func(b []byte) apiproto.Envelope {
+			_ = json.Unmarshal(b, &got)
+			return apiproto.Success(daemon.RemoveTaskResponse{OK: true})
+		})
+		if err := c.RemoveTask("t-1", expect); err != nil {
+			t.Fatalf("RemoveTask: %v", err)
+		}
+		if got.ID != "t-1" || got.Expect != expect {
+			t.Fatalf("daemon saw id=%q expect=%+v; want id=t-1 expect=%+v", got.ID, got.Expect, expect)
+		}
+	})
+
+	t.Run("TriggerTask", func(t *testing.T) {
+		var got daemon.TriggerTaskRequest
+		c := routeServer(t, "TriggerTask", func(b []byte) apiproto.Envelope {
+			_ = json.Unmarshal(b, &got)
+			return apiproto.Success(daemon.TriggerTaskResponse{OK: true})
+		})
+		if err := c.TriggerTask("t-1", expect); err != nil {
+			t.Fatalf("TriggerTask: %v", err)
+		}
+		if got.ID != "t-1" || got.Expect != expect {
+			t.Fatalf("daemon saw id=%q expect=%+v; want id=t-1 expect=%+v", got.ID, got.Expect, expect)
 		}
 	})
 }

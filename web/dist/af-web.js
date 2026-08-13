@@ -6428,17 +6428,20 @@ function requireTaskID(id, action) {
 async function addTask(task, token2) {
   await af("AddTask", { task }, token2);
 }
-async function updateTask(id, update, token2) {
-  requireTaskID(id, "update a task");
-  await af("UpdateTask", { id, update }, token2);
+function projectExpectation(task) {
+  return { enforce: true, project_path: task.project_path ?? "" };
 }
-async function triggerTask(id, token2) {
-  requireTaskID(id, "trigger a task");
-  await af("TriggerTask", { id }, token2);
+async function updateTask(task, update, token2) {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token2);
 }
-async function removeTask(id, token2) {
-  requireTaskID(id, "remove a task");
-  await af("RemoveTask", { id }, token2);
+async function triggerTask(task, token2) {
+  requireTaskID(task.id, "trigger a task");
+  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token2);
+}
+async function removeTask(task, token2) {
+  requireTaskID(task.id, "remove a task");
+  await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token2);
 }
 async function getConfig(token2) {
   const resp = await af("GetConfig", {}, token2);
@@ -15259,7 +15262,7 @@ function openEditTask(task) {
         const m = modal;
         m.setBusy(true);
         void updateTask(
-          task.id,
+          task,
           {
             name: input.name,
             prompt: input.prompt,
@@ -15293,7 +15296,7 @@ function toggleTask(task) {
   if (tok === null) {
     return;
   }
-  void updateTask(task.id, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
+  void updateTask(task, { enabled: !task.enabled }, tok).then(refreshTasks).catch((e) => {
     if (isMutationCommittedError(e)) {
       refreshTasks();
     }
@@ -15305,7 +15308,7 @@ function doTriggerTask(task) {
   if (tok === null) {
     return;
   }
-  void triggerTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void triggerTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
 function doRetryLimit() {
   const sel = selectedSession2();
@@ -15346,7 +15349,7 @@ function doRemoveTask(task) {
   if (tok === null) {
     return;
   }
-  void removeTask(task.id, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
+  void removeTask(task, tok).then(refreshTasks).catch((e) => surfaceTabError(e));
 }
 function setTheme(choice) {
   if (store.get().themeChoice === choice) {
