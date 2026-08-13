@@ -39,11 +39,12 @@ type ThemeConfig struct {
 	PaneBorderInteractive string `json:"pane_border_interactive" toml:"pane_border_interactive"`
 	PaneBorderPreview     string `json:"pane_border_preview" toml:"pane_border_preview"`
 
-	// preset remembers scalar TOML input such as theme = "nord" so a later
-	// whole-config save preserves the compact product choice instead of expanding
-	// it into nineteen implementation slots. Empty means the user supplied a
-	// custom [theme] table.
-	preset string
+	// preset names the palette for API consumers. explicitPreset distinguishes a
+	// user-written scalar such as theme = "nord" from the built-in Nord default:
+	// explicit choices round-trip as scalars, while first-run config keeps a table
+	// shape that older TOML-era binaries can still decode on rollback.
+	preset         string
+	explicitPreset bool
 }
 
 const DefaultThemePreset = "nord"
@@ -105,14 +106,17 @@ func zenburnThemeConfig() ThemeConfig {
 // ThemePreset resolves one supported product-level theme choice. The returned
 // value is complete, so callers never need a second defaulting path.
 func ThemePreset(name string) (ThemeConfig, bool) {
+	var preset ThemeConfig
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case DefaultThemePreset:
-		return DefaultThemeConfig(), true
+		preset = DefaultThemeConfig()
 	case "zenburn":
-		return zenburnThemeConfig(), true
+		preset = zenburnThemeConfig()
 	default:
 		return ThemeConfig{}, false
 	}
+	preset.explicitPreset = true
+	return preset, true
 }
 
 // Preset reports the named choice that produced this palette. Empty identifies
@@ -181,13 +185,13 @@ func ThemeSlotCount() int {
 	return count
 }
 
-// marshalConfigTOML preserves a named theme as a scalar while retaining the
-// ordinary struct encoder for custom [theme] tables. go-toml's scalar
-// TextMarshaler hook cannot conditionally fall back to table encoding, so the
-// top-level config encoder replaces only its own generated [theme] section.
+// marshalConfigTOML preserves an explicitly named theme as a scalar while
+// retaining table encoding for custom themes and the built-in first-run
+// default. The latter keeps newly materialized config readable on rollback by
+// older TOML-era binaries that only know the table shape.
 func marshalConfigTOML(cfg *Config) ([]byte, error) {
 	data, err := toml.Marshal(cfg)
-	if err != nil || cfg == nil || cfg.Theme.Preset() == "" {
+	if err != nil || cfg == nil || !cfg.Theme.explicitPreset {
 		return data, err
 	}
 

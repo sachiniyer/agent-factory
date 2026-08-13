@@ -966,8 +966,11 @@ func TestLoadConfig(t *testing.T) {
 		// an operator who wants auth finds the key already there to flip.
 		assert.Contains(t, string(data), `require_token = false`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
-		assert.Contains(t, string(data), `theme = 'nord'`)
-		assert.NotContains(t, string(data), `[theme]`)
+		// Keep the automatic default in the table shape older TOML-era binaries
+		// understand; only an explicit named choice is compacted to a scalar.
+		assert.Contains(t, string(data), `[theme]`)
+		assert.Contains(t, string(data), `accent = '#88C0D0'`)
+		assert.NotContains(t, string(data), `theme = 'nord'`)
 
 		// The materialized file must reload cleanly through the TOML path.
 		cfg, err := LoadConfig()

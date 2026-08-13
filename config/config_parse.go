@@ -113,6 +113,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if err := toml.Unmarshal(decodedData, &shape); err == nil {
 		if _, isTable := shape["theme"].(map[string]any); isTable {
 			config.Theme.preset = ""
+			config.Theme.explicitPreset = false
 		}
 	}
 	if err := toml.Unmarshal(decodedData, config); err != nil {

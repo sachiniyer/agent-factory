@@ -129,16 +129,24 @@ function shiftToContrast(color: string, backgrounds: readonly string[], minimum:
   return color.toUpperCase();
 }
 
-// Light-mode semantics get darker without sliding toward grey: reducing HSL
-// lightness preserves Nord's cyan/green/yellow/red hue families.
-function darkenToContrast(color: string, backgrounds: readonly string[], minimum: number): string {
+// Adjust light-mode semantics along their own HSL lightness axis before using
+// a neutral floor. Trying both directions preserves the configured hue even
+// when a custom "light" surface system is darker than its semantic colours.
+function adjustLightnessToContrast(
+  color: string,
+  backgrounds: readonly string[],
+  minimum: number,
+): string | null {
   if (passes(color, backgrounds, minimum)) return color.toUpperCase();
   const [hue, saturation, lightness] = rgbToHSL(color);
   for (let step = 1; step <= 100; step++) {
-    const candidate = hslToHex(hue, saturation, lightness * (1 - step / 100));
-    if (passes(candidate, backgrounds, minimum)) return candidate;
+    const amount = step / 100;
+    const darker = hslToHex(hue, saturation, lightness * (1 - amount));
+    if (passes(darker, backgrounds, minimum)) return darker;
+    const lighter = hslToHex(hue, saturation, lightness + (1 - lightness) * amount);
+    if (passes(lighter, backgrounds, minimum)) return lighter;
   }
-  return BLACK;
+  return null;
 }
 
 function readable(
@@ -151,7 +159,13 @@ function readable(
   if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
   const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
   if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
-  return contrastRatio(BLACK, backgrounds[0]!) >= contrastRatio(WHITE, backgrounds[0]!) ? BLACK : WHITE;
+  for (const endpoint of [BLACK, WHITE]) {
+    const shifted = shiftToContrast(fallback, backgrounds, minimum, endpoint);
+    if (passes(shifted, backgrounds, minimum)) return shifted;
+  }
+  const minimumContrast = (color: string): number =>
+    Math.min(...backgrounds.map((background) => contrastRatio(color, background)));
+  return minimumContrast(BLACK) >= minimumContrast(WHITE) ? BLACK : WHITE;
 }
 
 const themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name") as (keyof Omit<DaemonTheme, "name">)[];
@@ -211,8 +225,6 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     surfaces = [canvas, surface, raised];
   }
   const toward = dark ? source.foreground_strong : source.background;
-  const fallbackToward = dark ? NORD_THEME.foreground_strong : NORD_THEME.background;
-
   const text = readable(
     dark ? source.foreground : source.background,
     surfaces,
@@ -238,8 +250,9 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const modeSemantic = (candidate: string, fallback: string, minimum: number): string => {
     if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
     if (passes(candidate, surfaces, minimum)) return candidate.toUpperCase();
-    const lightFallback = darkenToContrast(fallback, surfaces, minimum);
-    return passes(lightFallback, surfaces, minimum) ? lightFallback : fallbackToward;
+    const adjusted = adjustLightnessToContrast(fallback, surfaces, minimum);
+    if (adjusted && passes(adjusted, surfaces, minimum)) return adjusted;
+    return readable(fallback, surfaces, minimum, text, text);
   };
 
   const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
@@ -253,7 +266,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
       ? semantic(candidate, fallback, [canvas], 4.5, toward)
       : passes(candidate, [canvas], 4.5)
         ? candidate.toUpperCase()
-        : darkenToContrast(fallback, [canvas], 4.5);
+        : (adjustLightnessToContrast(fallback, [canvas], 4.5) ?? readable(fallback, [canvas], 4.5, text, text));
   const termGreen = termColor(source.success, NORD_THEME.success);
   const termAmber = termColor(source.warning, NORD_THEME.warning);
   const termBlue = termColor(source.info, NORD_THEME.info);

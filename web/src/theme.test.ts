@@ -142,3 +142,28 @@ test("an incoherent custom elevation system falls back as a readable unit", () =
     assert.ok(contrastRatio(tokens["--af-text"], surface) >= 4.5);
   }
 });
+
+test("the final light semantic fallback is verified against every surface", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      foreground: "#5431D4",
+      foreground_strong: "#3D2893",
+      background: "#F5F5F5",
+      accent: "#BD7884",
+    },
+    "light",
+  );
+  const surfaces = [tokens["--af-bg-canvas"], tokens["--af-bg-surface"], tokens["--af-bg-raised"]];
+
+  for (const surface of surfaces) {
+    assert.ok(
+      contrastRatio(tokens["--af-accent"], surface) >= 4.5,
+      `${tokens["--af-accent"]} must remain AA on ${surface}`,
+    );
+    assert.ok(
+      contrastRatio(tokens["--af-border-selected"], surface) >= 3,
+      `${tokens["--af-border-selected"]} must remain visible on ${surface}`,
+    );
+  }
+});

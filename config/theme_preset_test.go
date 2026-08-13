@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +38,7 @@ func TestThemePresets(t *testing.T) {
 			PaneBorderInteractive: "#7F9F7F",
 			PaneBorderPreview:     "#DC8CC3",
 			preset:                "zenburn",
+			explicitPreset:        true,
 		}, zenburn)
 	})
 
@@ -89,6 +91,23 @@ func TestNamedThemeSurvivesConfigSave(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "zenburn", reloaded.Theme.Preset())
 	assert.Equal(t, "#3F3F3F", reloaded.Theme.Background)
+}
+
+func TestDefaultThemeSaveRemainsReadableByLegacyDecoders(t *testing.T) {
+	written, err := marshalConfigTOML(DefaultConfig())
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "[theme]")
+	assert.NotContains(t, string(written), "theme = 'nord'")
+
+	var legacy struct {
+		Theme struct {
+			Background string `toml:"background"`
+			Accent     string `toml:"accent"`
+		} `toml:"theme"`
+	}
+	require.NoError(t, toml.Unmarshal(written, &legacy))
+	assert.Equal(t, "#2E3440", legacy.Theme.Background)
+	assert.Equal(t, "#88C0D0", legacy.Theme.Accent)
 }
 
 func TestCustomThemeSurvivesConfigSave(t *testing.T) {
