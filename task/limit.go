@@ -121,9 +121,10 @@ func builtinLimitMatchers() map[string]agentLimitMatcher {
 // built-in default stands; validateConfig already drops such entries, so this is
 // defense in depth for hand-built configs and non-config callers.
 //
-// PR1 has no live call site; the daemon (PR2) will call this once with
-// cfg.LimitPatterns and reuse the result across poll ticks. Taking a plain
-// map keeps the task package decoupled from the config package.
+// The daemon reaches this through NewLimitDetector (daemon/manager.go), built
+// once with cfg.LimitPatterns, reused across poll ticks, and rebuilt on config
+// apply (daemon/config_apply.go). Taking a plain map keeps the task package
+// decoupled from the config package.
 func resolveLimitMatchers(overrides map[string]string) map[string]agentLimitMatcher {
 	matchers := builtinLimitMatchers()
 	for agent, pattern := range overrides {

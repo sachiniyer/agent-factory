@@ -18,11 +18,10 @@ import (
 // This file holds the two axes as separate fields and keeps the legacy Status
 // enum readable through a thin DERIVATION SHIM: GetStatus composes the old value
 // from (liveness, inFlightOp). Writers are migrated off the legacy enum —
-// SetStatusForTest is the only legacy-shaped writer left. Most production
-// mutations go through the Transition chokepoint; a few daemon single-writer
-// paths set the axes directly (SetLimitReached/ClearLimitReached, SetArchived).
-// The composed read and the legacy Status enum itself remain pending a separate
-// retirement (1e).
+// SetStatusForTest is the only legacy-shaped writer left; production code
+// writes the axes directly or through the Transition chokepoint. The composed
+// read and the legacy Status enum itself remain pending a separate retirement
+// (1e).
 
 // Liveness is the daemon-owned health axis: what state the backing tmux/worktree
 // is actually in, independent of any client operation in flight. It is the
@@ -313,9 +312,7 @@ func (i *Instance) setStatusLocked(s Status) {
 // SetStatusForTest sets the status under the instance mutex by decomposing the
 // legacy composed Status onto the two axes — TEST scaffolding only (#1195 Phase
 // 2e), for establishing a precondition state via the familiar single-value API.
-// Production code never writes lifecycle state through the legacy Status: it
-// writes through the Transition chokepoint or the daemon single-writer's direct
-// axis setters (SetLimitReached, SetArchived). Mirrors
+// Production code never writes lifecycle state through the legacy Status. Mirrors
 // the SetInFlightOpForTest / SetStartedForTest scaffolding pattern. (GetStatus
 // stays — the composed value is still a legitimate read for rendering and test
 // assertions, pending a separate retirement of the legacy Status enum.)
@@ -492,9 +489,10 @@ func (i *Instance) TabSpawnBlocked() error {
 }
 
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
-// sets the LiveLimitReached liveness and stores the parsed reset time (zero when
-// the banner carried none) for the sidebar badge and PR3's auto-resume
-// scheduler. There is no legacy Status value for SetStatus to decompose onto, so
+// sets the LiveLimitReached liveness and stores the parsed reset time (zero
+// when the banner carried none) for the sidebar badge and the auto-resume
+// scheduler (daemon/limitresume.go). There is no legacy Status value for
+// SetStatus to decompose onto, so
 // the daemon single-writer (#960) sets the liveness axis directly here. Skips a
 // row with any operation in flight so it never clobbers that operation's fence.
 func (i *Instance) SetLimitReached(resetAt time.Time) {
@@ -556,7 +554,7 @@ func (i *Instance) SetLimitResetAt(resetAt time.Time) {
 // ClearLimitReached moves a limit-blocked instance back to LiveRunning so the
 // daemon poll re-resolves its real state on the next tick and the [limit] badge
 // clears (#1146). A no-op when the instance is not limit-blocked, so the resume
-// action (and PR3's scheduler) can call it unconditionally.
+// action (and the auto-resume scheduler) can call it unconditionally.
 // ReparkLimitUnderResumeFence restores a limit window while the caller holds the
 // resume fence. It is the transaction-owned twin of SetLimitReached, in the same
 // shape as RecordHandoffSwap is to SwapAgentProgram: the plain setter refuses while

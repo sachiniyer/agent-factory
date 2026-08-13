@@ -596,17 +596,17 @@ func (d *updateDriver) rejectTag(tag string) {
 // whether the update lock was free.
 //
 // It is a strictly read-only use of the throttle cache, and that is the load-
-// bearing decision in this slice. Recording a check closes the window for every
-// other update trigger on the box — including the launch path, which is still
-// the only thing that installs. A daemon that consumed the window without
-// installing would leave a box whose af launches stop updating (the daemon wins
-// the window on its own cadence; the interactive launch arrives to find it
-// closed) in exchange for a driver that installs nothing: strictly worse than
-// today, and exactly the "a window where neither upgrades" outcome #2212 rules
-// out. So the invariant is: never close a window on behalf of an install you did
-// not perform. When this driver gains activation it installs, and it becomes a
-// full Due/Record participant under the same lock, failure closing the window
-// included.
+// bearing decision in this driver. Recording a check closes the window for every
+// other update trigger on the box — including the launch path, which is the
+// only installer on a box that has not opted into daemon activation. A daemon
+// that consumed the window without installing would leave a box whose af
+// launches stop updating (the daemon wins the window on its own cadence; the
+// interactive launch arrives to find it closed) in exchange for a driver that
+// installed nothing: exactly the "a window where neither upgrades" outcome
+// #2212 rules out. So the invariant is: never close a window on behalf of an
+// install you did not perform. That holds even on the activation path —
+// activateRelease exits at the hand-off and cannot observe whether the install
+// committed or rolled back, so it too records nothing (see its comment).
 //
 // Reading under the same non-blocking lock still buys the coordination that
 // matters: the daemon defers to a check another af just made, and stands down

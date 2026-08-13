@@ -112,7 +112,8 @@ func (e *blockedInPlaceInstallError) Error() string {
 // proceeds.
 //
 //   - No home, no journal, or ErrNoActiveTransaction — proceed. This is every
-//     box today.
+//     box that has not opted into daemon-owned activation
+//     (AGENT_FACTORY_DAEMON_UPGRADE).
 //   - A journal in a TERMINAL phase (committed, rolled_back, aborted) — proceed.
 //     Those phases are cleanup only; the activation is decided and there is no
 //     rollback left to corrupt.
