@@ -19,6 +19,19 @@ func (i *Instance) SetPRInfo(info *git.PRInfo) {
 	defer i.mu.Unlock()
 	i.prInfo = info
 	i.prInfoLastFetched = time.Now()
+	i.prInfoGeneration++
+}
+
+// PRInfoGeneration counts every write to this instance's PR info or its
+// freshness clock. A slow producer captures it at kickoff and compares before
+// recording, so a result that raced a NEWER producer's write is discarded
+// instead of overwriting it (#3287 review) — the badge equivalent of a CAS
+// expectation, best-effort because the final write happens under the write
+// path's own locks.
+func (i *Instance) PRInfoGeneration() uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.prInfoGeneration
 }
 
 // PRInfoAge returns how long ago PR info was last fetched. Returns a very
@@ -39,6 +52,7 @@ func (i *Instance) MarkPRInfoFetched() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.prInfoLastFetched = time.Now()
+	i.prInfoGeneration++
 }
 
 // SetPRInfoFetchedAtForTest backdates the freshness clock so staleness-window

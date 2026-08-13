@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +29,13 @@ type prSweepFixture struct {
 func newPRSweepFixture(t *testing.T) *prSweepFixture {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	// The sweep refuses to run without `gh` on PATH (discovery unavailable must
+	// not read as "no PR"). The fetch itself is stubbed in every test, so a
+	// do-nothing executable satisfies the availability probe deterministically,
+	// whatever the CI runner has installed.
+	ghDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(ghDir, "gh"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	repoPath := setupControlRepo(t)
 	repo, err := config.RepoFromPath(repoPath)
 	require.NoError(t, err)
@@ -176,6 +185,73 @@ func TestPRInfoSweepFailedFetchWaitsAFullWindow(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load())
 	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(1), calls.Load(), "a failed fetch must wait out the staleness window, not retry every sweep")
+}
+
+// TestPRInfoSweepSkipsWhenGhUnavailable pins the availability guard (#3287
+// review): with `gh` gone from PATH, discovery is unavailable — not answering
+// "no PR" — so the sweep must not run at all, and a previously recorded badge
+// survives instead of being cleared by the indistinguishable (nil, nil).
+func TestPRInfoSweepSkipsWhenGhUnavailable(t *testing.T) {
+	f := newPRSweepFixture(t)
+	calls := stubPRFetch(t, &sessiongit.PRInfo{Number: 41, Title: "fix: sweep", URL: "https://example.com/pr/41", State: "OPEN"}, nil)
+
+	f.manager.refreshStalePRInfo(context.Background())
+	require.Equal(t, int32(1), calls.Load())
+	require.NotNil(t, f.instance.GetPRInfo())
+
+	f.instance.SetPRInfoFetchedAtForTest(time.Now().Add(-time.Hour))
+	t.Setenv("PATH", t.TempDir()) // a PATH with no gh in it
+	f.manager.refreshStalePRInfo(context.Background())
+
+	require.Equal(t, int32(1), calls.Load(), "no fetch may run while gh is unavailable")
+	require.NotNil(t, f.instance.GetPRInfo(), "the cached badge must survive gh unavailability")
+	require.Equal(t, 41, readPersistedPRInfo(t, f.repoID).Number, "the persisted badge must survive gh unavailability")
+}
+
+// TestPRInfoSweepDiscardsResultWhenNewerProducerLanded pins the overwrite race
+// (#3287 review): a producer that lands while the sweep's `gh` call is in
+// flight (the TUI's selected-session refresh) advances the generation, and the
+// sweep's now-older result must be discarded, not recorded over it.
+func TestPRInfoSweepDiscardsResultWhenNewerProducerLanded(t *testing.T) {
+	f := newPRSweepFixture(t)
+	var calls atomic.Int32
+	prev := prInfoFetchFn
+	prInfoFetchFn = func(_ context.Context, _, branch string) (*sessiongit.PRInfo, error) {
+		calls.Add(1)
+		// A newer producer lands mid-fetch.
+		f.instance.SetPRInfo(&sessiongit.PRInfo{Number: 99, State: "MERGED", Branch: branch})
+		return &sessiongit.PRInfo{Number: 41, State: "OPEN"}, nil
+	}
+	t.Cleanup(func() { prInfoFetchFn = prev })
+
+	f.manager.refreshStalePRInfo(context.Background())
+
+	require.Equal(t, int32(1), calls.Load())
+	got := f.instance.GetPRInfo()
+	require.NotNil(t, got)
+	require.Equal(t, 99, got.Number, "the sweep's stale result must not overwrite the newer producer's write")
+}
+
+// TestPRInfoSweepRechecksAdmissionBeforeRecording pins the quiesce race (#3287
+// review): upgrade activation can close admission while `gh` runs, and the
+// sweep's write goes through Manager.SetPRInfo directly — no RPC gate fronts
+// it — so the recheck immediately before recording is what keeps a mutation
+// from persisting after admission closed.
+func TestPRInfoSweepRechecksAdmissionBeforeRecording(t *testing.T) {
+	f := newPRSweepFixture(t)
+	var calls atomic.Int32
+	prev := prInfoFetchFn
+	prInfoFetchFn = func(context.Context, string, string) (*sessiongit.PRInfo, error) {
+		calls.Add(1)
+		f.manager.lifecycle.markQuiescing()
+		return &sessiongit.PRInfo{Number: 41, State: "OPEN"}, nil
+	}
+	t.Cleanup(func() { prInfoFetchFn = prev })
+
+	f.manager.refreshStalePRInfo(context.Background())
+
+	require.Equal(t, int32(1), calls.Load())
+	require.Nil(t, f.instance.GetPRInfo(), "a result fetched before quiescing must not be recorded after it")
 }
 
 // TestPRInfoSweepStopsOnCancel pins the shutdown property (#3287 review): a

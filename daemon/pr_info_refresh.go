@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -94,6 +95,15 @@ func (m *Manager) refreshStalePRInfo(ctx context.Context) {
 	if !m.Ready() {
 		return
 	}
+	// `gh` missing is "discovery unavailable", not "no PR anywhere" — but
+	// FetchPRInfo deliberately folds it into (nil, nil), which downstream reads
+	// as an authoritative empty result. Left unguarded, a daemon whose service
+	// PATH lost `gh` would CLEAR every persisted badge on its first sweep
+	// (restored freshness clocks are zero, so everything looks stale). Skip the
+	// sweep outright and keep the cached values (#3287 review).
+	if _, err := exec.LookPath("gh"); err != nil {
+		return
+	}
 	type entry struct {
 		repoID   string
 		instance *session.Instance
@@ -136,6 +146,11 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 	// empty fetch then waits out a full staleness window instead of retrying on
 	// every sweep while the network is down.
 	inst.MarkPRInfoFetched()
+	// The generation after our own bump is the fence: any producer that lands
+	// while `gh` runs (a TUI selected-session refresh, another SetPRInfo)
+	// advances it, and this sweep's now-older result must be discarded rather
+	// than overwrite the newer state (#3287 review).
+	fetchGeneration := inst.PRInfoGeneration()
 	info, err := prInfoFetchFn(ctx, repoPath, branch)
 	if ctx.Err() != nil {
 		// Shutdown abandoned the lookup; a cancelled fetch is not a failure
@@ -161,6 +176,19 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 	// The branch can move while `gh` runs; a result for the old ref must not be
 	// recorded against the new one (the TUI drops this case too).
 	if _, current := inst.FetchPRInfoSnapshot(); current != branch {
+		return
+	}
+	// A newer producer landed while this fetch ran — its result outranks ours.
+	if inst.PRInfoGeneration() != fetchGeneration {
+		return
+	}
+	// Quiescing can begin while `gh` runs (upgrade activation marks it before
+	// requesting shutdown), and Manager.SetPRInfo below is the direct write
+	// path with no RPC admission gate in front of it — recheck immediately
+	// before recording so the sweep cannot persist a mutation after admission
+	// closed (#3287 review; the sweep-entry check alone leaves the whole fetch
+	// duration as a window).
+	if m.lifecycle != nil && m.lifecycle.mutationAdmissionError() != nil {
 		return
 	}
 	var data session.PRInfoData
