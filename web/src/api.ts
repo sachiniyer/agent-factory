@@ -744,8 +744,14 @@ export async function reorderTab(
 
 // --- web-tab health (#1813) -------------------------------------------------
 
-/** Whether a web tab's upstream is answering, as seen from the PARENT document. */
-export type WebTabHealth = "ok" | "dead";
+/**
+ * Whether a web tab's upstream is answering, as seen from the PARENT document.
+ * "dead" means the probe got through to the daemon and nothing usable answered
+ * behind it; "unreachable" means the probe never reached the daemon at all, so
+ * nothing was observed about the dev server (#3239) — the two need different
+ * copy, because they send the user to different components.
+ */
+export type WebTabHealth = "ok" | "dead" | "unreachable";
 
 /**
  * The marker the daemon's proxy sets on a 502 IT generated — i.e. the dev server never
@@ -843,9 +849,12 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
  * `timeoutMs` bounds the wait (Codex P2): a loopback target that ACCEPTS the
  * connection but never sends headers would otherwise leave this awaiting forever, and
  * the pane blank with no fallback and no Retry. An AbortController fires at the
- * deadline; a timed-out probe is treated as dead, exactly like a transport failure —
- * a target that cannot answer within the window is not answering. The caller passes
- * the same tunable the fallback UI uses (webFallbackMs), so a test can shrink it.
+ * deadline; a timed-out probe is treated as dead — a target that cannot answer within
+ * the window is not answering. A rejection BEFORE the deadline is different (#3239):
+ * that is the browser failing to reach the daemon origin itself, which observes
+ * nothing about the dev server behind it, so it is reported "unreachable" rather than
+ * folded into "dead". The caller passes the same tunable the fallback UI uses
+ * (webFallbackMs), so a test can shrink it.
  */
 export async function probeWebTab(path: string, token: string, timeoutMs: number): Promise<WebTabHealth> {
   const headers: Record<string, string> = {};
@@ -869,9 +878,16 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
     // error is its page to render (#1909).
     return resp.headers.get(WEBTAB_ERROR_HEADER) !== null ? "dead" : "ok";
   } catch {
-    // A transport failure (daemon down) OR our own abort (the target accepted but
-    // stalled past the deadline): either way nothing usable answered — dead.
-    return "dead";
+    // Our own abort: the request was in flight and the deadline passed with no
+    // answer — the dead-server fallback's state. Keyed on the signal WE armed, not
+    // on how the browser spells the abort rejection.
+    if (controller.signal.aborted) {
+      return "dead";
+    }
+    // A rejection before the deadline is the browser failing to reach the daemon
+    // origin itself. That observes nothing about the dev server behind the proxy,
+    // so it must not be attributed to it (#3239).
+    return "unreachable";
   } finally {
     clearTimeout(timer);
   }

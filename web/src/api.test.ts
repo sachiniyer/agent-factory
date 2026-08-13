@@ -663,11 +663,14 @@ test("probeWebTab: a redirect is an ANSWERING server — ok, and the frame follo
   assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "ok", "a redirecting server is alive");
 });
 
-test("probeWebTab: a transport failure is dead", async () => {
+test("probeWebTab: a transport failure is unreachable, not dead (#3239)", async () => {
+  // The fetch rejected before the deadline: the browser never reached the daemon, so
+  // nothing was observed about the dev server behind it. Reporting this as "dead"
+  // routed it to the dev-server fallback copy — blaming a hop that was never asked.
   (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
     throw new TypeError("Failed to fetch");
   };
-  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "dead");
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "unreachable");
 });
 
 test("probeWebTab: a fetch that never resolves is aborted at the timeout and reported dead (Codex P2)", async () => {
