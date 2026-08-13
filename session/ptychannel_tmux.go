@@ -18,7 +18,10 @@ import (
 // PR5): it captures a tmux pane's output through `pipe-pane` into a private FIFO
 // and drives input/size through `send-keys`/`resize-window` — all WITHOUT a
 // `tmux attach-session` render client. The WS PTY broker fans the FIFO bytes to
-// its subscribers; PR6 deletes the render client the TUI still uses today.
+// its subscribers, and the instance/tab drivers (TUI, web, CLI) stream through
+// it — their attach-session render client is gone (retired in #1592 Phase 2
+// PR7). The config-agent terminal takeover is the remaining exception: it hands
+// the terminal to a real `tmux attach-session` (app/config_agent.go, #2019).
 type tmuxClientlessChannel struct {
 	ts *tmux.TmuxSession
 

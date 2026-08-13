@@ -7,7 +7,7 @@
 // (§2.3), and the shared exact-Rect ClampToRect sizing helper. Mouse
 // hit-testing lives in the zones subpackage (§2.5).
 //
-// Nothing here is wired into app/ yet — that happens in the later PRs of
-// the phased plan (§4). Until then the package is kept alive by its own
-// tests.
+// app/ consumes it: home.relayout (app/home_model.go) sets the Grid inputs,
+// solves, and rebuilds the focus Ring, and the mouse handlers hit-test
+// through the zones subpackage.
 package layout

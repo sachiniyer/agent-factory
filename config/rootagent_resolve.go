@@ -5,11 +5,12 @@ package config
 // root-agent profile and ResolveRootAgent — the single authority on how every
 // root-agent source combines, so no consumer re-implements precedence.
 //
-// PR1 shipped the built-in + legacy layers as a config-only adapter with the
-// daemon untouched. PR2 adds the global and personal-project singleton layers and
-// wires the daemon (EnsureRootAgents and repoRootAgentWillMaterialize) onto this
-// function; the legacy path-keyed map is kept forever as a read-only source, so
-// existing configs never stop working.
+// Every layer is live: built-in, the global [root_agent] singleton
+// (GlobalRootAgentLayer), the legacy path-keyed map, and the personal
+// per-project singleton, with the daemon (EnsureRootAgents and
+// repoRootAgentWillMaterialize) resolving through this function. The legacy
+// path-keyed map is kept forever as a read-only source, so existing configs
+// never stop working.
 
 // RootAgent is the canonical root-agent profile: whether a project keeps an
 // always-ensured "root" session, and the command it runs. It is the singular

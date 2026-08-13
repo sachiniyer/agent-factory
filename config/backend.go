@@ -51,8 +51,8 @@ func SupportedBackendsString() string {
 	return strings.Join(SupportedBackends, ", ")
 }
 
-// DockerConfig parameterizes the docker runtime (#1592 Phase 4 PR3 config
-// surface; the runtime that consumes it lands in PR4). A session with
+// DockerConfig parameterizes the docker runtime (#1592 Phase 4; consumed by
+// session/backend_docker.go). A session with
 // `backend = "docker"` runs its workspace + agent in a container started from
 // Image, with RunArgs appended to the `docker run` invocation.
 type DockerConfig struct {
@@ -71,8 +71,8 @@ type DockerConfig struct {
 	RunArgs []string `json:"run_args,omitempty" toml:"run_args,omitempty"`
 }
 
-// SSHConfig parameterizes the ssh runtime (#1592 Phase 4 PR3 config surface; the
-// runtime that consumes it lands in PR5). A session with `backend = "ssh"` runs
+// SSHConfig parameterizes the ssh runtime (#1592 Phase 4; consumed by the
+// session package's ssh_*.go provisioning). A session with `backend = "ssh"` runs
 // its workspace + agent on Host over an ssh connection, with the agent-server
 // reached through a local-forward tunnel.
 type SSHConfig struct {
