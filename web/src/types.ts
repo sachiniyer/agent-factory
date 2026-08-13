@@ -294,6 +294,21 @@ export interface ProjectExpectation {
   project_path: string;
 }
 
+/**
+ * The slice of a displayed task record a mutation needs: the stable id to
+ * target and the project binding to pin (#3230). The api.ts mutation helpers
+ * take this instead of the full TaskData both because it is all they read and
+ * because the surface-parity audit (parity/derive_test.go webNestedValueReach)
+ * derives AddTask's reachable payload from every TaskData-typed parameter in
+ * api.ts — typing the mutations TaskData would make their pass-through call
+ * sites unanalyzable. Callers still hand over the full displayed TaskData;
+ * structural typing narrows it here.
+ */
+export interface TaskMutationRef {
+  id: string;
+  project_path: string;
+}
+
 /** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
 export interface TasksResponse {
   tasks: TaskData[] | null;

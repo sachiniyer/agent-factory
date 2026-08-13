@@ -468,8 +468,9 @@ func objectKeys(lit string) []string {
 // which is what catches TaskUpdate omitting project_path (#1935) mechanically
 // rather than by someone noticing.
 var webTSTypes = map[string]string{
-	"task.Task":       "TaskData",
-	"task.TaskUpdate": "TaskUpdate",
+	"task.Task":               "TaskData",
+	"task.TaskUpdate":         "TaskUpdate",
+	"task.ProjectExpectation": "ProjectExpectation",
 }
 
 var tsInterfaceFieldRe = regexp.MustCompile(`(?m)^\s*([A-Za-z_]\w*)\??\s*:`)

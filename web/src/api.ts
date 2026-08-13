@@ -34,6 +34,7 @@ import type {
   SessionData,
   SnapshotResponse,
   TaskData,
+  TaskMutationRef,
   TasksResponse,
   TaskUpdate,
 } from "./types.js";
@@ -940,9 +941,10 @@ export async function addTask(task: TaskData, token: string): Promise<void> {
  *  admission for a task mutation (#3230, the #3190 one-predicate rule). Always
  *  enforced: a caller holding a record always has a binding to pin, including
  *  the unbound one (project_path ""), which `enforce` distinguishes from "no
- *  expectation". The mutations below take the full TaskData rather than a bare
- *  id precisely so no call site can send an id without its binding. */
-function projectExpectation(task: TaskData): ProjectExpectation {
+ *  expectation". The mutations below take the displayed record (TaskMutationRef)
+ *  rather than a bare id precisely so no call site can send an id without its
+ *  binding. */
+function projectExpectation(task: TaskMutationRef): ProjectExpectation {
   return { enforce: true, project_path: task.project_path ?? "" };
 }
 
@@ -955,7 +957,7 @@ function projectExpectation(task: TaskData): ProjectExpectation {
  *  issuing the request. Takes the DISPLAYED record: the request pins its project
  *  binding, so a task rebound by another client while this pane was stale is
  *  refused rather than patched (#3230). */
-export async function updateTask(task: TaskData, update: TaskUpdate, token: string): Promise<void> {
+export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
   requireTaskID(task.id, "update a task");
   await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
 }
@@ -964,7 +966,7 @@ export async function updateTask(task: TaskData, update: TaskUpdate, token: stri
  *  scheduler path it uses for a scheduled fire, and refuses disabled + watch tasks.
  *  Refuses a task with no stable id, before issuing the request. Takes the
  *  DISPLAYED record and pins its project binding (#3230). */
-export async function triggerTask(task: TaskData, token: string): Promise<void> {
+export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "trigger a task");
   await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
@@ -973,7 +975,7 @@ export async function triggerTask(task: TaskData, token: string): Promise<void> 
  *  id, before issuing the request. Takes the DISPLAYED record and pins its
  *  project binding — the destructive verb the CAS most exists for: a stale
  *  project-A delete must not land on a task rebound to project B (#3230). */
-export async function removeTask(task: TaskData, token: string): Promise<void> {
+export async function removeTask(task: TaskMutationRef, token: string): Promise<void> {
   requireTaskID(task.id, "remove a task");
   await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
