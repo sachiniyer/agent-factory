@@ -204,8 +204,8 @@ var configManifest = []ManifestEntry{
 	{
 		Key:        "theme",
 		Type:       "table",
-		Default:    "the Zenburn palette",
-		Purpose:    "Colors the terminal interface uses · one #RRGGBB value per slot, and any slot you leave out keeps its default.",
+		Default:    "nord",
+		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
 		Tier:       TierCommon,
 		Settable:   false,
 		Sources:    sourceGlobalOnly,

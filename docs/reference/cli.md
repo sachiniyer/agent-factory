@@ -701,7 +701,7 @@ Settable keys:
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Structural keys (root_agents, [theme], the [keys] rebind table) and the
+Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
 here. Ask the config assistant to change them (it edits the file and validates), or
 edit config.toml directly and run "af config validate".

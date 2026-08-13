@@ -613,8 +613,8 @@ func TestInstanceRendererDeletingDimsSelectedRow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// SGR foreground params of the default Zenburn deleting gray.
-	dimFG := termenv.RGBColor("#989890").Sequence(false)
+	// SGR foreground params of the default Nord muted foreground.
+	dimFG := termenv.RGBColor("#C3CBD6").Sequence(false)
 
 	r := NewInstanceRenderer()
 	r.SetWidth(effectiveWidth(36))

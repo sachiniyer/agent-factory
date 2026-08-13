@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -878,6 +879,14 @@ type GetConfigResponse struct {
 	// user which file it is editing (a user with AF_HOME set is otherwise left
 	// guessing).
 	Path string `json:"path"`
+}
+
+// GetTheme is the palette read used by renderer clients. Config remains the
+// source of truth; the response carries only its resolved semantic slots, never
+// browser mode or renderer-specific derivatives.
+type GetThemeRequest struct{}
+type GetThemeResponse struct {
+	Theme apiproto.Theme `json:"theme"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.

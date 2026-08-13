@@ -106,6 +106,15 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
+	// A table is a custom palette, not the named default it overlays. Clear the
+	// preset metadata before decoding so a later save preserves the user's table
+	// rather than collapsing it to theme = "nord".
+	var shape map[string]any
+	if err := toml.Unmarshal(decodedData, &shape); err == nil {
+		if _, isTable := shape["theme"].(map[string]any); isTable {
+			config.Theme.preset = ""
+		}
+	}
 	if err := toml.Unmarshal(decodedData, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}

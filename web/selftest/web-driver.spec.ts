@@ -6280,9 +6280,40 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the white token (#ffffff → rgb(255, 255, 255)).
-  expect(lightRail).toBe("rgb(255, 255, 255)");
+  // The light rail surface is the Snow Storm-derived token.
+  expect(lightRail).toBe("rgb(227, 231, 239)");
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+
+  // The palette comes from the daemon, not this toggle. Replace GetTheme with the
+  // named legacy palette, reload, and prove the same web tokens now follow it.
+  await page.route("**/v1/GetTheme", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: {
+          theme: {
+            name: "zenburn",
+            foreground: "#DCDCCC",
+            foreground_strong: "#FFFFEF",
+            foreground_muted: "#989890",
+            foreground_dim: "#656555",
+            background: "#3F3F3F",
+            background_subtle: "#494949",
+            background_panel: "#4F4F4F",
+            accent: "#8CD0D3",
+          },
+        },
+        error: null,
+      }),
+    }),
+  );
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
+  await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.
   // Auto removes data-theme entirely (follow prefers-color-scheme).
@@ -6291,6 +6322,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
     .toBe(false);
   await page.evaluate(() => localStorage.removeItem("af-theme"));
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
 });
 
 interface TerminalGeometry {
@@ -7532,25 +7565,25 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
 
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
   await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#141a22");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#ffffff");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#E3E7EF");
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
   await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
   await ctx.close();
 });
 

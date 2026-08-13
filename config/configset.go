@@ -86,8 +86,8 @@ type settableKeySpec struct {
 //
 // Structural values stay hand-edited, and the manifest marks them Settable:false:
 //   - root_agents — a nested table (path → {program}); no scalar shape.
-//   - theme — a color table (see ThemeConfig); setting one slot at a time through
-//     the CLI is not how anyone edits a palette.
+//   - theme — a named preset or color table (see ThemeConfig); switching its
+//     representation or setting one slot at a time needs a structural editor.
 //   - keys — array-capable rebinds (an action may map to a list of keys).
 //   - session_env_passthrough / post_worktree_commands — []string lists left
 //     hand-edited for now. The comma-separated cfgStringList writer added for
@@ -378,7 +378,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
-			"Structural keys (root_agents, [theme], [keys] rebinds) are edited directly in config.toml",
+			"Structural keys (root_agents, theme, [keys] rebinds) are edited directly in config.toml",
 			key, strings.Join(SettableKeys(), ", "))
 	}
 
@@ -526,7 +526,7 @@ func resolveProjectSettable(key string) (section, leaf string, spec settableKeyS
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
 		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
-			"Structural keys (root_agents, [theme], [keys] rebinds) are edited directly in config.toml",
+			"Structural keys (root_agents, theme, [keys] rebinds) are edited directly in config.toml",
 			key, strings.Join(SettableKeys(), ", "))
 	}
 	scopeKey := key

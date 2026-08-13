@@ -10,8 +10,8 @@
  * follows the OS via @media (prefers-color-scheme: dark); and explicit
  * :root[data-theme="light"] / [data-theme="dark"] blocks DUPLICATE the light/dark
  * values so a user toggle (theme.ts stamps data-theme on <html>) WINS over the media
- * query in both directions. The dark status-dot hues are exact TUI (zenburn) parity
- * so the web reads the same as the TUI at a glance. */
+ * query in both directions. These declarations are the no-JavaScript Nord floor;
+ * theme.ts replaces only the colour tokens with the connected daemon palette. */
 
 /* --- Design tokens: LIGHT (the default) ---------------------------------- */
 :root {
@@ -44,43 +44,46 @@
   --af-r-full: 999px;
 
   /* Color */
-  --af-bg-canvas: #f4f6f9;
-  --af-bg-surface: #ffffff;
-  --af-bg-inset: #eceff4;
-  --af-bg-raised: #ffffff;
-  --af-bg-term: #fdfefe;
-  --af-border: #d8dee8;
-  --af-border-subtle: #e6eaf1;
-  --af-border-strong: #b9c2cf;
-  --af-text: #17202e;
-  --af-text-2: #56627a;
-  --af-text-3: #8792a3;
-  --af-accent: #2f5fd8;
-  --af-accent-hover: #2a53be;
-  --af-accent-subtle: rgba(47, 95, 216, 0.09);
-  --af-accent-tint: rgba(47, 95, 216, 0.16);
-  --af-on-accent: #ffffff;
-  --af-danger: #c9372c;
-  --af-danger-subtle: rgba(201, 55, 44, 0.09);
+  --af-bg-canvas: #d8dee9;
+  --af-bg-surface: #e3e7ef;
+  --af-bg-inset: #ced4df;
+  --af-bg-raised: #eceff4;
+  --af-bg-term: #d8dee9;
+  --af-border: #4c566a;
+  --af-border-subtle: #aeb4c0;
+  --af-border-strong: #4c566a;
+  --af-border-selected: #3d869b;
+  --af-border-interactive: #67874c;
+  --af-border-preview: #9e6d95;
+  --af-text: #2e3440;
+  --af-text-2: #3b4252;
+  --af-text-3: #434c5e;
+  --af-accent: #306979;
+  --af-accent-hover: #477988;
+  --af-accent-subtle: rgba(48, 105, 121, 0.09);
+  --af-accent-tint: rgba(48, 105, 121, 0.16);
+  --af-on-accent: #eceff4;
+  --af-danger: #9d454e;
+  --af-danger-subtle: rgba(157, 69, 78, 0.09);
 
   /* Status dots */
-  --af-dot-ready: #257a3e;
-  --af-dot-lost: #93650a;
-  --af-dot-dead: #6e7887;
-  --af-dot-archived: #6e7887;
-  --af-dot-limit: #b13d33;
+  --af-dot-ready: #67874c;
+  --af-dot-lost: #a3761c;
+  --af-dot-dead: #3b4252;
+  --af-dot-archived: #3b4252;
+  --af-dot-limit: #bb646d;
 
   /* Terminal hues */
-  --af-term-green: #1f7a33;
-  --af-term-amber: #93650a;
-  --af-term-blue: #2f5fd8;
-  --af-term-dim: #8792a3;
+  --af-term-green: #51693c;
+  --af-term-amber: #7c5a15;
+  --af-term-blue: #426486;
+  --af-term-dim: #434c5e;
 
   /* Elevation */
-  --af-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.08);
-  --af-shadow-2: 0 4px 10px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.06);
-  --af-shadow-overlay: 0 16px 48px rgba(16, 24, 40, 0.22), 0 4px 12px rgba(16, 24, 40, 0.12);
-  --af-backdrop: rgba(23, 32, 46, 0.42);
+  --af-shadow-1: 0 1px 2px rgba(46, 52, 64, 0.08);
+  --af-shadow-2: 0 4px 10px rgba(46, 52, 64, 0.12);
+  --af-shadow-overlay: 0 16px 48px rgba(46, 52, 64, 0.22);
+  --af-backdrop: rgba(46, 52, 64, 0.42);
 
   /* Layer contract: a drawer may cover the body, appbar disclosures may cover the
    * drawer, and an aria-modal surface must cover and block every one of them. */
@@ -94,110 +97,119 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: dark;
-    --af-bg-canvas: #0e1218;
-    --af-bg-surface: #141a22;
-    --af-bg-inset: #0b0f15;
-    --af-bg-raised: #1a212b;
-    --af-bg-term: #0c1016;
-    --af-border: #262e3a;
-    --af-border-subtle: #1d242e;
-    --af-border-strong: #39434f;
-    --af-text: #e7ecf3;
-    --af-text-2: #98a3b3;
-    --af-text-3: #626d7d;
-    --af-accent: #7aa2f7;
-    --af-accent-hover: #91b3f9;
-    --af-accent-subtle: rgba(122, 162, 247, 0.12);
-    --af-accent-tint: rgba(122, 162, 247, 0.2);
-    --af-on-accent: #0e1218;
-    --af-danger: #f0655c;
-    --af-danger-subtle: rgba(240, 101, 92, 0.12);
-    --af-dot-ready: #7f9f7f;
-    --af-dot-lost: #f0dfaf;
-    --af-dot-dead: #989890;
-    --af-dot-archived: #989890;
-    --af-dot-limit: #cc9393;
-    --af-term-green: #7f9f7f;
-    --af-term-amber: #f0dfaf;
-    --af-term-blue: #7aa2f7;
-    --af-term-dim: #626d7d;
-    --af-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --af-shadow-2: 0 4px 10px rgba(0, 0, 0, 0.45);
-    --af-shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.04);
-    --af-backdrop: rgba(4, 7, 12, 0.66);
+    --af-bg-canvas: #2e3440;
+    --af-bg-surface: #3b4252;
+    --af-bg-inset: #313744;
+    --af-bg-raised: #434c5e;
+    --af-bg-term: #2e3440;
+    --af-border: #9299a7;
+    --af-border-subtle: #596070;
+    --af-border-strong: #9299a7;
+    --af-border-selected: #88c0d0;
+    --af-border-interactive: #a3be8c;
+    --af-border-preview: #b48ead;
+    --af-text: #d8dee9;
+    --af-text-2: #c3cbd6;
+    --af-text-3: #b4bcc8;
+    --af-accent: #90c4d3;
+    --af-accent-hover: #84b3c1;
+    --af-accent-subtle: rgba(144, 196, 211, 0.12);
+    --af-accent-tint: rgba(144, 196, 211, 0.2);
+    --af-on-accent: #2e3440;
+    --af-danger: #d9b2b9;
+    --af-danger-subtle: rgba(217, 178, 185, 0.12);
+    --af-dot-ready: #a3be8c;
+    --af-dot-lost: #ebcb8b;
+    --af-dot-dead: #c3cbd6;
+    --af-dot-archived: #c3cbd6;
+    --af-dot-limit: #cc8a91;
+    --af-term-green: #a3be8c;
+    --af-term-amber: #ebcb8b;
+    --af-term-blue: #81a1c1;
+    --af-term-dim: #b4bcc8;
+    --af-shadow-1: 0 1px 2px rgba(46, 52, 64, 0.4);
+    --af-shadow-2: 0 4px 10px rgba(46, 52, 64, 0.45);
+    --af-shadow-overlay: 0 16px 48px rgba(46, 52, 64, 0.6);
+    --af-backdrop: rgba(46, 52, 64, 0.66);
   }
 }
 
 /* --- Design tokens: explicit LIGHT (toggle wins over the media query) ---- */
 :root[data-theme="light"] {
   color-scheme: light;
-  --af-bg-canvas: #f4f6f9;
-  --af-bg-surface: #ffffff;
-  --af-bg-inset: #eceff4;
-  --af-bg-raised: #ffffff;
-  --af-bg-term: #fdfefe;
-  --af-border: #d8dee8;
-  --af-border-subtle: #e6eaf1;
-  --af-border-strong: #b9c2cf;
-  --af-text: #17202e;
-  --af-text-2: #56627a;
-  --af-text-3: #8792a3;
-  --af-accent: #2f5fd8;
-  --af-accent-hover: #2a53be;
-  --af-accent-subtle: rgba(47, 95, 216, 0.09);
-  --af-accent-tint: rgba(47, 95, 216, 0.16);
-  --af-on-accent: #ffffff;
-  --af-danger: #c9372c;
-  --af-danger-subtle: rgba(201, 55, 44, 0.09);
-  --af-dot-ready: #257a3e;
-  --af-dot-lost: #93650a;
-  --af-dot-dead: #6e7887;
-  --af-dot-archived: #6e7887;
-  --af-dot-limit: #b13d33;
-  --af-term-green: #1f7a33;
-  --af-term-amber: #93650a;
-  --af-term-blue: #2f5fd8;
-  --af-term-dim: #8792a3;
-  --af-shadow-1: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 3px rgba(16, 24, 40, 0.08);
-  --af-shadow-2: 0 4px 10px rgba(16, 24, 40, 0.08), 0 2px 4px rgba(16, 24, 40, 0.06);
-  --af-shadow-overlay: 0 16px 48px rgba(16, 24, 40, 0.22), 0 4px 12px rgba(16, 24, 40, 0.12);
-  --af-backdrop: rgba(23, 32, 46, 0.42);
+  --af-bg-canvas: #d8dee9;
+  --af-bg-surface: #e3e7ef;
+  --af-bg-inset: #ced4df;
+  --af-bg-raised: #eceff4;
+  --af-bg-term: #d8dee9;
+  --af-border: #4c566a;
+  --af-border-subtle: #aeb4c0;
+  --af-border-strong: #4c566a;
+  --af-border-selected: #3d869b;
+  --af-border-interactive: #67874c;
+  --af-border-preview: #9e6d95;
+  --af-text: #2e3440;
+  --af-text-2: #3b4252;
+  --af-text-3: #434c5e;
+  --af-accent: #306979;
+  --af-accent-hover: #477988;
+  --af-accent-subtle: rgba(48, 105, 121, 0.09);
+  --af-accent-tint: rgba(48, 105, 121, 0.16);
+  --af-on-accent: #eceff4;
+  --af-danger: #9d454e;
+  --af-danger-subtle: rgba(157, 69, 78, 0.09);
+  --af-dot-ready: #67874c;
+  --af-dot-lost: #a3761c;
+  --af-dot-dead: #3b4252;
+  --af-dot-archived: #3b4252;
+  --af-dot-limit: #bb646d;
+  --af-term-green: #51693c;
+  --af-term-amber: #7c5a15;
+  --af-term-blue: #426486;
+  --af-term-dim: #434c5e;
+  --af-shadow-1: 0 1px 2px rgba(46, 52, 64, 0.08);
+  --af-shadow-2: 0 4px 10px rgba(46, 52, 64, 0.12);
+  --af-shadow-overlay: 0 16px 48px rgba(46, 52, 64, 0.22);
+  --af-backdrop: rgba(46, 52, 64, 0.42);
 }
 
 /* --- Design tokens: explicit DARK (toggle wins over the media query) ----- */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --af-bg-canvas: #0e1218;
-  --af-bg-surface: #141a22;
-  --af-bg-inset: #0b0f15;
-  --af-bg-raised: #1a212b;
-  --af-bg-term: #0c1016;
-  --af-border: #262e3a;
-  --af-border-subtle: #1d242e;
-  --af-border-strong: #39434f;
-  --af-text: #e7ecf3;
-  --af-text-2: #98a3b3;
-  --af-text-3: #626d7d;
-  --af-accent: #7aa2f7;
-  --af-accent-hover: #91b3f9;
-  --af-accent-subtle: rgba(122, 162, 247, 0.12);
-  --af-accent-tint: rgba(122, 162, 247, 0.2);
-  --af-on-accent: #0e1218;
-  --af-danger: #f0655c;
-  --af-danger-subtle: rgba(240, 101, 92, 0.12);
-  --af-dot-ready: #7f9f7f;
-  --af-dot-lost: #f0dfaf;
-  --af-dot-dead: #989890;
-  --af-dot-archived: #989890;
-  --af-dot-limit: #cc9393;
-  --af-term-green: #7f9f7f;
-  --af-term-amber: #f0dfaf;
-  --af-term-blue: #7aa2f7;
-  --af-term-dim: #626d7d;
-  --af-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --af-shadow-2: 0 4px 10px rgba(0, 0, 0, 0.45);
-  --af-shadow-overlay: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.04);
-  --af-backdrop: rgba(4, 7, 12, 0.66);
+  --af-bg-canvas: #2e3440;
+  --af-bg-surface: #3b4252;
+  --af-bg-inset: #313744;
+  --af-bg-raised: #434c5e;
+  --af-bg-term: #2e3440;
+  --af-border: #9299a7;
+  --af-border-subtle: #596070;
+  --af-border-strong: #9299a7;
+  --af-border-selected: #88c0d0;
+  --af-border-interactive: #a3be8c;
+  --af-border-preview: #b48ead;
+  --af-text: #d8dee9;
+  --af-text-2: #c3cbd6;
+  --af-text-3: #b4bcc8;
+  --af-accent: #90c4d3;
+  --af-accent-hover: #84b3c1;
+  --af-accent-subtle: rgba(144, 196, 211, 0.12);
+  --af-accent-tint: rgba(144, 196, 211, 0.2);
+  --af-on-accent: #2e3440;
+  --af-danger: #d9b2b9;
+  --af-danger-subtle: rgba(217, 178, 185, 0.12);
+  --af-dot-ready: #a3be8c;
+  --af-dot-lost: #ebcb8b;
+  --af-dot-dead: #c3cbd6;
+  --af-dot-archived: #c3cbd6;
+  --af-dot-limit: #cc8a91;
+  --af-term-green: #a3be8c;
+  --af-term-amber: #ebcb8b;
+  --af-term-blue: #81a1c1;
+  --af-term-dim: #b4bcc8;
+  --af-shadow-1: 0 1px 2px rgba(46, 52, 64, 0.4);
+  --af-shadow-2: 0 4px 10px rgba(46, 52, 64, 0.45);
+  --af-shadow-overlay: 0 16px 48px rgba(46, 52, 64, 0.6);
+  --af-backdrop: rgba(46, 52, 64, 0.66);
 }
 
 /* Semantic aliases used at component call sites. Deliverable 1 may replace the

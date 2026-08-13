@@ -103,6 +103,29 @@ func TestHTTP_Snapshot_ReadRoute(t *testing.T) {
 	require.Empty(t, resp.Instances)
 }
 
+// TestHTTP_GetTheme_ReadRoute pins the daemon palette as a first-class API
+// contract instead of leaving the browser to duplicate config defaults.
+func TestHTTP_GetTheme_ReadRoute(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	custom, ok := config.ThemePreset("zenburn")
+	require.True(t, ok)
+	cfg.Theme = custom
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+
+	rec := doHTTP(&controlServer{manager: m}, http.MethodPost, "/v1/GetTheme", `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	env := decodeEnvelope(t, rec)
+	require.Nil(t, env.Error)
+	var resp GetThemeResponse
+	dataInto(t, env, &resp)
+	assert.Equal(t, "zenburn", resp.Theme.Name)
+	assert.Equal(t, "#3F3F3F", resp.Theme.Background)
+	assert.Equal(t, "#8CD0D3", resp.Theme.Accent)
+}
+
 // TestHTTP_AddTask_MutationRoute covers a create/mutation route: POST /v1/AddTask
 // persists the task through the shared core and re-arms the scheduler.
 func TestHTTP_AddTask_MutationRoute(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 )
 
 // Theme is the active TUI palette after resolving config.ThemeConfig into
-// lipgloss colors. Defaults are Zenburn-derived (#1389).
+// lipgloss colors. The default is the Nord preset (#3220).
 type Theme struct {
 	Foreground            lipgloss.Color
 	ForegroundStrong      lipgloss.Color
@@ -34,7 +34,7 @@ type Theme struct {
 var activeTheme = themeFromConfig(config.DefaultThemeConfig())
 
 // AccentColor is the compatibility name for the main TUI accent. It now comes
-// from the active [theme] palette (Zenburn blue #8CD0D3 by default) instead of
+// from the active theme palette (Nord Frost #88C0D0 by default) instead of
 // the old fixed teal.
 var AccentColor = activeTheme.Accent
 

@@ -966,9 +966,8 @@ func TestLoadConfig(t *testing.T) {
 		// an operator who wants auth finds the key already there to flip.
 		assert.Contains(t, string(data), `require_token = false`)
 		assert.Contains(t, string(data), `worktree_root = 'sibling'`)
-		assert.Contains(t, string(data), `[theme]`)
-		assert.Contains(t, string(data), `accent = '#8CD0D3'`)
-		assert.Contains(t, string(data), `pane_border_preview = '#DC8CC3'`)
+		assert.Contains(t, string(data), `theme = 'nord'`)
+		assert.NotContains(t, string(data), `[theme]`)
 
 		// The materialized file must reload cleanly through the TOML path.
 		cfg, err := LoadConfig()
@@ -1104,7 +1103,7 @@ codex = "/opt/codex/bin/codex --quiet"
 		assert.Equal(t, "#010203", cfg.Theme.Foreground)
 		assert.Equal(t, "#AABBCC", cfg.Theme.PaneBorderPreview)
 		assert.Equal(t, DefaultThemeConfig().Success, cfg.Theme.Success,
-			"omitted theme fields keep their Zenburn defaults")
+			"omitted theme fields keep their Nord defaults")
 		assert.Equal(t, "/home/me/.local/bin/claude --dangerously-skip-permissions",
 			cfg.ProgramOverrides[tmux.ProgramClaude])
 		assert.Equal(t, "/opt/codex/bin/codex --quiet",

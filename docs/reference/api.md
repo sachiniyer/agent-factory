@@ -36,6 +36,7 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/ReorderTab` | `title`, `repo_id`, `tab_name`, `tab_index`, `new_index`, `id`, `tab_id` | Move a tab within a session's roster. Index 0 is reserved for the agent tab, so only slots 1..n-1 can be moved or targeted. Address the tab by tab_id (its stable id) when you have one — see RenameTab; it matters most here, since a reorder is what invalidates every other client's tab_index. |
 | `POST` | `/v1/SetPRInfo` | `title`, `repo_id`, `id`, `pr_info` | Record or clear the GitHub PR info for a session. Address the session by id when available: it is authoritative over title/repo_id, so an asynchronous result cannot land on a different session that reused the title. |
 | `POST` | `/v1/GetConfig` | — | List every user-facing global config key with its purpose, type, default, and current value. |
+| `POST` | `/v1/GetTheme` | — | Return the daemon's resolved semantic color palette for renderer clients. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
 | `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |

@@ -27,6 +27,7 @@ import {
   fetchSnapshot,
   killSession,
   getConfig,
+  getTheme,
   isMutationCommittedError,
   handoffSession,
   listBackends,
@@ -78,7 +79,15 @@ import { canHandoff, isArchived, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
-import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
+import {
+  applyDaemonTheme,
+  bootStampTheme,
+  persistThemeChoice,
+  refreshThemeMode,
+  resetDaemonTheme,
+  stampTheme,
+  type ThemeChoice,
+} from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -340,6 +349,17 @@ async function connect(candidate: string): Promise<void> {
   // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
   // /v1/auth-info on every load, so a tokenless daemon needs nothing on disk.
   storeToken(candidate);
+  // Palette and mode have separate owners (#3220): the daemon supplies the
+  // semantic colors, while the browser keeps its local Auto/Light/Dark choice.
+  // Apply before mounting the app phase so the first authenticated paint and a
+  // newly constructed xterm use the same palette. A failed additive read keeps
+  // the built-in Nord floor rather than blocking an otherwise valid login.
+  try {
+    applyDaemonTheme(await getTheme(candidate));
+  } catch {
+    resetDaemonTheme();
+  }
+  splitView.applyTheme();
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -402,6 +422,7 @@ function disconnect(): void {
   closeConfigAssistant();
   token = null;
   clearToken();
+  resetDaemonTheme();
   store.set({
     phase: "login",
     view: "sessions",
@@ -1572,6 +1593,7 @@ function watchSystemTheme(): void {
   }
   const onChange = (): void => {
     if (store.get().themeChoice === "auto") {
+      refreshThemeMode();
       splitView.applyTheme();
     }
   };

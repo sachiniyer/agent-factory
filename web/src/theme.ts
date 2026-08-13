@@ -1,220 +1,429 @@
-// Theme system (redesign PR1): first-class light/dark theming for the web client.
+// Browser theme choice + daemon palette projection (#3220 deliverable 1).
 //
-// The design tokens live in styles.css as CSS custom properties, with LIGHT as the
-// :root default, a dark layer via @media (prefers-color-scheme: dark), and explicit
-// :root[data-theme="light"] / [data-theme="dark"] blocks that let a user toggle WIN
-// over the media query in both directions. This module owns the small runtime half:
-//
-//   - the persisted Auto/Light/Dark CHOICE (localStorage, best-effort),
-//   - stamping `data-theme` on <html> so the CSS resolves the right layer, and
-//   - deriving the xterm.js ITheme (which cannot read CSS vars) from the resolved
-//     concrete mode, keyed to the same token values so the terminal matches chrome.
-//
-// The boot stamp (bootStampTheme) runs at the very top of index.ts BEFORE the app
-// mounts, so an explicit dark/light choice is applied before first paint — no
-// light/dark flash. It is CSP-safe: it ships inside the same-origin bundle, not as
-// an inline <script> (the daemon's `default-src 'self'` blocks inline script).
+// The browser owns only Auto/Light/Dark. The daemon owns the semantic palette;
+// this module validates its nineteen source slots, derives renderer tokens and
+// the xterm ANSI palette, and installs the active mode as CSS custom properties.
 
 import type { ITheme } from "@xterm/xterm";
+import type { DaemonTheme } from "./types.js";
 
-/** The persisted user preference: Auto follows the OS, Light/Dark force a mode. */
 export type ThemeChoice = "auto" | "light" | "dark";
-/** The resolved concrete mode Auto collapses to for xterm + any JS that needs it. */
 export type ThemeMode = "light" | "dark";
-
-/** The Auto/Light/Dark cycle order, for the appbar toggle. */
 export const THEME_CHOICES: readonly ThemeChoice[] = ["auto", "light", "dark"];
 
 const STORAGE_KEY = "af-theme";
+const HEX = /^#[0-9A-Fa-f]{6}$/;
+const BLACK = "#000000";
+const WHITE = "#FFFFFF";
 
-function isChoice(v: unknown): v is ThemeChoice {
-  return v === "auto" || v === "light" || v === "dark";
+/** The built-in readable floor and the palette new daemons return by default. */
+export const NORD_THEME: DaemonTheme = {
+  name: "nord",
+  foreground: "#D8DEE9",
+  foreground_strong: "#ECEFF4",
+  foreground_muted: "#C3CBD6",
+  foreground_dim: "#A7B0BE",
+  background: "#2E3440",
+  background_subtle: "#3B4252",
+  background_panel: "#434C5E",
+  accent: "#88C0D0",
+  success: "#A3BE8C",
+  warning: "#EBCB8B",
+  error: "#CC8A91",
+  info: "#81A1C1",
+  purple: "#B590AF",
+  selection_background: "#4C566A",
+  selection_foreground: "#ECEFF4",
+  pane_border_default: "#4C566A",
+  pane_border_selected: "#88C0D0",
+  pane_border_interactive: "#A3BE8C",
+  pane_border_preview: "#B48EAD",
+};
+
+type RGB = readonly [number, number, number];
+
+function rgb(hex: string): RGB | null {
+  if (!HEX.test(hex)) return null;
+  return [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+  ];
 }
 
-/** Reads the saved choice, defaulting to Auto (follow the OS) when unset or when
- *  localStorage is unavailable (private mode / blocked). */
+function hex([r, g, b]: RGB): string {
+  return `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`.toUpperCase();
+}
+
+function mix(a: string, b: string, amount: number): string {
+  const aa = rgb(a);
+  const bb = rgb(b);
+  if (!aa || !bb) return NORD_THEME.foreground;
+  return hex(aa.map((v, i) => v + (bb[i]! - v) * amount) as unknown as RGB);
+}
+
+function rgbToHSL(color: string): readonly [number, number, number] {
+  const value = rgb(color) ?? rgb(NORD_THEME.accent)!;
+  const [r, g, b] = value.map((part) => part / 255);
+  const max = Math.max(r!, g!, b!);
+  const min = Math.min(r!, g!, b!);
+  const lightness = (max + min) / 2;
+  if (max === min) return [0, 0, lightness];
+  const delta = max - min;
+  const saturation = lightness > 0.5 ? delta / (2 - max - min) : delta / (max + min);
+  let hue = 0;
+  if (max === r) hue = (g! - b!) / delta + (g! < b! ? 6 : 0);
+  else if (max === g) hue = (b! - r!) / delta + 2;
+  else hue = (r! - g!) / delta + 4;
+  return [hue / 6, saturation, lightness];
+}
+
+function hslToHex(hue: number, saturation: number, lightness: number): string {
+  if (saturation === 0) return hex([255 * lightness, 255 * lightness, 255 * lightness]);
+  const q = lightness < 0.5 ? lightness * (1 + saturation) : lightness + saturation - lightness * saturation;
+  const p = 2 * lightness - q;
+  const channel = (offset: number): number => {
+    let value = hue + offset;
+    if (value < 0) value += 1;
+    if (value > 1) value -= 1;
+    if (value < 1 / 6) return p + (q - p) * 6 * value;
+    if (value < 1 / 2) return q;
+    if (value < 2 / 3) return p + (q - p) * (2 / 3 - value) * 6;
+    return p;
+  };
+  return hex([255 * channel(1 / 3), 255 * channel(0), 255 * channel(-1 / 3)]);
+}
+
+function rgba(color: string, alpha: number): string {
+  const value = rgb(color) ?? rgb(NORD_THEME.background)!;
+  return `rgba(${value[0]}, ${value[1]}, ${value[2]}, ${alpha})`;
+}
+
+function luminance(color: string): number {
+  const value = rgb(color);
+  if (!value) return 0;
+  const linear = value.map((part) => {
+    const channel = part / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!;
+}
+
+/** WCAG relative-luminance contrast ratio, exported so tests measure the floor. */
+export function contrastRatio(a: string, b: string): number {
+  const first = luminance(a);
+  const second = luminance(b);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+function passes(color: string, backgrounds: readonly string[], minimum: number): boolean {
+  return HEX.test(color) && backgrounds.every((background) => contrastRatio(color, background) >= minimum);
+}
+
+function shiftToContrast(color: string, backgrounds: readonly string[], minimum: number, toward: string): string {
+  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
+  for (let step = 1; step <= 100; step++) {
+    const candidate = mix(color, toward, step / 100);
+    if (passes(candidate, backgrounds, minimum)) return candidate;
+  }
+  return color.toUpperCase();
+}
+
+// Light-mode semantics get darker without sliding toward grey: reducing HSL
+// lightness preserves Nord's cyan/green/yellow/red hue families.
+function darkenToContrast(color: string, backgrounds: readonly string[], minimum: number): string {
+  if (passes(color, backgrounds, minimum)) return color.toUpperCase();
+  const [hue, saturation, lightness] = rgbToHSL(color);
+  for (let step = 1; step <= 100; step++) {
+    const candidate = hslToHex(hue, saturation, lightness * (1 - step / 100));
+    if (passes(candidate, backgrounds, minimum)) return candidate;
+  }
+  return BLACK;
+}
+
+function readable(
+  candidate: string,
+  backgrounds: readonly string[],
+  minimum: number,
+  fallback: string,
+  toward: string,
+): string {
+  if (passes(candidate, backgrounds, minimum)) return candidate.toUpperCase();
+  const safeFallback = shiftToContrast(fallback, backgrounds, minimum, toward);
+  if (passes(safeFallback, backgrounds, minimum)) return safeFallback;
+  return contrastRatio(BLACK, backgrounds[0]!) >= contrastRatio(WHITE, backgrounds[0]!) ? BLACK : WHITE;
+}
+
+const themeKeys = Object.keys(NORD_THEME).filter((key) => key !== "name") as (keyof Omit<DaemonTheme, "name">)[];
+
+function normalizeTheme(value: Partial<DaemonTheme> | null | undefined): DaemonTheme {
+  const out = { ...NORD_THEME, name: typeof value?.name === "string" ? value.name : undefined };
+  for (const key of themeKeys) {
+    const candidate = value?.[key];
+    out[key] = typeof candidate === "string" && HEX.test(candidate) ? candidate.toUpperCase() : NORD_THEME[key];
+  }
+  return out;
+}
+
+export interface DerivedTheme {
+  tokens: Record<string, string>;
+  xterm: ITheme;
+}
+
+function semantic(
+  candidate: string,
+  fallback: string,
+  surfaces: readonly string[],
+  minimum: number,
+  toward: string,
+): string {
+  return readable(candidate, surfaces, minimum, fallback, toward);
+}
+
+/** Maps one daemon palette into every color-bearing web token for one mode. */
+export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): DerivedTheme {
+  const source = normalizeTheme(input);
+  const dark = mode === "dark";
+
+  let canvas = dark ? source.background : source.foreground;
+  let surface = dark ? source.background_subtle : mix(source.foreground, source.foreground_strong, 0.55);
+  let raised = dark ? source.background_panel : source.foreground_strong;
+  let inset = dark
+    ? mix(source.background, source.background_subtle, 0.22)
+    : mix(source.foreground, source.background, 0.06);
+  let surfaces = [canvas, surface, raised];
+
+  // A custom table can make its three elevations mutually incompatible with
+  // one shared text colour (for example black, white, black). In that case the
+  // safe unit is the surface SYSTEM, not an arbitrary single slot: retain the
+  // user's chromatic roles but restore Nord's coherent elevation floor.
+  const sourceSurfaceText = dark ? source.foreground : source.background;
+  const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
+  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+    canvas = dark ? NORD_THEME.background : NORD_THEME.foreground;
+    surface = dark
+      ? NORD_THEME.background_subtle
+      : mix(NORD_THEME.foreground, NORD_THEME.foreground_strong, 0.55);
+    raised = dark ? NORD_THEME.background_panel : NORD_THEME.foreground_strong;
+    inset = dark
+      ? mix(NORD_THEME.background, NORD_THEME.background_subtle, 0.22)
+      : mix(NORD_THEME.foreground, NORD_THEME.background, 0.06);
+    surfaces = [canvas, surface, raised];
+  }
+  const toward = dark ? source.foreground_strong : source.background;
+  const fallbackToward = dark ? NORD_THEME.foreground_strong : NORD_THEME.background;
+
+  const text = readable(
+    dark ? source.foreground : source.background,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground : NORD_THEME.background,
+    toward,
+  );
+  const text2 = readable(
+    dark ? source.foreground_muted : source.background_subtle,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground_muted : NORD_THEME.background_subtle,
+    toward,
+  );
+  const text3 = readable(
+    dark ? source.foreground_dim : source.background_panel,
+    surfaces,
+    4.5,
+    dark ? NORD_THEME.foreground_dim : NORD_THEME.background_panel,
+    toward,
+  );
+
+  const modeSemantic = (candidate: string, fallback: string, minimum: number): string => {
+    if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
+    if (passes(candidate, surfaces, minimum)) return candidate.toUpperCase();
+    const lightFallback = darkenToContrast(fallback, surfaces, minimum);
+    return passes(lightFallback, surfaces, minimum) ? lightFallback : fallbackToward;
+  };
+
+  const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
+  const danger = modeSemantic(source.error, NORD_THEME.error, 4.5);
+  const ready = modeSemantic(source.success, NORD_THEME.success, 3);
+  const lost = modeSemantic(source.warning, NORD_THEME.warning, 3);
+  const limit = modeSemantic(source.error, NORD_THEME.error, 3);
+  const dead = semantic(text2, NORD_THEME.foreground_muted, surfaces, 3, toward);
+  const termColor = (candidate: string, fallback: string): string =>
+    dark
+      ? semantic(candidate, fallback, [canvas], 4.5, toward)
+      : passes(candidate, [canvas], 4.5)
+        ? candidate.toUpperCase()
+        : darkenToContrast(fallback, [canvas], 4.5);
+  const termGreen = termColor(source.success, NORD_THEME.success);
+  const termAmber = termColor(source.warning, NORD_THEME.warning);
+  const termBlue = termColor(source.info, NORD_THEME.info);
+  const border = semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward);
+  const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
+  const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
+  const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
+
+  const onAccentCandidates = [source.selection_foreground, source.background, text, BLACK, WHITE];
+  const onAccent = onAccentCandidates.find((candidate) => passes(candidate, [accent], 4.5)) ?? text;
+  const accentHover = mix(accent, onAccent, 0.12);
+
+  const tokens: Record<string, string> = {
+    "--af-bg-canvas": canvas,
+    "--af-bg-surface": surface,
+    "--af-bg-inset": inset,
+    "--af-bg-raised": raised,
+    "--af-bg-term": canvas,
+    "--af-border": border,
+    "--af-border-subtle": mix(surface, border, 0.35),
+    "--af-border-strong": border,
+    "--af-border-selected": borderSelected,
+    "--af-border-interactive": borderInteractive,
+    "--af-border-preview": borderPreview,
+    "--af-text": text,
+    "--af-text-2": text2,
+    "--af-text-3": text3,
+    "--af-accent": accent,
+    "--af-accent-hover": accentHover,
+    "--af-accent-subtle": rgba(accent, dark ? 0.12 : 0.09),
+    "--af-accent-tint": rgba(accent, dark ? 0.2 : 0.16),
+    "--af-on-accent": onAccent,
+    "--af-danger": danger,
+    "--af-danger-subtle": rgba(danger, dark ? 0.12 : 0.09),
+    "--af-dot-ready": ready,
+    "--af-dot-lost": lost,
+    "--af-dot-dead": dead,
+    "--af-dot-archived": dead,
+    "--af-dot-limit": limit,
+    "--af-term-green": termGreen,
+    "--af-term-amber": termAmber,
+    "--af-term-blue": termBlue,
+    "--af-term-dim": text3,
+    "--af-shadow-1": `0 1px 2px ${rgba(source.background, dark ? 0.4 : 0.08)}`,
+    "--af-shadow-2": `0 4px 10px ${rgba(source.background, dark ? 0.45 : 0.12)}`,
+    "--af-shadow-overlay": `0 16px 48px ${rgba(source.background, dark ? 0.6 : 0.22)}`,
+    "--af-backdrop": rgba(source.background, dark ? 0.66 : 0.42),
+  };
+
+  const bright = (color: string): string => readable(mix(color, text, 0.18), [canvas], 4.5, text, text);
+  const xterm: ITheme = {
+    background: tokens["--af-bg-term"],
+    foreground: text,
+    cursor: text,
+    cursorAccent: canvas,
+    selectionBackground: rgba(source.selection_background, dark ? 0.72 : 0.45),
+    black: text3,
+    red: danger,
+    green: termGreen,
+    yellow: termAmber,
+    blue: termBlue,
+    magenta: termColor(source.purple, NORD_THEME.purple),
+    cyan: accent,
+    white: text2,
+    brightBlack: bright(text3),
+    brightRed: bright(danger),
+    brightGreen: bright(termGreen),
+    brightYellow: bright(termAmber),
+    brightBlue: bright(termBlue),
+    brightMagenta: bright(termColor(source.purple, NORD_THEME.purple)),
+    brightCyan: bright(accent),
+    brightWhite: text,
+  };
+  return { tokens, xterm };
+}
+
+let activeThemes = {
+  light: deriveTheme(NORD_THEME, "light"),
+  dark: deriveTheme(NORD_THEME, "dark"),
+};
+
+function isChoice(value: unknown): value is ThemeChoice {
+  return value === "auto" || value === "light" || value === "dark";
+}
+
 export function readThemeChoice(): ThemeChoice {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (isChoice(raw)) {
-      return raw;
-    }
+    if (isChoice(raw)) return raw;
   } catch {
-    // storage blocked — fall through to the Auto default
+    // A blocked store keeps the session choice but cannot persist it.
   }
   return "auto";
 }
 
-/** Persists the choice (best-effort; a blocked store is a silent no-op). */
 export function persistThemeChoice(choice: ThemeChoice): void {
   try {
     localStorage.setItem(STORAGE_KEY, choice);
   } catch {
-    // storage blocked — the choice still applies this session, just not persisted
+    // Best effort.
   }
-}
-
-// --- browser chrome (theme-color) ------------------------------------------
-//
-// index.html ships two <meta name="theme-color"> tags, one per scheme, and the
-// browser paints its chrome with the first whose media matches. That is exactly
-// right for Auto, and exactly WRONG the moment a user overrides the OS with the
-// appbar toggle: the media queries still follow the OS, so picking Dark on a
-// light OS leaves a white chrome capping a dark app.
-//
-// The fix keeps the media attributes untouched and instead makes the CONTENTS
-// agree: under an explicit choice both metas carry the chosen colour, so whichever
-// one the browser matches it paints the same thing. Auto restores the per-scheme
-// pair and the media queries do their job again.
-//
-// The values are --af-bg-surface (the appbar's fill), matching index.html — see
-// the comment there for why it is the surface token and not the canvas.
-
-/** --af-bg-surface, light. The colour of the appbar the browser chrome abuts. */
-const THEME_COLOR_LIGHT = "#ffffff";
-/** --af-bg-surface, dark. */
-const THEME_COLOR_DARK = "#141a22";
-
-/** The `content` each per-scheme theme-color meta should carry for a choice: Auto
- *  keeps them per-scheme so the media queries decide, while an explicit choice
- *  collapses both to one colour so the chrome follows the APP, not the OS. Pure so
- *  the collapse rule is unit-testable without a DOM (theme.test.ts). */
-export function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
-  if (choice === "auto") {
-    return { light: THEME_COLOR_LIGHT, dark: THEME_COLOR_DARK };
-  }
-  const forced = choice === "dark" ? THEME_COLOR_DARK : THEME_COLOR_LIGHT;
-  return { light: forced, dark: forced };
-}
-
-/** Writes themeColorMetaContents onto the two metas index.html declares. Best-effort:
- *  a shell without them (a test harness mounting the app into a bare document) is a
- *  no-op rather than a crash, since the chrome colour is decoration and must never
- *  take the app down with it. */
-function syncThemeColorMeta(choice: ThemeChoice): void {
-  const { light, dark } = themeColorMetaContents(choice);
-  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
-    // The pair is distinguished by its media attribute, not an id — that keeps
-    // index.html free of markup that exists only for JS to grab.
-    const isDark = (meta.getAttribute("media") ?? "").includes("dark");
-    meta.setAttribute("content", isDark ? dark : light);
-  }
-}
-
-/** Stamps `data-theme` on <html> for a choice: an explicit light/dark sets the
- *  attribute so its :root[data-theme=…] block wins over the media query; Auto
- *  removes the attribute so the media query decides. Also points the browser
- *  chrome at the same resolved theme, so the two can never disagree. */
-export function stampTheme(choice: ThemeChoice): void {
-  const root = document.documentElement;
-  if (choice === "auto") {
-    root.removeAttribute("data-theme");
-  } else {
-    root.setAttribute("data-theme", choice);
-  }
-  syncThemeColorMeta(choice);
-}
-
-/** The earliest boot stamp: read the saved choice and apply it before first paint
- *  so an explicit theme shows no light/dark flash. Returns the choice so the caller
- *  can seed its state without re-reading storage. Called at index.ts module top. */
-export function bootStampTheme(): ThemeChoice {
-  const choice = readThemeChoice();
-  stampTheme(choice);
-  return choice;
 }
 
 function prefersDark(): boolean {
   try {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   } catch {
-    // No matchMedia (very old / headless): the CSS :root default is LIGHT, so match
-    // it here rather than guessing dark.
     return false;
   }
 }
 
-/** The concrete mode the DOM is actually rendering: the stamped explicit attribute
- *  wins, else the OS preference (Auto). Reads the live DOM so it's always in sync
- *  with what CSS resolved, without threading the choice through every caller. */
 export function currentMode(): ThemeMode {
   const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light" || attr === "dark") {
-    return attr;
-  }
+  if (attr === "light" || attr === "dark") return attr;
   return prefersDark() ? "dark" : "light";
 }
 
-// --- xterm themes ----------------------------------------------------------
-//
-// xterm.js paints on a canvas and cannot read CSS custom properties, so its ITheme
-// is derived here from the SAME token values styles.css uses. background/foreground
-// are the term surface + primary text tokens; the ANSI palette is tuned per mode so
-// agent output stays legible (dark: a GitHub-dark-ish palette on the deep term bg;
-// light: darker, saturated hues that read on a near-white background).
-
-/** Dark xterm theme: background = --af-bg-term (dark), foreground = --af-text (dark),
- *  selection = --af-accent-tint (dark). */
-export const DARK_XTERM: ITheme = {
-  background: "#0c1016",
-  foreground: "#e7ecf3",
-  cursor: "#e7ecf3",
-  cursorAccent: "#0c1016",
-  selectionBackground: "rgba(122, 162, 247, 0.2)",
-  black: "#484f58",
-  red: "#ff7b72",
-  green: "#3fb950",
-  yellow: "#d29922",
-  blue: "#58a6ff",
-  magenta: "#bc8cff",
-  cyan: "#39c5cf",
-  white: "#b1bac4",
-  brightBlack: "#6e7681",
-  brightRed: "#ffa198",
-  brightGreen: "#56d364",
-  brightYellow: "#e3b341",
-  brightBlue: "#79c0ff",
-  brightMagenta: "#d2a8ff",
-  brightCyan: "#56d4dd",
-  brightWhite: "#f0f6fc",
-};
-
-/** Light xterm theme: background = --af-bg-term (light), foreground = --af-text
- *  (light), selection = --af-accent-tint (light). The ANSI palette uses GitHub-light
- *  hues — darker and more saturated than the dark palette so colored agent output
- *  stays readable on a near-white terminal. */
-export const LIGHT_XTERM: ITheme = {
-  background: "#fdfefe",
-  foreground: "#17202e",
-  cursor: "#17202e",
-  cursorAccent: "#fdfefe",
-  selectionBackground: "rgba(47, 95, 216, 0.16)",
-  black: "#24292f",
-  red: "#cf222e",
-  green: "#1a7f37",
-  yellow: "#9a6700",
-  blue: "#0969da",
-  magenta: "#8250df",
-  cyan: "#1b7c83",
-  white: "#6e7781",
-  brightBlack: "#57606a",
-  brightRed: "#a40e26",
-  brightGreen: "#116329",
-  brightYellow: "#7d4e00",
-  brightBlue: "#0550ae",
-  brightMagenta: "#6639ba",
-  brightCyan: "#3192aa",
-  brightWhite: "#8c959f",
-};
-
-/** The xterm ITheme for a resolved mode. */
-export function xtermTheme(mode: ThemeMode): ITheme {
-  return mode === "dark" ? DARK_XTERM : LIGHT_XTERM;
+function applyCurrentMode(): void {
+  const root = document.documentElement;
+  for (const [name, value] of Object.entries(activeThemes[currentMode()].tokens)) root.style.setProperty(name, value);
 }
 
-/** The xterm ITheme matching whatever the DOM is currently rendering, so a freshly
- *  constructed terminal (terminal.ts) is born in the active theme without the caller
- *  needing to know the mode. */
+export function themeColorMetaContents(choice: ThemeChoice): { light: string; dark: string } {
+  const light = activeThemes.light.tokens["--af-bg-surface"]!;
+  const dark = activeThemes.dark.tokens["--af-bg-surface"]!;
+  if (choice === "auto") return { light, dark };
+  const forced = choice === "dark" ? dark : light;
+  return { light: forced, dark: forced };
+}
+
+function syncThemeColorMeta(choice: ThemeChoice): void {
+  const colors = themeColorMetaContents(choice);
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    meta.setAttribute("content", (meta.getAttribute("media") ?? "").includes("dark") ? colors.dark : colors.light);
+  }
+}
+
+export function refreshThemeMode(): void {
+  applyCurrentMode();
+  syncThemeColorMeta(document.documentElement.hasAttribute("data-theme") ? currentMode() : "auto");
+}
+
+/** Installs a newly fetched daemon palette without changing the local mode choice. */
+export function applyDaemonTheme(theme: Partial<DaemonTheme>): void {
+  activeThemes = { light: deriveTheme(theme, "light"), dark: deriveTheme(theme, "dark") };
+  refreshThemeMode();
+}
+
+export function resetDaemonTheme(): void {
+  applyDaemonTheme(NORD_THEME);
+}
+
+export function stampTheme(choice: ThemeChoice): void {
+  const root = document.documentElement;
+  if (choice === "auto") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", choice);
+  applyCurrentMode();
+  syncThemeColorMeta(choice);
+}
+
+export function bootStampTheme(): ThemeChoice {
+  const choice = readThemeChoice();
+  stampTheme(choice);
+  return choice;
+}
+
+export function xtermTheme(mode: ThemeMode): ITheme {
+  return activeThemes[mode].xterm;
+}
+
 export function currentXtermTheme(): ITheme {
   return xtermTheme(currentMode());
 }
