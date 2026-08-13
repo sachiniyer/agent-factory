@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -39,21 +40,36 @@ const (
 
 // prInfoFetchFn is the discovery seam, a package var for the same reason as
 // the TUI's fetcher seam: the real function shells out to `gh`, which tests
-// must not do.
-var prInfoFetchFn = git.FetchPRInfo
+// must not do. Context-taking so the sweep can abandon an in-flight lookup
+// the moment the daemon shuts down.
+var prInfoFetchFn = git.FetchPRInfoContext
 
 // startPRInfoRefreshLoop runs the PR-info sweep until stopCh closes, mirroring
 // startInstancePollLoop's shape: the body runs once immediately (a restored
 // daemon has only zero-valued freshness clocks, so the first sweep is what
 // populates badges after a restart), then once per tick.
+//
+// stopCh is threaded INTO the sweep as a context, not just consulted between
+// ticks: a serialized sweep over N sessions with a stalled network could
+// otherwise hold `gh` subprocesses for N × the network timeout after shutdown
+// began, while runDaemon blocks in wg.Wait() ahead of its final persistence —
+// and the stop/upgrade path escalates to a kill long before that drains.
 func startPRInfoRefreshLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		// The watcher exits when stopCh closes — the only way the loop below
+		// ends — so it never outlives this goroutine's purpose.
+		go func() {
+			<-stopCh
+			cancel()
+		}()
 		ticker := time.NewTicker(prInfoSweepInterval)
 		defer ticker.Stop()
 		for {
-			manager.RefreshStalePRInfo()
+			manager.refreshStalePRInfo(ctx)
 			select {
 			case <-stopCh:
 				return
@@ -63,10 +79,11 @@ func startPRInfoRefreshLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 	}()
 }
 
-// RefreshStalePRInfo refreshes PR info for every eligible session whose entry
+// refreshStalePRInfo refreshes PR info for every eligible session whose entry
 // has gone stale, one fetch at a time so the sweep never bursts `gh`
-// subprocesses.
-func (m *Manager) RefreshStalePRInfo() {
+// subprocesses. It returns as soon as ctx is cancelled — between entries here,
+// and mid-fetch via the context handed to `gh`.
+func (m *Manager) refreshStalePRInfo(ctx context.Context) {
 	// The same lifecycle admission every mutation consults (#3231): during
 	// upgrade probation or quiescing the metadata snapshot must stay coherent,
 	// so the sweep writes nothing — and fetches nothing, since a result it
@@ -89,7 +106,10 @@ func (m *Manager) RefreshStalePRInfo() {
 	}
 	m.mu.Unlock()
 	for _, e := range entries {
-		m.refreshInstancePRInfo(e.repoID, e.instance)
+		if ctx.Err() != nil {
+			return
+		}
+		m.refreshInstancePRInfo(ctx, e.repoID, e.instance)
 	}
 }
 
@@ -98,7 +118,7 @@ func (m *Manager) RefreshStalePRInfo() {
 // from `gh` against a local branch, so only a started local-worktree session
 // with a branch qualifies, and rows that are archived, tearing down, or killed
 // have no use for a badge (their write would be refused anyway).
-func (m *Manager) refreshInstancePRInfo(repoID string, inst *session.Instance) {
+func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst *session.Instance) {
 	if inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return
 	}
@@ -116,7 +136,12 @@ func (m *Manager) refreshInstancePRInfo(repoID string, inst *session.Instance) {
 	// empty fetch then waits out a full staleness window instead of retrying on
 	// every sweep while the network is down.
 	inst.MarkPRInfoFetched()
-	info, err := prInfoFetchFn(repoPath, branch)
+	info, err := prInfoFetchFn(ctx, repoPath, branch)
+	if ctx.Err() != nil {
+		// Shutdown abandoned the lookup; a cancelled fetch is not a failure
+		// worth a warning, and nothing must be recorded from it.
+		return
+	}
 	if err != nil {
 		log.WarningLog.Printf("PR info sweep: fetch for %q failed: %v", inst.Title, err)
 		return

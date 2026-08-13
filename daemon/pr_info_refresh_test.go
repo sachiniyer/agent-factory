@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync/atomic"
@@ -63,7 +64,7 @@ func stubPRFetch(t *testing.T, info *sessiongit.PRInfo, err error) *atomic.Int32
 	t.Helper()
 	var calls atomic.Int32
 	prev := prInfoFetchFn
-	prInfoFetchFn = func(repoPath, branch string) (*sessiongit.PRInfo, error) {
+	prInfoFetchFn = func(_ context.Context, repoPath, branch string) (*sessiongit.PRInfo, error) {
 		calls.Add(1)
 		if info == nil {
 			return nil, err
@@ -83,7 +84,7 @@ func TestPRInfoSweepDiscoversWithoutAnyClient(t *testing.T) {
 	f := newPRSweepFixture(t)
 	calls := stubPRFetch(t, &sessiongit.PRInfo{Number: 41, Title: "fix: sweep", URL: "https://example.com/pr/41", State: "OPEN"}, nil)
 
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 
 	require.Equal(t, int32(1), calls.Load(), "one eligible stale session, one fetch")
 	got := f.instance.GetPRInfo()
@@ -106,11 +107,11 @@ func TestPRInfoSweepSkipsFreshEntries(t *testing.T) {
 	calls := stubPRFetch(t, nil, nil)
 
 	f.instance.MarkPRInfoFetched()
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(0), calls.Load(), "a fresh entry must not be re-fetched")
 
 	f.instance.SetPRInfoFetchedAtForTest(time.Now().Add(-time.Hour))
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(1), calls.Load(), "a stale entry must be fetched")
 }
 
@@ -121,7 +122,7 @@ func TestPRInfoSweepUnchangedResultWritesNothing(t *testing.T) {
 	f := newPRSweepFixture(t)
 	stubPRFetch(t, &sessiongit.PRInfo{Number: 41, Title: "fix: sweep", URL: "https://example.com/pr/41", State: "OPEN"}, nil)
 
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.NotNil(t, f.instance.GetPRInfo())
 
 	// Age the entry and corrupt the persisted copy: if the second sweep
@@ -130,7 +131,7 @@ func TestPRInfoSweepUnchangedResultWritesNothing(t *testing.T) {
 	f.instance.SetPRInfoFetchedAtForTest(time.Now().Add(-time.Hour))
 	markPersistedPRInfoState(t, f.repoID, "SENTINEL")
 
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	persisted := readPersistedPRInfo(t, f.repoID)
 	require.Equal(t, "SENTINEL", persisted.State, "an unchanged result must not re-persist")
 }
@@ -144,7 +145,7 @@ func TestPRInfoSweepRespectsLifecycleAdmission(t *testing.T) {
 	calls := stubPRFetch(t, &sessiongit.PRInfo{Number: 7}, nil)
 
 	f.manager.lifecycle.markQuiescing()
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 
 	require.Equal(t, int32(0), calls.Load(), "a quiescing daemon must not run PR discovery")
 	require.Nil(t, f.instance.GetPRInfo())
@@ -160,7 +161,7 @@ func TestPRInfoSweepSkipsIneligibleRows(t *testing.T) {
 	detached, err := sessiongit.NewGitWorktreeFromStorage(f.instance.Path, f.instance.Path, "pr-sweep", "", "", true, false)
 	require.NoError(t, err)
 	f.instance.SetGitWorktreeForTest(detached)
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(0), calls.Load(), "a detached-HEAD worktree has no branch to look up")
 }
 
@@ -171,10 +172,62 @@ func TestPRInfoSweepFailedFetchWaitsAFullWindow(t *testing.T) {
 	f := newPRSweepFixture(t)
 	calls := stubPRFetch(t, nil, fmt.Errorf("gh: network unreachable"))
 
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(1), calls.Load())
-	f.manager.RefreshStalePRInfo()
+	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(1), calls.Load(), "a failed fetch must wait out the staleness window, not retry every sweep")
+}
+
+// TestPRInfoSweepStopsOnCancel pins the shutdown property (#3287 review): a
+// sweep mid-fetch must observe cancellation — the in-flight lookup aborts via
+// the context handed to `gh`, nothing is recorded from it, and no further
+// entry is fetched — so daemon shutdown never waits out sessions × the network
+// timeout ahead of its final persistence.
+func TestPRInfoSweepStopsOnCancel(t *testing.T) {
+	f := newPRSweepFixture(t)
+
+	second, err := session.NewInstance(session.InstanceOptions{
+		Title:   "pr-sweep-2",
+		Path:    f.instance.Path,
+		Program: "claude",
+	})
+	require.NoError(t, err)
+	second.SetBackend(session.NewFakeBackend())
+	second.SetStartedForTest(true)
+	second.SetStatusForTest(session.Running)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(f.instance.Path, f.instance.Path, "pr-sweep-2", "af/pr-sweep-2", "", true, false)
+	require.NoError(t, err)
+	second.SetGitWorktreeForTest(gw)
+	f.manager.mu.Lock()
+	f.manager.instances[daemonInstanceKey(f.repoID, "pr-sweep-2")] = second
+	f.manager.mu.Unlock()
+
+	var calls atomic.Int32
+	prev := prInfoFetchFn
+	prInfoFetchFn = func(ctx context.Context, repoPath, branch string) (*sessiongit.PRInfo, error) {
+		calls.Add(1)
+		<-ctx.Done() // model a stalled `gh` that only the context can end
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { prInfoFetchFn = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		f.manager.refreshStalePRInfo(ctx)
+		close(done)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a cancelled sweep must return promptly, not wait out the network timeout")
+	}
+	require.Equal(t, int32(1), calls.Load(), "cancellation must stop the sweep before the next entry")
+	require.Nil(t, f.instance.GetPRInfo(), "nothing may be recorded from an abandoned lookup")
+	require.Nil(t, second.GetPRInfo())
 }
 
 // readPersistedPRInfo loads the repo's persisted instance list and returns the
