@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -131,8 +130,8 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		// read or parse failure, never plain absence (the home-gone vs
 		// unreadable distinction #3246 keeps).
 		registry := config.ProjectRegistryDirName
-		if home, homeErr := config.GetConfigDir(); homeErr == nil {
-			registry = filepath.Join(home, config.ProjectRegistryDirName)
+		if dir, dirErr := config.ProjectRegistryDir(); dirErr == nil {
+			registry = dir
 		}
 		log.ErrorLog.Printf("root agent snapshot: cannot list registered projects (registry %s); failing closed — no root agents will be started or healed until the registry is readable at a daemon start: %v", registry, err)
 		snap.registryUnreadable = true

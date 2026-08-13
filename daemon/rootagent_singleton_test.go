@@ -318,11 +318,10 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 // regression test into a silent no-op.
 func corruptProjectRegistry(t *testing.T) {
 	t.Helper()
-	home, err := config.GetConfigDir()
+	dir, err := config.ProjectRegistryDir()
 	if err != nil {
-		t.Fatalf("GetConfigDir: %v", err)
+		t.Fatalf("ProjectRegistryDir: %v", err)
 	}
-	dir := filepath.Join(home, config.ProjectRegistryDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir project registry: %v", err)
 	}
@@ -435,7 +434,10 @@ func TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer(t *testing.T)
 		},
 		{
 			// Fail closed composes (#3241): unloadable personal AND unresolvable
-			// root is still "decision unknown", keyed by the recorded path.
+			// root is still "decision unknown", keyed by the recorded path. The
+			// corrupt step overwrites the disable wholesale — the row proves an
+			// unparseable file fails closed regardless of what it once held, not
+			// that the disable survives corruption.
 			name:        "unloadable personal config",
 			personal:    "enabled = false",
 			corrupt:     breakPersonalRootAgentToml,

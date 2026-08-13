@@ -377,6 +377,16 @@ func projectRegistryDir() (string, error) {
 	return filepath.Join(home, ProjectRegistryDirName), nil
 }
 
+// ProjectRegistryDir returns the durable project registry directory
+// (<AF home>/<ProjectRegistryDirName>) without creating anything. Exported so
+// surfaces whose whole purpose is to NAME the registry — the daemon's
+// fail-closed ERROR when it cannot be listed (#3247) — derive the path from
+// the same source the reads use, instead of re-joining it locally and
+// drifting if the location ever moves.
+func ProjectRegistryDir() (string, error) {
+	return projectRegistryDir()
+}
+
 func projectRegistryLockPath(dir string) string {
 	return filepath.Join(dir, ".registry")
 }
