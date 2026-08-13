@@ -519,22 +519,24 @@ var ghostCleanupWorktree = func(
 			}
 		}
 	}
-	state, cleanupErr := gw.Cleanup()
+	cleanup := gw.Cleanup
+	if archivedRecordFree {
+		// Registered-only, like the live archived kill (#3278 review): the
+		// unregistered RemoveAll fallback cannot distinguish the archive from
+		// a directory that replaced it.
+		cleanup = gw.CleanupRegisteredOnly
+	}
+	state, cleanupErr := cleanup()
 	// Same postcondition as the live teardown (#3278 review): the pre-check
-	// narrows the race, this closes it. A settled ordinary cleanup that left
-	// the archived directory in place must retain the row — its only handle —
-	// whenever the origin vanished inside Cleanup's own hook/reap interval.
+	// narrows the race, this closes it. A settled ordinary cleanup must prove
+	// the archive conclusively absent before the row, its only handle, may be
+	// deleted.
 	if archivedRecordFree && state == git.CleanupSettled {
-		// Only ENOENT proves the archive gone (#3278 review): a failed stat is
-		// not evidence of absence, so anything else retains the row.
-		if _, statErr := os.Lstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
+		if settleErr := session.ArchivedCleanupSettled(data.Worktree.WorktreePath); settleErr != nil {
 			retained := fmt.Errorf(
-				"ordinary ghost cleanup reported settled but the archived worktree could not be proven absent from %s — kill again to re-establish its state",
-				data.Worktree.WorktreePath,
+				"ordinary ghost cleanup reported settled but %v — kill again to re-establish its state",
+				settleErr,
 			)
-			if statErr != nil {
-				retained = errors.Join(retained, statErr)
-			}
 			if cleanupErr != nil {
 				retained = errors.Join(retained, cleanupErr)
 			}

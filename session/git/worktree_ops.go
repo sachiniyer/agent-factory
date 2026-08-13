@@ -504,11 +504,12 @@ func (r *cleanupRun) state() CleanupState {
 	return CleanupSettled
 }
 
-// Cleanup removes the worktree and associated branch. It reports whether it
+// cleanup removes the worktree and associated branch. It reports whether it
 // ESTABLISHED the outcome (see CleanupState) alongside any error: callers that go
 // on to delete the session's record MUST gate on the state, not on the error.
-// If the worktree was not created by agent-factory (externalWorktree), only prune is done.
-func (g *GitWorktree) Cleanup() (CleanupState, error) {
+// If the worktree was not created by agent-factory (externalWorktree), only prune
+// is done. The exported entry points live in worktree_cleanup_modes.go.
+func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, error) {
 	// The run owns the state from the first line, so even the early returns below
 	// derive it instead of asserting one (#1917). Nothing in this function names a
 	// CleanupState constant: that is the rule that makes the next command added here
@@ -601,7 +602,19 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 			// unknown, and r.removeDir refuses on that, so no timeout can reach the
 			// unbounded os.RemoveAll.
 			if r.shouldRemoveWorktreeDir(err) {
-				r.removeDir(g.worktreePath)
+				if allowUnregisteredRemoval {
+					r.removeDir(g.worktreePath)
+				} else {
+					// The caller forbade the unregistered fallback: nothing can
+					// vouch that this directory is the one the record describes,
+					// so refusing IS an unknown outcome — the directory stays
+					// and the record must too.
+					r.unknown = true
+					r.errs = append(r.errs, fmt.Errorf(
+						"refusing to delete %s: git no longer vouches for it and this cleanup may not delete an unregistered directory; leaving it and the record in place",
+						g.worktreePath,
+					))
+				}
 			} else {
 				r.errs = append(r.errs, err)
 			}

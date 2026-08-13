@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -484,19 +485,31 @@ const archivedWorktreePointerMaxSize = 1 << 16
 // not fall back to pathname trust.
 func VerifyArchivedWorktreePointer(worktreePath string) error {
 	pointerPath := filepath.Join(worktreePath, ".git")
-	info, err := os.Lstat(pointerPath)
+	// One descriptor, opened without following links, carries every check and
+	// the read (#3278 review): a separate stat-then-read pair could be raced
+	// by a same-UID process swapping in a symlink or a special file between
+	// the two lookups, and an unbounded read of a swapped-in file could stall
+	// or exhaust memory on the kill path. O_NONBLOCK keeps the open itself
+	// from blocking on a FIFO; the fstat below rejects every non-regular file
+	// before any read, and regular-file reads ignore the flag.
+	f, err := os.OpenFile(pointerPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+		return fmt.Errorf("archived worktree pointer %s could not be opened without following links: %w", pointerPath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("archived worktree pointer %s could not be inspected: %w", pointerPath, err)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("archived worktree pointer %s is not a regular file", pointerPath)
 	}
-	if info.Size() > archivedWorktreePointerMaxSize {
-		return fmt.Errorf("archived worktree pointer %s is too large (%d bytes) to be a worktree pointer", pointerPath, info.Size())
-	}
-	content, err := os.ReadFile(pointerPath)
+	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
 	if err != nil {
 		return fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+	}
+	if len(content) > archivedWorktreePointerMaxSize {
+		return fmt.Errorf("archived worktree pointer %s is too large to be a worktree pointer", pointerPath)
 	}
 	line, _, _ := strings.Cut(string(content), "\n")
 	target, ok := strings.CutPrefix(line, "gitdir:")

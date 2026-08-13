@@ -380,3 +380,35 @@ func TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims(t *testing
 	assert.False(t, exists(archivedPath))
 	assert.Nil(t, recordFor(t, repoID, "direct-stalled-identity"))
 }
+
+// TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles: an
+// identity-unknown stalled fence whose archived directory was then manually
+// removed guards nothing, and both kill's and restore's claims wrap the same
+// ENOENT — so without clearing it the row is permanently undeletable (#3278
+// review). The kill must clear the fence durably and settle the absent path.
+func TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-stalled-absent")
+	require.NoError(t, os.RemoveAll(repoPath))
+	restoreIdentity := sessiongit.SetRelocationIdentityErrorForTest(
+		archivedPath, context.DeadlineExceeded)
+	t.Cleanup(restoreIdentity)
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-stalled-absent", RepoID: repoID})
+	require.Error(t, err, "the stalled fence must first be established")
+	record := recordFor(t, repoID, "direct-stalled-absent")
+	require.NotNil(t, record)
+	require.NotNil(t, record.Worktree.RelocationRecovery)
+	require.Equal(t, sessiongit.RelocationRecoveryStalled, record.Worktree.RelocationRecovery.State)
+
+	restoreIdentity()
+	require.NoError(t, os.RemoveAll(archivedPath),
+		"remove the archived directory the stalled fence was guarding")
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-stalled-absent", RepoID: repoID})
+	require.NoError(t, err,
+		"a stalled fence over a conclusively absent archive must clear and let the kill settle")
+	assert.Nil(t, recordFor(t, repoID, "direct-stalled-absent"),
+		"the settled kill must delete the permanently-stuck row")
+}

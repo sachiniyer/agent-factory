@@ -93,3 +93,29 @@ func TestKillTeardown_UnprovenArchiveAbsenceReportsUnknown(t *testing.T) {
 	assert.Equal(t, stateUnknown, state)
 	assert.ErrorIs(t, err, ErrWorkspaceStateUnknown)
 }
+
+// TestArchivedCleanupSettled pins the settlement decision (#3278 review): only
+// a conclusive ENOENT proves the archive dealt with; an occupied path or a
+// stat that failed rather than answered refuses the settlement, and the caller
+// retains the row.
+func TestArchivedCleanupSettled(t *testing.T) {
+	root := t.TempDir()
+	occupied := filepath.Join(root, "archive")
+	require.NoError(t, os.Mkdir(occupied, 0o755))
+
+	assert.Error(t, ArchivedCleanupSettled(occupied),
+		"an occupied path must refuse the settlement")
+
+	require.NoError(t, os.RemoveAll(occupied))
+	assert.NoError(t, ArchivedCleanupSettled(occupied),
+		"a conclusively absent path proves the archive dealt with")
+
+	if os.Geteuid() != 0 {
+		shield := filepath.Join(root, "shield")
+		require.NoError(t, os.MkdirAll(filepath.Join(shield, "inner"), 0o755))
+		require.NoError(t, os.Chmod(shield, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(shield, 0o755) })
+		assert.Error(t, ArchivedCleanupSettled(filepath.Join(shield, "inner")),
+			"a stat that failed rather than answered must refuse the settlement")
+	}
+}

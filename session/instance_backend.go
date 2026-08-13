@@ -337,6 +337,19 @@ func (i *Instance) WorktreeRelocationRecovery() (git.RelocationRecovery, bool) {
 	return gw.GetRelocationRecovery()
 }
 
+// SettleStalledWorktreeRelocationForAbsentPath clears an identity-unknown
+// stalled relocation record once its pathname conclusively answers ENOENT.
+// See GitWorktree.SettleStalledRelocationForAbsentPath.
+func (i *Instance) SettleStalledWorktreeRelocationForAbsentPath() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot settle stalled worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return gw.SettleStalledRelocationForAbsentPath()
+}
+
 // SettleWorktreeRelocationClaim revalidates a consumed recovery claim and
 // releases its ownership without relocating anything. The kill admission
 // producer uses it when a reclaimed stalled record turns out to need no

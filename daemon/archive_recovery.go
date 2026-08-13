@@ -223,6 +223,22 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 			// Refusing here would make the row permanently undeletable.
 			return nil
 		}
+		if unresolved && !recovery.IdentityKnown && errors.Is(claimErr, os.ErrNotExist) {
+			// An identity-unknown stalled fence guarding a conclusively absent
+			// path protects nothing, and every claim — kill's and restore's —
+			// wraps the same ENOENT, so refusing here would strand the row
+			// forever (#3278 review). Clear the fence durably and let the
+			// ordinary kill settle the missing path.
+			if settleErr := instance.SettleStalledWorktreeRelocationForAbsentPath(); settleErr == nil {
+				if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
+					return fmt.Errorf(
+						"the stalled identity fence for absent archived session %q was cleared but could not be persisted — retry the kill: %w",
+						title, persistErr,
+					)
+				}
+				return nil
+			}
+		}
 		wrapped := fmt.Errorf(
 			"the archived worktree identity for session %q could not be resolved for cleanup authorization: %w",
 			title, claimErr,

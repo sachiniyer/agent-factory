@@ -580,8 +580,14 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 			if recheckErr := m.recheckOrigin(); recheckErr != nil {
 				return stateUnknown, recheckErr
 			}
+			// Registered-only: the archived record-free kill may delete only
+			// what git's registration vouches for — never the unregistered
+			// RemoveAll fallback, which cannot distinguish the archive from a
+			// directory that replaced it (#3278 review).
+			cleanupState, err = gw.CleanupRegisteredOnly()
+		} else {
+			cleanupState, err = gw.Cleanup()
 		}
-		cleanupState, err = gw.Cleanup()
 		// The pre-check above narrows the race; this is what closes it (#3278
 		// review). Cleanup waits for hooks and reaps writers before its
 		// destructive git command, so an origin deleted anywhere in that
@@ -592,19 +598,11 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		// archived directory still occupies its path, because the caller's
 		// next step deletes the row that is the directory's only handle.
 		if m.recheckOrigin != nil && cleanupState == git.CleanupSettled {
-			// Only ENOENT proves the archive gone (#3278 review). A stat that
-			// FAILED — EACCES, EIO — is not evidence of absence, and falling
-			// through on it would delete the row over a directory that may
-			// still exist. The same fabricated-negative polarity rule as the
-			// origin probe: an unanswered question retains.
-			if _, statErr := os.Lstat(gw.GetWorktreePath()); !errors.Is(statErr, os.ErrNotExist) {
+			if settleErr := ArchivedCleanupSettled(gw.GetWorktreePath()); settleErr != nil {
 				retained := fmt.Errorf(
-					"%w: ordinary cleanup reported settled but the archived worktree could not be proven absent from %s — kill the session again to re-establish cleanup authorization",
-					ErrWorkspaceStateUnknown, gw.GetWorktreePath(),
+					"%w: ordinary cleanup reported settled but %v — kill the session again to re-establish cleanup authorization",
+					ErrWorkspaceStateUnknown, settleErr,
 				)
-				if statErr != nil {
-					retained = errors.Join(retained, statErr)
-				}
 				if err != nil {
 					retained = errors.Join(retained, err)
 				}
@@ -628,6 +626,23 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		log.WarningLog.Printf("kill %q: git worktree cleanup failed: %v", title, err)
 	}
 	return stateKnown, nil
+}
+
+// ArchivedCleanupSettled decides whether a settled ordinary cleanup may stand
+// for an archived record-free kill (#3278 review). Nil means the pathname
+// conclusively answers ENOENT — the archive is dealt with. Anything else — the
+// path still occupied, or a stat that failed rather than answered — returns
+// the reason the settlement cannot be trusted, and the caller retains the row.
+// Exported because the daemon's ghost cleanup shares the exact decision.
+func ArchivedCleanupSettled(path string) error {
+	if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+		reason := fmt.Errorf("the archived worktree could not be proven absent at %s", path)
+		if statErr != nil {
+			reason = errors.Join(reason, statErr)
+		}
+		return reason
+	}
+	return nil
 }
 
 func (teardownKill) clearsStarted() bool { return true }
