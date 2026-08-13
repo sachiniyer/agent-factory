@@ -2037,13 +2037,13 @@ button:disabled,
  * as focused via the whole-pane .af-kb-terminal outline). An inner accent ring shows
  * which pane the keyboard, Alt+w close, and a tab-bar click act on. */
 .af-kb-terminal .af-split-multi .af-pane-focused {
-  outline: 2px solid var(--af-accent);
+  outline: 2px solid var(--af-border-selected);
   outline-offset: -2px;
 }
 
 /* While a tab is being dragged, every pane hints it can receive the drop. */
 .af-dragging-tab .af-pane {
-  outline: 1px dashed var(--af-border);
+  outline: 1px dashed var(--af-border-interactive);
   outline-offset: -1px;
 }
 
@@ -2065,7 +2065,7 @@ button:disabled,
   position: absolute;
   display: none;
   background: var(--af-accent-tint);
-  border: 1px solid var(--af-accent);
+  border: 1px solid var(--af-border-preview);
   pointer-events: none;
   z-index: 5;
 }

@@ -82,6 +82,14 @@ test("the no-JavaScript CSS floor matches the derived Nord tokens exactly", () =
   }
 });
 
+test("pane states consume their corresponding semantic border tokens", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+
+  assert.match(css, /\.af-pane-focused\s*\{[^}]*outline:\s*2px solid var\(--af-border-selected\)/s);
+  assert.match(css, /\.af-dragging-tab \.af-pane\s*\{[^}]*outline:\s*1px dashed var\(--af-border-interactive\)/s);
+  assert.match(css, /\.af-drop-overlay\s*\{[^}]*border:\s*1px solid var\(--af-border-preview\)/s);
+});
+
 for (const mode of ["light", "dark"] as const) {
   test(`${mode} derived tokens meet the contrast floor`, () => {
     const { tokens } = deriveTheme(NORD_THEME, mode);

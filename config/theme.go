@@ -125,6 +125,16 @@ func (t ThemeConfig) Preset() string {
 	return t.preset
 }
 
+func (t ThemeConfig) matchesPreset() bool {
+	preset, ok := ThemePreset(t.preset)
+	if !ok {
+		return false
+	}
+	preset.preset = t.preset
+	preset.explicitPreset = t.explicitPreset
+	return t == preset
+}
+
 // UnmarshalText admits the compact TOML form: theme = "nord". TOML tables are
 // still decoded field-by-field by pelletier, so the established [theme] form
 // remains backward compatible.
@@ -191,7 +201,7 @@ func ThemeSlotCount() int {
 // older TOML-era binaries that only know the table shape.
 func marshalConfigTOML(cfg *Config) ([]byte, error) {
 	data, err := toml.Marshal(cfg)
-	if err != nil || cfg == nil || !cfg.Theme.explicitPreset {
+	if err != nil || cfg == nil || !cfg.Theme.explicitPreset || !cfg.Theme.matchesPreset() {
 		return data, err
 	}
 

@@ -93,6 +93,26 @@ func TestNamedThemeSurvivesConfigSave(t *testing.T) {
 	assert.Equal(t, "#3F3F3F", reloaded.Theme.Background)
 }
 
+func TestEditedNamedThemeSavesAsCustomTable(t *testing.T) {
+	cfg := DefaultConfig()
+	named, ok := ThemePreset("zenburn")
+	require.True(t, ok)
+	named.Accent = "#010203"
+	cfg.Theme = named
+
+	written, err := marshalConfigTOML(cfg)
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "[theme]")
+	assert.Contains(t, string(written), "accent = '#010203'")
+	assert.NotContains(t, string(written), "theme = 'zenburn'")
+
+	reloaded, err := parseConfigTOML(written, "config.toml")
+	require.NoError(t, err)
+	assert.Empty(t, reloaded.Theme.Preset())
+	assert.Equal(t, "#010203", reloaded.Theme.Accent)
+	assert.Equal(t, "#3F3F3F", reloaded.Theme.Background)
+}
+
 func TestDefaultThemeSaveRemainsReadableByLegacyDecoders(t *testing.T) {
 	written, err := marshalConfigTOML(DefaultConfig())
 	require.NoError(t, err)
