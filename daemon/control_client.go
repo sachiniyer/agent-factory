@@ -401,6 +401,21 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 			// serves SetConfigValue.
 		}
 	}
+	// A failed dial does not prove "no upgrade in flight": the hand-off leaves a
+	// window with NO daemon on the socket — the quiescing daemon has exited and
+	// the committed candidate has not bound yet — and a local write landing there
+	// bypasses the very admission this function exists to consult, mutating
+	// config after the candidate validated (and loaded) it. The durable upgrade
+	// journal covers that window; consult it exactly as EnsureDaemon does, and
+	// refuse the fallback only while a forward upgrade or rollback restore is
+	// provably live (fail-open otherwise — a bad journal must not wedge
+	// `af config set`, same doctrine as the launch path).
+	if homeDir, ok := configHomeDir(); ok {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress, upgradeGateRestoringPrevious:
+			return SetConfigValueResponse{}, gateErr
+		}
+	}
 	result, err := config.SetGlobalConfigValue(key, value)
 	if err != nil {
 		return SetConfigValueResponse{}, err

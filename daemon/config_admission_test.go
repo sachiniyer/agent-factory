@@ -1,17 +1,20 @@
 package daemon
 
 import (
+	"context"
 	"net"
 	"net/rpc"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/internal/upgradetxn"
 )
 
 // TestConfigMutationsRefusedWhileQuiescing is the quiescing companion to the
@@ -97,6 +100,29 @@ func TestSetGlobalConfigValueRefusalIsFinal(t *testing.T) {
 	written, readErr := os.ReadFile(tomlPath)
 	require.NoError(t, readErr)
 	require.Equal(t, orig, string(written), "a daemon refusal must leave config.toml untouched")
+}
+
+// TestSetGlobalConfigValueRefusesFallbackDuringLiveUpgrade pins the hand-off
+// window the socket cannot witness: the quiescing daemon has exited, the
+// candidate has not bound yet, so the dial fails — but the durable upgrade
+// journal still proves a live transaction, and the local-write fallback must
+// refuse rather than mutate config the candidate already validated against.
+func TestSetGlobalConfigValueRefusesFallbackDuringLiveUpgrade(t *testing.T) {
+	home := configClientHome(t)
+	inProgress := &upgradetxn.UpgradeInProgressError{
+		TransactionID: "txn-cfg", ToVersion: "1.0.256", Phase: upgradetxn.PhaseCandidateValidating,
+		Deadline: time.Now().Add(time.Minute),
+	}
+	prev := runEntrypointGate
+	t.Cleanup(func() { runEntrypointGate = prev })
+	runEntrypointGate = func(context.Context, string, bool) error { return inProgress }
+
+	_, err := SetGlobalConfigValue("default_program", "codex")
+	var typed *upgradetxn.UpgradeInProgressError
+	require.ErrorAs(t, err, &typed, "a live upgrade must refuse the daemonless fallback")
+
+	_, statErr := os.Stat(filepath.Join(home, config.TomlConfigFileName))
+	require.True(t, os.IsNotExist(statErr), "the refused fallback must write nothing")
 }
 
 // TestSetGlobalConfigValueNoDaemonWritesLocally pins the fallback: with nothing
