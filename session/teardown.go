@@ -582,6 +582,27 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 			}
 		}
 		cleanupState, err = gw.Cleanup()
+		// The pre-check above narrows the race; this is what closes it (#3278
+		// review). Cleanup waits for hooks and reaps writers before its
+		// destructive git command, so an origin deleted anywhere in that
+		// interval still turns every git failure into an answered, settled
+		// error — with the archived directory untouched. No probe placement
+		// can outrun that; the sound invariant is the postcondition: an
+		// archived kill must never report ordinary cleanup settled while the
+		// archived directory still occupies its path, because the caller's
+		// next step deletes the row that is the directory's only handle.
+		if m.recheckOrigin != nil && cleanupState == git.CleanupSettled {
+			if _, statErr := os.Lstat(gw.GetWorktreePath()); statErr == nil {
+				retained := fmt.Errorf(
+					"%w: ordinary cleanup reported settled but the archived worktree still occupies %s — the origin was likely deleted mid-teardown; kill the session again to re-establish cleanup authorization",
+					ErrWorkspaceStateUnknown, gw.GetWorktreePath(),
+				)
+				if err != nil {
+					retained = errors.Join(retained, err)
+				}
+				return stateUnknown, retained
+			}
+		}
 	}
 	// Same rule as closeTab, one layer down (#1917), and read off Cleanup's own
 	// reported STATE rather than re-derived from its error here. A git command that

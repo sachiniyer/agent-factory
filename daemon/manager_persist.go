@@ -507,8 +507,9 @@ var ghostCleanupWorktree = func(
 	// before ordinary cleanup while the archived directory still exists, or
 	// answered missing-origin failures would settle the teardown and the row
 	// delete would orphan an archive a ghost can never re-authorize.
-	if data.Status == session.Archived && data.Worktree.RelocationRecovery == nil &&
-		ghostRestoredWorktreeRemovable(data) {
+	archivedRecordFree := data.Status == session.Archived &&
+		data.Worktree.RelocationRecovery == nil && ghostRestoredWorktreeRemovable(data)
+	if archivedRecordFree {
 		if _, statErr := os.Lstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
 			if originErr := git.CheckRepoPresentForRelocation(data.Worktree.RepoPath); originErr != nil {
 				return git.CleanupStateUnknown, fmt.Errorf(
@@ -519,6 +520,22 @@ var ghostCleanupWorktree = func(
 		}
 	}
 	state, cleanupErr := gw.Cleanup()
+	// Same postcondition as the live teardown (#3278 review): the pre-check
+	// narrows the race, this closes it. A settled ordinary cleanup that left
+	// the archived directory in place must retain the row — its only handle —
+	// whenever the origin vanished inside Cleanup's own hook/reap interval.
+	if archivedRecordFree && state == git.CleanupSettled {
+		if _, statErr := os.Lstat(data.Worktree.WorktreePath); statErr == nil {
+			retained := fmt.Errorf(
+				"ordinary ghost cleanup reported settled but the archived worktree still occupies %s — the origin was likely deleted mid-teardown; kill again to re-establish its state",
+				data.Worktree.WorktreePath,
+			)
+			if cleanupErr != nil {
+				retained = errors.Join(retained, cleanupErr)
+			}
+			return git.CleanupStateUnknown, retained, nil
+		}
+	}
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
 	}
