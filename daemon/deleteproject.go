@@ -112,7 +112,7 @@ func normalizeDeleteProjectPath(path string) (string, string) {
 		return repo.Root, repo.ID
 	}
 	root = filepath.Clean(root)
-	return root, config.RepoIDFromRoot(root)
+	return root, config.RepoIDForRecordedRoot(root)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by

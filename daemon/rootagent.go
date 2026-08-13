@@ -155,12 +155,15 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 			// retry (#1122) resolves the repo the moment the path returns and
 			// would ensure it with no personal layer, starting a root whose
 			// enabled=false sat readable in the AF home the whole time. The
-			// residue is a project registered at a linked worktree: its recorded
-			// root is not the main root, so the derived ID cannot match and its
-			// layer applies only at a daemon start after the path returns.
-			repoID = config.RepoIDFromRoot(filepath.Clean(p.Root))
+			// residue is a recorded root that is not the main worktree's
+			// toplevel — a linked worktree of a bare clone, a subdirectory
+			// registration, or a spelling that later re-resolves through a
+			// symlink: there the derived ID cannot match what the sweep
+			// resolves, and the layer applies only at a daemon start after the
+			// path returns.
+			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; no root agent starts for it until the next daemon start, but its personal [root_agent] layer still applies to that path: %v", p.ID, p.Root, repoErr)
+			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", p.ID, p.Root, repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
@@ -209,8 +212,10 @@ func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConf
 // disabled without consulting lower layers — absence of proof is not
 // permission to start an agent. The returned zero resolution carries no
 // provenance on purpose: no config source decided this, the daemon's read
-// failure did, and the cause stays available to consumers in
-// rootAgentRegistryUnreadable and rootAgentPersonalUnreadable.
+// failure did, and the cause stays available in rootAgentRegistryUnreadable
+// and rootAgentPersonalUnreadable — #3264 wires it into the consumer-facing
+// messages (task-target validation, delete preflight, delivery errors), which
+// today still answer without it.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
 	if m.rootAgentDecisionUnknown(repoID) {
 		return config.RootAgentResolution{}
@@ -246,6 +251,15 @@ func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig 
 // for a root exactly when the loop will create one. Layers are merged, so a
 // personal enabled=false disables a legacy-enabled root here too.
 func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentResolution, bool) {
+	// Fail-closed short-circuit first: with the decision unknown the answer is
+	// the zero resolution whatever the layers say, and legacyRootAgentForRepo
+	// below forks git per root_agents entry — a real cost on the DeliverPrompt
+	// path. Candidacy reports true, not false: "not a candidate" would be a
+	// second unfounded claim about state that could not be read, and every
+	// caller keys on ok && Enabled, which unknown already forces false.
+	if m.rootAgentDecisionUnknown(repoID) {
+		return config.RootAgentResolution{}, true
+	}
 	legacy := m.legacyRootAgentForRepo(repoID)
 	_, isProject := m.rootAgentProjectRoots[repoID]
 	if legacy == nil && !isProject {
@@ -261,6 +275,16 @@ func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentRes
 // finishes.
 func (m *Manager) EnsureRootAgents() {
 	if !m.Ready() {
+		return
+	}
+
+	// With the registry unlistable (#3247) every candidate resolves to disabled
+	// through rootAgentDecisionUnknown, so the sweeps below could only fork git
+	// per legacy path per tick to re-derive a constant refusal — and the legacy
+	// path's retry/escalation logging would keep promising heals this daemon
+	// run can never deliver. The snapshot's boot-time ERROR is the one message
+	// for this state; skip the sweeps entirely.
+	if m.rootAgentRegistryUnreadable {
 		return
 	}
 

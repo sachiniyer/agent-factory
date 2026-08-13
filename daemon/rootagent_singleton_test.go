@@ -482,8 +482,13 @@ func TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer(t *testing.T)
 			if len(*seen) != tc.wantCreates {
 				t.Fatalf("want %d creates, got %d — a project unresolvable at snapshot time must keep its personal layer by recorded path", tc.wantCreates, len(*seen))
 			}
-			if tc.wantProgram != "" && (*seen)[0].Program != tc.wantProgram {
-				t.Fatalf("the personal program must reach CreateSession verbatim, got %q", (*seen)[0].Program)
+			if tc.wantProgram != "" {
+				if len(*seen) == 0 {
+					t.Fatalf("test row error: wantProgram is set but the row expects no create, so the program could never be asserted")
+				}
+				if (*seen)[0].Program != tc.wantProgram {
+					t.Fatalf("the personal program must reach CreateSession verbatim, got %q", (*seen)[0].Program)
+				}
 			}
 			if want := tc.wantCreates == 1; manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) != want {
 				t.Fatalf("repoRootAgentWillMaterialize must be %v here, agreeing with the ensure loop", want)
