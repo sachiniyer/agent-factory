@@ -167,7 +167,11 @@ export function directoryPicker(callbacks: {
 
   // A sibling of the list, not a child: the list is role="list", whose children
   // must be list items.
-  const emptyLine = h("p", { class: "af-dirpicker-empty" }, "No subdirectories here.");
+  const emptyLine = h(
+    "p",
+    { class: "af-dirpicker-empty" },
+    "No subdirectories here — go up or enter another path.",
+  );
   emptyLine.hidden = true;
 
   const note = h("p", { class: "af-dirpicker-note" });

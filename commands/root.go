@@ -264,6 +264,12 @@ func NewRootCommand(opts Options) *cobra.Command {
 	rootCmd.SetVersionTemplate(
 		"agent-factory version {{.Version}}\n" +
 			"https://github.com/sachiniyer/agent-factory/releases/tag/v{{.Version}}\n")
+	// Cobra registers the --version flag lazily inside Execute, and only on the
+	// command being executed — so `af gen-docs`, which executes a subcommand,
+	// walks a root flag set with no version flag and the generated CLI reference
+	// omits it (#3227). Register it eagerly so any surface that introspects the
+	// tree without executing the root sees the real flag set.
+	rootCmd.InitDefaultVersionFlag()
 	return rootCmd
 }
 

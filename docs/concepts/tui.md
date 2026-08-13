@@ -64,9 +64,10 @@ For a named long-running command or a web preview with a URL/port, use
 ## Sessions, tasks, and other surfaces
 
 - **`n`** creates a new local session; **`N`** creates a remote one.
-- **`a`** archives the selected session as the default done action (or restores
-  an archived, Lost, or Dead one). **`D`** permanently kills it, including any
-  uncommitted or unmerged work.
+- **`a`** archives the selected live session as the default done action, behind
+  a confirmation — on an archived, Lost, or Dead row it does nothing. **`r`**
+  restores an archived, Lost, or Dead session. **`D`** permanently kills a
+  session, including any uncommitted or unmerged work.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
@@ -83,7 +84,7 @@ For a named long-running command or a web preview with a URL/port, use
 
 Every binding above is the default. You can rebind almost all of them in the
 `[keys]` table of your config — a handful of structural keys (Enter, Tab,
-`Ctrl-]`, the `1`–`9` tab jumps) are reserved. Run:
+Shift-Tab, Esc, `Ctrl-]`, the `1`–`9` tab jumps) are reserved. Run:
 
 ```bash
 af keys
