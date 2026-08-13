@@ -211,9 +211,9 @@ func marshalConfigTOML(cfg *Config) ([]byte, error) {
 		insert = firstTable + 1
 	}
 	line := []byte(fmt.Sprintf("theme = '%s'\n\n", cfg.Theme.Preset()))
-	out := make([]byte, 0, len(withoutTheme)+len(line))
-	out = append(out, withoutTheme[:insert]...)
-	out = append(out, line...)
-	out = append(out, withoutTheme[insert:]...)
-	return out, nil
+	var out bytes.Buffer
+	out.Write(withoutTheme[:insert])
+	out.Write(line)
+	out.Write(withoutTheme[insert:])
+	return out.Bytes(), nil
 }

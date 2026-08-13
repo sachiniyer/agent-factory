@@ -455,6 +455,13 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 		}
 		sort.Strings(names)
 		materialized = true
+	} else if _, namedPreset := configured.(string); namedPreset && value.Kind() == reflect.Struct {
+		// A dual-shape composite such as theme = "zenburn" configures the
+		// complete typed struct produced by its text decoder. Treating the scalar
+		// only as top-level presence would make every expanded field look like an
+		// unconfigured mutation of the inherited snapshot.
+		names = compositeNames(value)
+		materialized = true
 	} else {
 		// JSON null is a present, typed nil table. It contributes no fields but
 		// remains visible as a present candidate in the trace.
@@ -467,8 +474,7 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 		leaf, ok := compositeLeaf(value, name)
 		if ok {
 			leaves[name] = leaf
-			if !builtIn {
-				configuredMap := configured.(map[string]any)
+			if configuredMap, mapped := configured.(map[string]any); !builtIn && mapped {
 				if !jsonEquivalent(configuredMap[name], clonedInterface(leaf)) {
 					normalized++
 				}
