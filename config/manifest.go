@@ -378,7 +378,7 @@ var configManifest = []ManifestEntry{
 		Key:        "global_agent_skills",
 		Type:       "bool",
 		Default:    "false",
-		Purpose:    "Let af add its af-usage skill to your own codex/gemini/amp config folders · off means those agents are not told about af.",
+		Purpose:    "Let af add its af-usage skill to your own codex/gemini/amp/devin config folders · off means those agents are not told about af.",
 		Tier:       TierAdvanced,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,

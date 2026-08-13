@@ -119,20 +119,21 @@ func globalAgentSkillsConsent() globalSkillConsent {
 //
 // Every base passed here is the USER'S GLOBAL per-agent config directory
 // (codex's $CODEX_HOME/skills, gemini's ~/.gemini/skills, amp's
-// ~/.config/amp/skills), which is why the consent gate lives at this one choke
-// point rather than in each caller (#1977). A file written there reaches outside
-// af and outlives it: it survives archiving the session, survives uninstalling
-// af, and is still loaded when the user runs that agent by hand in an unrelated
-// directory tomorrow. Creating a session is not consent to edit the user's
-// global tool configuration, so af does none of it unless global_agent_skills
-// is on. An empty returned path means "not injected"; every caller discards the
-// path and only checks the error, so this reads as a clean skip.
+// ~/.config/amp/skills, and devin's ~/.config/devin/skills), which is why the
+// consent gate lives at this one choke point rather than in each caller (#1977).
+// A file written there reaches outside af and outlives it: it survives archiving
+// the session, survives uninstalling af, and is still loaded when the user runs
+// that agent by hand in an unrelated directory tomorrow. Creating a session is
+// not consent to edit the user's global tool configuration, so af does none of
+// it unless global_agent_skills is on. An empty returned path means "not
+// injected"; every caller discards the path and only checks the error, so this
+// reads as a clean skip.
 //
 // The af-owned seams are unaffected and stay unconditional: claude
 // (--plugin-dir), aider (--read) and opencode (OPENCODE_CONFIG) all point at
 // files under af's OWN config dir, so they vanish with af and are invisible to
 // an agent af did not launch. That is the pattern this gate exists to converge
-// on; these three agents expose no equivalent per-launch pointer (codex's
+// on; these four agents expose no equivalent per-launch pointer (codex's
 // CODEX_HOME and gemini's GEMINI_CLI_HOME relocate the agent's whole home,
 // auth and history included, and amp's --settings-file would have af own
 // settings the user also sets), so consent is the honest seam until one does.
@@ -148,7 +149,7 @@ func ensureAfSkillDir(base string) (string, error) {
 		// decision not to make them (#1977's first objection).
 		removeAfSkillDir(skillDir, path)
 		// INFO, not WARNING (#2166): global_agent_skills defaults false, so this
-		// fires on every codex/gemini/amp session start on a DEFAULT install. af
+		// fires on every codex/gemini/amp/devin session start on a DEFAULT install. af
 		// is honoring the documented default, which is not a defect.
 		log.InfoLog.Printf("af skill: not writing %s — af does not manage global agent config directories unless global_agent_skills = true is set in the af config (af guidance not injected for this agent)", path)
 		return "", nil

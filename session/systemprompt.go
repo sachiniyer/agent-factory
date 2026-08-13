@@ -185,20 +185,21 @@ func shellQuote(s string) string {
 //   - Aider: --read flag pointing at an af-owned context file. Aider has NO
 //     auto-discovered global skills folder, so it takes a flag (like claude);
 //     --read is a known, repeatable, additive aider flag.
-//   - Devin: --respect-workspace-trust false, appended CONDITIONALLY (devin
-//     rejects the flag twice) to suppress its interactive workspace-trust modal
-//     so an af worktree reaches ready without a human answering it. af writes no
-//     af-usage skill for devin yet — that file seam ($HOME/.config/devin/skills)
-//     is a follow-up; this case only finalizes devin's launch command.
+//   - Devin: file seam — the af skill written to devin's global skills folder
+//     (~/.config/devin/skills) — plus --respect-workspace-trust false, appended
+//     CONDITIONALLY (devin rejects the flag twice) to suppress its interactive
+//     workspace-trust modal so an af worktree reaches ready without a human
+//     answering it.
 //   - Commands running no known agent: no injection.
 //
 // Accepted tradeoff (#1585 review, finding 2): DetectAgentFromCommand is a shared
 // basename heuristic, so a program_overrides entry pointing a NON-<agent> binary
-// named "codex"/"gemini"/"amp"/"aider" reaches the matching branch. For the file
-// seams this is benign (the launch command is unchanged; the worst case is a
-// dormant af-owned skill dir). For the flag seams (claude, aider) it carries the
-// same pre-existing #1116/#1131 exposure claude already has; we do NOT re-derive
-// agent-ness with a second heuristic — the #1132 rule is one detection choke-point.
+// named "codex"/"gemini"/"amp"/"aider"/"devin" reaches the matching branch. For
+// the pure file seams this is benign (the launch command is unchanged; the
+// worst case is a dormant af-owned skill dir). For the flag seams (claude,
+// aider, devin) it carries the same pre-existing #1116/#1131 exposure claude
+// already has; we do NOT re-derive agent-ness with a second heuristic — the
+// #1132 rule is one detection choke-point.
 func injectSystemPrompt(resolved string) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
