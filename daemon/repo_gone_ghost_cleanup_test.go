@@ -439,10 +439,6 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		t.Fatal("late ghost finalizer did not consume its durable row")
 	}
-	manager.mu.Lock()
-	_, rootGraceArmed := manager.rootKilledAt[repoID]
-	manager.mu.Unlock()
-	assert.True(t, rootGraceArmed, "late root cleanup must arm the same grace window as synchronous kill")
 
 	select {
 	case event := <-events:
@@ -454,4 +450,16 @@ func TestLateGhostCleanup_SuccessCompletesRootKill(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 		t.Error("late ghost cleanup removed the row without publishing session.killed")
 	}
+
+	// Read rootKilledAt only AFTER the event receive (#3283). `deleted` closes
+	// inside the finalizer's record-delete call, BEFORE completeLateGhostKill
+	// arms the grace window, so a read anchored on it races the arm. The event
+	// is the correct happens-before anchor: completeLateGhostKill arms root
+	// grace before publishing removal — the product invariant its own comment
+	// states — so by the time the event is received the map write is ordered
+	// before this read.
+	manager.mu.Lock()
+	_, rootGraceArmed := manager.rootKilledAt[repoID]
+	manager.mu.Unlock()
+	assert.True(t, rootGraceArmed, "late root cleanup must arm the same grace window as synchronous kill")
 }
