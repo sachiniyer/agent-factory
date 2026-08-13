@@ -310,6 +310,188 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 	}
 }
 
+// corruptProjectRegistry makes config.ListProjects fail on every platform and
+// runner: loadProjectRecords rejects a stray non-directory entry in the
+// registry directory, no permission bits involved. The probe call proves the
+// fixture actually fails — a registry that still lists would route every
+// assertion below through the ordinary resolution path and turn the
+// regression test into a silent no-op.
+func corruptProjectRegistry(t *testing.T) {
+	t.Helper()
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatalf("GetConfigDir: %v", err)
+	}
+	dir := filepath.Join(home, config.ProjectRegistryDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir project registry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stray"), []byte("not a project record"), 0o644); err != nil {
+		t.Fatalf("write stray registry file: %v", err)
+	}
+	if _, err := config.ListProjects(); err == nil {
+		t.Fatalf("fixture failed: ListProjects still succeeds on a corrupt registry")
+	}
+}
+
+// TestEnsureRootAgentsUnlistableRegistryFailsClosed is the #3247 ListProjects
+// arm. The registry is the only index of the personal configs that hold the
+// highest-precedence enabled=false, so when it cannot be listed at daemon
+// start NO repo can be proven un-disabled and no root agent may start —
+// legacy-only entries included. The unfixed early return dropped only the
+// singleton layers: fail-closed for singleton-enabled roots, fail-open for
+// singleton-DISABLED ones, because the legacy sweep kept ensuring with no
+// personal layer at all.
+func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup lays down project state before the registry is corrupted and
+		// returns the manager config carrying the legacy enable.
+		setup func(t *testing.T, repoPath string) *config.Config
+	}{
+		{
+			// The headline regression: the personal disable sits readable on
+			// disk; only the registry that would have NAMED it does not list.
+			name: "registered personal disable under a legacy enable",
+			setup: func(t *testing.T, repoPath string) *config.Config {
+				project := registerTestProject(t, repoPath)
+				writePersonalRootAgent(t, project.ID, "enabled = false")
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			// The blast-radius case the issue scopes deliberately: a legacy-only
+			// root with no registration is suppressed too, because an unlistable
+			// registry means "there may be a project record with a disable we
+			// cannot see" — for every repo.
+			name: "legacy-only entry",
+			setup: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			cfg := tc.setup(t, repoPath)
+			corruptProjectRegistry(t)
+
+			// The fail-closed ERROR fires from the snapshot inside NewManager,
+			// so the capture goes in first (httpserver_test.go idiom).
+			var errorLog bytes.Buffer
+			prevError := log.ErrorLog.Writer()
+			log.ErrorLog.SetOutput(&errorLog)
+			t.Cleanup(func() { log.ErrorLog.SetOutput(prevError) })
+
+			manager, err := NewManager(cfg)
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != 0 {
+				t.Fatalf("an unlistable project registry must fail every root agent closed, got %d creates — the registry is the only index of personal disables", len(*seen))
+			}
+			if findRootInstance(t, manager, repoPath) != nil {
+				t.Fatalf("no root instance may exist while the project registry is unlistable")
+			}
+			if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+				t.Fatalf("repoRootAgentWillMaterialize must be false while the project registry is unlistable — a delivery must not wait for a root the ensure loop will not create")
+			}
+			if got := errorLog.String(); !strings.Contains(got, config.ProjectRegistryDirName) || !strings.Contains(got, "failing closed") {
+				t.Fatalf("the snapshot must log an ERROR naming the registry and the fail-closed consequence; errors were:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer is the #3247
+// RepoFromPath arm: a registered project whose recorded root does not resolve
+// at daemon start (an absent mount, a checkout deleted and restored later)
+// must keep its personal [root_agent] layer, attributed by the recorded path —
+// whose hash IS the repo ID a checkout resolving at that path gets. The
+// unfixed code skipped the project wholesale, so the moment the path returned
+// the legacy sweep's per-tick retry (#1122) ensured the root with
+// Personal=nil, bypassing an enabled=false that sat readable in the AF home
+// the whole time.
+func TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer(t *testing.T) {
+	cases := []struct {
+		name string
+		// personal is the [root_agent] body written before the root vanishes;
+		// corrupt optionally makes the file unloadable afterwards.
+		personal    string
+		corrupt     func(t *testing.T, projectID string)
+		wantCreates int
+		wantProgram string
+	}{
+		{
+			// The headline regression: a readable personal disable must win even
+			// though the repo was unresolvable when the daemon snapshotted.
+			name:        "readable personal disable",
+			personal:    "enabled = false",
+			wantCreates: 0,
+		},
+		{
+			// Fail closed composes (#3241): unloadable personal AND unresolvable
+			// root is still "decision unknown", keyed by the recorded path.
+			name:        "unloadable personal config",
+			personal:    "enabled = false",
+			corrupt:     breakPersonalRootAgentToml,
+			wantCreates: 0,
+		},
+		{
+			// Attribution is a true resolution, not a blanket refusal: a personal
+			// enable's program must reach the create verbatim. The unfixed code
+			// also creates here — but with the default profile, proving the
+			// personal layer was dropped rather than merged.
+			name:        "readable personal program",
+			personal:    "enabled = true\nprogram = \"/opt/claude --model opus\"",
+			wantCreates: 1,
+			wantProgram: "/opt/claude --model opus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			project := registerTestProject(t, repoPath)
+			writePersonalRootAgent(t, project.ID, tc.personal)
+			if tc.corrupt != nil {
+				tc.corrupt(t, project.ID)
+			}
+
+			// The recorded root must NOT resolve while NewManager snapshots …
+			hidden := repoPath + ".hidden"
+			if err := os.Rename(repoPath, hidden); err != nil {
+				t.Fatalf("hide repo dir: %v", err)
+			}
+			manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			// … and must resolve again by the time the ensure loop ticks: the
+			// mount is back, and the legacy retry sees the repo for the first time.
+			if err := os.Rename(hidden, repoPath); err != nil {
+				t.Fatalf("restore repo dir: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != tc.wantCreates {
+				t.Fatalf("want %d creates, got %d — a project unresolvable at snapshot time must keep its personal layer by recorded path", tc.wantCreates, len(*seen))
+			}
+			if tc.wantProgram != "" && (*seen)[0].Program != tc.wantProgram {
+				t.Fatalf("the personal program must reach CreateSession verbatim, got %q", (*seen)[0].Program)
+			}
+			if want := tc.wantCreates == 1; manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) != want {
+				t.Fatalf("repoRootAgentWillMaterialize must be %v here, agreeing with the ensure loop", want)
+			}
+		})
+	}
+}
+
 // TestEnsureRootAgentsLegacyOnlyUnchangedThroughResolver: a plain legacy entry
 // with no project registration and no global/personal layer still ensures a
 // root, exactly as before PR2 — proving the resolver rewrite preserved the
