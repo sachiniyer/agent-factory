@@ -77,9 +77,12 @@ type rootEnsureState struct {
 // singleton, every registered project's personal [root_agent] layer and resolved
 // root (both keyed by repo ID), and the repo IDs the legacy root_agents map
 // already covers (so the singleton sweep can dedupe against it). It is
-// best-effort — a project whose checkout no longer resolves, or whose personal
-// config cannot be read, is logged and skipped, never fatal, so one bad project
-// never keeps the daemon from starting. Reading the registry once at start
+// best-effort — a project whose checkout no longer resolves is logged and
+// skipped, never fatal, so one bad project never keeps the daemon from starting.
+// The one exception to skip-and-continue is a personal config that exists but
+// cannot be READ (#3241): that file may hold the highest-precedence
+// enabled=false, so the project fails closed — a synthesized disabling personal
+// layer — rather than open. Reading the registry once at start
 // matches the RootAgents map's restart-to-apply contract: registering a project
 // or editing its personal root_agent takes effect on the next daemon start.
 func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
@@ -114,7 +117,17 @@ func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, 
 		projectRoots[repo.ID] = repo.Root
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
-			log.WarningLog.Printf("root agent snapshot: project %s personal config is unreadable; ignoring its root_agent override until the next daemon start: %v", p.ID, err)
+			// Fail CLOSED (#3241): this file may hold the highest-precedence
+			// `enabled = false`, so a failed read makes the project's root-agent
+			// decision unknown — it must not become "absent", or a lower-precedence
+			// enable (the ubiquitous empty legacy root_agents entry, or a global
+			// enabled=true) starts a root the user explicitly disabled. A
+			// synthesized disabling personal layer keeps every consumer of the
+			// snapshot — both ensure sweeps and repoRootAgentWillMaterialize —
+			// resolving this project to disabled. An already-live root is left
+			// alone (adopt-first); only creation and healing stop.
+			log.WarningLog.Printf("root agent snapshot: project %s personal config is unreadable; failing closed — no root agent will be started for it until the config is readable at a daemon start: %v", p.ID, err)
+			personal[repo.ID] = &config.RootAgentLayer{Value: config.RootAgent{Enabled: false}, EnabledSet: true}
 			continue
 		}
 		if layer := pc.RootAgentLayer(); layer != nil {
