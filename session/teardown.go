@@ -592,11 +592,19 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 		// archived directory still occupies its path, because the caller's
 		// next step deletes the row that is the directory's only handle.
 		if m.recheckOrigin != nil && cleanupState == git.CleanupSettled {
-			if _, statErr := os.Lstat(gw.GetWorktreePath()); statErr == nil {
+			// Only ENOENT proves the archive gone (#3278 review). A stat that
+			// FAILED — EACCES, EIO — is not evidence of absence, and falling
+			// through on it would delete the row over a directory that may
+			// still exist. The same fabricated-negative polarity rule as the
+			// origin probe: an unanswered question retains.
+			if _, statErr := os.Lstat(gw.GetWorktreePath()); !errors.Is(statErr, os.ErrNotExist) {
 				retained := fmt.Errorf(
-					"%w: ordinary cleanup reported settled but the archived worktree still occupies %s — the origin was likely deleted mid-teardown; kill the session again to re-establish cleanup authorization",
+					"%w: ordinary cleanup reported settled but the archived worktree could not be proven absent from %s — kill the session again to re-establish cleanup authorization",
 					ErrWorkspaceStateUnknown, gw.GetWorktreePath(),
 				)
+				if statErr != nil {
+					retained = errors.Join(retained, statErr)
+				}
 				if err != nil {
 					retained = errors.Join(retained, err)
 				}

@@ -525,11 +525,16 @@ var ghostCleanupWorktree = func(
 	// the archived directory in place must retain the row — its only handle —
 	// whenever the origin vanished inside Cleanup's own hook/reap interval.
 	if archivedRecordFree && state == git.CleanupSettled {
-		if _, statErr := os.Lstat(data.Worktree.WorktreePath); statErr == nil {
+		// Only ENOENT proves the archive gone (#3278 review): a failed stat is
+		// not evidence of absence, so anything else retains the row.
+		if _, statErr := os.Lstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
 			retained := fmt.Errorf(
-				"ordinary ghost cleanup reported settled but the archived worktree still occupies %s — the origin was likely deleted mid-teardown; kill again to re-establish its state",
+				"ordinary ghost cleanup reported settled but the archived worktree could not be proven absent from %s — kill again to re-establish its state",
 				data.Worktree.WorktreePath,
 			)
+			if statErr != nil {
+				retained = errors.Join(retained, statErr)
+			}
 			if cleanupErr != nil {
 				retained = errors.Join(retained, cleanupErr)
 			}

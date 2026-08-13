@@ -52,3 +52,44 @@ func TestKillTeardown_SettledOrdinaryCleanupWithSurvivingArchiveReportsUnknown(t
 		"the caller keys record retention off the unknown-state classifier")
 	assert.DirExists(t, archivedPath, "the archived directory must be left intact for the retry")
 }
+
+// TestKillTeardown_UnprovenArchiveAbsenceReportsUnknown: only ENOENT proves the
+// archive gone (#3278 review). A stat that FAILS — modeled with an unreadable
+// parent — is not evidence of absence, so the settled cleanup must still be
+// reported unknown instead of letting the row delete over a directory that may
+// exist.
+func TestKillTeardown_UnprovenArchiveAbsenceReportsUnknown(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-based stat failures cannot be modeled as root")
+	}
+	root := t.TempDir()
+	repoPath := filepath.Join(root, "origin")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", repoPath).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", repoPath, "add", "f.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", repoPath,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+	shield := filepath.Join(root, "shield")
+	require.NoError(t, os.MkdirAll(shield, 0o755))
+	archivedPath := filepath.Join(shield, "archived-wt")
+	require.NoError(t, exec.Command("git", "-C", repoPath,
+		"worktree", "add", "-b", "af/wt", archivedPath).Run())
+
+	gw, err := git.NewGitWorktreeFromStorage(
+		repoPath, archivedPath, "wt", "af/wt", "", false, true,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, os.RemoveAll(repoPath))
+	// Make the postcondition's stat FAIL rather than answer: the archive's
+	// parent becomes unsearchable after cleanup has already run against the
+	// missing origin.
+	mode := teardownKill{recheckOrigin: func() error { return nil }}
+	require.NoError(t, os.Chmod(shield, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(shield, 0o755) })
+
+	state, err := mode.handleWorktree(gw, "wt")
+	require.Error(t, err, "an unprovable archive absence must be reported unknown")
+	assert.Equal(t, stateUnknown, state)
+	assert.ErrorIs(t, err, ErrWorkspaceStateUnknown)
+}
