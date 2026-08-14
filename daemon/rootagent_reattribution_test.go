@@ -175,6 +175,121 @@ func TestEnsureRootAgentsReattributesWorktreeRecordedRoot(t *testing.T) {
 	}
 }
 
+// TestEnsureRootAgentsReattributesBareCloneWorktree pins the #3299 review's
+// round-2 P1: for a linked worktree of a BARE clone, RepoFromPath resolves
+// repo.Root to the parent of the bare common directory — not a worktree — so
+// probing the checkout marker there fails forever. The marker must be probed
+// at the RECORDED path, which binds to the same common dir the marker lives
+// in, exactly how Register/Rebind probe it.
+func TestEnsureRootAgentsReattributesBareCloneWorktree(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	src := filepath.Join(parent, "src")
+	if err := exec.Command("git", "init", src).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", src, "config", "user.email", "t@t"},
+		{"-C", src, "config", "user.name", "t"},
+		{"-C", src, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	bare := filepath.Join(parent, "bare.git")
+	if err := exec.Command("git", "clone", "--bare", src, bare).Run(); err != nil {
+		t.Fatalf("git clone --bare: %v", err)
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", bare, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add from bare: %v", err)
+	}
+
+	project := registerTestProject(t, worktree)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a personal disable must hold through re-attribution, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, worktree)).reason; got != rootAgentDisabled {
+		t.Fatalf("a bare-clone linked-worktree registration must re-attribute once its path resolves — the marker lives in the common dir the RECORDED path binds to — got reason %d", got)
+	}
+}
+
+// TestReattributionRespectsActiveDeleteFence pins the #3299 review's round-2
+// P1: DeleteProject installs its admission fence (projectDeletes) under the
+// derived ID BEFORE it records the deletion tombstone. Re-attribution inside
+// that window would publish the project under a real ID the in-flight delete
+// has never heard of, and the singleton sweep would create the root mid-
+// delete. A fenced entry must stay unresolved.
+func TestReattributionRespectsActiveDeleteFence(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/fenced\"")
+	rewriteRecordRoot(t, project.ID, worktree)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A delete is mid-flight: the fence is installed under the derived ID,
+	// the tombstone not yet.
+	manager.mu.Lock()
+	manager.projectDeletes[config.RepoIDForRecordedRoot(worktree)] = struct{}{}
+	manager.mu.Unlock()
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("re-attribution during an active delete fence must not publish the project under a real ID the delete cannot fence, got %d creates", len(*seen))
+	}
+	if layers := manager.rootAgentLayers.Load(); len(layers.unresolvedRoots) != 1 {
+		t.Fatalf("a fenced entry must stay unresolved so the finished delete's tombstone keeps its derived-ID target, got %d unresolved entries", len(layers.unresolvedRoots))
+	}
+}
+
 // TestReattributionCarriesDeletionTombstone pins the #3299 review's deletion
 // rule: DeleteProject on an unresolved project can only key its suppression by
 // the derived recorded-path ID, so re-attribution onto the repo's real ID must

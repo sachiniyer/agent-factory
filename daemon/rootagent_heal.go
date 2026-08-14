@@ -268,10 +268,21 @@ func projectRecordDirPresent(projectID string) bool {
 // clone reusing the recorded path would inherit the project's personal layer
 // and an autonomous root the user never opted that clone into; without the
 // marker the project simply stays unresolved, and the log names the rebind
-// remedy. A deletion tombstone recorded under the derived ID while the root
-// was unresolved is carried onto the real ID (#3299 review): DeleteProject
-// keyed deletedRootRepos by the only identity it had, and losing it across
-// re-attribution would resurrect an explicitly deleted project's root.
+// remedy. The marker is probed at the RECORDED path, never at repo.Root
+// (#3299 review round 2): for a linked worktree of a bare clone, RepoFromPath
+// resolves repo.Root to the parent of the bare common directory — not a
+// worktree at all — while the recorded path binds to the same common dir the
+// marker lives in, exactly how Register/Rebind probe it. A deletion tombstone
+// recorded under the derived ID while the root was unresolved is carried onto
+// the real ID (#3299 review): DeleteProject keyed deletedRootRepos by the
+// only identity it had, and losing it across re-attribution would resurrect
+// an explicitly deleted project's root. An entry whose derived ID sits behind
+// an ACTIVE delete fence (projectDeletes) is skipped outright: the fence is
+// installed before the tombstone, so re-attributing inside that window would
+// publish the project under a real ID the in-flight delete has never heard
+// of; left unresolved, the fence and the tombstone that follows it both keep
+// applying to the derived ID, and the next pass carries the finished
+// tombstone across.
 //
 // On acceptance the project's layers move from the recorded-path derived ID
 // to the repo's REAL identity — which also differs when the recorded root is
@@ -290,13 +301,25 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 		if err != nil {
 			continue
 		}
-		matches, err := config.ProjectCheckoutMatches(repo.Root, record.checkoutID)
+		matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
 		if err != nil || !matches {
 			if err != nil {
 				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be verified; leaving project %s unresolved: %v", record.root, record.projectID, err)
 			} else {
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it)", record.root, record.projectID, record.checkoutID, record.projectID)
+				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
 			}
+			continue
+		}
+		m.mu.Lock()
+		_, fenced := m.projectDeletes[derivedID]
+		if !fenced && derivedID != repo.ID {
+			if _, tombstoned := m.deletedRootRepos[derivedID]; tombstoned {
+				m.deletedRootRepos[repo.ID] = struct{}{}
+			}
+		}
+		m.mu.Unlock()
+		if fenced {
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete's fence and tombstone keep their derived-ID target", record.root, record.projectID)
 			continue
 		}
 		if !changed {
@@ -315,13 +338,6 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 		if projectID, ok := healed.personalUnreadable[derivedID]; ok && derivedID != repo.ID {
 			healed.personalUnreadable[repo.ID] = projectID
 			delete(healed.personalUnreadable, derivedID)
-		}
-		if derivedID != repo.ID {
-			m.mu.Lock()
-			if _, tombstoned := m.deletedRootRepos[derivedID]; tombstoned {
-				m.deletedRootRepos[repo.ID] = struct{}{}
-			}
-			m.mu.Unlock()
 		}
 		healed.projectRoots[repo.ID] = repo.Root
 		delete(healed.unresolvedRoots, derivedID)
