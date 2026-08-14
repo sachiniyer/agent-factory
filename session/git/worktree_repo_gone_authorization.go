@@ -487,20 +487,73 @@ const archivedWorktreePointerMaxSize = 1 << 16
 // Bounded like every other filesystem probe on this path (#3278 review): the
 // caller holds the session operation lock, and a stalled FUSE/NFS mount would
 // otherwise hang the kill on a plain open, fstat, read, or lstat. A tripped
-// deadline is an unknown, fail-closed answer.
+// deadline is an unknown, fail-closed answer — and it latches: a retry while
+// the stuck worker is still in flight is refused instead of stacking another
+// goroutine and descriptor against the same stalled path, mirroring
+// boundedRepoGoneOriginProbe's per-path flight.
 func VerifyArchivedWorktreePointer(worktreePath string) error {
-	resultC := make(chan error, 1)
-	go func() { resultC <- verifyArchivedWorktreePointer(worktreePath) }()
+	archivedPointerFlights.Lock()
+	if active := archivedPointerFlights.byPath[worktreePath]; active != nil {
+		if active.timedOut {
+			archivedPointerFlights.Unlock()
+			return fmt.Errorf(
+				"archived worktree pointer check under %s is still running after an earlier deadline: %w",
+				worktreePath, context.DeadlineExceeded,
+			)
+		}
+		archivedPointerFlights.Unlock()
+		return waitForArchivedPointerFlight(worktreePath, active)
+	}
+	flight := &archivedPointerFlight{done: make(chan struct{})}
+	archivedPointerFlights.byPath[worktreePath] = flight
+	archivedPointerFlights.Unlock()
+	go func() {
+		flight.err = verifyArchivedWorktreePointer(worktreePath)
+		archivedPointerFlights.Lock()
+		if archivedPointerFlights.byPath[worktreePath] == flight {
+			delete(archivedPointerFlights.byPath, worktreePath)
+		}
+		close(flight.done)
+		archivedPointerFlights.Unlock()
+	}()
+	return waitForArchivedPointerFlight(worktreePath, flight)
+}
+
+// archivedPointerFlight dedupes concurrent pointer verifications of one path
+// and latches after a deadline so retries cannot accumulate workers against a
+// stalled mount. No cancel: the worker's raw syscalls are not context-aware,
+// so the latch — refuse new callers until the stuck worker finally returns
+// and unpublishes itself — is the containment.
+type archivedPointerFlight struct {
+	done     chan struct{}
+	err      error
+	timedOut bool
+}
+
+var archivedPointerFlights = struct {
+	sync.Mutex
+	byPath map[string]*archivedPointerFlight
+}{byPath: map[string]*archivedPointerFlight{}}
+
+func waitForArchivedPointerFlight(worktreePath string, flight *archivedPointerFlight) error {
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
-	case err := <-resultC:
-		return err
+	case <-flight.done:
+		return flight.err
 	case <-timer.C:
-		return fmt.Errorf(
-			"timed out after %s while verifying archived worktree pointer under %s: %w",
-			relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
-		)
+		archivedPointerFlights.Lock()
+		if archivedPointerFlights.byPath[worktreePath] == flight {
+			flight.timedOut = true
+			archivedPointerFlights.Unlock()
+			return fmt.Errorf(
+				"timed out after %s while verifying archived worktree pointer under %s: %w",
+				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+			)
+		}
+		archivedPointerFlights.Unlock()
+		<-flight.done
+		return flight.err
 	}
 }
 

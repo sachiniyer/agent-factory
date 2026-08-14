@@ -349,6 +349,39 @@ func TestKillSession_DirectRepoGoneForeignWorktreeRefused(t *testing.T) {
 		"the foreign worktree must be left untouched")
 }
 
+// TestKillSession_ArchivedSiblingWorktreeAtPathRefused: `git worktree remove
+// -f` trusts registration alone, so a different worktree of the same
+// still-present origin parked at the archived path would be accepted and
+// deleted, dirty changes included (#3278 review). The registered-only cleanup
+// must prove the registration carries THIS session's branch before the
+// destructive remove, and refuse otherwise with the record retained.
+func TestKillSession_ArchivedSiblingWorktreeAtPathRefused(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-sibling-parked")
+
+	// Move the real archive aside, drop its stale registration, and park a
+	// sibling worktree (different branch, dirty) at the archived path.
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, exec.Command("git", "-C", repoPath, "worktree", "prune").Run())
+	siblingPath := filepath.Join(t.TempDir(), "sibling-wt")
+	require.NoError(t, exec.Command("git", "-C", repoPath,
+		"worktree", "add", "-b", "sibling-branch", siblingPath).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(siblingPath, "dirty-sibling.txt"),
+		[]byte("uncommitted sibling work"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", repoPath,
+		"worktree", "move", siblingPath, archivedPath).Run())
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-sibling-parked", RepoID: repoID})
+	require.Error(t, err,
+		"a sibling worktree registered at the archived path must not be deleted on this session's kill")
+	assert.ErrorContains(t, err, "not provably this session's worktree")
+	assert.True(t, exists(filepath.Join(archivedPath, "dirty-sibling.txt")),
+		"the sibling's dirty work must be left untouched")
+	require.NotNil(t, recordFor(t, repoID, "direct-sibling-parked"),
+		"the refused kill must retain the tombstoned record")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a

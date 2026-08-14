@@ -46,10 +46,9 @@ func TestKillTeardown_SettledOrdinaryCleanupWithSurvivingArchiveReportsUnknown(t
 
 	state, err := mode.handleWorktree(gw, "wt")
 	require.Error(t, err,
-		"a settled ordinary cleanup that left the archived directory in place must be reported unknown")
-	assert.Equal(t, stateUnknown, state)
-	assert.ErrorIs(t, err, ErrWorkspaceStateUnknown,
-		"the caller keys record retention off the unknown-state classifier")
+		"an archived cleanup against a vanished origin must be reported unknown, never settled")
+	assert.Equal(t, stateUnknown, state,
+		"teardownTabs keys record retention off this state and adds the ErrWorkspaceStateUnknown wrap")
 	assert.DirExists(t, archivedPath, "the archived directory must be left intact for the retry")
 }
 

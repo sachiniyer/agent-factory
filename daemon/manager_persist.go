@@ -510,7 +510,7 @@ var ghostCleanupWorktree = func(
 	archivedRecordFree := data.Status == session.Archived &&
 		data.Worktree.RelocationRecovery == nil && ghostRestoredWorktreeRemovable(data)
 	if archivedRecordFree {
-		if _, statErr := os.Lstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := git.BoundedLstat(data.Worktree.WorktreePath); !errors.Is(statErr, os.ErrNotExist) {
 			if originErr := git.CheckRepoPresentForRelocation(data.Worktree.RepoPath); originErr != nil {
 				return git.CleanupStateUnknown, fmt.Errorf(
 					"origin repo state for this archived ghost could not be proven present at its cleanup boundary; the archived worktree was left intact — kill again once the origin state settles: %w",

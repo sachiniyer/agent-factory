@@ -284,6 +284,30 @@ func mayDeleteWorktreeDir(registered, probeAnswered bool, removeErr error) bool 
 	return strings.Contains(removeErr.Error(), "validation failed")
 }
 
+// worktreeListedBranch returns the branch ref (`refs/heads/...`) the porcelain
+// listing records for worktreePath, and whether the path is listed at all. A
+// detached checkout reports an empty branch with listed=true. Shares
+// worktreeListed's normalization so the two probes cannot disagree about which
+// entry is "this" worktree.
+func worktreeListedBranch(porcelain, worktreePath string) (string, bool) {
+	target := normalizeWorktreePath(worktreePath)
+	matched := false
+	branch := ""
+	for _, line := range strings.Split(porcelain, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if matched {
+				return branch, true
+			}
+			matched = normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target
+			branch = ""
+		case matched && strings.HasPrefix(line, "branch "):
+			branch = strings.TrimPrefix(line, "branch ")
+		}
+	}
+	return branch, matched
+}
+
 // worktreeListed reports whether `git worktree list --porcelain` output names
 // worktreePath. The single scanner behind every registration probe in this
 // package — the probes differ only in how they BOUND the git call, never in how

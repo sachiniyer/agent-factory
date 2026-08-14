@@ -519,8 +519,9 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 				// and ordinary cleanup settles the missing path and clears the
 				// stale record — recheck only while the directory still
 				// exists, or a gone origin would strand an empty record
-				// forever.
-				if _, statErr := os.Lstat(gw.GetWorktreePath()); errors.Is(statErr, os.ErrNotExist) {
+				// forever. Bounded: this runs under the session operation
+				// lock, so a stalled mount must time out, not wedge the kill.
+				if _, statErr := git.BoundedLstat(gw.GetWorktreePath()); errors.Is(statErr, os.ErrNotExist) {
 					return nil
 				}
 				if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {
@@ -631,11 +632,12 @@ func (m teardownKill) handleWorktree(gw *git.GitWorktree, title string) (teardow
 // ArchivedCleanupSettled decides whether a settled ordinary cleanup may stand
 // for an archived record-free kill (#3278 review). Nil means the pathname
 // conclusively answers ENOENT — the archive is dealt with. Anything else — the
-// path still occupied, or a stat that failed rather than answered — returns
-// the reason the settlement cannot be trusted, and the caller retains the row.
-// Exported because the daemon's ghost cleanup shares the exact decision.
+// path still occupied, or a stat that failed, stalled, or timed out rather
+// than answered — returns the reason the settlement cannot be trusted, and the
+// caller retains the row. Exported because the daemon's ghost cleanup shares
+// the exact decision.
 func ArchivedCleanupSettled(path string) error {
-	if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := git.BoundedLstat(path); !errors.Is(statErr, os.ErrNotExist) {
 		reason := fmt.Errorf("the archived worktree could not be proven absent at %s", path)
 		if statErr != nil {
 			reason = errors.Join(reason, statErr)

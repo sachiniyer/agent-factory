@@ -349,7 +349,7 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 		!ghostRestoredWorktreeRemovable(&restored) {
 		return nil
 	}
-	if _, statErr := os.Lstat(restored.Worktree.WorktreePath); errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := sessiongit.BoundedLstat(restored.Worktree.WorktreePath); errors.Is(statErr, os.ErrNotExist) {
 		// An absent archived directory has nothing to orphan: ghost cleanup
 		// settles the missing path and clears the stale row (#3278 review).
 		// Refusing here would make the row permanently undeletable.

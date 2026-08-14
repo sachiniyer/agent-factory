@@ -1,10 +1,41 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
+
+// BoundedLstat runs os.Lstat through the shared identity-probe deadline (#3278
+// review). The destruction path's absence checks run while the caller holds
+// the session operation lock, so a stalled FUSE/NFS mount must surface as a
+// timeout — an unknown, fail-closed answer distinct from ENOENT — never as an
+// unbounded syscall wedging the kill. Mirrors boundedRelocationPathIdentity's
+// worker shape; like it, a timed-out worker is abandoned rather than joined.
+func BoundedLstat(path string) (os.FileInfo, error) {
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		info, err := os.Lstat(path)
+		resultC <- result{info: info, err: err}
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		return observed.info, observed.err
+	case <-timer.C:
+		return nil, fmt.Errorf(
+			"timed out after %s while checking path %s: %w",
+			relocationIdentityTimeout, path, context.DeadlineExceeded,
+		)
+	}
+}
 
 // SettleStalledRelocationForAbsentPath clears an identity-unknown stalled
 // record once its guarded pathname is conclusively absent (#3278 review). Such
@@ -23,7 +54,7 @@ func (g *GitWorktree) SettleStalledRelocationForAbsentPath() error {
 		g.relocationRecovery.IdentityKnown {
 		return fmt.Errorf("no identity-unknown stalled relocation record to settle")
 	}
-	if _, err := os.Lstat(g.worktreePath); !errors.Is(err, os.ErrNotExist) {
+	if _, err := BoundedLstat(g.worktreePath); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("stalled relocation path %s is not conclusively absent: %v", g.worktreePath, err)
 	}
 	g.relocationRecovery = nil
