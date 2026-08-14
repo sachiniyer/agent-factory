@@ -126,7 +126,7 @@ test("tinted semantic states consume their contrast-safe text tokens", () => {
   assert.match(css, /\.af-config-notice\s*\{[^}]*color:\s*var\(--af-accent-text\)/s);
   assert.match(
     css,
-    /\.af-project-item-current \.af-project-item-path\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s,
+    /\.af-project-item-current \.af-project-item-path,\s*\.af-project-item-current \.af-project-item-meta\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s,
   );
   assert.match(css, /\.af-row-selected\s*\{[^}]*color:\s*var\(--af-selected-text\)/s);
   assert.match(css, /\.af-row-selected \.af-row-branch\s*\{[^}]*color:\s*var\(--af-selected-text-muted\)/s);

@@ -651,7 +651,8 @@ button:disabled,
   color: var(--af-accent-text);
 }
 
-.af-project-item-current .af-project-item-path {
+.af-project-item-current .af-project-item-path,
+.af-project-item-current .af-project-item-meta {
   color: var(--af-selected-text-muted);
 }
 
