@@ -124,6 +124,12 @@ type CreateSessionRequest struct {
 
 type CreateSessionResponse struct {
 	Instance session.InstanceData `json:"instance"`
+	// The response stays successful on a committed failure — a create that
+	// retained and durably recorded its session/workspace (#3233) — so every
+	// transport keeps Instance and clients can address the retained row
+	// instead of treating the create as an untouched, freely retryable
+	// failure. VALUE embed, never a pointer: gob elides zero values.
+	MutationOutcome
 }
 
 type KillSessionRequest struct {
