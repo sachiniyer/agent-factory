@@ -509,10 +509,15 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 // together with its resolved and tmux names across the gob transport.
 func CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	var resp CreateTabResponse
-	if err := callDaemon("CreateTab", req, &resp); err != nil {
+	err := callDaemon("CreateTab", req, &resp)
+	// callDaemon classifies the committed outcome generically; keep the payload
+	// on that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the CLI must report so the survivor
+	// can be targeted. Only a clean failure has nothing to return.
+	if err != nil && !isMutationCommitted(err) {
 		return CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab on an existing session and
