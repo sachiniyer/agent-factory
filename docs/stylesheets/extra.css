@@ -1,48 +1,106 @@
-/* ==========================================================================
-   Agent Factory — docs theme
-   Built around the TUI Zenburn accent (#8cd0d3, ui/theme.go). The deeper teals
-   here are contrast-safe derivatives of that accent so the docs read as the
-   same product: the raw accent shines in dark mode, a deeper teal carries the
-   light-mode header/links where white-on-accent would fail WCAG.
-   ========================================================================== */
+/* Agent Factory docs — #3220 design language.
+   Components consume semantic tokens only. The two scheme blocks are the
+   built-in Nord-derived floor shared with the web client; Material's local
+   light/dark choice still decides which block applies. */
 
 :root {
-  --af-teal:        #8cd0d3;  /* the default TUI AccentColor, verbatim */
-  --af-teal-deep:   #34787b;  /* light-mode primary (header, contrast-safe) */
-  --af-teal-deeper: #285f62;
-  --af-teal-soft:   #e8f4f4;
   --md-code-font: "Roboto Mono", SFMono-Regular, Consolas, monospace;
 }
 
-/* --- Light scheme -------------------------------------------------------- */
 [data-md-color-scheme="default"] {
-  --md-primary-fg-color:        var(--af-teal-deep);
-  --md-primary-fg-color--light: var(--af-teal);
-  --md-primary-fg-color--dark:  var(--af-teal-deeper);
-  --md-accent-fg-color:         #1f6d70;
-  --md-typeset-a-color:         var(--af-teal-deep);
+  --af-bg-canvas: #d8dee9;
+  --af-bg-surface: #e3e7ef;
+  --af-bg-inset: #ced4df;
+  --af-bg-raised: #eceff4;
+  --af-border: #4c566a;
+  --af-border-subtle: #aeb4c0;
+  --af-text: #2e3440;
+  --af-text-muted: #3b4252;
+  --af-text-dim: #434c5e;
+  --af-accent: #2d6271;
+  --af-accent-hover: #285663;
+  --af-on-accent: #eceff4;
+  --af-focus-ring: #2d6271;
+  --af-media-bg: #2e3440;
+
+  --md-default-bg-color: var(--af-bg-canvas);
+  --md-default-fg-color: var(--af-text);
+  --md-default-fg-color--light: var(--af-text-muted);
+  --md-default-fg-color--lighter: var(--af-text-dim);
+  --md-default-fg-color--lightest: var(--af-border-subtle);
+  --md-primary-fg-color: var(--af-accent);
+  --md-primary-fg-color--light: var(--af-accent);
+  --md-primary-fg-color--dark: var(--af-accent-hover);
+  --md-primary-bg-color: var(--af-on-accent);
+  --md-accent-fg-color: var(--af-accent);
+  --md-typeset-a-color: var(--af-accent);
+  --md-code-bg-color: var(--af-bg-inset);
+  --md-code-fg-color: var(--af-text);
 }
 
-/* --- Dark scheme: the raw TUI accent leads ------------------------------- */
 [data-md-color-scheme="slate"] {
-  --md-primary-fg-color:        #163033;
-  --md-primary-fg-color--light: var(--af-teal);
-  --md-primary-fg-color--dark:  #0f2426;
-  --md-accent-fg-color:         var(--af-teal);
-  --md-typeset-a-color:         var(--af-teal);
-  --md-default-bg-color:        #0e1516;
-  --af-teal-soft:               #16292b;
+  --af-bg-canvas: #2e3440;
+  --af-bg-surface: #3b4252;
+  --af-bg-inset: #313744;
+  --af-bg-raised: #434c5e;
+  --af-border: #9299a7;
+  --af-border-subtle: #596070;
+  --af-text: #d8dee9;
+  --af-text-muted: #c3cbd6;
+  --af-text-dim: #b4bcc8;
+  --af-accent: #90c4d3;
+  --af-accent-hover: #9dcbd8;
+  --af-on-accent: #2e3440;
+  --af-focus-ring: #90c4d3;
+  --af-media-bg: #2e3440;
+
+  --md-default-bg-color: var(--af-bg-canvas);
+  --md-default-fg-color: var(--af-text);
+  --md-default-fg-color--light: var(--af-text-muted);
+  --md-default-fg-color--lighter: var(--af-text-dim);
+  --md-default-fg-color--lightest: var(--af-border-subtle);
+  --md-primary-fg-color: var(--af-accent);
+  --md-primary-fg-color--light: var(--af-accent);
+  --md-primary-fg-color--dark: var(--af-accent-hover);
+  --md-primary-bg-color: var(--af-on-accent);
+  --md-accent-fg-color: var(--af-accent);
+  --md-typeset-a-color: var(--af-accent);
+  --md-code-bg-color: var(--af-bg-inset);
+  --md-code-fg-color: var(--af-text);
 }
 
-/* Header/nav follow the primary; in dark mode keep the tab bar deep-teal. */
-[data-md-color-scheme="slate"] .md-header,
-[data-md-color-scheme="slate"] .md-tabs {
-  background-color: #0f2426;
+.md-header,
+.md-tabs {
+  color: var(--af-text);
+  background: var(--af-bg-surface);
+  border-bottom: 1px solid var(--af-border-subtle);
+  box-shadow: none;
 }
 
-/* ==========================================================================
-   Typography & header wordmark
-   ========================================================================== */
+.md-header__button,
+.md-tabs__link {
+  color: var(--af-text);
+}
+
+.md-search__form {
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border);
+}
+
+.md-search__input,
+.md-search__input::placeholder {
+  color: var(--af-text-muted);
+}
+
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  color: var(--af-accent);
+}
+
+:where(a, button, input, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--af-focus-ring);
+  outline-offset: 2px;
+}
 
 .md-header__title .md-header__topic:first-child .md-ellipsis {
   font-weight: 700;
@@ -52,223 +110,210 @@
 .md-typeset h1,
 .md-typeset h2,
 .md-typeset h3 {
-  letter-spacing: -0.015em;
   font-weight: 700;
+  letter-spacing: -0.015em;
 }
 
 .md-typeset h2 {
-  margin-top: 2.4rem;
+  margin-top: 1.8rem;
 }
 
-/* ==========================================================================
-   Hero (injected via overrides/home.html)
-   ========================================================================== */
+.md-main__inner {
+  margin-top: 0.6rem;
+}
 
+/* Landing-page hero, injected by overrides/home.html. */
 .af-hero {
-  background:
-    radial-gradient(1200px 400px at 15% -10%, rgba(124, 184, 187, 0.22), transparent 60%),
-    linear-gradient(180deg, var(--af-teal-soft) 0%, transparent 100%);
-  border-bottom: 1px solid var(--md-default-fg-color--lightest);
-  padding: 3.2rem 0.8rem 2.6rem;
-}
-
-[data-md-color-scheme="slate"] .af-hero {
-  background:
-    radial-gradient(1200px 400px at 15% -10%, rgba(124, 184, 187, 0.16), transparent 60%),
-    linear-gradient(180deg, #16292b 0%, transparent 100%);
+  padding: 1.4rem 0.8rem;
+  background: var(--af-bg-surface);
+  border-bottom: 1px solid var(--af-border-subtle);
 }
 
 .af-hero__inner {
-  max-width: 61rem;
-  margin: 0 auto;
   display: grid;
   grid-template-columns: 1.05fr 1fr;
-  gap: 2.4rem;
+  gap: 1.2rem;
   align-items: center;
+  max-width: 61rem;
+  margin: 0 auto;
 }
 
 .af-hero__eyebrow {
-  display: inline-block;
-  font-size: 0.66rem;
+  display: block;
+  margin-bottom: 0.45rem;
+  padding-left: 0.45rem;
+  color: var(--af-accent);
+  border-left: 2px solid var(--af-accent);
+  font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--af-teal-deep);
-  background: var(--af-teal-soft);
-  padding: 0.28rem 0.6rem;
-  border-radius: 999px;
-  margin-bottom: 0.9rem;
-}
-
-[data-md-color-scheme="slate"] .af-hero__eyebrow {
-  color: var(--af-teal);
+  letter-spacing: 0.02em;
 }
 
 .af-hero__title {
-  font-size: 2.15rem;
-  line-height: 1.12;
+  margin: 0 0 0.55rem;
+  font-size: 1.9rem;
   font-weight: 800;
   letter-spacing: -0.025em;
-  margin: 0 0 0.7rem;
+  line-height: 1.15;
 }
 
 .af-hero__title code {
-  background: rgba(124, 184, 187, 0.18);
-  color: var(--af-teal-deep);
-  padding: 0 0.24em;
-  border-radius: 0.24rem;
-}
-
-[data-md-color-scheme="slate"] .af-hero__title code {
-  color: var(--af-teal);
+  padding: 0 0.2em;
+  color: var(--af-text);
+  background: var(--af-bg-inset);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: 0.2rem;
 }
 
 .af-hero__tagline {
-  font-size: 0.92rem;
-  line-height: 1.6;
-  color: var(--md-default-fg-color--light);
-  margin: 0 0 1.3rem;
   max-width: 34rem;
+  margin: 0 0 0.8rem;
+  color: var(--af-text-muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
 }
 
 .af-hero__cta {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.7rem;
+  gap: 0.4rem;
 }
 
 .af-hero__cta .md-button {
   margin: 0;
 }
 
-.af-hero__cta .md-button--primary {
-  box-shadow: 0 6px 18px rgba(46, 124, 128, 0.28);
+.af-hero__cta .md-button,
+.md-typeset .md-button {
+  padding: 0.3rem 0.55rem;
+  color: var(--af-text);
+  border-color: var(--af-border);
+  border-radius: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
-.af-hero__media {
-  position: relative;
+.af-hero__cta .md-button:hover,
+.md-typeset .md-button:hover {
+  color: var(--af-text);
+  background: var(--af-bg-inset);
+  border-color: var(--af-accent);
+}
+
+.af-hero__cta .md-button--primary,
+.af-hero__cta .md-button--primary:hover,
+.md-typeset .md-button--primary,
+.md-typeset .md-button--primary:hover {
+  color: var(--af-on-accent);
+  background: var(--af-accent);
+  border-color: var(--af-accent);
+}
+
+.af-hero__cta .md-button--primary:hover,
+.md-typeset .md-button--primary:hover {
+  background: var(--af-accent-hover);
+  border-color: var(--af-accent-hover);
 }
 
 .af-hero__media :is(video, img) {
   display: block;
   width: 100%;
-  border-radius: 0.6rem;
-  border: 1px solid var(--md-default-fg-color--lightest);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.22);
+  background: var(--af-media-bg);
+  border: 1px solid var(--af-border);
+  border-radius: 0.25rem;
+  box-shadow: none;
 }
 
 .af-hero__media video {
   aspect-ratio: 2.2 / 1;
-  background: #282a36;
 }
 
 .af-hero__badges {
-  margin-top: 1.4rem;
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem 1.1rem;
-  font-size: 0.72rem;
-  color: var(--md-default-fg-color--light);
+  gap: 0.3rem 0.8rem;
+  margin-top: 0.8rem;
+  color: var(--af-text-muted);
+  font-size: 0.7rem;
 }
 
 .af-hero__badges span {
   display: inline-flex;
+  gap: 0.3rem;
   align-items: center;
-  gap: 0.35rem;
 }
 
 .af-hero__badges svg {
-  width: 0.9rem;
-  height: 0.9rem;
-  fill: var(--af-teal-deep);
-}
-
-[data-md-color-scheme="slate"] .af-hero__badges svg {
-  fill: var(--af-teal);
+  width: 0.85rem;
+  height: 0.85rem;
+  fill: var(--af-accent);
 }
 
 @media screen and (max-width: 44.9375em) {
   .af-hero__inner {
     grid-template-columns: 1fr;
-    gap: 1.6rem;
+    gap: 0.8rem;
   }
+
   .af-hero__title {
-    font-size: 1.7rem;
+    font-size: 1.6rem;
   }
+
   .af-hero__media {
     order: -1;
   }
 }
 
-/* Home page: suppress Material's auto-injected "Home" <h1> — the hero already
-   carries the page title/wordmark. */
+/* The hero already owns the landing-page title. */
 .af-home > h1:first-child {
   display: none;
 }
 
-/* ==========================================================================
-   Grid cards — capability grid
-   ========================================================================== */
-
+/* Capability and start-here cards stay dense and flat. */
 .md-typeset .grid.cards > ul > li,
 .md-typeset .grid.cards > :is(ul, ol) > li {
-  border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 0.6rem;
-  padding: 1.1rem 1.15rem;
-  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  padding: 0.7rem 0.75rem;
+  background: var(--af-bg-raised);
+  border: 1px solid var(--af-border-subtle);
+  border-radius: 0.25rem;
+  box-shadow: none;
+  transition: none;
 }
 
 .md-typeset .grid.cards > :is(ul, ol) > li:hover {
-  border-color: var(--af-teal);
-  box-shadow: 0 10px 30px rgba(46, 124, 128, 0.16);
-  transform: translateY(-2px);
+  background: var(--af-bg-inset);
+  border-color: var(--af-accent);
+  box-shadow: none;
+  transform: none;
 }
 
 .md-typeset .grid.cards > :is(ul, ol) > li > hr {
-  margin: 0.7rem 0;
-  border-color: var(--md-default-fg-color--lightest);
+  margin: 0.55rem 0;
+  border-color: var(--af-border-subtle);
 }
 
 .md-typeset .grid.cards .twemoji.lg,
 .md-typeset .grid.cards .lg.middle {
-  color: var(--af-teal-deep);
+  color: var(--af-accent);
 }
-
-[data-md-color-scheme="slate"] .md-typeset .grid.cards .twemoji.lg,
-[data-md-color-scheme="slate"] .md-typeset .grid.cards .lg.middle {
-  color: var(--af-teal);
-}
-
-/* ==========================================================================
-   Section heading above the card grid
-   ========================================================================== */
 
 .af-section-label {
-  text-align: center;
+  margin: 0.8rem 0 0.15rem;
+  color: var(--af-accent);
   font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--af-teal-deep);
-  margin: 2.6rem 0 0.2rem;
-}
-
-[data-md-color-scheme="slate"] .af-section-label {
-  color: var(--af-teal);
+  letter-spacing: 0.02em;
 }
 
 .af-section-title {
-  text-align: center;
-  margin-top: 0.2rem !important;
+  margin-top: 0.15rem !important;
 }
 
-/* ==========================================================================
-   Diagrams
-   ========================================================================== */
-
+/* Diagrams, tables, and real-product examples. */
 .md-typeset .mermaid {
-  margin: 1.4rem auto;
   max-width: 44rem;
+  margin: 1rem auto;
   overflow-x: auto;
   text-align: center;
 }
@@ -278,31 +323,23 @@
   height: auto;
 }
 
-/* ==========================================================================
-   Wide tables
-   ========================================================================== */
-
 .md-typeset .af-table-wide {
-  margin: 1rem 0 1.6rem;
+  margin: 0.8rem 0 1.2rem;
   overflow-x: auto;
   overscroll-behavior-x: contain;
 }
 
 .md-typeset .af-table-wide table {
-  margin: 0;
   width: 100%;
+  margin: 0;
 }
 
 .md-typeset .af-table-wide :is(th, td) {
   vertical-align: top;
 }
 
-/* ==========================================================================
-   Visual examples
-   ========================================================================== */
-
 .md-typeset .af-visual-example {
-  margin: 1rem 0 1.6rem;
+  margin: 0.8rem 0 1.2rem;
 }
 
 .md-typeset .af-visual-example > :first-child {
@@ -314,27 +351,21 @@
 }
 
 .md-typeset .af-visual-example figure {
-  margin: 0.8rem 0 0;
   width: 100%;
+  margin: 0.6rem 0 0;
 }
 
 .md-typeset .af-visual-example figure p {
-  margin: 0;
   width: 100%;
+  margin: 0;
 }
 
 .md-typeset .af-visual-example img {
   display: block;
-  height: auto;
-  max-width: 100%;
   width: 100%;
-  border: 1px solid var(--md-default-fg-color--lightest);
-  border-radius: 8px;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
-}
-
-/* Buttons: rounder, product-flavored */
-.md-typeset .md-button {
-  border-radius: 0.5rem;
-  font-weight: 600;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--af-border);
+  border-radius: 0.25rem;
+  box-shadow: none;
 }
