@@ -178,7 +178,9 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	var sessionEnv []string
 	if account != "" {
 		identityNames := sessionenv.AccountIdentityNames(accountAgent)
-		launchEnv = removeEnvironmentNames(launchEnv, identityNames)
+		boundaryNames := append([]string(nil), identityNames...)
+		boundaryNames = append(boundaryNames, sessionenv.AccountShellStartupNames()...)
+		launchEnv = removeEnvironmentNames(launchEnv, boundaryNames)
 		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
 		if resolveErr != nil {
 			return "", nil, nil, nil, "", resolveErr
@@ -186,7 +188,9 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		// Selected roots belong to this tmux session, not the client environment:
 		// a fresh server copies its first client's environment globally.
 		sessionEnv = selectedEnv
-		importNames = appendMissingEnvironmentNames(importNames, identityNames)
+		// Keep every removed name in update-environment so an existing server
+		// explicitly unsets stale identities and startup hooks before new-session.
+		importNames = appendMissingEnvironmentNames(importNames, boundaryNames)
 	}
 	defaultCommand := ""
 	if account != "" {

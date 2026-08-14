@@ -211,6 +211,18 @@ func TestApplyAccountEnvironment_RefusesHistoryReplay(t *testing.T) {
 	require.Error(t, err, "history replay must not execute an unvalidated identity mutation")
 }
 
+func TestApplyAccountEnvironment_RefusesIntegerDeclarationSideEffect(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "declare -i x=CODEX_HOME=42; codex", account)
+	require.Error(t, err, "integer-attributed declarations must not evaluate an identity assignment")
+}
+
+func TestApplyAccountEnvironment_RefusesDynamicBuiltinLoading(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "enable -f ./evil.so evil; evil; codex", account)
+	require.Error(t, err, "a dynamically loaded builtin can mutate the current shell environment")
+}
+
 func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{

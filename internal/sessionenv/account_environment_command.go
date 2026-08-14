@@ -138,7 +138,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
 		isBareName(words[0], "source"), isBareName(words[0], "trap"),
 		isBareName(words[0], "alias"), isBareName(words[0], "fc"),
-		isBareName(words[0], "history"):
+		isBareName(words[0], "history"), isBareName(words[0], "enable"):
 		// These builtins execute or schedule another shell program in the same
 		// environment, define commands that do, or load/replay unparsed history.
 		// Proving their effects would require a second parser pass with runtime
@@ -401,7 +401,7 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 				continue
 			}
 			if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
-				if value == "-n" || value == "+n" || value == "--nameref" {
+				if value == "-n" || value == "+n" || value == "--nameref" || value == "-i" {
 					return true
 				}
 				if len(value) != 2 {

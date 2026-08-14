@@ -20,6 +20,18 @@ var accountShellStartupNames = map[string]struct{}{
 	"ZDOTDIR":        {},
 }
 
+// AccountShellStartupNames returns environment variables that can execute or
+// select shell startup code before an account-scoped command reaches its exec
+// shim. Tmux removes these from its own command-shell boundary as well.
+func AccountShellStartupNames() []string {
+	names := make([]string, 0, len(accountShellStartupNames))
+	for name := range accountShellStartupNames {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // AccountShellCommand turns the user's shell executable into an interactive,
 // startup-file-free command. Shell startup files are code and could replace the
 // identity variables after the account boundary established them.

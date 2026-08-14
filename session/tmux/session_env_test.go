@@ -168,9 +168,22 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 
 	agent := NewTmuxSession("account-parent", "codex")
 	agent.SetAccountForAgent("codex", "work")
-	_, _, _, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
+	if err := agent.SetEnvPassthrough([]string{"BASH_ENV", "PS1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BASH_ENV", "/tmp/ambient-bashrc")
+	t.Setenv("PS1", "$((CODEX_HOME=42))")
+	_, agentLaunchEnv, agentImports, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range []string{"BASH_ENV", "PS1"} {
+		if launchEnvironmentHasName(agentLaunchEnv, name) {
+			t.Fatalf("account tmux client environment retained shell startup hook %s", name)
+		}
+		if !slices.Contains(agentImports, name) {
+			t.Fatalf("account tmux launch did not explicitly unset stale shell startup hook %s", name)
+		}
 	}
 	if got, ok := launchEnvironmentValue(agentSessionEnv, "CODEX_HOME"); !ok || got != accountDir {
 		t.Fatalf("agent session CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
