@@ -103,6 +103,36 @@ func ListProjects() ([]Project, error) {
 	return projects, nil
 }
 
+// ListProjectsIfPresent is ListProjects with absence made explicit: present
+// is false — with a nil error — when the registry directory does not exist.
+// The daemon's fail-closed recovery needs the distinction (#3315 review): a
+// registry that is ABSENT mid-repair or mid-mount-outage must read as a
+// transition to wait out, never as an empty registry to freeze, and
+// ListProjects deliberately hides that difference for ordinary callers. An
+// empty result is bound to a present registry by a post-read check, so a
+// directory that vanishes during the read cannot masquerade as empty; a
+// registry recreated empty within that window reports present-and-empty,
+// which by then is simply the truth.
+func ListProjectsIfPresent() ([]Project, bool, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return nil, false, err
+	}
+	if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	projects, err := ListProjects()
+	if err != nil {
+		return nil, true, err
+	}
+	if len(projects) == 0 {
+		if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+			return nil, false, nil
+		}
+	}
+	return projects, true, nil
+}
+
 // ResetProjectRegistry removes durable project records and this AF home's
 // checkout markers. Markers are home-scoped so resetting one home cannot break
 // another home's registry for the same checkout. It validates every record and

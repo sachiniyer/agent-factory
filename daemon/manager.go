@@ -218,56 +218,33 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
-	// rootAgentGlobal is the global [root_agent] singleton layer (#2216 Phase 6),
-	// snapshotted at daemon start (nil when the config declared no [root_agent]).
-	// Like the RootAgents map it is immutable in memory after construction:
-	// root_agent config changes take effect on the next daemon start.
-	rootAgentGlobal *config.RootAgentLayer
-	// rootAgentPersonal maps a registered project's repo ID to its personal
-	// [root_agent] layer, snapshotted at daemon start (projects with no such
-	// override are absent). It is the highest-precedence root-agent source,
-	// merged over global and legacy in config.ResolveRootAgent.
-	rootAgentPersonal map[string]*config.RootAgentLayer
-	// rootAgentPersonalUnreadable maps the repo ID of each registered project
-	// whose personal config existed but could not be LOADED at daemon start
-	// (#3241) to that project's ID. These repos fail closed:
-	// resolvedRootAgentFor resolves them to disabled without consulting lower
-	// layers, because the unloadable file may hold the highest-precedence
-	// enabled=false. Kept as its own map rather than a synthesized personal
-	// layer so consumers can distinguish "the user disabled this" from "af
-	// could not tell" — and the project ID is what lets their refusals name
-	// the config file to fix (#3264). Snapshot-built and immutable after
-	// construction, read without a lock — the rootAgentLegacyRepoIDs
-	// discipline, not the runtime-mutated, mu-guarded deletedRootRepos one.
-	// Restart-to-apply, like the rest of the snapshot.
-	rootAgentPersonalUnreadable map[string]string
-	// rootAgentRegistryUnreadable records that the project registry itself
-	// could not be listed at daemon start (#3247). The registry is the only
-	// index of the personal configs that may hold the highest-precedence
-	// enabled=false, so while it is unreadable NO repo — including one named
-	// only by a legacy root_agents entry — can be proven un-disabled, and
-	// rootAgentDecisionUnknown fails every repo closed for this daemon run.
-	// Same immutability and restart-to-apply discipline as
-	// rootAgentPersonalUnreadable.
-	rootAgentRegistryUnreadable bool
-	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
-	// root path, snapshotted at daemon start. It is the candidate set the ensure
-	// loop visits for a root enabled purely by the global/personal singleton — a
-	// project with no legacy root_agents entry — and supplies the repo root
-	// CreateSession needs. Restart-to-apply, like RootAgents.
-	rootAgentProjectRoots map[string]string
-	// rootAgentUnresolvedRoots maps the derived repo ID of each registered
-	// project whose recorded root did not resolve at daemon start to that
-	// recorded path (#3247 arm 2). These are configured projects the singleton
-	// sweep cannot visit; verdicts name them as unresolved rather than
-	// unconfigured (#3264). Same immutability discipline as the rest of the
-	// snapshot.
-	rootAgentUnresolvedRoots map[string]string
-	// rootAgentLegacyRepoIDs is the set of repo IDs a root_agents path resolved to
-	// at daemon start. The singleton-project sweep skips these so a repo named by
-	// both a legacy entry and a registered project is ensured once — by the legacy
-	// sweep, which merges the personal layer — rather than twice.
-	rootAgentLegacyRepoIDs map[string]bool
+	// rootAgentLayers is the root-agent configuration snapshot every resolution
+	// reads (#2216 Phase 6): the global [root_agent] layer, each registered
+	// project's personal layer and resolved root, the fail-closed unknowns
+	// (#3241/#3247), and the legacy dedup set — one immutable value, republished
+	// wholesale through this atomic pointer, never mutated in place.
+	// Immutability moved from the FIELDS to the VALUE when #3264 added the
+	// safe-direction self-heal: healRootAgentLayers may replace the snapshot
+	// with one carrying FEWER unknowns (a registry that lists again, a personal
+	// config that loads again), so readers Load() once and see a consistent
+	// snapshot, lock-free, exactly as before. Config EDITS remain
+	// restart-to-apply; only a read that failed at daemon start heals mid-run,
+	// by being read successfully for the first time.
+	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
+	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
+	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
+	// clock): while every retried read keeps failing the pass backs off to
+	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealRegistryStreak and rootHealAbsenceStreaks carry the two-strike
+	// counters for absence-classified observations (the applyHomeCheck
+	// discipline): registry recovery publishes on the second consecutive
+	// present-and-listable pass, and an ENOENT personal config heals to
+	// "removed" on the second consecutive dir-present observation. All
+	// guarded by m.mu, like rootEnsureStates.
+	rootHealFailures       int
+	rootHealNextAttempt    time.Time
+	rootHealRegistryStreak int
+	rootHealAbsenceStreaks map[string]int
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -487,55 +464,52 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	rootAgents := buildRootAgentSnapshot(cfg)
+	rootAgentLayers := buildRootAgentSnapshot(cfg)
 	mgr := &Manager{
-		cfg:                         cfg,
-		previewSecret:               previewSecret,
-		previewOrigins:              newPreviewOriginRegistry(),
-		editorOriginSecret:          editorSecret,
-		editorLabels:                newEditorLabelIndex(),
-		pollReloadCh:                make(chan struct{}, 1),
-		ready:                       make(chan struct{}),
-		lifecycle:                   lifecycle,
-		storage:                     storage,
-		instances:                   make(map[string]*session.Instance),
-		pendingCreates:              make(map[string]session.InstanceData),
-		reservedTitles:              make(map[string]struct{}),
-		projectDeletes:              make(map[string]struct{}),
-		projectDeleteLastSeq:        make(map[string]uint64),
-		reservedTmuxNames:           make(map[string]string),
-		reservedRemoteNames:         make(map[string]struct{}),
-		reservedTaskRuns:            make(map[string]int),
-		ghostTaskRuns:               make(map[string]int),
-		repoStartLocks:              make(map[string]*sync.Mutex),
-		aliveObservations:           make(map[string]uint64),
-		targetLocks:                 make(map[string]*sync.Mutex),
-		rootEnsureStates:            make(map[string]*rootEnsureState),
-		rootAgentGlobal:             rootAgents.global,
-		rootAgentPersonal:           rootAgents.personal,
-		rootAgentPersonalUnreadable: rootAgents.personalUnreadable,
-		rootAgentRegistryUnreadable: rootAgents.registryUnreadable,
-		rootAgentProjectRoots:       rootAgents.projectRoots,
-		rootAgentUnresolvedRoots:    rootAgents.unresolvedRoots,
-		rootAgentLegacyRepoIDs:      rootAgents.legacyRepoIDs,
-		rootKilledAt:                make(map[string]time.Time),
-		deletedRootRepos:            make(map[string]struct{}),
-		killsInFlight:               make(map[string]struct{}),
-		killRetries:                 make(map[string]*session.CleanupRetry),
-		ghostCleanupStalls:          make(map[string]string),
-		restoresInFlight:            make(map[string]struct{}),
-		lostRestoreStates:           make(map[string]*lostRestoreState),
-		limitResumeStates:           make(map[string]*limitResumeState),
-		handoffRetryDue:             make(map[string]time.Time),
-		settleOwed:                  make(map[string]settleOwedEntry),
-		remoteLossStates:            make(map[string]*remoteLossState),
-		instanceOpLocks:             make(map[string]*sync.Mutex),
-		pausedPolls:                 make(map[string]map[string]time.Time),
-		taskRunProbeDue:             make(map[string]time.Time),
-		events:                      newEventsHub(),
-		vscode:                      vscode,
-		configAgents:                configAgents,
+		cfg:                    cfg,
+		previewSecret:          previewSecret,
+		previewOrigins:         newPreviewOriginRegistry(),
+		editorOriginSecret:     editorSecret,
+		editorLabels:           newEditorLabelIndex(),
+		pollReloadCh:           make(chan struct{}, 1),
+		ready:                  make(chan struct{}),
+		lifecycle:              lifecycle,
+		storage:                storage,
+		instances:              make(map[string]*session.Instance),
+		pendingCreates:         make(map[string]session.InstanceData),
+		reservedTitles:         make(map[string]struct{}),
+		projectDeletes:         make(map[string]struct{}),
+		projectDeleteLastSeq:   make(map[string]uint64),
+		reservedTmuxNames:      make(map[string]string),
+		reservedRemoteNames:    make(map[string]struct{}),
+		reservedTaskRuns:       make(map[string]int),
+		ghostTaskRuns:          make(map[string]int),
+		repoStartLocks:         make(map[string]*sync.Mutex),
+		aliveObservations:      make(map[string]uint64),
+		targetLocks:            make(map[string]*sync.Mutex),
+		rootEnsureStates:       make(map[string]*rootEnsureState),
+		rootKilledAt:           make(map[string]time.Time),
+		deletedRootRepos:       make(map[string]struct{}),
+		killsInFlight:          make(map[string]struct{}),
+		killRetries:            make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:     make(map[string]string),
+		restoresInFlight:       make(map[string]struct{}),
+		lostRestoreStates:      make(map[string]*lostRestoreState),
+		limitResumeStates:      make(map[string]*limitResumeState),
+		handoffRetryDue:        make(map[string]time.Time),
+		settleOwed:             make(map[string]settleOwedEntry),
+		remoteLossStates:       make(map[string]*remoteLossState),
+		instanceOpLocks:        make(map[string]*sync.Mutex),
+		pausedPolls:            make(map[string]map[string]time.Time),
+		taskRunProbeDue:        make(map[string]time.Time),
+		rootHealAbsenceStreaks: make(map[string]int),
+		events:                 newEventsHub(),
+		vscode:                 vscode,
+		configAgents:           configAgents,
 	}
+	// Publish the start-of-day root-agent snapshot; healRootAgentLayers is the
+	// only later writer, and it republishes wholesale (#3264).
+	mgr.rootAgentLayers.Store(&rootAgentLayers)
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
 	mgr.live.Store(cfg)

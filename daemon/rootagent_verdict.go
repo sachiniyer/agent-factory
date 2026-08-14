@@ -80,19 +80,22 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if deleted {
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectDeleted}
 	}
-	if m.rootAgentRegistryUnreadable {
+	// One Load for the whole verdict, so the flags, the candidacy sets, and the
+	// resolution are read from a single consistent snapshot value.
+	layers := m.rootAgentLayers.Load()
+	if layers.registryUnreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentRegistryUnreadable}
 	}
-	if projectID, unreadable := m.rootAgentPersonalUnreadable[repoID]; unreadable {
+	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
 	}
 	legacy := m.legacyRootAgentForRepo(repoID)
-	_, isProject := m.rootAgentProjectRoots[repoID]
-	_, isUnresolved := m.rootAgentUnresolvedRoots[repoID]
+	_, isProject := layers.projectRoots[repoID]
+	_, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && !isProject && !isUnresolved {
 		return rootAgentMaterializeVerdict{reason: rootAgentNotConfigured}
 	}
-	resolution := m.resolvedRootAgentFor(repoID, legacy)
+	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
 		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved}
 	}
@@ -143,7 +146,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		if dir, err := config.ProjectRegistryDir(); err == nil {
 			registry = dir
 		}
-		return fmt.Sprintf("the project registry %s could not be listed at daemon start, so af fails every root agent closed rather than start one a personal config may disable; repair the registry and restart the daemon", registry)
+		return fmt.Sprintf("the project registry %s could not be listed at daemon start, so af fails every root agent closed rather than start one a personal config may disable; repair the registry — the daemon re-checks it on its ensure cadence", registry)
 	case rootAgentPersonalUnreadable:
 		path := "its personal project config"
 		if v.projectID != "" {
@@ -151,7 +154,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 				path = p
 			}
 		}
-		return fmt.Sprintf("its personal config %s cannot be loaded (read, parsed, or validated), so af fails closed rather than ignore a disable it cannot read; repair or remove it and restart the daemon", path)
+		return fmt.Sprintf("its personal config %s cannot be loaded (read, parsed, or validated), so af fails closed rather than ignore a disable it cannot read; repair or remove it — the daemon re-checks it on its ensure cadence", path)
 	}
 	return ""
 }
