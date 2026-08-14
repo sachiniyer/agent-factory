@@ -232,6 +232,29 @@ func projectForRoot(root string) (Project, bool, error) {
 	return Project{}, false, nil
 }
 
+// WithProjectConfigLockForRoot runs fn while holding the personal config file
+// lock for the registered project rooted at root. An unregistered root has no
+// supported personal-project writer, so fn runs without a lock. Registry and
+// lock failures are returned before fn runs.
+//
+// Identity-changing operations use this to keep their final personal-policy
+// read and durable identity checkpoint atomic with af config set/unset
+// --project. The ordinary resolver intentionally remains a point-in-time read.
+func WithProjectConfigLockForRoot(root string, fn func() error) error {
+	project, found, err := projectForRoot(root)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fn()
+	}
+	path, err := ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		return err
+	}
+	return WithFileLock(path, fn)
+}
+
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a
 // filesystem path — to a registered project. It never registers or mutates: a
 // path is normalized to its canonical checkout root (so any subdirectory selects

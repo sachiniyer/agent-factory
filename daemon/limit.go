@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -556,47 +557,36 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		configFenceHeld = true
 		m.accountLimitMu.Lock()
 		accountLimitFenceHeld = true
-		fallbackDue := accountSwap.fallbackDue
-		admitted, err := m.admitAccountSwap(instance, m.Config())
-		if err != nil {
-			if !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, err) {
-				return resumeNotPerformed, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+		liveConfig := m.Config()
+		if !liveConfig.LimitAutoResume {
+			// A live opt-out forbids every new automatic action, including an
+			// already-due ordinary same-account retry. Committed replacements use
+			// the independent recovery path and never enter this branch.
+			releaseAccountSwapFences()
+			return resumeNotPerformed, nil
+		}
+
+		root := instance.GetRepoPath()
+		if root == "" {
+			root = instance.Path
+		}
+		fallbackEligible := true
+		swapErr := config.WithProjectConfigLockForRoot(root, func() error {
+			var err error
+			fallbackEligible, err = m.commitNewAccountSwapIdentity(
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
+			return err
+		})
+		if swapErr != nil {
+			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
+				return resumeNotPerformed, swapErr
 			}
 			accountSwap = nil
 			releaseAccountSwapFences()
 		} else {
-			admitted.fallbackDue = fallbackDue
-			// Update the scheduler-owned opportunity too: the first candidate can
-			// be unprovable while a later explicitly configured one is admitted,
-			// and the completion log must name the identity actually selected.
-			*accountSwap = *admitted
-		}
-	}
-	if accountSwap != nil && !accountSwap.alreadySet {
-		if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
-			if !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, err) {
-				return resumeNotPerformed, err
-			}
-			accountSwap = nil
 			releaseAccountSwapFences()
+			forceRespawn = true
 		}
-	}
-	if accountSwap != nil && !accountSwap.alreadySet {
-		previousConversation, err := instance.SelectAccountAutomatically(accountSwap.from, accountSwap.to)
-		if err != nil {
-			return resumeNotPerformed, err
-		}
-		accountSwap.previousConversation = previousConversation
-		// The old runtime is conclusively stopped. Make the new identity durable
-		// BEFORE starting it, so a crash can never relaunch on the old account
-		// while the session reports the replacement.
-		if err := m.persistSettlement(repoID, key, instance); err != nil {
-			_ = instance.RestoreAccountSelectionUnderResumeFence(
-				accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
-			return resumeNotPerformed, err
-		}
-		releaseAccountSwapFences()
-		forceRespawn = true
 	}
 
 	as := instance.AgentServer()

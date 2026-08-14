@@ -285,6 +285,48 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	return admitted, err
 }
 
+// commitNewAccountSwapIdentity performs the destructive, durable half of a new
+// automatic replacement. The caller holds the config-apply, account-limit, and
+// personal-project policy fences. fallbackEligible is true only while no
+// identity has been selected, so an already-due ordinary resume may retain the
+// old identity after an admission or teardown refusal, but never after a failed
+// identity checkpoint.
+func (m *Manager) commitNewAccountSwapIdentity(
+	repoID, key, requestedTitle string,
+	instance *session.Instance,
+	scheduled *autoAccountSwap,
+	global *config.Config,
+) (fallbackEligible bool, err error) {
+	fallbackDue := scheduled.fallbackDue
+	admitted, err := m.admitAccountSwap(instance, global)
+	if err != nil {
+		return true, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+	}
+	admitted.fallbackDue = fallbackDue
+	// Update the scheduler-owned opportunity too: the first candidate can be
+	// unprovable while a later explicitly configured one is admitted, and the
+	// completion log must name the identity actually selected.
+	*scheduled = *admitted
+
+	if err := m.prepareRuntimeForAccountSwap(repoID, key, instance); err != nil {
+		return true, err
+	}
+	previousConversation, err := instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
+	if err != nil {
+		return false, err
+	}
+	scheduled.previousConversation = previousConversation
+	// The old runtime is conclusively stopped. Make the new identity durable
+	// BEFORE starting it, so a crash can never relaunch on the old account while
+	// the session reports the replacement.
+	if err := m.persistSettlement(repoID, key, instance); err != nil {
+		_ = instance.RestoreAccountSelectionUnderResumeFence(
+			scheduled.previousAccount, scheduled.previousAuto, scheduled.previousConversation)
+		return false, err
+	}
+	return false, nil
+}
+
 func accountSwapIdentity(agent, account string) string {
 	if strings.TrimSpace(account) == "" {
 		return "the ambient " + agent + " identity"

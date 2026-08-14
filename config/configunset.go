@@ -79,7 +79,7 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to remove emptied %s: %w", prettyPath, err)
 		}
-		return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
+		return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: ProjectConfigRequiresRestart(key)}, nil
 	}
 	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
 		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
@@ -87,7 +87,7 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 	if err := AtomicWriteFile(path, []byte(updated), 0o644); err != nil {
 		return nil, err
 	}
-	return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
+	return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: ProjectConfigRequiresRestart(key)}, nil
 }
 
 func projectConfigHasNoTopLevelKeys(content string) bool {
