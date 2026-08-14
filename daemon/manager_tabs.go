@@ -252,6 +252,10 @@ func tabTmuxNameByID(tabs []session.TabData, id string) string {
 // live tab for retry; otherwise stale disk state could respawn a killed tab on a
 // daemon restart (#2669).
 func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
+	return m.closeTabRequestedBy(req, "internal daemon caller")
+}
+
+func (m *Manager) closeTabRequestedBy(req CloseTabRequest, requester string) (string, error) {
 	instance, repoID, title, release, err := m.tabMutationTarget(req.ID, req.Title, req.RepoID,
 		tabMutationLabels{action: "close a tab", op: "tab close"})
 	if err != nil {
@@ -282,6 +286,7 @@ func (m *Manager) CloseTab(req CloseTabRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	log.InfoLog.Printf("CloseTab requested for tab %q (id %s) in session %q (id %s, repo %s) by %s", name, targetID, title, instance.ID, repoID, requester)
 	var vscodeKey string
 	if lastVSCode {
 		// Stop before removing the last durable UI retry handle. An unknown result

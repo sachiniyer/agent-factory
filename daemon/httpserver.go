@@ -275,7 +275,7 @@ func rpcHandlerCtx[Req any, Resp any](call func(context.Context, Req, *Resp) err
 			return
 		}
 		var resp Resp
-		if err := call(r.Context(), req, &resp); err != nil {
+		if err := call(withHTTPRPCRequester(r), req, &resp); err != nil {
 			status := http.StatusInternalServerError
 			if IsDaemonAdmissionRetryable(err) {
 				status = http.StatusServiceUnavailable
