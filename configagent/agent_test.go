@@ -202,9 +202,9 @@ func TestSpawnDeliversBriefingAsThePrompt(t *testing.T) {
 	}
 	for _, want := range []string{
 		"What do you want to change?", // the ModeChange opening
-		"### `listen_addr`",           // the manifest
+		"### `network.listen_addr`",   // the manifest
 		"Do not run git.",             // the scope fence
-		"af config set require_token true",
+		"af config set network.require_token true",
 	} {
 		if !strings.Contains(got.Prompt, want) {
 			t.Errorf("prompt is missing %q", want)

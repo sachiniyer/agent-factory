@@ -115,7 +115,7 @@ func TestRunningConfigDifference_NamesOnlyChangedPosture(t *testing.T) {
 	}
 
 	diff := RunningConfigDifference(boot, current)
-	require.Contains(t, diff, `listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`)
-	require.Contains(t, diff, "require_token: running false, file true")
-	require.Contains(t, diff, "require_loopback_token: running false, file true")
+	require.Contains(t, diff, `network.listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`)
+	require.Contains(t, diff, "network.require_token: running false, file true")
+	require.Contains(t, diff, "network.require_loopback_token: running false, file true")
 }

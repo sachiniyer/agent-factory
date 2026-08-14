@@ -304,12 +304,12 @@ func TestConfigPaneNamesTheCommandForDynamicTables(t *testing.T) {
 // keyboard while open: a config value is arbitrary text, and the global key map
 // must not eat it.
 //
-// "127.0.0.1:8080" is the real case (listen_addr) — it contains ".", ":" and
+// "127.0.0.1:8080" is the real case (network.listen_addr) — it contains ".", ":" and
 // digits, and the digits 1-9 are the TUI's tab-jump keys. If the pane did not
 // consume them, typing an address would jump tabs instead.
 func TestConfigPaneEditFieldTakesArbitraryValueText(t *testing.T) {
 	c := newTestConfigPane(t)
-	selectKey(t, c, "listen_addr")
+	selectKey(t, c, "network.listen_addr")
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	c.input.SetValue("")

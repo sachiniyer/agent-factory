@@ -41,7 +41,7 @@ listener that requires a bearer token on every request.
 This does not start the web UI, and serves no frontend at all — opening its port
 in a browser returns a 404 saying so. If you want the browser app, run the
 daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its listen_addr; agent-server is only
+is bundled into the daemon and served from its network.listen_addr; agent-server is only
 the headless per-workspace backend that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 
@@ -52,7 +52,7 @@ to host one workspace as a backend for a daemon on another machine.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
-port). Its token is mandatory for every peer, whatever the global require_token
+port). Its token is mandatory for every peer, whatever the global network.require_token
 key says: that key governs only the daemon's own web listener. On startup
 it prints one JSON line to stdout carrying the bound address and the bearer
 token. On SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the

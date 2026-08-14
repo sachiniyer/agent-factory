@@ -42,7 +42,7 @@ const worktreesResidueDir = "worktrees"
 //
 // Deliberately absent — these are PRESERVED so a fresh daemon comes back with
 // the same identity and configuration:
-//   - config.toml / config.json(.bak) — daemon config: listen_addr, defaults,
+//   - config.toml / config.json(.bak) — daemon config: network.listen_addr, defaults,
 //     root_agents, update_channel (#1736 keeps these; root_agents legitimately
 //     re-register from config on the next start).
 //   - repos/ — per-repo config (e.g. remote_hooks provisioner commands), which
@@ -185,7 +185,7 @@ autostart unit is only paused when it serves this AGENT_FACTORY_HOME; a daemon
 or unit for a different AF home is never touched.
 
 KEEPS your real git repositories (working tree, .git, and your own branches),
-and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
+and KEEPS the daemon configuration (config.toml: network.listen_addr, defaults,
 root_agents, update_channel, and per-repo config). After the wipe the
 supervised daemon restarts with empty session/task state and the same config;
 root_agents in config re-register, which is intended.
@@ -852,7 +852,7 @@ func printResetPlan(out io.Writer, plan *resetPlan) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "WILL KEEP:")
 	fmt.Fprintln(out, "  • your git repositories (working tree, .git, and your own branches)")
-	fmt.Fprintln(out, "  • daemon config: config.toml (listen_addr, defaults, root_agents, update_channel) and per-repo config")
+	fmt.Fprintln(out, "  • daemon config: config.toml (network.listen_addr, defaults, root_agents, update_channel) and per-repo config")
 	fmt.Fprintln(out, "  • registered agent accounts and their credentials (accounts/) — log out with the agent's own CLI to remove those")
 }
 

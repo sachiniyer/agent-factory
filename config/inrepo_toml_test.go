@@ -113,6 +113,20 @@ func TestLoadInRepoConfigTOMLKeyPolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), prettyHomePath(filepath.Join(home, ConfigFileName)))
 	})
 
+	t.Run("rejects grouped network settings as global-only", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		repoRoot := t.TempDir()
+		writeInRepoTomlConfig(t, repoRoot, "[network]\nrequire_token = true\n")
+
+		_, _, err := LoadInRepoConfig(repoRoot)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "network.require_token")
+		assert.Contains(t, err.Error(), "global setting")
+		assert.NotContains(t, err.Error(), "unknown key")
+		assert.Contains(t, err.Error(), filepath.Join(home, TomlConfigFileName))
+	})
+
 	t.Run("rejecting the TOML-only keys table points at config.toml", func(t *testing.T) {
 		// #1141 play-test minor 4: the keymap is TOML-only, so the "move it to
 		// the global config" message must name config.toml — a config.json

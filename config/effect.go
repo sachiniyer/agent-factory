@@ -85,11 +85,11 @@ var keyEffectClasses = map[string]EffectClass{
 	// (bind-new-before-close). A listen_addr rebind that FAILS is surfaced as a
 	// warning and reported as deferred to the next daemon start — the class here is
 	// the success case; the runtime outcome overrides the notice on failure.
-	"listen_addr":            EffectAppliedLive,
-	"preview_listen_addr":    EffectAppliedLive,
-	"require_token":          EffectAppliedLive,
-	"require_loopback_token": EffectAppliedLive,
-	"cors_allowed_origins":   EffectAppliedLive,
+	"network.listen_addr":            EffectAppliedLive,
+	"network.preview_listen_addr":    EffectAppliedLive,
+	"network.require_token":          EffectAppliedLive,
+	"network.require_loopback_token": EffectAppliedLive,
+	"network.cors_allowed_origins":   EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,

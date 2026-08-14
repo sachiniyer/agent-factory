@@ -87,11 +87,11 @@ var globalConfigReadOrder = []string{
 	"program_overrides",
 	"session_env_passthrough",
 	"auto_update",
-	"listen_addr",
-	"require_token",
-	"require_loopback_token",
-	"preview_listen_addr",
-	"cors_allowed_origins",
+	"network.listen_addr",
+	"network.require_token",
+	"network.require_loopback_token",
+	"network.preview_listen_addr",
+	"network.cors_allowed_origins",
 	"daemon_poll_interval",
 	"log_max_size_mb",
 	"log_max_backups",
@@ -444,18 +444,18 @@ Settable keys:
   default_program            agent enum (%s)
   program_overrides.<agent>  full command string for an agent
   auto_update                true | false
-  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+  network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and require_token defaults to FALSE —
-                             set require_token = true in the same breath, or anyone who can reach the
+                             full control plane on the network, and network.require_token defaults to FALSE —
+                             set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
-  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
-  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
-  preview_listen_addr        host:port for a separate per-tab web-tab preview origin (and, on a loopback
+  network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
-                             Kept apart from listen_addr on purpose: it serves previews/editors only, never
-                             the control API. Same address grammar as listen_addr.
+                             Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
+                             the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -471,11 +471,13 @@ Settable keys:
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
-  cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Legacy CLI aliases docker_mount_agent_credentials, ssh_host_key_verification,
-and sandbox_ssh remain accepted and edit the same canonical grouped values.
+Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
+require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
+ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
+canonical grouped values.
 
 Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable

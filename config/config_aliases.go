@@ -26,6 +26,11 @@ var configKeyAliases = []configKeyAlias{
 	{canonical: "ssh.host_key_verification", legacy: "ssh_host_key_verification", section: "ssh", leaf: "host_key_verification"},
 	{canonical: "docker.mount_agent_credentials", legacy: "docker_mount_agent_credentials", section: "docker", leaf: "mount_agent_credentials"},
 	{canonical: "sandbox.ssh", legacy: "sandbox_ssh", section: "sandbox", leaf: "ssh"},
+	{canonical: "network.listen_addr", legacy: "listen_addr", section: "network", leaf: "listen_addr"},
+	{canonical: "network.preview_listen_addr", legacy: "preview_listen_addr", section: "network", leaf: "preview_listen_addr"},
+	{canonical: "network.require_token", legacy: "require_token", section: "network", leaf: "require_token"},
+	{canonical: "network.require_loopback_token", legacy: "require_loopback_token", section: "network", leaf: "require_loopback_token"},
+	{canonical: "network.cors_allowed_origins", legacy: "cors_allowed_origins", section: "network", leaf: "cors_allowed_origins"},
 }
 
 // globalSettingsTables is decoded in addition to Config on the TOML path. It
@@ -41,6 +46,13 @@ type globalSettingsTables struct {
 	Sandbox struct {
 		SSH string `toml:"ssh"`
 	} `toml:"sandbox"`
+	Network struct {
+		ListenAddr           string   `toml:"listen_addr"`
+		PreviewListenAddr    string   `toml:"preview_listen_addr"`
+		RequireToken         bool     `toml:"require_token"`
+		RequireLoopbackToken bool     `toml:"require_loopback_token"`
+		CORSAllowedOrigins   []string `toml:"cors_allowed_origins"`
+	} `toml:"network"`
 }
 
 func canonicalConfigKey(key string) string {

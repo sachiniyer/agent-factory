@@ -145,7 +145,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "listen_addr",
+		Key:        "network.listen_addr",
 		Type:       "string",
 		Default:    "127.0.0.1:8443",
 		Purpose:    "Address the browser interface and HTTP API are served on · set it to \"\" to turn the web server off entirely.",
@@ -157,7 +157,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "require_token",
+		Key:        "network.require_token",
 		Type:       "bool",
 		Default:    "false",
 		Purpose:    "Require an access token from other machines on the network · off by default, so the browser interface opens with no login.",
@@ -169,10 +169,10 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "require_loopback_token",
+		Key:        "network.require_loopback_token",
 		Type:       "bool",
 		Default:    "false",
-		Purpose:    "Also require the token from browsers on this same machine · has no effect on its own, since it only tightens a token that require_token must first turn on.",
+		Purpose:    "Also require the token from browsers on this same machine · has no effect on its own, since it only tightens a token that network.require_token must first turn on.",
 		Tier:       TierCore,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -238,7 +238,7 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 3: everything else user-facing ----
 	{
-		Key:        "preview_listen_addr",
+		Key:        "network.preview_listen_addr",
 		Type:       "string",
 		Default:    `""`,
 		Purpose:    "Address for a separate per-tab web-tab preview origin, kept apart from the main interface · off by default; it hosts previews only and never the control API, and it works for same-machine viewing only.",
@@ -446,7 +446,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "cors_allowed_origins",
+		Key:        "network.cors_allowed_origins",
 		Type:       "list",
 		Default:    "none",
 		Purpose:    "Other websites allowed to call this machine's API from a browser · empty blocks every one of them.",

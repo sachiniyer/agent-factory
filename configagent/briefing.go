@@ -93,7 +93,7 @@ func BuildBriefing(mode Mode, cfg *config.Config, configPath string) string {
 
 A few settings have no ` + "`af config set`" + ` form because they are not one scalar value —
 ` + "`theme`" + ` and the ` + "`[keys]`" + ` rebinds are tables, ` + "`root_agents`" + ` is a table, and
-` + "`session_env_passthrough`" + ` and ` + "`cors_allowed_origins`" + ` are lists. You edit those by
+` + "`session_env_passthrough`" + ` is a list. You edit those by
 editing the global config file directly. See "Editing the structured settings" below;
 the same immediate-apply and echo rules hold, and you validate after every such edit.`)
 	fmt.Fprintf(&b, "- Say once, near the start, that all of this lives in `%s` and stays\n"+
@@ -129,33 +129,33 @@ af session is the place for it. Then carry on with the config conversation.
 
 This is the most consequential thing in this walkthrough, so read it carefully.
 
-` + "`listen_addr`" + ` decides who can reach af's web interface. ` + "`require_token`" + ` decides
+` + "`network.listen_addr`" + ` decides who can reach af's web interface. ` + "`network.require_token`" + ` decides
 whether they need a token to use it. The defaults are safe together:
-` + "`listen_addr = 127.0.0.1:8443`" + ` accepts connections only from this machine, so
-` + "`require_token = false`" + ` costs nothing — there is nobody else to authenticate.
+` + "`network.listen_addr = 127.0.0.1:8443`" + ` accepts connections only from this machine, so
+` + "`network.require_token = false`" + ` costs nothing — there is nobody else to authenticate.
 
 They stop being safe the moment the user wants to reach af from somewhere else: a
 phone, a laptop, another box, a Tailscale network. That needs a non-loopback
-listen_addr — anything that is not 127.0.0.1, ::1 or localhost — and it puts af's
+network.listen_addr — anything that is not 127.0.0.1, ::1 or localhost — and it puts af's
 full control plane, which can run commands on this machine, on the network.
 
 So if the user asks for access from anywhere other than this machine, set both, in
 the same breath, without being asked:
 
-    af config set listen_addr <the address they want>
-    af config set require_token true
+    af config set network.listen_addr <the address they want>
+    af config set network.require_token true
 
 and tell them plainly why: without the token, anyone who can reach that address can
 drive their agents and their machine.
 
-Never write a non-loopback listen_addr with require_token = false on your own
+Never write a non-loopback network.listen_addr with network.require_token = false on your own
 initiative. af allows that pairing — the daemon starts, serves, and warns once — so
 it is the user's call to make, not a configuration that fails loudly and teaches
 them. That is exactly why you must not make it for them. If they ask for it anyway,
 write it, and say in the same breath that anyone who can reach the address can drive
 their agents, and that the token or a loopback bind reached over SSH or Tailscale
-port-forwarding is the alternative. Note that require_loopback_token does not
-substitute for require_token here — it changes nothing while require_token is false.
+port-forwarding is the alternative. Note that network.require_loopback_token does not
+substitute for network.require_token here — it changes nothing while network.require_token is false.
 
 One more thing to tell them if they go off this machine: af serves plain HTTP and
 terminates no encryption of its own. Beyond a trusted private network, they want a
@@ -168,7 +168,7 @@ reverse proxy that terminates TLS (nginx, caddy), or a VPN such as Tailscale.
 	fmt.Fprintf(&b, `
 ## Editing the structured settings
 
-Five settings have no `+"`af config set`"+` form because they are not one scalar value.
+Four settings have no `+"`af config set`"+` form because they are not one scalar value.
 You edit these by editing the global config file at `+"`%s`"+` directly — and ONLY that
 file, never a repository's config. They are:
 
@@ -178,8 +178,6 @@ file, never a repository's config. They are:
   should always keep a session named root running.
 - `+"`session_env_passthrough`"+` — a list of exact environment variable NAMES a session may
   inherit. Names only — never put a value here. This is a security setting.
-- `+"`cors_allowed_origins`"+` — a list of exact web origins allowed to call the API from a
-  browser. Also a security setting; empty blocks every one of them.
 
 How to edit one:
 
