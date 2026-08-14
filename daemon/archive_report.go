@@ -100,6 +100,26 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 	return archivedPath, archived, committedErr
 }
 
+// keepUnrollableArchiveCommitted keeps the committed archive when rolling the
+// worktree back home itself failed. The move has landed and cannot be undone,
+// so callers get the archived location, the resolved projection, and the same
+// committed marker keepIncompleteArchiveCommitted returns — a plain error and
+// an empty location here told every transport failed-nothing-committed about
+// an archive that IS committed and kept (#3235).
+func (m *Manager) keepUnrollableArchiveCommitted(
+	repoID, archivedPath string,
+	instance *session.Instance,
+	hookErr error,
+	cause error,
+) (string, session.InstanceData, error) {
+	m.persistInstance(repoID, instance)
+	archived := instance.ToInstanceData()
+	m.publishEvent(agentproto.EventSessionArchived, archived)
+	committedErr := archiveCommittedWarning(instance, hookErr, cause)
+	log.WarningLog.Printf("%v", committedErr)
+	return archivedPath, archived, committedErr
+}
+
 func worktreeRecoveryLocation(instance *session.Instance) string {
 	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
 		if alternate != "" {
