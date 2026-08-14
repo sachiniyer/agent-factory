@@ -110,9 +110,9 @@ func redactHookJSONValue(value any) (any, bool) {
 		if !parsed {
 			// The opener alone does not distinguish a serialized document from an
 			// ordinary diagnostic such as "[INFO] connection failed".
-			if truncatedHookJSONDocumentContainsToken(value) {
-				// Preserve the established fail-closed boundary for a document whose
-				// token field parses after restoring only its missing container closer.
+			if malformedHookJSONDocumentContainsToken(value) {
+				// Decoder.Token retains duplicate members and the valid prefix before a
+				// syntax error, so malformed documents cannot hide an observed token key.
 				return hookOutputRedaction, true
 			}
 			return value, false
@@ -123,43 +123,72 @@ func redactHookJSONValue(value any) (any, bool) {
 	}
 }
 
-func truncatedHookJSONDocumentContainsToken(document string) bool {
-	trimmed := strings.TrimSpace(document)
-	if trimmed == "" {
-		return false
-	}
-
-	var closer byte
-	switch trimmed[0] {
-	case '{':
-		closer = '}'
-	case '[':
-		closer = ']'
-	default:
-		return false
-	}
-
-	value, parsed := decodeHookJSONDocument(document + string(closer))
-	return parsed && hookJSONValueContainsToken(value)
+type hookJSONContainer struct {
+	object       bool
+	expectingKey bool
 }
 
-func hookJSONValueContainsToken(value any) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if strings.EqualFold(key, "token") || hookJSONValueContainsToken(child) {
+// malformedHookJSONDocumentContainsToken walks the trustworthy token prefix of
+// a JSON-looking string. Unlike decoding into a map, the token stream preserves
+// duplicate object members; unlike json.Valid, it exposes keys parsed before a
+// missing closer or trailing syntax error. Strings encountered as values are
+// checked recursively because hooks can serialize JSON through multiple layers.
+func malformedHookJSONDocumentContainsToken(document string) bool {
+	decoder := json.NewDecoder(strings.NewReader(document))
+	decoder.UseNumber()
+	var containers []hookJSONContainer
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+
+		if delimiter, ok := token.(json.Delim); ok {
+			switch delimiter {
+			case '{':
+				containers = append(containers, hookJSONContainer{object: true, expectingKey: true})
+			case '[':
+				containers = append(containers, hookJSONContainer{})
+			case '}', ']':
+				if len(containers) == 0 {
+					return false
+				}
+				containers = containers[:len(containers)-1]
+				if len(containers) > 0 {
+					parent := &containers[len(containers)-1]
+					if parent.object && !parent.expectingKey {
+						parent.expectingKey = true
+					}
+				}
+			}
+			continue
+		}
+
+		if len(containers) == 0 {
+			continue
+		}
+		container := &containers[len(containers)-1]
+		if !container.object {
+			if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
 				return true
 			}
+			continue
 		}
-	case []any:
-		for _, child := range value {
-			if hookJSONValueContainsToken(child) {
+		if container.expectingKey {
+			key, ok := token.(string)
+			if !ok {
+				return false
+			}
+			if strings.EqualFold(key, "token") {
 				return true
 			}
+			container.expectingKey = false
+			continue
 		}
-	case string:
-		nested, parsed := decodeHookJSONDocument(value)
-		return parsed && hookJSONValueContainsToken(nested)
+		if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
+			return true
+		}
+		container.expectingKey = true
 	}
-	return false
 }

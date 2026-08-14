@@ -84,6 +84,16 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"token\":\"nested-secret\"}"}`,
 			want:   `{"message":"{\"token\":\"[REDACTED]\"}"}`,
 		},
+		{
+			name:   "serialized document with trailing malformed bytes",
+			output: `{"message":"{\"token\":\"trailing-secret\"} trailing"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "truncated serialized document with an overwritten token member",
+			output: `{"message":"{\"payload\":{\"token\":\"duplicate-secret\"},\"payload\":\"safe\""}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
