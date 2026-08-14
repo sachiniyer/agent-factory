@@ -80,7 +80,7 @@ func TestValidateEnabledTaskTargetNamesFailClosedCause(t *testing.T) {
 		{
 			name: "unlistable registry names the registry",
 			corrupt: func(t *testing.T, _ string) {
-				corruptProjectRegistry(t)
+				breakProjectRegistryEnumeration(t)
 			},
 			wantIn: func(t *testing.T, _ config.Project) string {
 				return config.ProjectRegistryDirName
@@ -166,7 +166,7 @@ func TestDeliverToReemergingRootNamesFailClosedCause(t *testing.T) {
 		{
 			name: "unlistable registry",
 			corrupt: func(t *testing.T, _ string) {
-				corruptProjectRegistry(t)
+				breakProjectRegistryEnumeration(t)
 			},
 			wantHandled: true,
 			wantIn:      config.ProjectRegistryDirName,

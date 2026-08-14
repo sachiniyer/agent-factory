@@ -310,13 +310,16 @@ func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
 	}
 }
 
-// corruptProjectRegistry makes config.ListProjects fail on every platform and
-// runner: loadProjectRecords rejects a stray non-directory entry in the
-// registry directory, no permission bits involved. The probe call proves the
-// fixture actually fails — a registry that still lists would route every
-// assertion below through the ordinary resolution path and turn the
-// regression test into a silent no-op.
-func corruptProjectRegistry(t *testing.T) {
+// breakProjectRegistryEnumeration makes the registry fail at ENUMERATION on
+// every platform and runner: the registry path becomes a regular file, so
+// os.ReadDir fails with ENOTDIR — no permission bits involved. Enumeration
+// failure is the one registry failure that stays machine-wide fail-closed
+// after the #3297 granularity split (a bad RECORD suppresses only itself).
+// Existing records are set aside and restored by the returned repair func,
+// which is the heal tests' "registry repaired mid-run" transition. Both the
+// break and the repair are probe-proven, so the fixture can never silently
+// no-op.
+func breakProjectRegistryEnumeration(t *testing.T) (repair func()) {
 	t.Helper()
 	dir, err := config.ProjectRegistryDir()
 	if err != nil {
@@ -325,11 +328,26 @@ func corruptProjectRegistry(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir project registry: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "stray"), []byte("not a project record"), 0o644); err != nil {
-		t.Fatalf("write stray registry file: %v", err)
+	aside := dir + ".aside"
+	if err := os.Rename(dir, aside); err != nil {
+		t.Fatalf("set registry aside: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write registry-path file: %v", err)
 	}
 	if _, err := config.ListProjects(); err == nil {
-		t.Fatalf("fixture failed: ListProjects still succeeds on a corrupt registry")
+		t.Fatalf("fixture failed: ListProjects still succeeds with the registry path not a directory")
+	}
+	return func() {
+		if err := os.Remove(dir); err != nil {
+			t.Fatalf("remove registry-path file: %v", err)
+		}
+		if err := os.Rename(aside, dir); err != nil {
+			t.Fatalf("restore registry: %v", err)
+		}
+		if _, err := config.ListProjects(); err != nil {
+			t.Fatalf("fixture repair failed: ListProjects still errors: %v", err)
+		}
 	}
 }
 
@@ -375,7 +393,7 @@ func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
 			seen := installOptionsRecordingBackend(t)
 			repoPath := setupControlRepo(t)
 			cfg := tc.setup(t, repoPath)
-			corruptProjectRegistry(t)
+			breakProjectRegistryEnumeration(t)
 
 			// The fail-closed ERROR fires from the snapshot inside NewManager,
 			// so the capture goes in first (httpserver_test.go idiom).
