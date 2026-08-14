@@ -148,6 +148,9 @@ func TestUnresolvableSSHAddressMakesTheBackendUnavailable(t *testing.T) {
 	for name, sshCfg := range map[string]config.SSHConfig{
 		"conflicting ports":    {Host: "10.0.0.7:2222", Port: 3333},
 		"unknown service name": {Host: "10.0.0.7:definitelynotaservice"},
+		// #3303: ssh.host=":22" is non-empty, so only the resolver can catch it —
+		// this is the "picker promise" the preconditions comment makes.
+		"port-only host": {Host: ":22"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfgCopy := sshCfg
@@ -156,6 +159,53 @@ func TestUnresolvableSSHAddressMakesTheBackendUnavailable(t *testing.T) {
 			assert.Contains(t, err.Error(), "backend=ssh")
 		})
 	}
+}
+
+// #3303: ":22" is a valid net.SplitHostPort input — ("", "22") — so the port
+// survives the split and the empty host used to come back as SUCCESS. Every
+// caller treats the returned host as the machine: net.JoinHostPort("", 22) is
+// ":22", which dials LOCALHOST, and `ssh-keygen -F ""` matches nothing, so the
+// dial probe, pinning, and cleanup all degraded silently instead of refusing.
+func TestPortOnlyAddressIsRefused(t *testing.T) {
+	for name, address := range map[string]string{
+		"numeric port only":      ":22",
+		"with whitespace":        " :22 ",
+		"service-name port only": ":ssh",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := resolveSSHHostPort(address, 0)
+			require.Error(t, err, "an address with no host must be refused, not resolved to localhost")
+			assert.Contains(t, err.Error(), strconv.Quote(address),
+				"the refusal must name the input so it is obvious what to fix")
+			assert.Contains(t, err.Error(), "host")
+		})
+	}
+
+	// Both real entry points must refuse it — one resolver is the point (#3044).
+	_, _, hookErr := hookProvisionHostPort(&hookProvisionRecord{Host: ":22"})
+	require.Error(t, hookErr, "hook provisioning must refuse a port-only address")
+	t.Setenv("HOME", t.TempDir())
+	_, sshErr := sshCommandPinnedTo(config.SSHConfig{Host: ":22"}, config.SSHHostKeyInsecure, "", 0)
+	require.Error(t, sshErr, "the ssh backend must refuse a port-only address, not compose a localhost dial")
+}
+
+// The refusal's neighbors, pinned so it cannot grow past its case.
+func TestPortOnlyRefusalDoesNotCatchItsNeighbors(t *testing.T) {
+	// A bracketed IPv6 literal with a port splits into a real host.
+	host, port, err := resolveSSHHostPort("[::1]:22", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "::1", host)
+	assert.Equal(t, 22, port)
+
+	// "host:" carries NO embedded port — SplitHostPort parses it, but the port
+	// half is empty, so splitEmbeddedPort reports "none" and the whole spelling
+	// passes through as the host. Downstream that fails loudly and names the
+	// input (ssh: "Could not resolve hostname host:"); it never silently becomes
+	// localhost, which is the hazard the refusal above exists for.
+	host, port, err = resolveSSHHostPort("host:", 7)
+	require.NoError(t, err)
+	assert.Equal(t, "host:", host)
+	assert.Equal(t, 7, port)
 }
 
 // Codex 3734483402 (P1): a handle persisted before #3044 may spell its port as a
