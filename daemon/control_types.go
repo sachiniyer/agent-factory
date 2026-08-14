@@ -455,6 +455,13 @@ type CreateTabResponse struct {
 	// It also makes the reservation inspectable rather than invisible, which is
 	// the complaint #1957 opened with.
 	TmuxName string `json:"tmux_name,omitempty"`
+	// The response stays successful on a committed failure — a spawned tab whose
+	// roster write failed and whose rollback could not prove the tmux session
+	// absent (#3237) — so every transport keeps the minted identity above and
+	// clients can explain or target the surviving tab instead of treating the
+	// create as an untouched, freely retryable failure. VALUE embed: gob elides
+	// zero pointers.
+	MutationOutcome
 }
 
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and
