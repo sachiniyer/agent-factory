@@ -385,6 +385,7 @@ func (r *ResolvedConfig) ResolvedValue(key string) (ResolvedValue, bool) {
 	if r == nil {
 		return ResolvedValue{}, false
 	}
+	key = canonicalConfigKey(key)
 	for _, value := range r.Resolution {
 		if value.Key == key {
 			return value, true

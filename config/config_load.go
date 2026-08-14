@@ -310,7 +310,8 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return err // invalid config.json: do not convert or rename it.
 		}
 
-		tomlBytes, err := marshalConfigTOML(cfg)
+		legacyMetadata, _ := metadataForSource(data, prettyConfigPath, FormatJSON)
+		tomlBytes, err := marshalGlobalConfigTOML(cfg, legacyMetadata.shape)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
@@ -396,7 +397,7 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// defaults without another write attempt.
 	}
 	if created {
-		data, err := marshalConfigTOML(defaultCfg)
+		data, err := marshalGlobalConfigTOML(defaultCfg, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal materialized config metadata: %w", err)
 		}
@@ -435,7 +436,7 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 	if err := ensureStorageParent(configPath); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
-	data, err := marshalConfigTOML(config)
+	data, err := marshalGlobalConfigTOML(config, config.source.shape)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal config: %w", err)
 	}

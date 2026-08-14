@@ -200,7 +200,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Contains(t, err.Error(), "never started listening")
-	assert.Contains(t, err.Error(), "sandbox_ssh", "the error must name the thing the operator can test by hand")
+	assert.Contains(t, err.Error(), "sandbox.ssh", "the error must name the thing the operator can test by hand")
 }
 
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {

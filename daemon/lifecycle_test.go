@@ -248,6 +248,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ResumeStatusPoll": blockedDuringProbation,
 	"SendPrompt":       blockedDuringProbation,
 	"SetConfigValue":   blockedDuringProbation,
+	"UnsetConfigValue": blockedDuringProbation,
 	"SetPRInfo":        blockedDuringProbation,
 	"SpawnConfigAgent": blockedDuringProbation,
 	"TriggerTask":      blockedDuringProbation,

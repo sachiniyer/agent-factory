@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 // This file implements `af config set` (#1192). It writes a single scalar key
@@ -134,17 +132,17 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"vscode_server_binary":           {kind: cfgString},
 	"limit_auto_resume":              {kind: cfgBool},
 	"global_agent_skills":            {kind: cfgBool},
-	"docker_mount_agent_credentials": {kind: cfgBool},
-	"ssh_host_key_verification": {kind: cfgString, validate: func(_, v string) error {
+	"docker.mount_agent_credentials": {kind: cfgBool, section: "docker"},
+	"ssh.host_key_verification": {kind: cfgString, section: "ssh", validate: func(_, v string) error {
 		if !IsValidSSHHostKeyVerification(v) {
-			return fmt.Errorf("ssh_host_key_verification must be one of [%s, %s, %s], got %q",
+			return fmt.Errorf("ssh.host_key_verification must be one of [%s, %s, %s], got %q",
 				SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, v)
 		}
 		return nil
 	}},
 	// Free-form: any ssh invocation the operator already uses. Its usability is
 	// checked at create time (BackendConfigError), like ssh.host — not here.
-	"sandbox_ssh": {kind: cfgString},
+	"sandbox.ssh": {kind: cfgString, section: "sandbox"},
 	"limit_retry_interval": {kind: cfgString, validate: func(_, v string) error {
 		return validateLimitRetryIntervalValue(v)
 	}},
@@ -354,8 +352,14 @@ func exposureWarning(cfg *Config, key string) string {
 // resolveSettable maps a user key ("default_program" or "program_overrides.claude")
 // to its spec, section, and leaf. ok is false for anything not on the allowlist.
 func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok bool) {
+	key = canonicalConfigKey(key)
 	if s, found := settableKeySpecs[key]; found && !s.dynamic {
-		return "", key, s, true
+		leaf := key
+		if s.section != "" {
+			prefix := s.section + "."
+			leaf = strings.TrimPrefix(key, prefix)
+		}
+		return s.section, leaf, s, true
 	}
 	if i := strings.IndexByte(key, '.'); i > 0 {
 		prefix, rest := key[:i], key[i+1:]
@@ -382,6 +386,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 			key, strings.Join(SettableKeys(), ", "))
 	}
 
+	key = canonicalConfigKey(key)
 	canonical, encoded, err := canonicalizeScalar(spec.kind, rawValue)
 	if err != nil {
 		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
@@ -472,52 +477,6 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	return result, nil
 }
 
-// UnsetResult reports a successful `af config unset --project`. Removed is false
-// when there was no override to clear — the command is a clean no-op then, not an
-// error.
-type UnsetResult struct {
-	Key             string `json:"key"`
-	Path            string `json:"path"`
-	Removed         bool   `json:"removed"`
-	RequiresRestart bool   `json:"requires_restart"`
-}
-
-// UnsetProjectConfigValue removes key's personal override for a project so the
-// value falls back to the lower layers again (#2216 Phase 5). Clearing an
-// override is deliberately distinct from setting a value equal to the lower
-// layer, which would still be a present, winning override. Unsetting a key that
-// is not present is a clean no-op. It is scoped to a project: there is no global
-// unset today (remove the line from config.toml by hand, or set a new value).
-func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
-	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
-	}
-	project, err := ResolveProjectSelector(selector)
-	if err != nil {
-		return nil, err
-	}
-	section, leaf, _, err := resolveProjectSettable(key)
-	if err != nil {
-		return nil, err
-	}
-	path, err := ProjectConfigTomlPath(project.ID)
-	if err != nil {
-		return nil, err
-	}
-	prettyPath := prettyHomePath(path)
-
-	var result *UnsetResult
-	writeErr := WithFileLock(path, func() error {
-		var err error
-		result, err = applyProjectUnset(path, prettyPath, section, leaf, key)
-		return err
-	})
-	if writeErr != nil {
-		return nil, writeErr
-	}
-	return result, nil
-}
-
 // resolveProjectSettable maps a user key to its settable spec AND enforces that
 // the key admits the personal-project layer in the manifest. The manifest is the
 // single authority on which keys may live where, so the write path checks it
@@ -547,56 +506,6 @@ func projectScopeError(key string) error {
 	}
 	return fmt.Errorf("%q describes the repository and cannot be a personal per-project override; set it in the repository's %s file",
 		key, filepath.Join(InRepoConfigDirName, TomlConfigFileName))
-}
-
-// applyProjectUnset removes the target key line from a project's config.toml
-// under the caller-held lock. A missing file or absent key is a clean no-op. If
-// the removal empties the file it is deleted, so the project falls fully back to
-// the lower layers rather than leaving a contentless file the loader rejects.
-func applyProjectUnset(path, prettyPath, section, leaf, key string) (*UnsetResult, error) {
-	current, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &UnsetResult{Key: key, Path: path, Removed: false}, nil
-		}
-		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
-	}
-	updated, removed := deleteTOMLScalar(string(current), section, leaf)
-	if !removed {
-		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
-	}
-	if projectConfigHasNoTopLevelKeys(updated) {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("failed to remove emptied %s: %w", prettyPath, err)
-		}
-		return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
-	}
-	// The edited bytes must still parse and validate exactly as a read would, so
-	// unset can never leave an unloadable personal config.
-	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
-		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
-	}
-	if err := AtomicWriteFile(path, []byte(updated), 0644); err != nil {
-		return nil, err
-	}
-	return &UnsetResult{Key: key, Path: path, Removed: true, RequiresRestart: true}, nil
-}
-
-// projectConfigHasNoTopLevelKeys reports whether content decodes to zero
-// top-level keys (blank, comments-only, or whitespace). An emptied [section]
-// header still counts as a key and keeps the file, which is harmless: a
-// present-but-empty table contributes no leaves to resolution.
-func projectConfigHasNoTopLevelKeys(content string) bool {
-	if strings.TrimSpace(content) == "" {
-		return true
-	}
-	var shape map[string]any
-	if err := toml.Unmarshal([]byte(content), &shape); err != nil {
-		// Leave the decision to the caller's parse gate rather than deleting a
-		// file we could not understand.
-		return false
-	}
-	return len(shape) == 0
 }
 
 // scalarWrite is one validated, canonicalized `config set` edit, ready to apply
@@ -656,6 +565,22 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
 	} else {
 		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+	}
+	// If this file already carries the flat compatibility spelling, keep it in
+	// sync inside the same lock. A rolled-back binary ignores the new table, so
+	// leaving a conflicting old value behind would make a rollback change the
+	// operator's setting. Grouped-only files stay grouped-only; no deprecated key
+	// is invented for a new install.
+	if alias, ok := configAliasForCanonical(w.key); ok {
+		if metadata, err := metadataForSource(current, tomlPath, FormatTOML); err == nil {
+			if _, present := metadata.shape[alias.legacy]; present {
+				if w.clear {
+					updated, _ = deleteTOMLScalar(updated, "", alias.legacy)
+				} else {
+					updated = setTOMLScalar(updated, "", alias.legacy, w.encoded)
+				}
+			}
+		}
 	}
 	updated = setTOMLScalar(updated, "", SchemaVersionField, strconv.Itoa(GlobalConfigSchemaVersion))
 
@@ -841,6 +766,9 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 				firstHeaderIdx = i
 			}
 			name := strings.TrimSpace(m[1])
+			if decoded, ok := tomlHeaderName(line); ok {
+				name = decoded
+			}
 			if name == section && targetHeaderIdx == -1 {
 				targetHeaderIdx = i
 			}
@@ -855,6 +783,16 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 				ls[i] = m[1] + encoded + comment
 				return rebuild()
 			}
+			if tomlScalarLineMatches(line, section, leaf) {
+				if updated, ok := replaceTOMLAssignmentValue(line, encoded); ok {
+					ls[i] = updated
+					return rebuild()
+				}
+			}
+			if updated, ok := setTOMLInlineTableMember(line, section, leaf, encoded); ok {
+				ls[i] = updated
+				return rebuild()
+			}
 		}
 		if curSection != section {
 			continue
@@ -863,6 +801,12 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 			_, comment := splitTrailingComment(m[2])
 			ls[i] = m[1] + encoded + comment
 			return rebuild()
+		}
+		if tomlScalarLineMatches(line, "", leaf) {
+			if updated, ok := replaceTOMLAssignmentValue(line, encoded); ok {
+				ls[i] = updated
+				return rebuild()
+			}
 		}
 		if strings.TrimSpace(line) != "" {
 			lastContentIdxInTarget = i
@@ -929,20 +873,36 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 
 	curSection := ""
 	removeAt := -1
+	rebuild := func() string {
+		out := strings.Join(ls, "\n")
+		if hadTrailingNewline && out != "" {
+			out += "\n"
+		}
+		return out
+	}
 	for i, line := range ls {
 		if m := tomlHeaderRe.FindStringSubmatch(line); m != nil {
 			curSection = strings.TrimSpace(m[1])
+			if decoded, ok := tomlHeaderName(line); ok {
+				curSection = decoded
+			}
 			continue
 		}
 		// Top-level dotted form (section.leaf = …), valid only at the root.
-		if dottedKeyRe != nil && curSection == "" && dottedKeyRe.MatchString(line) {
+		if dottedKeyRe != nil && curSection == "" && (dottedKeyRe.MatchString(line) || tomlScalarLineMatches(line, section, leaf)) {
 			removeAt = i
 			break
+		}
+		if curSection == "" && section != "" {
+			if updated, ok := deleteTOMLInlineTableMember(line, section, leaf); ok {
+				ls[i] = updated
+				return rebuild(), true
+			}
 		}
 		if curSection != section {
 			continue
 		}
-		if keyRe.MatchString(line) {
+		if keyRe.MatchString(line) || tomlScalarLineMatches(line, "", leaf) {
 			removeAt = i
 			break
 		}
@@ -952,11 +912,7 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 	}
 
 	ls = append(ls[:removeAt], ls[removeAt+1:]...)
-	out := strings.Join(ls, "\n")
-	if hadTrailingNewline && out != "" {
-		out += "\n"
-	}
-	return out, true
+	return rebuild(), true
 }
 
 // splitTrailingComment separates a TOML value from a trailing inline comment,

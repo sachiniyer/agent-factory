@@ -426,6 +426,9 @@ func valueFromSchemas(schemas []any, key string) (reflect.Value, bool) {
 }
 
 func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
+	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
+		key = alias.legacy
+	}
 	for value.IsValid() && value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			value = reflect.Zero(value.Type().Elem())
@@ -678,6 +681,7 @@ func pluralize(word string, count int) string {
 // leaf is projected from the already-resolved value and origins; it never runs
 // a second precedence algorithm.
 func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool) {
+	keyPath = canonicalConfigKey(keyPath)
 	if value, ok := r.ResolvedValue(keyPath); ok {
 		return value, true
 	}

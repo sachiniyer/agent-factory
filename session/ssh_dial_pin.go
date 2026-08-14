@@ -87,7 +87,7 @@ func pinForProvision(cfg config.SSHConfig, host string, port int, posture string
 	// FIRST, because it is a precondition rather than a preference, and checked
 	// before the probe so a session that cannot be pinned costs no dial at all.
 	if !sshPinIsCheckable(cfg, posture) {
-		log.InfoLog.Printf("backend=ssh: not pinning this session's address under ssh_host_key_verification=%q, "+
+		log.InfoLog.Printf("backend=ssh: not pinning this session's address under ssh.host_key_verification=%q, "+
 			"because ssh would not refuse a host key it has not been told to expect — so a pin landing on a "+
 			"machine this host's known_hosts entry was not recorded against would be accepted silently. A host "+
 			"with several addresses can therefore still split this session across machines (#3086); point "+

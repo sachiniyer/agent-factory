@@ -72,9 +72,9 @@ var keyEffectClasses = map[string]EffectClass{
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
-	"docker_mount_agent_credentials": EffectAppliedLive,
-	"ssh_host_key_verification":      EffectAppliedLive,
-	"sandbox_ssh":                    EffectAppliedLive,
+	"docker.mount_agent_credentials": EffectAppliedLive,
+	"ssh.host_key_verification":      EffectAppliedLive,
+	"sandbox.ssh":                    EffectAppliedLive,
 	// The daemon exposes theme to browser renderers from its live config. An
 	// ApplyConfig request makes it live immediately; a direct file edit gets that
 	// request when the next TUI launches against an already-running daemon.
@@ -107,6 +107,10 @@ var keyEffectClasses = map[string]EffectClass{
 // (program_overrides.claude, limit_patterns.foo) is classified by its base key,
 // since the daemon applies the whole map.
 func KeyEffectClass(key string) EffectClass {
+	key = canonicalConfigKey(key)
+	if class, ok := keyEffectClasses[key]; ok {
+		return class
+	}
 	base := key
 	if i := strings.IndexByte(key, '.'); i >= 0 {
 		base = key[:i]

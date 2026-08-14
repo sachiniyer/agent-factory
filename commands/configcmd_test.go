@@ -170,7 +170,7 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 		"on_archive_command",
 		"vscode_server_binary",
 		"root_agents",
-		"sandbox_ssh",
+		"sandbox.ssh",
 		"limit_patterns",
 		"keys",
 	} {
@@ -292,6 +292,7 @@ func TestConfigEntriesCoverAllKeys(t *testing.T) {
 		if key == "" || key == "-" {
 			continue
 		}
+		key = config.CanonicalConfigKey(key)
 		if reason, internal := configEntriesInternalKeys[key]; internal {
 			if got[key] {
 				t.Errorf("config key %q is listed in globalConfigReadOrder but also marked internal (%s) — pick one", key, reason)

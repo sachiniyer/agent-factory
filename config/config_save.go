@@ -97,7 +97,7 @@ func saveConfigLocked(config *Config) error {
 
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	config.SchemaVersion = GlobalConfigSchemaVersion
-	data, err := marshalConfigTOML(config)
+	data, err := marshalGlobalConfigTOML(config, config.source.shape)
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}

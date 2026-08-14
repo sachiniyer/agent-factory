@@ -24,7 +24,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
-- [`af config unset`](#af-config-unset) — Clear a per-project config override
+- [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon adopt`](#af-daemon-adopt) — Hand a detached daemon back to the installed autostart unit
@@ -563,13 +563,14 @@ inspect another project. Outside a git repository they fall back to global
 defaults. --explain shows every candidate and why it did or did not supply the
 effective value.
 
-"set"/"unset" write config. Without --project they edit the global config,
-changing a single settable key in place so all comments and ordering are
-preserved. With --project <id-or-path> they edit that registered project's
-machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. "af config set" applies a change to
-a running daemon in place where the key allows it (#2480), so most take effect
-without a restart; a raw hand-edit of config.toml still applies on the next start.
+"set"/"unset" write config in place so all comments and ordering are preserved.
+Without --project, set changes one settable global key and unset clears one
+migrated grouped/flat alias pair. With --project <id-or-path> they edit that
+registered project's machine-local override instead (built-in < global <
+in-repo < personal project), which is never checked into the repository. "af
+config set" applies a change to a running daemon in place where the key allows
+it (#2480), so most take effect without a restart; a raw hand-edit of config.toml
+still applies on the next start.
 
 ```
 af config
@@ -580,7 +581,7 @@ af config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
 - [`af config set`](#af-config-set) — Set a single settable global config key
-- [`af config unset`](#af-config-unset) — Clear a per-project config override
+- [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 
 **Global flags**
@@ -696,10 +697,13 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
-  docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
-  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
+  docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
-  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+
+Legacy CLI aliases docker_mount_agent_credentials, ssh_host_key_verification,
+and sandbox_ssh remain accepted and edit the same canonical grouped values.
 
 Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
@@ -744,23 +748,24 @@ af config set <key> <value> [flags]
 
 ## af config unset
 
-Clear a per-project config override
+Clear a config override or migrated global setting
 
 Remove one key's personal override for a project so the value falls back to
 the lower layers again (built-in < global < in-repo). Clearing an override is
 deliberately different from setting a value equal to the lower layer, which is
 still a present, winning override.
 
---project <id-or-path> is required: unset targets a project's machine-local
-config (a prj_ id from 'af projects list', or a path inside a registered
-repository). It edits only the target key, preserving every other comment and
-value, and is a clean no-op when there is no override to clear. There is no
-global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. The cleared override stops applying to sessions created in that project
-from now on.
+With --project, unset targets a project's machine-local config (a prj_ id from
+'af projects list', or a path inside a registered repository). Without
+--project, it clears one migrated global backend setting: docker.mount_agent_credentials,
+ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+accepted aliases. Global unset removes both on-disk spellings together, so a
+conflicting legacy value cannot silently reappear. Every path edits only the
+target setting, preserves unknown keys and comments, and is a clean no-op when
+there is nothing to clear.
 
 ```
-af config unset <key> --project <id-or-path> [flags]
+af config unset <key> [flags]
 ```
 
 **Flags**

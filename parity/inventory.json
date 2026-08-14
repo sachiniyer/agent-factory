@@ -219,6 +219,24 @@
       "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. (The TUI writes config directly in-process rather than via the SetConfigValue RPC — same capability, different transport, like session.send-prompt.)"
     },
     {
+      "id": "config.unset-global-alias",
+      "title": "Clear a migrated global config setting and both compatibility spellings",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configcmd.go config unset without --project -> daemon.UnsetGlobalConfigValue"
+      },
+      "verdict": "deliberate",
+      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope."
+    },
+    {
       "id": "config.write-project",
       "title": "Set or clear a personal per-project config override",
       "tui": {
@@ -1459,7 +1477,7 @@
       "af config get": "config.read",
       "af config list": "config.read",
       "af config set": "config.write",
-      "af config unset": "config.write-project",
+      "af config unset": "config.unset-global-alias",
       "af config validate": "config.validate",
       "af daemon adopt": "daemon.lifecycle",
       "af daemon install": "daemon.lifecycle",

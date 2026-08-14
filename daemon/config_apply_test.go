@@ -111,6 +111,29 @@ func TestApplyConfigReportsNetworkKeysApplied(t *testing.T) {
 	require.NotContains(t, result.Pending, "require_token")
 }
 
+func TestApplyConfigReportsCanonicalBackendSettingsApplied(t *testing.T) {
+	m := applyConfigTestManager(t)
+	for key, value := range map[string]string{
+		"docker.mount_agent_credentials": "true",
+		"ssh.host_key_verification":      "accept-new",
+		"sandbox.ssh":                    "ssh sandbox.example",
+	} {
+		_, err := config.SetGlobalConfigValue(key, value)
+		require.NoError(t, err)
+	}
+
+	result, err := m.ApplyConfig()
+	require.NoError(t, err)
+	for _, key := range []string{
+		"docker.mount_agent_credentials",
+		"ssh.host_key_verification",
+		"sandbox.ssh",
+	} {
+		require.Contains(t, result.Applied, key)
+		require.NotContains(t, result.Pending, key)
+	}
+}
+
 // TestApplyConfigReportsBranchPrefixPending is the regression for the lie the
 // per-key notice rework caught: branch_prefix is read from the FROZEN startup
 // config in the title-reservation helpers (manager_create.go, deliberately not
