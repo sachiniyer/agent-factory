@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -81,26 +80,6 @@ func ValidateProjectID(id string) error {
 		return fmt.Errorf("invalid project id %q (expected %s followed by 32 lowercase hex characters)", id, projectIDPrefix)
 	}
 	return nil
-}
-
-// ListProjects reads every durable binding without creating the AF home, the
-// projects directory, or a lock file. Initial registration uses an atomic
-// directory rename and rebinding uses AtomicWriteFile, so readers never need a
-// mutating read lock to avoid partially-written records.
-func ListProjects() ([]Project, error) {
-	dir, err := projectRegistryDir()
-	if err != nil {
-		return nil, err
-	}
-	records, err := loadProjectRecords(dir)
-	if err != nil {
-		return nil, err
-	}
-	projects := make([]Project, 0, len(records))
-	for _, record := range records {
-		projects = append(projects, projectFromRecord(record))
-	}
-	return projects, nil
 }
 
 // ResetProjectRegistry removes durable project records and this AF home's
@@ -184,7 +163,14 @@ func DeregisterProject(path string) (bool, error) {
 	}
 	removed := false
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		records, err := loadProjectRecords(dir)
+		// Tolerant read (#3297): a corrupt UNRELATED record must not brick the
+		// removal of a readable one — the registry's own repair tooling has to
+		// keep working while a bad entry exists. A failed record cannot match
+		// the target (its root is exactly what could not be read); if the
+		// target is not found among readable records while failures exist,
+		// "nothing to remove" is unprovable, so that one case stays an error
+		// naming the entries to repair by hand.
+		records, failures, _, err := loadProjectRecordsDetailed(dir)
 		if err != nil {
 			return err
 		}
@@ -198,12 +184,24 @@ func DeregisterProject(path string) (bool, error) {
 			removed = true
 			return nil
 		}
+		if len(failures) > 0 {
+			return fmt.Errorf("%s is not among the readable project records, and %d registry record(s) could not be read (%s); repair or remove those directories under %s, then retry", path, len(failures), projectRecordFailureIDs(failures), dir)
+		}
 		return nil
 	})
 	if err != nil {
 		return false, fmt.Errorf("deregister project: %w", err)
 	}
 	return removed, nil
+}
+
+// projectRecordFailureIDs joins failed record directory names for messages.
+func projectRecordFailureIDs(failures []ProjectRecordFailure) string {
+	ids := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		ids = append(ids, failure.DirectoryID)
+	}
+	return strings.Join(ids, ", ")
 }
 
 // RegisterProject records path as a project and returns its opaque identity.
@@ -222,9 +220,16 @@ func RegisterProject(path string) (Project, error) {
 
 	var registered Project
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		records, err := loadProjectRecords(dir)
+		// Registration scans every record for path/checkout collisions, so a
+		// record it cannot read makes uniqueness unprovable — refuse, naming
+		// the exact directories to repair (#3297). Strays hide nothing and do
+		// not block.
+		records, failures, _, err := loadProjectRecordsDetailed(dir)
 		if err != nil {
 			return err
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("%d project registry record(s) could not be read (%s); registration cannot prove this checkout is not already recorded there — repair or remove those directories under %s, then retry", len(failures), projectRecordFailureIDs(failures), dir)
 		}
 		checkoutID, markerExists, err := readCheckoutID(binding.checkoutMarkerPath)
 		if err != nil {
@@ -312,9 +317,15 @@ func RebindProject(id, path string) (Project, error) {
 
 	var rebound Project
 	err = WithFileLock(projectRegistryLockPath(dir), func() error {
-		records, err := loadProjectRecords(dir)
+		// Rebinding scans every record for a path collision, so an unreadable
+		// record makes that scan unprovable — refuse, naming the directories
+		// to repair (#3297). Strays hide nothing and do not block.
+		records, failures, _, err := loadProjectRecordsDetailed(dir)
 		if err != nil {
 			return err
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("%d project registry record(s) could not be read (%s); rebinding cannot prove %s is not already recorded there — repair or remove those directories under %s, then retry", len(failures), projectRecordFailureIDs(failures), binding.root, dir)
 		}
 		index := -1
 		for i, record := range records {
@@ -377,84 +388,22 @@ func projectRegistryDir() (string, error) {
 	return filepath.Join(home, ProjectRegistryDirName), nil
 }
 
+// ProjectRegistryDir returns the durable project registry directory
+// (<AF home>/<ProjectRegistryDirName>) without creating anything. Exported so
+// surfaces whose whole purpose is to NAME the registry — the daemon's
+// fail-closed ERROR when it cannot be listed (#3247) — derive the path from
+// the same source the reads use, instead of re-joining it locally and
+// drifting if the location ever moves.
+func ProjectRegistryDir() (string, error) {
+	return projectRegistryDir()
+}
+
 func projectRegistryLockPath(dir string) string {
 	return filepath.Join(dir, ".registry")
 }
 
 func projectRecordPath(dir, id string) string {
 	return filepath.Join(dir, id, projectMetadataFileName)
-}
-
-func loadProjectRecords(dir string) ([]projectRecord, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read project registry: %w", err)
-	}
-	records := make([]projectRecord, 0, len(entries))
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		if !entry.IsDir() {
-			return nil, fmt.Errorf("read project registry: unexpected file %s", filepath.Join(dir, entry.Name()))
-		}
-		if err := ValidateProjectID(entry.Name()); err != nil {
-			return nil, fmt.Errorf("read project registry: %w", err)
-		}
-		data, err := os.ReadFile(projectRecordPath(dir, entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("read project %s: %w", entry.Name(), err)
-		}
-		var record projectRecord
-		if err := json.Unmarshal(data, &record); err != nil {
-			return nil, fmt.Errorf("parse project %s: %w", entry.Name(), err)
-		}
-		if err := validateProjectRecord(entry.Name(), record); err != nil {
-			return nil, err
-		}
-		records = append(records, record)
-	}
-	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
-	return records, nil
-}
-
-func validateProjectRecord(directoryID string, record projectRecord) error {
-	if record.SchemaVersion != projectRegistrySchemaVersion {
-		if record.SchemaVersion > projectRegistrySchemaVersion {
-			return fmt.Errorf("project %s uses schema version %d, but this af supports up to %d — upgrade af", directoryID, record.SchemaVersion, projectRegistrySchemaVersion)
-		}
-		return fmt.Errorf("project %s has unsupported schema version %d", directoryID, record.SchemaVersion)
-	}
-	if err := ValidateProjectID(record.ID); err != nil {
-		return fmt.Errorf("project %s metadata: %w", directoryID, err)
-	}
-	if record.ID != directoryID {
-		return fmt.Errorf("project directory %s contains metadata for %s", directoryID, record.ID)
-	}
-	if !checkoutIDPattern.MatchString(record.CheckoutID) {
-		return fmt.Errorf("project %s has invalid checkout id %q", record.ID, record.CheckoutID)
-	}
-	if err := validateStoredProjectPath("root", record.Root); err != nil {
-		return fmt.Errorf("project %s: %w", record.ID, err)
-	}
-	if err := validateStoredProjectPath("checkout root", record.CheckoutRoot); err != nil {
-		return fmt.Errorf("project %s: %w", record.ID, err)
-	}
-	if record.RelativeRoot == "" || filepath.IsAbs(record.RelativeRoot) {
-		return fmt.Errorf("project %s has invalid relative root %q", record.ID, record.RelativeRoot)
-	}
-	cleanRelative := filepath.Clean(filepath.FromSlash(record.RelativeRoot))
-	if cleanRelative == ".." || strings.HasPrefix(cleanRelative, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("project %s has relative root outside its checkout: %q", record.ID, record.RelativeRoot)
-	}
-	wantRoot := filepath.Clean(filepath.Join(record.CheckoutRoot, cleanRelative))
-	if !sameProjectPath(wantRoot, record.Root) {
-		return fmt.Errorf("project %s root %s does not match checkout root %s plus relative root %s", record.ID, record.Root, record.CheckoutRoot, record.RelativeRoot)
-	}
-	return nil
 }
 
 func validateStoredProjectPath(field, path string) error {

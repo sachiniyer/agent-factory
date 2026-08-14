@@ -112,7 +112,7 @@ func normalizeDeleteProjectPath(path string) (string, string) {
 		return repo.Root, repo.ID
 	}
 	root = filepath.Clean(root)
-	return root, config.RepoIDFromRoot(root)
+	return root, config.RepoIDForRecordedRoot(root)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -127,7 +127,7 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 	}
 	var root string
 	for _, project := range projects {
-		if config.RepoIDFromRoot(project.Root) != repoID {
+		if config.RepoIDForRecordedRoot(project.Root) != repoID {
 			continue
 		}
 		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {
@@ -455,8 +455,16 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// and task delivery waits for that same promise. Include the reserved target
 	// before the empty-roster return, or DeleteProject can suppress re-creation
 	// and strand a root-targeted task behind a title ordinary auto-create refuses.
-	if !hasRoot && m.repoRootAgentWillMaterialize(repoID) {
-		titles = append(titles, session.RootSessionTitle)
+	// For this consumer UNKNOWN behaves like yes (#3264): a fail-closed repo
+	// (unloadable personal config, unlistable registry) reports
+	// willMaterialize=false, but deleting through that answer would drop the
+	// root_agents opt-in and leave the enabled task stranded the moment the
+	// config becomes readable again — the exact hazard this preflight refuses.
+	if !hasRoot {
+		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable:
+			titles = append(titles, session.RootSessionTitle)
+		}
 	}
 	sort.Strings(titles)
 	if len(titles) == 0 {

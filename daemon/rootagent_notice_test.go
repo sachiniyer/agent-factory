@@ -67,7 +67,10 @@ func TestEnsureRootAgentsMarksARootThatCameBackWithoutItsHistory(t *testing.T) {
 // users to ignore the one that matters.
 func TestEnsureRootAgentsLeavesNoNoticeWhenTheRootResumed(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
 	prior := session.AgentConversationData{}
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
 		fake := session.NewFakeBackend()

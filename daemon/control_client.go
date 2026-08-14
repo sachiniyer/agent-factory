@@ -412,8 +412,12 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	// `af config set`, same doctrine as the launch path).
 	if homeDir, ok := configHomeDir(); ok {
 		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
-		case upgradeGateInProgress, upgradeGateRestoringPrevious:
-			return SetConfigValueResponse{}, gateErr
+		case upgradeGateInProgress:
+			return SetConfigValueResponse{}, fmt.Errorf(
+				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
+		case upgradeGateRestoringPrevious:
+			return SetConfigValueResponse{}, fmt.Errorf(
+				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
 		}
 	}
 	result, err := config.SetGlobalConfigValue(key, value)

@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
@@ -235,6 +236,21 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// warm-up exit paths deliberately skip SaveInstances: nothing has been
 	// restored, and saving the empty instance map would wipe every persisted
 	// session.
+	//
+	// Establish shared tmux infrastructure at this last pre-restore barrier. The
+	// control socket remains early (#829), while warming rejects every concurrent
+	// mutation, so no session can spawn before this finishes. The launch is
+	// additive and fail-open: an unavailable user systemd manager leaves the
+	// historical per-session scope fallback in place.
+	if home, homeErr := config.GetConfigDir(); homeErr != nil {
+		log.WarningLog.Printf("cannot configure dedicated tmux server launch; session creation will use its fallback: %v", homeErr)
+	} else {
+		restoreTmuxServerConfig := sessiontmux.ConfigureDaemonServer(home)
+		defer restoreTmuxServerConfig()
+		if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
+			log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
+		}
+	}
 	log.InfoLog.Printf("control socket bound; restoring instances")
 	restoreDone := make(chan error, 1)
 	// Capture the seam on the main flow: reading the package var inside the

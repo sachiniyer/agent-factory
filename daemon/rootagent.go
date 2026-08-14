@@ -49,7 +49,26 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
+	// A transcript creation or removal can lag one poll without affecting the
+	// live root. Bound the directory scan instead of statting every historical
+	// transcript on the daemon's default one-second ensure cadence.
+	rootClaudeTranscriptInspectionInterval = 30 * time.Second
 )
+
+// rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
+// doubling per consecutive failure, capped at max. Used by the per-candidate
+// retry state and by the snapshot heal pass (#3264), so both pace on one rule.
+func rootEnsureBackoffFor(consecutiveFailures int) time.Duration {
+	backoff := rootEnsureBackoffMax
+	// Guard the shift: past ~16 doublings the exponential form has no meaning
+	// and would overflow.
+	if shift := consecutiveFailures - 1; shift < 16 {
+		if b := rootEnsureBackoffBase << shift; b < backoff {
+			backoff = b
+		}
+	}
+	return backoff
+}
 
 // rootKillHealDelay is the grace window the ensure loop honors after an
 // explicit KillSession of the root before it self-heals a still-configured
@@ -70,108 +89,56 @@ type rootEnsureState struct {
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
-}
-
-// buildRootAgentSnapshot captures the start-of-day root-agent configuration the
-// ensure loop resolves against (#2216 Phase 6): the global [root_agent]
-// singleton, every registered project's personal [root_agent] layer and resolved
-// root (both keyed by repo ID), and the repo IDs the legacy root_agents map
-// already covers (so the singleton sweep can dedupe against it). It is
-// best-effort — a project whose checkout no longer resolves is logged and
-// skipped, never fatal, so one bad project never keeps the daemon from starting.
-// The one exception to skip-and-continue is a personal config that exists but
-// cannot be LOADED — read, parsed, or validated (#3241): that file may hold the
-// highest-precedence enabled=false, so the project fails closed rather than
-// open, recorded in personalUnreadable and enforced by resolvedRootAgentFor.
-// Reading the registry once at start matches the RootAgents map's
-// restart-to-apply contract: registering a project or editing its personal
-// root_agent takes effect on the next daemon start.
-func buildRootAgentSnapshot(cfg *config.Config) (global *config.RootAgentLayer, personal map[string]*config.RootAgentLayer, personalUnreadable map[string]bool, projectRoots map[string]string, legacyRepoIDs map[string]bool) {
-	global = config.GlobalRootAgentLayer(cfg)
-	personal = map[string]*config.RootAgentLayer{}
-	personalUnreadable = map[string]bool{}
-	projectRoots = map[string]string{}
-	legacyRepoIDs = map[string]bool{}
-
-	for path := range cfg.RootAgents {
-		repo, err := config.RepoFromPath(config.ExpandTilde(path))
-		if err != nil {
-			// A not-yet-cloned legacy path is normal (#1122): the per-path ensure
-			// sweep retries it. It is simply not part of the dedup set until it
-			// resolves — and while it does not resolve it cannot collide with a
-			// registered project (which did resolve at start).
-			continue
-		}
-		legacyRepoIDs[repo.ID] = true
-	}
-
-	projects, err := config.ListProjects()
-	if err != nil {
-		log.WarningLog.Printf("root agent snapshot: could not list registered projects; singleton root agents are disabled until the next daemon start: %v", err)
-		return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
-	}
-	for _, p := range projects {
-		repo, err := config.RepoFromPath(p.Root)
-		if err != nil {
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; skipping it until the next daemon start: %v", p.ID, p.Root, err)
-			continue
-		}
-		projectRoots[repo.ID] = repo.Root
-		pc, err := config.LoadProjectConfig(p.ID)
-		if err != nil {
-			// Fail CLOSED (#3241): this file may hold the highest-precedence
-			// `enabled = false` — for a parse or read failure we provably cannot
-			// know — so the failed load makes the project's root-agent decision
-			// unknown. It must not become "absent", or a lower-precedence enable
-			// (the ubiquitous empty legacy root_agents entry, or a global
-			// enabled=true) starts a root the user explicitly disabled. Recording
-			// the repo in personalUnreadable makes resolvedRootAgentFor — the one
-			// resolution choke point both ensure sweeps and
-			// repoRootAgentWillMaterialize share — resolve it to disabled. An
-			// already-live root is left alone (adopt-first); only creation and
-			// healing stop, until the config loads at a daemon start — the same
-			// restart-to-apply contract as the rest of this snapshot.
-			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads at a daemon start: %v", p.ID, repo.Root, err)
-			personalUnreadable[repo.ID] = true
-			continue
-		}
-		if layer := pc.RootAgentLayer(); layer != nil {
-			personal[repo.ID] = layer
-		}
-	}
-	return global, personal, personalUnreadable, projectRoots, legacyRepoIDs
-}
-
-// rootAgentInputsFor assembles the resolver inputs for one repo from the
-// start-of-day snapshot plus its (optional) legacy entry. Callers resolve
-// through resolvedRootAgentFor, never through config.ResolveRootAgent directly,
-// so the fail-closed gate below cannot be bypassed.
-func (m *Manager) rootAgentInputsFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentInputs {
-	return config.RootAgentInputs{
-		Global:   m.rootAgentGlobal,
-		Legacy:   legacy,
-		Personal: m.rootAgentPersonal[repoID],
-	}
+	// Claude transcript verification is advisory while the root is live. Keep
+	// its filesystem work and any persistent inspection warning off the hot
+	// one-second ensure path.
+	nextClaudeTranscriptInspection time.Time
+	claudeTranscriptWarning        string
 }
 
 // resolvedRootAgentFor is the single resolution choke point for one repo: every
-// caller — both ensure sweeps and repoRootAgentWillMaterialize — resolves
-// through it, so they can never disagree on whether a root should run or what
-// it runs.
-//
-// It applies the daemon's fail-closed policy for an unloadable personal config
-// (#3241) before layering: a repo in rootAgentPersonalUnreadable resolves to
-// disabled without consulting lower layers, because the file that could not be
-// loaded may hold the highest-precedence enabled=false — absence of proof is
-// not permission to start an agent. The returned zero resolution carries no
-// provenance on purpose: no config source decided this, the daemon's read
-// failure did, and the cause stays available to consumers in
-// rootAgentPersonalUnreadable.
+// caller — both ensure sweeps and rootAgentMaterializeVerdictFor — resolves
+// through it (or through the same snapshot's resolve), so they can never
+// disagree on whether a root should run or what it runs.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
-	if m.rootAgentPersonalUnreadable[repoID] {
+	return m.rootAgentLayers.Load().resolve(repoID, legacy)
+}
+
+// resolve applies the daemon's fail-closed policy (#3241, #3247) before
+// layering: a repo whose decision decisionUnknown reports unknowable resolves
+// to disabled without consulting lower layers — absence of proof is not
+// permission to start an agent. The returned zero resolution carries no
+// provenance on purpose: no config source decided this, the daemon's read
+// failure did, and the cause stays available in the snapshot's unreadable
+// fields, which rootAgentMaterializeVerdictFor names to consumers (#3264).
+// Callers resolve through this method, never through config.ResolveRootAgent
+// directly, so the gate cannot be bypassed.
+func (s *rootAgentSnapshot) resolve(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
+	if s.decisionUnknown(repoID) {
 		return config.RootAgentResolution{}
 	}
-	return config.ResolveRootAgent(m.rootAgentInputsFor(repoID, legacy))
+	return config.ResolveRootAgent(config.RootAgentInputs{
+		Global:   s.global,
+		Legacy:   legacy,
+		Personal: s.personal[repoID],
+	})
+}
+
+// decisionUnknown is the daemon's one fail-closed predicate for root agents:
+// it reports that no layered resolution for this repo can be trusted, because
+// a config source that may hold the highest-precedence enabled=false could
+// not be read — the project registry itself (#3247, which hides every
+// personal layer at once), or this repo's personal config (#3241, including
+// one attributed by recorded path while its project root does not resolve).
+// The answer is stable for the snapshot value it is asked of; the unknowns
+// only ever NARROW, when healRootAgentLayers replaces the snapshot after a
+// retried read succeeds (#3264).
+func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
+	if s.registryUnreadable {
+		return true
+	}
+	_, unreadable := s.personalUnreadable[repoID]
+	return unreadable
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
@@ -183,21 +150,6 @@ func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig 
 	return entry
 }
 
-// rootAgentResolutionForRepo resolves the effective root-agent profile for one
-// repo ID and reports whether the repo is a candidate at all (named by a legacy
-// entry or a registered project). It is the single authority
-// repoRootAgentWillMaterialize shares with the ensure loop, so a delivery waits
-// for a root exactly when the loop will create one. Layers are merged, so a
-// personal enabled=false disables a legacy-enabled root here too.
-func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentResolution, bool) {
-	legacy := m.legacyRootAgentForRepo(repoID)
-	_, isProject := m.rootAgentProjectRoots[repoID]
-	if legacy == nil && !isProject {
-		return config.RootAgentResolution{}, false
-	}
-	return m.resolvedRootAgentFor(repoID, legacy), true
-}
-
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an
 // enabled root agent: the legacy root_agents entries and the registered projects
 // a global/personal [root_agent] singleton turns on (#2216 Phase 6). Called from
@@ -205,6 +157,22 @@ func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentRes
 // finishes.
 func (m *Manager) EnsureRootAgents() {
 	if !m.Ready() {
+		return
+	}
+
+	// Safe-direction self-heal first (#3264): while the snapshot carries
+	// unknowns, re-attempt exactly the reads that failed, so a boot-time
+	// transient does not pin root agents off until a human restarts the daemon.
+	m.healRootAgentLayers()
+
+	layers := m.rootAgentLayers.Load()
+	// With the registry (still) unlistable (#3247) every candidate resolves to
+	// disabled through decisionUnknown, so the sweeps below could only fork git
+	// per legacy path per tick to re-derive a constant refusal — and the legacy
+	// path's retry/escalation logging would keep promising heals this state
+	// cannot deliver. The snapshot's boot-time ERROR plus the heal pass above
+	// are the messages for this state; skip the sweeps entirely.
+	if layers.registryUnreadable {
 		return
 	}
 
@@ -225,17 +193,17 @@ func (m *Manager) EnsureRootAgents() {
 	// Registered projects a legacy entry did NOT already cover, enabled purely by
 	// the global or personal [root_agent] singleton. Skipping legacy-covered repo
 	// IDs is what keeps a repo named by both from being ensured twice.
-	if len(m.rootAgentProjectRoots) > 0 {
-		repoIDs := make([]string, 0, len(m.rootAgentProjectRoots))
-		for repoID := range m.rootAgentProjectRoots {
-			if m.rootAgentLegacyRepoIDs[repoID] {
+	if len(layers.projectRoots) > 0 {
+		repoIDs := make([]string, 0, len(layers.projectRoots))
+		for repoID := range layers.projectRoots {
+			if layers.legacyRepoIDs[repoID] {
 				continue
 			}
 			repoIDs = append(repoIDs, repoID)
 		}
 		sort.Strings(repoIDs)
 		for _, repoID := range repoIDs {
-			m.ensureSingletonRootAgent(repoID)
+			m.ensureSingletonRootAgent(repoID, layers.projectRoots[repoID])
 		}
 	}
 }
@@ -265,11 +233,10 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 
 // ensureSingletonRootAgent ensures the root for a registered project enabled by
 // the global/personal singleton with no legacy root_agents entry. The repo
-// identity and root come from the start-of-day snapshot (no per-tick git
-// resolution — a registered project resolved at daemon start), and the state is
-// keyed by that resolved root path.
-func (m *Manager) ensureSingletonRootAgent(repoID string) {
-	root := m.rootAgentProjectRoots[repoID]
+// identity and root come from the snapshot the caller enumerated (no per-tick
+// git resolution — a registered project resolved when its snapshot was read),
+// and the state is keyed by that resolved root path.
+func (m *Manager) ensureSingletonRootAgent(repoID, root string) {
 	m.mu.Lock()
 	st := m.rootEnsureStateForLocked(root)
 	skip := time.Now().Before(st.nextAttempt)
@@ -364,7 +331,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
-			// and whoever created it — is the root agent. Nothing to do.
+			// and whoever created it — is the root agent. The one mutation is
+			// refreshing a recorded Claude conversation from durable transcript
+			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			m.refreshRootClaudeConversation(repo.ID, key, repo.Root, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
@@ -404,6 +374,27 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	}
 
 	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
+	skipRecordedResume := false
+	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
+		transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
+		if inspectErr == nil {
+			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, carried.conversation)
+		}
+		switch {
+		case inspectErr != nil:
+			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
+				repo.Root, carried.conversation.ID, inspectErr)
+		case !state.RecordedExists && state.Resume.HasID():
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
+				repo.Root, carried.conversation.ID, state.Resume.ID)
+			carried.conversation = state.Resume
+		case !state.RecordedExists:
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
+				repo.Root, carried.conversation.ID)
+			skipRecordedResume = true
+		}
+	}
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: repo.Root,
@@ -438,6 +429,9 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 	}
+	if skipRecordedResume {
+		req.resumeConversation = session.AgentConversationData{}
+	}
 	data, err := m.CreateSession(context.Background(), req)
 	if err != nil && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
@@ -447,8 +441,27 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// what keeps an unresumable id from costing the root a backoff interval of
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
+		if req.resumeConversation.Agent == tmux.ProgramClaude {
+			transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
+			if inspectErr == nil {
+				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, req.resumeConversation)
+			}
+			if inspectErr != nil {
+				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
+					repo.Root, req.resumeConversation.ID, inspectErr)
+			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
+				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
+					repo.Root, req.resumeConversation.ID, err, state.Resume.ID)
+				req.resumeConversation = state.Resume
+				carried.conversation = state.Resume
+				data, err = m.CreateSession(context.Background(), req)
+			}
+		}
+	}
+	if err != nil && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			repo.Root, carried.conversation.Agent, carried.conversation.ID, err)
+			repo.Root, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.CreateSession(context.Background(), req)
 	}
@@ -550,12 +563,38 @@ func reportRootConversationCarry(repoRoot string, carried session.AgentConversat
 // concurrent-create retry) and then sends the prompt into it, so a watch/
 // monitor event is delivered once root returns instead of being dropped by the
 // reserved-name guard the auto-create path would hit. Returns handled=false
-// when the target is not a re-emerging root, so DeliverPrompt falls through to
-// its normal create path; on a wait timeout it returns handled=true with an
-// accurate "being recreated" error rather than the misleading reserved-name one.
+// when the target is not a reserved title at all, or when the repo is simply
+// unconfigured — there the reserved-name guard's "add it to root_agents"
+// advice is the correct answer. Every other refusing verdict is answered HERE
+// with its cause (#3264): falling through would tell a user whose repo IS in
+// root_agents to add it to root_agents, while the actual blocker — a disable,
+// an unloadable personal config, an unlistable registry, a deleted project —
+// went unnamed. On a wait timeout it returns handled=true with an accurate
+// "being recreated" error rather than the misleading reserved-name one.
 func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverPromptRequest) (string, session.PromptDeliveryStatus, bool, error) {
-	if !session.IsReservedTitle(req.Title) || !m.repoRootAgentWillMaterialize(repo.ID) {
+	if !session.IsReservedTitle(req.Title) {
 		return "", session.PromptCouldNotConfirm, false, nil
+	}
+	if req.Title != session.RootSessionTitle {
+		// A reserved-title VARIANT ("Root", " root ") can never be delivered
+		// to: the ensure loop creates only the exact title, so no root-agent
+		// policy fix makes this spelling deliverable. Fall through to the
+		// reserved-name guard, whose "pick another name" is the right advice —
+		// answering with a policy cause here would promise a remedy that
+		// cannot work (#3264 review). This also stops the wait path from
+		// waiting out targetDeliverWait for a title that will never appear.
+		return "", session.PromptCouldNotConfirm, false, nil
+	}
+	verdict := m.rootAgentMaterializeVerdictFor(repo.ID)
+	switch verdict.reason {
+	case rootAgentWillMaterialize:
+		// Fall through to the wait-and-send path below.
+	case rootAgentNotConfigured:
+		return "", session.PromptCouldNotConfirm, false, nil
+	default:
+		// Pre-flight refusal: nothing was sent, so the rate slot is refunded
+		// (#2501), and the error names what actually stops the root.
+		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q will not materialize: %s; event not delivered", repo.Root, rootAgentUnavailableDetail(verdict)))
 	}
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
 		// Pre-flight: the root never reappeared within the wait, so nothing was
@@ -586,31 +625,6 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 // should wait for the ensure loop rather than auto-create it (which the
 // reserved-name guard would reject).
 //
-// It routes through rootAgentResolutionForRepo, the SAME resolution the ensure
-// loop uses, so the two never disagree: a repo the loop will not create (a
-// personal enabled=false over a legacy entry, or a project no singleton turned
-// on) reports false, and a singleton-only project the loop WILL create reports
-// true even with no legacy root_agents entry. Otherwise a send-prompt to such a
-// root is wrongly rejected at the reserved-name gate (#1835).
-//
-// A deleted project (#1735) is the one case where the still-immutable snapshot
-// outlives the truth: DeleteProject removed the opt-in from disk but this
-// in-memory copy keeps listing the repo, and ensureResolvedRoot skips it for the
-// rest of the daemon's life. Answering from config alone would make callers wait
-// out targetDeliverWait for a root that can never come back, then blame a
-// recreation that is not happening, so deletion is checked with the same
-// lock+lookup the ensure loop uses, before the resolution.
-func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
-	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repoID]
-	m.mu.Unlock()
-	if deleted {
-		return false
-	}
-	resolution, ok := m.rootAgentResolutionForRepo(repoID)
-	return ok && resolution.Enabled
-}
-
 // reapedRootState is what a reaped root record hands to its replacement: the
 // state a fresh CreateSession cannot reconstruct on its own, snapshotted from
 // the exact record the reap is about to delete. It is one value rather than a
@@ -751,14 +765,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
-	backoff := rootEnsureBackoffMax
-	// Guard the shift: past ~16 doublings the exponential form has no
-	// meaning and would overflow.
-	if shift := st.consecutiveFailures - 1; shift < 16 {
-		if b := rootEnsureBackoffBase << shift; b < backoff {
-			backoff = b
-		}
-	}
+	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
 	st.nextAttempt = time.Now().Add(backoff)
 	if st.consecutiveFailures == rootEnsureEscalationThreshold {
 		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; the cause looks persistent — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureBackoffMax, err)

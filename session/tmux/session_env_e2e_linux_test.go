@@ -7,12 +7,73 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
+
+// TestFirstDaemonSessionImportsEnvironmentAfterServerBootstrap covers the
+// no-server edge where the daemon creates the dedicated server between its
+// initial existence probe and new-session. The first client must still extend
+// update-environment so agent credentials reach that pane without becoming
+// persistent server-global environment.
+func TestFirstDaemonSessionImportsEnvironmentAfterServerBootstrap(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	script := `#!/bin/sh
+set -eu
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user|--scope|--quiet|--collect|--unit=*|--property=*) shift ;;
+        --) shift; break ;;
+        *) exit 64 ;;
+    esac
+done
+exec "$@"
+`
+	if err := os.WriteFile(systemdRun, []byte(script), 0o700); err != nil {
+		t.Fatalf("write systemd-run shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	t.Setenv("OPENAI_API_KEY", "bootstrap-secret")
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	markerPath := filepath.Join(dir, "credential-observed")
+	agentPath := filepath.Join(dir, ProgramCodex)
+	agent := `#!/bin/sh
+test "${OPENAI_API_KEY:-}" = bootstrap-secret || exit 9
+: >"$1"
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(agentPath, []byte(agent), 0o700); err != nil {
+		t.Fatalf("write agent shim: %v", err)
+	}
+	session := NewTmuxSession("first-daemon-environment", strings.Join([]string{
+		shellquote.Quote(agentPath), shellquote.Quote(markerPath),
+	}, " "))
+	if err := session.Start(dir); err != nil {
+		t.Fatalf("start first session after dedicated server bootstrap: %v", err)
+	}
+	t.Cleanup(func() { _, _ = session.CloseAndWaitForPaneExit() })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(markerPath); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("first pane did not receive its approved OPENAI_API_KEY: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 // TestRealPaneEnvironmentIsFiltered reads variable names from the pane
 // process's own /proc environment on the package's private tmux server. It

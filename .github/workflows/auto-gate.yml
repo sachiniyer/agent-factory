@@ -319,20 +319,117 @@ jobs:
             const helperPath = path.join(process.env.GITHUB_WORKSPACE, ".github/scripts/auto-gate.js");
             const autoGate = require(helperPath);
             const targets = JSON.parse(process.env.TARGETS_JSON || "[]");
+            const aggregateExternalId =
+              `auto-gate:aggregate:head:${String(process.env.HEAD_SHA || "").toLowerCase()}`;
+            let ownedAggregateCheck = null;
+            // Keep the merge write single-shot. The wrappers only remember this
+            // transaction's aggregate generation and classify a refused response.
+            const concede = (message, cause) => {
+              core.notice(message);
+              const concession = new Error(message, { cause });
+              concession.autoGateMergeConceded = true;
+              throw concession;
+            };
+            const createCheck = github.rest.checks.create.bind(github.rest.checks);
+            github.rest.checks.create = async (options) => {
+              const response = await createCheck(options);
+              if (options.external_id === aggregateExternalId) {
+                ownedAggregateCheck = response.data;
+              }
+              return response;
+            };
+            const updateCheck = github.rest.checks.update.bind(github.rest.checks);
+            github.rest.checks.update = async (options) => {
+              const response = await updateCheck(options);
+              if (options.output?.title === "PASS: every open master PR at this commit passes Auto Gate") {
+                ownedAggregateCheck = response.data;
+              }
+              return response;
+            };
+            const mergePull = github.rest.pulls.merge.bind(github.rest.pulls);
+            github.rest.pulls.merge = async (options) => {
+              try {
+                return await mergePull(options);
+              } catch (error) {
+                const status = Number(
+                  error?.status ?? error?.response?.status ?? error?.response?.data?.status,
+                );
+                const message = error?.response?.data?.message || error?.message || "";
+                if (
+                  status === 405 &&
+                  (/Repository rule violations found/i.test(message) || /not mergeable/i.test(message))
+                ) {
+                  const { owner, repo, pull_number: prNumber, sha } = options;
+                  const expectedHeadSha = String(sha || "").toLowerCase();
+                  const pull = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                  if (pull.data.merged) {
+                    concede(
+                      `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
+                        `already merged ${pull.data.merge_commit_sha || expectedHeadSha}.`,
+                      error,
+                    );
+                  }
+
+                  const ownedCreatedAt = Date.parse(ownedAggregateCheck?.created_at || "") || 0;
+                  const aggregateChecks = await github.paginate(
+                    github.rest.checks.listForRef,
+                    { owner, repo, ref: expectedHeadSha, filter: "all", per_page: 100 },
+                  );
+                  const newerOwner = aggregateChecks
+                    .filter((check) => {
+                      const createdAt = Date.parse(check.created_at || "") || 0;
+                      const newerGeneration =
+                        createdAt > ownedCreatedAt ||
+                        (createdAt === ownedCreatedAt &&
+                          Number(check.id) > Number(ownedAggregateCheck?.id));
+                      return (
+                        ownedAggregateCheck &&
+                        newerGeneration &&
+                        check.name === "Auto Gate decision" &&
+                        check.external_id === aggregateExternalId &&
+                        check.app?.id === 15368 &&
+                        check.conclusion === "failure" &&
+                        check.output?.title?.startsWith(
+                          "WAITING: refreshing every PR/head decision",
+                        )
+                      );
+                    })
+                    .sort((left, right) => {
+                      const createdDifference =
+                        (Date.parse(right.created_at || "") || 0) -
+                        (Date.parse(left.created_at || "") || 0);
+                      return createdDifference || Number(right.id) - Number(left.id);
+                    })[0];
+                  if (newerOwner) {
+                    concede(
+                      `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
+                        `is newer Auto Gate check ${newerOwner.html_url || `#${newerOwner.id}`} ` +
+                        `owning ${expectedHeadSha} (${newerOwner.output.title}).`,
+                      error,
+                    );
+                  }
+                }
+                throw error;
+              }
+            };
             if (typeof autoGate.processAggregateHead === "function") {
-              await autoGate.processAggregateHead({
-                github,
-                context,
-                core,
-                headSha: process.env.HEAD_SHA,
-                targets: targets.map((target) => ({
-                  prNumber: Number(target.pr_number),
-                  headSha: target.head_sha,
-                })),
-                mergeEnabled: process.env.MERGE_ENABLED === "true",
-                manual: context.eventName === "workflow_dispatch",
-                readFailureReason: process.env.READ_FAILURE,
-              });
+              try {
+                await autoGate.processAggregateHead({
+                  github,
+                  context,
+                  core,
+                  headSha: process.env.HEAD_SHA,
+                  targets: targets.map((target) => ({
+                    prNumber: Number(target.pr_number),
+                    headSha: target.head_sha,
+                  })),
+                  mergeEnabled: process.env.MERGE_ENABLED === "true",
+                  manual: context.eventName === "workflow_dispatch",
+                  readFailureReason: process.env.READ_FAILURE,
+                });
+              } catch (error) {
+                if (!error?.autoGateMergeConceded) throw error;
+              }
               return;
             }
             // Landing compatibility: this workflow is visible before the new
@@ -369,11 +466,16 @@ jobs:
                 core.notice(`AUTO_GATE_ENABLED is not true; would merge PR #${target.pr_number}.`);
                 continue;
               }
-              await autoGate.merge({
-                github,
-                context,
-                core,
-                prNumber: Number(target.pr_number),
-                expectedHeadSha: process.env.HEAD_SHA,
-              });
+              try {
+                await autoGate.merge({
+                  github,
+                  context,
+                  core,
+                  prNumber: Number(target.pr_number),
+                  expectedHeadSha: process.env.HEAD_SHA,
+                });
+              } catch (error) {
+                if (error?.autoGateMergeConceded) return;
+                throw error;
+              }
             }
