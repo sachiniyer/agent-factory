@@ -3,6 +3,7 @@
 package tmux
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
@@ -36,14 +38,15 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
 
-	// Start an empty private server and keep it alive. The command under test is
-	// therefore only a client; putting it in a transient session-launch scope is
-	// unnecessary and obscures the ownership invariant #3307 needs to enforce.
-	out, err := exec.Command(
-		"tmux", "start-server", ";", "set-option", "-g", "exit-empty", "off",
-	).CombinedOutput()
+	// Start a foreign/legacy private server with the ordinary exit-empty policy.
+	// The daemon may attach clients, but must not make that server immortal: once
+	// its last session ends it should exit and be replaced by the dedicated scope.
+	out, err := exec.Command("tmux", "new-session", "-d", "-s", "preexisting", "sleep", "60").CombinedOutput()
 	if err != nil {
 		t.Fatalf("start private tmux server: %v: %s", err, out)
+	}
+	if out, err := exec.Command("tmux", "set-option", "-g", "exit-empty", "on").CombinedOutput(); err != nil {
+		t.Fatalf("set private server exit-empty on: %v: %s", err, out)
 	}
 	restore := ConfigureDaemonServer(t.TempDir())
 	t.Cleanup(restore)
@@ -55,6 +58,13 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	want := "tmux new-session -d -s af_worker"
 	if got := strings.Join(cmd.Args, " "); got != want {
 		t.Fatalf("existing-server client command = %q, want %q", got, want)
+	}
+	out, err = exec.Command("tmux", "show-options", "-gv", "exit-empty").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read existing server exit-empty: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "on" {
+		t.Fatalf("daemon changed existing server exit-empty to %q, want on", got)
 	}
 }
 
@@ -163,10 +173,16 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 	testguard.IsolateTmux(t)
 	dir := t.TempDir()
 	systemdRun := filepath.Join(dir, "systemd-run")
-	pidPath := systemdRun + ".pid"
-	script := "#!/bin/sh\nprintf '%s\\n' \"$$\" >\"$0.pid\"\nexec sleep 60\n"
+	parentPIDPath := systemdRun + ".parent"
+	childPIDPath := systemdRun + ".child"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$$\" >\"$0.parent\"\nsleep 60 &\nchild=$!\nprintf '%s\\n' \"$child\" >\"$0.child\"\nwait \"$child\"\n"
 	if err := os.WriteFile(systemdRun, []byte(script), 0o700); err != nil {
 		t.Fatalf("write blocking systemd-run shim: %v", err)
+	}
+	systemctl := filepath.Join(dir, "systemctl")
+	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\nfor suffix in child parent; do\n  pid=$(cat \"$base.$suffix\")\n  kill -KILL \"$pid\" 2>/dev/null || true\ndone\n"
+	if err := os.WriteFile(systemctl, []byte(stopScript), 0o700); err != nil {
+		t.Fatalf("write systemctl shim: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
@@ -177,19 +193,29 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 	if err := EnsureDaemonServer(); err == nil || !strings.Contains(err.Error(), "did not become ready") {
 		t.Fatalf("EnsureDaemonServer error = %v, want readiness timeout", err)
 	}
-	rawPID, err := os.ReadFile(pidPath)
+	stopArgs, err := os.ReadFile(systemctl + ".args")
 	if err != nil {
-		t.Fatalf("read launcher pid: %v", err)
+		t.Fatalf("read systemctl args: %v", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
-	if err != nil {
-		t.Fatalf("parse launcher pid: %v", err)
+	wantStopArgs := "--user kill --kill-whom=all --signal=KILL " + dedicatedServerScopeName() + ".scope"
+	if got := strings.TrimSpace(string(stopArgs)); got != wantStopArgs {
+		t.Fatalf("systemctl cleanup args = %q, want %q", got, wantStopArgs)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		t.Fatalf("timed-out dedicated server launcher %d is still alive", pid)
-	} else if err != syscall.ESRCH {
-		t.Fatalf("probe timed-out launcher %d: %v", pid, err)
+	for label, pidPath := range map[string]string{"launcher": parentPIDPath, "launcher child": childPIDPath} {
+		rawPID, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Fatalf("read %s pid: %v", label, err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+		if err != nil {
+			t.Fatalf("parse %s pid: %v", label, err)
+		}
+		if err := syscall.Kill(pid, 0); err == nil {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Errorf("timed-out dedicated server %s %d is still alive", label, pid)
+		} else if err != syscall.ESRCH {
+			t.Errorf("probe timed-out %s %d: %v", label, pid, err)
+		}
 	}
 }
 
@@ -223,6 +249,75 @@ func TestDedicatedServerTightensExistingLogPermissions(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("existing tmux server log mode = %04o, want 0600", got)
+	}
+}
+
+func TestDedicatedServerWrapperAppliesLiveRotationPolicy(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(configPath, []byte("log_max_size_mb = 2\nlog_max_backups = 1\n"), 0o600); err != nil {
+		t.Fatalf("write initial log policy: %v", err)
+	}
+	payloadPath := filepath.Join(dir, "payload")
+	if err := os.WriteFile(payloadPath, bytes.Repeat([]byte("x"), 1200*1024), 0o600); err != nil {
+		t.Fatalf("write stderr payload: %v", err)
+	}
+	readyPath := filepath.Join(dir, "ready")
+	releasePath := filepath.Join(dir, "release")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+: >"$AF_TEST_TMUX_READY"
+while [ ! -f "$AF_TEST_TMUX_RELEASE" ]; do sleep 0.01; done
+cat "$AF_TEST_TMUX_PAYLOAD" >&2
+exit 42
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	logPath := filepath.Join(home, dedicatedServerLogName)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("AF_TEST_TMUX_READY", readyPath)
+	t.Setenv("AF_TEST_TMUX_RELEASE", releasePath)
+	t.Setenv("AF_TEST_TMUX_PAYLOAD", payloadPath)
+	t.Setenv(dedicatedServerLogEnv, logPath)
+	done := make(chan error, 1)
+	go func() { done <- runDedicatedServer() }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("tmux shim did not reach its write barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(configPath, []byte("log_max_size_mb = 1\nlog_max_backups = 0\n"), 0o600); err != nil {
+		t.Fatalf("write live log policy: %v", err)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+		t.Fatalf("release tmux shim: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("failing tmux shim returned success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("tmux wrapper did not return")
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat dynamically rotated tmux server log: %v", err)
+	}
+	if info.Size() >= 1024*1024 {
+		t.Fatalf("tmux server log stayed at %d bytes after live 1MB policy, want below cap", info.Size())
+	}
+	if _, err := os.Stat(logPath + ".1"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("live log_max_backups=0 retained a rotated backup: %v", err)
 	}
 }
 

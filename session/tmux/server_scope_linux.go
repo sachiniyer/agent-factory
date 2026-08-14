@@ -25,6 +25,7 @@ const (
 	dedicatedServerLogName    = "tmux-server.log"
 	serverProbeTimeout        = 250 * time.Millisecond
 	serverStartupTimeout      = 2 * time.Second
+	serverScopeKillTimeout    = 2 * time.Second
 )
 
 var (
@@ -61,8 +62,7 @@ func configuredDaemonServerHome() (string, bool) {
 // EnsureDaemonServer starts tmux before any daemon-owned session spawn. The
 // foreground server lives in its own named systemd scope, independent of every
 // session launch and of the daemon service itself. tmux -D both preserves its
-// stderr and disables exit-empty; the explicit option write below pins that
-// zero-session lifetime as an observable postcondition.
+// stderr and disables exit-empty for the server it creates.
 func EnsureDaemonServer() error {
 	if !systemdunit.RunningDaemonProcess() {
 		return nil
@@ -79,7 +79,10 @@ func ensureDedicatedServer(home string) error {
 	defer serverBootstrapMu.Unlock()
 
 	if tmuxServerRunning() {
-		return keepTmuxServerAlive()
+		// Do not mutate a foreign or legacy server. Its ordinary exit-empty
+		// policy lets it retire after its last session, at which point a later
+		// spawn replaces it with the dedicated server below.
+		return nil
 	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("create AF home for tmux server log: %w", err)
@@ -89,8 +92,8 @@ func ensureDedicatedServer(home string) error {
 		return fmt.Errorf("secure existing tmux server log: %w", err)
 	}
 	// Apply the configured bound before systemd-run gets a direct append fd. The
-	// long-lived helper reopens the same path through NewRotatingFile and owns
-	// write-time rotation after startup.
+	// long-lived helper reopens the same path through NewLiveRotatingFile and
+	// owns write-time rotation after startup.
 	if writer, err := log.NewRotatingFile(logPath, 0o600); err != nil {
 		return fmt.Errorf("open bounded tmux server log: %w", err)
 	} else if err := writer.Close(); err != nil {
@@ -121,7 +124,7 @@ func ensureDedicatedServer(home string) error {
 	defer ticker.Stop()
 	for {
 		if tmuxServerRunning() {
-			return keepTmuxServerAlive()
+			return nil
 		}
 		select {
 		case launchErr := <-done:
@@ -131,7 +134,7 @@ func ensureDedicatedServer(home string) error {
 				// launcher failed. Prefer the observed healthy server to a false
 				// startup refusal.
 				if tmuxServerRunning() {
-					return keepTmuxServerAlive()
+					return nil
 				}
 				return fmt.Errorf("dedicated tmux server scope exited before readiness: %w", launchErr)
 			}
@@ -139,8 +142,8 @@ func ensureDedicatedServer(home string) error {
 		case <-deadline.C:
 			timeoutErr := fmt.Errorf("dedicated tmux server did not become ready within %s", serverStartupTimeout)
 			if done != nil {
-				if stopErr := stopAndReapLauncher(cmd, done); stopErr != nil {
-					return fmt.Errorf("%w (failed to stop its launcher: %v)", timeoutErr, stopErr)
+				if stopErr := stopAndReapDedicatedScope(cmd, done); stopErr != nil {
+					return fmt.Errorf("%w (failed to stop its scope: %v)", timeoutErr, stopErr)
 				}
 			}
 			return timeoutErr
@@ -148,14 +151,31 @@ func ensureDedicatedServer(home string) error {
 	}
 }
 
-func stopAndReapLauncher(cmd *exec.Cmd, done <-chan error) error {
+func stopAndReapDedicatedScope(cmd *exec.Cmd, done <-chan error) error {
+	// Killing only the systemd-run client can strand its child in the transient
+	// scope. Target the exact deterministic unit so every process in the failed
+	// bootstrap attempt is killed before the fail-open session launch proceeds.
+	ctx, cancel := context.WithTimeout(context.Background(), serverScopeKillTimeout)
+	defer cancel()
+	unit := dedicatedServerScopeName() + ".scope"
+	out, scopeErr := exec.CommandContext(
+		ctx, "systemctl", "--user", "kill", "--kill-whom=all", "--signal=KILL", unit,
+	).CombinedOutput()
+
 	killErr := cmd.Process.Kill()
 	// Stdout/stderr are direct files, not pipes, so SIGKILL makes Wait return
 	// promptly. Always receive the result: that both reaps the process and lets
 	// the goroutine terminate before fail-open returns to session creation.
 	<-done
 	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
-		return killErr
+		return fmt.Errorf("kill launcher: %w", killErr)
+	}
+	if scopeErr != nil {
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return fmt.Errorf("kill %s: %w: %s", unit, scopeErr, detail)
+		}
+		return fmt.Errorf("kill %s: %w", unit, scopeErr)
 	}
 	return nil
 }
@@ -178,20 +198,6 @@ func tmuxServerRunning() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
 	defer cancel()
 	return exec.CommandContext(ctx, "tmux", "show-options", "-gv", "exit-empty").Run() == nil
-}
-
-func keepTmuxServerAlive() error {
-	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "set-option", "-g", "exit-empty", "off").CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(out))
-		if detail != "" {
-			return fmt.Errorf("set tmux exit-empty off: %w: %s", err, detail)
-		}
-		return fmt.Errorf("set tmux exit-empty off: %w", err)
-	}
-	return nil
 }
 
 func dedicatedServerScopeCommand(logPath string) *exec.Cmd {
@@ -274,7 +280,7 @@ func runDedicatedServer() error {
 	if err := secureExistingServerLog(logPath); err != nil {
 		return fmt.Errorf("secure existing tmux server log: %w", err)
 	}
-	writer, err := log.NewRotatingFile(logPath, 0o600)
+	writer, err := log.NewLiveRotatingFile(logPath, 0o600)
 	if err != nil {
 		return fmt.Errorf("open bounded tmux server log: %w", err)
 	}
