@@ -283,6 +283,28 @@ func httpStatusForTab(err error) int {
 	return http.StatusInternalServerError
 }
 
+// ptyInputDelivery exposes the latest synchronous input call to the stream owner
+// so teardown can wait for its truthful outcome without cancelling an idle
+// WebSocket read (coder/websocket cancellation closes the raw transport).
+type ptyInputDelivery struct {
+	mu     sync.Mutex
+	latest chan error
+}
+
+func (d *ptyInputDelivery) begin() chan error {
+	done := make(chan error, 1)
+	d.mu.Lock()
+	d.latest = done
+	d.mu.Unlock()
+	return done
+}
+
+func (d *ptyInputDelivery) current() <-chan error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.latest
+}
+
 // servePTYStream runs the three loops of one subscriber's connection until any of
 // them ends: the writer (ring → PTY_OUT / resize-echo), the reader (INPUT/RESIZE/
 // detach → agent-server), and the keepalive pinger. It owns closing the
@@ -292,12 +314,13 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
+	inputDelivery := &ptyInputDelivery{}
 	readerDone := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		err := readPTYClient(ctx, binding, conn)
+		err := readPTYClient(ctx, binding, conn, inputDelivery)
 		readerDone <- err
 		cancel()
 	}()
@@ -305,24 +328,29 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 
 	writePTYStream(ctx, sub, conn)
 
-	cancel()
 	closeStatus := websocket.StatusNormalClosure
 	closeReason := ""
-	readerWait := time.NewTimer(wsWriteTimeout)
-	defer readerWait.Stop()
+	var readerErr error
 	select {
-	case err := <-readerDone:
-		if err != nil {
-			log.WarningLog.Printf("PTY input delivery failed; closing web stream so the client can reconnect: %v", err)
-			closeStatus = websocket.StatusInternalError
-			closeReason = "PTY input delivery failed"
+	case readerErr = <-readerDone:
+	default:
+		if inputResult := inputDelivery.current(); inputResult != nil {
+			readerWait := time.NewTimer(wsWriteTimeout)
+			select {
+			case readerErr = <-inputResult:
+			case <-readerWait.C:
+				readerErr = errors.New("PTY input delivery status is unknown during stream teardown")
+			}
+			readerWait.Stop()
 		}
-	case <-readerWait.C:
-		log.WarningLog.Printf("PTY reader did not stop during stream teardown; input delivery status is unknown")
+	}
+	if readerErr != nil {
+		log.WarningLog.Printf("PTY input delivery failed; closing web stream so the client can reconnect: %v", readerErr)
 		closeStatus = websocket.StatusInternalError
-		closeReason = "PTY input delivery status unknown"
+		closeReason = "PTY input delivery failed"
 	}
 	_ = conn.Close(closeStatus, closeReason)
+	cancel()
 	wg.Wait()
 }
 
@@ -434,7 +462,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
 // any read error ends the connection. A failed INPUT ends the stream with an
 // error so the client can reconnect rather than silently losing later keys.
-func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn) error {
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
@@ -448,8 +476,14 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 			// closed rather than routing later keys to whatever tab now holds the ordinal.
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
-				if err := binding.input(msg.Frame.Data); err != nil {
-					return fmt.Errorf("apply PTY input: %w", err)
+				inputResult := inputDelivery.begin()
+				err := binding.input(msg.Frame.Data)
+				if err != nil {
+					err = fmt.Errorf("apply PTY input: %w", err)
+				}
+				inputResult <- err
+				if err != nil {
+					return err
 				}
 			case agentproto.OpResize:
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)
