@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -291,25 +292,55 @@ func projectRecordDirPresent(projectID string) bool {
 // projectRoots, so the singleton sweep can create the root this run instead
 // of waiting for a daemon start. Mutates the candidate snapshot in place; the
 // caller publishes.
+// rootReattributionProbe is one asynchronous git/marker check for an
+// unresolved recorded root. Its result fields are written only by the probe
+// goroutine, strictly before done is closed; the poll goroutine reads them
+// only after observing that close, so no lock guards them.
+type rootReattributionProbe struct {
+	done    chan struct{}
+	repo    *config.RepoContext
+	matches bool
+}
+
+// rootHealProbeGrace bounds how long one heal pass waits for its probes: long
+// enough that a healthy local filesystem completes within the same pass (so
+// recovery still lands the tick the mount returns), short enough that a
+// stalled network mount delays the poll loop by at most this much per tick
+// rather than wedging it (#3299 review).
+const rootHealProbeGrace = 2 * time.Second
+
 func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 	if len(healed.unresolvedRoots) == 0 {
 		return false
 	}
+	deadline := time.After(rootHealProbeGrace)
 	changed := false
 	for derivedID, record := range healed.unresolvedRoots {
-		repo, err := config.RepoFromPath(record.root)
-		if err != nil {
+		m.mu.Lock()
+		probe := m.rootHealProbes[derivedID]
+		if probe == nil {
+			probe = &rootReattributionProbe{done: make(chan struct{})}
+			m.rootHealProbes[derivedID] = probe
+			go runRootReattributionProbe(probe, record)
+		}
+		m.mu.Unlock()
+		select {
+		case <-probe.done:
+		case <-deadline:
+			// Still running — a stalled mount must cost the poll loop a bounded
+			// wait, not a wedge. The entry stays unresolved (fail closed) and
+			// the probe is consumed on a later pass.
 			continue
 		}
-		matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
-		if err != nil || !matches {
-			if err != nil {
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be verified; leaving project %s unresolved: %v", record.root, record.projectID, err)
-			} else {
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
-			}
+		m.mu.Lock()
+		delete(m.rootHealProbes, derivedID)
+		m.mu.Unlock()
+		if !probe.matches {
+			// Resolution failed or the marker did not verify; the probe logged
+			// the specifics. A fresh probe next pass keeps re-checking.
 			continue
 		}
+		repo := probe.repo
 		m.mu.Lock()
 		_, fenced := m.projectDeletes[derivedID]
 		if !fenced && derivedID != repo.ID {
@@ -339,11 +370,37 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 			healed.personalUnreadable[repo.ID] = projectID
 			delete(healed.personalUnreadable, derivedID)
 		}
-		healed.projectRoots[repo.ID] = repo.Root
+		// The RECORDED root is the create path (see projectRootAgentLayers):
+		// repo.Root for a bare-clone linked worktree is not a repository.
+		healed.projectRoots[repo.ID] = record.root
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
 	return changed
+}
+
+// runRootReattributionProbe performs the blocking half of one re-attribution
+// check — git resolution and the checkout-marker probe, both of which touch
+// the recorded path's filesystem — so the poll goroutine never blocks on a
+// stalled mount. It logs its own negative outcomes because the consuming pass
+// only learns pass/fail.
+func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedProjectRecord) {
+	defer close(probe.done)
+	repo, err := config.RepoFromPath(record.root)
+	if err != nil {
+		return
+	}
+	matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
+	if err != nil {
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be verified; leaving project %s unresolved: %v", record.root, record.projectID, err)
+		return
+	}
+	if !matches {
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
+		return
+	}
+	probe.repo = repo
+	probe.matches = true
 }
 
 func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.RootAgentLayer {

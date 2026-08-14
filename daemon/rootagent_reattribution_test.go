@@ -175,16 +175,12 @@ func TestEnsureRootAgentsReattributesWorktreeRecordedRoot(t *testing.T) {
 	}
 }
 
-// TestEnsureRootAgentsReattributesBareCloneWorktree pins the #3299 review's
-// round-2 P1: for a linked worktree of a BARE clone, RepoFromPath resolves
-// repo.Root to the parent of the bare common directory — not a worktree — so
-// probing the checkout marker there fails forever. The marker must be probed
-// at the RECORDED path, which binds to the same common dir the marker lives
-// in, exactly how Register/Rebind probe it.
-func TestEnsureRootAgentsReattributesBareCloneWorktree(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	seen := installOptionsRecordingBackend(t)
-	parent := testguard.CanonicalTempDir(t)
+// setupBareCloneWorktree builds the #3299 identity residue in its sharpest
+// shape: a linked worktree of a BARE clone, where RepoFromPath resolves to
+// the parent of the bare common directory — a non-repository.
+func setupBareCloneWorktree(t *testing.T) (parent, worktree string) {
+	t.Helper()
+	parent = testguard.CanonicalTempDir(t)
 	src := filepath.Join(parent, "src")
 	if err := exec.Command("git", "init", src).Run(); err != nil {
 		t.Fatalf("git init: %v", err)
@@ -202,10 +198,21 @@ func TestEnsureRootAgentsReattributesBareCloneWorktree(t *testing.T) {
 	if err := exec.Command("git", "clone", "--bare", src, bare).Run(); err != nil {
 		t.Fatalf("git clone --bare: %v", err)
 	}
-	worktree := filepath.Join(parent, "wt")
+	worktree = filepath.Join(parent, "wt")
 	if err := exec.Command("git", "-C", bare, "worktree", "add", worktree).Run(); err != nil {
 		t.Fatalf("git worktree add from bare: %v", err)
 	}
+	return parent, worktree
+}
+
+// TestEnsureRootAgentsReattributesBareCloneWorktree pins the #3299 review's
+// round-2 P1: probing the checkout marker at repo.Root fails forever for a
+// bare-clone linked worktree; the RECORDED path binds to the common dir the
+// marker lives in, exactly how Register/Rebind probe it.
+func TestEnsureRootAgentsReattributesBareCloneWorktree(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent, worktree := setupBareCloneWorktree(t)
 
 	project := registerTestProject(t, worktree)
 	writePersonalRootAgent(t, project.ID, "enabled = false")
@@ -229,6 +236,44 @@ func TestEnsureRootAgentsReattributesBareCloneWorktree(t *testing.T) {
 	}
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, worktree)).reason; got != rootAgentDisabled {
 		t.Fatalf("a bare-clone linked-worktree registration must re-attribute once its path resolves — the marker lives in the common dir the RECORDED path binds to — got reason %d", got)
+	}
+}
+
+// TestEnsureRootAgentsCreatesRootAtBareCloneWorktree pins the #3299 review's
+// round-3 P1: re-attribution must publish the RECORDED root as the create
+// path. repo.Root for a bare-clone linked worktree is the parent of the bare
+// common directory — a non-repository — so a root enabled there could never
+// actually be created; the disable-only sibling test above cannot see that.
+func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent, worktree := setupBareCloneWorktree(t)
+
+	project := registerTestProject(t, worktree)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/bare-root\"")
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 1 {
+		t.Fatalf("an enabled bare-clone worktree project must get its root once its mount returns, got %d creates — a non-repository create path fails before the backend", len(*seen))
+	}
+	if got := (*seen)[0].Path; got != worktree {
+		t.Fatalf("the root must be created at the recorded worktree, got %q (repo.Root for a bare clone is the non-repository parent)", got)
+	}
+	if got := (*seen)[0].Program; got != "/opt/bare-root" {
+		t.Fatalf("the personal program must reach the create verbatim, got %q", got)
 	}
 }
 

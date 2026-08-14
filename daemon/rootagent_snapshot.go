@@ -169,7 +169,13 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
 			repoID, repoRoot = repo.ID, repo.Root
-			projectRoots[repoID] = repo.Root
+			// Publish the RECORDED root as the create path, not repo.Root: for a
+			// linked worktree of a bare clone, repo.Root is the parent of the
+			// bare common directory — a non-repository the singleton sweep could
+			// never create a session at — while the recorded root is the
+			// checkout the user registered (#3299 review). Identity still comes
+			// from repo.ID; only the working path differs.
+			projectRoots[repoID] = p.Root
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
 			// checkout deleted or no longer a git repository. The singleton sweep

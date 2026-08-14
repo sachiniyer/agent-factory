@@ -247,6 +247,14 @@ type Manager struct {
 	rootHealRegistryStreak   int
 	rootHealRegistryProjects []config.Project
 	rootHealAbsenceStreaks   map[string]int
+	// rootHealProbes holds the in-flight asynchronous re-attribution probes,
+	// keyed by the unresolved entry's derived repo ID (#3299 review): the
+	// probes fork git against recorded roots that were just absent — exactly
+	// the paths most likely to sit on a stalled network mount — so they run
+	// off the poll goroutine, and the heal pass consumes only completed
+	// results. Guarded by mu; each probe's fields are written solely by its
+	// goroutine before done is closed.
+	rootHealProbes map[string]*rootReattributionProbe
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -505,6 +513,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		pausedPolls:            make(map[string]map[string]time.Time),
 		taskRunProbeDue:        make(map[string]time.Time),
 		rootHealAbsenceStreaks: make(map[string]int),
+		rootHealProbes:         make(map[string]*rootReattributionProbe),
 		events:                 newEventsHub(),
 		vscode:                 vscode,
 		configAgents:           configAgents,
