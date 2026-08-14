@@ -1234,3 +1234,103 @@ func TestBothSelectorsAcceptReattributedPair(t *testing.T) {
 		t.Fatalf("the delete must land on the real identity, got %s", result.RepoID)
 	}
 }
+
+// TestDeleteRetiresPendingProbe pins the #3299 review's round-9 P1: deleting
+// a project whose identity verification is stalled mid-flight must retire the
+// probe (and, on the next pass, the unresolved entry), or the candidate repo
+// stays attribution-pending — fail-closed — forever, for a project that no
+// longer exists.
+func TestDeleteRetiresPendingProbe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	rewriteRecordRoot(t, project.ID, worktree)
+	realID := repoID(t, repoPath)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Rename(aside, parent) })
+	stuck := &rootReattributionProbe{done: make(chan struct{})}
+	stuck.candidate.Store(&config.RepoContext{Root: repoPath, ID: realID})
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(worktree)] = stuck
+	manager.mu.Unlock()
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentAttributionPending {
+		t.Fatalf("precondition: the stalled probe must hold the repo pending, got reason %d", got)
+	}
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+		t.Fatalf("DeleteProject while verification is stalled: %v", err)
+	}
+
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentAttributionPending {
+		t.Fatalf("a deleted project's stalled probe must not hold its candidate repo pending forever")
+	}
+	manager.EnsureRootAgents()
+	if layers := manager.rootAgentLayers.Load(); len(layers.unresolvedRoots) != 0 {
+		t.Fatalf("the tombstoned unresolved entry must be retired from the snapshot, got %d entries", len(layers.unresolvedRoots))
+	}
+}
+
+// TestAbsenceStrikesStaySpacedAcrossSiblingHeals pins the #3299 review's
+// round-9 P1: a sibling healing in the same pass resets the shared retry
+// clock to now, and the ENOENT two-strike release must still require its own
+// strikes to be SPACED — two observations one tick apart are one mount flap,
+// not two independent confirmations.
+func TestAbsenceStrikesStaySpacedAcrossSiblingHeals(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoA := setupControlRepo(t)
+	repoB := setupControlRepo(t)
+	projectA := registerTestProject(t, repoA)
+	projectB := registerTestProject(t, repoB)
+	writePersonalRootAgent(t, projectA.ID, "enabled = tr")
+	writePersonalRootAgent(t, projectB.ID, "enabled = tr")
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// After boot: A's config vanishes entirely (the ENOENT strike path), B's
+	// becomes readable (it will heal and reset the shared clock).
+	pathA, err := config.ProjectConfigTomlPath(projectA.ID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Remove(pathA); err != nil {
+		t.Fatalf("remove A config: %v", err)
+	}
+	writePersonalRootAgent(t, projectB.ID, "enabled = false")
+
+	manager.EnsureRootAgents() // pass 1: A strike 1, B heals, clock resets to now
+	manager.EnsureRootAgents() // pass 2, one tick later: A's observation must be IGNORED
+
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoA)).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("two unspaced ENOENT observations are one flap — the fail-closed latch must hold, got reason %d", got)
+	}
+}

@@ -115,9 +115,18 @@ func (m *Manager) healRootAgentLayers() {
 				rpChanged = true
 			}
 		}
-		if m.reattributeUnresolvedRoots(&healed) {
+		reattrChanged, settles := m.reattributeUnresolvedRoots(&healed)
+		if reattrChanged {
 			changed = true
 		}
+		// Applied AFTER the publish below: a settle releases the
+		// attribution-pending gate, which must not happen before the
+		// snapshot carrying the corresponding bridge/flags is visible.
+		defer func() {
+			for _, settle := range settles {
+				settle()
+			}
+		}()
 	}
 
 	if changed {
@@ -227,6 +236,18 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 				continue
 			}
 			m.mu.Lock()
+			// Per-project spacing, independent of the shared retry clock: an
+			// observation landing within one backoff base of the previous
+			// strike is IGNORED (not counted, not a reset) — two ticks one
+			// second apart must never satisfy a discipline that exists to
+			// survive mount flaps (#3299 review round 9).
+			now := nowFunc()
+			if last, ok := m.rootHealAbsenceLastStrike[projectID]; ok && now.Sub(last) < rootEnsureBackoffBase {
+				m.mu.Unlock()
+				personalUnreadable[repoID] = projectID
+				continue
+			}
+			m.rootHealAbsenceLastStrike[projectID] = now
 			m.rootHealAbsenceStreaks[projectID]++
 			strikes := m.rootHealAbsenceStreaks[projectID]
 			m.mu.Unlock()
@@ -252,6 +273,7 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 // resetPersonalAbsenceStreak clears a project's ENOENT two-strike counter.
 func (m *Manager) resetPersonalAbsenceStreak(projectID string) {
 	m.mu.Lock()
+	delete(m.rootHealAbsenceLastStrike, projectID)
 	delete(m.rootHealAbsenceStreaks, projectID)
 	m.mu.Unlock()
 }
@@ -382,9 +404,9 @@ const rootHealProbeResultTTL = 30 * time.Second
 // projectRoots, so the singleton sweep can create the root this run instead
 // of waiting for a daemon start. Mutates the candidate snapshot in place; the
 // caller publishes.
-func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed bool) {
+func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed bool, settles []func()) {
 	if len(healed.unresolvedRoots) == 0 {
-		return false
+		return false, nil
 	}
 	m.rootHealPassSeq++
 	pass := m.rootHealPassSeq
@@ -411,6 +433,13 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	// goroutine per entry, however long its mount stalls).
 	m.mu.Lock()
 	for derivedID, record := range healed.unresolvedRoots {
+		if _, deleted := m.deletedRootRepos[derivedID]; deleted {
+			// The project was deleted while unresolved; the consume loop
+			// below retires the entry. Never spawn for it — a stalled probe
+			// would hold its candidate repo attribution-pending for a
+			// project that no longer exists (#3299 review round 9).
+			continue
+		}
 		probe := m.rootHealProbes[derivedID]
 		if probe != nil {
 			select {
@@ -446,9 +475,29 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	expired := false
 	for derivedID, record := range healed.unresolvedRoots {
 		m.mu.Lock()
+		_, entryDeleted := m.deletedRootRepos[derivedID]
 		probe := m.rootHealProbes[derivedID]
+		settled := probe != nil && probe.settled
 		m.mu.Unlock()
-		if probe == nil || probe.settled {
+		if entryDeleted {
+			// DeleteProject tombstoned this project while it sat unresolved:
+			// retire the entry, its verdict bridges, and any probe state, so
+			// nothing keeps answering — or failing closed — for a project
+			// that no longer exists (#3299 review round 9).
+			cloneForWrite()
+			delete(healed.unresolvedRoots, derivedID)
+			for rid, d := range healed.unresolvedResolvedIDs {
+				if d == derivedID {
+					delete(healed.unresolvedResolvedIDs, rid)
+				}
+			}
+			m.mu.Lock()
+			delete(m.rootHealProbes, derivedID)
+			delete(m.rootHealProbeFailures, derivedID)
+			m.mu.Unlock()
+			continue
+		}
+		if probe == nil || settled {
 			// A settled negative neither pends nor re-consumes: it waits out
 			// its own retryAt, invisible to the pass.
 			continue
@@ -482,16 +531,27 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		}
 		if !probe.matches {
 			// Hold the settled negative in place under its own backoff
-			// (#3299 review round 7) — its bridge/flag bookkeeping below
-			// still publishes this pass.
-			m.rootHealProbeFailures[derivedID]++
-			probe.settled = true
-			probe.retryAt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealProbeFailures[derivedID]))
+			// (#3299 review round 7). The settle itself is DEFERRED to after
+			// the caller publishes the healed snapshot, and applied under
+			// m.mu (#3299 review round 9): settled releases the
+			// attribution-pending gate, and a concurrent verdict observing
+			// that release before the unreadable-marker bridge is published
+			// would resolve fail-open for an instant; the unsynchronized
+			// write also races rootAttributionPendingFor's locked read.
+			deferredProbe := probe
+			deferredID := derivedID
+			settles = append(settles, func() {
+				m.mu.Lock()
+				m.rootHealProbeFailures[deferredID]++
+				deferredProbe.retryAt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealProbeFailures[deferredID]))
+				deferredProbe.settled = true
+				m.mu.Unlock()
+			})
 		} else {
 			m.mu.Lock()
 			delete(m.rootHealProbes, derivedID)
-			m.mu.Unlock()
 			delete(m.rootHealProbeFailures, derivedID)
+			m.mu.Unlock()
 		}
 		if !probe.matches {
 			// The probe logged the specifics; a fresh probe next pass keeps
@@ -578,7 +638,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
-	return changed
+	return changed, settles
 }
 
 // runRootReattributionProbe performs the blocking half of one re-attribution
