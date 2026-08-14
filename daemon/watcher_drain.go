@@ -73,10 +73,9 @@ func (w *taskWatcher) drainLoop() {
 	// most once per episode anyway: its FIFO gate sends later events straight to
 	// the queue without attempting a delivery.
 	var parkLog parkLogThrottle
-	// loadFailedAlarm remembers that THIS loop folded a queue load failure into
-	// the delivery-failure alarm run (#1238). Needed for the one exit where no
-	// delivery outcome will ever clear that run: the queue healing EMPTY.
-	loadFailedAlarm := false
+	// loadFailing remembers that the previous peek hit an unreadable queue, so
+	// the first readable one can end the alarm run and shed the outage backoff.
+	loadFailing := false
 	// Account for the replay on EVERY exit, not just the drained-empty one
 	// (#1789). Expiring advances the cursor irreversibly — the record is gone
 	// and no later session can report it — so a stop landing in one of the
@@ -110,13 +109,16 @@ func (w *taskWatcher) drainLoop() {
 				// stale loadFailed() read and misfile the outage as
 				// corruption, parking the freshly recovered backlog.
 				//
-				// A parked replay IS a delivery outage (#1238): nothing will
-				// be attempted while the backlog cannot be read, so fold the
-				// failure into the alarm run — without this, a restart into an
-				// unreadable queue whose script stays quiet never raises the
-				// pending-unknown banner built for exactly this state.
-				w.recordDeliveryResult(time.Now(), err)
-				loadFailedAlarm = true
+				// A parked replay IS an outage (#1238) — without an alarm, a
+				// restart into an unreadable queue whose script stays quiet
+				// never raises the pending-unknown banner built for exactly
+				// this state. It gets its OWN run, never the delivery one: the
+				// script may still be emitting, and each of those live events
+				// delivering successfully would keep resetting the delivery
+				// run's clock, holding a populated unreadable backlog under
+				// the alarm threshold forever.
+				w.noteQueueUnreadable(err)
+				loadFailing = true
 				if parkLog.allow("load-failed", time.Now()) {
 					log.ErrorLog.Printf("watch task %s: cannot load the event queue; retrying while the storage failure lasts — repeats at most every %s while this holds: %v", w.taskID, watcherParkLogInterval, err)
 				}
@@ -151,16 +153,16 @@ func (w *taskWatcher) drainLoop() {
 			expired++
 			continue
 		}
+		if loadFailing {
+			// The backlog was enumerated again: end the unreadable-queue alarm
+			// run (only that run — a concurrent delivery outage keeps its own
+			// clock) and shed the outage backoff, so the first delivery failure
+			// after recovery waits the base delay, not the outage cap.
+			loadFailing = false
+			backoff = w.sup.drainBaseBackoff
+			w.clearQueueUnreadable()
+		}
 		if !ok {
-			if loadFailedAlarm {
-				// The queue healed EMPTY (or every record expired): the alarm
-				// run the load failure opened has nothing left to deliver, so
-				// no delivery outcome will ever clear it — clear it here. A
-				// healed non-empty queue never reaches this branch with an
-				// open run: its head either delivers (success clears) or keeps
-				// failing (the retry never lets peek report drained).
-				w.recordDeliveryResult(time.Now(), nil)
-			}
 			w.stopDraining()
 			// Close the wake-up race: an event enqueued after the empty peek
 			// but before draining cleared would otherwise strand until the

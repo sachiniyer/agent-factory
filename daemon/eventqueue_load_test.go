@@ -248,9 +248,12 @@ func TestEventQueue_LoadFailureErrorsCarryTypedSentinel(t *testing.T) {
 // hung network mount that doubles every watcher's startup stall. Observable
 // consequence pinned here: even if storage heals right after construction, the
 // OBSERVER path waits out eventQueueLoadRetryInterval rather than recovering on
-// the very next call. Scope: pendingCount only — the mutating entry points
-// retry unthrottled on purpose (each call stands for a real event, and refusing
-// its heal would drop it), which the replay regressions above pin.
+// the very next call. Scope: the autonomous paths — pendingCount here, and the
+// drainer's peek is the same shape — while the event-carrying entry points
+// (enqueue, the live FIFO gate) retry fresh on purpose: each of those calls
+// stands for a real event, and refusing its heal would drop it or route it
+// around a readable backlog. The replay regressions above pin enqueue's side;
+// TestEventQueue_LiveGateRecoveryIsUnthrottled pins the gate's.
 func TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle(t *testing.T) {
 	dir := t.TempDir()
 	// A huge interval makes the assertion airtight: any disk retry inside this
@@ -274,6 +277,33 @@ func TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle(t *testing.T) {
 
 	if got := q.pendingCount(); got != 0 || !q.loadFailed() {
 		t.Fatalf("pendingCount=%d loadFailed=%v right after a failed constructor load; the initial attempt must count against the retry throttle", got, q.loadFailed())
+	}
+}
+
+// TestEventQueue_LiveGateRecoveryIsUnthrottled pins the event-carrying side of
+// the split (#3242 review round 3): the live FIFO gate's count must heal a
+// failed load the moment storage recovers, without waiting out the observer
+// throttle — a stale zero there routes the live event AROUND a backlog that is
+// already readable again, breaking FIFO for no gain.
+func TestEventQueue_LiveGateRecoveryIsUnthrottled(t *testing.T) {
+	dir := t.TempDir()
+	oldInterval := eventQueueLoadRetryInterval
+	eventQueueLoadRetryInterval = time.Hour
+	t.Cleanup(func() { eventQueueLoadRetryInterval = oldInterval })
+
+	seed := newEventQueue(dir, "ab324209")
+	if err := seed.enqueue("only"); err != nil {
+		t.Fatalf("seed enqueue: %v", err)
+	}
+
+	denyAccess(t, seed.path, seed.path, 0o644)
+	q := newEventQueue(dir, "ab324209") // failed load arms the observer throttle
+
+	if err := os.Chmod(seed.path, 0o644); err != nil {
+		t.Fatalf("restore queue file mode: %v", err)
+	}
+	if got := q.pendingCountFresh(); got != 1 {
+		t.Fatalf("pendingCountFresh=%d after storage healed; the live gate must recover immediately, not wait out the observer throttle", got)
 	}
 }
 

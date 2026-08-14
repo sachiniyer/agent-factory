@@ -111,6 +111,57 @@ func TestDeliveryAlarms_LoadFailedQueueReportsPendingUnknown(t *testing.T) {
 	require.Zero(t, alarms[0].Pending)
 }
 
+// TestQueueUnreadableAlarm_SurvivesLiveDeliverySuccess pins the two-run split
+// (#3242 review round 3): while the backlog is unreadable, the script may keep
+// emitting and those live events may keep DELIVERING — each success clears the
+// delivery-failure run, and with one shared run that reset the alarm clock
+// forever, hiding a populated unreadable backlog. The queue-unreadable run must
+// survive live delivery successes and alarm on its own.
+func TestQueueUnreadableAlarm_SurvivesLiveDeliverySuccess(t *testing.T) {
+	s := newWatcherSupervisor()
+	now := time.Now()
+	w := registerFailingWatcher(s, "unread2", "repo1", "root", time.Time{}, 0, "")
+
+	queueDir := t.TempDir()
+	seed := newEventQueue(queueDir, "unread2")
+	require.NoError(t, seed.enqueue("event"))
+	denyAccess(t, seed.path, seed.path, 0o644)
+	w.queue = newEventQueue(queueDir, "unread2")
+
+	// The drain loop hits the unreadable queue, then a live delivery succeeds.
+	w.noteQueueUnreadable(errors.New("event-queue state unknown after a failed load"))
+	w.recordDeliveryResult(now, nil)
+
+	// Backdate the load-failure run past the threshold, as an outage would.
+	w.mu.Lock()
+	w.loadFailSince = now.Add(-watcherDeliveryAlarmThreshold - time.Minute)
+	w.mu.Unlock()
+
+	alarms := s.deliveryAlarms("repo1", now)
+	require.Len(t, alarms, 1, "the unreadable-backlog run must alarm despite live delivery successes")
+	require.True(t, alarms[0].PendingUnknown)
+	require.Zero(t, alarms[0].Consecutive, "no delivery attempts are being counted by this run")
+	require.Contains(t, alarms[0].LastError, "failed load")
+}
+
+// TestClearQueueUnreadable_PreservesDeliveryFailureRun pins the other half of
+// the split: ending the queue-unreadable run (the backlog became enumerable
+// again) must not erase a concurrent delivery-failure run — the target being
+// down is a separate outage with its own clock.
+func TestClearQueueUnreadable_PreservesDeliveryFailureRun(t *testing.T) {
+	w := &taskWatcher{taskID: "bbbb", name: "watch-bbbb"}
+	t0 := time.Now()
+
+	w.recordDeliveryResult(t0, errors.New("target down"))
+	w.noteQueueUnreadable(errors.New("unreadable"))
+	w.clearQueueUnreadable()
+
+	require.Equal(t, t0, w.deliverFailSince, "clearing the load run must not touch the delivery run")
+	require.Equal(t, 1, w.deliverFailCount)
+	require.True(t, w.loadFailSince.IsZero(), "the load run itself is cleared")
+	require.Empty(t, w.loadFailErr)
+}
+
 // TestRecordDeliveryResult_FailureRunLifecycle pins the failure-run bookkeeping
 // recordDeliveryResult maintains: the first failure stamps deliverFailSince,
 // subsequent failures extend the same run (since unchanged, count climbs, error

@@ -62,6 +62,31 @@ func (w *taskWatcher) recordDeliveryResult(now time.Time, err error) {
 	w.deliverFailErr = err.Error()
 }
 
+// noteQueueUnreadable opens (or refreshes the error on) the queue-unreadable
+// alarm run (#3242). A parked replay is an outage even while live deliveries
+// still succeed, so this run is tracked apart from the delivery-failure one —
+// a live success must never reset the backlog alarm's clock. Called by the
+// drain loop on every unreadable peek.
+func (w *taskWatcher) noteQueueUnreadable(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.loadFailSince.IsZero() {
+		w.loadFailSince = time.Now()
+	}
+	w.loadFailErr = err.Error()
+}
+
+// clearQueueUnreadable ends the queue-unreadable alarm run: the backlog was
+// enumerated again. It deliberately touches nothing in the delivery-failure
+// run — a delivery outage that began while the queue was unreadable keeps its
+// original clock.
+func (w *taskWatcher) clearQueueUnreadable() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.loadFailSince = time.Time{}
+	w.loadFailErr = ""
+}
+
 // deliveryAlarms returns the persistent delivery-failure alarms across watch
 // tasks whose repo matches repoID (empty = all repos), evaluated against now.
 // A task alarms only once its consecutive delivery failures have persisted for
@@ -86,18 +111,31 @@ func (s *watcherSupervisor) deliveryAlarms(repoID string, now time.Time) []Deliv
 		since := w.deliverFailSince
 		count := w.deliverFailCount
 		lastErr := w.deliverFailErr
+		loadSince := w.loadFailSince
+		loadErr := w.loadFailErr
 		w.mu.Unlock()
-		if since.IsZero() || now.Sub(since) < watcherDeliveryAlarmThreshold {
+		// Two independent runs can alarm (#3242): failing deliveries, and an
+		// unreadable backlog whose replay is parked — an outage even while live
+		// deliveries succeed. Either one persisting past the threshold alarms;
+		// when only the load run qualifies, it supplies the alarm's clock and
+		// error (there are no delivery attempts to count).
+		deliverAlarms := !since.IsZero() && now.Sub(since) >= watcherDeliveryAlarmThreshold
+		loadAlarms := !loadSince.IsZero() && now.Sub(loadSince) >= watcherDeliveryAlarmThreshold
+		if !deliverAlarms && !loadAlarms {
 			continue
+		}
+		if !deliverAlarms {
+			since, count, lastErr = loadSince, 0, loadErr
 		}
 		pending := 0
 		pendingUnknown := false
 		if w.queue != nil {
-			// pendingCount's throttled retry heals a failed load when storage
-			// has recovered; if the state stays unknown, say so instead of
-			// projecting a fabricated zero (#3242).
-			pending = w.queue.pendingCount()
-			pendingUnknown = w.queue.loadFailed()
+			// One atomic read: separate count/unknown calls race a concurrent
+			// heal into "0 pending, known" — the exact fabricated banner the
+			// unknown flag exists to prevent (#3242). The throttled retry
+			// inside heals a recovered load; while the state stays unknown,
+			// say so instead of projecting the zero.
+			pending, pendingUnknown = w.queue.pendingState()
 		}
 		alarms = append(alarms, DeliveryAlarm{
 			TaskID:         w.taskID,

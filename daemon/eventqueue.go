@@ -223,12 +223,14 @@ func (q *eventQueue) loadLocked() {
 }
 
 // retryLoadNowLocked re-attempts recovery unconditionally after a failed load;
-// a no-op once a load has succeeded. The mutating and consuming entry points
-// (enqueue, peek) use it: each call stands for a real event or replay attempt —
-// already bounded by the delivery rate window and the drain backoff — and each
-// is a designed recovery point (#3242), where refusing a heal to save one disk
-// attempt would drop a deliverable event. Loss beats latency the wrong way
-// around; those callers never wait out the throttle. Callers hold q.mu.
+// a no-op once a load has succeeded. The event-carrying entry points use it —
+// enqueue and the live FIFO gate (pendingCountFresh) — because each such call
+// stands for one real event already bounded by the delivery rate window, and
+// each is a designed recovery point (#3242) where a stale answer drops the
+// event or routes it around a readable backlog. Autonomous callers (snapshot
+// polling, the drainer's peek) take the throttled flavor instead: they carry
+// no event, so deferring their I/O costs nothing but latency. Callers hold
+// q.mu.
 func (q *eventQueue) retryLoadNowLocked() error {
 	if q.loadErr == nil {
 		return nil
@@ -367,6 +369,30 @@ func (q *eventQueue) pendingCount() int {
 	defer q.mu.Unlock()
 	_ = q.retryLoadLocked()
 	return q.pending
+}
+
+// pendingCountFresh is pendingCount with an unthrottled recovery attempt, for
+// the live FIFO gate (#3242): a live event is a real recovery point, and a
+// stale throttled zero there would route it AROUND a backlog that is already
+// readable again — breaking FIFO for no gain, since the very same event's
+// failed delivery would retry the load in enqueue anyway.
+func (q *eventQueue) pendingCountFresh() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.retryLoadNowLocked()
+	return q.pending
+}
+
+// pendingState reports the undelivered count and whether that count is UNKNOWN
+// as one atomic read (#3242): fetching them through separate calls races a
+// concurrent heal into "0 pending, known" — the exact fabricated banner the
+// unknown flag exists to prevent. The throttled retry keeps snapshot polling
+// cheap during an outage.
+func (q *eventQueue) pendingState() (pending int, unknown bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.retryLoadLocked()
+	return q.pending, q.loadErr != nil
 }
 
 // loadFailed reports whether the queue's on-disk state is currently unknown
@@ -559,9 +585,13 @@ func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, e
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	// A failed load must surface as an ERROR here, never as a drained-empty
-	// queue (#3242): the drainer parks on it and retries via the next
-	// enqueue/reload, instead of concluding there is nothing to replay.
-	if err := q.retryLoadNowLocked(); err != nil {
+	// queue (#3242): the drainer holds on it and keeps retrying, instead of
+	// concluding there is nothing to replay. Throttled on purpose: the drain
+	// loop retries on its backoff cadence with no event in hand, so its first
+	// peek after a failed constructor load must not repeat the blocking I/O
+	// the constructor just performed — recovery defers to the retry interval
+	// (the production drain backoff is longer anyway).
+	if err := q.retryLoadLocked(); err != nil {
 		return queuedEvent{}, eventQueueCursor{}, false, fmt.Errorf("%w: %w", errEventQueueLoadFailed, err)
 	}
 	for q.pending > 0 {
