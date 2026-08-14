@@ -13,6 +13,15 @@ func isLegacyTransientGhost(item session.InstanceData) bool {
 		item.PendingHandoffMission == "" && !item.RuntimeCleanupStateUnknown
 }
 
+// rawTaskRunHoldsSlot is the storage-only counterpart of holdsTaskRunSlot for
+// rows refreshDaemonInstances cannot materialize. Terminal markers must release
+// capacity here too because no Instance exists to run their lifecycle edge.
+func rawTaskRunHoldsSlot(item session.InstanceData) bool {
+	return item.TaskID != "" && item.TaskRunActive &&
+		!item.StartupStateUnknown && !item.UserKilled &&
+		session.IdleReasonFor(item) != session.IdleReasonRestoreGaveUp
+}
+
 // fromInstanceDataForRefresh is the entry point refreshDaemonInstances uses
 // to materialize a session.Instance from a persisted on-disk entry. It is a
 // package-level variable so tests can observe (or substitute) the call —

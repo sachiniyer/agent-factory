@@ -143,6 +143,10 @@ type LifecycleView struct {
 	// Recoverable is the backend's Recover capability: whether a lost session can
 	// be revived in place at all.
 	Recoverable bool
+	// LostRestoreGaveUp is the durable terminal gate for automatic recovery. An
+	// explicit restore remains legal and clears this when its replacement crosses
+	// the live boundary.
+	LostRestoreGaveUp bool
 }
 
 // LifecycleView snapshots the session's lifecycle state under ONE lock. Every
@@ -175,8 +179,9 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		// same non-reentrant lock would deadlock against a queued restore writer
 		// (#2096). Resolving it here also keeps the capability in the SAME critical
 		// section as the liveness axes, so the two can never disagree.
-		Recoverable:   i.capabilitiesLocked().Recover,
-		TaskRunActive: i.taskRunActive,
+		Recoverable:       i.capabilitiesLocked().Recover,
+		LostRestoreGaveUp: i.lostRestoreFailure.valid(),
+		TaskRunActive:     i.taskRunActive,
 	}
 }
 

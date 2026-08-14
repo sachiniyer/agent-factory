@@ -12,6 +12,7 @@ const (
 	IdleReasonNone                      IdleReason = ""
 	IdleReasonUsageLimit                IdleReason = "usage-limit"
 	IdleReasonProcessExited             IdleReason = "process-exited"
+	IdleReasonRestoreGaveUp             IdleReason = "restore-gave-up"
 	IdleReasonRecreatePending           IdleReason = "recreate-pending"
 	IdleReasonPromptNotDelivered        IdleReason = "prompt-not-delivered"
 	IdleReasonDeliveryUnconfirmed       IdleReason = "delivery-unconfirmed"
@@ -27,6 +28,8 @@ func (r IdleReason) Label() string {
 		return "usage limit"
 	case IdleReasonProcessExited:
 		return "process exited"
+	case IdleReasonRestoreGaveUp:
+		return "restore gave up"
 	case IdleReasonRecreatePending:
 		return "recreate notice pending"
 	case IdleReasonPromptNotDelivered:
@@ -55,6 +58,9 @@ func IdleReasonFor(data InstanceData) IdleReason {
 	case LiveLimitReached:
 		return IdleReasonUsageLimit
 	case LiveLost, LiveDead:
+		if data.LostRestoreFailure != nil && data.LostRestoreFailure.valid() {
+			return IdleReasonRestoreGaveUp
+		}
 		return IdleReasonProcessExited
 	case LiveReady:
 		// The prompt/recreate evidence below only explains a settled Ready row.
@@ -244,16 +250,24 @@ func (i *Instance) ReconcileIdleEvidence(attemptedAt time.Time, status PromptDel
 // IdleReasonSnapshot returns the derived reason and last observed pane churn in
 // one lock hold for row renderers.
 func (i *Instance) IdleReasonSnapshot() (IdleReason, time.Time) {
+	reason, _, churnAt := i.IdleReasonDetailSnapshot()
+	return reason, churnAt
+}
+
+// IdleReasonDetailSnapshot adds the structured terminal restore failure needed
+// by row renderers, under the same lock as the derived reason.
+func (i *Instance) IdleReasonDetailSnapshot() (IdleReason, *LostRestoreFailure, time.Time) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	data := InstanceData{
 		Status:                   i.statusLocked(),
 		Liveness:                 i.liveness,
 		InFlightOp:               i.inFlightOp,
+		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		RootRecreateContext:      i.rootRecreateContext,
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
 	}
-	return IdleReasonFor(data), i.lastPaneChurnAt
+	return IdleReasonFor(data), cloneLostRestoreFailure(i.lostRestoreFailure), i.lastPaneChurnAt
 }

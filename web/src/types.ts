@@ -62,6 +62,7 @@ export type LifecycleAction = "archive" | "restore";
 export type IdleReason =
   | "usage-limit"
   | "process-exited"
+  | "restore-gave-up"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -72,6 +73,12 @@ export type IdleReason =
 export interface AgentModelChange {
   before: string;
   after: string;
+}
+
+/** Durable terminal result of the daemon's automatic Lost-session restore loop. */
+export interface LostRestoreFailure {
+  attempts: number;
+  error: string;
 }
 
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
@@ -137,6 +144,8 @@ export interface SessionData {
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
+  /** Present while a Lost row has exhausted automatic restore attempts. */
+  lost_restore_failure?: LostRestoreFailure;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */

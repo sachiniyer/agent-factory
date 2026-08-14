@@ -90,6 +90,9 @@ type InstanceData struct {
 	// never from pane wording. Projection-only: ForStorage scrubs it, while live
 	// snapshots and daemonless list fallback recompute it with IdleReasonFor.
 	IdleReason IdleReason `json:"idle_reason,omitempty"`
+	// LostRestoreFailure persists why automatic recovery stopped across daemon
+	// restarts until an explicit runtime replacement succeeds.
+	LostRestoreFailure *LostRestoreFailure `json:"lost_restore_failure,omitempty"`
 	// LastPromptAttemptAt orders the most recent actual prompt send against later
 	// pane churn. Callers capture it before sending so churn racing the delivery is
 	// still known to be later. Persisted across daemon restarts.
