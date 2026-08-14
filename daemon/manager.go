@@ -289,7 +289,12 @@ type Manager struct {
 	// the running daemon's life (matching the existing "root_agents changes take
 	// effect on the next daemon start" contract — a re-added project's root
 	// materializes on restart, not mid-run). Guarded by m.mu.
-	deletedRootRepos map[string]struct{}
+	// The value is the deleted claimant's project ID ("" when the delete
+	// targeted an unregistered repo, e.g. a path occupant): a later PROVEN
+	// mismatch releases the tombstone only when the disproven claimant IS
+	// the deleted one (#3299 review round 15), so an occupant's own deletion
+	// can never be released by a dead third party's mismatch.
+	deletedRootRepos map[string]string
 	// deferredTaskLifecycle parks a task's declared on_complete verb (#2595) for a
 	// session whose run finished while a TUI was attached, mapping the session's
 	// daemon key to the stable id of the session that finished. The paused poll
@@ -520,7 +525,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		targetLocks:               make(map[string]*sync.Mutex),
 		rootEnsureStates:          make(map[string]*rootEnsureState),
 		rootKilledAt:              make(map[string]time.Time),
-		deletedRootRepos:          make(map[string]struct{}),
+		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),
 		killRetries:               make(map[string]*session.CleanupRetry),
 		ghostCleanupStalls:        make(map[string]string),

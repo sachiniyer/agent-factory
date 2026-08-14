@@ -593,4 +593,53 @@ func TestReusedPathDeleteTargetsOccupant(t *testing.T) {
 	if oldSuppressed {
 		t.Fatalf("the old project must be untouched by the occupant's delete")
 	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("the occupant's delete must not deregister the old project's registry row (#3299 round 15): %v", statErr)
+	}
+}
+
+// TestDisproofReleasesSamePathTombstone pins the #3299 review's round-15 P2:
+// a main-root project deleted while its path was absent tombstones the
+// derived ID — which IS any later occupant's real ID. Once the occupant
+// PROVES to be a different clone than the deleted claimant, the tombstone
+// must release, or the occupant's legitimate legacy opt-in is suppressed for
+// the daemon's lifetime by a dead third party.
+func TestDisproofReleasesSamePathTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The project is deleted while its path is absent…
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+	// …and an unrelated clone occupies the path; the legacy entry is ITS
+	// opt-in (in-memory: the delete's durable sweep already ran).
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 1 {
+		t.Fatalf("the proven-different occupant's legacy opt-in must be released from the dead claimant's tombstone, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got == rootAgentProjectDeleted {
+		t.Fatalf("the occupant's verdict must not report a dead third party's deletion")
+	}
 }

@@ -664,43 +664,29 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be read or holds an invalid id; leaving project %s unresolved until the marker is repaired (re-checked on the ensure cadence): %v", record.root, record.projectID, err)
 		return
 	}
-	if !matches {
-		if _, statErr := os.Stat(record.root); statErr != nil {
-			// The path vanished between git resolution and the marker read
-			// (a mount flap): that is not a PROVEN mismatch — the original
-			// checkout may be exactly what returns. Record it as unknowable,
-			// keeping the resolved identity for the verdict bridge, so the
-			// resolved repo fails closed instead of inheriting a rebind
-			// prescription for a checkout nobody disproved (#3299 review
-			// round 11).
-			probe.markerUnreadable = true
-			probe.vanished = true
-			log.WarningLog.Printf("root agent snapshot: recorded project root %s vanished during identity verification; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, statErr)
-			return
-		}
-		probe.mismatch = true
-		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
+	// Re-resolve BEFORE trusting either marker outcome (#3299 review rounds
+	// 13-15): a mount flip between the first resolution and the marker read
+	// means the marker was read from a different repository, and binding
+	// that verdict — match OR mismatch — to the first identity releases or
+	// claims the wrong repo. A vanished or changed resolution is unknowable,
+	// re-bound to whatever is at the path now, and re-checked next pass.
+	verify, verr := config.RepoFromPath(record.root)
+	if verr != nil {
+		probe.markerUnreadable = true
+		probe.vanished = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s vanished during identity verification; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, verr)
 		return
 	}
-	// Bind the marker verdict to the repository it was read AGAINST (#3299
-	// review round 13): between the resolution above and the marker read, a
-	// mount flip can swap which repository occupies the recorded path, and a
-	// matching marker from the second checkout must not move layers under
-	// the first checkout's identity. A changed or vanished resolution here is
-	// unknowable — re-checked next pass.
-	verify, err := config.RepoFromPath(record.root)
-	if err != nil || verify.ID != repo.ID {
-		if err == nil {
-			// The path now hosts a DIFFERENT repository than the one the
-			// marker was read against: re-bind the result to the current
-			// occupant (#3299 review round 14), so the unknowable verdict —
-			// and the fail-closed gate it feeds — covers the repo actually
-			// at the path, not the one that left.
-			probe.repo = verify
-			probe.candidate.Store(verify)
-		}
+	if verify.ID != repo.ID {
+		probe.repo = verify
+		probe.candidate.Store(verify)
 		probe.markerUnreadable = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed identity during verification; leaving project %s unresolved (re-checked on the ensure cadence)", record.root, record.projectID)
+		return
+	}
+	if !matches {
+		probe.mismatch = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
 		return
 	}
 	probe.matches = true

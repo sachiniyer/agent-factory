@@ -1036,3 +1036,56 @@ func TestMismatchReleasesDeadClaimsUnreadableLatch(t *testing.T) {
 		t.Fatalf("the occupant's verdict must not send users to repair a dead project's config")
 	}
 }
+
+// TestSameIDUnreadableMarkerFailsClosed pins the #3299 review's round-15 P1:
+// for a main-root recording no verdict bridge is ever recorded (the derived
+// hash IS the occupant's real ID), so the fail-closed predicate must check
+// the DIRECT unresolved record's unreadable state — or a readable personal
+// enabled=true survives an unverifiable marker and a legacy entry starts the
+// claimant's program inside an unverified checkout.
+func TestSameIDUnreadableMarkerFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not make a file unreadable for root")
+	}
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/unverified\"")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	candidates, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
+	if err != nil {
+		t.Fatalf("glob markers: %v", err)
+	}
+	var markers []string
+	for _, m := range candidates {
+		if !strings.HasSuffix(m, ".lock") {
+			markers = append(markers, m)
+		}
+	}
+	if len(markers) != 1 {
+		t.Fatalf("expected exactly one checkout marker, got %v", candidates)
+	}
+	if err := os.Chmod(markers[0], 0o000); err != nil {
+		t.Fatalf("chmod marker: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(markers[0], 0o644) })
+
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("an unverifiable same-ID checkout must fail closed against the legacy entry, got %d creates", len(*seen))
+	}
+}

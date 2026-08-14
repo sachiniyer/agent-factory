@@ -248,6 +248,11 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			}
 			if repoPath != "" {
 				if occupant, err := config.RepoFromPath(repoPath); err == nil && occupant.ID == repoID {
+					// The caller is deleting the OCCUPANT. The registry row
+					// matching this path belongs to the re-attributed project
+					// (this loop is standing at its alias), so the occupant's
+					// delete must not deregister it (#3299 review round 15).
+					repoPath = ""
 					break
 				}
 			}
@@ -364,9 +369,24 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// after start). Doing it before the teardown guarantees no poll tick respawns
 	// the root we are about to tear down; doing it only AFTER the persist means a
 	// failed write above never leaves a dangling suppression (#1740 review).
-	m.suppressRootAgent(repoID)
+	// The tombstone records WHOSE delete this was, so a later proven
+	// mismatch can release it only for the deleted claimant itself (#3299
+	// review round 15). A registry read failure degrades to "" — an
+	// unreleasable tombstone, the conservative direction.
+	claimantProjectID := ""
+	if repoPath != "" {
+		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
+			for _, p := range projects {
+				if filepath.Clean(p.Root) == filepath.Clean(repoPath) {
+					claimantProjectID = p.ID
+					break
+				}
+			}
+		}
+	}
+	m.suppressRootAgent(repoID, claimantProjectID)
 	if derivedAliasID != "" && derivedAliasID != repoID {
-		m.suppressRootAgent(derivedAliasID)
+		m.suppressRootAgent(derivedAliasID, claimantProjectID)
 	}
 	// A re-attribution probe for the deleted project is deliberately LEFT
 	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
@@ -593,9 +613,9 @@ func (m *Manager) sameProjectByReattribution(a, b string) bool {
 // and clears the kill-grace record so no stale grace window survives (#1735). The
 // ensure loop is keyed by config path, not repoID, so the deletedRootRepos check
 // (which resolves each path to its repoID) is where suppression takes effect.
-func (m *Manager) suppressRootAgent(repoID string) {
+func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.deletedRootRepos[repoID] = struct{}{}
+	m.deletedRootRepos[repoID] = claimantProjectID
 	delete(m.rootKilledAt, repoID)
 }

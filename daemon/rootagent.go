@@ -169,11 +169,16 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	// A checkout at some project's recorded root resolves to this repo, but
 	// its marker could not be READ (#3299 review round 6): the checkout may
 	// BE that project — whose personal layer (possibly enabled=false, or
-	// itself unreadable) sits under the derived ID where this resolution
-	// cannot see it. Identity unknowable means the decision is unknowable; a
-	// legacy entry for the same repo must not start the root off global
-	// layers alone. A PROVEN mismatch deliberately does not gate here: a
-	// different project's layers do not govern this repo.
+	// itself unreadable) sits where this resolution cannot see or trust it.
+	// Identity unknowable means the decision is unknowable; a legacy entry
+	// for the same repo must not start the root off global layers alone. A
+	// PROVEN mismatch deliberately does not gate here: a different project's
+	// layers do not govern this repo. The DIRECT lookup covers main-root
+	// recordings, where the derived hash IS the occupant's real ID and no
+	// bridge is ever recorded (#3299 review round 15).
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.markerUnreadable {
+		return true
+	}
 	if derived, bridged := s.unresolvedResolvedIDs[repoID]; bridged {
 		if record, ok := s.unresolvedRoots[derived]; ok && record.markerUnreadable {
 			return true
@@ -328,9 +333,19 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	// transition (#3299 review round 4). An ACTIVE derived-ID delete
 	// (projectDeletes) skips this tick the same way; when it finishes, its
 	// tombstone holds through this alias.
-	alias, hasAlias := m.rootAgentLayers.Load().reattributedFrom[repo.ID]
+	sweepLayers := m.rootAgentLayers.Load()
+	alias, hasAlias := sweepLayers.reattributedFrom[repo.ID]
 	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repo.ID]
+	claimant, deleted := m.deletedRootRepos[repo.ID]
+	if deleted && claimant != "" {
+		// A same-path tombstone releases once the checkout there PROVES to
+		// be a different clone than the deleted claimant's (#3299 review
+		// round 15): the occupant's legitimate opt-ins must not be
+		// suppressed for the daemon's lifetime by a dead third party.
+		if record, ok := sweepLayers.unresolvedRoots[repo.ID]; ok && record.identityMismatch && record.projectID == claimant {
+			deleted = false
+		}
+	}
 	if !deleted && hasAlias {
 		if _, ok := m.deletedRootRepos[alias]; ok {
 			deleted = true

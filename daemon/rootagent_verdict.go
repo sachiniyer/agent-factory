@@ -122,7 +122,15 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	layers := m.rootAgentLayers.Load()
 	alias, hasAlias := layers.reattributedFrom[repoID]
 	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repoID]
+	claimant, deleted := m.deletedRootRepos[repoID]
+	if deleted && claimant != "" {
+		// Same release as the ensure sweep (#3299 review round 15): a proven
+		// mismatch by the SAME claimant the tombstone recorded frees the
+		// occupant's repo from a dead third party's deletion.
+		if record, ok := layers.unresolvedRoots[repoID]; ok && record.identityMismatch && record.projectID == claimant {
+			deleted = false
+		}
+	}
 	if !deleted && hasAlias {
 		_, deleted = m.deletedRootRepos[alias]
 	}
