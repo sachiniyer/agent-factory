@@ -397,10 +397,6 @@ type cleanupRun struct {
 	unknown bool
 }
 
-// cleanupWorktreeStat is a seam for proving that a known-stalled workspace is
-// rejected before Cleanup touches its path. Production always uses os.Stat.
-var cleanupWorktreeStat = os.Stat
-
 // git runs one bounded local git command and RECORDS a tripped deadline. This is
 // the only place in the cleanup path that decides what a deadline means.
 func (r *cleanupRun) git(args ...string) (string, error) {
@@ -557,8 +553,11 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		return r.state(), errors.Join(r.errs...)
 	}
 
-	// Check if worktree path exists before attempting removal
-	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
+	worktreeExists, probeErr := r.probeCleanupWorktreePath()
+	if probeErr != nil {
+		return r.state(), probeErr
+	}
+	if worktreeExists {
 		// The registered-only mode proves ownership at BOTH ends of the reap
 		// (#3278 review). Before it: the writer reap terminates every process
 		// under the path, which is itself destructive against a replacement
@@ -642,9 +641,6 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 				r.errs = append(r.errs, err)
 			}
 		}
-	} else if !os.IsNotExist(err) {
-		// Only append error if it's not a "not exists" error
-		r.errs = append(r.errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
 	// Prune stale worktree metadata BEFORE deleting the branch. When the
