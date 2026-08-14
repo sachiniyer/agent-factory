@@ -19,6 +19,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -179,7 +180,7 @@ func (s *remoteAgentServer) SendPrompt(prompt string) error {
 
 func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	var resp agentSendPromptResp
-	if err := s.rc.call("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp); err != nil {
+	if err := s.rc.callWithin("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp, agentSendPromptCallTimeout); err != nil {
 		return PromptCouldNotConfirm, err
 	}
 	if !resp.Status.Valid() {
@@ -591,6 +592,19 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // Exported so the daemon's own pre-reap bound can be ordered ABOVE it: a caller
 // that gave up first would leave the in-sandbox git work running unbounded.
 const AgentArchiveCallTimeout = 3 * time.Minute
+
+// agentSendPromptCallTimeout is the send-prompt route's own budget: the
+// in-sandbox submit's worst case (two individually tmux-bounded delivery
+// attempts plus the #3293 redelivery wait — the submit is a SEQUENCE of
+// bounded commands, not itself bounded by the shared 30s ceiling) plus
+// transport slack. The outer call must OUTLIVE the inner submit: the headless
+// handler does not observe the request context, so a daemon that gives up
+// mid-retry leaves the sandbox delivering anyway and the caller likely to
+// re-send an already-delivered instruction — the exact double prompt the
+// #3293 boundary exists to prevent. Sized from the submit path's own bound so
+// a retimed delivery cannot silently outgrow it; the pairing is pinned by
+// TestSendPromptCallBudgetCoversTheInSandboxRetry.
+var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Second
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
 	return c.callWithin(path, req, resp, remoteAgentCallTimeout)

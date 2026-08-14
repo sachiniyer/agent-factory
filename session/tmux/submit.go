@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 
+	xansi "github.com/charmbracelet/x/ansi"
+
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -29,6 +31,12 @@ var (
 	// where there is no text to positively confirm. It keeps the ORIGINAL 500ms
 	// drain rather than silently shortening it.
 	emptyPromptDrain = 500 * time.Millisecond
+	// redeliverAfterAbsentDelay is how long SendKeysCommandObserved waits before
+	// its one automatic redelivery of an observed-absent prompt (#3293).
+	// Seconds-scale on purpose: observed-absent clusters on a pane that was busy
+	// mid-render (#1982), so a millisecond-scale retry re-enters the very render
+	// that just stranded the first paste. A package var so tests can tighten it.
+	redeliverAfterAbsentDelay = 5 * time.Second
 )
 
 // minDistinctiveFragment is the shortest payload fragment treated as
@@ -145,7 +153,12 @@ func pasteBufferName(processToken, sanitizedName string, seq uint64) string {
 // needs an explicit end-of-paste marker before the trailing Enter counts as a
 // submit (#1254/#1256) — and keeps working unchanged; it was never special, it was
 // just the only agent whose breakage was loud enough to notice.
-func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, error) {
+//
+// The middle return value reports whether an observed-absent outcome may be
+// automatically redelivered (#3293): true only when the post-Enter boundary
+// frame was captured and still lacked this payload's completion tail. It is
+// meaningful only alongside PromptNotDelivered and always false otherwise.
+func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bool, error) {
 	// A per-call unique buffer name: two concurrent deliveries to the same
 	// session must not share a buffer, or one call's load-buffer could overwrite
 	// the other's content between its load and paste and corrupt the submit. The
@@ -200,9 +213,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 			log.WarningLog.Printf("could not delete paste buffer %q after a failed load (it may never have been created): %v", buf, derr)
 		}
 		if loadTimedOut {
-			return PromptCouldNotConfirm, fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, false, fmt.Errorf("%w: load-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return PromptCouldNotConfirm, fmt.Errorf("error loading paste buffer: %w", err)
+		return PromptCouldNotConfirm, false, fmt.Errorf("error loading paste buffer: %w", err)
 	}
 
 	// Clear any draft stranded in the composer BEFORE this paste (#2070/#1982
@@ -290,9 +303,9 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 			log.ErrorLog.Printf("failed to delete paste buffer %q after paste error: %v", buf, derr)
 		}
 		if pasteTimedOut {
-			return PromptCouldNotConfirm, fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
+			return PromptCouldNotConfirm, false, fmt.Errorf("%w: paste-buffer after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
-		return PromptCouldNotConfirm, fmt.Errorf("error pasting buffer: %w", pasteErr)
+		return PromptCouldNotConfirm, false, fmt.Errorf("error pasting buffer: %w", pasteErr)
 	}
 	// Remember only a payload tmux actually accepted. Reusing the delivery
 	// probe's exact completion suffix keeps one source of truth for what tmux was
@@ -323,7 +336,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 	// daemon poll.
 	boundary, boundaryOK, err := t.sendEnterAndCaptureBoundary()
 	if err != nil {
-		return PromptCouldNotConfirm, err
+		return PromptCouldNotConfirm, false, err
 	}
 	if boundaryOK {
 		t.seedDeliveryBaseline(boundary)
@@ -331,6 +344,7 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 		t.deferDeliveryBaseline()
 	}
 
+	retryAuthorized := false
 	if observation.outcome == deliveryObservedAbsent {
 		// This is deliberately the only ERROR emitted by delivery observation:
 		// unlike could-not-observe, the final capture contains a new prefix from
@@ -340,8 +354,52 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, er
 		log.ErrorLog.Printf("submit: prompt delivery observed absent for session %q after %s; the pane rendered this prompt's prefix but not its completion tail; "+
 			"Enter sent best-effort. Pane tail: %s",
 			t.sanitizedName, pasteDeliveryMaxWait, oneLineTail(observation.pane))
+
+		// Authorize the #3293 automatic redelivery only if absence still held at
+		// the submit itself. The absent classification is evidence from BEFORE
+		// Enter; the boundary frame is captured in the same tmux command queue as
+		// Enter, so it is the pane as of the submit. If this payload's completion
+		// tail newly appears there, the paste visibly drained in the gap between
+		// the last observation poll and Enter — the Enter may well have submitted
+		// the full prompt, and a redelivery would be exactly the double prompt
+		// the non-retryable statuses exist to prevent (#3170). A failed boundary
+		// capture withholds too: a retry must be affirmatively authorized, never
+		// defaulted from a frame that could not be read.
+		//
+		// This narrows the pre-Enter/post-Enter gap; it cannot close it. A pane
+		// renders with lag behind the application's input queue, so no capture
+		// can prove what the composer had RECEIVED when Enter arrived (#2065:
+		// "not on screen" is not "not submitted"). The residual is the same
+		// uncertainty a human retrying a not-delivered report has always
+		// carried, which is the trade #3293 codified. It also deliberately does
+		// NOT reclassify the status: the pre-Enter frame authorized
+		// observed-absent and remains the reported evidence (#2255/#2266); the
+		// boundary frame only vetoes the retry.
+		//
+		// The boundary frame comes from `capture-pane -e` (the status monitor's
+		// convention), so a colorized composer interleaves ANSI escapes through
+		// the very tail being matched — the exact hazard that made
+		// capturePaneForDelivery avoid -e. Strip them before comparing, or the
+		// veto goes blind on styled composers and authorizes the retry against
+		// a tail that HAS visibly drained.
+		//
+		// The comparison anchor is the ABSENT observation frame, not the
+		// pre-paste baseline. An identical tail can already sit in the
+		// transcript at baseline — the #1146 limit resume redelivers the SAME
+		// prompt, so that is a designed-for case, not a corner — and if that
+		// old copy scrolls off while the new tail drains, the total against the
+		// baseline never increases and a <= baseline check would authorize the
+		// retry against a visibly drained paste. The absent frame is
+		// milliseconds from the boundary and is the frame in which the new
+		// tail was PROVEN missing, so a count that grows from it is evidence
+		// about this paste. Replacement within that ms window is still
+		// invisible to any count comparison — narrower again, still not
+		// closed, same residual honesty as above.
+		retryAuthorized = boundaryOK && probe.baselineCaptured &&
+			strings.Count(normalizeDelivery(xansi.Strip(boundary)), probe.completion) <=
+				strings.Count(normalizeDelivery(observation.pane), probe.completion)
 	}
-	return observation.outcome.promptDeliveryStatus(), nil
+	return observation.outcome.promptDeliveryStatus(), retryAuthorized, nil
 }
 
 // sendEnterAndCaptureBoundary submits whatever is pending and captures the pane
@@ -598,7 +656,14 @@ func hasLetterOrNumber(s string) bool {
 // their entire text as the completion and therefore cannot produce a terminal
 // negative. The existing two-capture rule still protects weak short strings.
 func newDeliveryProbe(text string) deliveryProbe {
-	n := []rune(normalizeDelivery(text))
+	// Strip ANSI from the PAYLOAD before deriving witnesses. A prompt can carry
+	// escape bytes of its own (colorized logs submitted through the API); the
+	// pane interprets those as control sequences and renders only the clean
+	// text, so witnesses that retained the raw bytes could never match any
+	// capture — a fully drained paste would read as absent, and with #3293
+	// that misread would authorize a redelivery of an instruction whose Enter
+	// may already have submitted it.
+	n := []rune(normalizeDelivery(xansi.Strip(text)))
 	const (
 		completionRunes = 32
 		witnessRunes    = 24
