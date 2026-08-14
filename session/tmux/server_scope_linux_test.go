@@ -92,6 +92,48 @@ func TestEnsuredSessionClientCannotRecreateVanishedServer(t *testing.T) {
 	}
 }
 
+func TestOldTmuxUsesSessionScopeCompatibilityFallback(t *testing.T) {
+	dir := t.TempDir()
+	tmuxShim := filepath.Join(dir, "tmux")
+	if err := os.WriteFile(tmuxShim, []byte("#!/bin/sh\nif [ \"$1\" = -V ]; then echo 'tmux 3.2a'; exit 0; fi\nexit 64\n"), 0o700); err != nil {
+		t.Fatalf("write old tmux shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_old_tmux")
+	if !scoped {
+		t.Fatalf("tmux 3.2a client command %q bypassed the compatibility scope", strings.Join(cmd.Args, " "))
+	}
+	want := "systemd-run --user --scope --quiet --collect -- tmux new-session -d -s af_old_tmux"
+	if got := strings.Join(cmd.Args, " "); got != want {
+		t.Fatalf("old-tmux compatibility command = %q, want %q", got, want)
+	}
+}
+
+func TestTmuxVersionSupportsNoStart(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{
+		{version: "tmux 3.2a", want: false},
+		{version: "tmux 3.3", want: true},
+		{version: "tmux 3.3a", want: true},
+		{version: "tmux 3.4", want: true},
+		{version: "tmux next-3.6", want: true},
+		{version: "tmux master", want: true},
+		{version: "tmux openbsd-7.4", want: false},
+		{version: "garbage", want: false},
+	} {
+		if got := tmuxVersionAtLeast(tc.version, 3, 3); got != tc.want {
+			t.Errorf("tmuxVersionAtLeast(%q, 3, 3) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
 func TestNewTmuxServerCommandDoesNotTrustInheritedSystemdMarker(t *testing.T) {
 	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
 	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()+1))

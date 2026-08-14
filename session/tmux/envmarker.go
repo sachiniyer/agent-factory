@@ -169,10 +169,13 @@ func tmuxSupportsNewSessionEnv() bool {
 	return newSessionEnvSupported
 }
 
-// versionSupportsNewSessionEnv parses a `tmux -V` string ("tmux 3.4",
-// "tmux 3.3a", "tmux next-3.6", "tmux master") and reports whether
-// `new-session -e` (tmux >= 3.2) is available.
 func versionSupportsNewSessionEnv(version string) bool {
+	return tmuxVersionAtLeast(version, 3, 2)
+}
+
+// tmuxVersionAtLeast parses a `tmux -V` string ("tmux 3.4", "tmux 3.3a",
+// "tmux next-3.6", "tmux master") for feature gates tied to a release.
+func tmuxVersionAtLeast(version string, wantMajor, wantMinor int) bool {
 	v := strings.TrimPrefix(version, "tmux ")
 	v = strings.TrimPrefix(v, "next-")
 	if v == "master" {
@@ -200,7 +203,7 @@ func versionSupportsNewSessionEnv(version string) bool {
 	if err != nil {
 		return false
 	}
-	return major > 3 || (major == 3 && minor >= 2)
+	return major > wantMajor || (major == wantMajor && minor >= wantMinor)
 }
 
 // afHomeDir mirrors config.GetConfigDir — $AGENT_FACTORY_HOME (tilde-expanded)

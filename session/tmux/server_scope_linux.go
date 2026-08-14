@@ -32,6 +32,7 @@ var (
 	daemonServerConfigMu sync.RWMutex
 	daemonServerHome     string
 	serverBootstrapMu    sync.Mutex
+	noStartWarningOnce   sync.Once
 )
 
 // ConfigureDaemonServer gives the tmux launch path the AF home where the
@@ -200,6 +201,13 @@ func tmuxServerRunning() bool {
 	return exec.CommandContext(ctx, "tmux", "show-options", "-gv", "exit-empty").Run() == nil
 }
 
+func tmuxSupportsNoStart() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tmux", "-V").Output()
+	return err == nil && tmuxVersionAtLeast(strings.TrimSpace(string(out)), 3, 3)
+}
+
 func dedicatedServerScopeCommand(logPath string) *exec.Cmd {
 	// /proc/<pid>/exe avoids systemd-run's ${NAME} argv expansion without
 	// requiring a new-systemd-only flag. The daemon remains alive throughout
@@ -314,10 +322,17 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 		return exec.Command("tmux", args...), false
 	}
 	if _, configured := configuredDaemonServerHome(); configured {
-		if serverErr == nil || tmuxServerRunning() {
-			return exec.Command("tmux", append([]string{"-N"}, args...)...), false
+		serverReady := serverErr == nil || tmuxServerRunning()
+		if serverReady {
+			if tmuxSupportsNoStart() {
+				return exec.Command("tmux", append([]string{"-N"}, args...)...), false
+			}
+			noStartWarningOnce.Do(func() {
+				log.WarningLog.Printf("tmux client lacks a verified -N no-autostart flag; using a per-session systemd scope compatibility fallback")
+			})
+		} else {
+			log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", serverErr)
 		}
-		log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", serverErr)
 	}
 
 	scopeArgs := []string{"--user", "--scope", "--quiet", "--collect", "--", "tmux"}
