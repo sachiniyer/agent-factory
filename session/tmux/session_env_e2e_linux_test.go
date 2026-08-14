@@ -246,6 +246,19 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 		t.Fatalf("open shell tab: %v", err)
 	}
 	t.Cleanup(func() { _, _ = shell.CloseAndWaitForPaneExit() })
+	storedEnvironment, err := exec.Command(
+		"tmux", "show-environment", "-t", "="+shell.SanitizedName(),
+	).Output()
+	if err != nil {
+		t.Fatalf("inspect shell tab tmux environment: %v", err)
+	}
+	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
+		for _, line := range strings.Split(string(storedEnvironment), "\n") {
+			if strings.HasPrefix(line, name+"=") {
+				t.Fatalf("tmux stored ambient identity %s for the account shell: %q", name, line)
+			}
+		}
+	}
 	reportCommand := "printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "; " +
 		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
 		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n"

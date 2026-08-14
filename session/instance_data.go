@@ -593,7 +593,7 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				Conversation:                  conversation,
 				Handoffs:                      handoffs,
 				tmux:                          ts,
-				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux(),
+				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
 			})
 		}
 		return

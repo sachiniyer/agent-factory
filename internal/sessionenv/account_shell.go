@@ -10,9 +10,10 @@ import (
 )
 
 var accountShellStartupNames = map[string]struct{}{
-	"BASH_ENV": {},
-	"ENV":      {},
-	"ZDOTDIR":  {},
+	"BASH_ENV":       {},
+	"ENV":            {},
+	"PROMPT_COMMAND": {},
+	"ZDOTDIR":        {},
 }
 
 // AccountShellCommand turns the user's shell executable into an interactive,

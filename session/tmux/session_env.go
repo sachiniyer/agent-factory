@@ -168,9 +168,46 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 		filterAgent = accountAgent
 	}
 	source := os.Environ()
-	return wrapped,
-		sessionenv.FilterForCommand(source, filterAgent, program, extra),
-		sessionenv.ImportNamesForCommand(source, filterAgent, program, extra), nil
+	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
+	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
+	if account != "" {
+		identityNames := sessionenv.AccountIdentityNames(accountAgent)
+		launchEnv = removeEnvironmentNames(launchEnv, identityNames)
+		importNames = appendMissingEnvironmentNames(importNames, identityNames)
+	}
+	return wrapped, launchEnv, importNames, nil
+}
+
+func removeEnvironmentNames(environ, names []string) []string {
+	denied := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		denied[name] = struct{}{}
+	}
+	out := environ[:0]
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if _, drop := denied[name]; ok && drop {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func appendMissingEnvironmentNames(names, required []string) []string {
+	set := make(map[string]struct{}, len(names)+len(required))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	for _, name := range required {
+		set[name] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // importClientEnvironmentArgs makes an existing tmux server copy the approved

@@ -1,6 +1,7 @@
 package sessionenv
 
 import (
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -126,6 +127,8 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		// require a second parser pass with runtime expansion, so a scoped sibling
 		// refuses them.
 		return true
+	case shellCommandExecutesString(words):
+		return true
 	default:
 		return false
 	}
@@ -240,7 +243,45 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 			return true
 		}
 	}
+	if invocation.CommandIndex >= 0 && shellCommandExecutesString(words[invocation.CommandIndex:]) {
+		return true
+	}
 	return false
+}
+
+func shellCommandExecutesString(words []*syntax.Word) bool {
+	if len(words) < 2 {
+		return false
+	}
+	command, literal := literalShellWord(words[0])
+	if !literal || !knownShellName(filepath.Base(command)) {
+		return false
+	}
+	for _, word := range words[1:] {
+		arg, literal := literalShellWord(word)
+		if !literal {
+			// A dynamic shell option could resolve to -c, so its effect is
+			// unprovable before execution.
+			return true
+		}
+		switch {
+		case arg == "-c", arg == "--command", strings.HasPrefix(arg, "--command="):
+			return true
+		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			strings.ContainsRune(strings.TrimPrefix(arg, "-"), 'c'):
+			return true
+		}
+	}
+	return false
+}
+
+func knownShellName(name string) bool {
+	switch name {
+	case "ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "sh", "tcsh", "zsh":
+		return true
+	default:
+		return false
+	}
 }
 
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {

@@ -62,3 +62,13 @@ func finishRecoverTabFailure(
 	}
 	return markRecoverRebuilt(rebuilt, setupErr)
 }
+
+func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err error) error {
+	if firstTime || tmuxSession == nil {
+		return err
+	}
+	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
+		return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+	}
+	return err
+}

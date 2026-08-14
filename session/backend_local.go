@@ -333,7 +333,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	// pane cannot be replaced: reattaching that process would expose the daemon's
 	// ambient credentials while presenting it as scoped (#3340).
 	if err := b.setupTabs(i); err != nil {
-		setupErr = err
+		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
 

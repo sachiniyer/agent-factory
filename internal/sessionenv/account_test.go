@@ -108,6 +108,9 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"eval 'unset CODEX_HOME'; make",
 		"alias run='OPENAI_API_KEY=other codex'; run",
 		"exec -c env HOME=$HOME codex",
+		"sh -c 'OPENAI_API_KEY=other codex'",
+		"/bin/bash -lc 'unset CODEX_HOME; codex'",
+		"env sh -c 'OPENAI_API_KEY=other codex'",
 		"for CODEX_HOME in /other; do make; done",
 		"op=unset; $op CODEX_HOME; make",
 		"env CODEX_HOME=/other make",
@@ -163,6 +166,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 			"ENV=/tmp/ambient-shrc",
 			"BASH_ENV=/tmp/ambient-bashrc",
 			"ZDOTDIR=/tmp/ambient-zdotdir",
+			"PROMPT_COMMAND=export CODEX_HOME=/tmp/ambient-codex",
 		}, command, account)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)

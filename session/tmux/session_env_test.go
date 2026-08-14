@@ -156,29 +156,47 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	t.Setenv("CODEX_HOME", "/ambient/codex")
+	t.Setenv("OPENAI_API_KEY", "ambient-secret")
 
 	agent := NewTmuxSession("account-parent", "codex")
 	agent.SetAccountForAgent("codex", "work")
 
 	process := agent.NewSiblingSession("account-process", "make -j4")
-	wrapped, _, _, err := process.launchEnvironment()
+	wrapped, environ, imports, err := process.launchEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
 		t.Fatalf("process sibling launch is not scoped to the parent account: %q", wrapped)
 	}
+	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
+		if launchEnvironmentHasName(environ, name) {
+			t.Fatalf("process sibling exposed ambient %s to the tmux session environment", name)
+		}
+		if !slices.Contains(imports, name) {
+			t.Fatalf("process sibling did not explicitly unset stale tmux %s", name)
+		}
+	}
 
 	shell, err := agent.NewShellSiblingSession("account-shell", "/bin/sh")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped, _, _, err = shell.launchEnvironment()
+	wrapped, environ, imports, err = shell.launchEnvironment()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
 		t.Fatalf("shell sibling launch is not scoped to the parent account: %q", wrapped)
+	}
+	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
+		if launchEnvironmentHasName(environ, name) {
+			t.Fatalf("shell sibling exposed ambient %s to the tmux session environment", name)
+		}
+		if !slices.Contains(imports, name) {
+			t.Fatalf("shell sibling did not explicitly unset stale tmux %s", name)
+		}
 	}
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())

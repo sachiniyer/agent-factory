@@ -125,10 +125,69 @@ func TestRecover_AccountTabFailureAfterRebuildKeepsCommittedMarker(t *testing.T)
 		"the committed rebuild does not make the partially recovered agent safe to leave running")
 }
 
+func TestLoad_AccountTabFailureStopsAgentBeforeDiscard(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_account_load_failure"
+	shellName := agentName + shellTmuxSuffix
+	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			text := cmd.String()
+			commands = append(commands, text)
+			if strings.Contains(text, "kill-session") && strings.Contains(text, shellName) {
+				return errors.New("persisted sibling did not stop")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	worktreePath := t.TempDir()
+	_, err := FromInstanceData(InstanceData{
+		Title:    "account-load-failure",
+		Path:     "/tmp/account-load-failure-repo",
+		Program:  tmux.ProgramCodex,
+		Account:  "work",
+		Status:   Running,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:     "/tmp/account-load-failure-repo",
+			WorktreePath: worktreePath,
+			SessionName:  "account-load-failure",
+			BranchName:   "af/account-load-failure",
+		},
+	})
+	require.Error(t, err)
+	require.True(t, commandIncludesSession(commands, "kill-session", agentName),
+		"a load error that discards the record must first stop its reattached agent")
+}
+
 func commandIncludesSession(commands []string, operation, sessionName string) bool {
 	for _, command := range commands {
-		if strings.Contains(command, operation) && strings.Contains(command, sessionName) {
-			return true
+		if !strings.Contains(command, operation) {
+			continue
+		}
+		for _, field := range strings.Fields(command) {
+			field = strings.Trim(field, "'\"")
+			if field == "="+sessionName || field == "="+sessionName+":" {
+				return true
+			}
 		}
 	}
 	return false

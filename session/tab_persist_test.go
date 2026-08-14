@@ -260,6 +260,23 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 	}
 }
 
+func TestRestartSurvival_TmuxlessAccountTabHasNoUnknownProcess(t *testing.T) {
+	instance := &Instance{}
+	restoreLocalTabs(instance, InstanceData{
+		Program: "codex",
+		Account: "work",
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent},
+			{Name: shellTabName, Kind: TabKindShell},
+		},
+	})
+
+	require.Len(t, instance.Tabs, 2)
+	require.Nil(t, instance.Tabs[1].tmux)
+	require.False(t, instance.Tabs[1].accountScopeProvenanceUnknown,
+		"a tmux-less row has no pre-scope process for a fresh shell to replace later")
+}
+
 func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
