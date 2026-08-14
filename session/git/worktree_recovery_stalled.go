@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -12,28 +13,70 @@ import (
 // review). The destruction path's absence checks run while the caller holds
 // the session operation lock, so a stalled FUSE/NFS mount must surface as a
 // timeout — an unknown, fail-closed answer distinct from ENOENT — never as an
-// unbounded syscall wedging the kill. Mirrors boundedRelocationPathIdentity's
-// worker shape; like it, a timed-out worker is abandoned rather than joined.
+// unbounded syscall wedging the kill. Per-path flight with a timed-out latch,
+// mirroring VerifyArchivedWorktreePointer: concurrent callers join one worker,
+// and after a deadline retries are refused instead of stacking goroutines and
+// blocked OS threads against the same stalled path until the stuck worker
+// finally returns and unpublishes itself.
 func BoundedLstat(path string) (os.FileInfo, error) {
-	type result struct {
-		info os.FileInfo
-		err  error
+	boundedLstatFlights.Lock()
+	if active := boundedLstatFlights.byPath[path]; active != nil {
+		if active.timedOut {
+			boundedLstatFlights.Unlock()
+			return nil, fmt.Errorf(
+				"path check for %s is still running after an earlier deadline: %w",
+				path, context.DeadlineExceeded,
+			)
+		}
+		boundedLstatFlights.Unlock()
+		return waitForBoundedLstat(path, active)
 	}
-	resultC := make(chan result, 1)
+	flight := &boundedLstatFlight{done: make(chan struct{})}
+	boundedLstatFlights.byPath[path] = flight
+	boundedLstatFlights.Unlock()
 	go func() {
-		info, err := os.Lstat(path)
-		resultC <- result{info: info, err: err}
+		flight.info, flight.err = os.Lstat(path)
+		boundedLstatFlights.Lock()
+		if boundedLstatFlights.byPath[path] == flight {
+			delete(boundedLstatFlights.byPath, path)
+		}
+		close(flight.done)
+		boundedLstatFlights.Unlock()
 	}()
+	return waitForBoundedLstat(path, flight)
+}
+
+type boundedLstatFlight struct {
+	done     chan struct{}
+	info     os.FileInfo
+	err      error
+	timedOut bool
+}
+
+var boundedLstatFlights = struct {
+	sync.Mutex
+	byPath map[string]*boundedLstatFlight
+}{byPath: map[string]*boundedLstatFlight{}}
+
+func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, error) {
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
-	case observed := <-resultC:
-		return observed.info, observed.err
+	case <-flight.done:
+		return flight.info, flight.err
 	case <-timer.C:
-		return nil, fmt.Errorf(
-			"timed out after %s while checking path %s: %w",
-			relocationIdentityTimeout, path, context.DeadlineExceeded,
-		)
+		boundedLstatFlights.Lock()
+		if boundedLstatFlights.byPath[path] == flight {
+			flight.timedOut = true
+			boundedLstatFlights.Unlock()
+			return nil, fmt.Errorf(
+				"timed out after %s while checking path %s: %w",
+				relocationIdentityTimeout, path, context.DeadlineExceeded,
+			)
+		}
+		boundedLstatFlights.Unlock()
+		<-flight.done
+		return flight.info, flight.err
 	}
 }
 

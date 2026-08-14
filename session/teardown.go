@@ -520,9 +520,17 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 				// stale record — recheck only while the directory still
 				// exists, or a gone origin would strand an empty record
 				// forever. Bounded: this runs under the session operation
-				// lock, so a stalled mount must time out, not wedge the kill.
-				if _, statErr := git.BoundedLstat(gw.GetWorktreePath()); errors.Is(statErr, os.ErrNotExist) {
-					return nil
+				// lock, so a stalled mount must time out — and a timeout must
+				// STOP here (#3278 review): falling through would reach
+				// Cleanup's own unbounded stat of the same stalled path.
+				if _, statErr := git.BoundedLstat(gw.GetWorktreePath()); statErr != nil {
+					if errors.Is(statErr, os.ErrNotExist) {
+						return nil
+					}
+					return fmt.Errorf(
+						"%w: the archived worktree's state at %s could not be established (%v) — kill the session again once the path answers",
+						ErrWorkspaceStateUnknown, gw.GetWorktreePath(), statErr,
+					)
 				}
 				if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {
 					return fmt.Errorf(

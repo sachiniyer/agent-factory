@@ -297,11 +297,24 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	// a stalled record may have chosen its identity-qualified alternate and
 	// moved the worktree location there.
 	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(claim.Path); pointerErr != nil {
-		instance.PreserveWorktreeRelocationClaimForRetry(claim)
-		return fmt.Errorf(
+		refusal := fmt.Errorf(
 			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually, or run a restore first: a failed repo-gone restore installs the cleanup authorization kill needs",
 			title, pointerErr, claim.Path,
 		)
+		if unresolved {
+			// The reclaim already re-verified this identity, so settle the
+			// consumed record instead of downgrading it to claim_stale — a
+			// stale fence would make every later kill skip this producer and
+			// leave the refusal's retry unreachable without a restore (#3278
+			// review). The next kill re-derives from record-free scratch; a
+			// failed settle falls back to the conservative stale fence.
+			if settleErr := m.settleReclaimedStalledIdentity(repoID, title, repoPath, instance, claim); settleErr != nil {
+				return errors.Join(refusal, settleErr)
+			}
+			return refusal
+		}
+		instance.PreserveWorktreeRelocationClaimForRetry(claim)
+		return refusal
 	}
 	return m.prepareRepoGoneCleanup("kill", repoID, title, repoPath, instance, claim)
 }
@@ -349,11 +362,21 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 		!ghostRestoredWorktreeRemovable(&restored) {
 		return nil
 	}
-	if _, statErr := sessiongit.BoundedLstat(restored.Worktree.WorktreePath); errors.Is(statErr, os.ErrNotExist) {
-		// An absent archived directory has nothing to orphan: ghost cleanup
-		// settles the missing path and clears the stale row (#3278 review).
-		// Refusing here would make the row permanently undeletable.
-		return nil
+	if _, statErr := sessiongit.BoundedLstat(restored.Worktree.WorktreePath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			// An absent archived directory has nothing to orphan: ghost
+			// cleanup settles the missing path and clears the stale row
+			// (#3278 review). Refusing here would make the row permanently
+			// undeletable.
+			return nil
+		}
+		// A stat that failed or timed out must refuse rather than fall
+		// through to probes and cleanup against a path whose state is
+		// unknown (#3278 review).
+		return fmt.Errorf(
+			"the archived worktree's state at %s could not be established; nothing was changed — retry once the path answers: %w",
+			restored.Worktree.WorktreePath, statErr,
+		)
 	}
 	probeErr := sessiongit.CheckRepoPresentForRelocation(restored.Worktree.RepoPath)
 	if probeErr == nil {
