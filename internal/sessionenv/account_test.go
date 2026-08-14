@@ -97,8 +97,11 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
 		"OPENAI_API_KEY=other make",
+		"OPENAI_API_KEY=other make >build.log",
+		"OPENAI_API_KEY=other make &",
 		"env CODEX_HOME=/other make",
 		"env CODEX_HOME=$HOME/.codex make",
+		"env -S 'CODEX_HOME=/other make'",
 		"env -uCODEX_HOME make",
 		"env -i make",
 	} {
@@ -116,6 +119,8 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
 		"PORT=3000 npm start",
+		"PORT=3000 npm start >server.log",
+		"PORT=3000 npm start &",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",
 	} {

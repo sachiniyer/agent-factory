@@ -64,10 +64,26 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	if command == "" {
 		return false
 	}
-	call, ok := singleSimpleCall(command)
-	if !ok {
-		return false
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return true
 	}
+	mutates := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		if callMutatesAccountEnvironment(call, names) {
+			mutates = true
+			return false
+		}
+		return true
+	})
+	return mutates
+}
+
+func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
 	for _, assign := range call.Assigns {
 		if assign != nil && assign.Name != nil {
 			if _, denied := names[assign.Name.Value]; denied {
@@ -102,7 +118,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 		if !literal {
 			name, assignment := shellWordAssignmentName(word)
 			if !assignment {
-				return false
+				return true
 			}
 			// envcommand only needs a literal placeholder to preserve the
 			// mutation's name and position; a dynamic value is still an
@@ -113,7 +129,7 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	}
 	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
 	if err != nil {
-		return false
+		return true
 	}
 	if invocation.ClearEnvironment {
 		return true

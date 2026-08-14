@@ -125,6 +125,7 @@ func TestAddShellTab_UsesAccountScopedShellLaunch(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("SHELL", "/bin/sh")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	inst := startedMockInstance(t, "af_tabs_account_shell")
 	inst.Account = "work"

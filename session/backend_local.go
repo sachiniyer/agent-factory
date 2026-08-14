@@ -328,12 +328,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	// which is what actually restores or re-spawns each rebuilt tab.
 	i.restoreCarriedTabs()
 
-	// Bring up the instance's non-agent tabs (#930 PR 2/4). This is best-effort:
-	// a tab failure leaves the instance fully usable with just the agent tab (the
-	// failed tab renders a fallback), so it must not fail the whole start. Runs
-	// after the agent session is up so each tab can be a sibling of it (sharing
-	// tmux deps).
-	b.setupTabs(i)
+	// Bring up the instance's non-agent tabs (#930 PR 2/4). Ordinary tab failures
+	// remain best-effort, but an account-scoped restore must refuse if a persisted
+	// pane cannot be replaced: reattaching that process would expose the daemon's
+	// ambient credentials while presenting it as scoped (#3340).
+	if err := b.setupTabs(i); err != nil {
+		setupErr = err
+		return setupErr
+	}
 
 	return nil
 }
@@ -590,7 +592,9 @@ func (b *LocalBackend) respawn(i *Instance) error {
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
-	b.setupTabs(i)
+	if err := b.setupTabs(i); err != nil {
+		return err
+	}
 
 	// The program was just re-spawned and is booting: Running, exactly like a
 	// fresh create. ConfirmLive clears the OpRestoring/OpCreating fence this
@@ -628,19 +632,20 @@ func resetAgentBrokerCaptures(i *Instance) {
 // tab-create`), never automatically. The fresh-$SHELL fallback below only fires
 // when a PERSISTED shell tab restored dead (#991), replacing it so the user
 // lands on a working terminal instead of a corpse.
-func (b *LocalBackend) setupTabs(i *Instance) {
+func (b *LocalBackend) setupTabs(i *Instance) error {
 	i.mu.RLock()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
+	account := i.Account
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.RUnlock()
 
 	if agentTmux == nil || gw == nil {
-		return
+		return nil
 	}
 	worktreePath := gw.GetWorktreePath()
 	if worktreePath == "" {
-		return
+		return nil
 	}
 
 	// Reconnect every persisted non-agent tab that carries a session (Tabs[0] is
@@ -657,11 +662,31 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 		}
 		if tab.tmux != nil {
 			if err := refreshTabSessionEnvironment(i, tab); err != nil {
+				if account != "" {
+					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
+				}
 				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
 				continue
 			}
-			if err := tab.tmux.Restore(worktreePath); err != nil {
+			if account != "" {
+				exists, known := tab.tmux.ProbeSession()
+				if !known {
+					return fmt.Errorf("restore account-scoped tab %q for %q: tmux session state is unknown", tab.Name, i.Title)
+				}
+				if exists {
+					if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {
+						return fmt.Errorf("restore account-scoped tab %q for %q: stop the pre-scope process: %w", tab.Name, i.Title, err)
+					}
+				}
+			}
+			restoreResult, err := tab.tmux.RestoreWithResult(worktreePath)
+			if err != nil {
+				if account != "" {
+					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
+				}
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
+			} else if account != "" && restoreResult != tmux.RestoreRespawned {
+				return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process", tab.Name, i.Title)
 			}
 		}
 		if tab.Kind != TabKindShell {
@@ -690,7 +715,7 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 		// A fresh instance (or one whose user closed every shell tab), or every
 		// persisted shell came back live: a terminal tab is never auto-created
 		// (#1100), and there is nothing to replace.
-		return
+		return nil
 	}
 
 	// Create a fresh sibling session for each dead shell so it inherits the agent's
@@ -743,7 +768,7 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 		bindings = append(bindings, shellBinding{id: tab.ID, tmux: shellTmux})
 	}
 	if len(bindings) == 0 {
-		return
+		return nil
 	}
 
 	// Bind the fresh sessions under one lock, re-finding each tab by its STABLE ID,
@@ -779,6 +804,7 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 			log.WarningLog.Printf("setup shell tab for %q: releasing an orphaned replacement session whose tab vanished: %v", i.Title, cerr)
 		}
 	}
+	return nil
 }
 
 // Kill is best-effort: each cleanup step runs independently and a failure in
