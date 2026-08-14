@@ -137,6 +137,17 @@ func (s *watcherSupervisor) deliveryAlarms(repoID string, now time.Time) []Deliv
 			// say so instead of projecting the zero.
 			pending, pendingUnknown = w.queue.pendingState()
 		}
+		if loadAlarms && !pendingUnknown {
+			// The snapshot's own retry just enumerated the queue, so the
+			// unreadable run is over — end it here rather than leaving a false
+			// alarm parked until the drainer's backoff (up to its cap) wakes.
+			// Whichever observer sees the heal first ends the run; a delivery
+			// outage alarming alongside keeps its own clock and still projects.
+			w.clearQueueUnreadable()
+			if !deliverAlarms {
+				continue
+			}
+		}
 		alarms = append(alarms, DeliveryAlarm{
 			TaskID:         w.taskID,
 			TaskName:       w.name,
