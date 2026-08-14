@@ -107,6 +107,15 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 	// sharing this lock (trust prompt, codex safety) wait out the seconds-scale
 	// delay — only on the rare stranded path, and strictly shorter than the
 	// stall a wedged tmux server can already impose here.
+	//
+	// What the hold does NOT cover: the raw attach stream. SendRawKeys is
+	// lockless by design (clientless.go), so an interactively typed draft can
+	// land during this wait and be consumed by the retry's pre-paste clear —
+	// the same frame-granularity interleaving every delivery's unconditional
+	// clear already tolerates, recurring once more on the rare absent path.
+	// The designed guard for a user typing in a pane is the daemon's attach
+	// defer (#1586), applied where attach state lives; no keystroke-sound
+	// suppression exists at this layer (#2065/#2225).
 	log.WarningLog.Printf("submit: redelivering prompt to session %q once in %s; delivery was observed absent through the submit boundary and the pre-paste clear makes redelivery safe (#3293)",
 		t.sanitizedName, redeliverAfterAbsentDelay)
 	time.Sleep(redeliverAfterAbsentDelay)

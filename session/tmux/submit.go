@@ -9,6 +9,8 @@ import (
 	"time"
 	"unicode"
 
+	xansi "github.com/charmbracelet/x/ansi"
+
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -369,8 +371,15 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		// NOT reclassify the status: the pre-Enter frame authorized
 		// observed-absent and remains the reported evidence (#2255/#2266); the
 		// boundary frame only vetoes the retry.
+		//
+		// The boundary frame comes from `capture-pane -e` (the status monitor's
+		// convention), so a colorized composer interleaves ANSI escapes through
+		// the very tail being matched — the exact hazard that made
+		// capturePaneForDelivery avoid -e. Strip them before comparing, or the
+		// veto goes blind on styled composers and authorizes the retry against
+		// a tail that HAS visibly drained.
 		retryAuthorized = boundaryOK && probe.baselineCaptured &&
-			strings.Count(normalizeDelivery(boundary), probe.completion) <= probe.completionBaseline
+			strings.Count(normalizeDelivery(xansi.Strip(boundary)), probe.completion) <= probe.completionBaseline
 	}
 	return observation.outcome.promptDeliveryStatus(), retryAuthorized, nil
 }

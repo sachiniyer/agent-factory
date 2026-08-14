@@ -206,25 +206,45 @@ func TestCouldNotConfirmIsNotRedelivered(t *testing.T) {
 // as Enter — shows the completion tail. That Enter may well have submitted the
 // full prompt, so the redelivery must be withheld: one paste, and the honest
 // not-delivered report stands on its authorizing pre-Enter frame.
+//
+// The styled case matters separately: the boundary capture preserves ANSI
+// escapes (capture-pane -e), so a colorized composer interleaves styling
+// through the very tail being matched. The veto must see through that, or the
+// one frame it exists to inspect goes blind exactly on real agent composers.
 func TestObservedAbsentWithDrainedBoundaryFrameIsNotRedelivered(t *testing.T) {
-	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+	drained := redeliverPrompt
+	styledTail := strings.Replace(redeliverPrompt, "COMPLETION_TAIL", "COMPLETION\x1b[32m_\x1b[0mTAIL", 1)
+	require.NotEqual(t, drained, styledTail, "the styled fixture must actually interleave escapes through the tail")
 
-	model := &redeliverPaneModel{
-		boundaryPane: "╭─ composer ─╮\n│ > " + redeliverPrompt + " │\n╰────────────╯",
-		renderForPaste: func(int, string) string {
-			return redeliverStrandRender
-		},
+	tests := []struct {
+		name  string
+		frame string
+	}{
+		{name: "plain drained tail", frame: drained},
+		{name: "ansi-styled drained tail", frame: styledTail},
 	}
-	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 
-	status, err := session.SendKeysCommandObserved(redeliverPrompt)
-	require.NoError(t, err)
-	require.Equal(t, PromptNotDelivered, status,
-		"the pre-Enter frame authorized observed-absent and remains the reported evidence")
+			model := &redeliverPaneModel{
+				boundaryPane: "╭─ composer ─╮\n│ > " + tt.frame + " │\n╰────────────╯",
+				renderForPaste: func(int, string) string {
+					return redeliverStrandRender
+				},
+			}
+			session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
 
-	_, pastes, _ := model.counts()
-	require.Equal(t, 1, pastes,
-		"a boundary frame showing the completion tail means the paste drained by Enter time — the Enter may have submitted it, so redelivery must be withheld")
+			status, err := session.SendKeysCommandObserved(redeliverPrompt)
+			require.NoError(t, err)
+			require.Equal(t, PromptNotDelivered, status,
+				"the pre-Enter frame authorized observed-absent and remains the reported evidence")
+
+			_, pastes, _ := model.counts()
+			require.Equal(t, 1, pastes,
+				"a boundary frame showing the completion tail means the paste drained by Enter time — the Enter may have submitted it, so redelivery must be withheld")
+		})
+	}
 }
 
 // TestRedeliveryHoldsTheInputLockAcrossBothAttempts pins the two attempts as
