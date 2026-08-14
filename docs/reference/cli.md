@@ -724,7 +724,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides.<agent>, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 

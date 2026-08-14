@@ -513,6 +513,26 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 	}
 }
 
+func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	for _, want := range []string{
+		"Every global key can be changed with `af config set <key> <value>`",
+		"Each successful set reports when that key takes effect",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("briefing introduction is missing %q", want)
+		}
+	}
+	for _, obsolete := range []string{
+		"tables you edit in the file by hand",
+		"Either way the change applies the next time af and its background service start",
+	} {
+		if strings.Contains(out, obsolete) {
+			t.Errorf("briefing introduction still contains obsolete guidance %q", obsolete)
+		}
+	}
+}
+
 func TestRenderBriefingDescribesThemeAsScalarOrTable(t *testing.T) {
 	entry := manifestKeyIndex(t)["theme"]
 	if !reflect.DeepEqual(entry.AcceptedTypes, []string{"string", "table"}) {

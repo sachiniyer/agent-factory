@@ -209,6 +209,13 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	}
 }
 
+func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
+	want := "(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command)"
+	if !strings.Contains(configSetCmd.Long, want) {
+		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
+	}
+}
+
 func TestConfigListLabelsRootAgentMigrationShapes(t *testing.T) {
 	tempAFHome(t)
 	var out bytes.Buffer
