@@ -235,6 +235,34 @@ func TestVerdictNamesUnresolvedProjectRoot(t *testing.T) {
 	}
 }
 
+// TestVerdictSeesUnresolvableLegacyEntry: with BOTH the recorded project root
+// and its matching root_agents path unavailable at daemon start, the legacy
+// layer must still be attributed by recorded-root identity — an empty entry
+// means enabled, and the legacy sweep's per-tick retry creates the root the
+// moment the path returns, so the verdict is "will materialize", not "no
+// layer enables this repo" (#3264 review, round 5).
+func TestVerdictSeesUnresolvableLegacyEntry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	registerTestProject(t, repoPath)
+	rid := repoID(t, repoPath)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Rename(hidden, repoPath) })
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentWillMaterialize {
+		t.Fatalf("verdict reason = %d, want rootAgentWillMaterialize — the unresolvable legacy entry still opts the repo in, and its per-tick retry creates the root when the path returns", got)
+	}
+}
+
 // TestDeliverToReemergingRootVariantTitleKeepsFallthrough: a reserved-title
 // VARIANT ("Root") can never be delivered to — the ensure loop creates only
 // the exact title — so the cause-bearing branch must not intercept it and

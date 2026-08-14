@@ -165,11 +165,24 @@ func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, st
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		repo, err := RepoFromPath(ExpandTilde(key))
-		if err != nil {
+		expanded := ExpandTilde(key)
+		if repo, err := RepoFromPath(expanded); err == nil {
+			if repo.ID == repoID {
+				entry := global.RootAgents[key]
+				return &entry, key
+			}
 			continue
 		}
-		if repo.ID == repoID {
+		// The key's path does not resolve right now — an absent mount, a repo
+		// not yet cloned (#1122). Fall back to recorded-root identity
+		// (RepoIDForRecordedRoot), the same rule the daemon snapshot uses to
+		// attribute unresolvable project roots: a caller asking about that
+		// repo must still see this entry, because an empty entry means
+		// enabled and the legacy ensure sweep's per-tick retry creates the
+		// root the moment the path returns. Dropping it instead told
+		// consumers "no layer enables this repo" about a repo whose opt-in
+		// sat in root_agents the whole time (#3264 review).
+		if RepoIDForRecordedRoot(expanded) == repoID {
 			entry := global.RootAgents[key]
 			return &entry, key
 		}
