@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // TestResolveRepoMetadataRoot_Layouts pins the three origin layouts (#3278
@@ -33,7 +35,9 @@ func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
 		require.NoError(t, os.Symlink(moved, filepath.Join(repo, ".git")))
 		got, err := resolveRepoMetadataRoot(repo)
 		require.NoError(t, err, "a symlinked .git directory must not be treated as a redirect file")
-		assert.Equal(t, filepath.Join(repo, ".git"), got)
+		assert.Equal(t,
+			pathutil.ResolveForCompare(filepath.Join(repo, ".git")),
+			pathutil.ResolveForCompare(got))
 	})
 	t.Run("separate git dir redirect", func(t *testing.T) {
 		root := t.TempDir()
@@ -43,8 +47,38 @@ func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
 			"--separate-git-dir", meta, repo).Run())
 		got, err := resolveRepoMetadataRoot(repo)
 		require.NoError(t, err)
-		assert.Equal(t, meta, got)
+		// git may write the redirect in symlink-resolved form (macOS TMPDIR),
+		// which is exactly why production compares via ResolveForCompare.
+		assert.Equal(t, pathutil.ResolveForCompare(meta), pathutil.ResolveForCompare(got))
 	})
+	t.Run("symlinked redirect file", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		meta := filepath.Join(root, "meta")
+		require.NoError(t, exec.Command("git", "init", "-b", "main",
+			"--separate-git-dir", meta, repo).Run())
+		redirect := filepath.Join(repo, ".git")
+		movedRedirect := filepath.Join(root, "redirect-file")
+		require.NoError(t, os.Rename(redirect, movedRedirect))
+		require.NoError(t, os.Symlink(movedRedirect, redirect))
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err,
+			"a .git symlink to a gitdir redirect file must be resolved, not refused with ELOOP")
+		assert.Equal(t, pathutil.ResolveForCompare(meta), pathutil.ResolveForCompare(got))
+	})
+}
+
+// TestVerifyWorktreePointerShape_NewlinePathPreserved: git writes filesystem
+// paths literally into pointer files, so a newline INSIDE the target path must
+// survive the parse (#3278 review) — only the terminating newline is stripped.
+func TestVerifyWorktreePointerShape_NewlinePathPreserved(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "odd\nrepo", ".git", "worktrees", "wt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+		[]byte("gitdir: "+target+"\n"), 0o644))
+	got, err := verifyWorktreePointerShape(dir)
+	require.NoError(t, err, "an interior newline in the gitdir path must not truncate the parse")
+	assert.Equal(t, target, got)
 }
 
 // TestVerifyArchivedWorktreePointer_Shapes pins the pointer check's refusal

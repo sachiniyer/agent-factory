@@ -345,8 +345,17 @@ func (m *Manager) settleReclaimedStalledIdentity(
 	claim sessiongit.RelocationClaim,
 ) error {
 	if settleErr := instance.SettleWorktreeRelocationClaim(claim); settleErr != nil {
+		// The failed settle left an in-memory claim_stale fence disk never
+		// saw; restore the reclaimable stalled shape so the next kill
+		// re-derives instead of being refused until a restart (#3278 review).
+		if restoreErr := instance.RestoreStalledWorktreeFenceAfterFailedSettle(); restoreErr != nil {
+			return errors.Join(fmt.Errorf(
+				"the reclaimed stalled archived worktree identity for session %q could not be settled against origin %s — restore the session before retrying: %w",
+				title, repoPath, settleErr,
+			), restoreErr)
+		}
 		return fmt.Errorf(
-			"the reclaimed stalled archived worktree identity for session %q could not be settled against origin %s: %w",
+			"the reclaimed stalled archived worktree identity for session %q could not be settled against origin %s — retry the kill: %w",
 			title, repoPath, settleErr,
 		)
 	}

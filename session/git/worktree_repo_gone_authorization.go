@@ -684,8 +684,11 @@ func readBoundedPointerLine(label, pointerPath string) (string, error) {
 	if len(content) > archivedWorktreePointerMaxSize {
 		return "", fmt.Errorf("%s %s is too large to be a pointer file", label, pointerPath)
 	}
-	line, _, _ := strings.Cut(string(content), "\n")
-	return line, nil
+	// Strip only the single terminating newline (#3278 review): git writes
+	// filesystem paths literally, so a newline INSIDE the recorded path must
+	// survive the parse — cutting at the first newline truncated genuine
+	// pointers for newline-bearing repository or worktree-parent paths.
+	return strings.TrimSuffix(string(content), "\n"), nil
 }
 
 // verifyWorktreePointerShape performs the occupant-side structural check
@@ -717,19 +720,25 @@ func verifyWorktreePointerShape(worktreePath string) (string, error) {
 // repo is present in the callers' mode, so the redirect is readable.
 func resolveRepoMetadataRoot(repoPath string) (string, error) {
 	dotGit := filepath.Join(repoPath, ".git")
-	// os.Stat, not Lstat (#3278 review): a `.git` SYMLINK to the real
-	// metadata directory is a layout git accepts, and treating it as a
-	// redirect file would fail the O_NOFOLLOW open with ELOOP and refuse
-	// every ordinary kill of such an origin's archives. Following to a
-	// directory is the answer; only a non-directory result is a redirect.
-	info, err := os.Stat(dotGit)
+	// A `.git` symlink — to the metadata directory OR to a gitdir redirect
+	// file — is a layout git accepts (#3278 review). Resolve it first: the
+	// bounded redirect reader deliberately refuses to follow links, so
+	// handing it the unresolved symlink would always fail with ELOOP and
+	// refuse every ordinary kill of such an origin's archives.
+	resolved := dotGit
+	if lst, err := os.Lstat(dotGit); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		if r, evalErr := filepath.EvalSymlinks(dotGit); evalErr == nil {
+			resolved = r
+		}
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
-		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", dotGit, err)
+		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", resolved, err)
 	}
 	if info.IsDir() {
-		return dotGit, nil
+		return resolved, nil
 	}
-	return readGitdirPointerFile("origin metadata redirect", dotGit, repoPath)
+	return readGitdirPointerFile("origin metadata redirect", resolved, repoPath)
 }
 
 func verifyArchivedWorktreePointer(worktreePath string) error {

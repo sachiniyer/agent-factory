@@ -350,6 +350,19 @@ func (i *Instance) SettleStalledWorktreeRelocationForAbsentPath() error {
 	return gw.SettleStalledRelocationForAbsentPath()
 }
 
+// RestoreStalledWorktreeFenceAfterFailedSettle re-materializes the reclaimable
+// stalled fence after a failed settle. See
+// GitWorktree.RestoreStalledFenceAfterFailedSettle.
+func (i *Instance) RestoreStalledWorktreeFenceAfterFailedSettle() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore stalled worktree fence for %q: instance has no worktree", i.Title)
+	}
+	return gw.RestoreStalledFenceAfterFailedSettle()
+}
+
 // SettleWorktreeRelocationClaim revalidates a consumed recovery claim and
 // releases its ownership without relocating anything. The kill admission
 // producer uses it when a reclaimed stalled record turns out to need no

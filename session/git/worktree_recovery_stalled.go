@@ -149,6 +149,26 @@ func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
 	}
 }
 
+// RestoreStalledFenceAfterFailedSettle re-materializes the identity-unknown
+// stalled state after a failed settle of a reclaimed stalled record (#3278
+// review). The failed settle leaves an in-memory claim_stale fence that disk
+// never saw — the durable record is still the stalled fence — and that
+// mismatch makes the kill producer skip while admission refuses, stranding
+// same-process retries before any tombstone exists. Restoring the stalled
+// shape re-aligns memory with disk so the next kill reclaims and re-derives;
+// the failed identity evidence is deliberately dropped, since it just failed
+// revalidation.
+func (g *GitWorktree) RestoreStalledFenceAfterFailedSettle() error {
+	g.relocationMu.Lock()
+	defer g.relocationMu.Unlock()
+	if g.activeRelocationClaim != nil || g.relocationRecovery == nil ||
+		g.relocationRecovery.State != RelocationRecoveryClaimStale {
+		return fmt.Errorf("no stale fence from a failed settle to restore")
+	}
+	g.relocationRecovery = &RelocationRecovery{State: RelocationRecoveryStalled}
+	return nil
+}
+
 // SettleStalledRelocationForAbsentPath clears an identity-unknown stalled
 // record once its guarded pathname is conclusively absent (#3278 review). Such
 // a record holds no directory identity — the probe that created it never
