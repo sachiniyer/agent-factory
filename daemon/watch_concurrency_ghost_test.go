@@ -273,6 +273,80 @@ func TestUserKilledGhostDoesNotHoldTaskRunSlot(t *testing.T) {
 	}
 }
 
+// TestRestoreGaveUpGhostDoesNotHoldTaskRunSlot keeps raw-row accounting aligned
+// with holdsTaskRunSlot. A terminal Lost restore releases the task cap when its
+// Instance loads; it must do the same when startup cannot materialize the row,
+// or no in-memory lifecycle edge can ever release the resulting ghost slot.
+func TestRestoreGaveUpGhostDoesNotHoldTaskRunSlot(t *testing.T) {
+	tests := []struct {
+		name      string
+		stableID  string
+		breakLoad bool
+	}{
+		{name: "instance materialization fails", stableID: "restore-gave-up-id", breakLoad: true},
+		{name: "legacy id persistence fails"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := setupControlRepo(t)
+			repo, err := config.RepoFromPath(repoPath)
+			if err != nil {
+				t.Fatalf("RepoFromPath: %v", err)
+			}
+			const title = "restore-gave-up-ghost"
+			if err := appendInstanceData(repo.ID, session.InstanceData{
+				ID:            tc.stableID,
+				TaskID:        "task1",
+				Title:         title,
+				Path:          repoPath,
+				Status:        session.Lost,
+				Liveness:      session.LiveLost,
+				TaskRunActive: true,
+				LostRestoreFailure: &session.LostRestoreFailure{
+					Attempts: lostRestoreMaxAttempts,
+					Error:    "agent exited at startup",
+				},
+				BackendType: "local",
+				Worktree:    session.GitWorktreeData{RepoPath: repoPath},
+			}); err != nil {
+				t.Fatalf("append terminal restore row: %v", err)
+			}
+			if tc.breakLoad {
+				failLoadFor(t, title)
+			} else {
+				previous := persistLegacyInstanceID
+				persistLegacyInstanceID = func(string, session.InstanceData) error {
+					return errors.New("stable id persistence failed")
+				}
+				t.Cleanup(func() { persistLegacyInstanceID = previous })
+			}
+
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			if err := manager.RestoreInstances(); err != nil {
+				t.Fatalf("RestoreInstances: %v", err)
+			}
+			manager.mu.Lock()
+			_, live := manager.instances[daemonInstanceKey(repo.ID, title)]
+			counted := manager.countTaskRunsLocked(repo.ID, "task1")
+			admitErr := manager.admitTaskRunLocked(repo.ID, "task1", 1)
+			manager.mu.Unlock()
+			if live {
+				t.Fatal("precondition: terminal row unexpectedly materialized")
+			}
+			if counted != 0 {
+				t.Fatalf("terminal restore ghost consumed %d task slot(s); give-up must release the cap", counted)
+			}
+			if admitErr != nil {
+				t.Fatalf("terminal restore ghost blocked the next task event: %v", admitErr)
+			}
+		})
+	}
+}
+
 // TestGhostTaskRunClearsWhenTheRowLoadsAgain: the ghost set is a projection,
 // rebuilt every refresh — not bookkeeping. A row that starts loading again must
 // stop being a ghost, or its slot would be held twice: once by the ghost and once

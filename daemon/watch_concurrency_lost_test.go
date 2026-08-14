@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
@@ -9,9 +10,9 @@ import (
 )
 
 // A Lost session is one whose backing tmux vanished with no kill on record — an
-// outage, an OOM, a reboot. The daemon's restore loop keeps trying to revive it
-// and never gives up on a recoverable one, so for the concurrency cap it is still
-// very much this task's session: it can come back Running at any tick.
+// outage, an OOM, a reboot. While the daemon's restore loop is still trying to
+// revive it, the concurrency cap still treats it as this task's session: it can
+// come back Running at any tick. A terminal give-up releases the slot.
 //
 // These pin that the cap counts it. Freeing the slot the moment a session went
 // Lost would let a capped watcher admit replacements during an outage and then
@@ -201,7 +202,15 @@ func TestCanAutoRestoreLostSession(t *testing.T) {
 
 	t.Run("a started, recoverable, untombstoned lost session holds its slot", func(t *testing.T) {
 		if !canAutoRestoreLostSession(newLost(t, "lost").LifecycleView()) {
-			t.Fatal("the restore loop retries this session forever; it must keep its slot")
+			t.Fatal("the restore loop is still retrying this session; it must keep its slot")
+		}
+	})
+
+	t.Run("a lost session whose restore gave up releases its slot", func(t *testing.T) {
+		inst := newLost(t, "gave-up")
+		inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("agent exited at startup"))
+		if canAutoRestoreLostSession(inst.LifecycleView()) {
+			t.Fatal("the automatic restore loop is terminal; it cannot keep a task slot wedged")
 		}
 	})
 

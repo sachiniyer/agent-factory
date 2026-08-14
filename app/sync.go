@@ -676,6 +676,12 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileArchiveWarning(d.ArchiveWarning) {
 		changed = true
 	}
+	// Automatic restore can exhaust its attempts while liveness stays Lost. Mirror
+	// that durable terminal axis independently so an already-open TUI surfaces the
+	// reason immediately rather than only after cold-start materialization.
+	if inst.ReconcileLostRestoreFailure(d.LostRestoreFailure) {
+		changed = true
+	}
 	// Mirror the daemon's durable mechanical evidence independently of liveness.
 	// An interactive send can change delivery status while the row remains Ready,
 	// and pane churn can race the next Running transition (#3168).

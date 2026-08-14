@@ -535,7 +535,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 							continue
 						}
 					}
-					if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
+					if rawTaskRunHoldsSlot(item) {
 						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					}
 					continue
@@ -568,7 +568,10 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// runs against m.instances, which is exactly where a ghost is absent. A
 				// tombstoned row that stops loading would therefore hold its slot for
 				// good and park every later event for that task (#2418).
-				if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
+				// LostRestoreFailure is likewise terminal: the retry loop deliberately
+				// released the slot after giving up, so an unloadable copy cannot reclaim
+				// it as a ghost on the next daemon start (#3310).
+				if rawTaskRunHoldsSlot(item) {
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}

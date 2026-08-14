@@ -45,6 +45,17 @@ test("idle detail renders only mechanical reason values and observed churn age",
     idleReasonDetail(sess({ idle_reason: "something-later" as never, last_pane_churn_at: "bad" }), now),
     "",
   );
+  assert.equal(
+    idleReasonDetail(
+      sess({
+        liveness: Liveness.Lost,
+        idle_reason: "restore-gave-up",
+        lost_restore_failure: { attempts: 6, error: "agent exited at startup" },
+      }),
+      now,
+    ),
+    "restore gave up after 6 attempts: agent exited at startup",
+  );
 });
 
 test("operator status groups every mechanical idle reason by the action it needs", () => {
@@ -53,6 +64,7 @@ test("operator status groups every mechanical idle reason by the action it needs
     ["in-flight", { liveness: Liveness.Ready, in_flight_op: InFlightOp.Restoring }, "working"],
     ["usage limit", { liveness: Liveness.LimitReached, idle_reason: "usage-limit" }, "waiting-limit"],
     ["process exited", { liveness: Liveness.Lost, idle_reason: "process-exited" }, "broken"],
+    ["restore gave up", { liveness: Liveness.Lost, idle_reason: "restore-gave-up" }, "broken"],
     ["prompt absent", { liveness: Liveness.Ready, idle_reason: "prompt-not-delivered" }, "broken"],
     ["recreate notice", { liveness: Liveness.Ready, idle_reason: "recreate-pending" }, "needs-you"],
     ["delivery unknown", { liveness: Liveness.Ready, idle_reason: "delivery-unconfirmed" }, "needs-you"],
