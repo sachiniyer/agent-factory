@@ -21,6 +21,10 @@ import (
 var (
 	pasteDeliveryMaxWait      = 2 * time.Second
 	pasteDeliveryPollInterval = 50 * time.Millisecond
+	// Indirected so tests can advance delivery polls without asking the scheduler
+	// to fit several goroutine wakeups inside a compressed wall-clock window.
+	pasteDeliveryNow   = time.Now
+	pasteDeliverySleep = time.Sleep
 	// emptyPromptDrain is the fallback for a prompt that normalizes to nothing,
 	// where there is no text to positively confirm. It keeps the ORIGINAL 500ms
 	// drain rather than silently shortening it.
@@ -724,16 +728,16 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 		// quietly shortening it. Still inspect the pane afterward: a successful
 		// capture distinguishes a readable-but-unverified send from an observer
 		// failure even though neither can prove delivery.
-		deadline := time.Now().Add(pasteDeliveryMaxWait)
-		time.Sleep(emptyPromptDrain)
-		if remaining := time.Until(deadline); remaining > 0 {
+		deadline := pasteDeliveryNow().Add(pasteDeliveryMaxWait)
+		pasteDeliverySleep(emptyPromptDrain)
+		if remaining := deadline.Sub(pasteDeliveryNow()); remaining > 0 {
 			if content, ok := t.capturePaneForDeliveryWithin(remaining); ok {
 				return deliveryObservation{outcome: deliveryObservedUnverified, pane: content}
 			}
 		}
 		return deliveryObservation{outcome: deliveryCouldNotObserve}
 	}
-	deadline := time.Now().Add(pasteDeliveryMaxWait)
+	deadline := pasteDeliveryNow().Add(pasteDeliveryMaxWait)
 	streak := 0
 	// A short tail is weak evidence, so require two consecutive sightings before
 	// trusting it (see minDistinctiveFragment).
@@ -746,13 +750,13 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 		// If the prior capture succeeded and the following poll interval carried
 		// us across the deadline, that prior read is the terminal observation. Do
 		// not launch an already-expired capture just to turn success into unknown.
-		if time.Until(deadline) <= 0 {
+		if deadline.Sub(pasteDeliveryNow()) <= 0 {
 			return lastObservation
 		}
 
 		// Bound each capture by what is LEFT of this loop's budget, so a wedged
 		// server cannot push a single capture past the deadline below (#2099).
-		if content, ok := t.capturePaneForDeliveryWithin(time.Until(deadline)); ok {
+		if content, ok := t.capturePaneForDeliveryWithin(deadline.Sub(pasteDeliveryNow())); ok {
 			normalized := normalizeDelivery(content)
 			if probe.baselineCaptured &&
 				strings.Count(normalized, probe.completion) > probe.completionBaseline {
@@ -782,14 +786,14 @@ func (t *TmuxSession) waitForPasteDelivered(probe deliveryProbe) deliveryObserva
 			streak = 0
 			lastObservation = deliveryObservation{outcome: deliveryCouldNotObserve}
 		}
-		if time.Now().After(deadline) {
+		if pasteDeliveryNow().After(deadline) {
 			// Only a terminal successful capture with this prompt's new render
 			// witness supports a negative. Earlier evidence followed by an
 			// unbound or unreadable frame is unknown: the pane may have elided or
 			// drained the paste after that frame.
 			return lastObservation
 		}
-		time.Sleep(pasteDeliveryPollInterval)
+		pasteDeliverySleep(pasteDeliveryPollInterval)
 	}
 }
 

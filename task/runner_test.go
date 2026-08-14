@@ -283,29 +283,89 @@ func newPreviewInstanceWithProgram(t *testing.T, program string, previewFn func(
 	return inst
 }
 
+type observedReadinessTimer struct {
+	duration time.Duration
+}
+
+type observedReadinessClock struct {
+	timers        chan observedReadinessTimer
+	ticks         chan time.Time
+	tickerStarted chan time.Duration
+}
+
+func newObservedReadinessClock() *observedReadinessClock {
+	return &observedReadinessClock{
+		timers:        make(chan observedReadinessTimer, 4),
+		ticks:         make(chan time.Time, 1),
+		tickerStarted: make(chan time.Duration, 1),
+	}
+}
+
+func (c *observedReadinessClock) clock() readinessClock {
+	return readinessClock{
+		after: func(d time.Duration) <-chan time.Time {
+			fired := make(chan time.Time, 1)
+			c.timers <- observedReadinessTimer{duration: d}
+			return fired
+		},
+		newTicker: func(d time.Duration) (<-chan time.Time, func()) {
+			c.tickerStarted <- d
+			return c.ticks, func() {}
+		},
+	}
+}
+
+func receiveReadinessEvent[T any](t *testing.T, events <-chan T, description string) T {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		var zero T
+		return zero
+	}
+}
+
 // TestWaitForReadyNonAgentBecomesReadyOnAnyOutput pins the #1131 fix at the
 // WaitForReady level: an instance whose program runs no known agent (e.g. the
 // play-test sandbox's "claude"→"bash" override) must become ready as soon as
 // the pane shows any non-blank content — not spin the full timeout waiting
-// for a claude prompt glyph. The 2s watchdog (well under the 10s timeout)
-// fails the test on the pre-fix behavior.
+// for a claude prompt glyph. A virtual ticker makes readiness depend on one
+// observed poll rather than how many polls a loaded host fits into a watchdog.
 func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
-	defer setWaitForReadyTimingForTest(10*time.Second, time.Millisecond)()
-
+	clock := newObservedReadinessClock()
+	var captures atomic.Int32
 	inst := newPreviewInstanceWithProgram(t, "bash", func() (string, error) {
+		captures.Add(1)
 		return "sandbox$ ", nil
 	})
 
 	done := make(chan error, 1)
-	go func() { done <- WaitForReady(context.Background(), inst) }()
+	go func() {
+		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
+	}()
+
+	timer := receiveReadinessEvent(t, clock.timers, "initial readiness timer")
+	if timer.duration != waitForReadyTimeout {
+		t.Fatalf("initial timer = %s, want readiness timeout %s", timer.duration, waitForReadyTimeout)
+	}
+	pollInterval := receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker")
+	if pollInterval != waitForReadyPollInterval {
+		t.Fatalf("poll interval = %s, want %s", pollInterval, waitForReadyPollInterval)
+	}
+	clock.ticks <- time.Time{}
 
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("expected non-agent pane with output to be ready, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("WaitForReady still polling a non-agent pane that already has output (#1131 pre-fix behavior)")
+	case <-time.After(10 * time.Second):
+		t.Fatal("WaitForReady did not finish after observing a non-agent pane with output")
+	}
+	if got := captures.Load(); got != 1 {
+		t.Fatalf("pane captures = %d, want exactly one observed readiness poll", got)
 	}
 }
 
@@ -376,37 +436,70 @@ func setPostWorktreeHooksDoneForWait(fn func(*session.Instance) <-chan struct{})
 // longer than the (tiny) base timeout while the hook runs; readiness must be
 // deferred until the hook drains, so the healthy agent is not spuriously failed.
 func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
-	defer setWaitForReadyTimingForTest(30*time.Millisecond, time.Millisecond)()
-
 	hookDone := make(chan struct{})
 	defer setPostWorktreeHooksDoneForWait(func(*session.Instance) <-chan struct{} { return hookDone })()
 
+	clock := newObservedReadinessClock()
 	var ready atomic.Bool
+	var captures atomic.Int32
+	polls := make(chan struct{})
 	inst := newPreviewInstance(t, func() (string, error) {
-		if ready.Load() {
+		captures.Add(1)
+		isReady := ready.Load()
+		polls <- struct{}{}
+		if isReady {
 			return "ready now\n❯ ", nil
 		}
 		return "still building the worktree...\n", nil
 	})
 
-	// The agent only renders its prompt well after the 30ms base timeout would
-	// have fired — but while the hook is in flight, so readiness must be held.
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(120 * time.Millisecond)
-		ready.Store(true)
-		close(hookDone)
+		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
 	}()
 
-	done := make(chan error, 1)
-	go func() { done <- WaitForReady(context.Background(), inst) }()
+	graceTimer := receiveReadinessEvent(t, clock.timers, "hook grace timer")
+	if graceTimer.duration != waitForReadyHookGrace {
+		t.Fatalf("timer while hooks run = %s, want hook grace %s", graceTimer.duration, waitForReadyHookGrace)
+	}
+	receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker")
+	select {
+	case timer := <-clock.timers:
+		t.Fatalf("readiness timeout %s was armed while hooks were still running", timer.duration)
+	default:
+	}
+
+	// Drive several observed not-ready polls with hooks in flight. Their count,
+	// not elapsed wall time, proves that hook runtime is excluded from the budget.
+	for range 3 {
+		clock.ticks <- time.Time{}
+		receiveReadinessEvent(t, polls, "not-ready pane capture")
+		select {
+		case err := <-done:
+			t.Fatalf("WaitForReady returned while hooks were still running: %v", err)
+		default:
+		}
+	}
+
+	ready.Store(true)
+	close(hookDone)
+	readyTimer := receiveReadinessEvent(t, clock.timers, "post-hook readiness timer")
+	if readyTimer.duration != waitForReadyTimeout {
+		t.Fatalf("timer after hooks drained = %s, want fresh readiness timeout %s", readyTimer.duration, waitForReadyTimeout)
+	}
+	clock.ticks <- time.Time{}
+	receiveReadinessEvent(t, polls, "ready pane capture")
 
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("a slow post-worktree hook must not time out a healthy agent, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("WaitForReady never returned while a slow hook was in flight")
+	case <-time.After(10 * time.Second):
+		t.Fatal("WaitForReady did not return after the post-hook poll observed a healthy agent")
+	}
+	if got := captures.Load(); got != 4 {
+		t.Fatalf("pane captures = %d, want three in-hook polls plus one ready poll", got)
 	}
 }
 
