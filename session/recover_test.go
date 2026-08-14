@@ -106,8 +106,8 @@ func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	restored.mu.Lock()
 	restored.Tabs[1].Kind = TabKindProcess
-	restored.Tabs[1].Command = "make"
-	restored.Tabs[1].tmux.SetProgram("make")
+	restored.Tabs[1].Command = "git status --short"
+	restored.Tabs[1].tmux.SetProgram("git status --short")
 	restored.mu.Unlock()
 	restored.Path = initTempGitRepo(t)
 	restored.SetLimitReached(time.Time{})

@@ -779,7 +779,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	inst.SetGitWorktreeForTest(gw)
 	inst.SetTmuxSession(agent)
 	inst.SetBackend(&session.LocalBackend{})
-	if _, err := inst.AddProcessTab("make", "build"); err != nil {
+	if _, err := inst.AddProcessTab("git status --short", "build"); err != nil {
 		t.Fatal(err)
 	}
 	data := inst.ToInstanceData()
@@ -789,8 +789,8 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 	siblingName := data.Tabs[1].TmuxName
 	blockedSibling = siblingName
 	if state, err := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
-		siblingName, "make", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
-		t.Fatalf("make sibling absent: state=%v err=%v", state, err)
+		siblingName, "git status --short", pty, executor).Close(); state != tmux.PaneStateKnown || err != nil {
+		t.Fatalf("process sibling absent: state=%v err=%v", state, err)
 	}
 	if inst.TabAlive(1) {
 		t.Fatal("fixture sibling must be absent while the replacement agent answers live")

@@ -284,11 +284,11 @@ func TestRespawnForAccountSwapPropagatesSiblingRestartFailure(t *testing.T) {
 	inst := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix, executor)
 	inst.mu.Lock()
 	inst.Tabs[1].Kind = TabKindProcess
-	inst.Tabs[1].Command = "make"
-	inst.Tabs[1].tmux.SetProgram("make")
+	inst.Tabs[1].Command = "git status --short"
+	inst.Tabs[1].tmux.SetProgram("git status --short")
 	inst.Tabs = append(inst.Tabs, &Tab{
-		ID: "build", Name: "build", Kind: TabKindProcess, Command: "make",
-		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "make",
+		ID: "build", Name: "build", Kind: TabKindProcess, Command: "git status --short",
+		tmux: tmux.NewTmuxSessionFromSanitizedNameWithDeps(processName, "git status --short",
 			failAccountSwapProcessPty{t: t, cmdExec: executor, name: processName}, executor),
 	})
 	inst.mu.Unlock()
@@ -321,8 +321,8 @@ func TestRespawnForAccountSwapUsesThePreflightedProgramSnapshot(t *testing.T) {
 		recordingExec(map[string]bool{}, &newSessions, &spawns))
 	inst.mu.Lock()
 	inst.Tabs[1].Kind = TabKindProcess
-	inst.Tabs[1].Command = "make"
-	inst.Tabs[1].tmux.SetProgram("make")
+	inst.Tabs[1].Command = "git status --short"
+	inst.Tabs[1].tmux.SetProgram("git status --short")
 	inst.mu.Unlock()
 	inst.Path = initTempGitRepo(t)
 	inst.SetLimitReached(time.Time{})
