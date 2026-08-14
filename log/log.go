@@ -384,6 +384,10 @@ func (w *rotatingWriter) Close() error {
 // applies both to the initial open and to the fresh file each rotation
 // creates. The writer is safe for concurrent use; Close is idempotent.
 func NewRotatingFile(path string, perm os.FileMode) (io.WriteCloser, error) {
+	return newRotatingFile(path, perm)
+}
+
+func newRotatingFile(path string, perm os.FileMode) (*rotatingWriter, error) {
 	maxBytes, backups := rotationPolicy()
 	if fi, err := os.Stat(path); err == nil && fi.Size() > maxBytes {
 		rotateFiles(path, backups)
