@@ -1,6 +1,10 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
 
 // The typed recover/respawn failure shapes LocalBackend hands the daemon, split
 // out of backend_local.go for the file-length lint (#1145). Both exist so the
@@ -41,4 +45,20 @@ func markRecoverRebuilt(rebuilt bool, err error) error {
 		return err
 	}
 	return &RecoverRebuiltWorkspaceError{Err: err}
+}
+
+func finishRecoverTabFailure(
+	title string,
+	rebuilt bool,
+	restoreResult tmux.RestoreResult,
+	tmuxSession *tmux.TmuxSession,
+	err error,
+) error {
+	setupErr := fmt.Errorf("recover: restore tabs for session %q: %w", title, err)
+	if restoreResult == tmux.RestoreRespawned {
+		if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
+			setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+		}
+	}
+	return markRecoverRebuilt(rebuilt, setupErr)
 }

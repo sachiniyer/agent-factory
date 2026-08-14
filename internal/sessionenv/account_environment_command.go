@@ -119,10 +119,12 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 	case isBareName(words[0], "printf"):
 		return printfMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
-		isBareName(words[0], "source"), isBareName(words[0], "trap"):
+		isBareName(words[0], "source"), isBareName(words[0], "trap"),
+		isBareName(words[0], "alias"):
 		// These builtins execute or schedule another shell program in the same
-		// environment. Proving their effects would require a second parser pass
-		// with runtime expansion, so a scoped sibling refuses them.
+		// environment, or define commands that do. Proving their effects would
+		// require a second parser pass with runtime expansion, so a scoped sibling
+		// refuses them.
 		return true
 	default:
 		return false
@@ -137,8 +139,19 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 		switch {
 		case isBareName(words[0], "exec"):
 			words = words[1:]
-			if len(words) > 0 && wordEquals(words[0], "--") {
-				words = words[1:]
+			if len(words) > 0 {
+				option, literal := literalShellWord(words[0])
+				if !literal {
+					return nil, true
+				}
+				if option == "--" {
+					words = words[1:]
+				} else if strings.HasPrefix(option, "-") && option != "-" {
+					// Bash and other shells give exec options environment-changing
+					// behavior (notably `exec -c`). No option is needed by af's
+					// sibling path, so unsupported forms fail closed.
+					return nil, true
+				}
 			}
 			for len(words) > 0 {
 				name, assignment := shellWordAssignmentName(words[0])

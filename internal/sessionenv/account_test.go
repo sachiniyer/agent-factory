@@ -106,6 +106,8 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"read CODEX_HOME </dev/null; make",
 		"printf -v CODEX_HOME other; make",
 		"eval 'unset CODEX_HOME'; make",
+		"alias run='OPENAI_API_KEY=other codex'; run",
+		"exec -c env HOME=$HOME codex",
 		"for CODEX_HOME in /other; do make; done",
 		"op=unset; $op CODEX_HOME; make",
 		"env CODEX_HOME=/other make",

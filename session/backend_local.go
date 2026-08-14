@@ -586,14 +586,15 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
-	if err := ts.Restore(workDir); err != nil {
+	restoreResult, err := ts.RestoreWithResult(workDir)
+	if err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	if err := b.setupTabs(i); err != nil {
-		return err
+		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)
 	}
 
 	// The program was just re-spawned and is booting: Running, exactly like a
