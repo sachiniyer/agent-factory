@@ -1018,3 +1018,112 @@ func TestRepoIDOnlyDeleteDeregistersReattributedRecord(t *testing.T) {
 		t.Fatalf("the durable record must be deregistered through the alias, not silently survive (stat err: %v)", statErr)
 	}
 }
+
+// TestStalledSiblingDoesNotHotLoopNegatives pins the #3299 review's round-7
+// P2: a permanently in-flight sibling keeps the heal pass on the per-tick
+// cadence, and a completed NEGATIVE entry must rest under its own retry
+// backoff on those hot passes — not be deleted and respawned as a fresh git
+// probe every tick.
+func TestStalledSiblingDoesNotHotLoopNegatives(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	stalledRepo := setupControlRepo(t)
+	absentRepo := setupControlRepo(t)
+	registerTestProject(t, stalledRepo)
+	registerTestProject(t, absentRepo)
+	for _, p := range []string{stalledRepo, absentRepo} {
+		if err := os.Rename(p, p+".hidden"); err != nil {
+			t.Fatalf("hide repo dir: %v", err)
+		}
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	stalledID := config.RepoIDForRecordedRoot(stalledRepo)
+	absentID := config.RepoIDForRecordedRoot(absentRepo)
+	manager.mu.Lock()
+	manager.rootHealProbes[stalledID] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.mu.Unlock()
+
+	// Pass 1: the absent sibling's probe completes negative and must settle.
+	manager.EnsureRootAgents()
+	manager.mu.Lock()
+	probe := manager.rootHealProbes[absentID]
+	failures := manager.rootHealProbeFailures[absentID]
+	manager.mu.Unlock()
+	if probe == nil || !probe.settled || failures != 1 {
+		t.Fatalf("a completed negative must settle in place under its own backoff (probe=%v failures=%d)", probe, failures)
+	}
+
+	// Pass 2 arrives on the stalled sibling's hot cadence: the settled entry
+	// must rest, not respawn another git probe.
+	manager.mu.Lock()
+	manager.rootHealNextAttempt = time.Time{}
+	manager.mu.Unlock()
+	manager.EnsureRootAgents()
+	manager.mu.Lock()
+	same := manager.rootHealProbes[absentID] == probe
+	failures = manager.rootHealProbeFailures[absentID]
+	manager.mu.Unlock()
+	if !same || failures != 1 {
+		t.Fatalf("the settled negative must rest until its retryAt, got respawn (same=%v failures=%d)", same, failures)
+	}
+}
+
+// TestBothSelectorsAcceptReattributedPair pins the #3299 review's round-7 P2:
+// a documented request naming the real repo_id AND the (again unavailable)
+// recorded path describes ONE re-attributed project; the selector match must
+// consult the alias instead of rejecting the pair.
+func TestBothSelectorsAcceptReattributedPair(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	rewriteRecordRoot(t, project.ID, worktree)
+	realID := repoID(t, repoPath)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	// The mount vanishes again; the client supplies BOTH selectors it knows.
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent again: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Rename(aside, parent) })
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID, RepoPath: worktree})
+	if err != nil {
+		t.Fatalf("both-selector delete of a re-attributed project must be accepted through the alias: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("the delete must land on the real identity, got %s", result.RepoID)
+	}
+}

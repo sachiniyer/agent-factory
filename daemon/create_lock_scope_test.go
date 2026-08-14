@@ -214,10 +214,10 @@ func TestReserveCreate_RefusesWhenAProjectDeleteWasAlreadyRunningAtTheSample(t *
 	inDelete := make(chan struct{})
 	releaseDelete := make(chan struct{})
 	prevDeregister := deregisterRootAgents
-	deregisterRootAgents = func(id string) ([]string, error) {
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
 		close(inDelete)
 		<-releaseDelete
-		return prevDeregister(id)
+		return prevDeregister(ids...)
 	}
 	t.Cleanup(func() { deregisterRootAgents = prevDeregister })
 

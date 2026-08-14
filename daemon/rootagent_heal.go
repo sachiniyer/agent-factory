@@ -299,6 +299,12 @@ type rootReattributionProbe struct {
 	// itself failed (EACCES, EIO): identity unknowable, no rebind advice.
 	mismatch         bool
 	markerUnreadable bool
+	// settled marks a consumed NEGATIVE result held in place until retryAt:
+	// per-entry pacing, so a stalled sibling's hot pass cadence cannot make
+	// this entry respawn a git probe every poll tick (#3299 review round 7).
+	// Written only by the poll goroutine, after done is closed.
+	settled bool
+	retryAt time.Time
 }
 
 // rootHealProbeGrace bounds how long one heal pass waits for its probes: long
@@ -392,7 +398,13 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		if probe != nil {
 			select {
 			case <-probe.done:
-				if nowFunc().Sub(probe.completedAt) > rootHealProbeResultTTL {
+				if probe.settled {
+					// A consumed negative rests until its own backoff
+					// expires; only then does a fresh probe re-check.
+					if !nowFunc().Before(probe.retryAt) {
+						probe = nil
+					}
+				} else if nowFunc().Sub(probe.completedAt) > rootHealProbeResultTTL {
 					probe = nil
 				}
 			default:
@@ -419,7 +431,9 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		m.mu.Lock()
 		probe := m.rootHealProbes[derivedID]
 		m.mu.Unlock()
-		if probe == nil {
+		if probe == nil || probe.settled {
+			// A settled negative neither pends nor re-consumes: it waits out
+			// its own retryAt, invisible to the pass.
 			continue
 		}
 		ready := false
@@ -451,9 +465,19 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			pending = true
 			continue
 		}
-		m.mu.Lock()
-		delete(m.rootHealProbes, derivedID)
-		m.mu.Unlock()
+		if !probe.matches {
+			// Hold the settled negative in place under its own backoff
+			// (#3299 review round 7) — its bridge/flag bookkeeping below
+			// still publishes this pass.
+			m.rootHealProbeFailures[derivedID]++
+			probe.settled = true
+			probe.retryAt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealProbeFailures[derivedID]))
+		} else {
+			m.mu.Lock()
+			delete(m.rootHealProbes, derivedID)
+			m.mu.Unlock()
+			delete(m.rootHealProbeFailures, derivedID)
+		}
 		if !probe.matches {
 			// The probe logged the specifics; a fresh probe next pass keeps
 			// re-checking. Record the failure shape for verdict consumers —

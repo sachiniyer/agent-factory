@@ -255,6 +255,13 @@ type Manager struct {
 	// results. Guarded by mu; each probe's fields are written solely by its
 	// goroutine before done is closed.
 	rootHealProbes map[string]*rootReattributionProbe
+	// rootHealProbeFailures counts consecutive negative probe outcomes per
+	// unresolved entry, driving that entry's OWN retry backoff: a stalled
+	// sibling keeps the heal pass on the hot per-tick cadence, and without
+	// per-entry pacing every completed-negative sibling would respawn its
+	// git probe on each of those ticks (#3299 review round 7). Poll
+	// goroutine only.
+	rootHealProbeFailures map[string]int
 	// rootHealPassSeq numbers the heal passes. A probe carries the pass that
 	// spawned it, and a result is only consumed by that same pass: a probe
 	// finishing after its pass's grace expired describes a filesystem from a
@@ -521,6 +528,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		taskRunProbeDue:        make(map[string]time.Time),
 		rootHealAbsenceStreaks: make(map[string]int),
 		rootHealProbes:         make(map[string]*rootReattributionProbe),
+		rootHealProbeFailures:  make(map[string]int),
 		events:                 newEventsHub(),
 		vscode:                 vscode,
 		configAgents:           configAgents,

@@ -217,7 +217,11 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		// registry row — a split-target partial delete hidden behind success.
 		var pathRepoID string
 		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
-		if pathRepoID != repoID {
+		if pathRepoID != repoID && !m.sameProjectByReattribution(repoID, pathRepoID) {
+			// The alias check keeps the documented both-selector shape working
+			// for a re-attributed project whose recorded path is unavailable
+			// again: the real repo_id and the derived path hash then describe
+			// the SAME registered project (#3299 review round 7).
 			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
 	}
@@ -306,20 +310,19 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// in-memory change also keeps the failure ATOMIC: on error nothing is archived
 	// AND no in-memory suppression is left behind, so a failed delete leaves the
 	// project fully intact. A project with no opt-in is a nil, nil no-op.
-	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
+	// BOTH identities in ONE durable mutation (#3299 review rounds 6-7): a
+	// re-attributed project's legacy key spelled as the unavailable recorded
+	// path matches only its derived hash, and two separate writes could
+	// remove one opt-in and then fail — falsifying the nothing-was-changed
+	// guarantee below.
+	optInIDs := []string{repoID}
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		optInIDs = append(optInIDs, derivedAliasID)
+	}
+	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
-		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
-	}
-	if derivedAliasID != "" && derivedAliasID != repoID {
-		// The same opt-in sweep under the project's OTHER identity: a legacy
-		// key spelled as the unavailable recorded path matches only its
-		// derived hash (#3299 review round 6).
-		if removed, cfgErr := deregisterRootAgents(derivedAliasID); cfgErr != nil {
-			return result, fmt.Errorf("delete project %s: could not durably remove its recorded-path root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
-		} else if len(removed) > 0 {
-			log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s) under its recorded-path identity %s: %v", repoID, len(removed), derivedAliasID, removed)
-		}
+		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s) across its identities %v: %v", repoID, len(removed), optInIDs, removed)
 	}
 
 	// The repo's durable #2355 registry record is dropped LATER, only after every
@@ -534,6 +537,18 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 		return nil, fmt.Errorf("delete project %s: enabled task(s) target session(s) it must remove: %s; disable or retarget them, then delete the project again; nothing was changed", repoID, strings.Join(blockers, "; "))
 	}
 	return taskTargets, nil
+}
+
+// sameProjectByReattribution reports whether two differing delete selectors
+// describe one re-attributed project: one names the real identity, the other
+// the derived recorded-path hash, and the published snapshot's alias links
+// them in either direction.
+func (m *Manager) sameProjectByReattribution(a, b string) bool {
+	layers := m.rootAgentLayers.Load()
+	if layers == nil {
+		return false
+	}
+	return layers.reattributedFrom[a] == b || layers.reattributedFrom[b] == a
 }
 
 // suppressRootAgent marks repoID's project as deleted for the rest of this

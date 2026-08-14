@@ -78,7 +78,7 @@ var rootAgentSaveRaceHookForTest func()
 // key→repo resolution runs under the lock too: it decides which keys the write
 // drops, so resolving it against a pre-lock snapshot could drop an entry a
 // racing writer had just added.
-func DeregisterRootAgentsForRepo(repoID string) ([]string, error) {
+func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 	var removed []string
 	err := withGlobalConfigLock(func() error {
 		cfg, err := loadConfigLocked()
@@ -86,9 +86,16 @@ func DeregisterRootAgentsForRepo(repoID string) ([]string, error) {
 			return err
 		}
 		removed = nil
+		// One read-modify-write for EVERY identity: a re-attributed project
+		// carries two (real and derived recorded-path), and sweeping them as
+		// separate writes could remove one opt-in and then fail, breaking the
+		// caller's nothing-was-changed guarantee (#3299 review round 7).
 		for key := range cfg.RootAgents {
-			if rootAgentKeyMatchesRepo(key, repoID) {
-				removed = append(removed, key)
+			for _, repoID := range repoIDs {
+				if rootAgentKeyMatchesRepo(key, repoID) {
+					removed = append(removed, key)
+					break
+				}
 			}
 		}
 		if len(removed) == 0 {
