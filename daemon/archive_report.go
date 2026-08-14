@@ -100,6 +100,55 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 	return archivedPath, archived, committedErr
 }
 
+// keepUnrollableArchiveCommitted keeps the committed archive when rolling the
+// worktree back home itself failed AND the bytes provably stayed at the
+// archived location. In that case callers get the archived location, the
+// resolved projection, and the same committed marker
+// keepIncompleteArchiveCommitted returns — a plain error and an empty location
+// told every transport failed-nothing-committed about an archive that IS
+// committed and kept (#3235).
+//
+// A rollback error is NOT proof the archive stayed put (#3335 review): the
+// move home can land the bytes and then fail registration repair, which
+// commits the pre-archive location while still returning an error — and a
+// cut-off move leaves the directory identity unresolved. Claiming
+// committed-at-archivedPath there would point every client at a vacated path,
+// so those cases keep the prior plain double-failure shape, whose message
+// names both locations for manual recovery.
+//
+// The committed claim must also BE durable before it is made (#3335 review):
+// an undurable Archived row means a restart reloads the pre-archive live row,
+// and a committed marker would let DeleteProject deregister the project on top
+// of it. So the durable write is retried here, and only its success claims
+// committed; a second failure keeps the plain shape callers refuse-and-retry on.
+func (m *Manager) keepUnrollableArchiveCommitted(
+	repoID, archivedPath string,
+	instance *session.Instance,
+	hookErr error,
+	cause error,
+) (string, session.InstanceData, error) {
+	if _, _, unresolved := instance.GetWorktreeRelocationCandidates(); unresolved ||
+		instance.GetWorktreePath() != archivedPath {
+		m.persistInstance(repoID, instance)
+		return "", session.InstanceData{}, cause
+	}
+	if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
+		// The committed claim itself could not be made durable: a restart reloads
+		// the pre-archive live row while the bytes sit under archivedPath. A
+		// committed marker here would also let DeleteProject convert this to a
+		// warning and deregister the project on top of that stale row (#3335
+		// review) — before this helper existed, the plain error is what stopped
+		// that. Keep the plain double-failure shape until the claim can land.
+		return "", session.InstanceData{}, errors.Join(cause,
+			fmt.Errorf("the committed archive also could not be written durably: %w", persistErr))
+	}
+	archived := instance.ToInstanceData()
+	m.publishEvent(agentproto.EventSessionArchived, archived)
+	committedErr := archiveCommittedWarning(instance, hookErr, cause)
+	log.WarningLog.Printf("%v", committedErr)
+	return archivedPath, archived, committedErr
+}
+
 func worktreeRecoveryLocation(instance *session.Instance) string {
 	if primary, alternate, ok := instance.GetWorktreeRelocationCandidates(); ok {
 		if alternate != "" {

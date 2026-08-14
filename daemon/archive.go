@@ -164,12 +164,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// locks, and archive fence.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
 		archivedPath, rerr := m.archiveRemoteSession(repoID, instance, req.Title)
-		if rerr != nil {
+		if rerr != nil && !isMutationCommitted(rerr) {
 			return "", session.InstanceData{}, rerr
 		}
+		// A committed rerr still reaches here: the branch is on origin and the
+		// sandbox is reaped, so callers get the location and projection, and
+		// clients reconcile the completed transition off this event (#3235).
 		archived := instance.ToInstanceData()
 		m.publishEvent(agentproto.EventSessionArchived, archived)
-		return archivedPath, archived, nil
+		return archivedPath, archived, rerr
 	}
 
 	dest, err := archivedWorktreePath(repoID, req.Title)
@@ -341,11 +344,13 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
-			// The worktree cannot be returned home. Keep and best-effort persist the
-			// committed archive rather than claiming a live Lost session at a path
-			// that no longer exists, while surfacing both unknown outcomes.
-			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery", req.Title, archivedPath, stopErr, rbErr)
+			// The worktree cannot be returned home. Keep the committed archive
+			// rather than claiming a live Lost session at a path that no longer
+			// exists, and report it as committed — with the location and
+			// projection — like the keepIncompleteArchiveCommitted sibling (#3235).
+			return m.keepUnrollableArchiveCommitted(repoID, archivedPath, instance, hookErr, fmt.Errorf(
+				"archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery",
+				req.Title, archivedPath, stopErr, rbErr))
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		archiveCommitted = false
@@ -361,10 +366,11 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// Could not move the worktree home: the committed archive is the
-			// safest remaining state. Persist it best-effort and surface both
-			// failures so the operator can recover it manually.
-			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
+			// safest remaining state. Keep it and report it as committed — with
+			// the location and projection — like the sibling above (#3235).
+			return m.keepUnrollableArchiveCommitted(repoID, archivedPath, instance, hookErr, fmt.Errorf(
+				"archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery",
+				req.Title, archivedPath, perr, rbErr))
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		archiveCommitted = false
@@ -451,8 +457,20 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// best-effort write leaves the on-disk record naming the pushed branch, so a
 		// restart loads the session Lost and an explicit restore re-provisions it.
 		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
-		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, perr)
+		// The committed claim must itself be durable before it is made (#3335
+		// review), exactly as keepUnrollableArchiveCommitted enforces for the
+		// local body: ArchiveSandbox records the pushed branch only in memory, so
+		// if no write ever lands, a restart loads a row with an empty or stale
+		// branch — the Lost re-provision then clones the repo's default branch and
+		// strands the pushed work — and DeleteProject would convert the committed
+		// marker to a warning and deregister the project over that row. Retry the
+		// durable write; only its success claims committed, with the pushed
+		// branch preserved (#3235). A second failure keeps the plain shape whose
+		// message still names the branch for manual recovery.
+		if retryErr := archivePersist(m, repoID, instance); retryErr != nil {
+			return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, errors.Join(perr, retryErr))
+		}
+		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but its durable record initially failed to write: %w", title, branch, perr)}
 	}
 	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil
