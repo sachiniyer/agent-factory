@@ -14,7 +14,6 @@ import (
 	cmdutil "github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -104,7 +103,7 @@ type resetPlan struct {
 	projectCountUnavailable bool
 	worktrees               int                 // AF-managed worktrees (excludes external --here trees)
 	repoRoots               map[string]struct{} // distinct repos with AF records (display only)
-	branches                map[string][]string // repoRoot -> AF-created branch names to prune
+	branches                []branchTarget      // AF-created branches to prune
 	// sessionCountsByRepo lets execution count only records whose repo-level
 	// delete/retain write completed, instead of echoing the planned totals.
 	sessionCountsByRepo map[string]resetSessionCounts
@@ -129,10 +128,18 @@ type resetPlan struct {
 // root git needs to operate on it and the repoID whose record set describes it
 // (the record is retained when the removal is blocked — see #2110).
 type worktreeTarget struct {
-	repoID   string
-	root     string
-	path     string
-	archived bool // category of the owning record, for blocked-result accounting
+	repoID string
+	root   string
+	path   string
+}
+
+// branchTarget is one AF-created branch to prune, with the repo root git needs
+// to operate on it and the repoID whose record set planned it (the record is
+// retained when the branch could not be confirmed gone — see #3243).
+type branchTarget struct {
+	repoID string
+	root   string
+	name   string
 }
 
 type resetSessionCounts struct {
@@ -141,11 +148,7 @@ type resetSessionCounts struct {
 }
 
 func (p *resetPlan) branchCount() int {
-	n := 0
-	for _, names := range p.branches {
-		n += len(names)
-	}
-	return n
+	return len(p.branches)
 }
 
 // resetSummary is what a factory reset actually removed, printed on completion.
@@ -158,6 +161,10 @@ type resetSummary struct {
 	branches  int // branches actually deleted (<= plan.branchCount())
 	corrupt   int // repos left intact because their records were unreadable
 	blocked   int // worktrees git would not release (locked) — records retained (#2110)
+	// unverified counts branches that could not be CONFIRMED gone: the existence
+	// probe failed, or the deletion itself did. Their session records are
+	// retained so a re-run can finish the cleanup (#3243).
+	unverified int
 }
 
 var resetCmd = &cobra.Command{
@@ -507,7 +514,6 @@ func planFactoryReset() (*resetPlan, error) {
 		configDir:           dir,
 		storage:             storage,
 		repoRoots:           make(map[string]struct{}),
-		branches:            make(map[string][]string),
 		sessionCountsByRepo: make(map[string]resetSessionCounts),
 	}
 
@@ -558,7 +564,7 @@ func planFactoryReset() (*resetPlan, error) {
 			if r.Worktree.WorktreePath != "" && !r.Worktree.ExternalWorktree && root != "" {
 				plan.worktrees++
 				plan.worktreeTargets = append(plan.worktreeTargets,
-					worktreeTarget{repoID: repoID, root: root, path: r.Worktree.WorktreePath, archived: archived})
+					worktreeTarget{repoID: repoID, root: root, path: r.Worktree.WorktreePath})
 			}
 			if root == "" {
 				continue
@@ -578,7 +584,7 @@ func planFactoryReset() (*resetPlan, error) {
 			// the default cannot un-write those records; this structural guard is
 			// what actually protects them.
 			if !r.Worktree.ExternalWorktree && branchCreatedByAF(r.Worktree) && r.Worktree.BranchName != "" {
-				plan.branches[root] = append(plan.branches[root], r.Worktree.BranchName)
+				plan.branches = append(plan.branches, branchTarget{repoID: repoID, root: root, name: r.Worktree.BranchName})
 			}
 		}
 	}
@@ -660,18 +666,6 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		projectsRemoved = plan.projects
 	}
 
-	// Collect the AF-created branch targets before worktree removal. The deletion
-	// primitive reports whether each branch was actually removed, which is the
-	// only result included in the final summary.
-	type branchRef struct{ root, name string }
-	var planned []branchRef
-	for root, names := range plan.branches {
-		for _, b := range names {
-			ref := branchRef{root, b}
-			planned = append(planned, ref)
-		}
-	}
-
 	// Remove ONLY the specific worktree DIRECTORIES AF created for its sessions
 	// (from the records), never a blind per-repo bulk pass — that would delete
 	// the user's own manually-created linked worktrees. Deletes NO branch here;
@@ -684,7 +678,6 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// the record here is what made the old "re-run to finish" guidance a lie — the
 	// re-run planned nothing and the branch stayed blocked forever.
 	blockedWorktrees := make(map[string][]string) // repoID -> worktree paths still registered
-	blockedSessions := make(map[string]resetSessionCounts)
 	worktreesRemoved := 0
 	for _, wt := range plan.worktreeTargets {
 		removed, err := git.RemoveWorktreeDir(wt.root, wt.path)
@@ -695,13 +688,6 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 			errs = append(errs, fmt.Errorf("remove worktree %s: %w", wt.path, err))
 			if errors.Is(err, git.ErrWorktreeStillRegistered) {
 				blockedWorktrees[wt.repoID] = append(blockedWorktrees[wt.repoID], wt.path)
-				counts := blockedSessions[wt.repoID]
-				if wt.archived {
-					counts.archived++
-				} else {
-					counts.sessions++
-				}
-				blockedSessions[wt.repoID] = counts
 			}
 		}
 	}
@@ -710,8 +696,16 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// archived), gated on BranchCreatedByUs at plan time. After worktree removal
 	// + prune above, a live session's branch is no longer checked out, so
 	// `git branch -D` succeeds. Best-effort per branch.
+	//
+	// A branch that could not be CONFIRMED gone — the existence probe failed, or
+	// the deletion itself did — keeps its session records (#3243, the same rule
+	// the blocked worktrees above follow): a failed probe is unknown, not
+	// absent, and the records are the only durable list of AF-created branch
+	// targets, so dropping them here would orphan a branch that may still exist
+	// beyond the reach of any re-run.
 	branchesDeleted := 0
-	for _, ref := range planned {
+	unverifiedBranches := make(map[string][]string) // repoID -> branch names not confirmed deleted
+	for _, ref := range plan.branches {
 		removed, err := git.DeleteLocalBranch(ref.root, ref.name)
 		if removed {
 			branchesDeleted++
@@ -719,6 +713,7 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		if err != nil {
 			log.WarningLog.Printf("reset: %v", err)
 			errs = append(errs, fmt.Errorf("delete branch %s in %s: %w", ref.name, ref.root, err))
+			unverifiedBranches[ref.repoID] = append(unverifiedBranches[ref.repoID], ref.name)
 		}
 	}
 
@@ -728,12 +723,16 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	// intact — erasing a record whose branch we deliberately did not prune would
 	// orphan that branch.
 	//
-	// A repo with a BLOCKED worktree (#2110) is preserved the same way, but at
-	// record granularity: only the records whose worktree is still registered
-	// survive, so the retained state is exactly the part of the reset that did not
-	// happen — and no record is left pointing at a worktree this run deleted.
+	// A repo with a BLOCKED worktree (#2110) or an UNVERIFIED branch (#3243) is
+	// preserved the same way, but at record granularity: only the records whose
+	// worktree is still registered, or whose branch could not be confirmed gone,
+	// survive — so the retained state is exactly the part of the reset that did
+	// not happen.
 	preserveRepoIDs := append([]string(nil), plan.corruptRepoIDs...)
 	for rid := range blockedWorktrees {
+		preserveRepoIDs = append(preserveRepoIDs, rid)
+	}
+	for rid := range unverifiedBranches {
 		preserveRepoIDs = append(preserveRepoIDs, rid)
 	}
 	removedSessions := resetSessionCounts{}
@@ -746,14 +745,16 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 		}
 	} else {
 		for _, rid := range plan.processedRepoIDs {
-			if paths, blocked := blockedWorktrees[rid]; blocked {
-				if err := retainBlockedInstances(rid, paths); err != nil {
-					errs = append(errs, fmt.Errorf("retain blocked session records for repo %s: %w", rid, err))
+			paths, worktreeBlocked := blockedWorktrees[rid]
+			branchNames, branchUnverified := unverifiedBranches[rid]
+			if worktreeBlocked || branchUnverified {
+				kept, err := retainIncompleteInstances(rid, paths, branchNames)
+				if err != nil {
+					errs = append(errs, fmt.Errorf("retain session records for repo %s: %w", rid, err))
 				} else {
 					plannedCounts := plan.sessionCountsByRepo[rid]
-					blockedCounts := blockedSessions[rid]
-					removedSessions.sessions += max(0, plannedCounts.sessions-blockedCounts.sessions)
-					removedSessions.archived += max(0, plannedCounts.archived-blockedCounts.archived)
+					removedSessions.sessions += max(0, plannedCounts.sessions-kept.sessions)
+					removedSessions.archived += max(0, plannedCounts.archived-kept.archived)
 				}
 				continue
 			}
@@ -813,141 +814,25 @@ func executeFactoryReset(plan *resetPlan) (*resetSummary, error) {
 	for _, paths := range blockedWorktrees {
 		blockedCount += len(paths)
 	}
+	unverifiedCount := 0
+	for _, names := range unverifiedBranches {
+		unverifiedCount += len(names)
+	}
 	summary := &resetSummary{
-		sessions:  removedSessions.sessions,
-		archived:  removedSessions.archived,
-		tasks:     tasksRemoved,
-		projects:  projectsRemoved,
-		worktrees: worktreesRemoved,
-		branches:  branchesDeleted,
-		corrupt:   len(plan.corruptRepoIDs),
-		blocked:   blockedCount,
+		sessions:   removedSessions.sessions,
+		archived:   removedSessions.archived,
+		tasks:      tasksRemoved,
+		projects:   projectsRemoved,
+		worktrees:  worktreesRemoved,
+		branches:   branchesDeleted,
+		corrupt:    len(plan.corruptRepoIDs),
+		blocked:    blockedCount,
+		unverified: unverifiedCount,
 	}
 	if len(errs) > 0 {
 		return summary, errors.Join(errs...)
 	}
 	return summary, nil
-}
-
-// removeArchivedDirs removes each per-repo archived-worktree tree under
-// <AF_HOME>/archived/<repoID>/, EXCEPT for repos in preserve (the corrupt/
-// unreadable ones). Those repos' records survive the reset and still point at
-// their archives, so removing the archives would leave a dangling reference.
-// Archived dirs for deleted repos — and orphaned dirs with no record at all —
-// are removed. Returns any per-dir removal errors (best-effort, non-fatal).
-func removeArchivedDirs(configDir string, preserve []string) []error {
-	archivedRoot := filepath.Join(configDir, "archived")
-	entries, err := os.ReadDir(archivedRoot)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return []error{fmt.Errorf("read %s: %w", archivedRoot, err)}
-	}
-
-	keep := make(map[string]struct{}, len(preserve))
-	for _, id := range preserve {
-		keep[id] = struct{}{}
-	}
-
-	var errs []error
-	for _, e := range entries {
-		if _, preserved := keep[e.Name()]; preserved {
-			continue // preserved repo — keep its archives consistent with its record
-		}
-		p := filepath.Join(archivedRoot, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
-		}
-	}
-	// If nothing is preserved, the archived/ root is now empty — drop it too so a
-	// clean reset leaves no stray dir behind.
-	if len(preserve) == 0 {
-		if err := os.RemoveAll(archivedRoot); err != nil {
-			errs = append(errs, fmt.Errorf("remove %s: %w", archivedRoot, err))
-		}
-	}
-	return errs
-}
-
-// pruneWorktreeResidue empties the AF worktrees/ tree entry-by-entry, keeping
-// any top-level entry that holds a worktree the reset deliberately left in place
-// (#2110). It is the guarded form of the wholesale `os.RemoveAll(worktrees/)`.
-//
-// Keeping is TOP-LEVEL: an entry that merely contains a blocked worktree is kept
-// whole, siblings included. Over-preserving is the safe direction — the residue
-// is one directory that the recovery re-run removes once the worktree is gone,
-// whereas under-preserving destroys a checkout git still owns.
-func pruneWorktreeResidue(root string, keep []string) []error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return []error{fmt.Errorf("read %s: %w", root, err)}
-	}
-	var errs []error
-	for _, e := range entries {
-		p := filepath.Join(root, e.Name())
-		if holdsAnyPath(p, keep) {
-			continue
-		}
-		if err := os.RemoveAll(p); err != nil {
-			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
-		}
-	}
-	return errs
-}
-
-// holdsAnyPath reports whether dir IS, or contains, any of paths.
-//
-// Both sides go through pathutil.ResolveForCompare so a record stored with one
-// spelling matches a scan that walked another — and, critically, so a blocked
-// worktree whose DIRECTORY is already gone still matches: a plain EvalSymlinks
-// cannot resolve a missing leaf, which on a symlinked root (macOS /var ->
-// /private/var) silently turns "keep this" into "delete this" (#2110).
-func holdsAnyPath(dir string, paths []string) bool {
-	dir = pathutil.ResolveForCompare(dir)
-	for _, p := range paths {
-		p = pathutil.ResolveForCompare(p)
-		if p == dir || pathutil.IsStrictlyInside(p, dir) {
-			return true
-		}
-	}
-	return false
-}
-
-// retainBlockedInstances rewrites repoID's record set down to ONLY the sessions
-// whose worktree git refused to release (#2110), dropping every record the reset
-// actually completed.
-//
-// This is what makes the printed recovery honest. `af reset` deletes records
-// even on partial failure, so the old "re-run `af reset` to finish" planned
-// nothing on the second run and the blocked branch was stuck forever. Keeping
-// the blocked session's record — and only that one — means the re-run after
-// `git worktree unlock` plans exactly the leftover work, and the TUI never shows
-// a record whose worktree this run already deleted.
-func retainBlockedInstances(repoID string, blockedPaths []string) error {
-	keep := make(map[string]struct{}, len(blockedPaths))
-	for _, p := range blockedPaths {
-		keep[filepath.Clean(p)] = struct{}{}
-	}
-	return config.UpdateRepoInstances(repoID, func(raw json.RawMessage) (json.RawMessage, error) {
-		var recs []session.InstanceData
-		if err := json.Unmarshal(raw, &recs); err != nil {
-			return nil, fmt.Errorf("read instances: %w", err)
-		}
-		kept := make([]session.InstanceData, 0, len(blockedPaths))
-		for _, r := range recs {
-			if r.Worktree.WorktreePath == "" {
-				continue
-			}
-			if _, blocked := keep[filepath.Clean(r.Worktree.WorktreePath)]; blocked {
-				kept = append(kept, r)
-			}
-		}
-		return json.Marshal(kept)
-	})
 }
 
 func printResetPlan(out io.Writer, plan *resetPlan) {
@@ -989,6 +874,12 @@ func printResetSummary(out io.Writer, s *resetSummary) {
 		fmt.Fprintf(out, "  Needs attention: %d worktree(s) are still registered with git — usually because "+
 			"they are locked. Each was left in place, along with its branch and its session record. "+
 			"Run the recovery command shown with each one below, then re-run `af reset` to finish.\n", s.blocked)
+	}
+	if s.unverified > 0 {
+		fmt.Fprintf(out, "  Needs attention: %d session branch(es) could not be confirmed deleted — an existence "+
+			"check or a deletion failed, and a failed check does not mean the branch is gone. Each error below "+
+			"names what could not be checked. The affected session records were kept so the branches stay "+
+			"findable; fix the cause, then re-run `af reset` to finish.\n", s.unverified)
 	}
 	fmt.Fprintln(out, "Preserved: your git repositories, daemon config (config.toml), and registered agent accounts (accounts/).")
 	fmt.Fprintln(out, "The supervised daemon will restart with empty session/task/project-registration state and the same config.")
