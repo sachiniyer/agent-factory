@@ -497,13 +497,16 @@ func TestAddOrReplaceOrphanCandidateReplacesRecycledPID(t *testing.T) {
 		"a current marked process must replace a stale identity that reused its PID")
 }
 
-func spawnMarkedSessionWithEscapee(t *testing.T, name, home string) proctree.Process {
+func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation ...string) proctree.Process {
 	t.Helper()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "escapee.pid")
 	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-e", EnvMarkerSession + "=" + name}
 	if home != "" {
 		args = append(args, "-e", EnvMarkerHome+"="+home)
+	}
+	if len(generation) > 0 {
+		args = append(args, "-e", EnvMarkerGeneration+"="+generation[0])
 	}
 	args = append(args, fmt.Sprintf("nohup sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300", pidFile))
 	out, err := exec.Command("tmux", args...).CombinedOutput()

@@ -170,7 +170,7 @@ The built-in allowlist keeps the pieces sessions need:
   terminal color preferences, and tmux's own `TMUX`, `TMUX_PANE`, and
   `TMUX_TMPDIR` markers.
 - Agent Factory state: `AGENT_FACTORY_HOME`, `AGENT_FACTORY_AUTO_UPDATE`,
-  `AF_HOME`, `AF_SESSION`, `AF_DAEMON_URL`, and `AF_DAEMON_TOKEN`.
+  `AF_HOME`, `AF_SESSION`, `AF_SESSION_GEN`, `AF_DAEMON_URL`, and `AF_DAEMON_TOKEN`.
 - Git and GitHub authentication: `GH_TOKEN`, `GITHUB_TOKEN`, their Enterprise
   variants, `GH_HOST`, `GH_CONFIG_DIR`, `SSH_AUTH_SOCK`, Git SSH/askpass and
   config-file selectors, Git author/committer identity, and GPG agent/home

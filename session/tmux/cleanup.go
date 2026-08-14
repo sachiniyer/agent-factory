@@ -755,15 +755,36 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
 	}
+	// Establish the generation cohort once, before the grace window opens. Prefer
+	// the captured predecessor evidence; only a blind recovery with no marked
+	// candidate uses the first refresh to discover its initial cohort. Later
+	// refreshes may follow only those generations, so a same-named re-create cannot
+	// become the vanished session merely by appearing while this sweep is waiting
+	// (#3309).
+	generations := orphanGenerations(candidates, match)
+	var initialFilter *orphanGenerationSet
+	if !generations.empty() {
+		initialFilter = &generations
+	}
+	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, initialFilter)
+	sweepErr = errors.Join(sweepErr, initialErr)
+	candidates = initialCandidates
+	if generations.empty() {
+		generations = orphanGenerations(candidates, match)
+	}
 	// Two refresh/reap passes cover a helper that appears after the pre-marker
 	// snapshot and a child it forks during the first bounded grace period. A
 	// final non-destructive refresh below is the evidence that cleanup finished.
-	for range 2 {
-		refreshed, beforeErr := refreshOrphanCandidates(candidates, match)
+	for pass := range 2 {
+		refreshed := candidates
+		var beforeErr error
+		if pass > 0 {
+			refreshed, beforeErr = refreshOrphanCandidates(candidates, match, &generations)
+		}
 		observed, observeErr := observeOrphanAncestry(refreshed, match, reapGraceWait)
-		refreshed, afterErr := refreshOrphanCandidates(observed, match)
+		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
+		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -779,8 +800,8 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 		}
 		candidates = refreshed
 	}
-	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match)
-	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome)
+	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
+	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	if len(left) > 0 {
 		pids := make([]string, 0, len(left))

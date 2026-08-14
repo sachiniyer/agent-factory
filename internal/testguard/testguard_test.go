@@ -202,13 +202,14 @@ func TestSandboxHome_SetsAndRestores(t *testing.T) {
 }
 
 // TestSandboxHome_ScrubsAndRestoresMarkers pins the #1120 marker contract:
-// SandboxHome scrubs AF_SESSION/AF_HOME for the package run, and restore puts
-// each marker back to its exact pre-sandbox state — including unsetting a
+// SandboxHome scrubs AF_SESSION/AF_SESSION_GEN/AF_HOME for the package run, and
+// restore puts each marker back to its exact pre-sandbox state — including unsetting a
 // marker that was absent before but got set during the run, so nothing set
 // mid-package leaks past restore.
 func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	// Present before: must be scrubbed during the run and restored after.
 	t.Setenv("AF_SESSION", "pre-sandbox-session")
+	t.Setenv("AF_SESSION_GEN", "pre-sandbox-generation")
 	// Absent before: t.Setenv registers restoration of the original value,
 	// then Unsetenv makes it genuinely absent for SandboxHome to observe.
 	t.Setenv("AF_HOME", "placeholder")
@@ -219,6 +220,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	restore := SandboxHome()
 	if v, ok := os.LookupEnv("AF_SESSION"); ok {
 		t.Fatalf("SandboxHome must scrub AF_SESSION; still set to %q", v)
+	}
+	if v, ok := os.LookupEnv("AF_SESSION_GEN"); ok {
+		t.Fatalf("SandboxHome must scrub AF_SESSION_GEN; still set to %q", v)
 	}
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("SandboxHome must scrub AF_HOME; still set to %q", v)
@@ -232,6 +236,9 @@ func TestSandboxHome_ScrubsAndRestoresMarkers(t *testing.T) {
 	restore()
 	if got := os.Getenv("AF_SESSION"); got != "pre-sandbox-session" {
 		t.Fatalf("restore did not put AF_SESSION back; got %q", got)
+	}
+	if got := os.Getenv("AF_SESSION_GEN"); got != "pre-sandbox-generation" {
+		t.Fatalf("restore did not put AF_SESSION_GEN back; got %q", got)
 	}
 	if v, ok := os.LookupEnv("AF_HOME"); ok {
 		t.Fatalf("restore must unset AF_HOME (absent pre-sandbox); still set to %q", v)
