@@ -23,10 +23,14 @@ import (
 // CreateSession asks the daemon to create, start, and persist a session.
 func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
 	var resp daemon.CreateSessionResponse
-	if err := c.call("CreateSession", req, &resp); err != nil {
+	err := c.call("CreateSession", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a retained failed create (#3233) still has a durable row the
+	// caller may need to address. Only a clean failure has nothing to return.
+	if err != nil && !IsMutationCommitted(err) {
 		return nil, err
 	}
-	return &resp.Instance, nil
+	return &resp.Instance, err
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.

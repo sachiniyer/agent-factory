@@ -476,10 +476,14 @@ func RequestApplyTheme() (ApplyThemeResponse, error) {
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	var resp CreateSessionResponse
-	if err := callDaemon("CreateSession", req, &resp); err != nil {
+	err := callDaemon("CreateSession", req, &resp)
+	// callDaemon classifies the committed outcome generically; keep the payload
+	// on that path — a retained failed create (#3233) still has a durable row
+	// the CLI may need to report. Only a clean failure has nothing to return.
+	if err != nil && !isMutationCommitted(err) {
 		return nil, err
 	}
-	return &resp.Instance, nil
+	return &resp.Instance, err
 }
 
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may

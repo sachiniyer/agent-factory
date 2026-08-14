@@ -6283,6 +6283,9 @@ async function createSession(input, token2) {
     body.backend = backend;
   }
   const resp = await af("CreateSession", body, token2);
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.instance;
 }
 async function pauseStatusPoll(id, token2) {
