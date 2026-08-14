@@ -28,7 +28,16 @@ func TestArchiveSession_PersistAndRollbackFailure_ReportsCommittedArchive(t *tes
 	require.NoError(t, derr)
 
 	prev := archivePersist
-	archivePersist = func(*Manager, string, *session.Instance) error {
+	calls := 0
+	archivePersist = func(m *Manager, rid string, inst *session.Instance) error {
+		calls++
+		if calls > 1 {
+			// The disk heals for the helper's durable retry: only a LANDED
+			// Archived row may claim committed (#3335 review), so the committed
+			// case is a transient write failure plus an independent rollback
+			// collision.
+			return prev(m, rid, inst)
+		}
 		// Block the road home while failing the durable write: the worktree has
 		// already moved to dest, so a file squatting on the vacated source makes
 		// the rollback's move-home refuse ("destination already exists") — the
@@ -53,6 +62,48 @@ func TestArchiveSession_PersistAndRollbackFailure_ReportsCommittedArchive(t *tes
 	archEv := drainNextSessionEvent(t, ch, agentproto.EventSessionArchived)
 	assert.Equal(t, inst.ID, archEv.ID,
 		"a kept-committed archive must publish session.archived like its keepIncompleteArchiveCommitted sibling")
+}
+
+// TestArchiveSession_PersistNeverHeals_StaysPlainFailure pins the durability
+// half of the #3335 review: the committed claim must itself be durable before
+// it is made. When the durable write keeps failing after the failed rollback,
+// a restart would reload the pre-archive live row while the bytes sit under
+// the archive — and a committed marker would let DeleteProject convert the
+// failure to a warning and deregister the project on top of that stale row.
+// The plain double-failure error is what stops that, exactly as before.
+func TestArchiveSession_PersistNeverHeals_StaysPlainFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+
+	prev := archivePersist
+	archivePersist = func(*Manager, string, *session.Instance) error {
+		// Same rollback collision as the committed sibling above, but the disk
+		// never heals: every durable write fails.
+		_ = os.WriteFile(srcPath, []byte("in the way"), 0644)
+		return errors.New("forced persist failure")
+	}
+	t.Cleanup(func() { archivePersist = prev })
+
+	_, ch := manager.events.subscribe()
+	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not be written durably",
+		"the second write failure must be named alongside the double failure")
+	assert.False(t, isMutationCommitted(err),
+		"an undurable archive must not claim committed: DeleteProject would deregister over a stale live row")
+	assert.Empty(t, archivedPath)
+	assert.Empty(t, archived.ID)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type == agentproto.EventSessionArchived {
+				t.Fatal("no archived event may be published for an archive whose durable claim never landed")
+			}
+			continue
+		default:
+		}
+		break
+	}
 }
 
 // TestKeepUnrollableArchiveCommitted_RefusesWhenBytesLeftTheArchive pins the

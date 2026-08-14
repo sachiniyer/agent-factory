@@ -115,6 +115,12 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 // committed-at-archivedPath there would point every client at a vacated path,
 // so those cases keep the prior plain double-failure shape, whose message
 // names both locations for manual recovery.
+//
+// The committed claim must also BE durable before it is made (#3335 review):
+// an undurable Archived row means a restart reloads the pre-archive live row,
+// and a committed marker would let DeleteProject deregister the project on top
+// of it. So the durable write is retried here, and only its success claims
+// committed; a second failure keeps the plain shape callers refuse-and-retry on.
 func (m *Manager) keepUnrollableArchiveCommitted(
 	repoID, archivedPath string,
 	instance *session.Instance,
@@ -126,7 +132,16 @@ func (m *Manager) keepUnrollableArchiveCommitted(
 		m.persistInstance(repoID, instance)
 		return "", session.InstanceData{}, cause
 	}
-	m.persistInstance(repoID, instance)
+	if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
+		// The committed claim itself could not be made durable: a restart reloads
+		// the pre-archive live row while the bytes sit under archivedPath. A
+		// committed marker here would also let DeleteProject convert this to a
+		// warning and deregister the project on top of that stale row (#3335
+		// review) — before this helper existed, the plain error is what stopped
+		// that. Keep the plain double-failure shape until the claim can land.
+		return "", session.InstanceData{}, errors.Join(cause,
+			fmt.Errorf("the committed archive also could not be written durably: %w", persistErr))
+	}
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)
 	committedErr := archiveCommittedWarning(instance, hookErr, cause)
