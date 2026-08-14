@@ -550,7 +550,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		return err
 	}
 	data, err := s.manager.CreateSession(ctx, req)
-	if err != nil {
+	// A committed retained create (#3233) lands in the envelope with the
+	// retained projection in Instance; a genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Instance = data

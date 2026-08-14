@@ -205,8 +205,12 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			// durable record is one no operator surface could ever revoke.
 			createCommitted = true
 			settleRetainedCreate(instance)
-			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
-				title, serr)
+			// COMMITTED on the wire too (#3233): the row and workspace are durable,
+			// so the retained projection rides back with the marker — a plain error
+			// with an empty InstanceData reads as failed-nothing-committed and
+			// invites a free retry against a title this row still holds.
+			return instance.ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to start instance %q, and its startup outcome could not be determined safely, so its workspace was left in place; the session is recorded for inspection and no automatic cleanup will run: %w",
+				title, serr)}
 		}
 
 		// The create failed, so this instance would normally be discarded — it was
@@ -235,8 +239,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 					title, instance.GetWorktreePath(), errors.Join(serr, killErr, keepErr))
 			}
 			settleRetainedCreate(instance)
-			return session.InstanceData{}, fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
-				title, errors.Join(serr, killErr))
+			// Same committed contract as the unknown-start branch above (#3233):
+			// the tombstoned row is durable and the daemon owns its cleanup retry.
+			return instance.ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to start instance %q, and its cleanup could not complete safely, so its workspace was left in place; the session is recorded and the daemon will keep retrying the cleanup — it will clear once that succeeds: %w",
+				title, errors.Join(serr, killErr))}
 		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
 	}
