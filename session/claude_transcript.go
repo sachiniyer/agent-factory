@@ -27,7 +27,7 @@ type ClaudeProjectConversationState struct {
 // by program and returns the newest direct transcript for workingDir. Claude
 // encodes every non-alphanumeric character in an absolute project path as '-'.
 func InspectClaudeProjectConversations(program, workingDir string, recorded AgentConversationData) (ClaudeProjectConversationState, error) {
-	configDir, err := tmux.ClaudeConfigDirFromCommand(program, workingDir)
+	configDir, err := claudeConfigDirFromCommand(program, workingDir)
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
@@ -76,6 +76,34 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 		}
 	}
 	return state, nil
+}
+
+func claudeConfigDirFromCommand(command, workingDir string) (string, error) {
+	launch, err := tmux.CommandEnvironmentFromCommand(command, workingDir)
+	if err != nil {
+		return "", err
+	}
+	effective := func(name string) (string, bool) {
+		override := launch.Override(name)
+		if !override.Present {
+			value, set := os.LookupEnv(name)
+			return value, set
+		}
+		return override.Value, override.Set
+	}
+	resolve := func(path string) string {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
+	}
+	if configDir, set := effective("CLAUDE_CONFIG_DIR"); set && strings.TrimSpace(configDir) != "" {
+		return resolve(configDir), nil
+	}
+	if home, set := effective("HOME"); set && strings.TrimSpace(home) != "" {
+		return filepath.Join(resolve(home), ".claude"), nil
+	}
+	return "", os.ErrNotExist
 }
 
 func claudeProjectName(path string) string {

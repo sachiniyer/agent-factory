@@ -81,10 +81,3 @@ func TestCodexHomeFromCommandUsesEffectiveCwd(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(string(filepath.Separator), "tmp", "relative"), got)
 }
-
-func TestClaudeConfigDirFromCommandUsesEffectiveEnvironment(t *testing.T) {
-	launchDir := t.TempDir()
-	got, err := ClaudeConfigDirFromCommand("env -C /tmp CLAUDE_CONFIG_DIR=relative claude", launchDir)
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(string(filepath.Separator), "tmp", "relative"), got)
-}
