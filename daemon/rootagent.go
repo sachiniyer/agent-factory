@@ -540,10 +540,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		case inspectErr != nil:
 			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
 				repo.Root, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Latest.HasID():
+		case !state.RecordedExists && state.Resume.HasID():
 			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				repo.Root, carried.conversation.ID, state.Latest.ID)
-			carried.conversation = state.Latest
+				repo.Root, carried.conversation.ID, state.Resume.ID)
+			carried.conversation = state.Resume
 		case !state.RecordedExists:
 			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
 				repo.Root, carried.conversation.ID)
@@ -605,11 +605,11 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			if inspectErr != nil {
 				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
 					repo.Root, req.resumeConversation.ID, inspectErr)
-			} else if !state.RecordedExists && state.Latest.HasID() && !strings.EqualFold(state.Latest.ID, req.resumeConversation.ID) {
+			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
 				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					repo.Root, req.resumeConversation.ID, err, state.Latest.ID)
-				req.resumeConversation = state.Latest
-				carried.conversation = state.Latest
+					repo.Root, req.resumeConversation.ID, err, state.Resume.ID)
+				req.resumeConversation = state.Resume
+				carried.conversation = state.Resume
 				data, err = m.CreateSession(context.Background(), req)
 			}
 		}

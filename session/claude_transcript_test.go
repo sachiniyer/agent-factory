@@ -22,7 +22,7 @@ func TestClaudeProjectNameMatchesClaudeSanitizer(t *testing.T) {
 		"Claude truncates project slugs at 200 UTF-16 code units and appends its base-36 path hash")
 }
 
-func TestInspectClaudeProjectConversationsFindsNewestAndChecksRecorded(t *testing.T) {
+func TestInspectClaudeProjectConversationsKeepsExistingRecordedTranscript(t *testing.T) {
 	configDir := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), ".project")
 	projectDir := filepath.Join(configDir, "projects", claudeProjectName(workDir))
@@ -44,8 +44,9 @@ func TestInspectClaudeProjectConversationsFindsNewestAndChecksRecorded(t *testin
 	)
 	require.NoError(t, err)
 	require.True(t, state.RecordedExists)
-	require.Equal(t, latestID, state.Latest.ID)
-	require.Equal(t, ConversationCaptureClaudeTranscript, state.Latest.CaptureKind)
+	require.Equal(t, recordedID, state.Resume.ID,
+		"a newer same-project transcript is not evidence that it belongs to the recorded root process")
+	require.Equal(t, ConversationCaptureClaudeTranscript, state.Resume.CaptureKind)
 
 	require.NoError(t, os.Remove(recordedPath))
 	state, err = InspectClaudeProjectConversations(
@@ -54,7 +55,7 @@ func TestInspectClaudeProjectConversationsFindsNewestAndChecksRecorded(t *testin
 	)
 	require.NoError(t, err)
 	require.False(t, state.RecordedExists)
-	require.Equal(t, latestID, state.Latest.ID)
+	require.Equal(t, latestID, state.Resume.ID)
 }
 
 func TestInspectClaudeProjectConversationsUsesEffectiveLaunchDirectory(t *testing.T) {
@@ -74,5 +75,5 @@ func TestInspectClaudeProjectConversationsUsesEffectiveLaunchDirectory(t *testin
 	)
 	require.NoError(t, err)
 	require.True(t, state.RecordedExists)
-	require.Equal(t, id, state.Latest.ID)
+	require.Equal(t, id, state.Resume.ID)
 }
