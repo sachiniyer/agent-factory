@@ -239,15 +239,26 @@ func (t *TmuxSession) Start(workDir string) error {
 	return nil
 }
 
-// CheckAndHandleTrustPrompt checks the pane content once for a trust prompt and dismisses it if found.
-// Returns true if the prompt was found and handled.
+// CheckAndHandleTrustPrompt checks the pane content once for a trust prompt
+// and dismisses it if found. It reports whether a dialog was in the way of the
+// pane's composer — NOT whether the dismissal keystroke landed.
+//
+// That distinction is the #3302 contract: task.DismissTrustPrompt treats false
+// as "the pane shows no dialog", which is the create path's permission to type
+// the user's prompt into the pane. A dialog that was positively identified but
+// whose keystroke failed is still on screen, so every such branch returns true
+// and lets the caller retry within its budget — the same fail-closed answer
+// handleCodexSafetyBuffering already gives on its send-keys failures. An
+// unreadable pane likewise reports true: a failed capture is not an observed
+// dialog-free pane, and the caller's readiness re-wait fails fast on a session
+// that is genuinely gone.
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	t.inputMu.Lock()
 	defer t.inputMu.Unlock()
 
 	content, err := t.CapturePaneContent()
 	if err != nil {
-		return false
+		return true
 	}
 
 	// Key off the agent actually running in the pane, token-matched — a loose
@@ -258,7 +269,6 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
-				return false
 			}
 			return true
 		}
@@ -269,7 +279,6 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if CodexTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
-				return false
 			}
 			return true
 		}
@@ -277,7 +286,6 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if DocTrustPromptPresent(content) {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
-				return false
 			}
 			return true
 		}

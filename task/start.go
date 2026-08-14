@@ -60,7 +60,11 @@ func SetTrustPromptTimingForTest(retryDelay time.Duration) func() {
 type TrustPromptTarget interface {
 	ReadinessTarget
 	// CheckAndHandleTrustPrompt dismisses a visible trust dialog and reports
-	// whether one was there — i.e. whether another may follow it.
+	// whether one was in the way — i.e. whether another check is owed before the
+	// pane may be typed into. False is the loop's permission to let the caller
+	// deliver the user's prompt, so it must mean an OBSERVED dialog-free pane: a
+	// dialog whose dismissal keystroke failed and a pane that could not be read
+	// both report true (#3302).
 	CheckAndHandleTrustPrompt() bool
 }
 
