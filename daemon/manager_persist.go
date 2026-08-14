@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -465,6 +467,15 @@ var ghostCleanupWorktree = func(
 			return git.CleanupStateUnknown, recoveryErr, nil
 		}
 	}
+	if recovery != nil && !gw.HasUnresolvedRelocation() {
+		// RestoreRelocationRecovery normalized the identity-unknown
+		// cleanup_stalled record away as process-epoch state (#3278 review).
+		// Mirror that in the loaded row: leaving the raw pointer would let the
+		// caller misclassify this record-free run as a descriptor cleanup
+		// after a boundary refusal and latch "restart before retrying" over a
+		// worker that never ran.
+		data.Worktree.RelocationRecovery = nil
+	}
 	if data.ArchiveReport != nil {
 		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}
@@ -500,7 +511,60 @@ var ghostCleanupWorktree = func(
 		projectGhostPersistenceSnapshot(persisted, gw)
 		return state, cleanupErr, lateResult
 	}
-	state, cleanupErr := gw.Cleanup()
+	// Ghost twin of the live deletion-boundary recheck (#3278 review). The
+	// admission probe was point-in-time; re-establish the origin immediately
+	// before ordinary cleanup while the archived directory still exists, or
+	// answered missing-origin failures would settle the teardown and the row
+	// delete would orphan an archive a ghost can never re-authorize.
+	// Derived from the NORMALIZED lifecycle, not the raw persisted pointer
+	// (#3278 review): RestoreRelocationRecovery deliberately drops an
+	// identity-unknown cleanup_stalled record as process-epoch state, so a
+	// restarted daemon's gw is record-free even though the row still carries
+	// the pointer — and that run needs every record-free guard.
+	archivedRecordFree := data.Status == session.Archived &&
+		!unresolved && ghostRestoredWorktreeRemovable(data)
+	if archivedRecordFree {
+		if _, statErr := git.BoundedLstat(data.Worktree.WorktreePath); statErr != nil {
+			// A timeout must stop here rather than fall through to Cleanup's
+			// own unbounded stat of the same stalled path (#3278 review);
+			// only ENOENT means there is nothing left to guard.
+			if !errors.Is(statErr, os.ErrNotExist) {
+				return git.CleanupStateUnknown, fmt.Errorf(
+					"the archived ghost worktree's state at %s could not be established at its cleanup boundary — kill again once the path answers: %w",
+					data.Worktree.WorktreePath, statErr,
+				), nil
+			}
+		} else if originErr := git.CheckRepoPresentForRelocation(data.Worktree.RepoPath); originErr != nil {
+			return git.CleanupStateUnknown, fmt.Errorf(
+				"origin repo state for this archived ghost could not be proven present at its cleanup boundary; the archived worktree was left intact — kill again once the origin state settles: %w",
+				originErr,
+			), nil
+		}
+	}
+	cleanup := gw.Cleanup
+	if archivedRecordFree {
+		// Registered-only, like the live archived kill (#3278 review): the
+		// unregistered RemoveAll fallback cannot distinguish the archive from
+		// a directory that replaced it.
+		cleanup = gw.CleanupRegisteredOnly
+	}
+	state, cleanupErr := cleanup()
+	// Same postcondition as the live teardown (#3278 review): the pre-check
+	// narrows the race, this closes it. A settled ordinary cleanup must prove
+	// the archive conclusively absent before the row, its only handle, may be
+	// deleted.
+	if archivedRecordFree && state == git.CleanupSettled {
+		if settleErr := session.ArchivedCleanupSettled(data.Worktree.WorktreePath); settleErr != nil {
+			retained := fmt.Errorf(
+				"ordinary ghost cleanup reported settled but %v — kill again to re-establish its state",
+				settleErr,
+			)
+			if cleanupErr != nil {
+				retained = errors.Join(retained, cleanupErr)
+			}
+			return git.CleanupStateUnknown, retained, nil
+		}
+	}
 	if cleanupErr != nil {
 		log.WarningLog.Printf("ghost session %q: worktree cleanup failed: %v", title, cleanupErr)
 	}

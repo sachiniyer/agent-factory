@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
@@ -461,4 +464,311 @@ func requireCleanupPathIdentity(path string, expected pathIdentity, expectedGene
 // every other error is unknown and must retain the archive.
 func CheckRepoPresentForRelocation(repoPath string) error {
 	return boundedRepoGoneOriginProbe(&GitWorktree{repoPath: repoPath})
+}
+
+// archivedWorktreePointerMaxSize bounds the .git pointer read. A linked
+// worktree's pointer file is one short line; anything larger is not one.
+const archivedWorktreePointerMaxSize = 1 << 16
+
+// VerifyArchivedWorktreePointer checks that the directory occupying
+// worktreePath carries a linked-worktree `.git` pointer file — the identity
+// evidence the archive itself wrote at creation time and both archive move
+// variants preserve. A record-free direct kill authorizes deletion from the
+// current pathname occupant, so this is what separates the archived worktree
+// from an unrelated directory later created at the same path (#3278 review).
+//
+// The pointer's repository half is deliberately not compared against the
+// recorded origin: the origin is conclusively gone when this runs, so its
+// canonical form cannot be resolved, and the recorded path and git's stored
+// gitdir may differ only by symlink resolution (macOS TMPDIR). The check binds
+// to the pointer's structure — a gitdir line naming a `.git/worktrees/<name>`
+// metadata directory — which an unrelated replacement directory does not have.
+// Absence, unreadability, or any other shape refuses: deletion authority must
+// not fall back to pathname trust.
+//
+// Bounded like every other filesystem probe on this path (#3278 review): the
+// caller holds the session operation lock, and a stalled FUSE/NFS mount would
+// otherwise hang the kill on a plain open, fstat, read, or lstat. A tripped
+// deadline is an unknown, fail-closed answer — and it latches: a retry while
+// the stuck worker is still in flight is refused instead of stacking another
+// goroutine and descriptor against the same stalled path, mirroring
+// boundedRepoGoneOriginProbe's per-path flight.
+func VerifyArchivedWorktreePointer(worktreePath string) error {
+	return boundedPointerCheck("archived", worktreePath, verifyArchivedWorktreePointer)
+}
+
+// VerifyRegisteredWorktreeOccupant checks that the directory currently
+// occupying worktreePath carries a linked-worktree `.git` pointer INTO
+// repoPath's metadata (#3278 review). A worktree registration is repo-side
+// metadata and keeps reporting the recorded path and branch after the worktree
+// was moved aside — git merely marks the entry prunable — so the listing alone
+// is stale evidence about the OCCUPANT; and a genuine foreign repository's
+// worktree parked at the path satisfies the generic pointer shape, so the
+// pointer must additionally resolve into THIS origin's metadata root. Both
+// sides exist in this repo-present mode, so symlink-resolved comparison is
+// sound (macOS TMPDIR included). This is the repo-present sibling of
+// VerifyArchivedWorktreePointer.
+func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
+	return boundedPointerCheck("occupant\x00"+repoPath, worktreePath, func(path string) error {
+		target, err := verifyWorktreePointerShape(path)
+		if err != nil {
+			return err
+		}
+		// The origin's REAL metadata directory, not the `.git` pathname: a
+		// separate-git-dir origin redirects it, and comparing against the
+		// redirect file's path would refuse every ordinary kill of such an
+		// archived session (#3278 review).
+		expectedRoot, err := resolveRepoMetadataRoot(repoPath)
+		if err != nil {
+			return err
+		}
+		targetRoot := filepath.Dir(filepath.Dir(target))
+		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
+			return fmt.Errorf(
+				"worktree pointer under %s resolves into %s, not this origin's metadata %s — the occupant belongs to a different repository",
+				path, targetRoot, expectedRoot,
+			)
+		}
+		// Bidirectional binding (#3278 review): the registration leaf the
+		// occupant names must exist and its gitdir backpointer must name the
+		// occupant back. A stale pointer into a removed sibling leaf, or a
+		// copied worktree whose leaf points at some other checkout, both fail
+		// here — the occupant must be THE worktree its registration describes,
+		// not merely one under the right metadata root.
+		backpointer, err := readWorktreeBackpointer(target)
+		if err != nil {
+			return err
+		}
+		occupantPointer := filepath.Join(path, ".git")
+		if pathutil.ResolveForCompare(backpointer) != pathutil.ResolveForCompare(occupantPointer) {
+			return fmt.Errorf(
+				"worktree registration %s points back at %s, not this occupant's %s — the occupant is not the worktree its registration describes",
+				target, backpointer, occupantPointer,
+			)
+		}
+		return nil
+	})
+}
+
+// pointerCheckFlight dedupes concurrent pointer verifications of one path per
+// check kind and latches after a deadline so retries cannot accumulate workers
+// against a stalled mount. No cancel: the worker's raw syscalls are not
+// context-aware, so the latch — refuse new callers until the stuck worker
+// finally returns and unpublishes itself — is the containment.
+type pointerCheckFlight struct {
+	done     chan struct{}
+	err      error
+	timedOut bool
+}
+
+var pointerCheckFlights = struct {
+	sync.Mutex
+	byKey map[string]*pointerCheckFlight
+}{byKey: map[string]*pointerCheckFlight{}}
+
+func boundedPointerCheck(kind, worktreePath string, check func(string) error) error {
+	key := kind + "\x00" + worktreePath
+	pointerCheckFlights.Lock()
+	if active := pointerCheckFlights.byKey[key]; active != nil {
+		if active.timedOut {
+			pointerCheckFlights.Unlock()
+			return fmt.Errorf(
+				"worktree pointer check under %s is still running after an earlier deadline: %w",
+				worktreePath, context.DeadlineExceeded,
+			)
+		}
+		pointerCheckFlights.Unlock()
+		return waitForPointerCheckFlight(key, worktreePath, active)
+	}
+	flight := &pointerCheckFlight{done: make(chan struct{})}
+	pointerCheckFlights.byKey[key] = flight
+	pointerCheckFlights.Unlock()
+	go func() {
+		flight.err = check(worktreePath)
+		pointerCheckFlights.Lock()
+		if pointerCheckFlights.byKey[key] == flight {
+			delete(pointerCheckFlights.byKey, key)
+		}
+		close(flight.done)
+		pointerCheckFlights.Unlock()
+	}()
+	return waitForPointerCheckFlight(key, worktreePath, flight)
+}
+
+func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) error {
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-flight.done:
+		return flight.err
+	case <-timer.C:
+		pointerCheckFlights.Lock()
+		if pointerCheckFlights.byKey[key] == flight {
+			flight.timedOut = true
+			pointerCheckFlights.Unlock()
+			return fmt.Errorf(
+				"timed out after %s while verifying worktree pointer under %s: %w",
+				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+			)
+		}
+		pointerCheckFlights.Unlock()
+		<-flight.done
+		return flight.err
+	}
+}
+
+// readGitdirPointerFile reads a `gitdir:` redirect file — a worktree's `.git`
+// pointer or a separate-git-dir repository's `.git` file — and returns the
+// cleaned, absolute target. One descriptor, opened without following links,
+// carries every check and the read (#3278 review): a separate stat-then-read
+// pair could be raced by a same-UID process swapping in a symlink or a special
+// file between the two lookups, and an unbounded read of a swapped-in file
+// could stall or exhaust memory on the kill path. O_NONBLOCK keeps the open
+// itself from blocking on a FIFO; the fstat below rejects every non-regular
+// file before any read, and regular-file reads ignore the flag.
+func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
+	line, err := readBoundedPointerLine(label, pointerPath)
+	if err != nil {
+		return "", err
+	}
+	target, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
+	}
+	// Strip only the format's single separator space (#3278 review): git
+	// writes the path literally after "gitdir: ", and a path that genuinely
+	// ends (or continues) with whitespace must survive the parse — TrimSpace
+	// truncated real separate-git-dir names ending in a space.
+	target = strings.TrimPrefix(target, " ")
+	if target == "" {
+		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(baseDir, target)
+	}
+	return filepath.Clean(target), nil
+}
+
+// readWorktreeBackpointer reads a registration leaf's `gitdir` file — a raw
+// single-line path naming the worktree's `.git` pointer — through the same
+// single-descriptor bounded reader.
+func readWorktreeBackpointer(registrationLeaf string) (string, error) {
+	backpointerPath := filepath.Join(registrationLeaf, "gitdir")
+	line, err := readBoundedPointerLine("worktree registration backpointer", backpointerPath)
+	if err != nil {
+		return "", err
+	}
+	// The backpointer file is the raw path plus a terminating newline; the
+	// path itself is preserved literally, whitespace included.
+	target := line
+	if target == "" {
+		return "", fmt.Errorf("worktree registration backpointer %s is empty", backpointerPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(registrationLeaf, target)
+	}
+	return filepath.Clean(target), nil
+}
+
+func readBoundedPointerLine(label, pointerPath string) (string, error) {
+	f, err := os.OpenFile(pointerPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return "", fmt.Errorf("%s %s could not be opened without following links: %w", label, pointerPath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("%s %s could not be inspected: %w", label, pointerPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s %s is not a regular file", label, pointerPath)
+	}
+	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
+	if err != nil {
+		return "", fmt.Errorf("%s %s could not be read: %w", label, pointerPath, err)
+	}
+	if len(content) > archivedWorktreePointerMaxSize {
+		return "", fmt.Errorf("%s %s is too large to be a pointer file", label, pointerPath)
+	}
+	// Strip only the single terminating newline (#3278 review): git writes
+	// filesystem paths literally, so a newline INSIDE the recorded path must
+	// survive the parse — cutting at the first newline truncated genuine
+	// pointers for newline-bearing repository or worktree-parent paths.
+	return strings.TrimSuffix(string(content), "\n"), nil
+}
+
+// verifyWorktreePointerShape performs the occupant-side structural check
+// shared by both pointer verifications: a regular, bounded `.git` file whose
+// gitdir line names a `.git/worktrees/<name>`-shaped metadata directory (the
+// leaf lives under a "worktrees" parent for every layout, separate git dirs
+// included). It returns the cleaned, absolute gitdir target for the caller's
+// own target rules.
+func verifyWorktreePointerShape(worktreePath string) (string, error) {
+	pointerPath := filepath.Join(worktreePath, ".git")
+	target, err := readGitdirPointerFile("archived worktree pointer", pointerPath, worktreePath)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Base(target)
+	if name == "" || name == "." || name == string(filepath.Separator) ||
+		filepath.Base(filepath.Dir(target)) != "worktrees" {
+		return "", fmt.Errorf(
+			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
+			pointerPath, target,
+		)
+	}
+	return target, nil
+}
+
+// resolveRepoMetadataRoot returns the origin's actual git metadata directory:
+// `<repoPath>/.git` when that is a directory, or the target of its gitdir
+// redirect for a `git init --separate-git-dir` layout (#3278 review) — the
+// repo is present in the callers' mode, so the redirect is readable.
+func resolveRepoMetadataRoot(repoPath string) (string, error) {
+	dotGit := filepath.Join(repoPath, ".git")
+	// A `.git` symlink — to the metadata directory OR to a gitdir redirect
+	// file — is a layout git accepts (#3278 review). Resolve it first: the
+	// bounded redirect reader deliberately refuses to follow links, so
+	// handing it the unresolved symlink would always fail with ELOOP and
+	// refuse every ordinary kill of such an origin's archives.
+	resolved := dotGit
+	if lst, err := os.Lstat(dotGit); err == nil && lst.Mode()&os.ModeSymlink != 0 {
+		if r, evalErr := filepath.EvalSymlinks(dotGit); evalErr == nil {
+			resolved = r
+		}
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", resolved, err)
+	}
+	if info.IsDir() {
+		return resolved, nil
+	}
+	return readGitdirPointerFile("origin metadata redirect", resolved, repoPath)
+}
+
+func verifyArchivedWorktreePointer(worktreePath string) error {
+	target, err := verifyWorktreePointerShape(worktreePath)
+	if err != nil {
+		return err
+	}
+	pointerPath := filepath.Join(worktreePath, ".git")
+	// A gitdir that still exists cannot belong to the gone origin: when the
+	// origin probed conclusively absent or non-Git, its .git/worktrees metadata
+	// went with it — recorded and resolved forms of the same directory vanish
+	// together, symlinked prefixes included. A live target therefore means the
+	// pathname occupant is a worktree of some OTHER, still-present repository,
+	// and deleting it would corrupt that repository's checkout (#3278 review).
+	if _, err := os.Lstat(target); err == nil {
+		return fmt.Errorf(
+			"archived worktree pointer %s names gitdir %s, which still exists — the directory belongs to a live repository, not the gone origin",
+			pointerPath, target,
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf(
+			"archived worktree pointer %s: could not establish the state of gitdir %s: %w",
+			pointerPath, target, err,
+		)
+	}
+	return nil
 }

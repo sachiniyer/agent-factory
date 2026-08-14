@@ -119,6 +119,18 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
 	// retain a record, but it cannot undo teardown that already happened.
 	if instance != nil {
+		// A direct kill of an archived session may be the first operation to
+		// learn its origin repo is gone (#3176). Nothing failed before this
+		// kill, so no relocation record exists and the admission below would
+		// read that absence as permission. Establish and persist the
+		// identity-qualified cleanup authorization first — the same record a
+		// failed restore leaves — or refuse before the tombstone, leaving at
+		// most a conservative, non-destructive fence.
+		stage.set("checking archived origin state")
+		if prepErr := m.prepareDirectRepoGoneKillCleanup(repoID, req.Title, instance); prepErr != nil {
+			return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: %w", req.Title, prepErr)
+		}
+		stage.set("validating destruction admission")
 		if admissionErr := instance.ValidateWorktreeDestructionAdmission(); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of session %q was not started because its worktree relocation is unresolved; nothing was changed: %w",
@@ -126,6 +138,16 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 			)
 		}
 	} else if data != nil {
+		// The ghost twin of the producer above (#3278 review): an archived,
+		// record-free ghost cannot have cleanup authorization built for it, so
+		// an origin that cannot be proven present refuses the kill instead of
+		// letting ordinary ghost cleanup settle against it and orphan the
+		// archive.
+		if ghostErr := ghostDirectRepoGoneKillGuard(data); ghostErr != nil {
+			return session.InstanceData{}, fmt.Errorf(
+				"kill of ghost session %q was not started: %w", req.Title, ghostErr,
+			)
+		}
 		if admissionErr := validateGhostWorktreeDestructionAdmission(data); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of ghost session %q was not started because its persisted worktree recovery is not safe to consume; nothing was changed — retry archive or restore before destructive cleanup: %w",
@@ -151,7 +173,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	// because the failure stops here.
 	stage.set("persisting kill tombstone")
 	if err := m.persistKillTombstone(repoID, instance, data); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; nothing was changed — retry the kill: %w", req.Title, err)
+		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; the session was not torn down — retry the kill: %w", req.Title, err)
 	}
 	// Past the commit point. Every error below leaves the kill durably recorded
 	// (and usually the tombstoned row retained as its retry handle), so each one

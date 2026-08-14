@@ -504,11 +504,12 @@ func (r *cleanupRun) state() CleanupState {
 	return CleanupSettled
 }
 
-// Cleanup removes the worktree and associated branch. It reports whether it
+// cleanup removes the worktree and associated branch. It reports whether it
 // ESTABLISHED the outcome (see CleanupState) alongside any error: callers that go
 // on to delete the session's record MUST gate on the state, not on the error.
-// If the worktree was not created by agent-factory (externalWorktree), only prune is done.
-func (g *GitWorktree) Cleanup() (CleanupState, error) {
+// If the worktree was not created by agent-factory (externalWorktree), only prune
+// is done. The exported entry points live in worktree_cleanup_modes.go.
+func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, error) {
 	// The run owns the state from the first line, so even the early returns below
 	// derive it instead of asserting one (#1917). Nothing in this function names a
 	// CleanupState constant: that is the rule that makes the next command added here
@@ -558,6 +559,16 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 
 	// Check if worktree path exists before attempting removal
 	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
+		// The registered-only mode proves ownership at BOTH ends of the reap
+		// (#3278 review). Before it: the writer reap terminates every process
+		// under the path, which is itself destructive against a replacement
+		// directory whose only possible end state here is retention — refuse
+		// unlisted or mismatched occupants before touching their processes.
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
+		}
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
 		// recursively and fail "directory not empty" only when a live writer keeps
@@ -565,6 +576,19 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		// session whose agent backgrounded a survivor (installer, dev server) leaks
 		// the worktree otherwise. Best-effort and bounded — see reapWorktreeWriters.
 		reapWorktreeWriters(g.worktreePath)
+
+		// ...and again after it, immediately before the destructive remove:
+		// the reap can take seconds, and the verification belongs as close to
+		// the removal as git allows. git offers no compare-and-swap between a
+		// listing and a remove, so the probe-to-remove interval is the
+		// irreducible check-then-act residue; a same-UID actor re-plumbing
+		// registrations inside af's private namespace within it is the
+		// deliberate-reconstruction class the review already accepted.
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
+		}
 
 		// Remove the worktree using git command. Bounded by localGitTimeout
 		// (#1917): this recursive delete is the one local git command that
@@ -601,7 +625,19 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 			// unknown, and r.removeDir refuses on that, so no timeout can reach the
 			// unbounded os.RemoveAll.
 			if r.shouldRemoveWorktreeDir(err) {
-				r.removeDir(g.worktreePath)
+				if allowUnregisteredRemoval {
+					r.removeDir(g.worktreePath)
+				} else {
+					// The caller forbade the unregistered fallback: nothing can
+					// vouch that this directory is the one the record describes,
+					// so refusing IS an unknown outcome — the directory stays
+					// and the record must too.
+					r.unknown = true
+					r.errs = append(r.errs, fmt.Errorf(
+						"refusing to delete %s: git no longer vouches for it and this cleanup may not delete an unregistered directory; leaving it and the record in place",
+						g.worktreePath,
+					))
+				}
 			} else {
 				r.errs = append(r.errs, err)
 			}
@@ -659,31 +695,6 @@ var (
 	repoGoneReapMatching          = reapWorktreeWritersMatching
 	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir
 )
-
-// shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
-// directory itself after `git worktree remove -f` returned removeErr. It is the
-// #802/#726 decision tree documented at the call site.
-//
-// It no longer needs its own timeout guard: the probe runs through r.git, so a
-// timed-out probe marks the run unknown and r.removeDir refuses regardless of what
-// this returns. That is the point of the run — the safety no longer depends on this
-// function remembering anything. It still refuses on an UNKNOWN registration rather
-// than falling back to the string gate, so a probe that could not be asked is never
-// read as "not ours" (#1917 round 4).
-func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
-	registered, ok := r.registered()
-	if !ok && r.unknown {
-		// The probe TIMED OUT. Never act on a verdict we could not obtain, and never
-		// re-enter the unbounded delete on a filesystem that just stalled. The run
-		// is already unknown, so the record is retained and a retry can finish.
-		//
-		// This branch is the RUN's, not the rule's — which is why it lives here and
-		// the rule itself is the shared function below. Conflating a stall with an
-		// error was itself a bug (found reviewing #1917's own diff).
-		return false
-	}
-	return mayDeleteWorktreeDir(registered, ok, removeErr)
-}
 
 // isWorktreeRegistered reports whether git still lists g.worktreePath as a
 // registered worktree of the repo. Used after a failed `git worktree remove`
