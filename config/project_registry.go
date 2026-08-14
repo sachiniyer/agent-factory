@@ -118,7 +118,11 @@ func ListProjectsIfPresent() ([]Project, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+	present, err := projectRegistryDirPresent(dir)
+	if err != nil {
+		return nil, present, err
+	}
+	if !present {
 		return nil, false, nil
 	}
 	projects, err := ListProjects()
@@ -126,11 +130,32 @@ func ListProjectsIfPresent() ([]Project, bool, error) {
 		return nil, true, err
 	}
 	if len(projects) == 0 {
-		if _, statErr := os.Lstat(dir); errors.Is(statErr, os.ErrNotExist) {
+		present, err = projectRegistryDirPresent(dir)
+		if err != nil {
+			return nil, present, err
+		}
+		if !present {
 			return nil, false, nil
 		}
 	}
 	return projects, true, nil
+}
+
+// projectRegistryDirPresent follows the registry path so a dangling symlink is
+// unavailable rather than a present, empty registry. A resolved non-directory
+// is present but invalid and must fail the caller's read closed.
+func projectRegistryDirPresent(dir string) (bool, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return true, fmt.Errorf("inspect project registry: %w", err)
+	}
+	if !info.IsDir() {
+		return true, fmt.Errorf("inspect project registry: %s is not a directory", dir)
+	}
+	return true, nil
 }
 
 // ResetProjectRegistry removes durable project records and this AF home's
