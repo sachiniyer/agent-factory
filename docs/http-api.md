@@ -203,6 +203,14 @@ unspecified field — and the scheduler-owned fields — as-stored, so a single-
 edit cannot clobber a concurrent edit another client made (#1700). See
 [tasks.md](tasks.md) for the task shape.
 
+`Snapshot` accepts additive list filters in the request body: `live: true`
+excludes archived sessions; `statuses` is an array of lifecycle names
+(`running`, `ready`, `lost`, `dead`, `archived`, or `limit-reached`) matched as
+OR alternatives; `created_after` is an RFC 3339 creation-time lower bound; and
+`limit` is a positive maximum row count. These filters compose, run after
+`repo_id` scoping, and are applied by the daemon before the response is encoded.
+Omitting all four preserves the complete response and its existing stable order.
+
 `UpdateTask`, `RemoveTask`, and `TriggerTask` also accept an optional `expect`
 object — `{ "enforce": true, "project_path": "/repos/alpha" }` — asserting the
 project the task was bound to when the caller authorized it. The daemon
