@@ -375,11 +375,28 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappe
 		`nohup codex -c cli_auth_credentials_store="keyring"`,
 		`timeout 30 codex -c cli_auth_credentials_store="keyring"`,
 		`setsid codex -c cli_auth_credentials_store="keyring"`,
+		`sudo sh -c 'CODEX_HOME=/other exec codex'`,
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "launch wrapper %q must not hide a selected-agent identity override", command)
 		require.Contains(t, err.Error(), "cannot prove")
 	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesMakefileLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`make -f launcher.mk`,
+		`make --file=launcher.mk`,
+		`make -E 'launch:; CODEX_HOME=/other codex' launch`,
+		`gmake --eval='launch:; CODEX_HOME=/other codex' launch`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "make invocation %q evaluates a hidden launch program", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand("make -j4", account),
+		"ordinary make parallelism remains a valid scoped sibling")
 }
 
 func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
