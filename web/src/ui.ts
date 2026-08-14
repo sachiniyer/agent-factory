@@ -1917,12 +1917,12 @@ export class AppShell {
     prBadge.hidden = true;
     this.prBadge = prBadge;
     this.prBadgeSig = "";
-    // Title, then the badge. The "Live · master" meta that used to sit beside the
-    // title — terminal connection state joined to the session's branch — was
-    // removed as chrome nobody wanted to look at (#2458); the badge is not that:
-    // it carries an action (follow the PR), not ambient state. The wrapper owns
-    // the header's layout, and the tab bar beside it flexes against it.
-    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle, prBadge);
+    // The title wrapper remains title-only: the mobile shell hides that repeated
+    // chrome to reclaim its sole control row (#2354), while the PR link must stay
+    // reachable there. The "Live · master" meta that used to sit beside the title
+    // was removed as chrome nobody wanted to look at (#2458); the badge is not
+    // that — it carries an action (follow the PR), not ambient state.
+    const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
     // that state — ◆ glyph, "Limit reached" label, "[limit] resets …" title prefix
@@ -1996,7 +1996,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2580,7 +2580,7 @@ export class AppShell {
     // touches the DOM and a state flip (open → merged) patches exactly once.
     if (this.prBadge) {
       const badge = prBadgeContent(selected);
-      const sig = badge ? `${badge.url} ${badge.label} ${badge.tooltip}` : "";
+      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
       if (sig !== this.prBadgeSig) {
         this.prBadgeSig = sig;
         if (badge) {

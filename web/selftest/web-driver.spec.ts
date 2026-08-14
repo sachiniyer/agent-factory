@@ -1564,6 +1564,13 @@ test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, abs
   await expect(badge).toHaveAttribute("rel", "noopener noreferrer");
   await expect(badge).toHaveAttribute("title", /Teach the rail to sing/);
 
+  // The selected-session mobile shell deliberately hides the repeated title
+  // wrapper to reclaim the only control row (#2354). The PR link is an action,
+  // not repeated chrome, so it must remain reachable when that wrapper vanishes.
+  await p.setViewportSize({ width: 390, height: 844 });
+  await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
+  await p.setViewportSize({ width: 1280, height: 720 });
+
   // Fail closed: moving the selection to a row whose projection is the empty
   // struct must withdraw the badge — not leave a stale chip pointing at the
   // previous session's PR.

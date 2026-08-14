@@ -13904,7 +13904,7 @@ var AppShell = class {
     prBadge.hidden = true;
     this.prBadge = prBadge;
     this.prBadgeSig = "";
-    const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle, prBadge);
+    const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle);
     const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
     retryBtn.title = "Resume this session from its usage-limit wall";
     retryBtn.addEventListener("click", () => this.actions.retryLimit());
@@ -13932,7 +13932,7 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h2("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h2("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";

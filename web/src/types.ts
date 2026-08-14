@@ -188,9 +188,6 @@ export interface SessionData {
   tabs?: TabData[];
 }
 
-/** The subset of session.TabData (session/storage.go) the web tab bar reads: the
- *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
- *  tab). Field names match the Go JSON tags so this decodes the projection as-is. */
 /** The wire shape of session/storage.go PRInfoData: the daemon's cached answer to
  *  "which PR belongs to this session's branch". Field names match the Go JSON tags
  *  (all `omitempty`), and `state` carries gh's uppercase vocabulary (OPEN / MERGED /
@@ -206,6 +203,9 @@ export interface PRInfoData {
   branch?: string;
 }
 
+/** The subset of session.TabData (session/storage.go) the web tab bar reads: the
+ *  display name and the kind (index 0 / TabKind.Agent is the unclosable agent
+ *  tab). Field names match the Go JSON tags so this decodes the projection as-is. */
 export interface TabData {
   /** The tab's stable id (session/storage.go TabData.ID, #1738): minted at
    *  creation and never reused, so the web addresses a tab's stream (?tab_id=) and
