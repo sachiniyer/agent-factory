@@ -37,14 +37,8 @@ func redactHookOutputTokens(output string) string {
 // followed by trailing malformed bytes, which would put an unparseable payload
 // back into the supposedly precise branch.
 func redactHookJSONDocument(document string) (string, bool) {
-	if !json.Valid([]byte(document)) {
-		return "", false
-	}
-
-	decoder := json.NewDecoder(strings.NewReader(document))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, parsed := decodeHookJSONDocument(document)
+	if !parsed {
 		return "", false
 	}
 
@@ -59,6 +53,20 @@ func redactHookJSONDocument(document string) (string, bool) {
 		return hookOutputRedaction, true
 	}
 	return string(encoded), true
+}
+
+func decodeHookJSONDocument(document string) (any, bool) {
+	if !json.Valid([]byte(document)) {
+		return nil, false
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 func redactHookJSONValue(value any) (any, bool) {
@@ -100,12 +108,58 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		redacted, parsed := redactHookJSONDocument(value)
 		if !parsed {
-			// Its opening establishes that this is a structured child payload, but a
-			// failed parse leaves no trustworthy field boundaries inside it.
-			return hookOutputRedaction, true
+			// The opener alone does not distinguish a serialized document from an
+			// ordinary diagnostic such as "[INFO] connection failed".
+			if truncatedHookJSONDocumentContainsToken(value) {
+				// Preserve the established fail-closed boundary for a document whose
+				// token field parses after restoring only its missing container closer.
+				return hookOutputRedaction, true
+			}
+			return value, false
 		}
 		return redacted, redacted != value
 	default:
 		return value, false
 	}
+}
+
+func truncatedHookJSONDocumentContainsToken(document string) bool {
+	trimmed := strings.TrimSpace(document)
+	if trimmed == "" {
+		return false
+	}
+
+	var closer byte
+	switch trimmed[0] {
+	case '{':
+		closer = '}'
+	case '[':
+		closer = ']'
+	default:
+		return false
+	}
+
+	value, parsed := decodeHookJSONDocument(document + string(closer))
+	return parsed && hookJSONValueContainsToken(value)
+}
+
+func hookJSONValueContainsToken(value any) bool {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			if strings.EqualFold(key, "token") || hookJSONValueContainsToken(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if hookJSONValueContainsToken(child) {
+				return true
+			}
+		}
+	case string:
+		nested, parsed := decodeHookJSONDocument(value)
+		return parsed && hookJSONValueContainsToken(nested)
+	}
+	return false
 }
