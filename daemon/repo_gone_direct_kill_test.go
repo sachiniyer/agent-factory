@@ -578,6 +578,26 @@ func TestKillSession_ArchivedLegacyNoBranchStaysKillable(t *testing.T) {
 		"the settled kill must delete the session row")
 }
 
+// TestKillSession_ArchivedSymlinkOccupantRefused: a genuine archive is a real
+// directory — cleanup's own first probe follows links, so a symlink parked at
+// the archived path (potentially into a stalled mount) must be refused at the
+// teardown boundary before any link-following probe runs (#3278 review).
+func TestKillSession_ArchivedSymlinkOccupantRefused(t *testing.T) {
+	manager, repoID, _, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-symlink-occupant")
+	movedAside := archivedPath + "-moved-aside"
+	require.NoError(t, os.Rename(archivedPath, movedAside))
+	require.NoError(t, os.Symlink(movedAside, archivedPath))
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-symlink-occupant", RepoID: repoID})
+	require.Error(t, err, "a symlink occupant must be refused, never followed into cleanup")
+	assert.ErrorContains(t, err, "is a symlink")
+	assert.True(t, exists(movedAside), "the symlink's target must be left untouched")
+	require.NotNil(t, recordFor(t, repoID, "direct-symlink-occupant"),
+		"the refused kill must retain the record")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a

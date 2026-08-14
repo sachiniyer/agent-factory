@@ -524,7 +524,7 @@ var ghostCleanupWorktree = func(
 	archivedRecordFree := data.Status == session.Archived &&
 		!unresolved && ghostRestoredWorktreeRemovable(data)
 	if archivedRecordFree {
-		if _, statErr := git.BoundedLstat(data.Worktree.WorktreePath); statErr != nil {
+		if info, statErr := git.BoundedLstat(data.Worktree.WorktreePath); statErr != nil {
 			// A timeout must stop here rather than fall through to Cleanup's
 			// own unbounded stat of the same stalled path (#3278 review);
 			// only ENOENT means there is nothing left to guard.
@@ -534,6 +534,14 @@ var ghostCleanupWorktree = func(
 					data.Worktree.WorktreePath, statErr,
 				), nil
 			}
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			// Same rule as the live teardown (#3278 review): a genuine archive
+			// is a real directory, and cleanup's own first probe follows
+			// links, so a symlink occupant must refuse here.
+			return git.CleanupStateUnknown, fmt.Errorf(
+				"the occupant at %s is a symlink, not the archived directory — refusing to enter ghost cleanup through it",
+				data.Worktree.WorktreePath,
+			), nil
 		} else if originErr := git.CheckRepoPresentForRelocation(data.Worktree.RepoPath); originErr != nil {
 			return git.CleanupStateUnknown, fmt.Errorf(
 				"origin repo state for this archived ghost could not be proven present at its cleanup boundary; the archived worktree was left intact — kill again once the origin state settles: %w",
