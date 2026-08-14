@@ -208,6 +208,100 @@ func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
 	})
 }
 
+// TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle pins the retry
+// throttle on the constructor path (#3242 review round 2): the failed load
+// newEventQueue itself performs is a real disk attempt and must arm the
+// throttle, so the run loop's immediate pendingCount answers from the recorded
+// error instead of issuing a second consecutive blocking disk attempt — on a
+// hung network mount that doubles every watcher's startup stall. Observable
+// consequence pinned here: even if storage heals right after construction,
+// recovery waits out eventQueueLoadRetryInterval rather than landing on the
+// very next call.
+func TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle(t *testing.T) {
+	dir := t.TempDir()
+	// A huge interval makes the assertion airtight: any disk retry inside this
+	// test means the constructor's attempt never armed the throttle at all.
+	oldInterval := eventQueueLoadRetryInterval
+	eventQueueLoadRetryInterval = time.Hour
+	t.Cleanup(func() { eventQueueLoadRetryInterval = oldInterval })
+
+	seed := newEventQueue(dir, "ab324206")
+	if err := seed.enqueue("only"); err != nil {
+		t.Fatalf("seed enqueue: %v", err)
+	}
+
+	denyAccess(t, seed.path, seed.path, 0o644)
+	q := newEventQueue(dir, "ab324206") // this failed attempt must arm the throttle
+
+	// Storage heals immediately — microseconds after the constructor's attempt.
+	if err := os.Chmod(seed.path, 0o644); err != nil {
+		t.Fatalf("restore queue file mode: %v", err)
+	}
+
+	if got := q.pendingCount(); got != 0 || !q.loadFailed() {
+		t.Fatalf("pendingCount=%d loadFailed=%v right after a failed constructor load; the initial attempt must count against the retry throttle", got, q.loadFailed())
+	}
+}
+
+// TestDeliveryAlarms_UnreadableQueueRaisesAlarmWithoutDeliveries pins the last
+// leg of the #3242 operator projection (review round 2): a daemon that starts
+// while a POPULATED queue file is unreadable, with a healthy target and a
+// script that emits nothing new, must still raise the delivery alarm — a
+// parked replay IS a delivery outage. deliverFailSince historically moved only
+// on delivery attempts, and this scenario performs none, so the
+// pending-unknown banner built for exactly this state was unreachable in it.
+func TestDeliveryAlarms_UnreadableQueueRaisesAlarmWithoutDeliveries(t *testing.T) {
+	dir := t.TempDir()
+	oldThreshold := watcherDeliveryAlarmThreshold
+	watcherDeliveryAlarmThreshold = 100 * time.Millisecond
+	t.Cleanup(func() { watcherDeliveryAlarmThreshold = oldThreshold })
+
+	// First lifetime: three events queue behind failing deliveries, then stop.
+	s1, _ := newTestSupervisor(t, staticTasks(watchTask("ab324207", `echo e1; echo e2; echo e3; sleep 60`, dir)))
+	fd1 := &flakyDeliver{}
+	s1.deliver = fd1.deliver
+	queueDir, _ := s1.queueDir()
+	if err := s1.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "backlog to persist", func() bool {
+		return newEventQueue(queueDir, "ab324207").pendingCount() == 3
+	})
+	s1.Stop()
+
+	// Second lifetime starts with the queue file unreadable and a script that
+	// emits nothing; the sentinel proves the watcher's run loop is up.
+	queuePath := filepath.Join(queueDir, "ab324207.jsonl")
+	denyAccess(t, queuePath, queuePath, 0o644)
+	s2, _ := newTestSupervisor(t, staticTasks(watchTask("ab324207", `touch "`+dir+`/started"; sleep 60`, dir)))
+	fd2 := &flakyDeliver{}
+	fd2.healed.Store(true)
+	s2.deliver = fd2.deliver
+	s2.queueDir = func() (string, error) { return queueDir, nil }
+	if err := s2.Reload(); err != nil {
+		t.Fatalf("Reload second lifetime: %v", err)
+	}
+	waitUntil(t, 10*time.Second, "watch script to start", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "started"))
+		return err == nil
+	})
+
+	// No delivery will ever be attempted, so only the load failure itself can
+	// open the alarm run. It must, once past the (shrunk) threshold — and it
+	// must say the count is unknown rather than fabricate a zero.
+	waitUntil(t, 10*time.Second, "delivery alarm for the unreadable queue", func() bool {
+		for _, a := range s2.deliveryAlarms("", time.Now()) {
+			if a.TaskID == "ab324207" && a.PendingUnknown {
+				return true
+			}
+		}
+		return false
+	})
+	if got := fd2.delivered(); len(got) != 0 {
+		t.Fatalf("no delivery should have been attempted; delivered %v", got)
+	}
+}
+
 // TestEventQueue_LoadFailureAdvanceRefuses pins the consume-side guard: a
 // cursor minted before the state went unknown must not consume anything from a
 // queue whose load failed. Refusing with an error parks the drainer; silently
