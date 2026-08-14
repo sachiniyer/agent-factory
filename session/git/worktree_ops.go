@@ -397,11 +397,6 @@ type cleanupRun struct {
 	unknown bool
 }
 
-// cleanupWorktreeStat is a seam for proving that a known-stalled workspace is
-// rejected before Cleanup touches its path. Production uses a bounded Lstat so
-// a final-component symlink is inspected, never followed onto a stalled mount.
-var cleanupWorktreeStat = BoundedLstat
-
 // git runs one bounded local git command and RECORDS a tripped deadline. This is
 // the only place in the cleanup path that decides what a deadline means.
 func (r *cleanupRun) git(args ...string) (string, error) {
@@ -558,21 +553,11 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		return r.state(), errors.Join(r.errs...)
 	}
 
-	// Check if the worktree path exists before attempting removal. This must be
-	// a three-valued, no-follow probe: an unresponsive FUSE/NFS target behind a
-	// final-component symlink must not wedge Cleanup while the caller holds the
-	// session operation lock, and an inconclusive answer is not absence.
-	worktreeInfo, statErr := cleanupWorktreeStat(g.worktreePath)
-	if statErr == nil {
-		if worktreeInfo.Mode()&os.ModeSymlink != 0 {
-			r.unknown = true
-			refusal := fmt.Errorf(
-				"refusing to inspect or clean up worktree %s: the final path component is a symbolic link; leaving it and the session record in place",
-				g.worktreePath,
-			)
-			r.errs = append(r.errs, refusal)
-			return r.state(), errors.Join(r.errs...)
-		}
+	worktreeExists, probeErr := r.probeCleanupWorktreePath()
+	if probeErr != nil {
+		return r.state(), probeErr
+	}
+	if worktreeExists {
 		// The registered-only mode proves ownership at BOTH ends of the reap
 		// (#3278 review). Before it: the writer reap terminates every process
 		// under the path, which is itself destructive against a replacement
@@ -656,19 +641,6 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 				r.errs = append(r.errs, err)
 			}
 		}
-	} else if errors.Is(statErr, context.DeadlineExceeded) {
-		r.unknown = true
-		refusal := fmt.Errorf(
-			"cannot establish whether worktree path %s exists: %w",
-			g.worktreePath, statErr,
-		)
-		r.errs = append(r.errs, refusal)
-		return r.state(), errors.Join(r.errs...)
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		// Preserve Cleanup's answered-error behavior: callers decide whether a
-		// later bounded Git answer or the archived-path postcondition settles
-		// the operation. Only a probe deadline is unknown at this boundary.
-		r.errs = append(r.errs, fmt.Errorf("failed to check worktree path: %w", statErr))
 	}
 
 	// Prune stale worktree metadata BEFORE deleting the branch. When the
