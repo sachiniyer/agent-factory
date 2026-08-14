@@ -94,7 +94,7 @@ func (m *Manager) healRootAgentLayers() {
 			healed.personalUnreadable = personalUnreadable
 			changed = true
 		}
-		if reattributeUnresolvedRoots(&healed) {
+		if m.reattributeUnresolvedRoots(&healed) {
 			changed = true
 		}
 	}
@@ -262,23 +262,41 @@ func projectRecordDirPresent(projectID string) bool {
 // reattributeUnresolvedRoots re-attempts git resolution for recorded project
 // roots that did not resolve at snapshot time (#3247 arm 2, residue closed by
 // #3299). A successful RepoFromPath is content-bearing evidence — a mount
-// flap cannot fabricate a resolved toplevel — so one observation suffices, in
-// contrast to the absence-classified two-strike paths above. On resolution
-// the project's layers move from the recorded-path derived ID to the repo's
-// REAL identity, which also differs when the recorded root is a linked
-// worktree of a bare clone or a subdirectory registration — the residue the
-// derived key cannot cover — and the resolved root joins projectRoots, so the
-// singleton sweep can create the root this run instead of waiting for a
-// daemon start. Mutates the candidate snapshot in place; the caller
-// publishes.
-func reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
+// flap cannot fabricate a resolved toplevel — but AVAILABILITY IS NOT
+// IDENTITY (#3299 review): the resolved checkout must also carry the
+// project's checkout marker (config.ProjectCheckoutMatches), or a different
+// clone reusing the recorded path would inherit the project's personal layer
+// and an autonomous root the user never opted that clone into; without the
+// marker the project simply stays unresolved, and the log names the rebind
+// remedy. A deletion tombstone recorded under the derived ID while the root
+// was unresolved is carried onto the real ID (#3299 review): DeleteProject
+// keyed deletedRootRepos by the only identity it had, and losing it across
+// re-attribution would resurrect an explicitly deleted project's root.
+//
+// On acceptance the project's layers move from the recorded-path derived ID
+// to the repo's REAL identity — which also differs when the recorded root is
+// a linked worktree of a bare clone or a subdirectory registration, the
+// residue the derived key cannot cover — and the resolved root joins
+// projectRoots, so the singleton sweep can create the root this run instead
+// of waiting for a daemon start. Mutates the candidate snapshot in place; the
+// caller publishes.
+func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 	if len(healed.unresolvedRoots) == 0 {
 		return false
 	}
 	changed := false
-	for derivedID, recorded := range healed.unresolvedRoots {
-		repo, err := config.RepoFromPath(recorded)
+	for derivedID, record := range healed.unresolvedRoots {
+		repo, err := config.RepoFromPath(record.root)
 		if err != nil {
+			continue
+		}
+		matches, err := config.ProjectCheckoutMatches(repo.Root, record.checkoutID)
+		if err != nil || !matches {
+			if err != nil {
+				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be verified; leaving project %s unresolved: %v", record.root, record.projectID, err)
+			} else {
+				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it)", record.root, record.projectID, record.checkoutID, record.projectID)
+			}
 			continue
 		}
 		if !changed {
@@ -287,7 +305,7 @@ func reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 			healed.personal = cloneLayerMap(healed.personal)
 			healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
 			healed.projectRoots = cloneStringMap(healed.projectRoots)
-			healed.unresolvedRoots = cloneStringMap(healed.unresolvedRoots)
+			healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
 			changed = true
 		}
 		if layer, ok := healed.personal[derivedID]; ok && derivedID != repo.ID {
@@ -298,9 +316,16 @@ func reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 			healed.personalUnreadable[repo.ID] = projectID
 			delete(healed.personalUnreadable, derivedID)
 		}
+		if derivedID != repo.ID {
+			m.mu.Lock()
+			if _, tombstoned := m.deletedRootRepos[derivedID]; tombstoned {
+				m.deletedRootRepos[repo.ID] = struct{}{}
+			}
+			m.mu.Unlock()
+		}
 		healed.projectRoots[repo.ID] = repo.Root
 		delete(healed.unresolvedRoots, derivedID)
-		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", recorded, repo.ID)
+		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
 	return changed
 }
@@ -315,6 +340,14 @@ func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.Root
 
 func cloneStringMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneUnresolvedMap(in map[string]unresolvedProjectRecord) map[string]unresolvedProjectRecord {
+	out := make(map[string]unresolvedProjectRecord, len(in))
 	for k, v := range in {
 		out[k] = v
 	}

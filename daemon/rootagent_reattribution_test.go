@@ -84,6 +84,42 @@ func TestEnsureRootAgentsReattributesResolvedRootMidRun(t *testing.T) {
 	}
 }
 
+// TestEnsureRootAgentsKeepsSwappedCloneUnresolved pins the #3299 review's
+// identity rule: a DIFFERENT clone reusing the recorded path resolves in git
+// but carries no checkout marker for the project, so re-attribution must
+// refuse — availability is not identity. Before the fix the swap inherited
+// the project's enabled personal layer and an autonomous root.
+func TestEnsureRootAgentsKeepsSwappedCloneUnresolved(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/hijacked\"")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A stranger's clone appears at the recorded path: a real git repo, but
+	// without the registered checkout's marker.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init swapped clone: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a marker-less checkout at the recorded path must not inherit the project's root agent, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentProjectUnresolved {
+		t.Fatalf("an unverified checkout must keep the project unresolved (fail closed), got reason %d", got)
+	}
+}
+
 // TestEnsureRootAgentsReattributesWorktreeRecordedRoot: the identity residue —
 // the record names a linked worktree, whose derived path hash can never equal
 // the repo's main-root identity. Resolution must move the personal disable
@@ -136,5 +172,62 @@ func TestEnsureRootAgentsReattributesWorktreeRecordedRoot(t *testing.T) {
 	}
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentDisabled {
 		t.Fatalf("the healed project must report the true disable, got reason %d", got)
+	}
+}
+
+// TestReattributionCarriesDeletionTombstone pins the #3299 review's deletion
+// rule: DeleteProject on an unresolved project can only key its suppression by
+// the derived recorded-path ID, so re-attribution onto the repo's real ID must
+// carry the tombstone with it — or the explicitly deleted project's root is
+// recreated the moment its mount returns.
+func TestReattributionCarriesDeletionTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/deleted\"")
+	rewriteRecordRoot(t, project.ID, worktree)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The user deletes the project while its checkout is unavailable: the only
+	// identity DeleteProject can record is the derived recorded-path ID.
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+		t.Fatalf("DeleteProject while unresolved: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a deleted project's root must stay suppressed across re-attribution, got %d creates — the tombstone was lost moving to the real repo ID", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentProjectDeleted {
+		t.Fatalf("the re-attributed identity must report the deletion, got reason %d", got)
 	}
 }

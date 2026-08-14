@@ -41,7 +41,7 @@ type rootAgentSnapshot struct {
 	// their layers sit in personal/personalUnreadable — so consumer verdicts
 	// must not call them unconfigured and advise adding config that already
 	// exists (#3264 review).
-	unresolvedRoots    map[string]string
+	unresolvedRoots    map[string]unresolvedProjectRecord
 	legacyRepoIDs      map[string]bool
 	registryUnreadable bool
 }
@@ -60,7 +60,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		personal:           map[string]*config.RootAgentLayer{},
 		personalUnreadable: map[string]string{},
 		projectRoots:       map[string]string{},
-		unresolvedRoots:    map[string]string{},
+		unresolvedRoots:    map[string]unresolvedProjectRecord{},
 		legacyRepoIDs:      map[string]bool{},
 	}
 
@@ -149,11 +149,22 @@ func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []
 // do not load. Shared by the start-of-day builder and the safe-direction heal
 // (#3264), so a healed registry read produces exactly the snapshot a daemon
 // start would have.
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots, unresolvedRoots map[string]string) {
+// unresolvedProjectRecord retains what re-attribution needs from a project
+// whose recorded root did not resolve: the recorded path, and the identity
+// evidence (#3299 review) — the project ID and the checkout marker id that
+// proves a returning path holds the SAME clone, not a different checkout
+// reusing it.
+type unresolvedProjectRecord struct {
+	root       string
+	projectID  string
+	checkoutID string
+}
+
+func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]string{}
-	unresolvedRoots = map[string]string{}
+	unresolvedRoots = map[string]unresolvedProjectRecord{}
 	for _, p := range projects {
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
@@ -179,7 +190,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// path returns.
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
-			unresolvedRoots[repoID] = p.Root
+			unresolvedRoots[repoID] = unresolvedProjectRecord{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
 			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", p.ID, p.Root, repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
