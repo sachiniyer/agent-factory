@@ -51,12 +51,18 @@ const (
 type rootAgentMaterializeVerdict struct {
 	reason    rootAgentMaterializeReason
 	projectID string
-	// disabledSource is set for rootAgentDisabled: the layer that supplied the
-	// effective enabled=false. The built-in source means NO layer enabled the
-	// repo (a registered project with no root-agent config anywhere) — a
-	// materially different remedy from an explicit disable, and naming an
-	// "explicit enabled=false" there would be a false cause (#3304 review).
-	disabledSource config.RootAgentSource
+	// enabledSource is the layer that supplied the effective `enabled` value,
+	// set for rootAgentDisabled (which layer said false — the built-in source
+	// means NO layer enabled the repo, a materially different remedy from an
+	// explicit disable) and for rootAgentProjectUnresolved (which layer said
+	// true — attributing a global enable to the project's own config would be
+	// a false cause). #3304 review, both.
+	enabledSource config.RootAgentSource
+	// rootUnresolved marks that the repo's registered project root did not
+	// resolve at daemon start. Carried on rootAgentDisabled too: a disable
+	// remedy that only says "enable it and restart" is incomplete when the
+	// path must also come back before any restart can create the root.
+	rootUnresolved bool
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -88,13 +94,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := m.resolvedRootAgentFor(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, disabledSource: resolution.EnabledSource}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
 		// start and no legacy entry's per-tick retry covers the repo: nothing
 		// can create this root until a daemon start where the path resolves.
-		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved}
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true}
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
@@ -116,15 +122,22 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentNotConfigured:
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
 	case rootAgentProjectUnresolved:
-		return "its registered project's root-agent config enables it, but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)"
+		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)", v.enabledSource)
 	case rootAgentDisabled:
-		if v.disabledSource == config.RootAgentSourceBuiltIn || v.disabledSource == "" {
+		// A disable on a project whose recorded root is also unresolvable needs
+		// both remedies: enabling alone leaves a root the restarted daemon
+		// still cannot create (#3304 review).
+		pathClause := ""
+		if v.rootUnresolved {
+			pathClause = " — and its recorded project root does not currently resolve to a git repository, so bring that path back before the restart too"
+		}
+		if v.enabledSource == config.RootAgentSourceBuiltIn || v.enabledSource == "" {
 			// No layer enabled it: a registered project with no root-agent
 			// config anywhere defaults to disabled. There is no enabled=false
 			// to point at, so do not invent one.
-			return "no root_agent layer enables this repo (registered projects default to disabled); enable it in the project's personal [root_agent] or the global [root_agent], or add a root_agents entry, then restart the daemon"
+			return "no root_agent layer enables this repo (registered projects default to disabled); enable it in the project's personal [root_agent] or the global [root_agent], or add a root_agents entry, then restart the daemon" + pathClause
 		}
-		return fmt.Sprintf("its root agent resolves to disabled — an explicit enabled=false in the %s layer wins; enable it and restart the daemon", v.disabledSource)
+		return fmt.Sprintf("its root agent resolves to disabled — an explicit enabled=false in the %s layer wins; enable it and restart the daemon%s", v.enabledSource, pathClause)
 	case rootAgentRegistryUnreadable:
 		registry := config.ProjectRegistryDirName
 		if dir, err := config.ProjectRegistryDir(); err == nil {
@@ -138,7 +151,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 				path = p
 			}
 		}
-		return fmt.Sprintf("its personal config %s exists but cannot be loaded, so af fails closed rather than ignore a disable it cannot read; fix or remove that file and restart the daemon", path)
+		return fmt.Sprintf("its personal config %s cannot be loaded (read, parsed, or validated), so af fails closed rather than ignore a disable it cannot read; repair or remove it and restart the daemon", path)
 	}
 	return ""
 }
