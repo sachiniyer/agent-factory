@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // TestRestoreSession_RecoverFailsAfterRebuild_ReportsCommittedWithPath is
@@ -23,6 +25,14 @@ func TestRestoreSession_RecoverFailsAfterRebuild_ReportsCommittedWithPath(t *tes
 		Err: errors.New("recover: failed to re-spawn session \"manual\": tmux spawn failed after rebuild"),
 	}
 	inst := registerStarted(t, manager, repoID, repoPath, "manual", backend, true, session.Lost)
+	// registerStarted seeds no worktree; the committed arm's contract is that the
+	// REBUILT path is preserved, so the fixture must have one to preserve.
+	gw, gwErr := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(filepath.Dir(repoPath), "wt-manual"), "manual", "af/manual", "", false, true)
+	if gwErr != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", gwErr)
+	}
+	inst.SetGitWorktreeForTest(gw)
 
 	worktreePath, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "manual", RepoID: repoID})
 	if err == nil {
