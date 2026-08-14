@@ -143,14 +143,47 @@ function isRetryableGitHubError(error) {
   if (Number.isFinite(status)) {
     return status === 408 || status === 429 || status >= 500 || isRateLimitError(error);
   }
+  if (isRetryableGraphQLError(error)) {
+    return true;
+  }
   const detail = `${error?.code || ""} ${error?.name || ""} ${error?.message || ""}`;
   return /fetch failed|network|socket|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(detail);
+}
+
+function isRetryableGraphQLError(error) {
+  const errors = graphQLResponseErrors(error);
+  return errors.length > 0 && errors.every((responseError) => {
+    const message = responseError?.message || "";
+    return (
+      /^Something went wrong while executing your query\b/i.test(message) ||
+      isGraphQLRateLimitError(responseError)
+    );
+  });
+}
+
+function graphQLResponseErrors(error) {
+  if (error?.name !== "GraphqlResponseError") {
+    return [];
+  }
+  const errors = error.errors || error.response?.errors;
+  return Array.isArray(errors) ? errors : [];
+}
+
+function isGraphQLRateLimitError(error) {
+  return (
+    String(error?.type || "").toUpperCase() === "RATE_LIMITED" ||
+    /(?:API|secondary) rate limit|rate limit exceeded|abuse detection/i.test(error?.message || "")
+  );
 }
 
 function isRateLimitError(error) {
   const status = Number(error?.status);
   if (status === 429) {
     return true;
+  }
+  if (!Number.isFinite(status)) {
+    const errors = graphQLResponseErrors(error);
+    return errors.length > 0 && errors.every(isGraphQLRateLimitError);
   }
   if (status !== 403) {
     return false;
