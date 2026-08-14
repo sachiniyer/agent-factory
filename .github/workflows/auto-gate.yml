@@ -338,6 +338,14 @@ jobs:
               }
               return response;
             };
+            const updateCheck = github.rest.checks.update.bind(github.rest.checks);
+            github.rest.checks.update = async (options) => {
+              const response = await updateCheck(options);
+              if (options.output?.title === "PASS: every open master PR at this commit passes Auto Gate") {
+                ownedAggregateCheck = response.data;
+              }
+              return response;
+            };
             const mergePull = github.rest.pulls.merge.bind(github.rest.pulls);
             github.rest.pulls.merge = async (options) => {
               try {
