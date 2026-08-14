@@ -302,8 +302,8 @@ func TestEveryManifestValueIsAcceptedByTheWriter(t *testing.T) {
 }
 
 // TestEveryManifestRowIsSettableAndHasNoReadOnlyClass is the owner directive
-// from #3345. The wire manifest must not recreate the removed Editable/EditHint
-// class, and every global row must name a writer spec.
+// from #3345. The compatibility wire field may only ever say editable=true;
+// no current or pre-upgrade client may receive a read-only row.
 func TestEveryManifestRowIsSettableAndHasNoReadOnlyClass(t *testing.T) {
 	for _, e := range ManifestWithValues(DefaultConfig()) {
 		if !e.Settable {
@@ -314,9 +314,12 @@ func TestEveryManifestRowIsSettableAndHasNoReadOnlyClass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, retired := range []string{`"editable"`, `"edit_hint"`} {
-		if strings.Contains(string(payload), retired) {
-			t.Errorf("wire manifest still contains retired read-only field %s: %s", retired, payload)
+	if !strings.Contains(string(payload), `"editable":true`) {
+		t.Fatalf("wire manifest does not protect active pre-upgrade clients with editable=true: %s", payload)
+	}
+	for _, forbidden := range []string{`"editable":false`, `"edit_hint"`} {
+		if strings.Contains(string(payload), forbidden) {
+			t.Errorf("wire manifest still contains read-only state %s: %s", forbidden, payload)
 		}
 	}
 }

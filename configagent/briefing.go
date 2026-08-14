@@ -91,9 +91,11 @@ func BuildBriefing(mode Mode, cfg *config.Config, configPath string) string {
   in a {data,error} envelope and errors come back on stderr, so the exit code alone
   only tells you whether it worked.
 
-Tables and lists use one compact JSON value with ` + "`af config set`" + `. See "Editing the
-structured settings" below for their exact shapes. They follow the same validated,
-immediate-apply and echo rules as scalar settings.`)
+Tables and lists other than ` + "`cors_allowed_origins`" + ` use one compact JSON value with
+` + "`af config set`" + `. See "Editing the structured settings" below for their exact shapes.
+` + "`cors_allowed_origins`" + ` remains comma-separated, for example
+` + "`af config set cors_allowed_origins https://one.example.com,https://two.example.com`" + `.
+They follow the same validated, immediate-apply and echo rules as scalar settings.`)
 	fmt.Fprintf(&b, "- Say once, near the start, that all of this lives in `%s` and stays\n"+
 		"  hand-editable, so anything can be undone by opening that file. Say it once · not per setting.\n",
 		configPath)

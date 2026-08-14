@@ -177,6 +177,7 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 		"af config get <key>",
 		"af config set <key> '<json>'",
 		"Every write you make goes through `af config set`",
+		"cors_allowed_origins` remains comma-separated",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("briefing is missing the structured-edit instruction %q", want)

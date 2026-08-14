@@ -49,6 +49,21 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 	if !ok {
 		return "", "", fmt.Errorf("%q does not name a writable global config field", key)
 	}
+	if key == "root_agent" {
+		var decoded rootAgentConfigJSON
+		if err := decodeCompactJSON(key, raw, &decoded); err != nil {
+			return "", "", err
+		}
+		if err := rejectStructuredNulls(key, raw); err != nil {
+			return "", "", err
+		}
+		value := reflect.ValueOf(decoded)
+		encoded, err := encodeStructuredTOML(key, value)
+		if err != nil {
+			return "", "", err
+		}
+		return editorValue(value), encoded, nil
+	}
 
 	target := field.Addr().Interface()
 	var decodedTheme themeConfigJSON
@@ -60,16 +75,11 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 		decodedTheme = themeConfigJSON(holder.Theme)
 		target = &decodedTheme
 	}
-	decoder := json.NewDecoder(strings.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return "", "", fmt.Errorf("expected compact JSON for %s: %w", key, err)
+	if err := decodeCompactJSON(key, raw, target); err != nil {
+		return "", "", err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return "", "", fmt.Errorf("expected one JSON value")
-		}
-		return "", "", fmt.Errorf("invalid trailing JSON: %w", err)
+	if err := rejectStructuredNulls(key, raw); err != nil {
+		return "", "", err
 	}
 	if key == "theme" {
 		field.Set(reflect.ValueOf(ThemeConfig(decodedTheme)))
@@ -87,6 +97,69 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 }
 
 type themeConfigJSON ThemeConfig
+
+// rootAgentConfigJSON preserves JSON field presence while a structured value is
+// encoded. RootAgent.Enabled deliberately lacks omitempty for full Config
+// serialization, but a personal override that omits enabled must keep inheriting
+// that field from lower layers rather than materializing enabled=false.
+type rootAgentConfigJSON struct {
+	Enabled *bool   `json:"enabled,omitempty" toml:"enabled,omitempty"`
+	Program *string `json:"program,omitempty" toml:"program,omitempty"`
+}
+
+func decodeCompactJSON(key, raw string, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("expected compact JSON for %s: %w", key, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("expected one JSON value")
+		}
+		return fmt.Errorf("invalid trailing JSON: %w", err)
+	}
+	return nil
+}
+
+// rejectStructuredNulls rejects explicit JSON nulls at any depth. TOML has no
+// null value; allowing encoding/json to quietly retain a preseeded default (or
+// a Go zero value) would turn an invalid edit into a different valid setting.
+func rejectStructuredNulls(key, raw string) error {
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return nil // decodeCompactJSON already returns the actionable syntax error.
+	}
+	if path, ok := firstJSONNullPath(value, key); ok {
+		return fmt.Errorf("%s must not be null", path)
+	}
+	return nil
+}
+
+func firstJSONNullPath(value any, path string) (string, bool) {
+	switch typed := value.(type) {
+	case nil:
+		return path, true
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if found, ok := firstJSONNullPath(typed[key], path+"."+key); ok {
+				return found, true
+			}
+		}
+	case []any:
+		for i, item := range typed {
+			if found, ok := firstJSONNullPath(item, fmt.Sprintf("%s[%d]", path, i)); ok {
+				return found, true
+			}
+		}
+	}
+	return "", false
+}
 
 func writableConfigFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 	rv := reflect.ValueOf(cfg)
@@ -415,7 +488,8 @@ func removeTOMLTopLevelValue(content, key string) (string, error) {
 		case unstable.Table, unstable.ArrayTable:
 			start, _ := wholeLineRange(data, firstKeyOffset, firstKeyOffset)
 			if currentBlock != nil && currentBlock.target {
-				ranges = append(ranges, byteRange{start: currentBlock.start, end: start})
+				end := leadingTableCommentStart(data, start, currentBlock.start)
+				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
 			}
 			currentTable = parts
 			currentBlock = &tableBlock{start: start, target: len(parts) > 0 && parts[0] == key}
@@ -480,4 +554,28 @@ func wholeLineRange(data []byte, start, end int) (int, int) {
 		}
 	}
 	return start, end
+}
+
+// leadingTableCommentStart returns the start of the contiguous comment block
+// immediately introducing a table header. Those comments belong to the next
+// table, not to the target table being replaced. A blank line stops the scan,
+// so comments in the target table remain part of the target block.
+func leadingTableCommentStart(data []byte, headerStart, floor int) int {
+	start := headerStart
+	for start > floor {
+		lineEnd := start
+		if lineEnd > 0 && data[lineEnd-1] == '\n' {
+			lineEnd--
+		}
+		lineStart := floor
+		if previous := bytes.LastIndexByte(data[floor:lineEnd], '\n'); previous >= 0 {
+			lineStart = floor + previous + 1
+		}
+		line := bytes.TrimSpace(data[lineStart:lineEnd])
+		if !bytes.HasPrefix(line, []byte("#")) {
+			break
+		}
+		start = lineStart
+	}
+	return start
 }

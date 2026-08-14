@@ -104,6 +104,11 @@ type ConfigEntry struct {
 	Purpose       string   `json:"purpose"`
 	Tier          int      `json:"tier"`
 	TierName      string   `json:"tier_name"`
+	// Editable is a wire-only upgrade bridge for a browser bundle that was
+	// already open when the daemon upgraded. Older bundles interpret an absent
+	// field as false and would make every row read-only. It is uniformly true;
+	// current code must never use it to classify rows.
+	Editable bool `json:"editable"`
 	// Settable is the MANIFEST's claim: `af config set` accepts this key — or,
 	// for a dynamic family, its LEAVES (`af config set program_overrides.claude
 	// …`). It is pinned against the real allowlist by
@@ -153,6 +158,7 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 			Purpose:       e.Purpose,
 			Tier:          int(e.Tier),
 			TierName:      TierName(e.Tier),
+			Editable:      true,
 			Settable:      e.Settable,
 			Enum:          e.Enum,
 			Value:         value,

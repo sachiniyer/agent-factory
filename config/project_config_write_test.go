@@ -196,6 +196,46 @@ func TestUnsetProjectConfigDynamicLeaf(t *testing.T) {
 	assert.Equal(t, "/a/codex", cfg.ProgramOverrides["codex"])
 }
 
+func TestUnsetProjectConfigStructuredTable(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n\n[program_overrides]\nclaude = \"/a/claude\"\n")
+
+	res, err := UnsetProjectConfigValue(project.ID, "program_overrides")
+	require.NoError(t, err)
+	require.True(t, res.Removed, "the whole structured override must be removed")
+
+	path, _ := ProjectConfigTomlPath(project.ID)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "program_overrides")
+	assert.Contains(t, string(data), "branch_prefix = \"feat/\"", "unrelated personal keys survive")
+}
+
+func TestSetProjectConfigValueRootAgentPreservesOmittedEnabled(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+
+	res, err := SetProjectConfigValue(project.ID, "root_agent", `{"program":"codex"}`)
+	require.NoError(t, err)
+	assert.Equal(t, `{"program":"codex"}`, res.Value)
+
+	path, _ := ProjectConfigTomlPath(project.ID)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "enabled", "an omitted field must keep inheriting from lower layers")
+
+	cfg, err := LoadProjectConfig(project.ID)
+	require.NoError(t, err)
+	layer := cfg.RootAgentLayer()
+	require.NotNil(t, layer)
+	assert.False(t, layer.EnabledSet)
+	assert.Equal(t, "codex", layer.Value.Program)
+	resolved := ResolveRootAgent(RootAgentInputs{
+		Global:   &RootAgentLayer{Value: RootAgent{Enabled: true}, EnabledSet: true},
+		Personal: layer,
+	})
+	assert.True(t, resolved.RootAgent.Enabled, "the omitted personal field must inherit global enabled=true")
+}
+
 func TestUnsetProjectConfigAbsentKeyIsNoOp(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	writePersonalConfig(t, project.ID, "branch_prefix = \"feat/\"\n")

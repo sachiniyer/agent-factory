@@ -215,6 +215,17 @@ func TestSetTOMLStructuredReplacesMultilineValueAndTable(t *testing.T) {
 	}
 }
 
+func TestSetTOMLStructuredPreservesCommentIntroducingNextTable(t *testing.T) {
+	in := "[program_overrides]\nclaude = 'old'\n# security settings\n[unrelated]\nvalue = 'kept'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# security settings\n[unrelated]") {
+		t.Fatalf("replacement dropped the next table's leading comment:\n%s", got)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
@@ -684,6 +695,7 @@ func TestSetGlobalConfigValueStructuredValidationRejectsBeforeWrite(t *testing.T
 		key, value, want string
 	}{
 		{"theme", `{"accent":"red"}`, "#RRGGBB"},
+		{"theme", `{"accent":null}`, "must not be null"},
 		{"program_overrides", `{"not-an-agent":"cmd"}`, "must be one of"},
 		{"session_env_passthrough", `["SECRET=value"]`, "exact POSIX name"},
 		{"limit_patterns", `{"claude":"("}`, "regular expression"},
