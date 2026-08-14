@@ -187,6 +187,72 @@ func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(
 	}
 }
 
+func TestResumeLimitedSessions_SerializesPersonalCandidateWriteWithIdentityCommit(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	if _, err := config.SetProjectConfigValue(repoID, "limit_account_candidates", "work"); err != nil {
+		t.Fatalf("set initial personal candidate: %v", err)
+	}
+
+	admissionPaused := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+	previousHook := testHookAccountSwapBeforeAdmissionReturns
+	testHookAccountSwapBeforeAdmissionReturns = func() {
+		close(admissionPaused)
+		<-releaseAdmission
+	}
+	t.Cleanup(func() {
+		release()
+		testHookAccountSwapBeforeAdmissionReturns = previousHook
+	})
+
+	resumeDone := make(chan struct{})
+	go func() {
+		manager.ResumeLimitedSessions()
+		close(resumeDone)
+	}()
+	select {
+	case <-admissionPaused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final account-swap admission did not read the personal candidate policy")
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := config.SetProjectConfigValue(repoID, "limit_account_candidates", "")
+		writeDone <- err
+	}()
+	select {
+	case err := <-writeDone:
+		release()
+		<-resumeDone
+		t.Fatalf("personal candidate restriction completed between final policy read and identity commit: %v", err)
+	case <-time.After(100 * time.Millisecond):
+		// The identity decision owns the personal config file lock until commit.
+	}
+
+	release()
+	select {
+	case <-resumeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("account swap did not finish after final admission was released")
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("personal candidate restriction after identity commit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("personal candidate writer stayed blocked after identity commit")
+	}
+	if account, automatic := inst.AccountSelection(); account != "work" || !automatic {
+		t.Fatalf("serialized identity selection = (%q, %v), want committed work before writer reports", account, automatic)
+	}
+}
+
 func TestResumeLimitedSessions_FinalAdmissionUsesAppliedLiveAccountPolicy(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -257,6 +323,56 @@ func TestResumeLimitedSessions_FinalAdmissionUsesAppliedLiveAccountPolicy(t *tes
 				t.Fatal("applied opt-out must retain the existing limit wait")
 			}
 		})
+	}
+}
+
+func TestResumeLimitedSessions_LiveOptOutDoesNotTakeDueOrdinaryFallback(t *testing.T) {
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "continue", base.Add(-limitResumeGrace))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	admissionPaused := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+	previousHook := testHookAccountSwapBeforeFinalFence
+	testHookAccountSwapBeforeFinalFence = func() {
+		close(admissionPaused)
+		<-releaseAdmission
+	}
+	t.Cleanup(func() {
+		release()
+		testHookAccountSwapBeforeFinalFence = previousHook
+	})
+
+	resumeDone := make(chan struct{})
+	go func() {
+		manager.ResumeLimitedSessions()
+		close(resumeDone)
+	}()
+	select {
+	case <-admissionPaused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("due replacement did not reach final admission")
+	}
+
+	writeLimitAccountCandidates(t, "limit_auto_resume = false\nlimit_account_candidates = [\"work\"]\n")
+	result, err := manager.ApplyConfig()
+	require.NoError(t, err)
+	require.Contains(t, result.Applied, "limit_auto_resume")
+
+	release()
+	select {
+	case <-resumeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume stayed blocked after final admission was released")
+	}
+
+	if _, respawns, prompts := backend.snapshot(); respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("applied opt-out still took the due ordinary fallback: respawns=%d prompts=%v", respawns, prompts)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("applied opt-out must retain the due limit wait")
 	}
 }
 
