@@ -176,7 +176,7 @@ var httpRoutes = []HTTPRoute{
 		Method:         http.MethodPost,
 		Path:           "/v1/Snapshot",
 		sandboxAllowed: true,
-		Description:    "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
+		Description:    "List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos).",
 		requestType:    reflect.TypeOf(SnapshotRequest{}),
 		// rpcHandlerCtx, not rpcHandler: the handler needs the request context to
 		// see whether the caller is a sandbox and narrow to its own session (#3056).

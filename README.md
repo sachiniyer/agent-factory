@@ -103,6 +103,7 @@ Three ideas carry the whole tool.
   their tabs and scheduled tasks.
 
 ```bash
+af sessions list --live --max-age 24h --limit 50
 af sessions create --name fix-auth --prompt "Fix the login redirect loop"
 af sessions preview fix-auth
 af sessions watch fix-auth      # block until it goes idle

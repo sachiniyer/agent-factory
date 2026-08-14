@@ -843,6 +843,25 @@
       "notes": ""
     },
     {
+      "id": "session.list.filters",
+      "title": "Bound session lists by lifecycle, creation age, and count",
+      "tui": {
+        "status": "no",
+        "pointer": "app/session_control.go requests an unfiltered Snapshot for the authoritative navigation rail"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "web/src/api.ts fetchSnapshot requests the complete rail"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsListCmd maps --live/--status/--max-age/--limit onto SnapshotRequest"
+      },
+      "verdict": "deliberate",
+      "issue": "#3362",
+      "notes": "The CLI and public POST /v1/Snapshot API are query surfaces, so they expose composable daemon-side bounds before transfer. The TUI and web use Snapshot as their authoritative navigation rail and must reconcile every session; filtering that rail would make an omitted row indistinguishable from deletion and strand it from interactive management. A separate client-side search/view control could hide rows without narrowing the authoritative snapshot, but that is a different UI feature rather than parity for this bounded scripting query."
+    },
+    {
       "id": "session.pr.open",
       "title": "Open / copy a session's PR URL",
       "tui": {
@@ -1754,6 +1773,10 @@
       "af sessions kill --help": "meta.discovery",
       "af sessions list --all": "session.list",
       "af sessions list --help": "meta.discovery",
+      "af sessions list --limit": "session.list.filters",
+      "af sessions list --live": "session.list.filters",
+      "af sessions list --max-age": "session.list.filters",
+      "af sessions list --status": "session.list.filters",
       "af sessions preview --full": "session.preview-full",
       "af sessions preview --plain": "session.preview-plain",
       "af sessions preview --help": "meta.discovery",
@@ -1868,6 +1891,30 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SnapshotRequest": {
+        "cli": {
+          "created_after": {
+            "ok": "Reached by sessionsListCmd after Cobra parses --max-age (api/sessions.go assigns req.CreatedAfter). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
+          },
+          "limit": {
+            "ok": "Reached by sessionsListCmd after Cobra parses --limit (api/sessions.go assigns req.Limit). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
+          }
+        },
+        "tui": {
+          "created_after": {
+            "ok": "Deliberate: the TUI snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their archive/restore/kill controls; bounded history is a CLI/public-API query, not rail state."
+          },
+          "limit": {
+            "ok": "Deliberate: the TUI must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
+          },
+          "live": {
+            "ok": "Deliberate: archived sessions remain visible in the TUI so users can restore or permanently remove them. The TUI cannot request only live rows without removing those lifecycle controls."
+          },
+          "statuses": {
+            "ok": "Deliberate: the TUI rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
+          }
+        }
+      },
       "PreviewRequest": {
         "tui": {
           "tab_name": {
@@ -2143,6 +2190,20 @@
       }
     },
     "web_rpcs": {
+      "Snapshot": {
+        "created_after": {
+          "ok": "Deliberate: the web snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their interactive lifecycle controls."
+        },
+        "limit": {
+          "ok": "Deliberate: the web must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
+        },
+        "live": {
+          "ok": "Deliberate: archived sessions stay in the web rail so users can restore or permanently remove them; requesting only live rows would remove those controls."
+        },
+        "statuses": {
+          "ok": "Deliberate: the web rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
+        }
+      },
       "CreateSession": {
         "title": {
           "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) — the TUI's friendly behavior. See session.create.opt.title."

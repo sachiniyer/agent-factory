@@ -1638,7 +1638,7 @@ List sessions in the current project
 
 List sessions in the current project.
 
-Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed.
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
 
 ```
 af sessions list [flags]
@@ -1649,6 +1649,10 @@ af sessions list [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | List sessions across every project instead of only the current one |
+| `--limit` | `int` | Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded) (default `0`) |
+| `--live` |  | Exclude archived sessions |
+| `--max-age` | `duration` | Only list sessions created within this duration (for example 24h) (default `0s`) |
+| `--status` | `stringArray` | Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached) |
 
 **Global flags**
 
