@@ -24,8 +24,9 @@ import (
 // registering a new repo on the fly. The picker navigates like the instances
 // rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
-	projects := m.buildProjectList()
+	projects, registryDegraded := m.buildProjectList()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
+	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
@@ -38,7 +39,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 // Used by the on-demand ctrl+p picker, which fetches synchronously; the always-
 // visible Projects section rebuilds from buildProjectListFrom on the background
 // poll instead (no second on-loop RPC).
-func (m *home) buildProjectList() []overlay.Project {
+func (m *home) buildProjectList() ([]overlay.Project, bool) {
 	data, err := allReposSnapshotFetcher()
 	if err != nil {
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
@@ -53,7 +54,11 @@ func (m *home) buildProjectList() []overlay.Project {
 // session still appear. Names are the repo basename; ties break by root. Split
 // out from buildProjectList so the background poll can reuse the all-repos data
 // it already fetched off-loop rather than issuing a second daemon RPC.
-func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Project {
+// The second return reports a DEGRADED registry read (#3298): the union can
+// still render from the other sources, but presenting it as complete would be
+// a failed read shown as an empty result — every registered sessionless
+// project silently vanishes from the picker. Callers surface the degradation.
+func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Project, bool) {
 	counts := map[string]int{}
 	// inPlace counts the subset of each repo's live sessions that delete-project
 	// tears down instead of archiving (#1973). Keyed off the SAME predicate the
@@ -100,11 +105,13 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 	// the union for repos registered before the add-verb rewire, so an existing opt-in
 	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
 	// as the counts above come from the daemon's session snapshot passed in.
+	registryDegraded := false
 	if projects, err := config.ListProjects(); err == nil {
 		for _, p := range projects {
 			seen(p.Root)
 		}
 	} else {
+		registryDegraded = true
 		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
 	}
 	if m.appConfig != nil {
@@ -131,7 +138,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) []overlay.Proje
 		}
 		return projects[i].Root < projects[j].Root
 	})
-	return projects
+	return projects, registryDegraded
 }
 
 // projectRows maps the discovered project list into Projects-section rows,
@@ -154,7 +161,9 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously).
 func (m *home) refreshSidebarProjects() {
-	m.projects.SetProjects(m.projectRows(m.buildProjectList()))
+	projects, registryDegraded := m.buildProjectList()
+	m.projects.SetProjects(m.projectRows(projects))
+	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
 }
 
@@ -168,7 +177,11 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 		log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
 		return false
 	}
-	changed := m.projects.SetProjects(m.projectRows(m.buildProjectListFrom(data)))
+	projects, registryDegraded := m.buildProjectListFrom(data)
+	changed := m.projects.SetProjects(m.projectRows(projects))
+	if m.projects.SetDegraded(registryDegraded) {
+		changed = true
+	}
 	m.syncProjectsHint()
 	return changed
 }

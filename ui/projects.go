@@ -67,6 +67,11 @@ var projectRowSelectedStyle lipgloss.Style
 // moves the focus ring on Esc.
 type ProjectsPane struct {
 	projects []SidebarProject
+	// degraded marks a failed project-registry read (#3298): the list still
+	// renders from the other discovery sources, but it may be missing every
+	// registered sessionless project, and presenting it as complete would be
+	// a failed read shown as an empty result.
+	degraded bool
 
 	rect    layout.Rect
 	compact bool
@@ -140,6 +145,16 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 
 // Projects returns the current row list (test/inspection helper).
 func (p *ProjectsPane) Projects() []SidebarProject { return p.projects }
+
+// SetDegraded records whether the project registry read failed (#3298), so
+// the section says the list may be incomplete instead of presenting the
+// remaining discovery sources as the whole world. Reports whether the flag
+// changed, so a background refresh only repaints on a real diff.
+func (p *ProjectsPane) SetDegraded(degraded bool) bool {
+	changed := p.degraded != degraded
+	p.degraded = degraded
+	return changed
+}
 
 // SetRect implements layout.Pane.
 func (p *ProjectsPane) SetRect(r layout.Rect) { p.rect = r }
@@ -291,14 +306,20 @@ func (p *ProjectsPane) String() string {
 		p.selected = 0
 	}
 
-	// 1-line degraded summary (mirrors the Automations compact mode).
+	// 1-line degraded summary (mirrors the Automations compact mode). A "?"
+	// marks a count built over a failed registry read: it may be missing
+	// registered projects (#3298).
 	if p.compact || p.rect.H <= 1 {
 		style := projectsTitleDimStyle
 		if p.focused {
 			style = projectsTitleStyle
 		}
+		count := fmt.Sprintf("%d", len(p.projects))
+		if p.degraded {
+			count += "?"
+		}
 		return layout.ClampToRect(
-			p.titleLine(fmt.Sprintf(" Projects: %d ", len(p.projects)), style), p.rect)
+			p.titleLine(fmt.Sprintf(" Projects: %s ", count), style), p.rect)
 	}
 
 	nameStyle := projectsTitleDimStyle
@@ -307,7 +328,14 @@ func (p *ProjectsPane) String() string {
 	}
 	title := p.titleLine(fmt.Sprintf(" Projects (%d) ", len(p.projects)), nameStyle)
 	lines := []string{title}
-	if len(p.projects) == 0 {
+	if p.degraded {
+		// The registry read failed, so the rows below may be missing every
+		// registered sessionless project — say so instead of rendering the
+		// remaining sources as a complete list (#3298). This row also stands
+		// in for the empty-state line: "no other projects yet" would be a
+		// claim the failed read cannot support.
+		lines = append(lines, projectsHintStyle.Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
+	} else if len(p.projects) == 0 {
 		lines = append(lines, projectRowStyle.Render(fitLine("  no other projects yet", p.rect.W)))
 	}
 
@@ -321,8 +349,12 @@ func (p *ProjectsPane) String() string {
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold
-	// scrolls into view instead of moving invisibly.
+	// scrolls into view instead of moving invisibly. The degraded notice above
+	// occupies one of the content rows.
 	visible := contentH - 1
+	if p.degraded {
+		visible--
+	}
 	if visible < 0 {
 		visible = 0
 	}

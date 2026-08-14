@@ -220,3 +220,19 @@ func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {
 	}
 	return Project{}, false
 }
+
+// TestProjectPickerDegradedNotice pins #3298 in the picker: a failed registry
+// read renders the incompleteness warning above the rows, and a healthy read
+// does not.
+func TestProjectPickerDegradedNotice(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
+	p.SetMaxSize(60, 20)
+	if out := p.Render(); strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a healthy picker must not warn, got:\n%s", out)
+	}
+	p.SetDegraded(true)
+	out := p.Render()
+	if !strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a degraded picker must warn that the list may be incomplete, got:\n%s", out)
+	}
+}
