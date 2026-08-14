@@ -598,6 +598,44 @@ func TestKillSession_ArchivedSymlinkOccupantRefused(t *testing.T) {
 		"the refused kill must retain the record")
 }
 
+// TestKillSession_SeparateGitDirMetadataOutlivesOrigin: deleting a
+// separate-git-dir origin's WORKING TREE leaves its external metadata alive,
+// and target existence alone is not proof of foreign ownership (#3278 review)
+// — the direct kill must authorize the genuine archive (surviving leaf points
+// back at this occupant, not under a live repo's .git) and consume it.
+func TestKillSession_SeparateGitDirMetadataOutlivesOrigin(t *testing.T) {
+	manager, repoID, _ := newStatusTestManager(t)
+	root := t.TempDir()
+	sepRepo := filepath.Join(root, "sep-origin")
+	sepMeta := filepath.Join(root, "sep-origin-meta")
+	require.NoError(t, exec.Command("git", "init", "-b", "main",
+		"--separate-git-dir", sepMeta, sepRepo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(sepRepo, "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", sepRepo, "add", "f.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", sepRepo,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+
+	inst, _ := registerArchivable(t, manager, repoID, sepRepo, "direct-sepdir-outlives")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{
+		Title: "direct-sepdir-outlives", RepoID: repoID,
+	})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	// The working-tree root goes; the external metadata legitimately stays.
+	require.NoError(t, os.RemoveAll(sepRepo))
+	require.DirExists(t, sepMeta)
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-sepdir-outlives", RepoID: repoID})
+	require.NoError(t, err,
+		"the surviving separate metadata must not be mistaken for a foreign live repository")
+	assert.False(t, exists(archivedPath), "the archive must be consumed")
+	assert.Nil(t, recordFor(t, repoID, "direct-sepdir-outlives"),
+		"the settled kill must delete the session row")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a
