@@ -229,15 +229,6 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 		t.Fatalf("write agent fixture: %v", err)
 	}
 	reportPath := filepath.Join(dir, "shell-environment")
-	shellPath := filepath.Join(dir, "sh")
-	shellScript := "#!/bin/sh\n" +
-		"printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "\n" +
-		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
-		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n" +
-		"while :; do sleep 1; done\n"
-	if err := os.WriteFile(shellPath, []byte(shellScript), 0o700); err != nil {
-		t.Fatalf("write shell fixture: %v", err)
-	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	agent := NewTmuxSession("account-tab-parent", ProgramCodex)
@@ -247,7 +238,7 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
 
-	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", shellPath)
+	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", "/bin/sh")
 	if err != nil {
 		t.Fatalf("prepare shell tab: %v", err)
 	}
@@ -255,6 +246,12 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 		t.Fatalf("open shell tab: %v", err)
 	}
 	t.Cleanup(func() { _, _ = shell.CloseAndWaitForPaneExit() })
+	reportCommand := "printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "; " +
+		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
+		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n"
+	if err := shell.SendRawKeys([]byte(reportCommand)); err != nil {
+		t.Fatalf("inspect account-scoped shell environment: %v", err)
+	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	var report []byte

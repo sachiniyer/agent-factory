@@ -106,6 +106,8 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"read CODEX_HOME </dev/null; make",
 		"printf -v CODEX_HOME other; make",
 		"eval 'unset CODEX_HOME'; make",
+		"for CODEX_HOME in /other; do make; done",
+		"op=unset; $op CODEX_HOME; make",
 		"env CODEX_HOME=/other make",
 		"env CODEX_HOME=$HOME/.codex make",
 		"env -S 'CODEX_HOME=/other make'",
@@ -133,6 +135,7 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"command unset PORT; make",
 		"export PORT=3000; make",
 		"readonly PORT=3000; make",
+		"for PORT in 3000; do make; done",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",
 		"command env PORT=3000 npm start",
@@ -165,7 +168,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 }
 
 func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing.T) {
-	for _, shell := range []string{"/bin/fish", "/bin/zsh"} {
+	for _, shell := range []string{"/bin/fish", "/bin/zsh", "/opt/company/bash"} {
 		_, err := AccountShellCommand(shell)
 		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
 		require.Contains(t, err.Error(), "no credential-safe account launch mode")

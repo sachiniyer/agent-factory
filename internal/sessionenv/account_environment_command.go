@@ -23,17 +23,68 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	}
 	mutates := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok {
-			return true
-		}
-		if callMutatesAccountEnvironment(call, names) {
+		if nodeMutatesAccountEnvironment(node, names) {
 			mutates = true
 			return false
 		}
 		return true
 	})
 	return mutates
+}
+
+func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
+	switch node := node.(type) {
+	case *syntax.CallExpr:
+		return callMutatesAccountEnvironment(node, names)
+	case *syntax.Assign:
+		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
+	case *syntax.WordIter:
+		return node.Name != nil && accountEnvironmentNameDenied(node.Name.Value, names)
+	case *syntax.ParamExp:
+		return node.Param != nil && node.Exp != nil &&
+			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull) &&
+			accountEnvironmentNameDenied(node.Param.Value, names)
+	case *syntax.BinaryArithm:
+		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
+	case *syntax.UnaryArithm:
+		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	default:
+		return false
+	}
+}
+
+func accountEnvironmentNameDenied(name string, names map[string]struct{}) bool {
+	_, denied := names[name]
+	return denied
+}
+
+func arithmeticAssignmentMutatesAccountEnvironment(expr *syntax.BinaryArithm, names map[string]struct{}) bool {
+	switch expr.Op {
+	case syntax.Assgn, syntax.AddAssgn, syntax.SubAssgn, syntax.MulAssgn,
+		syntax.QuoAssgn, syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn,
+		syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
+		syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
+		name, ok := arithmeticAccountEnvironmentName(expr.X)
+		return ok && accountEnvironmentNameDenied(name, names)
+	default:
+		return false
+	}
+}
+
+func arithmeticIncrementMutatesAccountEnvironment(expr *syntax.UnaryArithm, names map[string]struct{}) bool {
+	if expr.Op != syntax.Inc && expr.Op != syntax.Dec {
+		return false
+	}
+	name, ok := arithmeticAccountEnvironmentName(expr.X)
+	return ok && accountEnvironmentNameDenied(name, names)
+}
+
+func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
+	word, ok := expr.(*syntax.Word)
+	if !ok {
+		return "", false
+	}
+	return literalShellWord(word)
 }
 
 func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struct{}) bool {
@@ -48,6 +99,11 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 	words, unsafe := unwrapAccountCommand(call.Args, names)
 	if unsafe || len(words) == 0 {
 		return unsafe
+	}
+	if _, literal := literalShellWord(words[0]); !literal {
+		// A dynamic command name can resolve to env or a same-shell builtin such
+		// as unset/export, so its effect on the selected identity is unprovable.
+		return true
 	}
 	switch {
 	case isBareName(words[0], "env"):

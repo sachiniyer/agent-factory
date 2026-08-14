@@ -626,8 +626,10 @@ func resetAgentBrokerCaptures(i *Instance) {
 // setupTabs brings up an instance's non-agent tabs after its agent session is
 // live. On restore it reconnects every persisted tab (shell and any later
 // process tabs) to its exact tmux session by name so they survive an af/daemon
-// restart, re-spawning in the worktree only if the tmux server died across a
-// reboot (Restore handles both). A fresh instance comes up with only the agent
+// restart. An account-scoped tab reconstructed from disk is the exception: its
+// old process has no in-memory launch provenance, so it is replaced once before
+// being marked scoped; a tab this daemon created keeps running across an
+// agent-only respawn. A fresh instance comes up with only the agent
 // tab (#1100) — terminal tabs are created on demand ('t' / `af sessions
 // tab-create`), never automatically. The fresh-$SHELL fallback below only fires
 // when a PERSISTED shell tab restored dead (#991), replacing it so the user
@@ -648,8 +650,8 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 		return nil
 	}
 
-	// Reconnect every persisted non-agent tab that carries a session (Tabs[0] is
-	// the agent tab, already restored by Start), then replace EACH shell tab that
+	// Reconnect every non-agent tab that carries a session (Tabs[0] is the agent
+	// tab, already restored by Start), then replace EACH shell tab that
 	// did not come back live with a fresh sibling session. Per-shell, NOT a single
 	// hasLiveShell flag: with multiple shell tabs, one live shell used to suppress
 	// replacement of every dead one, and the all-dead path replaced only the first —
@@ -661,6 +663,7 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 			continue
 		}
 		if tab.tmux != nil {
+			refreshUnknownScope := account != "" && tab.accountScopeProvenanceUnknown
 			if err := refreshTabSessionEnvironment(i, tab); err != nil {
 				if account != "" {
 					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
@@ -668,7 +671,7 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
 				continue
 			}
-			if account != "" {
+			if refreshUnknownScope {
 				exists, known := tab.tmux.ProbeSession()
 				if !known {
 					return fmt.Errorf("restore account-scoped tab %q for %q: tmux session state is unknown", tab.Name, i.Title)
@@ -685,8 +688,19 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
 				}
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
-			} else if account != "" && restoreResult != tmux.RestoreRespawned {
+			} else if refreshUnknownScope && restoreResult != tmux.RestoreRespawned {
 				return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process", tab.Name, i.Title)
+			} else if refreshUnknownScope {
+				i.mu.Lock()
+				for currentIdx, current := range i.Tabs {
+					if current.ID == tab.ID {
+						i.replaceTabFieldLocked(currentIdx, func(copy *Tab) {
+							copy.accountScopeProvenanceUnknown = false
+						})
+						break
+					}
+				}
+				i.mu.Unlock()
 			}
 		}
 		if tab.Kind != TabKindShell {

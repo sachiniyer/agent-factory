@@ -225,8 +225,8 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 		gitWorktree: gw,
 		Tabs: []*Tab{
 			newAgentTab(agentTs),
-			newShellTab(shellTs),
-			{ID: newTabID(), Name: "build", Kind: TabKindProcess, Command: "make", tmux: processTs},
+			{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: shellTs, accountScopeProvenanceUnknown: true},
+			{ID: newTabID(), Name: "build", Kind: TabKindProcess, Command: "make", tmux: processTs, accountScopeProvenanceUnknown: true},
 		},
 	}
 
@@ -253,6 +253,60 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 			"the persisted tab must be replaced so the scoped launch environment is applied to its process")
 		require.Contains(t, startCommands[name], sessionenv.AccountEnvironmentExecMarker,
 			"the replacement process must launch through the selected-account environment boundary")
+	}
+	for _, tab := range inst.GetTabs()[1:] {
+		require.False(t, tab.accountScopeProvenanceUnknown,
+			"a verified scoped replacement must survive a later same-daemon agent respawn")
+	}
+}
+
+func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const repoPath = "/tmp/account-respawn-preserve-repo"
+	const agentName = "af_abc123_account_respawn"
+	shellName := agentName + shellTmuxSuffix
+
+	cmdExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
+	baseRun := cmdExec.RunFunc
+	var commands []string
+	cmdExec.RunFunc = func(cmd *exec.Cmd) error {
+		commands = append(commands, cmd.String())
+		return baseRun(cmd)
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	gw, err := git.NewGitWorktreeFromStorage(
+		repoPath, filepath.Join(t.TempDir(), "wt"), "account-respawn",
+		"account-respawn-branch", "", false, true)
+	require.NoError(t, err)
+
+	agentTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(agentName, "codex", pty, cmdExec)
+	agentTs.SetAccountForAgent("codex", "work")
+	shellTs, err := agentTs.NewShellSiblingSession(shellName, "/bin/sh")
+	require.NoError(t, err)
+	inst := &Instance{
+		Title:       "account-respawn",
+		Path:        repoPath,
+		Program:     "codex",
+		Account:     "work",
+		backend:     &LocalBackend{},
+		started:     true,
+		gitWorktree: gw,
+		Tabs: []*Tab{
+			newAgentTab(agentTs),
+			newShellTab(shellTs),
+		},
+	}
+
+	require.NoError(t, (&LocalBackend{}).setupTabs(inst))
+	for _, command := range commands {
+		require.False(t, strings.Contains(command, "kill-session") && strings.Contains(command, shellName),
+			"same-daemon agent recovery must preserve an already-scoped sibling process")
+		require.False(t, strings.Contains(command, "new-session") && strings.Contains(command, shellName),
+			"same-daemon agent recovery must not restart an already-scoped sibling process")
 	}
 }
 
@@ -290,7 +344,10 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 		backend:     &LocalBackend{},
 		started:     true,
 		gitWorktree: gw,
-		Tabs:        []*Tab{newAgentTab(agentTs), newShellTab(shellTs)},
+		Tabs: []*Tab{
+			newAgentTab(agentTs),
+			{ID: newTabID(), Name: shellTabName, Kind: TabKindShell, tmux: shellTs, accountScopeProvenanceUnknown: true},
+		},
 	}
 
 	err = (&LocalBackend{}).setupTabs(inst)

@@ -585,14 +585,15 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
 			}
 			instance.Tabs = append(instance.Tabs, &Tab{
-				ID:           id,
-				Name:         td.Name,
-				Kind:         kind,
-				Command:      td.Command,
-				URL:          td.URL,
-				Conversation: conversation,
-				Handoffs:     handoffs,
-				tmux:         ts,
+				ID:                            id,
+				Name:                          td.Name,
+				Kind:                          kind,
+				Command:                       td.Command,
+				URL:                           td.URL,
+				Conversation:                  conversation,
+				Handoffs:                      handoffs,
+				tmux:                          ts,
+				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux(),
 			})
 		}
 		return

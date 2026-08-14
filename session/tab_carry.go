@@ -49,6 +49,7 @@ import (
 func (i *Instance) restoreCarriedTabs() {
 	i.mu.Lock()
 	carried := i.carriedTabs
+	account := i.Account
 	// One-shot: a retried launch of the same object must not rebuild the tabs a
 	// previous attempt already appended.
 	i.carriedTabs = nil
@@ -90,7 +91,10 @@ func (i *Instance) restoreCarriedTabs() {
 			// restoreLocalTabs does on load.
 			id = newTabID()
 		}
-		tab := &Tab{ID: id, Name: name, Kind: kind, Command: td.Command, URL: td.URL}
+		tab := &Tab{
+			ID: id, Name: name, Kind: kind, Command: td.Command, URL: td.URL,
+			accountScopeProvenanceUnknown: account != "" && kind.HasTmux(),
+		}
 		if kind.HasTmux() {
 			token := ""
 			if strings.HasPrefix(td.TmuxName, prefix) {
