@@ -84,8 +84,8 @@ func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
 	}
 	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
 
-	// loadRemoteHooksForPath must reject an empty launch_cmd.
-	_, err = loadRemoteHooksForPath(repoDir)
+	// loadRemoteHooksForPathIfConfigured must reject an empty launch_cmd.
+	_, _, err = loadRemoteHooksForPathIfConfigured(repoDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "launch_cmd")
 }
@@ -140,7 +140,7 @@ func TestE2ERemoteHooksRelativePaths(t *testing.T) {
 
 	// Backend resolution rewrites the commands to absolute paths under the repo
 	// root before they reach any exec site.
-	hooks, err := loadRemoteHooksForPath(repoDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(repoDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/launch.sh"), hooks.LaunchCmd)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/delete.sh"), hooks.DeleteCmd)
@@ -162,14 +162,14 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mainRepo.Root, repo.Root, "linked worktree must resolve to the main repo root")
 
-	hooks, err := loadRemoteHooksForPath(worktreeDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(worktreeDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(mainRepo.Root, ".agent-factory/hooks/launch.sh"), hooks.LaunchCmd,
 		"hooks must resolve against the main repo root, not the worktree")
 	assert.NotContains(t, hooks.LaunchCmd, worktreeDir)
 }
 
-// TestE2EBackendResolutionWithInRepoConfig verifies that loadRemoteHooksForPath
+// TestE2EBackendResolutionWithInRepoConfig verifies that loadRemoteHooksForPathIfConfigured
 // reads the in-repo .agent-factory/config.json (#800) and that it shadows the
 // legacy per-repo location.
 func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
@@ -199,7 +199,7 @@ func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
 		},
 	}))
 
-	hooks, err := loadRemoteHooksForPath(repoDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(repoDir)
 	require.NoError(t, err)
 	assert.Equal(t, "/bin/echo in-repo", hooks.LaunchCmd)
 }
