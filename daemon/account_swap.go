@@ -149,7 +149,10 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 		}
 		if sessionenv.AgentForCommand(other.AgentProgram()) == agent {
 			if account, limitedNow := other.LimitAccount(); limitedNow && strings.TrimSpace(account) != "" {
-				limitedSet[account] = struct{}{}
+				resetAt, hasReset := other.LimitResetAt()
+				if !hasReset || now.Before(resetAt.Add(limitResumeGrace)) {
+					limitedSet[account] = struct{}{}
+				}
 			}
 		}
 		for _, observation := range other.AccountLimitObservations() {
