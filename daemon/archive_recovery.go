@@ -126,10 +126,26 @@ func (m *Manager) persistAndInstallRepoGoneCleanup(
 	instance *session.Instance,
 ) error {
 	if persistErr := m.persistInstanceErr(repoID, instance); persistErr != nil {
-		return fmt.Errorf(
+		wrapped := fmt.Errorf(
 			"cannot %s session %q because its origin repo %s is gone, and could not persist an unresolved archived worktree identity: %w",
 			operation, title, repoPath, persistErr,
 		)
+		// Nothing durable was written, so un-stage the in-memory fence (#3278
+		// review): leaving claim_stale in memory over a record-free disk would
+		// make the kill gate skip its producer while destruction admission
+		// refuses, stranding same-process retries — and the tombstone was
+		// never written, so no finisher exists to converge them. Reclaiming
+		// and settling restores the record-free state the transaction began
+		// with; if either step fails, the conservative in-memory fence stays.
+		if staged, reclaimErr := instance.ClaimWorktreeRelocationForRetry(); reclaimErr == nil {
+			if settleErr := instance.SettleWorktreeRelocationClaim(staged); settleErr != nil {
+				return errors.Join(wrapped, fmt.Errorf(
+					"the staged in-memory identity fence could not be released either — restore the session (or restart the daemon) before retrying the %s: %w",
+					operation, settleErr,
+				))
+			}
+		}
+		return wrapped
 	}
 	stagedClaim, err := instance.ClaimWorktreeRelocationForRetry()
 	if err != nil {

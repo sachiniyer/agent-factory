@@ -463,6 +463,43 @@ func TestKillSession_StalledAlternateReclaimVerifiesSelectedPath(t *testing.T) {
 		"the settled kill must delete the session row")
 }
 
+// TestKillSession_DirectRepoGoneStagingPersistFailureStaysRetryable: when the
+// direct-kill producer's FIRST durable write (the claim_stale staging fence)
+// fails, nothing durable exists — so the in-memory fence must be un-staged, or
+// the same-process retry is stranded: the gate skips its producer over the
+// leftover claim_stale, admission refuses, and no tombstone means no finisher
+// (#3278 review). The retry must re-derive authorization from scratch.
+func TestKillSession_DirectRepoGoneStagingPersistFailureStaysRetryable(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-staging-persist")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	diskFull := errors.New("forced staging persistence failure")
+	previousPersist := testHookPersistInstanceData
+	failed := false
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if data.Title == "direct-staging-persist" && data.Worktree.RelocationRecovery != nil && !failed {
+			failed = true
+			return diskFull
+		}
+		return nil
+	}
+	t.Cleanup(func() { testHookPersistInstanceData = previousPersist })
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-staging-persist", RepoID: repoID})
+	require.Error(t, err, "the failed staging write must refuse the kill")
+	assert.ErrorContains(t, err, diskFull.Error())
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(archivedPath))
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-staging-persist", RepoID: repoID})
+	require.NoError(t, err,
+		"the same-process retry must re-derive authorization after the staging write failure")
+	assert.False(t, exists(archivedPath))
+	assert.Nil(t, recordFor(t, repoID, "direct-staging-persist"))
+}
+
 // TestKillSession_StalledFenceOverAbsentArchiveClearsAndSettles: an
 // identity-unknown stalled fence whose archived directory was then manually
 // removed guards nothing, and both kill's and restore's claims wrap the same
