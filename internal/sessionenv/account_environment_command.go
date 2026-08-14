@@ -112,7 +112,7 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		return true
 	}
 	switch {
-	case isBareName(words[0], "env"):
+	case isAccountCommandName(words[0], "env"):
 		return envCallMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
@@ -191,13 +191,13 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 					return nil, true
 				}
 			}
-		case isBareName(words[0], "nohup"):
+		case isAccountCommandName(words[0], "nohup"):
 			var unsafe bool
 			words, unsafe = unwrapNohup(words[1:])
 			if unsafe {
 				return nil, true
 			}
-		case isBareName(words[0], "nice"):
+		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
 			words, unsafe = unwrapNice(words[1:])
 			if unsafe {
@@ -311,6 +311,11 @@ func knownShellName(name string) bool {
 	default:
 		return false
 	}
+}
+
+func isAccountCommandName(word *syntax.Word, want string) bool {
+	value, literal := literalShellWord(word)
+	return literal && filepath.Base(value) == want
 }
 
 func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {

@@ -686,7 +686,10 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 				}
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			} else if refreshUnknownScope && restoreResult != tmux.RestoreRespawned {
-				return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process", tab.Name, i.Title)
+				if _, cleanupErr := tab.tmux.CloseAndWaitForPaneExit(); cleanupErr != nil {
+					return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process and could not stop it: %w", tab.Name, i.Title, cleanupErr)
+				}
+				return fmt.Errorf("restore account-scoped tab %q for %q reattached a pre-scope process; stopped it before refusing restore", tab.Name, i.Title)
 			} else if refreshUnknownScope {
 				i.mu.Lock()
 				for currentIdx, current := range i.Tabs {

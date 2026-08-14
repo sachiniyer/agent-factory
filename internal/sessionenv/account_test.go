@@ -120,9 +120,11 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"export PROMPT_COMMAND='export CODEX_HOME=/other'; /bin/bash --noprofile --norc -i",
 		"BASH_ENV=/tmp/ambient-bashrc make",
 		"nohup sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/nohup sh -c 'unset CODEX_HOME; codex'",
 		"env nohup sh -c 'unset CODEX_HOME; codex'",
 		"nohup env sh -c 'unset CODEX_HOME; codex'",
 		"nice sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/nice sh -c 'unset CODEX_HOME; codex'",
 		"typeset -n ref=CODEX_HOME; ref=/other; codex",
 		"unset 'CODEX_HOME[0]'; codex",
 		"export 'CODEX_HOME[0]=/other'; codex",
@@ -135,6 +137,7 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"for CODEX_HOME in /other; do make; done",
 		"op=unset; $op CODEX_HOME; make",
 		"env CODEX_HOME=/other make",
+		"/usr/bin/env CODEX_HOME=/other make",
 		"env CODEX_HOME=$HOME/.codex make",
 		"env -S 'CODEX_HOME=/other make'",
 		"command env CODEX_HOME=/other make",
@@ -193,6 +196,7 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 			"BASH_ENV=/tmp/ambient-bashrc",
 			"ZDOTDIR=/tmp/ambient-zdotdir",
 			"PROMPT_COMMAND=export CODEX_HOME=/tmp/ambient-codex",
+			"PS1=$((CODEX_HOME=42))",
 		}, command, account)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)

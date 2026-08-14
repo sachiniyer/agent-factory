@@ -13,6 +13,10 @@ var accountShellStartupNames = map[string]struct{}{
 	"BASH_ENV":       {},
 	"ENV":            {},
 	"PROMPT_COMMAND": {},
+	"PS0":            {},
+	"PS1":            {},
+	"PS2":            {},
+	"PS4":            {},
 	"ZDOTDIR":        {},
 }
 
