@@ -57,3 +57,38 @@ func TestRedactHookOutputTokensRecursesThroughSerializedJSON(t *testing.T) {
 
 	assert.NotContains(t, redactHookOutputTokens(document), "nested-secret")
 }
+
+func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name:   "bracket-prefixed diagnostic",
+			output: `{"message":"[INFO] connection failed"}`,
+			want:   `{"message":"[INFO] connection failed"}`,
+		},
+		{
+			name:   "brace-prefixed diagnostic",
+			output: `{"message":"{error}: bad config"}`,
+			want:   `{"message":"{error}: bad config"}`,
+		},
+		{
+			name:   "quote-prefixed diagnostic",
+			output: `{"message":"\"quoted diagnostic"}`,
+			want:   `{"message":"\"quoted diagnostic"}`,
+		},
+		{
+			name:   "serialized document with token",
+			output: `{"message":"{\"token\":\"nested-secret\"}"}`,
+			want:   `{"message":"{\"token\":\"[REDACTED]\"}"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, redactHookOutputTokens(test.output))
+		})
+	}
+}
