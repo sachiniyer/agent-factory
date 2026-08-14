@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -18,8 +20,11 @@ import (
 )
 
 type rejectingPTYInputBinding struct {
-	err    error
-	called chan []byte
+	err         error
+	called      chan []byte
+	started     chan struct{}
+	startedOnce sync.Once
+	release     <-chan struct{}
 }
 
 func (*rejectingPTYInputBinding) subscribe(session.Seq) (session.PTYSubscription, error) {
@@ -28,6 +33,12 @@ func (*rejectingPTYInputBinding) subscribe(session.Seq) (session.PTYSubscription
 
 func (b *rejectingPTYInputBinding) input(p []byte) error {
 	b.called <- append([]byte(nil), p...)
+	if b.started != nil {
+		b.startedOnce.Do(func() { close(b.started) })
+	}
+	if b.release != nil {
+		<-b.release
+	}
 	return b.err
 }
 
@@ -42,6 +53,24 @@ func (*waitingPTYSubscription) NextEvent(ctx context.Context) (session.PTYEvent,
 
 func (*waitingPTYSubscription) Seq() session.Seq { return 0 }
 func (*waitingPTYSubscription) Close() error     { return nil }
+
+type teardownPTYSubscription struct {
+	inputStarted <-chan struct{}
+	releaseInput chan struct{}
+}
+
+func (s *teardownPTYSubscription) NextEvent(ctx context.Context) (session.PTYEvent, error) {
+	select {
+	case <-s.inputStarted:
+		context.AfterFunc(ctx, func() { close(s.releaseInput) })
+		return session.PTYEvent{}, io.EOF
+	case <-ctx.Done():
+		return session.PTYEvent{}, ctx.Err()
+	}
+}
+
+func (*teardownPTYSubscription) Seq() session.Seq { return 0 }
+func (*teardownPTYSubscription) Close() error     { return nil }
 
 type delayedPTYWriteConn struct {
 	net.Conn
@@ -173,5 +202,77 @@ func TestServePTYStreamInputErrorClosesWebSocket(t *testing.T) {
 	_, _, err = conn.Read(ctx)
 	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
 		t.Fatalf("input failure close status = %v (err %v), want %v", got, err, websocket.StatusInternalError)
+	}
+}
+
+// TestServePTYStreamTeardownWaitsForInputError proves session teardown cannot
+// commit to a normal close while an input delivery is still in flight. It drives
+// the ordering from the exit frame the client observes rather than a wall-clock
+// scheduling window.
+func TestServePTYStreamTeardownWaitsForInputError(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+
+	inputStarted := make(chan struct{})
+	releaseInput := make(chan struct{})
+	binding := &rejectingPTYInputBinding{
+		err:     errors.New("tmux rejected input during teardown"),
+		called:  make(chan []byte, 1),
+		started: inputStarted,
+		release: releaseInput,
+	}
+	sub := &teardownPTYSubscription{inputStarted: inputStarted, releaseInput: releaseInput}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		servePTYStream(binding, sub, conn)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial PTY stream: %v", err)
+	}
+	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
+
+	hello, err := agentproto.ReadMessage(ctx, conn)
+	if err != nil {
+		t.Fatalf("read stream hello: %v", err)
+	}
+	if !hello.Binary || hello.Frame.Op != agentproto.OpHello {
+		t.Fatalf("first message = %+v, want OpHello", hello)
+	}
+
+	want := []byte("last keys")
+	if err := agentproto.WriteFrame(ctx, conn, agentproto.InputFrame(want)); err != nil {
+		t.Fatalf("write input: %v", err)
+	}
+	select {
+	case got := <-binding.called:
+		if string(got) != string(want) {
+			t.Fatalf("binding input = %q, want %q", got, want)
+		}
+	case <-ctx.Done():
+		t.Fatalf("binding did not receive input: %v", ctx.Err())
+	}
+
+	exit, err := agentproto.ReadMessage(ctx, conn)
+	if err != nil {
+		t.Fatalf("read session exit during input delivery: %v", err)
+	}
+	if exit.Binary {
+		t.Fatalf("message after input = binary %+v, want %v", exit.Frame, agentproto.MsgExit)
+	}
+	if got, err := agentproto.MessageTypeOf(exit.Text); err != nil || got != agentproto.MsgExit {
+		t.Fatalf("message after input type = %v (err %v), want %v", got, err, agentproto.MsgExit)
+	}
+
+	_, _, err = conn.Read(ctx)
+	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {
+		t.Fatalf("teardown input failure close status = %v (err %v), want %v", got, err, websocket.StatusInternalError)
 	}
 }

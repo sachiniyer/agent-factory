@@ -308,6 +308,8 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 	cancel()
 	closeStatus := websocket.StatusNormalClosure
 	closeReason := ""
+	readerWait := time.NewTimer(wsWriteTimeout)
+	defer readerWait.Stop()
 	select {
 	case err := <-readerDone:
 		if err != nil {
@@ -315,7 +317,10 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 			closeStatus = websocket.StatusInternalError
 			closeReason = "PTY input delivery failed"
 		}
-	default:
+	case <-readerWait.C:
+		log.WarningLog.Printf("PTY reader did not stop during stream teardown; input delivery status is unknown")
+		closeStatus = websocket.StatusInternalError
+		closeReason = "PTY input delivery status unknown"
 	}
 	_ = conn.Close(closeStatus, closeReason)
 	wg.Wait()
