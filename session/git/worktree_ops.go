@@ -559,15 +559,6 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 
 	// Check if worktree path exists before attempting removal
 	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
-		// The registered-only mode must also prove the registration is THIS
-		// session's before the destructive remove (#3278 review): -f would
-		// accept and delete any registered worktree at the path, including a
-		// sibling parked there.
-		if !allowUnregisteredRemoval {
-			if err := r.requireRegisteredBranchMatch(); err != nil {
-				return r.state(), errors.Join(r.errs...)
-			}
-		}
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
 		// recursively and fail "directory not empty" only when a live writer keeps
@@ -575,6 +566,22 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 		// session whose agent backgrounded a survivor (installer, dev server) leaks
 		// the worktree otherwise. Best-effort and bounded — see reapWorktreeWriters.
 		reapWorktreeWriters(g.worktreePath)
+
+		// The registered-only mode must also prove the registration is THIS
+		// session's before the destructive remove (#3278 review): -f would
+		// accept and delete any registered worktree at the path, including a
+		// sibling parked there. Deliberately AFTER the writer reap — that call
+		// can take seconds, and the verification belongs as close to the
+		// destructive command as git allows. git offers no compare-and-swap
+		// between a listing and a remove, so the probe-to-remove interval is
+		// the irreducible check-then-act residue; a same-UID actor re-plumbing
+		// registrations inside af's private namespace within it is the
+		// deliberate-reconstruction class the review already accepted.
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
+		}
 
 		// Remove the worktree using git command. Bounded by localGitTimeout
 		// (#1917): this recursive delete is the one local git command that

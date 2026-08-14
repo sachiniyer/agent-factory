@@ -507,8 +507,13 @@ var ghostCleanupWorktree = func(
 	// before ordinary cleanup while the archived directory still exists, or
 	// answered missing-origin failures would settle the teardown and the row
 	// delete would orphan an archive a ghost can never re-authorize.
+	// Derived from the NORMALIZED lifecycle, not the raw persisted pointer
+	// (#3278 review): RestoreRelocationRecovery deliberately drops an
+	// identity-unknown cleanup_stalled record as process-epoch state, so a
+	// restarted daemon's gw is record-free even though the row still carries
+	// the pointer — and that run needs every record-free guard.
 	archivedRecordFree := data.Status == session.Archived &&
-		data.Worktree.RelocationRecovery == nil && ghostRestoredWorktreeRemovable(data)
+		!unresolved && ghostRestoredWorktreeRemovable(data)
 	if archivedRecordFree {
 		if _, statErr := git.BoundedLstat(data.Worktree.WorktreePath); statErr != nil {
 			// A timeout must stop here rather than fall through to Cleanup's

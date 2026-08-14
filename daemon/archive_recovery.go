@@ -374,7 +374,15 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 		// The dedicated ghost admission below reports decode failures itself.
 		return nil
 	}
-	if restored.Status != session.Archived || restored.Worktree.RelocationRecovery != nil ||
+	// An identity-unknown cleanup_stalled record is process-epoch state that
+	// restart normalization drops (#3278 review), so a ghost carrying one is
+	// effectively record-free and needs this guard exactly like a bare row;
+	// every other lifecycle is owned by the dedicated ghost admission below.
+	recoveryRecord := restored.Worktree.RelocationRecovery
+	effectivelyRecordFree := recoveryRecord == nil ||
+		(recoveryRecord.State == sessiongit.RelocationRecoveryCleanupStalled &&
+			!recoveryRecord.IdentityKnown)
+	if restored.Status != session.Archived || !effectivelyRecordFree ||
 		!ghostRestoredWorktreeRemovable(&restored) {
 		return nil
 	}

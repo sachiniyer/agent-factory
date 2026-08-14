@@ -314,6 +314,33 @@ func TestKillSession_ArchivedGhostOriginVanishesAfterAdmissionRetained(t *testin
 	assert.True(t, exists(archivedPath), "the archive must remain intact after the refused retry")
 }
 
+// TestKillSession_ArchivedGhostGenericStallRepoGoneRefused: an
+// identity-unknown cleanup_stalled record is process-epoch state that restart
+// normalization deliberately drops, leaving the worktree effectively
+// record-free — so an archived ghost carrying one must get the record-free
+// guards (#3278 review). Testing the raw persisted pointer instead skipped
+// them all, and an origin-gone kill settled ordinary git failures and orphaned
+// the archive while deleting the row.
+func TestKillSession_ArchivedGhostGenericStallRepoGoneRefused(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-ghost-generic-stall")
+	data := inst.ToInstanceData()
+	data.Worktree.RelocationRecovery = &session.GitWorktreeRelocationRecoveryData{
+		State: sessiongit.RelocationRecoveryCleanupStalled,
+	}
+	require.NoError(t, persistInstanceData(repoID, data))
+	require.NoError(t, os.RemoveAll(repoPath))
+	ghostFor(t, manager, repoID, "direct-ghost-generic-stall")
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-generic-stall", RepoID: repoID})
+	require.Error(t, err,
+		"a generic-stall archived ghost with a gone origin must be refused, not settled over answered failures")
+	assert.ErrorContains(t, err, "identity-qualified cleanup cannot be authorized")
+	assert.True(t, exists(archivedPath), "the refused kill must leave the archive intact")
+	require.NotNil(t, recordFor(t, repoID, "direct-ghost-generic-stall"),
+		"the refused kill must keep the row as the archive's handle")
+}
+
 // TestKillSession_DirectRepoGoneForeignWorktreeRefused: a still-live linked
 // worktree of another repository parked at the archived path must never be
 // deleted on the strength of this session's record (#3278 review): its gitdir
