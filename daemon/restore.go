@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -192,6 +193,18 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	}); err != nil {
 		m.persistInstance(repoID, instance)
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
+		// Recovery that rebuilt the missing worktree (and possibly recreated its
+		// branch) before failing has already mutated durable workspace state, and
+		// the persist above just recorded it. The session is NOT restored — the
+		// message says retry — but a raw error with an empty worktree_path would
+		// read as failed-nothing-committed about a mutation that landed (#3236).
+		// A pre-mutation failure stays exactly the plain retryable error below.
+		var rebuilt *session.RecoverRebuiltWorkspaceError
+		if errors.As(err, &rebuilt) {
+			return instance.GetWorktreePath(), &mutationCommittedError{err: fmt.Errorf(
+				"restore of session %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the restore: %w",
+				title, instance.GetWorktreePath(), err)}
+		}
 		return "", err
 	}
 	// Reset FIRST, before the persist below: recovery replaced the runtime the
