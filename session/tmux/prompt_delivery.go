@@ -113,3 +113,23 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 	status, _, err = t.sendKeysPasteBuffer(text)
 	return status, err
 }
+
+// SendPromptWorstCaseBound returns an upper bound on one SendKeysCommandObserved
+// call: two full submit attempts plus the redelivery wait (#3293). It exists for
+// transport callers whose own deadline must OUTLIVE the submit — the remote
+// send-prompt route budget — because a transport that gives up mid-retry leaves
+// the in-sandbox submit running and possibly delivering, inviting the caller to
+// re-send an already-delivered instruction (the AgentArchiveCallTimeout lesson,
+// #2923).
+//
+// The bound is computed here, next to the submit path it describes, from the
+// same knobs that bound the path itself. An attempt is counted as its
+// individually bounded tmux commands plus the delivery observation window; the
+// command count is deliberately GENEROUS (the longest success path issues 8:
+// load, pre-clear capture, two cursor reads, clear, post-clear capture, paste,
+// Enter+boundary) so a future added capture does not silently outgrow the bound.
+func SendPromptWorstCaseBound() time.Duration {
+	const boundedCommandsPerAttempt = 10
+	attempt := boundedCommandsPerAttempt*tmuxCommandTimeout + pasteDeliveryMaxWait
+	return 2*attempt + redeliverAfterAbsentDelay
+}

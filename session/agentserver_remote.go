@@ -19,6 +19,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -592,17 +593,18 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // that gave up first would leave the in-sandbox git work running unbounded.
 const AgentArchiveCallTimeout = 3 * time.Minute
 
-// agentSendPromptCallTimeout is the send-prompt route's own budget. The
-// in-sandbox submit may now perform TWO independently bounded delivery
-// attempts plus the seconds-scale #3293 redelivery wait, so it gets the shared
-// ceiling per attempt plus that wait. Under the shared 30s ceiling alone, a
-// degraded first attempt could push the combined call past the budget: the
-// daemon would see a transport error while the in-sandbox handler kept going
-// and possibly delivered the retry — leaving the caller likely to re-send an
-// already-delivered instruction, the exact double prompt the #3293 boundary
-// exists to prevent. The 5s term is tmux's redeliverAfterAbsentDelay; anyone
-// growing that delay must grow this budget with it.
-const agentSendPromptCallTimeout = 2*remoteAgentCallTimeout + 5*time.Second
+// agentSendPromptCallTimeout is the send-prompt route's own budget: the
+// in-sandbox submit's worst case (two individually tmux-bounded delivery
+// attempts plus the #3293 redelivery wait — the submit is a SEQUENCE of
+// bounded commands, not itself bounded by the shared 30s ceiling) plus
+// transport slack. The outer call must OUTLIVE the inner submit: the headless
+// handler does not observe the request context, so a daemon that gives up
+// mid-retry leaves the sandbox delivering anyway and the caller likely to
+// re-send an already-delivered instruction — the exact double prompt the
+// #3293 boundary exists to prevent. Sized from the submit path's own bound so
+// a retimed delivery cannot silently outgrow it; the pairing is pinned by
+// TestSendPromptCallBudgetCoversTheInSandboxRetry.
+var agentSendPromptCallTimeout = tmux.SendPromptWorstCaseBound() + 15*time.Second
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
 	return c.callWithin(path, req, resp, remoteAgentCallTimeout)
