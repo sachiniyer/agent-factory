@@ -196,6 +196,21 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		if err != nil {
 			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
+		if repoPath == "" {
+			// A re-attributed project's record still carries its recorded
+			// path, whose derived ID is what the record lookup keys on. A
+			// real-ID-only request must follow the alias to find that record,
+			// or the delete removes sessions and reports success while the
+			// durable registration survives a restart (#3299 review round 6).
+			if layers := m.rootAgentLayers.Load(); layers != nil {
+				if derived, ok := layers.reattributedFrom[repoID]; ok {
+					repoPath, err = registeredProjectRootForRepoID(derived)
+					if err != nil {
+						return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+					}
+				}
+			}
+		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
 		// sessions/root-agent state while RepoPath chooses a potentially different
@@ -214,12 +229,24 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// real→derived; translate the target so the delete tears down and
 	// suppresses the identity the state actually carries, rather than
 	// deregistering the record while the real-ID root keeps running.
+	derivedAliasID := ""
 	if layers := m.rootAgentLayers.Load(); layers != nil {
 		for realID, derived := range layers.reattributedFrom {
 			if derived == repoID {
 				log.InfoLog.Printf("delete project %s: recorded path is unavailable, but the project was re-attributed to repo %s while it resolved; deleting under that identity", repoID, realID)
+				derivedAliasID = repoID
 				repoID = realID
 				break
+			}
+		}
+		if derivedAliasID == "" {
+			// A real-ID target for a re-attributed project keeps its derived
+			// twin in hand too: durable state written before the transition —
+			// a legacy root_agents key spelled as the unavailable recorded
+			// path hashes to the derived ID — must not survive the delete
+			// (#3299 review round 6).
+			if derived, ok := layers.reattributedFrom[repoID]; ok {
+				derivedAliasID = derived
 			}
 		}
 	}
@@ -284,6 +311,16 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	} else if len(removed) > 0 {
 		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
 	}
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		// The same opt-in sweep under the project's OTHER identity: a legacy
+		// key spelled as the unavailable recorded path matches only its
+		// derived hash (#3299 review round 6).
+		if removed, cfgErr := deregisterRootAgents(derivedAliasID); cfgErr != nil {
+			return result, fmt.Errorf("delete project %s: could not durably remove its recorded-path root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
+		} else if len(removed) > 0 {
+			log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s) under its recorded-path identity %s: %v", repoID, len(removed), derivedAliasID, removed)
+		}
+	}
 
 	// The repo's durable #2355 registry record is dropped LATER, only after every
 	// session it promised to archive is actually archived (#2549): deregistering here,
@@ -296,6 +333,9 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// the root we are about to tear down; doing it only AFTER the persist means a
 	// failed write above never leaves a dangling suppression (#1740 review).
 	m.suppressRootAgent(repoID)
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		m.suppressRootAgent(derivedAliasID)
+	}
 
 	// Archive/kill every live session for the repo BEFORE removing its durable identity,
 	// so no session outlives the project's registry entry (#2549). The phase-1 gate above

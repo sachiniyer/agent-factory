@@ -117,6 +117,18 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
 	}
+	// An unreadable-marker bridge makes this repo's decision unknowable
+	// (decisionUnknown fails it closed for both sweeps): report the true
+	// cause — the project's unverifiable checkout — rather than falling
+	// through to a resolution that cannot see the project's layers (#3299
+	// review round 6). A PROVEN mismatch stays out of this early return: a
+	// legacy entry for the repo may legitimately materialize there, and the
+	// mismatch surfaces through the not-configured bridge below instead.
+	if derived, bridged := layers.unresolvedResolvedIDs[repoID]; bridged && repoID != derived {
+		if record, ok := layers.unresolvedRoots[derived]; ok && record.markerUnreadable {
+			return m.rootAgentMaterializeVerdictFor(derived)
+		}
+	}
 	legacy := m.legacyRootAgentForRepo(repoID)
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
@@ -138,7 +150,7 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, projectID: unresolved.projectID}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
@@ -186,7 +198,12 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		// both remedies: enabling alone leaves a root the restarted daemon
 		// still cannot create (#3304 review).
 		pathClause := ""
-		if v.rootUnresolved {
+		switch {
+		case v.rootMarkerUnreadable:
+			pathClause = " — and the checkout marker at its recorded project root cannot be read, so make that marker readable before the restart too"
+		case v.rootIdentityMismatch:
+			pathClause = fmt.Sprintf(" — and the checkout at its recorded project root does not carry the project's registry marker (a different clone may occupy the path), so run `af projects rebind %s <path>` before the restart too if that checkout replaces the original", v.projectID)
+		case v.rootUnresolved:
 			pathClause = " — and its recorded project root does not currently resolve to a git repository, so bring that path back before the restart too"
 		}
 		if v.enabledSource == config.RootAgentSourceBuiltIn || v.enabledSource == "" {

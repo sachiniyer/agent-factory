@@ -440,6 +440,8 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			}
 		}
 		if !ready {
+			// Genuinely in flight: progress, not failure — keep the cadence
+			// close so the result is consumed the tick after it lands.
 			pending = true
 			continue
 		}
@@ -464,17 +466,36 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			if probe.repo != nil && probe.repo.ID != derivedID {
 				resolvedID = probe.repo.ID
 			}
+			staleBridge := false
+			for rid, derived := range healed.unresolvedResolvedIDs {
+				if derived == derivedID && rid != resolvedID {
+					staleBridge = true
+				}
+			}
 			if record.identityMismatch != probe.mismatch || record.markerUnreadable != probe.markerUnreadable ||
-				(resolvedID != "" && healed.unresolvedResolvedIDs[resolvedID] != derivedID) {
+				staleBridge || (resolvedID != "" && healed.unresolvedResolvedIDs[resolvedID] != derivedID) {
 				cloneForWrite()
 				record.identityMismatch = probe.mismatch
 				record.markerUnreadable = probe.markerUnreadable
 				healed.unresolvedRoots[derivedID] = record
+				// Retire every bridge this record held before recording the
+				// current one (if any): a path that went absent again, or that
+				// now resolves to a DIFFERENT repository, must not leave the
+				// previously observed repo answering for this project forever
+				// (#3299 review round 6).
+				for rid, derived := range healed.unresolvedResolvedIDs {
+					if derived == derivedID && rid != resolvedID {
+						delete(healed.unresolvedResolvedIDs, rid)
+					}
+				}
 				if resolvedID != "" {
 					healed.unresolvedResolvedIDs[resolvedID] = derivedID
 				}
 			}
-			pending = true
+			// A COMPLETED negative outcome is a normal failed read: it feeds
+			// the failure backoff rather than the hot pending cadence, or an
+			// unavailable root would fork git on every poll tick forever
+			// (#3299 review round 6).
 			continue
 		}
 		repo := probe.repo

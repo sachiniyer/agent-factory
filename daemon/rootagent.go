@@ -137,8 +137,23 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	if s.registryUnreadable {
 		return true
 	}
-	_, unreadable := s.personalUnreadable[repoID]
-	return unreadable
+	if _, unreadable := s.personalUnreadable[repoID]; unreadable {
+		return true
+	}
+	// A checkout at some project's recorded root resolves to this repo, but
+	// its marker could not be READ (#3299 review round 6): the checkout may
+	// BE that project — whose personal layer (possibly enabled=false, or
+	// itself unreadable) sits under the derived ID where this resolution
+	// cannot see it. Identity unknowable means the decision is unknowable; a
+	// legacy entry for the same repo must not start the root off global
+	// layers alone. A PROVEN mismatch deliberately does not gate here: a
+	// different project's layers do not govern this repo.
+	if derived, bridged := s.unresolvedResolvedIDs[repoID]; bridged {
+		if record, ok := s.unresolvedRoots[derived]; ok && record.markerUnreadable {
+			return true
+		}
+	}
+	return false
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
