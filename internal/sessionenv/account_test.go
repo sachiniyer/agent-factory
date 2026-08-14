@@ -113,6 +113,16 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"env sh -c 'OPENAI_API_KEY=other codex'",
 		"sh <<'EOF'\nunset CODEX_HOME\ncodex\nEOF",
 		"bash -i",
+		"PROMPT_COMMAND='export CODEX_HOME=/other' /bin/bash --noprofile --norc -i",
+		"ENV=/tmp/ambient-shrc /bin/sh -i",
+		"env PROMPT_COMMAND='export CODEX_HOME=/other' /bin/bash --noprofile --norc -i",
+		"env PROMPT_COMMAND='export CODEX_HOME=/other' nohup /bin/bash --noprofile --norc -i",
+		"export PROMPT_COMMAND='export CODEX_HOME=/other'; /bin/bash --noprofile --norc -i",
+		"BASH_ENV=/tmp/ambient-bashrc make",
+		"nohup sh -c 'unset CODEX_HOME; codex'",
+		"env nohup sh -c 'unset CODEX_HOME; codex'",
+		"nohup env sh -c 'unset CODEX_HOME; codex'",
+		"nice sh -c 'unset CODEX_HOME; codex'",
 		"typeset -n ref=CODEX_HOME; ref=/other; codex",
 		"unset 'CODEX_HOME[0]'; codex",
 		"export 'CODEX_HOME[0]=/other'; codex",
@@ -133,12 +143,12 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 	} {
 		_, err := ApplyAccountEnvironment(nil, command, account)
 		require.Error(t, err, "command %q must not replace the sibling account environment", command)
-		require.Contains(t, err.Error(), "sets an identity variable")
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 	}
 	_, err := ApplyAccountEnvironment(nil, "CLAUDE_CODE_USE_BEDROCK=$MODE make",
 		Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
 	require.Error(t, err, "a dynamic provider selector can redirect a sibling away from the selected account")
-	require.Contains(t, err.Error(), "sets an identity variable")
+	require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 }
 
 func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
@@ -154,6 +164,8 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"let PORT=42; make",
 		"mapfile DATA </dev/null; make",
 		"readarray -t DATA </dev/null; make",
+		"nohup make",
+		"nice -n 5 make",
 		"for PORT in 3000; do make; done",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",

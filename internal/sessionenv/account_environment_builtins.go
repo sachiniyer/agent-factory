@@ -6,6 +6,51 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+func unwrapNohup(words []*syntax.Word) ([]*syntax.Word, bool) {
+	if len(words) > 0 && wordEquals(words[0], "--") {
+		words = words[1:]
+	}
+	if len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal || strings.HasPrefix(option, "-") {
+			return nil, true
+		}
+	}
+	return words, false
+}
+
+func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			return words[1:], false
+		case option == "-n" || option == "--adjustment":
+			if len(words) < 2 {
+				return nil, true
+			}
+			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			words = words[2:]
+		case strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment="):
+			words = words[1:]
+		case strings.HasPrefix(option, "-") && len(option) > 1:
+			// Traditional nice accepts a bare numeric adjustment such as -10.
+			if strings.Trim(option[1:], "0123456789") != "" {
+				return nil, true
+			}
+			words = words[1:]
+		default:
+			return words, false
+		}
+	}
+	return nil, false
+}
+
 func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for _, word := range words {
 		expression, literal := literalShellWord(word)

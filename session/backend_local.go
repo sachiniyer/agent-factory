@@ -613,17 +613,6 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	return nil
 }
 
-// resetAgentBrokerCaptures is the single post-replacement hook for every local
-// pane respawn. A handoff and a recovery both replace the process behind the
-// same stable tab; retaining a broker capture from either old pane strands every
-// existing and future subscriber on a silent read loop.
-func resetAgentBrokerCaptures(i *Instance) {
-	i.noteAgentRuntimeReplaced()
-	if as, ok := i.AgentServer().(*localAgentServer); ok {
-		as.resetBrokerCaptures()
-	}
-}
-
 // setupTabs brings up an instance's non-agent tabs after its agent session is
 // live. On restore it reconnects every persisted tab (shell and any later
 // process tabs) to its exact tmux session by name so they survive an af/daemon
@@ -635,7 +624,7 @@ func resetAgentBrokerCaptures(i *Instance) {
 // tab-create`), never automatically. The fresh-$SHELL fallback below only fires
 // when a PERSISTED shell tab restored dead (#991), replacing it so the user
 // lands on a working terminal instead of a corpse.
-func (b *LocalBackend) setupTabs(i *Instance) error {
+func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 	i.mu.RLock()
 	agentTmux := i.tmuxLocked()
 	gw := i.gitWorktree
@@ -659,6 +648,10 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 	// so restoring stranded the user on "Terminal session not available" for every
 	// shell but one (#2527).
 	var deadShells []*Tab
+	var respawnedAccountTabs []*tmux.TmuxSession
+	defer func() {
+		setupErr = cleanupRespawnedAccountTabs(setupErr, respawnedAccountTabs)
+	}()
 	for idx, tab := range tabs {
 		if idx == 0 {
 			continue
@@ -684,6 +677,9 @@ func (b *LocalBackend) setupTabs(i *Instance) error {
 				}
 			}
 			restoreResult, err := tab.tmux.RestoreWithResult(worktreePath)
+			if err == nil && account != "" && restoreResult == tmux.RestoreRespawned {
+				respawnedAccountTabs = append(respawnedAccountTabs, tab.tmux)
+			}
 			if err != nil {
 				if account != "" {
 					return fmt.Errorf("restore account-scoped tab %q for %q: %w", tab.Name, i.Title, err)

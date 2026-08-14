@@ -102,6 +102,10 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 	if unsafe || len(words) == 0 {
 		return unsafe
 	}
+	return unwrappedAccountCommandMutates(words, names)
+}
+
+func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struct{}) bool {
 	if _, literal := literalShellWord(words[0]); !literal {
 		// A dynamic command name can resolve to env or a same-shell builtin such
 		// as unset/export, so its effect on the selected identity is unprovable.
@@ -187,6 +191,18 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 					return nil, true
 				}
 			}
+		case isBareName(words[0], "nohup"):
+			var unsafe bool
+			words, unsafe = unwrapNohup(words[1:])
+			if unsafe {
+				return nil, true
+			}
+		case isBareName(words[0], "nice"):
+			var unsafe bool
+			words, unsafe = unwrapNice(words[1:])
+			if unsafe {
+				return nil, true
+			}
 		default:
 			return words, false
 		}
@@ -248,8 +264,15 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 			return true
 		}
 	}
-	if invocation.CommandIndex >= 0 && shellCommandIsUnproven(words[invocation.CommandIndex:]) {
-		return true
+	if invocation.CommandIndex >= 0 {
+		commandWords, unsafe := unwrapAccountCommand(words[invocation.CommandIndex:], names)
+		if unsafe {
+			return true
+		}
+		if len(commandWords) == 0 {
+			return false
+		}
+		return unwrappedAccountCommandMutates(commandWords, names)
 	}
 	return false
 }
@@ -262,14 +285,23 @@ func shellCommandIsUnproven(words []*syntax.Word) bool {
 	if !literal || !knownShellName(filepath.Base(command)) {
 		return false
 	}
+	return !accountShellCommandWordsProven(words)
+}
+
+func accountShellCommandWordsProven(words []*syntax.Word) bool {
+	if len(words) == 0 {
+		return false
+	}
+	command, _ := literalShellWord(words[0])
 	// A sibling shell may read profiles, stdin, a script, or a command string.
 	// The only statically proven form is the same absolute, startup-free command
 	// AccountShellCommand generates for a dedicated shell tab.
 	args, literal := literalCommandArgs(words)
 	if !literal || !filepath.IsAbs(command) {
-		return true
+		return false
 	}
-	return !slices.Equal(args[1:], trustedAccountShellArgs(command))
+	want := trustedAccountShellArgs(command)
+	return want != nil && slices.Equal(args[1:], want)
 }
 
 func knownShellName(name string) bool {

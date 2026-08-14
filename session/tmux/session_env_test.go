@@ -188,6 +188,13 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
+	_, _, _, processDefault, err := process.prepareLaunchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(processDefault, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(processDefault, "/bin/sh -i") {
+		t.Fatalf("process sibling default window command is not a scoped startup-free shell: %q", processDefault)
+	}
 
 	shell, err := agent.NewShellSiblingSession("account-shell", "/bin/sh")
 	if err != nil {
@@ -213,6 +220,13 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	}
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
+	}
+	_, _, _, shellDefault, err := shell.prepareLaunchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shellDefault != wrapped {
+		t.Fatalf("account shell default window command = %q, want initial scoped shell %q", shellDefault, wrapped)
 	}
 }
 

@@ -178,6 +178,63 @@ func TestLoad_AccountTabFailureStopsAgentBeforeDiscard(t *testing.T) {
 		"a load error that discards the record must first stop its reattached agent")
 }
 
+func TestLoad_AccountLaterTabFailureStopsEarlierRespawnedSibling(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_account_partial_load"
+	firstName := agentName + "__first"
+	secondName := agentName + "__second"
+	inner := nameKeyedExec(map[string]bool{agentName: true, secondName: true})
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			text := cmd.String()
+			commands = append(commands, text)
+			if strings.Contains(text, "kill-session") && strings.Contains(text, secondName) {
+				return errors.New("later persisted sibling did not stop")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	worktreePath := t.TempDir()
+	_, err := FromInstanceData(InstanceData{
+		Title:    "account-partial-load",
+		Path:     "/tmp/account-partial-load-repo",
+		Program:  tmux.ProgramCodex,
+		Account:  "work",
+		Status:   Running,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+			{Name: "first", Kind: TabKindShell, TmuxName: firstName},
+			{Name: "second", Kind: TabKindProcess, Command: "make", TmuxName: secondName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:     "/tmp/account-partial-load-repo",
+			WorktreePath: worktreePath,
+			SessionName:  "account-partial-load",
+			BranchName:   "af/account-partial-load",
+		},
+	})
+	require.Error(t, err)
+	require.True(t, commandIncludesSession(commands, "new-session", firstName),
+		"the first missing sibling must reproduce as respawned before the later failure")
+	require.True(t, commandIncludesSession(commands, "kill-session", firstName),
+		"a later restore failure must tear down every sibling this discarded load already respawned")
+}
+
 func commandIncludesSession(commands []string, operation, sessionName string) bool {
 	for _, command := range commands {
 		if !strings.Contains(command, operation) {
