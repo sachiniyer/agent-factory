@@ -49,6 +49,10 @@ const rootEnsureEscalationThreshold = 6
 var (
 	rootEnsureBackoffBase = 10 * time.Second
 	rootEnsureBackoffMax  = 5 * time.Minute
+	// A transcript creation or removal can lag one poll without affecting the
+	// live root. Bound the directory scan instead of statting every historical
+	// transcript on the daemon's default one-second ensure cadence.
+	rootClaudeTranscriptInspectionInterval = 30 * time.Second
 )
 
 // rootKillHealDelay is the grace window the ensure loop honors after an
@@ -70,6 +74,11 @@ type rootEnsureState struct {
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
+	// Claude transcript verification is advisory while the root is live. Keep
+	// its filesystem work and any persistent inspection warning off the hot
+	// one-second ensure path.
+	nextClaudeTranscriptInspection time.Time
+	claudeTranscriptWarning        string
 }
 
 // rootAgentSnapshot is the start-of-day root-agent configuration the ensure
@@ -443,7 +452,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
-			// and whoever created it — is the root agent. Nothing to do.
+			// and whoever created it — is the root agent. The one mutation is
+			// refreshing a recorded Claude conversation from durable transcript
+			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			m.refreshRootClaudeConversation(repo.ID, key, repo.Root, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
@@ -483,6 +495,27 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	}
 
 	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
+	skipRecordedResume := false
+	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
+		transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
+		if inspectErr == nil {
+			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, carried.conversation)
+		}
+		switch {
+		case inspectErr != nil:
+			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
+				repo.Root, carried.conversation.ID, inspectErr)
+		case !state.RecordedExists && state.Latest.HasID():
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
+				repo.Root, carried.conversation.ID, state.Latest.ID)
+			carried.conversation = state.Latest
+		case !state.RecordedExists:
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
+				repo.Root, carried.conversation.ID)
+			skipRecordedResume = true
+		}
+	}
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: repo.Root,
@@ -517,6 +550,9 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 	}
+	if skipRecordedResume {
+		req.resumeConversation = session.AgentConversationData{}
+	}
 	data, err := m.CreateSession(context.Background(), req)
 	if err != nil && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
@@ -526,8 +562,27 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// what keeps an unresumable id from costing the root a backoff interval of
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
+		if req.resumeConversation.Agent == tmux.ProgramClaude {
+			transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
+			if inspectErr == nil {
+				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, req.resumeConversation)
+			}
+			if inspectErr != nil {
+				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
+					repo.Root, req.resumeConversation.ID, inspectErr)
+			} else if !state.RecordedExists && state.Latest.HasID() && !strings.EqualFold(state.Latest.ID, req.resumeConversation.ID) {
+				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
+					repo.Root, req.resumeConversation.ID, err, state.Latest.ID)
+				req.resumeConversation = state.Latest
+				carried.conversation = state.Latest
+				data, err = m.CreateSession(context.Background(), req)
+			}
+		}
+	}
+	if err != nil && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			repo.Root, carried.conversation.Agent, carried.conversation.ID, err)
+			repo.Root, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.CreateSession(context.Background(), req)
 	}

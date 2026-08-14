@@ -3,9 +3,12 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/stretchr/testify/require"
 
@@ -49,6 +52,21 @@ func seedRootConversation(t *testing.T, inst *session.Instance) session.AgentCon
 	return conv
 }
 
+func writeRootClaudeTranscript(t *testing.T, configDir, repoPath, id string) string {
+	t.Helper()
+	projectName := strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return '-'
+	}, filepath.Clean(repoPath))
+	projectDir := filepath.Join(configDir, "projects", projectName)
+	require.NoError(t, os.MkdirAll(projectDir, 0o700))
+	path := filepath.Join(projectDir, id+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	return path
+}
+
 // TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish is the #2616 headline
 // assertion: the conversation id the re-created root is launched on must be the
 // id the vanished one had. Asserting only that a root exists again passes
@@ -56,8 +74,11 @@ func seedRootConversation(t *testing.T, inst *session.Instance) session.AgentCon
 // root, it was a root that came back as somebody else.
 func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
@@ -192,6 +213,8 @@ func (unresumableCarryBackend) Start(*session.Instance, bool) error {
 // worse ("the root never came back"), on every tick, forever.
 func TestEnsureRootAgentsFallsBackToAFreshAgentWhenTheCarriedCreateFails(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	var seen []session.InstanceOptions
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
 		seen = append(seen, opts)
@@ -204,6 +227,7 @@ func TestEnsureRootAgentsFallsBackToAFreshAgentWhenTheCarriedCreateFails(t *test
 	})
 	t.Cleanup(restore)
 	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
@@ -227,6 +251,239 @@ func TestEnsureRootAgentsFallsBackToAFreshAgentWhenTheCarriedCreateFails(t *test
 	manager.mu.Unlock()
 	require.NotNil(t, st)
 	require.Zero(t, st.consecutiveFailures, "a root that came back is not a failed ensure")
+}
+
+// TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry is the
+// #3306 outage: the persisted root conversation was generations stale and its
+// transcript had disappeared, while Claude's project store still held the live
+// captain's newer conversation. The heal must try that recoverable transcript
+// before it is allowed to start a fresh, amnesiac root.
+func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+
+	const newestConversationID = "5299e00d-1111-4222-8333-f7045e07a242"
+	var seen []session.InstanceOptions
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		seen = append(seen, opts)
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		if opts.ResumeConversation.ID == priorRootConversationID {
+			return unresumableCarryBackend{readyFakeBackend{fake}}, nil
+		}
+		return readyFakeBackend{fake}, nil
+	})
+	t.Cleanup(restore)
+	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, newestConversationID)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	seedRootConversation(t, first)
+
+	var warning bytes.Buffer
+	previousWarning := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warning)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.GreaterOrEqual(t, len(seen), 2)
+	for _, attempt := range seen[1:] {
+		require.True(t, attempt.ResumeConversation.HasID(),
+			"a recoverable on-disk transcript must be tried before a fresh root")
+	}
+	require.Equal(t, newestConversationID, seen[len(seen)-1].ResumeConversation.ID,
+		"the replacement root must resume the newest existing project transcript")
+	require.Contains(t, warning.String(), priorRootConversationID)
+	require.Contains(t, warning.String(), newestConversationID,
+		"the stale-to-newer conversation substitution must be visible in the log")
+}
+
+func TestEnsureRootAgentsUsesResolvedProgramOverrideForClaudeTranscripts(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	ambientConfigDir := t.TempDir()
+	overrideConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", ambientConfigDir)
+	repoPath := setupControlRepo(t)
+
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude})
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramClaude: "CLAUDE_CONFIG_DIR=" + overrideConfigDir + " claude",
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+	const newestConversationID = "5299e00d-1111-4222-8333-f7045e07a242"
+	writeRootClaudeTranscript(t, overrideConfigDir, repoPath, newestConversationID)
+	seen := installOptionsRecordingBackend(t)
+
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	seedRootConversation(t, first)
+
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.Len(t, *seen, 2)
+	require.Equal(t, newestConversationID, (*seen)[1].ResumeConversation.ID,
+		"transcript inspection must use the same program_overrides command as launch")
+}
+
+func TestEnsureRootAgentsRefreshUsesTheLiveClaudeCommandAfterConfigChanges(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	liveConfigDir := t.TempDir()
+	newConfigDir := t.TempDir()
+	repoPath := setupControlRepo(t)
+
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude})
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramClaude: "CLAUDE_CONFIG_DIR=" + liveConfigDir + " claude",
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+	seen := installOptionsRecordingBackend(t)
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	require.Len(t, *seen, 1)
+	root := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, root)
+	seedRootConversation(t, root)
+	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle,
+		"CLAUDE_CONFIG_DIR="+liveConfigDir+" claude"))
+
+	const liveReplacementID = "5299e00d-1111-4222-8333-f7045e07a242"
+	const newConfigID = "a399e00d-1111-4222-8333-f7045e07a242"
+	writeRootClaudeTranscript(t, liveConfigDir, repoPath, liveReplacementID)
+	writeRootClaudeTranscript(t, newConfigDir, repoPath, newConfigID)
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "CLAUDE_CONFIG_DIR=" + newConfigDir + " claude"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	manager.EnsureRootAgents()
+
+	require.Equal(t, liveReplacementID, root.AgentConversation().ID,
+		"a live root must inspect the immutable pane command, not a changed program_overrides value")
+}
+
+// A transcript can disappear after the preflight stat but before Claude has
+// finished its resume attempt. Re-check the store on that failure and consume
+// a newly rotated transcript before the fresh fallback.
+func TestEnsureRootAgentsRechecksClaudeTranscriptsAfterResumeFailure(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	repoPath := setupControlRepo(t)
+	stalePath := writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
+
+	const newestConversationID = "5299e00d-1111-4222-8333-f7045e07a242"
+	var seen []session.InstanceOptions
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		seen = append(seen, opts)
+		fake := session.NewFakeBackend()
+		fake.CompleteStart()
+		if opts.ResumeConversation.ID == priorRootConversationID {
+			require.NoError(t, os.Remove(stalePath))
+			writeRootClaudeTranscript(t, claudeConfigDir, repoPath, newestConversationID)
+			return unresumableCarryBackend{readyFakeBackend{fake}}, nil
+		}
+		return readyFakeBackend{fake}, nil
+	})
+	t.Cleanup(restore)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	seedRootConversation(t, first)
+
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.Len(t, seen, 3, "the heal must try the stored and substituted conversations without a fresh attempt")
+	require.Equal(t, priorRootConversationID, seen[1].ResumeConversation.ID)
+	require.Equal(t, newestConversationID, seen[2].ResumeConversation.ID)
+}
+
+// The ensure poll keeps the persisted root id aligned before an outage, not
+// only while reacting to one. Each replacement id comes from an existing file.
+func TestEnsureRootAgentsOnlyReplacesAMissingClaudeConversationAfterThePollInterval(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	advance := withFrozenClock(t)
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	root := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, root)
+	seedRootConversation(t, root)
+
+	oldPath := writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
+	const newestConversationID = "5299e00d-1111-4222-8333-f7045e07a242"
+	newPath := writeRootClaudeTranscript(t, claudeConfigDir, repoPath, newestConversationID)
+	oldTime := time.Now().Add(-time.Minute)
+	require.NoError(t, os.Chtimes(oldPath, oldTime, oldTime))
+	newTime := oldTime.Add(time.Second)
+	require.NoError(t, os.Chtimes(newPath, newTime, newTime))
+
+	manager.EnsureRootAgents()
+
+	require.Len(t, *seen, 1, "refreshing conversation metadata must not restart a healthy root")
+	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
+		"a still-valid root conversation must not be replaced by another process's newer transcript")
+
+	require.NoError(t, os.Remove(oldPath))
+	manager.EnsureRootAgents()
+	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
+		"the one-second ensure loop must not rescan every project transcript on every tick")
+	advance(time.Hour)
+	manager.EnsureRootAgents()
+
+	require.Equal(t, newestConversationID, root.AgentConversation().ID)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	require.Equal(t, newestConversationID, persistedConversationID(t, repo.ID))
+}
+
+func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	advance := withFrozenClock(t)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{
+		Program: "CLAUDE_CONFIG_DIR=$HOME/.claude claude",
+	})
+
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	require.Len(t, *seen, 1)
+	root := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, root)
+	seedRootConversation(t, root)
+	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, cfg.RootAgents[repoPath].Program))
+
+	var warning bytes.Buffer
+	previousWarning := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warning)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+
+	manager.EnsureRootAgents()
+	advance(time.Hour)
+	manager.EnsureRootAgents()
+
+	require.Equal(t, 1, strings.Count(warning.String(), "could not verify its recorded claude conversation"),
+		"a persistent inspection error must not flood the one-second daemon poll log")
 }
 
 // TestReportRootConversationCarryDistinguishesTheThreeOutcomes: whichever way

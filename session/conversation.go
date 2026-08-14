@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	ConversationCaptureInjected     = "injected"
-	ConversationCaptureCodexRollout = "codex_rollout"
+	ConversationCaptureInjected         = "injected"
+	ConversationCaptureCodexRollout     = "codex_rollout"
+	ConversationCaptureClaudeTranscript = "claude_transcript"
 )
 
 // AgentConversationData is the provider-specific conversation identity for a
