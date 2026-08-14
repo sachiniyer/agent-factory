@@ -31,6 +31,38 @@ func registryGranularityFixture(t *testing.T) (home string, goodRoot string, goo
 	return home, goodRoot, good, badRoot, bad
 }
 
+// TestListProjectsDetailedIsolatesRecordFailuresAndStrays: the detailed read
+// returns the readable projects, names the corrupt record, reports the stray,
+// and errs only when enumeration itself fails.
+func TestListProjectsDetailedIsolatesRecordFailuresAndStrays(t *testing.T) {
+	_, _, good, _, bad := registryGranularityFixture(t)
+	dir, err := ProjectRegistryDir()
+	require.NoError(t, err)
+	strayPath := filepath.Join(dir, "stray")
+	require.NoError(t, os.WriteFile(strayPath, []byte("x"), 0o644))
+
+	projects, failures, strays, present, err := ListProjectsDetailed()
+	require.NoError(t, err, "record failures and strays are not enumeration failures")
+	assert.True(t, present)
+	require.Len(t, projects, 1)
+	assert.Equal(t, good.ID, projects[0].ID)
+	require.Len(t, failures, 1)
+	assert.Equal(t, bad.ID, failures[0].DirectoryID)
+	assert.Error(t, failures[0].Err)
+	assert.Equal(t, []string{strayPath}, strays)
+
+	// The strict form still refuses the same registry, unchanged.
+	_, err = ListProjects()
+	require.Error(t, err)
+
+	// Enumeration failure is the one err: the registry path becomes a file.
+	require.NoError(t, os.RemoveAll(dir))
+	require.NoError(t, os.WriteFile(dir, []byte("not a directory"), 0o644))
+	_, _, _, present, err = ListProjectsDetailed()
+	require.Error(t, err, "a failed enumeration is the only whole-registry error")
+	assert.True(t, present, "the registry path exists (as a file), so this is a present-but-unenumerable registry")
+}
+
 // TestDeregisterProjectSurvivesUnrelatedCorruptRecord: removing a readable
 // record must work while an unrelated record is corrupt — the registry's own
 // repair tooling must not be bricked by the thing it would repair. A target
@@ -66,4 +98,30 @@ func TestRegisterProjectRefusesNamingCorruptRecords(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), bad.ID)
 	assert.Contains(t, err.Error(), "repair or remove")
+}
+
+// TestRecordShapedFileIsAFailureNotAStray pins the #3316 review: a
+// non-directory entry bearing a VALID record name is a broken record — a
+// record directory clobbered into a file must not read as a harmless stray,
+// or Register/Rebind would proceed without its hidden collision data.
+func TestRecordShapedFileIsAFailureNotAStray(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	dir, err := ProjectRegistryDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	const clobbered = "prj_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, clobbered), []byte("was a directory"), 0o644))
+
+	_, failures, strays, present, err := ListProjectsDetailed()
+	require.NoError(t, err)
+	assert.True(t, present)
+	assert.Empty(t, strays, "a record-shaped file is not a stray")
+	require.Len(t, failures, 1)
+	assert.Equal(t, clobbered, failures[0].DirectoryID)
+
+	fresh := initProjectRegistryRepo(t, filepath.Join(t.TempDir(), "fresh"))
+	_, err = RegisterProject(fresh)
+	require.Error(t, err, "registration must refuse while a record-shaped entry is unreadable")
+	assert.Contains(t, err.Error(), clobbered)
 }

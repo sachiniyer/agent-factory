@@ -142,26 +142,25 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 
 	snap.legacyRepoIDs = legacyRepoIDSet(cfg)
 
-	projects, err := config.ListProjects()
+	projects, failures, strays, _, err := config.ListProjectsDetailed()
 	if err != nil {
-		// Fail CLOSED (#3247): the registry is the only index of the personal
-		// configs that may hold the highest-precedence enabled=false, so with it
-		// unlistable NO repo — including one named only by a legacy root_agents
-		// entry — can be proven un-disabled, and none may start or heal.
-		// Returning with only the singleton layers missing was fail-open for
-		// singleton-DISABLED roots: the legacy sweep kept ensuring them with no
-		// personal layer at all. An absent registry is not this branch —
-		// ListProjects reports that as zero projects — so this is always a real
-		// read or parse failure, never plain absence (the home-gone vs
-		// unreadable distinction #3246 keeps).
+		// Fail CLOSED, registry-wide, for a failed ENUMERATION only (#3247,
+		// granularity per #3297): with the record list itself unknown, NO repo
+		// — including one named only by a legacy root_agents entry — can be
+		// proven un-disabled, and none may start or heal. Per-record failures
+		// take the per-record branch below instead; an absent registry lists
+		// as zero projects — so this is always a real enumeration failure,
+		// never plain absence (the home-gone vs unreadable distinction #3246
+		// keeps).
 		registry := config.ProjectRegistryDirName
 		if dir, dirErr := config.ProjectRegistryDir(); dirErr == nil {
 			registry = dir
 		}
-		log.ErrorLog.Printf("root agent snapshot: cannot list registered projects (registry %s); failing closed — no root agents will be started or healed until the registry is readable again (re-checked on the ensure cadence): %v", registry, err)
+		log.ErrorLog.Printf("root agent snapshot: cannot enumerate the project registry (%s); failing closed — no root agents will be started or healed until the registry is readable again (re-checked on the ensure cadence): %v", registry, err)
 		snap.registryUnreadable = true
 		return snap
 	}
+	logRegistryRecordProblems(failures, strays)
 	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots = projectRootAgentLayers(projects)
 	return snap
 }
@@ -185,6 +184,25 @@ func legacyRepoIDSet(cfg *config.Config) map[string]bool {
 		ids[repo.ID] = true
 	}
 	return ids
+}
+
+// logRegistryRecordProblems names each registry record the snapshot had to
+// suppress and any stray files it ignored. THE GRANULARITY RULE (#3297,
+// stated at the read in config.ListProjectsDetailed): a record that cannot be
+// read suppresses only ITS OWN project — its root path lives inside the
+// unreadable record, so the suppression cannot be keyed to a repo, and a
+// legacy root_agents entry for the same repo still applies as its own opt-in
+// (the accepted residue). A stray file suppresses nothing: enumeration
+// succeeded and every real record was read. Only a failed enumeration fails
+// the machine closed — one bad record must not become a machine-wide
+// root-agent outage.
+func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []string) {
+	for _, failure := range failures {
+		log.WarningLog.Printf("root agent snapshot: project registry record %s cannot be read; only that project is affected — its personal [root_agent] layer is unreachable and the singleton sweep cannot ensure it, though a legacy root_agents entry for the same repo still applies as its own opt-in — until the record is repaired (or removed) and the daemon restarts: %v", failure.DirectoryID, failure.Err)
+	}
+	if len(strays) > 0 {
+		log.WarningLog.Printf("root agent snapshot: project registry contains %d non-record file(s) (%s); they affect nothing and can be removed", len(strays), strings.Join(strays, ", "))
+	}
 }
 
 // projectRootAgentLayers derives the registry-dependent half of the snapshot
