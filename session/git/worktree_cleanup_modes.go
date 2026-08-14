@@ -49,15 +49,16 @@ func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 }
 
 // requireRegisteredBranchMatch proves the registered worktree at the recorded
-// path is THIS session's before the registered-only mode issues its
-// destructive remove (#3278 review). `git worktree remove -f` trusts the
-// registration alone, so a different worktree of the same still-present
-// origin parked at the archived path would be accepted and deleted, dirty
-// changes included. The registration's branch is the session-identifying fact
-// git itself maintains; a different branch, a detached checkout, or a probe
-// that could not answer all refuse and retain. An unlisted path passes
-// through: the remove below fails on its own and the registered-only mode
-// already refuses the unregistered fallback.
+// path is THIS session's before the registered-only mode acts on it (#3278
+// review). `git worktree remove -f` trusts the registration alone, so a
+// different worktree of the same still-present origin parked at the archived
+// path would be accepted and deleted, dirty changes included. The
+// registration's branch is the session-identifying fact git itself maintains;
+// a different branch, a detached checkout, an UNLISTED occupant, or a probe
+// that could not answer all refuse and retain — an unlisted directory is not
+// provably the archive either, this mode may never RemoveAll it, and its only
+// possible end state is retention, so nothing destructive (the writer reap
+// included) should touch it first.
 func (r *cleanupRun) requireRegisteredBranchMatch() error {
 	output, err := r.git("worktree", "list", "--porcelain")
 	if err != nil {
@@ -71,7 +72,13 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 	}
 	branch, listed := worktreeListedBranch(output, r.g.worktreePath)
 	if !listed {
-		return nil
+		r.unknown = true
+		refusal := fmt.Errorf(
+			"refusing to act on %s: git does not register it as a worktree, so it is not provably this session's archive; leaving it and the record in place",
+			r.g.worktreePath,
+		)
+		r.errs = append(r.errs, refusal)
+		return refusal
 	}
 	expected := "refs/heads/" + r.g.branchName
 	if branch != expected {
