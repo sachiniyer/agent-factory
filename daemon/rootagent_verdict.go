@@ -101,6 +101,15 @@ type rootAgentMaterializeVerdict struct {
 // legacy lookup below, whose result could not change the answer; then
 // candidacy; then the layered resolution the ensure sweeps share.
 func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMaterializeVerdict {
+	// The pending gate is sampled BEFORE the snapshot load (#3299 review
+	// round 11): the healer publishes the moved layers and only then retires
+	// the probe, so a gate observed open here guarantees the Load below sees
+	// the post-transition snapshot — sampled the other way around, a verdict
+	// could pass the gate yet resolve against layers still keyed by the
+	// derived ID.
+	if m.rootAttributionPendingFor(repoID) {
+		return rootAgentMaterializeVerdict{reason: rootAgentAttributionPending, rootUnresolved: true}
+	}
 	// One Load for the whole verdict, so the flags, the candidacy sets, and the
 	// resolution are read from a single consistent snapshot value. Loaded
 	// before the deletion check because deletion state may be keyed by the
@@ -122,12 +131,6 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
-	}
-	if m.rootAttributionPendingFor(repoID) {
-		// Mirror the resolvedRootAgentFor gate: an in-flight identity
-		// verification fails closed, and the verdict names it rather than
-		// reporting a resolution that cannot yet see the project's layers.
-		return rootAgentMaterializeVerdict{reason: rootAgentAttributionPending, rootUnresolved: true}
 	}
 	// An unreadable-marker bridge makes this repo's decision unknowable
 	// (decisionUnknown fails it closed for both sweeps): report the true

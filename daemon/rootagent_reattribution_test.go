@@ -1235,14 +1235,16 @@ func TestBothSelectorsAcceptReattributedPair(t *testing.T) {
 	}
 }
 
-// TestDeleteRetiresPendingProbe pins the #3299 review's round-9 P1: deleting
-// a project whose identity verification is stalled mid-flight must retire the
-// probe (and, on the next pass, the unresolved entry), or the candidate repo
-// stays attribution-pending — fail-closed — forever, for a project that no
-// longer exists.
-func TestDeleteRetiresPendingProbe(t *testing.T) {
+// TestDeleteSuppressionSurvivesLateProbeCompletion pins the converged
+// rounds 9-11 stance on deleting a project whose identity verification is
+// stalled: the probe keeps running and its pending gate keeps the candidate
+// repo fail-closed (which doubles as the delete's suppression), and when the
+// probe finally completes, the re-attribution publishes the alias that lets
+// the derived-ID tombstone suppress — and report — the deletion under the
+// real identity. No window in that sequence may create the deleted root.
+func TestDeleteSuppressionSurvivesLateProbeCompletion(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
+	seen := installOptionsRecordingBackend(t)
 	parent := testguard.CanonicalTempDir(t)
 	repoPath := filepath.Join(parent, "repo")
 	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
@@ -1262,7 +1264,7 @@ func TestDeleteRetiresPendingProbe(t *testing.T) {
 		t.Fatalf("git worktree add: %v", err)
 	}
 	project := registerTestProject(t, repoPath)
-	writePersonalRootAgent(t, project.ID, "enabled = false")
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/latecomer\"")
 	rewriteRecordRoot(t, project.ID, worktree)
 	realID := repoID(t, repoPath)
 
@@ -1274,29 +1276,40 @@ func TestDeleteRetiresPendingProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Rename(aside, parent) })
 	stuck := &rootReattributionProbe{done: make(chan struct{})}
 	stuck.candidate.Store(&config.RepoContext{Root: repoPath, ID: realID})
 	manager.mu.Lock()
 	manager.rootHealProbes[config.RepoIDForRecordedRoot(worktree)] = stuck
 	manager.mu.Unlock()
-	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentAttributionPending {
-		t.Fatalf("precondition: the stalled probe must hold the repo pending, got reason %d", got)
-	}
 
 	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
 		t.Fatalf("DeleteProject while verification is stalled: %v", err)
 	}
-
-	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentAttributionPending {
-		t.Fatalf("a deleted project's stalled probe must not hold its candidate repo pending forever")
+	// While the marker read stalls, fail-closed doubles as suppression.
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentAttributionPending {
+		t.Fatalf("a stalled verification must keep the candidate repo fail-closed, got reason %d", got)
 	}
-	// Later passes may respawn a probe for the still-snapshotted entry — the
-	// probe-to-alias chain is what carries deletion suppression to the real
-	// identity — but the pending gate must keep exempting the dead project.
 	manager.EnsureRootAgents()
-	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentAttributionPending {
-		t.Fatalf("a respawned probe for the deleted project must not re-arm the pending gate")
+	if len(*seen) != 0 {
+		t.Fatalf("no window during the stall may create the deleted root, got %d creates", len(*seen))
+	}
+
+	// The probe finally completes with a verified match: the alias must
+	// carry the derived-ID tombstone to the real identity.
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	stuck.repo = &config.RepoContext{Root: repoPath, ID: realID}
+	stuck.matches = true
+	stuck.completedAt = time.Now()
+	close(stuck.done)
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("the late completion must re-attribute into suppression, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentProjectDeleted {
+		t.Fatalf("the re-attributed identity must report the deletion through the alias, got reason %d", got)
 	}
 }
 

@@ -655,6 +655,18 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		return
 	}
 	if !matches {
+		if _, statErr := os.Stat(record.root); statErr != nil {
+			// The path vanished between git resolution and the marker read
+			// (a mount flap): that is not a PROVEN mismatch — the original
+			// checkout may be exactly what returns. Record it as unknowable,
+			// keeping the resolved identity for the verdict bridge, so the
+			// resolved repo fails closed instead of inheriting a rebind
+			// prescription for a checkout nobody disproved (#3299 review
+			// round 11).
+			probe.markerUnreadable = true
+			log.WarningLog.Printf("root agent snapshot: recorded project root %s vanished during identity verification; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, statErr)
+			return
+		}
 		probe.mismatch = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
 		return
@@ -671,21 +683,21 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 // are NOT pending: a proven mismatch releases the repo (a different project's
 // layers do not govern it) and an unreadable marker holds it closed through
 // the snapshot bridge instead.
+//
+// The gate deliberately applies to DELETED projects' probes too (#3299
+// review rounds 9-11, converged): while a dead project's marker read stalls,
+// fail-closed doubles as the deletion suppression the alias will carry once
+// the probe completes; exempting or retiring the probe (both tried) opened a
+// window where an in-memory legacy entry could resurrect the deleted root
+// before the alias existed. The cost — a replacement checkout at that path
+// waits out the stall before its repo can start legacy roots — is the fail-
+// closed direction, and it clears the moment the probe's marker read
+// finishes (a mismatch settles and releases).
 func (m *Manager) rootAttributionPendingFor(repoID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for derivedID, probe := range m.rootHealProbes {
+	for _, probe := range m.rootHealProbes {
 		if probe.settled {
-			continue
-		}
-		if _, deleted := m.deletedRootRepos[derivedID]; deleted {
-			// The project behind this probe was deleted: its tombstone (and,
-			// once the probe completes and re-attributes, the alias) owns the
-			// suppression. Holding the candidate repo attribution-pending on
-			// a probe that may be stalled forever would fail a dead project's
-			// repo closed indefinitely (#3299 review round 9). The probe
-			// itself keeps running — its eventual match publishes the alias
-			// that lets deletion suppression reach the real identity.
 			continue
 		}
 		if c := probe.candidate.Load(); c != nil && c.ID == repoID {

@@ -355,21 +355,14 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	if derivedAliasID != "" && derivedAliasID != repoID {
 		m.suppressRootAgent(derivedAliasID)
 	}
-	// Retire any re-attribution probe for the deleted project (#3299 review
-	// round 9): a probe stalled mid-verification would otherwise hold its
-	// candidate repo attribution-pending — fail-closed — forever, for a
-	// project that no longer exists; the tombstones above own the suppression
-	// from here. The probe goroutine itself cannot be cancelled, but with the
-	// map entry gone its late result is unreachable, and the deregistered
-	// record cannot respawn a successor after the next snapshot rebuild.
-	m.mu.Lock()
-	delete(m.rootHealProbes, repoID)
-	delete(m.rootHealProbeFailures, repoID)
-	if derivedAliasID != "" {
-		delete(m.rootHealProbes, derivedAliasID)
-		delete(m.rootHealProbeFailures, derivedAliasID)
-	}
-	m.mu.Unlock()
+	// A re-attribution probe for the deleted project is deliberately LEFT
+	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
+	// is unfinished, the attribution-pending gate fails the candidate repo
+	// closed — which doubles as this delete's suppression — and its eventual
+	// completion publishes the reattributedFrom alias that carries the
+	// tombstones above to the real identity. Retiring or exempting the probe
+	// (both tried) opened a window where an in-memory legacy entry could
+	// resurrect the deleted root before the alias existed.
 
 	// Archive/kill every live session for the repo BEFORE removing its durable identity,
 	// so no session outlives the project's registry entry (#2549). The phase-1 gate above
