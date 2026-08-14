@@ -114,12 +114,12 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 		gone := filepath.Join(dir, "gone-repo", ".git", "worktrees", "wt")
 		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
 			[]byte("gitdir: "+gone+"\n"), 0o644))
-		assert.NoError(t, VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin")))
+		assert.NoError(t, VerifyArchivedWorktreePointer(dir))
 	})
 
 	t.Run("missing pointer refused", func(t *testing.T) {
 		dir := newWorktreeDir(t)
-		assert.Error(t, VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin")))
+		assert.Error(t, VerifyArchivedWorktreePointer(dir))
 	})
 
 	t.Run("symlink pointer refused without following", func(t *testing.T) {
@@ -127,7 +127,7 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 		target := filepath.Join(dir, "real-file")
 		require.NoError(t, os.WriteFile(target, []byte("gitdir: /x/.git/worktrees/wt\n"), 0o644))
 		require.NoError(t, os.Symlink(target, filepath.Join(dir, ".git")))
-		err := VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin"))
+		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "without following links")
 	})
@@ -135,7 +135,7 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 	t.Run("fifo pointer refused without blocking", func(t *testing.T) {
 		dir := newWorktreeDir(t)
 		require.NoError(t, syscall.Mkfifo(filepath.Join(dir, ".git"), 0o644))
-		err := VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin"))
+		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err, "a FIFO at .git must be refused, not block the kill on open or read")
 		assert.Contains(t, err.Error(), "not a regular file")
 	})
@@ -144,7 +144,7 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 		dir := newWorktreeDir(t)
 		huge := "gitdir: /x/.git/worktrees/" + strings.Repeat("a", archivedWorktreePointerMaxSize) + "\n"
 		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"), []byte(huge), 0o644))
-		err := VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin"))
+		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "too large")
 	})
@@ -153,7 +153,7 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 		dir := newWorktreeDir(t)
 		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
 			[]byte("gitdir: /somewhere/plain\n"), 0o644))
-		err := VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin"))
+		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "not a linked-worktree metadata directory")
 	})
@@ -164,8 +164,8 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 		require.NoError(t, os.MkdirAll(live, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
 			[]byte("gitdir: "+live+"\n"), 0o644))
-		err := VerifyArchivedWorktreePointer(dir, filepath.Join(dir, "gone-origin"))
+		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "belongs to a live repository")
+		assert.Contains(t, err.Error(), "which still exists")
 	})
 }

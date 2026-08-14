@@ -639,12 +639,14 @@ func TestKillSession_ArchivedSymlinkOccupantRefused(t *testing.T) {
 		"the refused kill must retain the record")
 }
 
-// TestKillSession_SeparateGitDirMetadataOutlivesOrigin: deleting a
-// separate-git-dir origin's WORKING TREE leaves its external metadata alive,
-// and target existence alone is not proof of foreign ownership (#3278 review)
-// — the direct kill must authorize the genuine archive (surviving leaf points
-// back at this occupant, not under a live repo's .git) and consume it.
-func TestKillSession_SeparateGitDirMetadataOutlivesOrigin(t *testing.T) {
+// TestKillSession_SeparateGitDirSurvivorRefusedThenRestoreRouteKills: a
+// separate-git-dir origin's surviving metadata is indistinguishable from a
+// live foreign repository's — git writes no origin backlink into the external
+// metadata (#3368 review) — so the direct kill must refuse conservatively,
+// and the refusal's named recovery must actually work: a failed repo-gone
+// restore validates the origin directly, installs the cleanup authorization,
+// and the next kill consumes the archive.
+func TestKillSession_SeparateGitDirSurvivorRefusedThenRestoreRouteKills(t *testing.T) {
 	manager, repoID, _ := newStatusTestManager(t)
 	root := t.TempDir()
 	sepRepo := filepath.Join(root, "sep-origin")
@@ -656,10 +658,10 @@ func TestKillSession_SeparateGitDirMetadataOutlivesOrigin(t *testing.T) {
 	require.NoError(t, exec.Command("git", "-C", sepRepo,
 		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
 
-	inst, _ := registerArchivable(t, manager, repoID, sepRepo, "direct-sepdir-outlives")
+	inst, _ := registerArchivable(t, manager, repoID, sepRepo, "direct-sepdir-survivor")
 	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{
-		Title: "direct-sepdir-outlives", RepoID: repoID,
+		Title: "direct-sepdir-survivor", RepoID: repoID,
 	})
 	require.NoError(t, err)
 	archivedPath := inst.GetWorktreePath()
@@ -669,11 +671,23 @@ func TestKillSession_SeparateGitDirMetadataOutlivesOrigin(t *testing.T) {
 	require.DirExists(t, sepMeta)
 
 	inst.SetBackend(&session.LocalBackend{})
-	_, err = manager.KillSession(KillSessionRequest{Title: "direct-sepdir-outlives", RepoID: repoID})
-	require.NoError(t, err,
-		"the surviving separate metadata must not be mistaken for a foreign live repository")
-	assert.False(t, exists(archivedPath), "the archive must be consumed")
-	assert.Nil(t, recordFor(t, repoID, "direct-sepdir-outlives"),
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-sepdir-survivor", RepoID: repoID})
+	require.Error(t, err,
+		"the surviving metadata cannot be distinguished from a foreign live repository; the direct kill must refuse")
+	assert.ErrorContains(t, err, "run a restore first")
+	assert.True(t, exists(archivedPath), "the refused kill must leave the archive intact")
+
+	// The named recovery: the failed repo-gone restore installs the cleanup
+	// authorization without consulting the pointer, and the next kill
+	// consumes the archive through the claimed transaction.
+	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{
+		Title: "direct-sepdir-survivor", RepoID: repoID,
+	})
+	require.Error(t, err, "the restore itself fails repo-gone, installing authorization on the way out")
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-sepdir-survivor", RepoID: repoID})
+	require.NoError(t, err, "the authorized kill must consume the archive")
+	assert.False(t, exists(archivedPath))
+	assert.Nil(t, recordFor(t, repoID, "direct-sepdir-survivor"),
 		"the settled kill must delete the session row")
 }
 
