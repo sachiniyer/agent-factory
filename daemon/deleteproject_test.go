@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -264,7 +265,7 @@ func TestDeleteProject_RepoIDOnlyRegistryReadFailureLeavesProjectIntact(t *testi
 
 func TestRegisteredProjectRootForRepoID_ResolvesBareWorktreeIdentity(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	base := t.TempDir()
+	base := testguard.CanonicalTempDir(t)
 	source := filepath.Join(base, "source")
 	bare := filepath.Join(base, "origin.git")
 	worktree := filepath.Join(base, "worktree")
