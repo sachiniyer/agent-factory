@@ -42,11 +42,14 @@ import (
 // the same silent exit 1 as a missing ref (git ≥2.45 grew `show-ref --exists`
 // to separate them, but AF must hold on older gits too) — so a silent exit 1
 // is confirmed by direct observation before it counts as absence: no loose
-// ref file may exist at the branch's path. A directory there is fine (a stale
-// hierarchy dir left by deleting a/b can never be a loose ref), and a path
-// that cannot exist (ENOENT/ENOTDIR, e.g. under a linked worktree's .git
-// file) is consistent with absence; a present file, or a failed stat, returns
-// the error.
+// ref file may exist at the branch's path under the repo's COMMON git dir,
+// resolved via `git rev-parse --git-common-dir` because a gitfile root (a
+// linked worktree, or --separate-git-dir) keeps its refs elsewhere than
+// <root>/.git. A directory at the branch's path is fine (a stale hierarchy
+// dir left by deleting a/b can never be a loose ref), and ENOENT/ENOTDIR is
+// consistent with absence (no loose file; the reftable stub makes refs/heads
+// itself a file); a present file, a failed stat, or a failed common-dir
+// resolution returns the error.
 func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	if repoRoot == "" || branch == "" {
 		return false, nil
@@ -75,7 +78,27 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
-		loose := filepath.Join(gitPath, "refs", "heads", filepath.FromSlash(branch))
+		// The loose ref lives under the COMMON git dir, which is <root>/.git only
+		// when that is a directory. When .git is a gitfile — a linked worktree, or
+		// a main worktree made with --separate-git-dir — the refs live wherever it
+		// (and, for a linked worktree, its commondir indirection) points, so an
+		// Lstat under the gitfile would report ENOTDIR for every branch and
+		// "confirm" any silent exit 1 as absence. Let git resolve the indirection;
+		// a failed resolution is itself a failed probe, never absence.
+		common := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-common-dir")
+		var commonOut, commonErr bytes.Buffer
+		common.Stdout = &commonOut
+		common.Stderr = &commonErr
+		if err := common.Run(); err != nil {
+			return false, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
+				repoRoot, err, strings.TrimSpace(commonErr.String()))
+		}
+		commonDir := strings.TrimSpace(commonOut.String())
+		if !filepath.IsAbs(commonDir) {
+			// Relative output is relative to the -C directory.
+			commonDir = filepath.Join(repoRoot, commonDir)
+		}
+		loose := filepath.Join(commonDir, "refs", "heads", filepath.FromSlash(branch))
 		fi, statErr := os.Lstat(loose)
 		switch {
 		case statErr == nil && fi.IsDir():

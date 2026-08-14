@@ -250,3 +250,94 @@ func TestDeleteLocalBranch_NestedDeGittedRootNeverTouchesEnclosingRepo(t *testin
 	assert.True(t, refExists(t, parent, "af-shared-name"),
 		"the enclosing repo's branch must never be deleted through a nested record root")
 }
+
+// linkedWorktreeOf adds a linked worktree of the repo at root (on its own new
+// branch, so no branch under test is ever checked out there) and returns its
+// path. In a linked worktree .git is a FILE pointing at the private gitdir, and
+// the loose refs live in the main repo's common dir — the layout the loose-ref
+// confirmation must resolve rather than assume.
+func linkedWorktreeOf(t *testing.T, root string) string {
+	t.Helper()
+	lw := filepath.Join(t.TempDir(), "lw")
+	runGit(t, root, "worktree", "add", "-q", "-b", "af-lw-holder", lw)
+	return lw
+}
+
+// TestDeleteLocalBranch_LinkedWorktreeUnreadableLooseRefIsErrorNotAbsence pins
+// the gitfile half of the loose-ref confirmation: from a linked-worktree root,
+// <root>/.git is a file, so a naive Lstat under it can never find the loose
+// ref — every probe would "confirm" absence while the unreadable ref sits in
+// the main repo's common dir. The confirmation must resolve the common dir and
+// observe the real file, and report the failed probe.
+func TestDeleteLocalBranch_LinkedWorktreeUnreadableLooseRefIsErrorNotAbsence(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	main := branchRepo(t, "af-kept")
+	lw := linkedWorktreeOf(t, main)
+	loose := filepath.Join(main, ".git", "refs", "heads", "af-kept")
+	require.NoError(t, os.Chmod(loose, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(loose, 0o644) })
+
+	deleted, err := DeleteLocalBranch(lw, "af-kept")
+	require.Error(t, err,
+		"an unreadable loose ref must be a failed probe from a linked-worktree root too, not confirmed absence")
+	assert.False(t, deleted)
+	assert.Contains(t, err.Error(), "af-kept", "the error must name the branch it could not check")
+
+	require.NoError(t, os.Chmod(loose, 0o644))
+	assert.True(t, refExists(t, main, "af-kept"),
+		"sanity: the branch exists the whole time")
+}
+
+// TestDeleteLocalBranch_SeparateGitDirUnreadableLooseRefIsErrorNotAbsence is
+// the same rule for a MAIN worktree whose .git is a gitfile because the repo
+// was made with --separate-git-dir: the refs live wherever that file points.
+func TestDeleteLocalBranch_SeparateGitDirUnreadableLooseRefIsErrorNotAbsence(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	root := filepath.Join(t.TempDir(), "repo")
+	gitdir := filepath.Join(t.TempDir(), "gitdir")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	runGit(t, root, "init", "-q", "-b", "master", "--separate-git-dir", gitdir, ".")
+	runGit(t, root, "commit", "-q", "--allow-empty", "-m", "initial")
+	runGit(t, root, "branch", "af-kept")
+	loose := filepath.Join(gitdir, "refs", "heads", "af-kept")
+	require.NoError(t, os.Chmod(loose, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(loose, 0o644) })
+
+	deleted, err := DeleteLocalBranch(root, "af-kept")
+	require.Error(t, err,
+		"an unreadable loose ref behind a --separate-git-dir gitfile must be a failed probe, not confirmed absence")
+	assert.False(t, deleted)
+
+	require.NoError(t, os.Chmod(loose, 0o644))
+	assert.True(t, refExists(t, root, "af-kept"),
+		"sanity: the branch exists the whole time")
+}
+
+// TestDeleteLocalBranch_LinkedWorktreeMissingBranchIsCleanNoOp guards the
+// resolution against over-retaining: a genuinely absent branch probed from a
+// linked-worktree root must stay a determinate, silent no-op.
+func TestDeleteLocalBranch_LinkedWorktreeMissingBranchIsCleanNoOp(t *testing.T) {
+	main := branchRepo(t, "af-once")
+	lw := linkedWorktreeOf(t, main)
+
+	deleted, err := DeleteLocalBranch(lw, "af-never-existed")
+	require.NoError(t, err, "a determinately missing branch is a clean no-op from any root")
+	assert.False(t, deleted)
+}
+
+// TestDeleteLocalBranch_LinkedWorktreeExistingBranchIsDeleted keeps the happy
+// path working through a gitfile root: refs are shared, so deleting an
+// AF-created branch recorded against a linked-worktree root must still work.
+func TestDeleteLocalBranch_LinkedWorktreeExistingBranchIsDeleted(t *testing.T) {
+	main := branchRepo(t, "af-normal")
+	lw := linkedWorktreeOf(t, main)
+
+	deleted, err := DeleteLocalBranch(lw, "af-normal")
+	require.NoError(t, err)
+	assert.True(t, deleted)
+	assert.False(t, refExists(t, main, "af-normal"))
+}
