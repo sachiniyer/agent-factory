@@ -117,7 +117,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// reads the switched-to project's tasks — not the launch repo's. Its own
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
-		tasks, tasksErr := task.LoadTasksForRepo(repoRoot)
+		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
 		// Fetch the cross-repo session list on the same off-loop poll so the
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event

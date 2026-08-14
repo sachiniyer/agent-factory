@@ -101,6 +101,35 @@ func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
 	assert.True(t, rows[0].Active)
 }
 
+func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
+	h := newTestHome(t)
+	repoRoot := initTestGitRepo(t)
+	h.repoRoot = repoRoot
+	h.repoID = config.RepoIDFromRoot(repoRoot)
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-probes")
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nprintf x >> \"$AF_GIT_PROBE_MARKER\"\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_GIT_PROBE_MARKER", marker)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	_, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	first, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+
+	_, degraded = h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	second, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Len(t, second, len(first), "a successful path resolution must survive the 750ms project poll")
+}
+
 func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
 	h := newTestHome(t)
 	ancestor := initTestGitRepo(t)

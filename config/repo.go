@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // repoIDPattern restricts a repoID to characters that are safe to use as a
@@ -28,6 +30,11 @@ var ErrNotGitRepository = errors.New("not inside a git repository")
 // 12 chars; the cap is loose enough to accommodate future schemes while
 // preventing unbounded allocation in path joins or error messages.
 const maxRepoIDLength = 128
+
+// repoGitWaitDelay bounds Output waiting on a pipe inherited by a helper that
+// outlives a cancelled git process. The normal rev-parse path has no helpers;
+// this is the fail-closed edge for hooks/wrappers around git on a stale mount.
+const repoGitWaitDelay = 100 * time.Millisecond
 
 // ValidateRepoID enforces the shape of a repository identifier before it is
 // used to construct a filesystem path. Returns an error when the id is
@@ -72,8 +79,13 @@ func resolveMainRepoRoot(pathArgs ...string) (string, error) {
 }
 
 func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
+	return resolveRepoRootsContext(context.Background(), pathArgs...)
+}
+
+func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootResolution, error) {
 	// Get the toplevel for the current location
-	topCmd := exec.Command("git", append(pathArgs, "rev-parse", "--show-toplevel")...)
+	topCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--show-toplevel")...)
+	topCmd.WaitDelay = repoGitWaitDelay
 	// The outside-repository classification below parses Git's diagnostic. Force
 	// that one command to the locale the parser expects so a translated stderr
 	// cannot turn ordinary absence into a fatal scope-resolution error (#3134).
@@ -83,7 +95,7 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 		// A bare repository has no toplevel, but it is still a valid identity
 		// root. Accept that direct shape so callers holding the resolved identity
 		// can continue to address repo-scoped state.
-		if bareRoot, bareErr := resolveDirectBareRepoRoot(pathArgs...); bareErr == nil && bareRoot != "" {
+		if bareRoot, bareErr := resolveDirectBareRepoRootContext(ctx, pathArgs...); bareErr == nil && bareRoot != "" {
 			return repoRootResolution{identityRoot: bareRoot, workspaceRoot: bareRoot}, nil
 		}
 		var exitErr *exec.ExitError
@@ -100,9 +112,13 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 	// In the main repo: git-dir == ".git", git-common-dir == ".git"
 	// In a worktree:    git-dir == "<main>/.git/worktrees/<name>",
 	//                   git-common-dir == "<main>/.git"
-	infoCmd := exec.Command("git", "-C", toplevel, "rev-parse", "--git-dir", "--git-common-dir")
+	infoCmd := exec.CommandContext(ctx, "git", "-C", toplevel, "rev-parse", "--git-dir", "--git-common-dir")
+	infoCmd.WaitDelay = repoGitWaitDelay
 	infoOut, err := infoCmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return repoRootResolution{}, ctx.Err()
+		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
 	parts := strings.SplitN(strings.TrimSpace(string(infoOut)), "\n", 2)
@@ -126,7 +142,7 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 		}
 	}
 	commonDir = filepath.Clean(commonDir)
-	bare, err := gitDirIsBare(commonDir)
+	bare, err := gitDirIsBareContext(ctx, commonDir)
 	if err != nil {
 		return repoRootResolution{}, err
 	}
@@ -141,7 +157,8 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 	// commonDir is the main repo's .git directory.
 	// For submodules, git stores the worktree path in core.worktree inside the git dir.
 	// For regular repos, core.worktree is unset and the parent of .git is the repo root.
-	wtCmd := exec.Command("git", "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
+	wtCmd := exec.CommandContext(ctx, "git", "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
+	wtCmd.WaitDelay = repoGitWaitDelay
 	wtOut, err := wtCmd.Output()
 	if err == nil {
 		worktree := strings.TrimSpace(string(wtOut))
@@ -150,17 +167,22 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 		}
 		return repoRootResolution{identityRoot: filepath.Clean(worktree), workspaceRoot: toplevel}, nil
 	}
+	if ctx.Err() != nil {
+		return repoRootResolution{}, ctx.Err()
+	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return repoRootResolution{identityRoot: filepath.Dir(commonDir), workspaceRoot: toplevel}, nil
 }
 
-func resolveDirectBareRepoRoot(pathArgs ...string) (string, error) {
-	bareCmd := exec.Command("git", append(pathArgs, "rev-parse", "--is-bare-repository")...)
+func resolveDirectBareRepoRootContext(ctx context.Context, pathArgs ...string) (string, error) {
+	bareCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--is-bare-repository")...)
+	bareCmd.WaitDelay = repoGitWaitDelay
 	bareOut, err := bareCmd.Output()
 	if err != nil || strings.TrimSpace(string(bareOut)) != "true" {
 		return "", err
 	}
-	dirCmd := exec.Command("git", append(pathArgs, "rev-parse", "--absolute-git-dir")...)
+	dirCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--absolute-git-dir")...)
+	dirCmd.WaitDelay = repoGitWaitDelay
 	dirOut, err := dirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve bare git directory: %w", err)
@@ -168,8 +190,9 @@ func resolveDirectBareRepoRoot(pathArgs ...string) (string, error) {
 	return filepath.Clean(strings.TrimSpace(string(dirOut))), nil
 }
 
-func gitDirIsBare(gitDir string) (bool, error) {
-	cmd := exec.Command("git", "--git-dir", gitDir, "rev-parse", "--is-bare-repository")
+func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "rev-parse", "--is-bare-repository")
+	cmd.WaitDelay = repoGitWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, err)
@@ -269,7 +292,15 @@ func CurrentRepo() (*RepoContext, error) {
 // An ordinary linked worktree resolves to its main worktree. A bare repository
 // keeps the requesting checkout as Root and the bare directory as IdentityRoot.
 func RepoFromPath(path string) (*RepoContext, error) {
-	resolved, err := resolveRepoRoots("-C", path)
+	return RepoFromPathContext(context.Background(), path)
+}
+
+// RepoFromPathContext is RepoFromPath with caller-owned cancellation. Polling
+// and registry scans use it so one unreachable checkout cannot indefinitely
+// block an unrelated live project; admission paths retain RepoFromPath's full
+// error contract and unbounded caller lifetime.
+func RepoFromPathContext(ctx context.Context, path string) (*RepoContext, error) {
+	resolved, err := resolveRepoRootsContext(ctx, "-C", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get git repo root for %s: %w", path, err)
 	}

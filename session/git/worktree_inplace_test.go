@@ -104,6 +104,23 @@ func TestNewGitWorktreeInPlace_BareCloneLinkedWorktree(t *testing.T) {
 	require.NoError(t, err, "cleanup must preserve the user's linked worktree")
 }
 
+// A direct bare repository is an identity/source, not a workspace. Accepting
+// it for --here would launch the agent inside Git's metadata directory and let
+// ordinary workspace operations mutate repository internals.
+func TestNewGitWorktreeInPlace_DirectBareRepoIsNotAWorkspace(t *testing.T) {
+	sandboxHome(t)
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	runGitInPlaceTest(t, parent, "init", source)
+	runGitInPlaceTest(t, source, "commit", "--allow-empty", "-m", "initial")
+	runGitInPlaceTest(t, parent, "clone", "--bare", source, bare)
+
+	_, _, err := NewGitWorktreeInPlace(bare)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "working tree")
+}
+
 // TestNewGitWorktreeInPlace_NotARepo verifies the clear-error contract:
 // --here outside a git repository must fail with an actionable message.
 func TestNewGitWorktreeInPlace_NotARepo(t *testing.T) {

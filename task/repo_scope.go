@@ -51,11 +51,25 @@ type repoResolution struct {
 // unavailable still degrades to the raw path equality this filter used before,
 // never to "no tasks".
 func newRepoScope(repoRoot string) *repoScope {
+	return newRepoScopeWithID(repoRoot, config.RepoIDForPath(repoRoot))
+}
+
+func newRepoScopeWithID(repoRoot, repoID string) *repoScope {
 	return &repoScope{
 		root: repoRoot,
-		id:   config.RepoIDForPath(repoRoot),
+		id:   repoID,
 		seen: map[string]repoResolution{},
 	}
+}
+
+// LoadTasksForKnownRepo is the polling/display loader for a caller that already
+// resolved repoID. Reusing that identity avoids a git probe every 750ms and, in
+// registry mode, an empty ID means there is no active task scope at all.
+func LoadTasksForKnownRepo(repoRoot, repoID string) ([]Task, error) {
+	if repoID == "" {
+		return nil, nil
+	}
+	return loadTasksForScope(newRepoScopeWithID(repoRoot, repoID))
 }
 
 // matches reports both whether t belongs to this display scope and whether that

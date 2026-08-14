@@ -377,6 +377,15 @@ func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
 		hooksCtx:          ctx,
 		hooksCancel:       cancel,
 	}
+	inside, err := g.runGitCommand(worktreeRoot, "rev-parse", "--is-inside-work-tree")
+	if err != nil {
+		cancel()
+		return nil, "", fmt.Errorf("failed to verify the in-place working tree: %w", err)
+	}
+	if strings.TrimSpace(inside) != "true" {
+		cancel()
+		return nil, "", fmt.Errorf("an in-place session requires a checked-out working tree; %s is repository metadata, not a workspace", worktreeRoot)
+	}
 
 	// Record the repo's current branch verbatim ("HEAD" when detached): the
 	// session runs on whatever is checked out, and since Cleanup() never

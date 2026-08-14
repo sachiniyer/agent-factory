@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -17,6 +19,13 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
+
+const projectPathScanTimeout = 150 * time.Millisecond
+
+type projectPathResolution struct {
+	id   string
+	root string
+}
 
 // showProjectPickerOverlay opens the project switcher (#1461): every repo af has
 // seen — the current project, repos with tracked sessions, and the root_agents
@@ -65,27 +74,33 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		count        int
 		inPlace      int
 	}
-	type pathResolution struct {
-		id   string
-		root string
-	}
 	projectsByID := map[string]*projectAggregate{}
-	resolvedPaths := map[string]pathResolution{}
-	resolvePath := func(path string) pathResolution {
+	resolvedPaths := map[string]projectPathResolution{}
+	ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
+	defer cancel()
+	resolvePath := func(path string) projectPathResolution {
 		if path == "" {
-			return pathResolution{}
+			return projectPathResolution{}
 		}
 		if resolved, ok := resolvedPaths[path]; ok {
 			return resolved
 		}
-		resolved := pathResolution{id: config.RepoIDForRecordedRoot(path), root: filepath.Clean(path)}
-		if repo, err := config.RepoFromPath(path); err == nil {
-			resolved = pathResolution{id: repo.ID, root: repo.WorkspacePath()}
+		if resolved, ok := m.projectPathResolutions[path]; ok {
+			resolvedPaths[path] = resolved
+			return resolved
+		}
+		resolved := projectPathResolution{id: config.RepoIDForRecordedRoot(path), root: filepath.Clean(path)}
+		if repo, err := config.RepoFromPathContext(ctx, path); err == nil {
+			resolved = projectPathResolution{id: repo.ID, root: repo.WorkspacePath()}
+			if m.projectPathResolutions == nil {
+				m.projectPathResolutions = make(map[string]projectPathResolution)
+			}
+			m.projectPathResolutions[path] = resolved
 		}
 		resolvedPaths[path] = resolved
 		return resolved
 	}
-	ensure := func(resolved pathResolution, priority int) *projectAggregate {
+	ensure := func(resolved projectPathResolution, priority int) *projectAggregate {
 		if resolved.id == "" || resolved.root == "" {
 			return nil
 		}
@@ -125,7 +140,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		// through Git so a deliberately retained pre-#3358 row cannot be adopted
 		// by an enclosing, unrelated repository merely because its old parent
 		// path now resolves there.
-		identity := pathResolution{
+		identity := projectPathResolution{
 			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
 		}
 		// Path is the requested operational workspace. Prefer it only when Git
@@ -564,7 +579,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
 
-	if tasks, err := task.LoadTasksForRepo(repo.Root); err != nil {
+	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
 		m.automations.TaskPane().SetTasks(nil)

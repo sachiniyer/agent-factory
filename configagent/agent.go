@@ -100,10 +100,15 @@ func Reap(sessionName string) error {
 	return reapViaDaemon(sessionName)
 }
 
-// resolveConfigForRepo is config.ResolveConfig behind a var, so a test can drive
-// the missing-binary path without materializing a repo. Production always uses
-// the real resolver.
-var resolveConfigForRepo = config.ResolveConfig
+// resolveConfigForRepo is the identity-aware repo config resolver behind a var,
+// so a test can drive the missing-binary path without materializing a repo.
+var resolveConfigForRepo = func(path string) (*config.ResolvedConfig, error) {
+	repo, err := config.RepoFromPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return config.ResolveConfigForRepo(repo)
+}
 
 // Spawn starts the config agent and returns the tmux session name AND the
 // absolute socket path to attach to.

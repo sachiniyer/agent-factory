@@ -1,13 +1,20 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
+)
+
+const (
+	registeredProjectProbeTimeout = 250 * time.Millisecond
+	registeredProjectScanTimeout  = time.Second
 )
 
 // ProjectConfig is the machine-local, per-project personal override layer
@@ -242,13 +249,28 @@ func projectForRepo(repo *RepoContext) (Project, bool, error) {
 			return project, true, nil
 		}
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+	defer cancel()
 	for _, project := range projects {
-		candidate, err := RepoFromPath(project.Root)
-		if err == nil && candidate.ID == repo.ID {
+		candidateID, ok := registeredProjectRepoID(ctx, project.Root)
+		if ok && candidateID == repo.ID {
 			return project, true, nil
+		}
+		if ctx.Err() != nil {
+			break
 		}
 	}
 	return Project{}, false, nil
+}
+
+func registeredProjectRepoID(parent context.Context, root string) (string, bool) {
+	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
+	defer cancel()
+	repo, err := RepoFromPathContext(ctx, root)
+	if err != nil {
+		return "", false
+	}
+	return repo.ID, true
 }
 
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a

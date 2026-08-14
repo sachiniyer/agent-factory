@@ -167,19 +167,29 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 // unknown project archives nothing, drops no opt-in or registration, and returns
 // a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
+	target, err := resolveDeleteProjectTarget(req)
+	if err != nil {
+		return DeleteProjectResult{RepoID: target.repoID}, err
+	}
 	m.taskTargetMu.Lock()
 	defer m.taskTargetMu.Unlock()
-	return m.deleteProject(req)
+	return m.deleteProject(target)
 }
 
-// deleteProject performs DeleteProject while taskTargetMu is already held from
-// blocker preflight through the final session mutation.
-func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
+type deleteProjectTarget struct {
+	repoID   string
+	repoPath string
+}
+
+// resolveDeleteProjectTarget performs every filesystem/Git selector probe
+// before DeleteProject takes taskTargetMu. A stale registry root must not hold
+// the cross-task lifecycle lock while Git waits on an unrelated mount.
+func resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
 	if repoID == "" {
 		if repoPath == "" {
-			return DeleteProjectResult{}, fmt.Errorf("delete project: repo_id or repo_path is required")
+			return deleteProjectTarget{}, fmt.Errorf("delete project: repo_id or repo_path is required")
 		}
 		// Expand a leading ~ BEFORE canonicalizing: git (RepoFromPath) does not do
 		// tilde expansion — the shell normally would — so a literal "~/repo" request
@@ -198,7 +208,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		var err error
 		repoPath, err = registeredProjectRootForRepoID(repoID)
 		if err != nil {
-			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
@@ -207,9 +217,17 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		var pathRepoID string
 		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
 		if pathRepoID != repoID {
-			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
 	}
+	return deleteProjectTarget{repoID: repoID, repoPath: repoPath}, nil
+}
+
+// deleteProject performs DeleteProject while taskTargetMu is already held from
+// blocker preflight through the final session mutation.
+func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResult, error) {
+	repoID := resolved.repoID
+	repoPath := resolved.repoPath
 	result := DeleteProjectResult{RepoID: repoID}
 
 	// FAIL CLOSED, before mutating ANY state, if a session for this repo is still being

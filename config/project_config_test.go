@@ -2,8 +2,10 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -190,4 +192,56 @@ func TestProjectForRootUnregisteredIsNotFound(t *testing.T) {
 	_, found, err := projectForRoot(repoRoot)
 	require.NoError(t, err)
 	require.False(t, found, "an unregistered repo has no personal layer")
+}
+
+func TestProjectForRepoBoundsUnrelatedRegistryIdentityProbe(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--allow-empty", "-m", "initial")
+	bare := filepath.Join(base, "backing.git")
+	first := filepath.Join(base, "first")
+	second := filepath.Join(base, "second")
+	runProjectRegistryGit(t, base, "clone", "--bare", seed, bare)
+	runProjectRegistryGit(t, bare, "worktree", "add", first)
+	runProjectRegistryGit(t, bare, "worktree", "add", "-b", "second", second)
+	registered, err := RegisterProject(first)
+	require.NoError(t, err)
+	target, err := RepoFromPath(second)
+	require.NoError(t, err)
+
+	registryDir, err := projectRegistryDir()
+	require.NoError(t, err)
+	staleRoot := filepath.Join(base, "stalled")
+	require.NoError(t, os.MkdirAll(staleRoot, 0o755))
+	stale := projectRecord{
+		SchemaVersion: projectRegistrySchemaVersion,
+		ID:            "prj_00000000000000000000000000000000",
+		CheckoutID:    "chk_00000000000000000000000000000000",
+		Root:          staleRoot,
+		CheckoutRoot:  staleRoot,
+		RelativeRoot:  ".",
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(registryDir, stale.ID), 0o755))
+	require.NoError(t, writeProjectRecord(registryDir, stale))
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_ROOT\"*) /bin/sleep 3; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_ROOT", staleRoot)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	started := time.Now()
+	got, found, err := projectForRepo(target)
+	elapsed := time.Since(started)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, registered.ID, got.ID)
+	assert.Less(t, elapsed, 2*time.Second,
+		"one unrelated stalled registry root must not block config resolution for a healthy sibling")
 }
