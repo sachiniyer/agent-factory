@@ -38,7 +38,7 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 		return
 	}
 	m.clearRootClaudeTranscriptWarning(st)
-	if state.RecordedExists || !state.Latest.HasID() || strings.EqualFold(state.Latest.ID, recorded.ID) {
+	if state.RecordedExists || !state.Resume.HasID() || strings.EqualFold(state.Resume.ID, recorded.ID) {
 		return
 	}
 
@@ -58,7 +58,7 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 	if status == session.Dead || status == session.Lost || status == session.Archived {
 		return
 	}
-	if !inst.SetAgentConversation(state.Latest) {
+	if !inst.SetAgentConversation(state.Resume) {
 		return
 	}
 
@@ -73,11 +73,11 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, in
 	if err != nil {
 		inst.SetAgentConversation(recorded)
 		log.WarningLog.Printf("root agent for %s could not persist replacement claude conversation %s: %v",
-			repoRoot, state.Latest.ID, err)
+			repoRoot, state.Resume.ID, err)
 		return
 	}
 	log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; persisted newest on-disk project conversation %s instead",
-		repoRoot, recorded.ID, state.Latest.ID)
+		repoRoot, recorded.ID, state.Resume.ID)
 }
 
 func (m *Manager) rootClaudeTranscriptInspectionDue(st *rootEnsureState) bool {
