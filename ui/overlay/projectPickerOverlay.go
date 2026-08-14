@@ -267,14 +267,14 @@ func (p *ProjectPickerOverlay) Render() string {
 	if avail < 1 {
 		avail = 1
 	}
-	start, end := p.visibleWindow(avail)
-	if start > 0 {
+	start, end, showAbove, showBelow := p.windowForAvailableRows(avail)
+	if showAbove {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
-	if end < p.rowCount() {
+	if showBelow {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
@@ -286,6 +286,35 @@ func (p *ProjectPickerOverlay) Render() string {
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
 
 	return finishRender(style, fit, textRect, lines)
+}
+
+// windowForAvailableRows mirrors searchOverlay's budgeting discipline: shrink
+// the data window until the rows PLUS their scroll indicators fit within
+// available, so an indicator can never push the frame past SetMaxSize —
+// PlaceOverlay returns an oversized foreground uncomposited, which drops the
+// whole TUI background for one extra row (#3331 review). When even one row
+// plus indicators cannot fit, show the single selected row and let the
+// indicators go: a cramped-but-composited frame beats a full-screen takeover.
+func (p *ProjectPickerOverlay) windowForAvailableRows(available int) (startIdx, endIdx int, showAbove, showBelow bool) {
+	rows := available
+	for rows > 0 {
+		startIdx, endIdx = p.visibleWindow(rows)
+		showAbove = startIdx > 0
+		showBelow = endIdx < p.rowCount()
+		need := endIdx - startIdx
+		if showAbove {
+			need++
+		}
+		if showBelow {
+			need++
+		}
+		if need <= available {
+			return startIdx, endIdx, showAbove, showBelow
+		}
+		rows--
+	}
+	startIdx, endIdx = p.visibleWindow(1)
+	return startIdx, endIdx, false, false
 }
 
 // renderRow renders one navigable row: a project ("name (N)") or the trailing
