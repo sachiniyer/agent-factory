@@ -15,7 +15,7 @@ import (
 // recoverable. It replaces the id only after its own transcript disappears;
 // while that file exists, a newer project transcript may belong to another
 // Claude process and is not evidence about this root.
-func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, rootAgent config.RootAgent, inst *session.Instance, st *rootEnsureState) {
+func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, inst *session.Instance, st *rootEnsureState) {
 	recorded := inst.AgentConversation()
 	if recorded.Agent != tmux.ProgramClaude || !recorded.HasID() {
 		return
@@ -23,11 +23,11 @@ func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot string, ro
 	if !m.rootClaudeTranscriptInspectionDue(st) {
 		return
 	}
-	program, err := rootAgentTranscriptProgram(repoRoot, rootAgent)
-	if err != nil {
+	program := inst.ResolvedPaneProgram()
+	if strings.TrimSpace(program) == "" {
 		m.logRootClaudeTranscriptWarning(st,
-			"root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v",
-			repoRoot, recorded.ID, err)
+			"root agent for %s could not verify its recorded claude conversation %s against the project transcript store: live pane launch command is unavailable",
+			repoRoot, recorded.ID)
 		return
 	}
 	state, err := session.InspectClaudeProjectConversations(program, repoRoot, recorded)

@@ -336,6 +336,41 @@ func TestEnsureRootAgentsUsesResolvedProgramOverrideForClaudeTranscripts(t *test
 		"transcript inspection must use the same program_overrides command as launch")
 }
 
+func TestEnsureRootAgentsRefreshUsesTheLiveClaudeCommandAfterConfigChanges(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	liveConfigDir := t.TempDir()
+	newConfigDir := t.TempDir()
+	repoPath := setupControlRepo(t)
+
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude})
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramClaude: "CLAUDE_CONFIG_DIR=" + liveConfigDir + " claude",
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+	seen := installOptionsRecordingBackend(t)
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	require.Len(t, *seen, 1)
+	root := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, root)
+	seedRootConversation(t, root)
+	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle,
+		"CLAUDE_CONFIG_DIR="+liveConfigDir+" claude"))
+
+	const liveReplacementID = "5299e00d-1111-4222-8333-f7045e07a242"
+	const newConfigID = "a399e00d-1111-4222-8333-f7045e07a242"
+	writeRootClaudeTranscript(t, liveConfigDir, repoPath, liveReplacementID)
+	writeRootClaudeTranscript(t, newConfigDir, repoPath, newConfigID)
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "CLAUDE_CONFIG_DIR=" + newConfigDir + " claude"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	manager.EnsureRootAgents()
+
+	require.Equal(t, liveReplacementID, root.AgentConversation().ID,
+		"a live root must inspect the immutable pane command, not a changed program_overrides value")
+}
+
 // A transcript can disappear after the preflight stat but before Claude has
 // finished its resume attempt. Re-check the store on that failure and consume
 // a newly rotated transcript before the fresh fallback.
@@ -436,6 +471,7 @@ func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testi
 	root := findRootInstance(t, manager, repoPath)
 	require.NotNil(t, root)
 	seedRootConversation(t, root)
+	root.SetTmuxSession(tmux.NewTmuxSession(session.RootSessionTitle, cfg.RootAgents[repoPath].Program))
 
 	var warning bytes.Buffer
 	previousWarning := log.WarningLog.Writer()

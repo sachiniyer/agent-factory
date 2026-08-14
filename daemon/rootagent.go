@@ -455,8 +455,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
-			m.refreshRootClaudeConversation(repo.ID, key, repo.Root,
-				resolution.RootAgent, inst, st)
+			m.refreshRootClaudeConversation(repo.ID, key, repo.Root, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
