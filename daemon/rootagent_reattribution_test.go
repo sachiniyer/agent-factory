@@ -588,7 +588,11 @@ func TestDeleteTranslatesReattributedIdentity(t *testing.T) {
 		t.Fatalf("git worktree add: %v", err)
 	}
 	project := registerTestProject(t, repoPath)
-	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/translated\"")
+	// Disabled on purpose: the pin is the identity translation, and a live
+	// fake-backend root would drag in archive-vs-kill classification that
+	// depends on launch state the recording backend never reaches. The
+	// re-attribution alias is recorded regardless of the enable decision.
+	writePersonalRootAgent(t, project.ID, "enabled = false")
 	rewriteRecordRoot(t, project.ID, worktree)
 	realID := repoID(t, repoPath)
 
@@ -604,8 +608,11 @@ func TestDeleteTranslatesReattributedIdentity(t *testing.T) {
 		t.Fatalf("restore parent: %v", err)
 	}
 	manager.EnsureRootAgents()
-	if len(*seen) != 1 {
-		t.Fatalf("setup: the re-attributed enabled root must be created, got %d creates", len(*seen))
+	if len(*seen) != 0 {
+		t.Fatalf("setup: the disabled project must re-attribute without a create, got %d creates", len(*seen))
+	}
+	if layers := manager.rootAgentLayers.Load(); layers.reattributedFrom[realID] == "" {
+		t.Fatalf("setup: re-attribution must record the identity alias")
 	}
 
 	// The mount vanishes again, and the user deletes by the recorded path.
@@ -655,9 +662,18 @@ func TestMarkerReadFailureIsNotAMismatch(t *testing.T) {
 	}
 	// The checkout is back — the ORIGINAL — but its marker file is
 	// unreadable.
-	markers, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
-	if err != nil || len(markers) != 1 {
-		t.Fatalf("expected exactly one checkout marker, got %v (err %v)", markers, err)
+	candidates, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
+	if err != nil {
+		t.Fatalf("glob markers: %v", err)
+	}
+	var markers []string
+	for _, m := range candidates {
+		if !strings.HasSuffix(m, ".lock") {
+			markers = append(markers, m)
+		}
+	}
+	if len(markers) != 1 {
+		t.Fatalf("expected exactly one checkout marker, got %v", candidates)
 	}
 	if err := os.Chmod(markers[0], 0o000); err != nil {
 		t.Fatalf("chmod marker: %v", err)
