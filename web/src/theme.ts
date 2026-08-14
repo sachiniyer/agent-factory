@@ -487,15 +487,12 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     }
     return best;
   };
-  const bright = (color: string): string => {
-    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
-      for (let step = 18; step <= 100; step++) {
-        const candidate = mix(color, endpoint, step / 100);
-        if (candidate !== color.toUpperCase() && passes(candidate, [canvas], 4.5)) return candidate;
-      }
-    }
-    return color.toUpperCase();
-  };
+  // A normal colour may sit just inside AA on a mid-luminance canvas, leaving
+  // only a narrow band of distinct readable neighbours. The coarse 18% bright
+  // shift skipped that band and collapsed back onto the normal role. Reuse the
+  // exhaustive one-channel-step search so custom chromatic pairs retain their
+  // intensity distinction whenever the accepted normal colour is readable.
+  const bright = (color: string): string => ansiDistinct(color, [color]);
   // ANSI names describe terminal roles, not permission to disappear into the
   // canvas. Use the already-accepted primary/tertiary text endpoints, swapping
   // their intensity by mode so black and white both remain AA on the terminal.

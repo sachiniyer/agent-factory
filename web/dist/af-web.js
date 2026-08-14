@@ -7701,15 +7701,7 @@ function deriveTheme(input, mode) {
     }
     return best;
   };
-  const bright = (color) => {
-    for (const endpoint of dark ? [WHITE, BLACK] : [BLACK, WHITE]) {
-      for (let step = 18; step <= 100; step++) {
-        const candidate = mix(color, endpoint, step / 100);
-        if (candidate !== color.toUpperCase() && passes(candidate, [canvas], 4.5)) return candidate;
-      }
-    }
-    return color.toUpperCase();
-  };
+  const bright = (color) => ansiDistinct(color, [color]);
   const ansiBlack = dark ? text3 : text;
   const ansiWhite = ansiDistinct(dark ? text : text3, [ansiBlack]);
   const brightBlack = ansiDistinct(ansiBlack, [ansiBlack, ansiWhite]);
@@ -15136,7 +15128,7 @@ async function fetchRegisteredProjects(tok) {
     return [];
   }
 }
-function disconnect(loginError = null) {
+function disconnect(loginError = null, authRequired = store.get().authRequired) {
   connectionGate.invalidate();
   stopStream();
   closeModal();
@@ -15149,6 +15141,7 @@ function disconnect(loginError = null) {
     phase: "login",
     view: "sessions",
     selectedProject: null,
+    authRequired,
     connecting: false,
     loginError,
     sessions: [],
@@ -15897,7 +15890,7 @@ async function refreshDaemonPalette(tok) {
     const status = error instanceof ApiError ? error.status : 0;
     const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
     if (plan.reauthenticate) {
-      disconnect(describeError(error));
+      disconnect(describeError(error), true);
       return;
     }
     if (plan.reset) {

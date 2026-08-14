@@ -1111,6 +1111,45 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   await expect(p.locator(".af-app")).toHaveCount(0);
 
   await ctx.close();
+
+  // The same decision can change while a tokenless client is already open: a
+  // live config apply may begin requiring tokens and publish theme.changed. The
+  // resulting palette 401 must return to a paste-token form, not preserve the
+  // stale auth_required=false choice and offer an empty-credential retry loop.
+  const transitionCtx = await browser.newContext();
+  const live = await transitionCtx.newPage();
+  let rejectTheme = false;
+  await live.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket = socket;
+        }
+        return socket;
+      },
+    });
+  });
+  await live.route("**/v1/GetTheme", (route) => {
+    if (!rejectTheme) return route.continue();
+    return route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: failureBody("token required after live config apply"),
+    });
+  });
+  await openTokenless(live);
+  rejectTheme = true;
+  await live.evaluate(() => {
+    const socket = (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect(live.locator("#af-token")).toBeVisible();
+  await expect(live.locator(".af-login-form button[type=submit]")).toContainText("Connect");
+  await expect(live.locator(".af-app")).toHaveCount(0);
+  await transitionCtx.close();
 });
 
 test("a failed login renders the daemon's real message, never [object Object]", async ({ browser }) => {

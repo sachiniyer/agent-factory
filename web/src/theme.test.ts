@@ -327,7 +327,7 @@ test("a surface system with no shared fill foreground falls back coherently", ()
   }
 });
 
-test("custom ANSI black and white endpoints remain readable and distinct", () => {
+test("custom ANSI normal and bright roles remain readable and distinct", () => {
   const { xterm } = deriveTheme(
     {
       ...NORD_THEME,
@@ -341,11 +341,23 @@ test("custom ANSI black and white endpoints remain readable and distinct", () =>
     },
     "dark",
   );
-  const endpoints = [xterm.black!, xterm.brightBlack!, xterm.white!, xterm.brightWhite!];
-
-  assert.equal(new Set(endpoints).size, endpoints.length, `ANSI endpoints collapsed: ${endpoints.join(", ")}`);
-  for (const endpoint of endpoints) {
-    assert.ok(contrastRatio(endpoint, xterm.background!) >= 4.5, `${endpoint} must be AA on ${xterm.background}`);
+  for (const [normal, bright] of [
+    ["black", "brightBlack"],
+    ["red", "brightRed"],
+    ["green", "brightGreen"],
+    ["yellow", "brightYellow"],
+    ["blue", "brightBlue"],
+    ["magenta", "brightMagenta"],
+    ["cyan", "brightCyan"],
+    ["white", "brightWhite"],
+  ] as const) {
+    assert.notEqual(xterm[normal], xterm[bright], `${normal} and ${bright} collapsed`);
+    for (const name of [normal, bright]) {
+      assert.ok(
+        contrastRatio(xterm[name]!, xterm.background!) >= 4.5,
+        `${name} ${xterm[name]} must be AA on ${xterm.background}`,
+      );
+    }
   }
 });
 

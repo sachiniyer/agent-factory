@@ -431,7 +431,7 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  terminal, and returns to login. This is the "forget the saved token" affordance
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
-function disconnect(loginError: string | null = null): void {
+function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
   connectionGate.invalidate();
   stopStream();
   closeModal();
@@ -444,6 +444,7 @@ function disconnect(loginError: string | null = null): void {
     phase: "login",
     view: "sessions",
     selectedProject: null,
+    authRequired,
     connecting: false,
     loginError,
     sessions: [],
@@ -1765,7 +1766,7 @@ async function refreshDaemonPalette(tok: string): Promise<void> {
       // Reuse the one credential-rejection path: stop every authenticated stream,
       // forget the stored bearer, reset the palette, and show the login surface.
       // Retrying the same rejected token once a second can never recover.
-      disconnect(describeError(error));
+      disconnect(describeError(error), true);
       return;
     }
     if (plan.reset) {
