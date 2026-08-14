@@ -94,7 +94,10 @@ func (i *Instance) AddShellTab() (*Tab, error) {
 	// for the session to appear, which must not block other readers of i.mu. The
 	// tmux name was resolved above against the live sibling sessions, so it is
 	// collision-free and restorable by exact name.
-	shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+	shellTmux, err := agentTmux.NewShellSiblingSession(tmuxName, defaultShell())
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare shell tab: %w", err)
+	}
 	if err := shellTmux.Start(worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to start shell tab: %w", err)
 	}

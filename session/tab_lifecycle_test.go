@@ -121,6 +121,21 @@ func TestAddShellTab_AppendsAndNamesUniquely(t *testing.T) {
 		"each shell tab must have a unique tmux session name")
 }
 
+func TestAddShellTab_UsesAccountScopedShellLaunch(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("SHELL", "/bin/sh")
+
+	inst := startedMockInstance(t, "af_tabs_account_shell")
+	inst.Account = "work"
+	inst.Tabs[0].tmux.SetAccountForAgent("claude", "work")
+
+	tab, err := inst.AddShellTab()
+	require.NoError(t, err)
+	require.Equal(t, "/bin/sh -i", tab.tmux.Program(),
+		"an account-scoped terminal must not source startup files that can replace its selected identity")
+}
+
 // TestCloseTab_RemovesAndProtectsAgent verifies CloseTab removes a shell tab and
 // kills its session, but refuses to close the agent tab (index 0) or any
 // out-of-range index.

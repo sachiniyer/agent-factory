@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -201,5 +202,80 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		if slices.Contains(names, denied) {
 			t.Fatalf("pane environment retained disallowed variable %s", denied)
 		}
+	}
+}
+
+// TestAccountScopedShellTabInheritsSelectedCredentials is the #3340 regression:
+// a shell tab is a sibling tmux session, but its credential identity belongs to
+// the parent agent session. The shell must receive the selected account root and
+// must not receive the daemon's ambient API key.
+func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
+	testguard.IsolateTmux(t)
+	forceNewSessionEnvMarkers(t, true)
+
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")
+	if err != nil {
+		t.Fatalf("register fixture account: %v", err)
+	}
+	ambientHome := filepath.Join(home, "ambient-codex")
+	t.Setenv("CODEX_HOME", ambientHome)
+	t.Setenv("OPENAI_API_KEY", "ambient-must-not-reach-tab")
+
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, ProgramCodex)
+	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+		t.Fatalf("write agent fixture: %v", err)
+	}
+	reportPath := filepath.Join(dir, "shell-environment")
+	shellPath := filepath.Join(dir, "sh")
+	shellScript := "#!/bin/sh\n" +
+		"printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "\n" +
+		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
+		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n" +
+		"while :; do sleep 1; done\n"
+	if err := os.WriteFile(shellPath, []byte(shellScript), 0o700); err != nil {
+		t.Fatalf("write shell fixture: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	agent := NewTmuxSession("account-tab-parent", ProgramCodex)
+	agent.SetAccountForAgent(ProgramCodex, "work")
+	if err := agent.Start(dir); err != nil {
+		t.Fatalf("start account-scoped parent session: %v", err)
+	}
+	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
+
+	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", shellPath)
+	if err != nil {
+		t.Fatalf("prepare shell tab: %v", err)
+	}
+	if err := shell.Start(dir); err != nil {
+		t.Fatalf("open shell tab: %v", err)
+	}
+	t.Cleanup(func() { _, _ = shell.CloseAndWaitForPaneExit() })
+
+	deadline := time.Now().Add(3 * time.Second)
+	var report []byte
+	for time.Now().Before(deadline) {
+		report, err = os.ReadFile(reportPath)
+		if err == nil && len(report) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("shell tab did not report its environment: %v", err)
+	}
+	got := string(report)
+	if !strings.Contains(got, "CODEX_HOME="+accountDir+"\n") {
+		t.Fatalf("shell tab did not inherit selected account root; report:\n%s", got)
+	}
+	if strings.Contains(got, "CODEX_HOME="+ambientHome+"\n") {
+		t.Fatalf("shell tab inherited ambient credential root; report:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=absent\n") {
+		t.Fatalf("shell tab inherited ambient API credentials; report:\n%s", got)
 	}
 }

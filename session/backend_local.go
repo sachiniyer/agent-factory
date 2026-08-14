@@ -14,47 +14,6 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
-func configuredSessionEnvPassthrough(explicit []string) []string {
-	names := append([]string(nil), explicit...)
-	if cfg, err := config.LoadConfig(); err == nil && cfg != nil {
-		names = append(names, cfg.SessionEnvPassthrough...)
-	}
-	normalized, _ := sessionenv.NormalizeExtraNames(names)
-	return normalized
-}
-
-func sessionEnvPassthroughForInstance(i *Instance) []string {
-	i.mu.RLock()
-	explicit := append([]string(nil), i.sessionEnvPassthrough...)
-	i.mu.RUnlock()
-	if cfg := resolveConfigForInstance(i); cfg != nil {
-		explicit = append(explicit, cfg.SessionEnvPassthrough...)
-	}
-	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
-	return normalized
-}
-
-func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
-	if err := tmuxSession.SetEnvPassthrough(sessionEnvPassthroughForInstance(i)); err != nil {
-		return fmt.Errorf("invalid session environment pass-through: %w", err)
-	}
-	// Refreshed alongside the pass-through, on the same paths, so a restored or
-	// re-provisioned session carries the account it was created with rather than
-	// quietly reverting to the ambient identity (#3051).
-	tmuxSession.SetAccountForAgent(sessionenv.AgentForCommand(i.AgentProgram()), i.Account)
-	return nil
-}
-
-func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
-	if worktree == nil {
-		return nil
-	}
-	if err := worktree.SetHookEnvironment(sessionEnvPassthroughForInstance(i)); err != nil {
-		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
-	}
-	return nil
-}
-
 // LocalBackend implements Backend using local tmux sessions and git worktrees.
 type LocalBackend struct{}
 
@@ -697,6 +656,10 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 			continue
 		}
 		if tab.tmux != nil {
+			if err := refreshTabSessionEnvironment(i, tab); err != nil {
+				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
+				continue
+			}
 			if err := tab.tmux.Restore(worktreePath); err != nil {
 				log.WarningLog.Printf("restore tab %q for %q failed: %v", tab.Name, i.Title, err)
 			}
@@ -768,7 +731,11 @@ func (b *LocalBackend) setupTabs(i *Instance) {
 			reserved[token] = true
 			tmuxName = prefix + token
 		}
-		shellTmux := agentTmux.NewSiblingSession(tmuxName, defaultShell())
+		shellTmux, err := agentTmux.NewShellSiblingSession(tmuxName, defaultShell())
+		if err != nil {
+			log.WarningLog.Printf("prepare shell tab %q for %q failed: %v", name, i.Title, err)
+			continue
+		}
 		if err := shellTmux.Start(worktreePath); err != nil {
 			log.WarningLog.Printf("start shell tab %q for %q failed: %v", name, i.Title, err)
 			continue

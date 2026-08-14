@@ -153,6 +153,38 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 	}
 }
 
+func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
+	forceSessionEnvExecutable(t, "/opt/af")
+	forceNewSessionEnvMarkers(t, true)
+
+	agent := NewTmuxSession("account-parent", "codex")
+	agent.SetAccountForAgent("codex", "work")
+
+	process := agent.NewSiblingSession("account-process", "make -j4")
+	wrapped, _, _, err := process.launchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
+		t.Fatalf("process sibling launch is not scoped to the parent account: %q", wrapped)
+	}
+
+	shell, err := agent.NewShellSiblingSession("account-shell", "/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, _, _, err = shell.launchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wrapped, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(wrapped, "work") {
+		t.Fatalf("shell sibling launch is not scoped to the parent account: %q", wrapped)
+	}
+	if shell.Program() != "/bin/sh -i" {
+		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
+	}
+}
+
 func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	t.Setenv("AWS_ACCESS_KEY_ID", "fixture")

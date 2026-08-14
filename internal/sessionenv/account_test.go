@@ -80,6 +80,48 @@ func TestApplyAccount_ReplacesRatherThanAppendsTheConfigDir(t *testing.T) {
 	require.Equal(t, "/afhome/accounts/codex/personal", dir)
 }
 
+func TestApplyAccountEnvironment_ScopesSiblingAndRemovesAmbientIdentity(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	scoped, err := ApplyAccountEnvironment([]string{
+		"PATH=/usr/bin",
+		"CODEX_HOME=/home/op/.codex",
+		"OPENAI_API_KEY=sk-ambient",
+	}, "make -j4", account)
+	require.NoError(t, err)
+	require.Contains(t, scoped, "CODEX_HOME="+account.Dir)
+	_, leaked := envValue(scoped, "OPENAI_API_KEY")
+	require.False(t, leaked, "a process sibling must not inherit the ambient API identity")
+}
+
+func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "OPENAI_API_KEY=other make", account)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sets an identity variable")
+}
+
+func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for shell, want := range map[string]string{
+		"/bin/bash": "/bin/bash --noprofile --norc -i",
+		"/bin/fish": "/bin/fish --no-config --interactive",
+		"/bin/zsh":  "/bin/zsh --no-rcs --no-globalrcs -i",
+	} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err)
+		require.Equal(t, want, command)
+
+		scoped, err := ApplyAccountEnvironment([]string{
+			"PATH=/bin",
+			"ENV=/tmp/ambient-shrc",
+			"BASH_ENV=/tmp/ambient-bashrc",
+			"ZDOTDIR=/tmp/ambient-zdotdir",
+		}, command, account)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+	}
+}
+
 // Two sessions on different accounts must get different roots. This is the
 // assertion an allowlist implementation fails: passthrough carries the daemon's
 // ONE value to every session, so both would be identical while each looked
