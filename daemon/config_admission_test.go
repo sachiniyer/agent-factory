@@ -83,6 +83,42 @@ func (s *quiescingConfigControl) SetConfigValue(_ SetConfigValueRequest, _ *SetC
 	return errDaemonQuiescing()
 }
 
+// refusingThemeControl is reachable and answers Ping, but refuses the palette
+// mutation. RequestApplyTheme must not flatten this into the same benign outcome
+// as a failed dial or an old daemon without the method.
+type refusingThemeControl struct{}
+
+func (s *refusingThemeControl) ApplyTheme(_ ApplyThemeRequest, _ *ApplyThemeResponse) error {
+	return errDaemonQuiescing()
+}
+
+func (s *refusingThemeControl) Ping(_ PingRequest, resp *PingResponse) error {
+	resp.Phase = DaemonPhaseQuiescing
+	return nil
+}
+
+func TestRequestApplyThemeDistinguishesAbsenceSkewAndRefusal(t *testing.T) {
+	t.Run("no daemon is a later-start apply", func(t *testing.T) {
+		configClientHome(t)
+		_, err := RequestApplyTheme()
+		require.NoError(t, err)
+	})
+
+	t.Run("old daemon is a later-restart apply", func(t *testing.T) {
+		configClientHome(t)
+		serveControlStub(t, &legacyConfigControl{applied: make(chan struct{})})
+		_, err := RequestApplyTheme()
+		require.NoError(t, err)
+	})
+
+	t.Run("reachable refusal is final", func(t *testing.T) {
+		configClientHome(t)
+		serveControlStub(t, &refusingThemeControl{})
+		_, err := RequestApplyTheme()
+		require.True(t, IsDaemonQuiescingErr(err), "want the daemon's own refusal, got: %v", err)
+	})
+}
+
 // TestSetGlobalConfigValueRefusalIsFinal pins the client half of #3231: once a
 // daemon has answered the dial, its refusal is the outcome — the client must
 // not fall back to the local write it would have used with no daemon, because
