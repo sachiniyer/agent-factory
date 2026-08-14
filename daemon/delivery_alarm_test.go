@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -109,6 +110,42 @@ func TestDeliveryAlarms_LoadFailedQueueReportsPendingUnknown(t *testing.T) {
 	require.True(t, alarms[0].PendingUnknown,
 		"an unloadable queue must project pending-unknown, not a fabricated zero")
 	require.Zero(t, alarms[0].Pending)
+}
+
+// TestDeliveryAlarms_SnapshotHealEndsLoadOnlyAlarm pins the heal-observation
+// contract (#3242 review round 4): when the snapshot's own pendingState retry
+// enumerates the queue again, a load-only alarm run must end with it — not
+// persist as a false "0 pending" delivery alarm until the drainer's backoff
+// (up to its cap) happens to wake and clear it.
+func TestDeliveryAlarms_SnapshotHealEndsLoadOnlyAlarm(t *testing.T) {
+	s := newWatcherSupervisor()
+	now := time.Now()
+	// Let the snapshot's throttled retry attempt real I/O immediately.
+	oldInterval := eventQueueLoadRetryInterval
+	eventQueueLoadRetryInterval = time.Nanosecond
+	t.Cleanup(func() { eventQueueLoadRetryInterval = oldInterval })
+	w := registerFailingWatcher(s, "healed", "repo1", "root", time.Time{}, 0, "")
+
+	queueDir := t.TempDir()
+	seed := newEventQueue(queueDir, "healed")
+	require.NoError(t, seed.enqueue("event"))
+	denyAccess(t, seed.path, seed.path, 0o644)
+	w.queue = newEventQueue(queueDir, "healed")
+
+	// The drain loop opened the load-only run and is now asleep in its
+	// backoff; storage heals before the snapshot fires.
+	w.noteQueueUnreadable(errors.New("event-queue state unknown after a failed load"))
+	w.mu.Lock()
+	w.loadFailSince = now.Add(-watcherDeliveryAlarmThreshold - time.Minute)
+	w.mu.Unlock()
+	require.NoError(t, os.Chmod(seed.path, 0o644))
+
+	require.Empty(t, s.deliveryAlarms("repo1", now),
+		"the snapshot's own retry enumerated the queue; a load-only alarm must end rather than project a false alarm")
+	w.mu.Lock()
+	cleared := w.loadFailSince.IsZero()
+	w.mu.Unlock()
+	require.True(t, cleared, "whichever observer sees the heal first ends the run — here, the snapshot")
 }
 
 // TestQueueUnreadableAlarm_SurvivesLiveDeliverySuccess pins the two-run split
