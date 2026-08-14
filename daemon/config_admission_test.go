@@ -108,21 +108,47 @@ func TestSetGlobalConfigValueRefusalIsFinal(t *testing.T) {
 // journal still proves a live transaction, and the local-write fallback must
 // refuse rather than mutate config the candidate already validated against.
 func TestSetGlobalConfigValueRefusesFallbackDuringLiveUpgrade(t *testing.T) {
-	home := configClientHome(t)
-	inProgress := &upgradetxn.UpgradeInProgressError{
-		TransactionID: "txn-cfg", ToVersion: "1.0.256", Phase: upgradetxn.PhaseCandidateValidating,
-		Deadline: time.Now().Add(time.Minute),
-	}
 	prev := runEntrypointGate
 	t.Cleanup(func() { runEntrypointGate = prev })
-	runEntrypointGate = func(context.Context, string, bool) error { return inProgress }
 
-	_, err := SetGlobalConfigValue("default_program", "codex")
-	var typed *upgradetxn.UpgradeInProgressError
-	require.ErrorAs(t, err, &typed, "a live upgrade must refuse the daemonless fallback")
+	tests := []struct {
+		name      string
+		phase     upgradetxn.Phase
+		wantCause string
+		wantRetry string
+	}{
+		{
+			name:      "forward upgrade",
+			phase:     upgradetxn.PhaseCandidateValidating,
+			wantCause: "config change refused during daemon upgrade handoff",
+			wantRetry: "retry after the upgrade finishes",
+		},
+		{
+			name:      "rollback restore",
+			phase:     upgradetxn.PhasePreviousValidating,
+			wantCause: "config change refused while rollback restores the previous daemon",
+			wantRetry: "retry after rollback recovery finishes",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := configClientHome(t)
+			inProgress := &upgradetxn.UpgradeInProgressError{
+				TransactionID: "txn-cfg", ToVersion: "1.0.256", Phase: tc.phase,
+				Deadline: time.Now().Add(time.Minute),
+			}
+			runEntrypointGate = func(context.Context, string, bool) error { return inProgress }
 
-	_, statErr := os.Stat(filepath.Join(home, config.TomlConfigFileName))
-	require.True(t, os.IsNotExist(statErr), "the refused fallback must write nothing")
+			_, err := SetGlobalConfigValue("default_program", "codex")
+			var typed *upgradetxn.UpgradeInProgressError
+			require.ErrorAs(t, err, &typed, "a live upgrade must refuse the daemonless fallback")
+			require.ErrorContains(t, err, tc.wantCause)
+			require.ErrorContains(t, err, tc.wantRetry)
+
+			_, statErr := os.Stat(filepath.Join(home, config.TomlConfigFileName))
+			require.True(t, os.IsNotExist(statErr), "the refused fallback must write nothing")
+		})
+	}
 }
 
 // TestSetGlobalConfigValueNoDaemonWritesLocally pins the fallback: with nothing
