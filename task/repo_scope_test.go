@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
 )
 
 // These pin #2098: the TUI task pane loads through LoadTasksForRepo, which used
@@ -153,6 +155,35 @@ func TestLoadTasksForRepo_LinkedWorktree(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1, "a linked worktree resolves to the main repo root, so its task belongs to that project")
 	assert.Equal(t, "worktree-task", got[0].Name)
+}
+
+func TestLoadTasksForRepo_BareCloneLinkedWorktree(t *testing.T) {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+	require.NoError(t, exec.Command("git", "init", source).Run())
+	for _, args := range [][]string{
+		{"-C", source, "config", "user.email", "test@example.com"},
+		{"-C", source, "config", "user.name", "Test User"},
+		{"-C", source, "commit", "--allow-empty", "-m", "init"},
+		{"clone", "--bare", source, bare},
+		{"-C", bare, "worktree", "add", worktree},
+	} {
+		out, err := exec.Command("git", args...).CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	repo, err := config.RepoFromPath(worktree)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), repo.ID)
+
+	setupTestTasks(t, []Task{
+		{ID: "bare0001", Name: "bare-task", ProjectPath: worktree, RepoID: repo.ID, Program: "claude", Enabled: true, CreatedAt: time.Now()},
+		{ID: "bare0002", Name: "bare-legacy-task", ProjectPath: worktree, Program: "claude", Enabled: true, CreatedAt: time.Now()},
+	})
+	got, err := LoadTasksForRepo(worktree)
+	require.NoError(t, err)
+	require.Len(t, got, 2, "retained and path-resolved task identities must both match the bare repository")
 }
 
 // TestLoadTasksForRepo_NonRepoPathsFallBackToPathEquality pins the degenerate

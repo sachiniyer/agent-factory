@@ -805,7 +805,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		if root == "" {
 			root = inst.Path
 		}
-		rid := config.RepoIDFromRoot(root)
+		rid := config.RepoIDForPath(root)
 		grouped[rid] = append(grouped[rid], data.ForStorage())
 	}
 

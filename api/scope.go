@@ -162,8 +162,8 @@ func (c *projectIDCache) resolve(projectPath string) config.ResolvedProject {
 
 // sessionRepoRoot derives the root of the project a session belongs to FROM THE
 // SESSION'S OWN RECORD, mirroring Storage's root→repoID derivation (#667): the
-// worktree's RepoPath is the canonical root (sessions create stores the
-// git-resolved repo.Root there), and Path is the fallback for worktree-less
+// worktree's RepoPath is the canonical identity root (sessions create stores
+// RepoContext.IdentityPath there), and Path is the fallback for worktree-less
 // rows (remote backends). Returns "" when neither is known.
 //
 // Shared by `archive --self` and `whoami` so the two cannot drift. Hashing

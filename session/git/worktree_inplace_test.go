@@ -76,6 +76,34 @@ func TestNewGitWorktreeInPlace(t *testing.T) {
 	runGitInPlaceTest(t, repoRoot, "show-ref", "--verify", "refs/heads/user/current-work")
 }
 
+// TestNewGitWorktreeInPlace_BareCloneLinkedWorktree verifies #3358 at the git
+// provisioning boundary: lifecycle commands retain the bare repository as
+// their identity/source, while the external workspace is the linked worktree.
+func TestNewGitWorktreeInPlace_BareCloneLinkedWorktree(t *testing.T) {
+	sandboxHome(t)
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+	runGitInPlaceTest(t, parent, "init", source)
+	runGitInPlaceTest(t, source, "commit", "--allow-empty", "-m", "initial")
+	runGitInPlaceTest(t, parent, "clone", "--bare", source, bare)
+	runGitInPlaceTest(t, bare, "worktree", "add", worktree)
+
+	gw, branch, err := NewGitWorktreeInPlace(worktree)
+	require.NoError(t, err)
+	assert.NotEmpty(t, branch)
+	assert.Equal(t, normalizeWorktreePath(bare), normalizeWorktreePath(gw.GetRepoPath()))
+	assert.Equal(t, normalizeWorktreePath(worktree), normalizeWorktreePath(gw.GetWorktreePath()))
+	assert.True(t, gw.IsExternalWorktree())
+
+	require.NoError(t, gw.Setup())
+	_, err = gw.Cleanup()
+	require.NoError(t, err)
+	_, err = os.Stat(worktree)
+	require.NoError(t, err, "cleanup must preserve the user's linked worktree")
+}
+
 // TestNewGitWorktreeInPlace_NotARepo verifies the clear-error contract:
 // --here outside a git repository must fail with an actionable message.
 func TestNewGitWorktreeInPlace_NotARepo(t *testing.T) {

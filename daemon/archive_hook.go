@@ -68,7 +68,18 @@ type onArchiveHookContext struct {
 // while LoadInRepoConfig rejects the same key before any repository-controlled
 // command can execute.
 func runOnArchiveHook(hookCtx onArchiveHookContext) error {
-	resolved, err := config.ResolveConfig(hookCtx.repoRoot)
+	// Prefer the live worktree so a bare repository's identity directory is
+	// never treated as a checkout. If Git metadata is already unavailable, keep
+	// the historical identity-root fallback: on_archive_command is admitted only
+	// from operator config and can still be useful while salvaging a lost repo.
+	repo, repoErr := config.RepoFromPath(hookCtx.worktree)
+	var resolved *config.ResolvedConfig
+	var err error
+	if repoErr == nil {
+		resolved, err = config.ResolveConfigForRepo(repo)
+	} else {
+		resolved, err = config.ResolveConfig(hookCtx.repoRoot)
+	}
 	if err != nil {
 		return fmt.Errorf("load on-archive hook configuration: %w", err)
 	}

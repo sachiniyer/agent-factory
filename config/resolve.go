@@ -90,6 +90,17 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, recordInRepoLoadObservation)
 }
 
+// ResolveConfigForRepo resolves repo-keyed legacy state against the identity
+// root while reading checked-in and personal config from the requesting
+// workspace. The distinction matters for a bare repository's linked worktree:
+// the bare directory owns identity but has no checked-out files.
+func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	return resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), recordInRepoLoadObservation)
+}
+
 // ResolveConfigForInspection returns the same effective values and provenance
 // as ResolveConfig without logging or persisting the per-repo load observation.
 // It is the resolver for read surfaces such as `af config --project`. This is
@@ -97,6 +108,15 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 // documented first-run and legacy-format migration behavior.
 func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
+}
+
+// ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
+// in-repo load observation.
+func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	return resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation)
 }
 
 type inRepoLoadObservation uint8
@@ -109,6 +129,10 @@ const (
 // resolveConfig is the one value/provenance path for runtime and inspection
 // callers. The typed observation mode is the only behavior difference.
 func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	return resolveConfigRoots(repoRoot, repoRoot, observation)
+}
+
+func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
 	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
 		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
 	}
@@ -121,18 +145,18 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 		return nil, err
 	}
 
-	repoID := RepoIDFromRoot(repoRoot)
+	repoID := RepoIDFromRoot(identityRoot)
 	legacy, err := LoadRepoConfig(repoID)
 	if err != nil {
 		return nil, err
 	}
 
-	inRepo, raw, err := LoadInRepoConfig(repoRoot)
+	inRepo, raw, err := LoadInRepoConfig(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	if inRepo != nil && observation == recordInRepoLoadObservation {
-		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
+		logInRepoConfigLoaded(repoID, workspaceRoot, inRepo, raw)
 	}
 
 	documents = append(documents, sourceDocument{
@@ -142,7 +166,7 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	})
 	if inRepo == nil {
 		inRepo = &InRepoConfig{source: sourceMetadata{
-			path:   InRepoTomlConfigPath(repoRoot),
+			path:   InRepoTomlConfigPath(workspaceRoot),
 			format: FormatTOML,
 		}}
 	}
@@ -158,36 +182,36 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocument(repoRoot)
+	personalDoc, err := projectPersonalDocumentForRoots(identityRoot, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	documents = append(documents, personalDoc)
 
-	res, err := materializeResolution(global, repoRoot, AllManifest(), documents, true)
+	res, err := materializeResolution(global, workspaceRoot, AllManifest(), documents, true)
 	if err != nil {
 		return nil, err
 	}
 
-	// Rewrite relative hook command paths to absolute against repoRoot
+	// Rewrite relative hook command paths to absolute against workspaceRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a
 	// hook command — launch/list/attach/delete/terminal, startup import,
 	// restore liveness, preview — receives its RemoteHooks from ResolveConfig, so
-	// resolving here covers them all. repoRoot is the main worktree root, so
-	// sessions in linked worktrees resolve hooks against the repository whose
-	// config file was loaded, never against a worktree path. The rewrite
-	// applies to the legacy-location value too, so both sources behave
-	// identically.
+	// resolving here covers them all. workspaceRoot is the checkout whose config
+	// was loaded. It normally equals identityRoot; for a bare repository's
+	// linked worktree it is the only root that contains checked-out commands.
+	// The rewrite applies to the legacy-location value too, so both sources
+	// behave identically.
 	if res.RemoteHooks != nil {
 		before := res.RemoteHooks
-		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(repoRoot)
+		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(workspaceRoot)
 		if !jsonEquivalent(before, res.RemoteHooks) {
 			annotateResolutionWinner(res, "remote_hooks", "relative command paths resolved against the project root")
 		}
 	}
 	refreshResolutionValues(res)
 
-	warnLegacyRepoConfig(repoID, repoRoot, legacy, inRepo)
+	warnLegacyRepoConfig(repoID, workspaceRoot, legacy, inRepo)
 	return res, nil
 }
 
@@ -202,6 +226,33 @@ var projectRegistryWarnOnce sync.Once
 // to fail resolution over. It keeps the layer present for requireAllSources.
 func emptyProjectPersonalDocument() sourceDocument {
 	return sourceDocument{layer: SourceProjectPersonal, metadata: sourceMetadata{format: FormatTOML}}
+}
+
+// projectPersonalDocumentForRoots preserves the registered project's personal
+// layer when a bare repository is addressed through a different linked
+// worktree. Registry records name a checkout, while repo-keyed configuration
+// belongs to the bare identity shared by all of its checkouts.
+func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string) (sourceDocument, error) {
+	if identityRoot == workspaceRoot {
+		return projectPersonalDocument(workspaceRoot)
+	}
+	projects, err := ListProjects()
+	if err != nil {
+		return projectPersonalDocumentFromLookup(Project{}, false, err)
+	}
+	for _, project := range projects {
+		if sameProjectPath(project.Root, workspaceRoot) {
+			return projectPersonalDocumentFromLookup(project, true, nil)
+		}
+	}
+	repoID := RepoIDFromRoot(identityRoot)
+	for _, project := range projects {
+		repo, err := RepoFromPath(project.Root)
+		if err == nil && repo.ID == repoID {
+			return projectPersonalDocumentFromLookup(project, true, nil)
+		}
+	}
+	return emptyProjectPersonalDocument(), nil
 }
 
 // projectPersonalDocument builds the SourceProjectPersonal document for
@@ -219,6 +270,10 @@ func emptyProjectPersonalDocument() sourceDocument {
 // error, because they call the registry directly.
 func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
 	project, found, err := projectForRoot(repoRoot)
+	return projectPersonalDocumentFromLookup(project, found, err)
+}
+
+func projectPersonalDocumentFromLookup(project Project, found bool, err error) (sourceDocument, error) {
 	if err != nil {
 		projectRegistryWarnOnce.Do(func() {
 			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)

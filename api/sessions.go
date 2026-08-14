@@ -336,9 +336,10 @@ pointing at one).`,
 			}
 			return jsonError(err)
 		}
+		workspace := repo.WorkspacePath()
 
-		if !git.IsGitRepo(repo.Root) {
-			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+		if !git.IsGitRepo(workspace) {
+			return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
 		}
 
 		// Fail fast on the reserved root-agent title (#1106) before any
@@ -360,7 +361,7 @@ pointing at one).`,
 			return jsonError(fmt.Errorf("session with title %q already exists", createTitle))
 		}
 
-		cfg, err := config.ResolveConfig(repo.Root)
+		cfg, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -391,7 +392,7 @@ pointing at one).`,
 		// user never typed.
 		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
 			Backend: session.BackendKind(createBackendFlag),
-		}, repo.Root)
+		}, workspace)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -418,7 +419,7 @@ pointing at one).`,
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createTitle,
-			RepoPath: repo.Root,
+			RepoPath: workspace,
 			Program:  program,
 			Account:  createAccountFlag,
 			Prompt:   createPromptFlag,
@@ -693,7 +694,7 @@ success.`,
 			// guard still fires with its own clear message.
 			root := sessionRepoRoot(data)
 			if root != "" {
-				repoID = config.RepoIDFromRoot(root)
+				repoID = newProjectIDCache().idFor(root)
 			}
 		} else {
 			if title == "" {

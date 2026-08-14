@@ -359,16 +359,18 @@ func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
 		absPath = repoPath
 	}
 
-	repoRoot, err := findGitRepoRoot(absPath)
+	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("an in-place session must be created inside a git repository: %w", err)
 	}
+	repoRoot := repo.IdentityPath()
+	worktreeRoot := repo.WorkspacePath()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &GitWorktree{
 		repoPath:          repoRoot,
-		worktreePath:      repoRoot,
-		worktreeDir:       filepath.Dir(repoRoot),
+		worktreePath:      worktreeRoot,
+		worktreeDir:       filepath.Dir(worktreeRoot),
 		branchName:        "",
 		externalWorktree:  true,
 		branchCreatedByUs: false,
@@ -379,7 +381,7 @@ func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
 	// Record the repo's current branch verbatim ("HEAD" when detached): the
 	// session runs on whatever is checked out, and since Cleanup() never
 	// deletes it the name is purely informational (sidebar, PR lookup).
-	branchName, err := g.runGitCommand(repoRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	branchName, err := g.runGitCommand(worktreeRoot, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		cancel()
 		if strings.Contains(err.Error(), "ambiguous argument 'HEAD'") ||
@@ -392,7 +394,7 @@ func NewGitWorktreeInPlace(repoPath string) (*GitWorktree, string, error) {
 
 	// The base commit is the current HEAD: diffs for an in-place session show
 	// what the agent changed on top of where the user already was.
-	head, err := g.runGitCommand(repoRoot, "rev-parse", "HEAD")
+	head, err := g.runGitCommand(worktreeRoot, "rev-parse", "HEAD")
 	if err != nil {
 		cancel()
 		return nil, "", fmt.Errorf("failed to resolve HEAD for in-place session: %w", err)

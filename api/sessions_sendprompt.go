@@ -176,12 +176,13 @@ can inspect per-session results.`,
 			if repoErr != nil {
 				return jsonError(repoErr)
 			}
+			workspace := repo.WorkspacePath()
 
-			if !git.IsGitRepo(repo.Root) {
-				return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+			if !git.IsGitRepo(workspace) {
+				return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
 			}
 
-			cfg, err := config.ResolveConfig(repo.Root)
+			cfg, err := config.ResolveConfigForRepo(repo)
 			if err != nil {
 				return jsonError(err)
 			}
@@ -197,7 +198,7 @@ can inspect per-session results.`,
 			// send-prompt has no --backend flag, so the repo's `backend` key is
 			// the whole selection; a docker/ssh/hook repo runs the agent in the
 			// sandbox and must not be refused for a missing local one.
-			local, err := session.LocalPrereqsRequired(session.InstanceOptions{}, repo.Root)
+			local, err := session.LocalPrereqsRequired(session.InstanceOptions{}, workspace)
 			if err != nil {
 				return jsonError(err)
 			}
@@ -209,7 +210,7 @@ can inspect per-session results.`,
 
 			_, status, err := deliverPromptViaDaemon(daemon.DeliverPromptRequest{
 				Title:    title,
-				RepoPath: repo.Root,
+				RepoPath: workspace,
 				Program:  program,
 				Prompt:   prompt,
 			})

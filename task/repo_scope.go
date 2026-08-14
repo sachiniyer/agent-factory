@@ -45,15 +45,15 @@ type repoResolution struct {
 
 // newRepoScope canonicalizes the target side.
 //
-// repoRoot is contractually a main-worktree root (config.CurrentRepo /
-// RepoFromPath), which every caller passes, so hashing it directly yields the
-// same canonical ID the task side resolves to — no git call needed for the
-// common path. A caller that passes something else degrades to the raw path
-// equality this filter used before, never to "no tasks".
+// repoRoot is normally a main-worktree root, but a bare repository has no main
+// worktree and RepoContext.Root remains the requesting checkout (#3358). Resolve
+// an existing root through Git before hashing; a caller that passes something
+// unavailable still degrades to the raw path equality this filter used before,
+// never to "no tasks".
 func newRepoScope(repoRoot string) *repoScope {
 	return &repoScope{
 		root: repoRoot,
-		id:   config.RepoIDFromRoot(repoRoot),
+		id:   config.RepoIDForPath(repoRoot),
 		seen: map[string]repoResolution{},
 	}
 }

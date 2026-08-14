@@ -560,8 +560,8 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// .agent-factory/config.json over the legacy per-repo file. Skipped in
 	// registry mode (no active repo, #2477): there are no repo-scoped hooks to
 	// show until a project is selected, and switchProject re-resolves them then.
-	if repoRoot != "" {
-		repoCfg, err := config.ResolveConfig(repoRoot)
+	if repo != nil {
+		repoCfg, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			log.WarningLog.Printf("failed to resolve repo config: %v", err)
 		} else {

@@ -365,7 +365,7 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 // this message is the entire basis on which the user consents to a destructive
 // action. On confirm it dispatches the async daemon archive-then-remove.
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
-	repoID := config.RepoIDFromRoot(proj.Root)
+	repoID := config.RepoIDForPath(proj.Root)
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
 	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
@@ -476,7 +476,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// carried-over value silently runs this project's tasks under the previous
 	// project's agent (#2138). Session creation is separately covered:
 	// preflightSessionCreate re-resolves and blocks.
-	if resolved, err := config.ResolveConfig(repo.Root); err == nil {
+	if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
 		// config and only overwrites it with a non-empty in-repo value, and a

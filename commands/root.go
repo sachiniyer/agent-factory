@@ -111,7 +111,7 @@ https://sachiniyer.github.io/agent-factory/remote-http-auth/`,
 			// repo, else the global config alone for a registry-mode launch.
 			var cfg *config.ResolvedConfig
 			if repo != nil {
-				cfg, err = config.ResolveConfig(repo.Root)
+				cfg, err = config.ResolveConfigForRepo(repo)
 			} else {
 				cfg, err = config.ResolveGlobalConfig()
 			}

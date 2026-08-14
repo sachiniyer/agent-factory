@@ -158,7 +158,11 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
 			repoID, repoRoot = repo.ID, repo.Root
-			projectRoots[repoID] = repo.Root
+			// Repo identity comes from repo.ID, but an in-place root agent runs
+			// at the registered checkout. Keep that recorded root explicit: the
+			// pre-#3358 resolver substituted the non-repository parent of a bare
+			// common directory here. This flips PR #3334's deliberate parity pin.
+			projectRoots[repoID] = p.Root
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
 			// checkout deleted or no longer a git repository. The singleton sweep

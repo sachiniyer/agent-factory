@@ -1,14 +1,17 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -38,6 +41,59 @@ func setupBareCloneWorktree3358(t *testing.T) (parent, bare, worktree string) {
 	run(parent, "clone", "--bare", source, bare)
 	run(bare, "worktree", "add", worktree)
 	return parent, bare, worktree
+}
+
+// TestCreateSessionPreservesAndNamesLegacyBareCloneRows pins the compatibility
+// rule for rows written before #3358. They stay under the old parent identity —
+// old records discarded the requesting worktree, so moving them could claim an
+// unrelated repository — and the create names that retained state explicitly.
+func TestCreateSessionPreservesAndNamesLegacyBareCloneRows(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent, _, worktree := setupBareCloneWorktree3358(t)
+	legacyID := config.RepoIDFromRoot(parent)
+	branchOwned := false
+	legacy := session.InstanceData{
+		ID:     "legacy-bare-row",
+		Title:  "legacy-parent",
+		Path:   parent,
+		Status: session.Archived,
+		Worktree: session.GitWorktreeData{
+			RepoPath:          parent,
+			WorktreePath:      parent,
+			SessionName:       "legacy-parent",
+			ExternalWorktree:  true,
+			BranchCreatedByUs: &branchOwned,
+		},
+	}
+	if err := appendInstanceData(legacyID, legacy); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: "new-identity", RepoPath: worktree, Program: "claude", InPlace: true,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	rows, err := loadRepoInstanceData(legacyID)
+	if err != nil {
+		t.Fatalf("reload legacy rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != legacy.ID {
+		t.Fatalf("legacy rows were moved or overwritten: %+v", rows)
+	}
+	if warning := warnings.String(); !strings.Contains(warning, "pre-#3358") || !strings.Contains(warning, legacyID) {
+		t.Fatalf("compatibility warning did not name retained identity %s: %q", legacyID, warning)
+	}
 }
 
 // TestCreateSessionAtBareCloneWorktreeUsesBareIdentityAndWorkspace drives the
