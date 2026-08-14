@@ -2,6 +2,7 @@ package git
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -10,6 +11,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestResolveRepoMetadataRoot_Layouts pins the three origin layouts (#3278
+// review): a plain .git directory, a symlinked .git (followed to the
+// directory, never treated as a redirect file), and a separate-git-dir
+// redirect file.
+func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
+	t.Run("plain directory", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "repo")
+		require.NoError(t, exec.Command("git", "init", "-b", "main", repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(repo, ".git"), got)
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		require.NoError(t, exec.Command("git", "init", "-b", "main", repo).Run())
+		moved := filepath.Join(root, "metadata")
+		require.NoError(t, os.Rename(filepath.Join(repo, ".git"), moved))
+		require.NoError(t, os.Symlink(moved, filepath.Join(repo, ".git")))
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err, "a symlinked .git directory must not be treated as a redirect file")
+		assert.Equal(t, filepath.Join(repo, ".git"), got)
+	})
+	t.Run("separate git dir redirect", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		meta := filepath.Join(root, "meta")
+		require.NoError(t, exec.Command("git", "init", "-b", "main",
+			"--separate-git-dir", meta, repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		assert.Equal(t, meta, got)
+	})
+}
 
 // TestVerifyArchivedWorktreePointer_Shapes pins the pointer check's refusal
 // polarity (#3278 review): only a regular, bounded .git file with a

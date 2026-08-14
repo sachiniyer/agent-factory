@@ -529,6 +529,23 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 				path, targetRoot, expectedRoot,
 			)
 		}
+		// Bidirectional binding (#3278 review): the registration leaf the
+		// occupant names must exist and its gitdir backpointer must name the
+		// occupant back. A stale pointer into a removed sibling leaf, or a
+		// copied worktree whose leaf points at some other checkout, both fail
+		// here — the occupant must be THE worktree its registration describes,
+		// not merely one under the right metadata root.
+		backpointer, err := readWorktreeBackpointer(target)
+		if err != nil {
+			return err
+		}
+		occupantPointer := filepath.Join(path, ".git")
+		if pathutil.ResolveForCompare(backpointer) != pathutil.ResolveForCompare(occupantPointer) {
+			return fmt.Errorf(
+				"worktree registration %s points back at %s, not this occupant's %s — the occupant is not the worktree its registration describes",
+				target, backpointer, occupantPointer,
+			)
+		}
 		return nil
 	})
 }
@@ -610,6 +627,44 @@ func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFli
 // itself from blocking on a FIFO; the fstat below rejects every non-regular
 // file before any read, and regular-file reads ignore the flag.
 func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
+	line, err := readBoundedPointerLine(label, pointerPath)
+	if err != nil {
+		return "", err
+	}
+	target, ok := strings.CutPrefix(line, "gitdir:")
+	if !ok {
+		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(baseDir, target)
+	}
+	return filepath.Clean(target), nil
+}
+
+// readWorktreeBackpointer reads a registration leaf's `gitdir` file — a raw
+// single-line path naming the worktree's `.git` pointer — through the same
+// single-descriptor bounded reader.
+func readWorktreeBackpointer(registrationLeaf string) (string, error) {
+	backpointerPath := filepath.Join(registrationLeaf, "gitdir")
+	line, err := readBoundedPointerLine("worktree registration backpointer", backpointerPath)
+	if err != nil {
+		return "", err
+	}
+	target := strings.TrimSpace(line)
+	if target == "" {
+		return "", fmt.Errorf("worktree registration backpointer %s is empty", backpointerPath)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(registrationLeaf, target)
+	}
+	return filepath.Clean(target), nil
+}
+
+func readBoundedPointerLine(label, pointerPath string) (string, error) {
 	f, err := os.OpenFile(pointerPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("%s %s could not be opened without following links: %w", label, pointerPath, err)
@@ -627,21 +682,10 @@ func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 		return "", fmt.Errorf("%s %s could not be read: %w", label, pointerPath, err)
 	}
 	if len(content) > archivedWorktreePointerMaxSize {
-		return "", fmt.Errorf("%s %s is too large to be a gitdir pointer", label, pointerPath)
+		return "", fmt.Errorf("%s %s is too large to be a pointer file", label, pointerPath)
 	}
 	line, _, _ := strings.Cut(string(content), "\n")
-	target, ok := strings.CutPrefix(line, "gitdir:")
-	if !ok {
-		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
-	}
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(baseDir, target)
-	}
-	return filepath.Clean(target), nil
+	return line, nil
 }
 
 // verifyWorktreePointerShape performs the occupant-side structural check
@@ -673,7 +717,12 @@ func verifyWorktreePointerShape(worktreePath string) (string, error) {
 // repo is present in the callers' mode, so the redirect is readable.
 func resolveRepoMetadataRoot(repoPath string) (string, error) {
 	dotGit := filepath.Join(repoPath, ".git")
-	info, err := os.Lstat(dotGit)
+	// os.Stat, not Lstat (#3278 review): a `.git` SYMLINK to the real
+	// metadata directory is a layout git accepts, and treating it as a
+	// redirect file would fail the O_NOFOLLOW open with ELOOP and refuse
+	// every ordinary kill of such an origin's archives. Following to a
+	// directory is the answer; only a non-directory result is a redirect.
+	info, err := os.Stat(dotGit)
 	if err != nil {
 		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", dotGit, err)
 	}

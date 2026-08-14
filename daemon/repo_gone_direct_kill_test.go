@@ -548,6 +548,36 @@ func TestKillSession_ArchivedSeparateGitDirKillStaysOrdinary(t *testing.T) {
 		"the settled kill must delete the session row")
 }
 
+// TestKillSession_ArchivedLegacyNoBranchStaysKillable: old archives persisted
+// no branch, and constructing an impossible "refs/heads/" expectation made
+// every origin-present kill of such a row tombstone and retain forever (#3278
+// review). Ownership for legacy rows rests on the exact occupant/backpointer
+// binding, which needs no branch.
+func TestKillSession_ArchivedLegacyNoBranchStaysKillable(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "direct-legacy-branchless")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{
+		Title: "direct-legacy-branchless", RepoID: repoID,
+	})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	// Model the legacy persisted shape: no branch on record.
+	legacyGw, err := sessiongit.NewGitWorktreeFromStorage(
+		repoPath, archivedPath, "direct-legacy-branchless", "", "", false, false,
+	)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(legacyGw)
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-legacy-branchless", RepoID: repoID})
+	require.NoError(t, err, "a legacy archive with no persisted branch must stay killable")
+	assert.False(t, exists(archivedPath), "the archived worktree must be removed")
+	assert.Nil(t, recordFor(t, repoID, "direct-legacy-branchless"),
+		"the settled kill must delete the session row")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a

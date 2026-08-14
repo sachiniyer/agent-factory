@@ -64,7 +64,10 @@ func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
 // possible end state is retention, so nothing destructive (the writer reap
 // included) should touch it first.
 func (r *cleanupRun) requireRegisteredBranchMatch() error {
-	output, err := r.git("worktree", "list", "--porcelain")
+	// -z: NUL-delimited records (#3278 review) — a repository or worktree
+	// parent containing a newline would otherwise truncate the listed path
+	// and misreport the archive as unlisted, retaining it forever.
+	output, err := r.git("worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		r.unknown = true
 		refusal := fmt.Errorf(
@@ -96,15 +99,21 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		r.errs = append(r.errs, refusal)
 		return refusal
 	}
-	expected := "refs/heads/" + r.g.branchName
-	if branch != expected {
-		r.unknown = true
-		refusal := fmt.Errorf(
-			"refusing to remove %s: git registers it with branch %q, not this session's %q — it is not provably this session's worktree; leaving it and the record in place",
-			r.g.worktreePath, branch, expected,
-		)
-		r.errs = append(r.errs, refusal)
-		return refusal
+	// A legacy archive persisted before branches were recorded has no branch
+	// to compare (#3278 review); ownership for those rests on the exact
+	// occupant/backpointer binding below, which needs no branch — refusing on
+	// an impossible "refs/heads/" match would make such rows undeletable.
+	if r.g.branchName != "" {
+		expected := "refs/heads/" + r.g.branchName
+		if branch != expected {
+			r.unknown = true
+			refusal := fmt.Errorf(
+				"refusing to remove %s: git registers it with branch %q, not this session's %q — it is not provably this session's worktree; leaving it and the record in place",
+				r.g.worktreePath, branch, expected,
+			)
+			r.errs = append(r.errs, refusal)
+			return refusal
+		}
 	}
 	// The listing is repo-side metadata and keeps reporting the recorded path
 	// and branch after the worktree was moved aside (git merely marks the
@@ -141,14 +150,16 @@ func worktreeListedBranchBounded(porcelain, worktreePath string) (string, bool, 
 	targetBase := filepath.Base(filepath.Clean(worktreePath))
 	matched := false
 	branch := ""
-	for _, line := range strings.Split(porcelain, "\n") {
+	// NUL-delimited -z records: attributes are NUL-terminated, so paths may
+	// contain newlines without truncating the parse.
+	for _, field := range strings.Split(porcelain, "\x00") {
 		switch {
-		case strings.HasPrefix(line, "worktree "):
+		case strings.HasPrefix(field, "worktree "):
 			if matched {
 				return branch, true, nil
 			}
 			branch = ""
-			entry := strings.TrimPrefix(line, "worktree ")
+			entry := strings.TrimPrefix(field, "worktree ")
 			if filepath.Base(filepath.Clean(entry)) != targetBase {
 				matched = false
 				continue
@@ -160,8 +171,8 @@ func worktreeListedBranchBounded(porcelain, worktreePath string) (string, bool, 
 				)
 			}
 			matched = resolved == targetResolved
-		case matched && strings.HasPrefix(line, "branch "):
-			branch = strings.TrimPrefix(line, "branch ")
+		case matched && strings.HasPrefix(field, "branch "):
+			branch = strings.TrimPrefix(field, "branch ")
 		}
 	}
 	return branch, matched, nil
