@@ -542,6 +542,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}
 	defer releaseAccountLimitFence()
 	if accountSwap != nil && !accountSwap.alreadySet {
+		testHookAccountSwapBeforeFinalFence()
 		m.accountLimitMu.Lock()
 		accountLimitFenceHeld = true
 		fallbackDue := accountSwap.fallbackDue

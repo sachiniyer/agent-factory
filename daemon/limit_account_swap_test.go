@@ -187,6 +187,60 @@ func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(
 	}
 }
 
+func TestResumeLimitedSessions_FinalAdmissionUsesAppliedLiveAccountPolicy(t *testing.T) {
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	admissionPaused := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+	previousHook := testHookAccountSwapBeforeFinalFence
+	testHookAccountSwapBeforeFinalFence = func() {
+		close(admissionPaused)
+		<-releaseAdmission
+	}
+	t.Cleanup(func() {
+		release()
+		testHookAccountSwapBeforeFinalFence = previousHook
+	})
+
+	resumeDone := make(chan struct{})
+	go func() {
+		manager.ResumeLimitedSessions()
+		close(resumeDone)
+	}()
+	select {
+	case <-admissionPaused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("scheduled account replacement did not reach final admission")
+	}
+
+	writeLimitAccountCandidates(t, "limit_auto_resume = false\nlimit_account_candidates = []\n")
+	result, err := manager.ApplyConfig()
+	require.NoError(t, err)
+	require.Contains(t, result.Applied, "limit_auto_resume")
+	require.Contains(t, result.Applied, "limit_account_candidates")
+
+	release()
+	select {
+	case <-resumeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume stayed blocked after final admission was released")
+	}
+
+	if _, respawns, prompts := backend.snapshot(); respawns != 0 || len(prompts) != 0 {
+		t.Fatalf("applied opt-out still replaced the runtime: respawns=%d prompts=%v", respawns, prompts)
+	}
+	if account, automatic := inst.AccountSelection(); account != "" || automatic {
+		t.Fatalf("applied opt-out still committed account selection (%q, %v)", account, automatic)
+	}
+	if !inst.LimitReached() {
+		t.Fatal("applied opt-out must retain the existing limit wait")
+	}
+}
+
 func TestResumeLimitedSessions_LoadsDurableAccountLimitEvidenceOncePerPass(t *testing.T) {
 	base := nowFunc()
 	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "wait", base.Add(time.Hour))

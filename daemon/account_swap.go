@@ -44,6 +44,12 @@ var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationD
 // No-op in production.
 var testHookAccountSwapBeforeAdmissionReturns = func() {}
 
+// testHookAccountSwapBeforeFinalFence pauses a scheduled replacement before it
+// enters final admission. Tests use it to apply a newer live identity policy
+// after the scheduler snapshot but before any destructive replacement work.
+// No-op in production.
+var testHookAccountSwapBeforeFinalFence = func() {}
+
 // setLimitReached records a live limit through the manager-owned publication
 // boundary, so a final account-swap admission observes either the whole limit
 // publication or the whole durable identity commit.
