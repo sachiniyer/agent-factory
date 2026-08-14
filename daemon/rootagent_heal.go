@@ -32,7 +32,7 @@ import (
 // ensure curve and the injectable clock.
 func (m *Manager) healRootAgentLayers() {
 	layers := m.rootAgentLayers.Load()
-	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 {
+	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 && len(layers.unresolvedRoots) == 0 {
 		return
 	}
 	m.mu.Lock()
@@ -92,6 +92,9 @@ func (m *Manager) healRootAgentLayers() {
 		if healedCount > 0 {
 			healed.personal = personal
 			healed.personalUnreadable = personalUnreadable
+			changed = true
+		}
+		if reattributeUnresolvedRoots(&healed) {
 			changed = true
 		}
 	}
@@ -254,4 +257,66 @@ func projectRecordDirPresent(projectID string) bool {
 	}
 	info, err := os.Stat(filepath.Dir(path))
 	return err == nil && info.IsDir()
+}
+
+// reattributeUnresolvedRoots re-attempts git resolution for recorded project
+// roots that did not resolve at snapshot time (#3247 arm 2, residue closed by
+// #3299). A successful RepoFromPath is content-bearing evidence — a mount
+// flap cannot fabricate a resolved toplevel — so one observation suffices, in
+// contrast to the absence-classified two-strike paths above. On resolution
+// the project's layers move from the recorded-path derived ID to the repo's
+// REAL identity, which also differs when the recorded root is a linked
+// worktree of a bare clone or a subdirectory registration — the residue the
+// derived key cannot cover — and the resolved root joins projectRoots, so the
+// singleton sweep can create the root this run instead of waiting for a
+// daemon start. Mutates the candidate snapshot in place; the caller
+// publishes.
+func reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
+	if len(healed.unresolvedRoots) == 0 {
+		return false
+	}
+	changed := false
+	for derivedID, recorded := range healed.unresolvedRoots {
+		repo, err := config.RepoFromPath(recorded)
+		if err != nil {
+			continue
+		}
+		if !changed {
+			// Copy-on-first-write: the maps in the candidate snapshot are
+			// shared with the published value until replaced.
+			healed.personal = cloneLayerMap(healed.personal)
+			healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
+			healed.projectRoots = cloneStringMap(healed.projectRoots)
+			healed.unresolvedRoots = cloneStringMap(healed.unresolvedRoots)
+			changed = true
+		}
+		if layer, ok := healed.personal[derivedID]; ok && derivedID != repo.ID {
+			healed.personal[repo.ID] = layer
+			delete(healed.personal, derivedID)
+		}
+		if projectID, ok := healed.personalUnreadable[derivedID]; ok && derivedID != repo.ID {
+			healed.personalUnreadable[repo.ID] = projectID
+			delete(healed.personalUnreadable, derivedID)
+		}
+		healed.projectRoots[repo.ID] = repo.Root
+		delete(healed.unresolvedRoots, derivedID)
+		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", recorded, repo.ID)
+	}
+	return changed
+}
+
+func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.RootAgentLayer {
+	out := make(map[string]*config.RootAgentLayer, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

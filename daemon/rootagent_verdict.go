@@ -140,7 +140,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentRecordsUnreadable:
 		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
 	case rootAgentProjectUnresolved:
-		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)", v.enabledSource)
+		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back — the daemon re-checks it on its ensure cadence and resumes the project without a restart", v.enabledSource)
 	case rootAgentDisabled:
 		// A disable on a project whose recorded root is also unresolvable needs
 		// both remedies: enabling alone leaves a root the restarted daemon

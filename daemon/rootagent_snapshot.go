@@ -180,7 +180,7 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
 			unresolvedRoots[repoID] = p.Root
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", p.ID, p.Root, repoErr)
+			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", p.ID, p.Root, repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
