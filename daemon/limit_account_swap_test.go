@@ -189,9 +189,13 @@ func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(
 
 func TestResumeLimitedSessions_SerializesPersonalCandidateWriteWithIdentityCommit(t *testing.T) {
 	base := nowFunc()
-	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
-	if _, err := config.SetProjectConfigValue(repoID, "limit_account_candidates", "work"); err != nil {
+	project, err := config.RegisterProject(inst.Path)
+	if err != nil {
+		t.Fatalf("register project: %v", err)
+	}
+	if _, err := config.SetProjectConfigValue(project.ID, "limit_account_candidates", "work"); err != nil {
 		t.Fatalf("set initial personal candidate: %v", err)
 	}
 
@@ -222,7 +226,7 @@ func TestResumeLimitedSessions_SerializesPersonalCandidateWriteWithIdentityCommi
 
 	writeDone := make(chan error, 1)
 	go func() {
-		_, err := config.SetProjectConfigValue(repoID, "limit_account_candidates", "")
+		_, err := config.SetProjectConfigValue(project.ID, "limit_account_candidates", "")
 		writeDone <- err
 	}()
 	select {
