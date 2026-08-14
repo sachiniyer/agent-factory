@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -107,6 +108,19 @@ func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preser
 		onDisk := make(map[string]string, len(requested)+1)
 		for agent, command := range requested {
 			onDisk[agent] = command
+		}
+		// Empty entries are removal tombstones hidden from CurrentValue. Keep
+		// them even if the corresponding executable is temporarily absent from
+		// PATH while another override is edited; otherwise the executable would
+		// silently reappear the next time detection succeeds.
+		if current != nil {
+			for agent, command := range current.ProgramOverrides {
+				if command == "" {
+					if _, present := requested[agent]; !present {
+						onDisk[agent] = ""
+					}
+				}
+			}
 		}
 		for agent := range DefaultConfig().ProgramOverrides {
 			if _, present := requested[agent]; !present {
@@ -431,34 +445,23 @@ func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded strin
 	}
 }
 
-// encodeTOMLString renders s as a TOML string, preferring a literal single-quoted
-// string (matching go-toml's output style and leaving backslashes in paths
-// untouched). It falls back to a basic double-quoted string only when s contains
-// a single quote or a newline, which a literal string cannot represent.
+// encodeTOMLString renders s through the TOML library rather than manually
+// quoting user input. Marshal cannot fail for a string-only envelope; a panic
+// here would therefore indicate a broken dependency contract, not bad input.
 func encodeTOMLString(s string) string {
-	if !strings.ContainsAny(s, "'\n\r") {
-		return "'" + s + "'"
+	type envelope struct {
+		Value string `toml:"value"`
 	}
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteRune(r)
-		}
+	encoded, err := toml.Marshal(envelope{Value: s})
+	if err != nil {
+		panic(fmt.Sprintf("encode TOML string: %v", err))
 	}
-	b.WriteByte('"')
-	return b.String()
+	line := strings.TrimSuffix(string(encoded), "\n")
+	const prefix = "value = "
+	if !strings.HasPrefix(line, prefix) || strings.Contains(line[len(prefix):], "\n") {
+		panic(fmt.Sprintf("unexpected TOML string encoding %q", line))
+	}
+	return strings.TrimPrefix(line, prefix)
 }
 
 type byteRange struct {

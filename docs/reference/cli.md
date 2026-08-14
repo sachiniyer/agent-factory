@@ -663,11 +663,11 @@ af config list [flags]
 Set one global config key
 
 Write one key into the global config.toml, editing only that value in place —
-every comment, blank line, section header, and key ordering is preserved (the
-file is not regenerated). Every global config key is settable. Scalar values use
-their ordinary text form; tables and non-comma lists use compact JSON. Values are
-validated with the same rules the config loader uses before anything is written,
-so set can never leave a config that fails to load.
+preserving every unrelated comment, blank line, section header, and key ordering
+(the file is not regenerated). Every global config key is settable. Scalar values
+use their ordinary text form; tables and non-comma lists use compact JSON. Values
+are validated with the same rules the config loader uses before anything is
+written, so set can never leave a config that fails to load.
 
 Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode, devin)

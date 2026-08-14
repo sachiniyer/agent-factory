@@ -227,6 +227,18 @@ func TestSetTOMLStructuredPreservesCommentIntroducingNextTable(t *testing.T) {
 	}
 }
 
+func TestSetTOMLStructuredInsertsRootValueBeforeArrayTable(t *testing.T) {
+	in := "# future extension\n[[future_workers]]\nname = 'one'\n"
+	got, err := setTOMLStructured(in, "session_env_passthrough", "session_env_passthrough = [\"HTTP_PROXY\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# future extension\nsession_env_passthrough = [\"HTTP_PROXY\"]\n[[future_workers]]\nname = 'one'\n"
+	if got != want {
+		t.Fatalf("root value landed inside an array table:\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
@@ -254,6 +266,20 @@ func TestEncodeTOMLString(t *testing.T) {
 		if got := encodeTOMLString(in); got != want {
 			t.Errorf("encodeTOMLString(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestEncodeTOMLStringRoundTripsQuotedControlInput(t *testing.T) {
+	want := "single' double\" slash\\ newline\ncontrol\x01"
+	encoded := "value = " + encodeTOMLString(want) + "\n"
+	var decoded struct {
+		Value string `toml:"value"`
+	}
+	if err := toml.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("encoded user string is not valid TOML: %v\n%s", err, encoded)
+	}
+	if decoded.Value != want {
+		t.Fatalf("encoded user string round-tripped as %q, want %q", decoded.Value, want)
 	}
 }
 
@@ -747,6 +773,39 @@ func TestSetGlobalConfigValueWholeProgramOverridesCanRemoveDetectedDefault(t *te
 	}
 	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{}` || res.Value != `{}` {
 		t.Fatalf("deleted override refreshed as shown=%q (ok=%v), echo=%q; want {}", shown, ok, res.Value)
+	}
+}
+
+func TestSetGlobalConfigValuePreservesHiddenTombstoneWhileDetectorIsUnavailable(t *testing.T) {
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	availablePath := binDir + ":" + os.Getenv("PATH")
+	t.Setenv("PATH", availablePath)
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+	writeTempConfig(t, "default_program = 'claude'\n")
+
+	if _, err := SetGlobalConfigValue("program_overrides", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	if _, err := SetGlobalConfigValue("program_overrides", `{"codex":"codex --model gpt-5"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", availablePath)
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(after, "claude"); got != "claude" {
+		t.Fatalf("saving while detection was unavailable dropped the hidden tombstone: ResolveProgram = %q", got)
+	}
+	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{"codex":"codex --model gpt-5"}` {
+		t.Fatalf("editor value = %q (ok=%v), want only the submitted codex override", shown, ok)
 	}
 }
 

@@ -216,6 +216,15 @@ func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
 	}
 }
 
+func TestConfigSetHelpQualifiesStructuredCommentPreservation(t *testing.T) {
+	if !strings.Contains(configSetCmd.Long, "preserving every unrelated comment") {
+		t.Fatalf("config set help must qualify the structured writer's comment guarantee:\n%s", configSetCmd.Long)
+	}
+	if strings.Contains(configSetCmd.Long, "every comment, blank line, section header, and key ordering is preserved") {
+		t.Fatalf("config set help still promises to preserve comments inside the replaced value:\n%s", configSetCmd.Long)
+	}
+}
+
 func TestConfigListLabelsRootAgentMigrationShapes(t *testing.T) {
 	tempAFHome(t)
 	var out bytes.Buffer

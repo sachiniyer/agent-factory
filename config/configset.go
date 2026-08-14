@@ -666,7 +666,7 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 }
 
 var (
-	tomlHeaderRe = regexp.MustCompile(`^\s*\[([^\[\]]+)\]\s*(#.*)?$`)
+	tomlHeaderRe = regexp.MustCompile(`^\s*(?:\[([^\[\]]+)\]|\[\[([^\[\]]+)\]\])\s*(#.*)?$`)
 )
 
 // setTOMLScalar returns content with [section] leaf set to encoded, changing only
@@ -736,7 +736,11 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 			if firstHeaderIdx == -1 {
 				firstHeaderIdx = i
 			}
-			name := strings.TrimSpace(m[1])
+			name := m[1]
+			if name == "" {
+				name = m[2]
+			}
+			name = strings.TrimSpace(name)
 			if decoded, ok := tomlHeaderName(line); ok {
 				name = decoded
 			}
@@ -856,7 +860,11 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 	}
 	for i, line := range ls {
 		if m := tomlHeaderRe.FindStringSubmatch(line); m != nil {
-			curSection = strings.TrimSpace(m[1])
+			curSection = m[1]
+			if curSection == "" {
+				curSection = m[2]
+			}
+			curSection = strings.TrimSpace(curSection)
 			if decoded, ok := tomlHeaderName(line); ok {
 				curSection = decoded
 			}
