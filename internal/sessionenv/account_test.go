@@ -417,6 +417,21 @@ func TestValidateAccountEnvironmentCommandRefusesPackageScriptLaunchers(t *testi
 	}
 }
 
+func TestValidateAccountEnvironmentCommandRefusesCargoLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`cargo run`,
+		`cargo test`,
+		`cargo build`,
+		`rustup run stable cargo run`,
+		`cross run`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "Rust launcher %q can execute package-owned program text", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
 func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
