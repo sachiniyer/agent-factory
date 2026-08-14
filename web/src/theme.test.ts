@@ -298,6 +298,32 @@ test("selected-row foregrounds remain AA on both accent fill strengths", () => {
   }
 });
 
+test("a readable endpoint preserves a coherent custom surface system", () => {
+  const { tokens } = deriveTheme(
+    {
+      ...NORD_THEME,
+      background: "#777777",
+      background_subtle: "#777777",
+      background_panel: "#777777",
+      foreground: "#777777",
+    },
+    "dark",
+  );
+
+  assert.equal(tokens["--af-bg-canvas"], "#777777");
+  assert.equal(tokens["--af-bg-surface"], "#777777");
+  assert.equal(tokens["--af-bg-raised"], "#777777");
+  assert.notEqual(tokens["--af-text"], "#777777");
+  for (const surface of [
+    tokens["--af-bg-canvas"],
+    tokens["--af-bg-surface"],
+    tokens["--af-bg-inset"],
+    tokens["--af-bg-raised"],
+  ]) {
+    assert.ok(contrastRatio(tokens["--af-text"], surface) >= 4.5);
+  }
+});
+
 test("a surface system with no shared fill foreground falls back coherently", () => {
   const { tokens } = deriveTheme(
     {
@@ -468,5 +494,42 @@ test("the final light semantic fallback is verified against every surface", () =
       contrastRatio(tokens["--af-border-selected"], surface) >= 3,
       `${tokens["--af-border-selected"]} must remain visible on ${surface}`,
     );
+  }
+});
+
+test("light contrast correction preserves configured semantic hues", () => {
+  const red = "#FF0000";
+  const { tokens, xterm } = deriveTheme(
+    {
+      ...NORD_THEME,
+      accent: red,
+      success: red,
+      warning: red,
+      error: red,
+      info: red,
+      purple: red,
+      pane_border_default: red,
+      pane_border_selected: red,
+      pane_border_interactive: red,
+      pane_border_preview: red,
+    },
+    "light",
+  );
+
+  for (const color of [
+    tokens["--af-accent"],
+    tokens["--af-danger"],
+    tokens["--af-dot-ready"],
+    tokens["--af-dot-lost"],
+    tokens["--af-border"],
+    tokens["--af-border-selected"],
+    xterm.red!,
+    xterm.green!,
+    xterm.yellow!,
+    xterm.blue!,
+    xterm.magenta!,
+    xterm.cyan!,
+  ]) {
+    assert.match(color, /^#[0-9A-F]{2}0000$/, `${color} must retain the configured red hue`);
   }
 });

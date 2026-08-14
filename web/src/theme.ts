@@ -278,7 +278,10 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   // user's chromatic roles but restore Nord's coherent elevation floor.
   const sourceSurfaceText = dark ? source.foreground : source.background;
   const fallbackSurfaceText = dark ? NORD_THEME.foreground : NORD_THEME.background;
-  if (!passes(sourceSurfaceText, surfaces, 4.5) && !passes(fallbackSurfaceText, surfaces, 4.5)) {
+  const hasSharedSurfaceText = [sourceSurfaceText, fallbackSurfaceText, BLACK, WHITE].some((candidate) =>
+    passes(candidate, surfaces, 4.5),
+  );
+  if (!hasSharedSurfaceText) {
     resetSurfaceSystem();
   }
   const toward = dark ? source.foreground_strong : source.background;
@@ -291,13 +294,19 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
     fallbackSurfaceText,
     toward,
   );
+  const lightSemantic = (
+    candidate: string,
+    fallback: string,
+    backgrounds: readonly string[],
+    minimum: number,
+    neutral: string,
+  ): string =>
+    adjustLightnessToContrast(candidate, backgrounds, minimum) ??
+    adjustLightnessToContrast(fallback, backgrounds, minimum) ??
+    readable(fallback, backgrounds, minimum, neutral, neutral);
   const provisionalSemantic = (candidate: string, fallback: string): string => {
     if (dark) return semantic(candidate, fallback, surfaces, 4.5, toward);
-    if (passes(candidate, surfaces, 4.5)) return candidate.toUpperCase();
-    return (
-      adjustLightnessToContrast(fallback, surfaces, 4.5) ??
-      readable(fallback, surfaces, 4.5, provisionalText, provisionalText)
-    );
+    return lightSemantic(candidate, fallback, surfaces, 4.5, provisionalText);
   };
   const hasSharedFillText = (color: string, alphas: readonly number[]): boolean => {
     const fills = surfaces.flatMap((background) => alphas.map((alpha) => mix(background, color, alpha)));
@@ -337,10 +346,7 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
 
   const modeSemantic = (candidate: string, fallback: string, minimum: number): string => {
     if (dark) return semantic(candidate, fallback, surfaces, minimum, toward);
-    if (passes(candidate, surfaces, minimum)) return candidate.toUpperCase();
-    const adjusted = adjustLightnessToContrast(fallback, surfaces, minimum);
-    if (adjusted && passes(adjusted, surfaces, minimum)) return adjusted;
-    return readable(fallback, surfaces, minimum, text, text);
+    return lightSemantic(candidate, fallback, surfaces, minimum, text);
   };
 
   const accent = modeSemantic(source.accent, NORD_THEME.accent, 4.5);
@@ -353,13 +359,13 @@ export function deriveTheme(input: Partial<DaemonTheme>, mode: ThemeMode): Deriv
   const termColor = (candidate: string, fallback: string): string =>
     dark
       ? semantic(candidate, fallback, [canvas], 4.5, toward)
-      : passes(candidate, [canvas], 4.5)
-        ? candidate.toUpperCase()
-        : (adjustLightnessToContrast(fallback, [canvas], 4.5) ?? readable(fallback, [canvas], 4.5, text, text));
+      : lightSemantic(candidate, fallback, [canvas], 4.5, text);
   const termGreen = termColor(source.success, NORD_THEME.success);
   const termAmber = termColor(source.warning, NORD_THEME.warning);
   const termBlue = termColor(source.info, NORD_THEME.info);
-  const border = semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward);
+  const border = dark
+    ? semantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, toward)
+    : lightSemantic(source.pane_border_default, NORD_THEME.pane_border_default, surfaces, 3, text);
   const borderSelected = modeSemantic(source.pane_border_selected, NORD_THEME.pane_border_selected, 3);
   const borderInteractive = modeSemantic(source.pane_border_interactive, NORD_THEME.pane_border_interactive, 3);
   const borderPreview = modeSemantic(source.pane_border_preview, NORD_THEME.pane_border_preview, 3);
