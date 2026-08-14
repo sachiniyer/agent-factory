@@ -6349,6 +6349,9 @@ async function createTab(id, title, token2) {
     { id, title, repo_id: "", shell: true, command: "", name: "" },
     token2
   );
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 async function createVSCodeTab(id, title, token2) {
@@ -6358,6 +6361,9 @@ async function createVSCodeTab(id, title, token2) {
     { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
     token2
   );
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 async function closeTab(id, title, tabName, tabId, token2) {
