@@ -28,7 +28,6 @@ type autoAccountSwap struct {
 	alreadySet           bool
 	fallbackDue          bool
 	fellBack             bool
-	global               *config.Config
 }
 
 var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
@@ -136,6 +135,9 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 	if committed := committedAccountSwap(instance); committed != nil {
 		return committed, nil
 	}
+	if global == nil || !global.LimitAutoResume {
+		return nil, nil
+	}
 	agent := sessionenv.AgentForCommand(instance.AgentProgram())
 	if _, supported := sessionenv.SupportsAccounts(agent); !supported {
 		return nil, nil
@@ -226,7 +228,6 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 		to:              candidates[0],
 		candidates:      candidates,
 		agent:           agent,
-		global:          global,
 	}, nil
 }
 

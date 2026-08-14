@@ -533,26 +533,37 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}()
 
 	forceRespawn := false
+	configFenceHeld := false
 	accountLimitFenceHeld := false
-	releaseAccountLimitFence := func() {
+	releaseAccountSwapFences := func() {
 		if accountLimitFenceHeld {
 			m.accountLimitMu.Unlock()
 			accountLimitFenceHeld = false
 		}
+		if configFenceHeld {
+			m.configApplyMu.Unlock()
+			configFenceHeld = false
+		}
 	}
-	defer releaseAccountLimitFence()
+	defer releaseAccountSwapFences()
 	if accountSwap != nil && !accountSwap.alreadySet {
 		testHookAccountSwapBeforeFinalFence()
+		// Serialize the final policy read and identity checkpoint with live config
+		// application. If an opt-out or candidate restriction has already applied,
+		// this admission observes it; once admission owns the fence, ApplyConfig
+		// cannot report a newer policy live until the identity commit has settled.
+		m.configApplyMu.Lock()
+		configFenceHeld = true
 		m.accountLimitMu.Lock()
 		accountLimitFenceHeld = true
 		fallbackDue := accountSwap.fallbackDue
-		admitted, err := m.admitAccountSwap(instance, accountSwap.global)
+		admitted, err := m.admitAccountSwap(instance, m.Config())
 		if err != nil {
 			if !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, err) {
 				return resumeNotPerformed, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
 			}
 			accountSwap = nil
-			releaseAccountLimitFence()
+			releaseAccountSwapFences()
 		} else {
 			admitted.fallbackDue = fallbackDue
 			// Update the scheduler-owned opportunity too: the first candidate can
@@ -567,7 +578,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				return resumeNotPerformed, err
 			}
 			accountSwap = nil
-			releaseAccountLimitFence()
+			releaseAccountSwapFences()
 		}
 	}
 	if accountSwap != nil && !accountSwap.alreadySet {
@@ -584,7 +595,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
 			return resumeNotPerformed, err
 		}
-		releaseAccountLimitFence()
+		releaseAccountSwapFences()
 		forceRespawn = true
 	}
 

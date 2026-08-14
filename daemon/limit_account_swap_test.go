@@ -188,56 +188,75 @@ func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(
 }
 
 func TestResumeLimitedSessions_FinalAdmissionUsesAppliedLiveAccountPolicy(t *testing.T) {
-	base := nowFunc()
-	manager, _, inst, backend := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
-	configureLimitAccountCandidate(t, manager, "work")
-
-	admissionPaused := make(chan struct{})
-	releaseAdmission := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
-	previousHook := testHookAccountSwapBeforeFinalFence
-	testHookAccountSwapBeforeFinalFence = func() {
-		close(admissionPaused)
-		<-releaseAdmission
+	tests := []struct {
+		name       string
+		config     string
+		appliedKey string
+	}{
+		{
+			name:       "auto resume disabled with candidate retained",
+			config:     "limit_auto_resume = false\nlimit_account_candidates = [\"work\"]\n",
+			appliedKey: "limit_auto_resume",
+		},
+		{
+			name:       "candidate removed while auto resume stays enabled",
+			config:     "limit_auto_resume = true\nlimit_account_candidates = []\n",
+			appliedKey: "limit_account_candidates",
+		},
 	}
-	t.Cleanup(func() {
-		release()
-		testHookAccountSwapBeforeFinalFence = previousHook
-	})
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := nowFunc()
+			manager, _, inst, backend := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+			configureLimitAccountCandidate(t, manager, "work")
 
-	resumeDone := make(chan struct{})
-	go func() {
-		manager.ResumeLimitedSessions()
-		close(resumeDone)
-	}()
-	select {
-	case <-admissionPaused:
-	case <-time.After(5 * time.Second):
-		t.Fatal("scheduled account replacement did not reach final admission")
-	}
+			admissionPaused := make(chan struct{})
+			releaseAdmission := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+			previousHook := testHookAccountSwapBeforeFinalFence
+			testHookAccountSwapBeforeFinalFence = func() {
+				close(admissionPaused)
+				<-releaseAdmission
+			}
+			t.Cleanup(func() {
+				release()
+				testHookAccountSwapBeforeFinalFence = previousHook
+			})
 
-	writeLimitAccountCandidates(t, "limit_auto_resume = false\nlimit_account_candidates = []\n")
-	result, err := manager.ApplyConfig()
-	require.NoError(t, err)
-	require.Contains(t, result.Applied, "limit_auto_resume")
-	require.Contains(t, result.Applied, "limit_account_candidates")
+			resumeDone := make(chan struct{})
+			go func() {
+				manager.ResumeLimitedSessions()
+				close(resumeDone)
+			}()
+			select {
+			case <-admissionPaused:
+			case <-time.After(5 * time.Second):
+				t.Fatal("scheduled account replacement did not reach final admission")
+			}
 
-	release()
-	select {
-	case <-resumeDone:
-	case <-time.After(5 * time.Second):
-		t.Fatal("resume stayed blocked after final admission was released")
-	}
+			writeLimitAccountCandidates(t, test.config)
+			result, err := manager.ApplyConfig()
+			require.NoError(t, err)
+			require.Contains(t, result.Applied, test.appliedKey)
 
-	if _, respawns, prompts := backend.snapshot(); respawns != 0 || len(prompts) != 0 {
-		t.Fatalf("applied opt-out still replaced the runtime: respawns=%d prompts=%v", respawns, prompts)
-	}
-	if account, automatic := inst.AccountSelection(); account != "" || automatic {
-		t.Fatalf("applied opt-out still committed account selection (%q, %v)", account, automatic)
-	}
-	if !inst.LimitReached() {
-		t.Fatal("applied opt-out must retain the existing limit wait")
+			release()
+			select {
+			case <-resumeDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("resume stayed blocked after final admission was released")
+			}
+
+			if _, respawns, prompts := backend.snapshot(); respawns != 0 || len(prompts) != 0 {
+				t.Fatalf("applied opt-out still replaced the runtime: respawns=%d prompts=%v", respawns, prompts)
+			}
+			if account, automatic := inst.AccountSelection(); account != "" || automatic {
+				t.Fatalf("applied opt-out still committed account selection (%q, %v)", account, automatic)
+			}
+			if !inst.LimitReached() {
+				t.Fatal("applied opt-out must retain the existing limit wait")
+			}
+		})
 	}
 }
 
