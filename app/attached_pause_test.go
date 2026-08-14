@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/daemon"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 func testAttachTarget(h *home, title string) sessionActionTarget {
@@ -64,7 +63,7 @@ func TestPreviewTick_PausedWhileAttached(t *testing.T) {
 }
 
 // TestSelectionChanged_SkipsRefreshWhileAttached covers selectionChanged
-// directly. While attached, it must skip refreshPanesCmd and fetchPRInfoCmd
+// directly. While attached, it must skip refreshPanesCmd and refreshPRInfoCmd
 // — both of which were observed in the #598 trace adding to tmux-server
 // contention. The synchronous mutations (mode, menu state) still run so
 // other code paths that happen to call selectionChanged stay consistent.
@@ -81,25 +80,24 @@ func TestSelectionChanged_SkipsRefreshWhileAttached(t *testing.T) {
 	// refreshPanesCmd.
 	assert.Nil(t, cmd,
 		"selectionChanged must return nil while attached: refreshPanesCmd "+
-			"and fetchPRInfoCmd are both gated — neither should be queued "+
+			"and refreshPRInfoCmd are both gated — neither should be queued "+
 			"behind the user's detach key (#598)")
 }
 
-// TestTickUpdatePRInfo_PausedWhileAttached: the 60s PR info refresh tick
-// shells out to `gh pr view` for the selected instance. While attached
-// that network round-trip provides no visible benefit (PR badge in the
-// hidden sidebar) and races against detach for the tmux/socket stack.
+// TestTickUpdatePRInfo_PausedWhileAttached: the 60s PR info refresh tick pokes
+// the daemon for the selected instance. While attached that round-trip provides
+// no visible benefit because the sidebar is hidden.
 func TestTickUpdatePRInfo_PausedWhileAttached(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	// Count fetch invocations to prove fetchPRInfoCmd was NOT dispatched.
+	// Count requests to prove refreshPRInfoCmd was NOT dispatched.
 	calls := 0
-	restore := SetPRInfoFetcherForTest(func(string, string) (*git.PRInfo, error) {
+	restore := SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
 		calls++
-		return nil, nil
+		return nil
 	})
 	defer restore()
 
@@ -108,15 +106,14 @@ func TestTickUpdatePRInfo_PausedWhileAttached(t *testing.T) {
 	require.NotNil(t, cmd, "tick must still re-arm itself")
 
 	// Identity check: the cmd should be the bare re-schedule, not a
-	// tea.Batch that contains fetchPRInfoCmd.
+	// tea.Batch that contains refreshPRInfoCmd.
 	gotPtr := reflect.ValueOf(cmd).Pointer()
 	wantPtr := reflect.ValueOf(tickUpdatePRInfoCmd).Pointer()
 	assert.Equal(t, wantPtr, gotPtr,
 		"while attached the handler must return tickUpdatePRInfoCmd, "+
-			"not a tea.Batch that includes fetchPRInfoCmd (#598)")
+			"not a tea.Batch that includes refreshPRInfoCmd (#598)")
 	assert.Equal(t, 0, calls,
-		"prInfoFetcher must not be invoked while attached: gh pr view "+
-			"is a network call we don't want racing detach")
+		"PR-info refresh must not be requested while attached")
 }
 
 // TestAttachOverlayCallback_ClearsFlagOnDetach exercises the success path

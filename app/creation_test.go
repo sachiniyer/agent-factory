@@ -71,19 +71,19 @@ func newTestHome(t *testing.T) *home {
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
+	// Tab mutations and PR-info refresh pokes route through daemon RPCs.
 	// Stub the seams with safe defaults so tests that incidentally trigger them
 	// never dial — or spawn — a real daemon. Tests exercising these paths
 	// override the relevant seam. createTab/closeTab default to an error so an
-	// unstubbed mutation fails loudly rather than reaching the daemon; setPRInfo
-	// defaults to a no-op so the in-memory PR-badge path stays exercisable.
+	// unstubbed mutation fails loudly rather than reaching the daemon; PR refresh
+	// defaults to a no-op because snapshots own the projected badge.
 	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return daemon.CreateTabResponse{}, fmt.Errorf("createTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
-	t.Cleanup(SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
+	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
 		return nil
 	}))
 

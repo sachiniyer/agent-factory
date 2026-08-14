@@ -91,6 +91,47 @@ func (i *Instance) MarkPRInfoFetched() {
 	i.prInfoGeneration++
 }
 
+// PRInfoFetchClaim is an opaque, reversible freshness claim. Generation exposes
+// only the fence the daemon's guarded write compares; the prior clock stays
+// private so it can be restored only as one coherent state.
+type PRInfoFetchClaim struct {
+	priorFetchedAt  time.Time
+	priorGeneration uint64
+	generation      uint64
+}
+
+func (c PRInfoFetchClaim) Generation() uint64 { return c.generation }
+
+// BeginPRInfoFetch atomically claims a stale entry for one producer. Returning
+// false means another producer fetched or claimed it inside staleAfter.
+func (i *Instance) BeginPRInfoFetch(staleAfter time.Duration) (PRInfoFetchClaim, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.prInfoLastFetched.IsZero() && time.Since(i.prInfoLastFetched) < staleAfter {
+		return PRInfoFetchClaim{}, false
+	}
+	claim := PRInfoFetchClaim{
+		priorFetchedAt: i.prInfoLastFetched, priorGeneration: i.prInfoGeneration,
+		generation: i.prInfoGeneration + 1,
+	}
+	i.prInfoLastFetched = time.Now()
+	i.prInfoGeneration = claim.generation
+	return claim, true
+}
+
+// CancelPRInfoFetch restores a claim that obtained no result, but only if no
+// later producer advanced the generation. A successful newer write wins and
+// makes this cancellation a harmless no-op.
+func (i *Instance) CancelPRInfoFetch(claim PRInfoFetchClaim) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.prInfoGeneration != claim.generation {
+		return
+	}
+	i.prInfoLastFetched = claim.priorFetchedAt
+	i.prInfoGeneration = claim.priorGeneration
+}
+
 // SetPRInfoFetchedAtForTest backdates the freshness clock so staleness-window
 // tests can age an entry without sleeping. Test-only; nothing is derived from
 // the timestamp beyond PRInfoAge itself.

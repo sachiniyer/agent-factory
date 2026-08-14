@@ -131,9 +131,9 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 // code whose only caller was its own test. Add them the day the TUI grows a
 // rename/reorder surface.
 
-// SetPRInfo asks the daemon to record (or clear) a session's GitHub PR info.
-func (c *Client) SetPRInfo(req daemon.SetPRInfoRequest) error {
-	return c.call("SetPRInfo", req, &daemon.SetPRInfoResponse{})
+// RefreshPRInfo asks the daemon to discover and project a session's GitHub PR.
+func (c *Client) RefreshPRInfo(req daemon.RefreshPRInfoRequest) error {
+	return c.call("RefreshPRInfo", req, &daemon.RefreshPRInfoResponse{})
 }
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for

@@ -8,7 +8,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
-	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 )
 
 // TestTUIHasNoInstancesWritePath is the #959 structural guard for the
@@ -16,7 +15,7 @@ import (
 // the TUI could write its whole-list view of instances.json and overwrite a
 // daemon-authored record (e.g. an out-of-band tab). That is now impossible by
 // construction: the TUI has NO instances.json write path at all. This drives
-// every TUI mutation that used to persist — quit, new tab, PR-info — and asserts
+// every TUI mutation that used to persist — quit, new tab, PR refresh — and asserts
 // the TUI's instances file stays empty: with nothing to write, nothing can be
 // clobbered.
 func TestTUIHasNoInstancesWritePath(t *testing.T) {
@@ -37,14 +36,12 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 	_, _ = h.handleNewTab()
 	require.Equal(t, 3, inst.TabCount(), "the daemon-created tab must appear locally")
 
-	// PR-info update: the write routes through the daemon (stubbed no-op).
-	prRestore := SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error { return nil })
+	// PR-info refresh: the TUI sends identity only; the daemon owns the write.
+	prRestore := SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error { return nil })
 	defer prRestore()
-	_, _ = h.Update(prInfoUpdatedMsg{
-		target: captureSessionActionTarget(inst, h.repoID),
-		branch: inst.GetBranch(),
-		info:   &sessiongit.PRInfo{Number: 5, State: "OPEN"},
-	})
+	refresh := refreshPRInfoCmd(inst, h.repoID, true)
+	require.NotNil(t, refresh)
+	_ = refresh()
 
 	// After every previously-persisting path, the TUI's instances.json is still
 	// empty — the TUI never wrote it, so an out-of-band daemon record can never be
