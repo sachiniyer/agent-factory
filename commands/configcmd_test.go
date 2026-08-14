@@ -209,6 +209,22 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	}
 }
 
+func TestConfigSetHelpListsEveryProjectStructuredForm(t *testing.T) {
+	want := "(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command)"
+	if !strings.Contains(configSetCmd.Long, want) {
+		t.Fatalf("config set help omits a valid per-project structured form; want %q in:\n%s", want, configSetCmd.Long)
+	}
+}
+
+func TestConfigSetHelpQualifiesStructuredCommentPreservation(t *testing.T) {
+	if !strings.Contains(configSetCmd.Long, "preserving every unrelated comment") {
+		t.Fatalf("config set help must qualify the structured writer's comment guarantee:\n%s", configSetCmd.Long)
+	}
+	if strings.Contains(configSetCmd.Long, "every comment, blank line, section header, and key ordering is preserved") {
+		t.Fatalf("config set help still promises to preserve comments inside the replaced value:\n%s", configSetCmd.Long)
+	}
+}
+
 func TestConfigListLabelsRootAgentMigrationShapes(t *testing.T) {
 	tempAFHome(t)
 	var out bytes.Buffer

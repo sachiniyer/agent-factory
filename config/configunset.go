@@ -29,7 +29,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	section, leaf, _, err := resolveProjectSettable(key)
+	section, leaf, spec, err := resolveProjectSettable(key)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +42,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	var result *UnsetResult
 	writeErr := WithFileLock(path, func() error {
 		var err error
-		result, err = applyProjectUnset(path, prettyPath, section, leaf, key)
+		result, err = applyProjectUnset(path, prettyPath, section, leaf, key, spec.structured && section == "")
 		return err
 	})
 	if writeErr != nil {
@@ -53,7 +53,7 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 
 // applyProjectUnset removes the target key line from a project's config.toml
 // under the caller-held lock. A missing file or absent key is a clean no-op.
-func applyProjectUnset(path, prettyPath, section, leaf, key string) (*UnsetResult, error) {
+func applyProjectUnset(path, prettyPath, section, leaf, key string, structured bool) (*UnsetResult, error) {
 	current, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -61,7 +61,17 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string) (*UnsetResul
 		}
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
-	updated, removed := deleteTOMLScalar(string(current), section, leaf)
+	updated := string(current)
+	removed := false
+	if structured {
+		updated, err = removeTOMLTopLevelValue(updated, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove %s from %s: %w", key, prettyPath, err)
+		}
+		removed = updated != string(current)
+	} else {
+		updated, removed = deleteTOMLScalar(updated, section, leaf)
+	}
 	if !removed {
 		return &UnsetResult{Key: key, Path: path, Removed: false}, nil
 	}

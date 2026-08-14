@@ -433,16 +433,23 @@ func unknownConfigKeyError(key string) error {
 
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
-	Short: "Set a single settable global config key",
+	Short: "Set one global config key",
 	Long: fmt.Sprintf(`Write one key into the global config.toml, editing only that value in place —
-every comment, blank line, section header, and key ordering is preserved (the
-file is not regenerated). Only a curated set of scalar keys is settable; the
-value is validated with the same rules the config loader uses before anything is
+preserving every unrelated comment, blank line, section header, and key ordering
+(the file is not regenerated). Every global config key is settable. Scalar values
+use their ordinary text form; tables and non-comma lists use compact JSON. Values
+are validated with the same rules the config loader uses before anything is
 written, so set can never leave a config that fails to load.
 
 Settable keys:
   default_program            agent enum (%s)
+  program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
+  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
+  session_env_passthrough    compact JSON array of exact environment variable names
+  root_agents                compact JSON object keyed by repository path
+  root_agent                 compact JSON object with enabled and optional program
+  keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
   network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
@@ -467,6 +474,7 @@ Settable keys:
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
+  limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
@@ -479,25 +487,25 @@ require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
 ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
 canonical grouped values.
 
-Structural keys (root_agents, theme, the [keys] rebind table) and the
-session_env_passthrough list have no single-scalar shape, so they are not settable
-here. Ask the config assistant to change them (it edits the file and validates), or
-edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480). Of the structural
-keys above, theme is applied to the daemon palette when af next launches, [keys]
-applies to that TUI launch, and root_agents waits for the next daemon start.
+Structured values must be shell-quoted so the JSON remains one argument. A write
+uses the same apply-on-save path as the TUI and web config panes (#2480). Most
+keys apply to the running daemon immediately; each successful set prints its
+exact effect notice.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides.<agent>, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
   af config set default_program codex
   af config set auto_update false
+  af config set theme zenburn
+  af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo`, tmux.SupportedProgramsString()),
@@ -569,13 +577,10 @@ var configValidateCmd = &cobra.Command{
 daemon do at startup and report whether it loads. It writes nothing and
 materializes nothing — a read-only check.
 
-This is the companion to a hand-edit. Most keys go through "af config set",
-which validates before it writes and so can never leave a broken file; but the
-structured settings (theme, the [keys] rebinds, root_agents, and the
-session_env_passthrough list) are edited in the file directly, and a broken edit
-there is a hard load failure with no fallback to defaults. Run this after such an
-edit: exit 0 means af can load it, while a non-zero exit names what is wrong so it
-can be fixed before the next launch.`,
+This is the companion to a raw hand-edit. "af config set" validates every scalar
+and structured key before it writes and so cannot leave a broken file. A manual
+edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
+names what must be fixed before the next launch.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

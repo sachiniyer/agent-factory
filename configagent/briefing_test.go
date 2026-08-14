@@ -159,51 +159,60 @@ func TestBriefingStatesTheApplyRules(t *testing.T) {
 	}
 }
 
-// TestBriefingEditsStructuredKeysByFileThenValidates is the #2453/#2454 reversal.
-//
-// The four structured keys (theme, keys, root_agents, session_env_passthrough)
-// have no `af config set` scalar form, and the assistant is
-// now the editor for them: it edits the GLOBAL config file directly and then
-// validates. The briefing must both authorize that and require the validate step,
-// because a broken structured edit is a hard startup failure with no default
-// fallback — so an unvalidated edit is exactly the wedge this step prevents.
-//
-// This replaces TestBriefingRefusesToSetTheme, which pinned the OLD "af config set
-// cannot write it, do not try" instruction that #2454 removed.
-func TestBriefingEditsStructuredKeysByFileThenValidates(t *testing.T) {
+// TestBriefingSetsStructuredKeysThroughConfigSet pins #3345's single validated
+// write path. The assistant must never bypass apply-on-save with a raw file edit.
+func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
 
-	// Every structured key must be named as file-editable in the new section.
 	for _, key := range []string{
-		"theme", "keys", "root_agents", "session_env_passthrough",
+		"theme", "keys", "root_agents", "root_agent", "program_overrides",
+		"limit_patterns", "session_env_passthrough",
 	} {
 		if !strings.Contains(out, "`"+key+"`") {
-			t.Errorf("briefing must name the structured key %q as file-editable", key)
+			t.Errorf("briefing must name structured key %q", key)
 		}
 	}
-	// The validate-after step must be present AND named as non-optional.
 	for _, want := range []string{
 		"## Editing the structured settings",
-		"editing the global config file",
-		"af config validate",
-		"not optional",
+		"af config get <key>",
+		"af config set <key> '<json>'",
+		"Every write you make goes through `af config set`",
+		"cors_allowed_origins` remains comma-separated",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("briefing is missing the structured-edit instruction %q", want)
 		}
 	}
-	// The retired instruction must be gone: the agent is no longer told the theme
-	// cannot be written or to point the user at the file to do it themselves.
-	if strings.Contains(out, "cannot write it") {
-		t.Error("briefing still says `af config set` cannot write theme — #2454 makes the assistant the editor")
+	for _, retired := range []string{"editing the global config file", "direct edits to that one global file"} {
+		if strings.Contains(out, retired) {
+			t.Errorf("briefing still directs a raw structured edit: %q", retired)
+		}
 	}
-	// The one piece of the old theme guidance that SURVIVES: don't grind through hex
-	// slots in chat. That is UX, not a prohibition on editing.
 	if !strings.Contains(out, "do not offer to pick hex values") {
 		t.Error("briefing should still tell the agent not to pick hex values slot by slot in conversation")
 	}
 	if !strings.Contains(out, "`af config set network.cors_allowed_origins <value>`") {
 		t.Error("the assistant must use the canonical settable network key for the CORS list")
+	}
+}
+
+func TestBriefingUsesPerKeyEffectNoticeForStructuredSettings(t *testing.T) {
+	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
+	if !strings.Contains(out, "per-key effect notice") {
+		t.Error("briefing must defer structured-setting timing to af config set's per-key effect notice")
+	}
+	if strings.Contains(out, "same validated, immediate-apply") {
+		t.Error("briefing still claims every structured setting applies immediately")
+	}
+}
+
+func TestBriefingAllowsPartialCustomThemeObjects(t *testing.T) {
+	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
+	if !strings.Contains(out, "only the requested color slots") {
+		t.Error("briefing must explain that a custom theme object may contain only requested slots")
+	}
+	if strings.Contains(out, "containing all") {
+		t.Error("briefing still requires every color slot in a custom theme object")
 	}
 }
 

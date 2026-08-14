@@ -10,16 +10,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestConfigValidateAcceptsAGoodConfig is the #2453 companion to a hand-edit:
-// the config assistant edits the structured settings in the file directly, then
-// runs `af config validate` to prove the file still loads before it moves on. A
-// well-formed file must pass with a clear OK.
+// TestConfigValidateAcceptsAGoodConfig is the companion to a raw hand-edit.
+// Every config-set surface validates before writing, but users retain direct
+// ownership of config.toml and need a clear OK after editing it themselves.
 func TestConfigValidateAcceptsAGoodConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	path := filepath.Join(home, "config.toml")
-	// A structured edit of exactly the shape the assistant now makes: a [theme]
-	// table that af config set cannot write, hand-written into the file.
+	// A structured hand-edit remains valid even though the safer UI/CLI path can
+	// now write this same table.
 	if err := os.WriteFile(path, []byte("default_program = 'claude'\n\n[theme]\nbackground = '#101010'\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -36,17 +35,15 @@ func TestConfigValidateAcceptsAGoodConfig(t *testing.T) {
 }
 
 // TestConfigValidateRejectsABrokenEdit is the whole reason the command exists.
-// A direct structured edit that does not load is a HARD startup failure with no
-// fallback to defaults, so the assistant must be able to catch it before the
-// user restarts. Validate has to FAIL — loudly, with a locatable error — on a
+// A direct edit that does not load is a HARD startup failure with no fallback
+// to defaults. Validate has to FAIL — loudly, with a locatable error — on a
 // malformed file.
 func TestConfigValidateRejectsABrokenEdit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	path := filepath.Join(home, "config.toml")
 	// A broken edit: an unterminated table header. This is the class of mistake a
-	// hand-edit makes and af config set cannot, since set never regenerates the
-	// file from a bad state.
+	// hand-edit can make and af config set cannot, since set refuses a bad state.
 	if err := os.WriteFile(path, []byte("default_program = 'claude'\n[theme\nbackground = '#101010'\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
