@@ -74,24 +74,6 @@ func (b *LocalBackend) Capabilities() Capabilities {
 	}
 }
 
-// WorktreeUnavailableError marks a recover/respawn failure caused by the
-// persisted worktree path being unavailable before tmux is touched. The daemon
-// uses the typed shape to add one-shot diagnostics for vanished live worktrees
-// without parsing error strings (#1303).
-type WorktreeUnavailableError struct {
-	Title        string
-	WorktreePath string
-	Err          error
-}
-
-func (e *WorktreeUnavailableError) Error() string {
-	return fmt.Sprintf("recover: session %q worktree unavailable: %v", e.Title, e.Err)
-}
-
-func (e *WorktreeUnavailableError) Unwrap() error {
-	return e.Err
-}
-
 // Start brings a local session up in two explicit phases (#1592 Phase 1 PR4):
 // provision establishes WHERE the agent will run (the tmux session handle bound
 // to the instance, plus — for a fresh create — the git worktree record and its
@@ -594,6 +576,11 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	// rewritten value would omit `--resume <id>` and the boundary would refuse the
 	// recovered pane as carrying undeclared arguments (#3083 review).
 	declarationBase := resolvedProgram
+	// Flipped once a missing worktree is rebuilt below: from that point a
+	// failure is no longer an untouched one — the rebuild has already recreated
+	// durable workspace state (and a fresh rebuild recreates the branch) — so
+	// the later error returns carry RecoverRebuiltWorkspaceError (#3236).
+	rebuilt := false
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
@@ -624,8 +611,10 @@ func (b *LocalBackend) respawn(i *Instance) error {
 			// GeneratedArgsBetween describes only the later system-prompt additions and
 			// the account boundary refuses `--resume <id>` as undeclared (#3083 review).
 			resolvedProgram = exactProgram
+			rebuilt = true
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s", i.Title, workDir, gw.GetBranchName())
 		} else {
+			rebuilt = true
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 		}
 	}
@@ -634,13 +623,13 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	setLaunchProgram(ts, program,
 		accountLaunchProof(declarationBase, program, resolution.trustBase))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
-		return fmt.Errorf("recover: %w", err)
+		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
 	if err := ts.Restore(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}
-		return fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err)
+		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	b.setupTabs(i)
 
