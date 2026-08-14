@@ -235,16 +235,18 @@ type Manager struct {
 	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
 	// clock): while every retried read keeps failing the pass backs off to
 	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
-	// rootHealRegistryStreak and rootHealAbsenceStreaks carry the two-strike
-	// counters for absence-classified observations (the applyHomeCheck
-	// discipline): registry recovery publishes on the second consecutive
-	// present-and-listable pass, and an ENOENT personal config heals to
+	// rootHealRegistryStreak/rootHealRegistryProjects and
+	// rootHealAbsenceStreaks carry the two-strike counters for
+	// absence-classified observations (the applyHomeCheck discipline):
+	// registry recovery publishes on the second consecutive MATCHING
+	// present-and-listable snapshot, and an ENOENT personal config heals to
 	// "removed" on the second consecutive dir-present observation. All
 	// guarded by m.mu, like rootEnsureStates.
-	rootHealFailures       int
-	rootHealNextAttempt    time.Time
-	rootHealRegistryStreak int
-	rootHealAbsenceStreaks map[string]int
+	rootHealFailures         int
+	rootHealNextAttempt      time.Time
+	rootHealRegistryStreak   int
+	rootHealRegistryProjects []config.Project
+	rootHealAbsenceStreaks   map[string]int
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config

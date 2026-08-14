@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -49,8 +50,8 @@ func (m *Manager) healRootAgentLayers() {
 		// transition, not proof of zero projects: a repair mv in flight, a
 		// mount blip. ListProjectsIfPresent makes that distinction explicit
 		// and binds an empty result to a present registry. On top of that,
-		// recovery publishes only on the SECOND consecutive present-and-
-		// listable observation, one backoff cadence apart, and re-verifies
+		// recovery publishes only on the SECOND consecutive MATCHING present-
+		// and-listable snapshot, one backoff cadence apart, and re-verifies
 		// presence after the dependent personal-config reads — the
 		// applyHomeCheck two-strike discipline (only a definite observation,
 		// twice consecutively), because a mount flap inside a single pass can
@@ -59,27 +60,27 @@ func (m *Manager) healRootAgentLayers() {
 		// passes plus the post-read binding; that residue is indistinguishable
 		// without filesystem transactions and is accepted, in writing, here.
 		if projects, present, err := config.ListProjectsIfPresent(); err == nil && present {
-			m.mu.Lock()
-			m.rootHealRegistryStreak++
-			streak := m.rootHealRegistryStreak
-			m.mu.Unlock()
+			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
 				personal, personalUnreadable, projectRoots, unresolvedRoots := projectRootAgentLayers(projects)
-				if _, stillPresent, perr := config.ListProjectsIfPresent(); perr == nil && stillPresent {
+				verifiedProjects, stillPresent, perr := config.ListProjectsIfPresent()
+				if perr == nil && stillPresent && slices.Equal(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
 					healed.registryUnreadable = false
 					changed = true
+					m.resetRootHealRegistryObservation()
 					log.InfoLog.Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
+				} else if perr == nil && stillPresent {
+					// The post-read check is another valid observation. Retain it as
+					// the new candidate, but require the next cadence to agree before
+					// any latch is released.
+					m.observeRootHealRegistrySnapshot(verifiedProjects)
 				} else {
-					m.mu.Lock()
-					m.rootHealRegistryStreak = 0
-					m.mu.Unlock()
+					m.resetRootHealRegistryObservation()
 				}
 			}
 		} else {
-			m.mu.Lock()
-			m.rootHealRegistryStreak = 0
-			m.mu.Unlock()
+			m.resetRootHealRegistryObservation()
 		}
 	} else {
 		personal, personalUnreadable, healedCount := m.retryUnreadablePersonalConfigs(layers)
@@ -108,6 +109,31 @@ func (m *Manager) healRootAgentLayers() {
 		m.rootHealFailures++
 		m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
 	}
+	m.mu.Unlock()
+}
+
+// observeRootHealRegistrySnapshot records one successful registry read. A
+// changed project set starts a new streak: two individually successful reads
+// cannot prove recovery when a mount transition made them observe different
+// registries. config.ListProjects returns projects in registry-entry order, so
+// direct slice equality also binds every identity and recorded-path field used
+// to build the root-agent snapshot.
+func (m *Manager) observeRootHealRegistrySnapshot(projects []config.Project) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.rootHealRegistryStreak == 0 || !slices.Equal(m.rootHealRegistryProjects, projects) {
+		m.rootHealRegistryProjects = slices.Clone(projects)
+		m.rootHealRegistryStreak = 1
+		return m.rootHealRegistryStreak
+	}
+	m.rootHealRegistryStreak++
+	return m.rootHealRegistryStreak
+}
+
+func (m *Manager) resetRootHealRegistryObservation() {
+	m.mu.Lock()
+	m.rootHealRegistryStreak = 0
+	m.rootHealRegistryProjects = nil
 	m.mu.Unlock()
 }
 

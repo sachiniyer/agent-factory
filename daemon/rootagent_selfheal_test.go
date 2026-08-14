@@ -293,6 +293,75 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 	}
 }
 
+// TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots pins the
+// post-merge #3315 P1: two successful registry reads are not enough when they
+// describe different snapshots. A mount outage can expose an empty underlying
+// directory on the second pass, and publishing that result would release the
+// machine-wide latch without the personal disable observed on the first pass.
+func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	corruptProjectRegistry(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentRegistryUnreadable {
+		t.Fatalf("fixture: the corrupt registry must fail closed at start, got reason %d", got)
+	}
+
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.EnsureRootAgents() // first successful observation includes the disable
+
+	// The mounted registry disappears and exposes a present, empty mountpoint.
+	// That is another successful read, but not confirmation of the first one.
+	aside := dir + ".aside"
+	if err := os.Rename(dir, aside); err != nil {
+		t.Fatalf("set registry aside: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create empty underlying registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("different consecutive registry snapshots must keep the latch closed, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentRegistryUnreadable {
+		t.Fatalf("the latch must hold until consecutive registry snapshots agree, got reason %d", got)
+	}
+
+	// The mounted registry returns. Its first observation replaces the empty
+	// candidate; only the second matching observation may publish the disable.
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove empty underlying registry: %v", err)
+	}
+	if err := os.Rename(aside, dir); err != nil {
+		t.Fatalf("restore registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("the matching recovered snapshot contains a personal disable, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentDisabled {
+		t.Fatalf("the matching recovered snapshot must publish the personal disable, got reason %d", got)
+	}
+}
+
 // TestRootAgentHealRecomputesLegacyDedup pins the #3315 review's stale-dedup
 // finding: a legacy path that resolved only AFTER boot must be in the healed
 // snapshot's dedup set, or the singleton sweep can double-visit its repo
