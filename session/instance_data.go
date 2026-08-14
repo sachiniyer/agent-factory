@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -539,6 +540,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	if err := instance.Start(false); err != nil {
+		var unknownScope *accountTabScopeUnknownError
+		if errors.As(err, &unknownScope) {
+			// The agent restore was rolled back, but the sibling probe did not
+			// establish whether its pre-scope pane is live. Keep the row inert and
+			// explicitly killable so storage retains its exact tmux cleanup handle.
+			instance.MarkStartupStateUnknown()
+			return instance, nil
+		}
 		return nil, err
 	}
 

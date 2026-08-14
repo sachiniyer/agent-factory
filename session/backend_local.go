@@ -184,7 +184,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				i.mu.Unlock()
 				if ts != nil {
 					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
-						setupErr = fmt.Errorf("%v (cleanup error: %v)", setupErr, cleanupErr)
+						setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
 					}
 				}
 			}
@@ -663,9 +663,9 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 			// shell validation can refuse (for example, an unsupported $SHELL), and
 			// returning first would discard the record while leaving that pane live.
 			if refreshUnknownScope {
-				exists, known := tab.tmux.ProbeSession()
+				exists, known := probeRestoredTabSession(tab.tmux)
 				if !known {
-					return fmt.Errorf("restore account-scoped tab %q for %q: tmux session state is unknown", tab.Name, i.Title)
+					return &accountTabScopeUnknownError{title: i.Title, tab: tab.Name}
 				}
 				if exists {
 					if _, err := tab.tmux.CloseAndWaitForPaneExit(); err != nil {

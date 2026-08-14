@@ -6,6 +6,22 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// accountTabScopeUnknownError marks a persisted account sibling whose tmux
+// existence probe did not answer. The loader retains that instance inert rather
+// than dropping the only handle to a process that may still be live.
+type accountTabScopeUnknownError struct {
+	title string
+	tab   string
+}
+
+func (e *accountTabScopeUnknownError) Error() string {
+	return fmt.Sprintf("restore account-scoped tab %q for %q: tmux session state is unknown", e.tab, e.title)
+}
+
+var probeRestoredTabSession = func(session *tmux.TmuxSession) (bool, bool) {
+	return session.ProbeSession()
+}
+
 // The typed recover/respawn failure shapes LocalBackend hands the daemon, split
 // out of backend_local.go for the file-length lint (#1145). Both exist so the
 // daemon can classify a failure without parsing error strings.

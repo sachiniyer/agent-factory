@@ -284,6 +284,71 @@ func TestLoad_AccountShellPreparationFailureStopsPreScopeSibling(t *testing.T) {
 		"a persisted pre-scope sibling must be stopped before shell preparation refuses the load")
 }
 
+func TestLoad_AccountUnknownSiblingProbeRetainsInertRecord(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/sh")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_account_unknown_probe"
+	shellName := agentName + shellTmuxSuffix
+	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			commands = append(commands, cmd.String())
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	previousRestore := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previousRestore })
+	previousProbe := probeRestoredTabSession
+	probeRestoredTabSession = func(session *tmux.TmuxSession) (bool, bool) {
+		if session.SanitizedName() == shellName {
+			return false, false
+		}
+		return session.ProbeSession()
+	}
+	t.Cleanup(func() { probeRestoredTabSession = previousProbe })
+
+	instance, err := FromInstanceData(InstanceData{
+		ID:       "account-unknown-probe-id",
+		Title:    "account-unknown-probe",
+		Path:     "/tmp/account-unknown-probe-repo",
+		Program:  tmux.ProgramCodex,
+		Account:  "work",
+		Status:   Running,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:     "/tmp/account-unknown-probe-repo",
+			WorktreePath: t.TempDir(),
+			SessionName:  "account-unknown-probe",
+			BranchName:   "af/account-unknown-probe",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, instance)
+	require.True(t, instance.StartupStateUnknown(), "the retained row must stay inert until explicit teardown")
+	require.False(t, instance.Started())
+	require.True(t, instance.CanKill(), "the retained row must keep an explicit cleanup action")
+	stored := instance.ToInstanceData()
+	require.True(t, stored.StartupStateUnknown, "the retention marker must survive the next storage projection")
+	require.Len(t, stored.Tabs, 2)
+	require.Equal(t, shellName, stored.Tabs[1].TmuxName, "the unknown sibling cleanup handle must survive")
+	require.False(t, commandIncludesSession(commands, "kill-session", shellName),
+		"an inconclusive probe is not permission to kill the sibling")
+}
+
 func TestLoad_AccountRestoreRaceStopsReattachedPreScopeSibling(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
