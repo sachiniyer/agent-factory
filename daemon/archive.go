@@ -457,12 +457,20 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// best-effort write leaves the on-disk record naming the pushed branch, so a
 		// restart loads the session Lost and an explicit restore re-provisions it.
 		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
-		m.persistInstance(repoID, instance)
-		// COMMITTED, with the pushed branch preserved: the archive's effects are
-		// durable (branch on origin, sandbox reaped) and cannot be retried into
-		// existence again, so a plain error with an empty location would tell the
-		// caller failed-nothing-committed about an archive that landed (#3235).
-		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, perr)}
+		// The committed claim must itself be durable before it is made (#3335
+		// review), exactly as keepUnrollableArchiveCommitted enforces for the
+		// local body: ArchiveSandbox records the pushed branch only in memory, so
+		// if no write ever lands, a restart loads a row with an empty or stale
+		// branch — the Lost re-provision then clones the repo's default branch and
+		// strands the pushed work — and DeleteProject would convert the committed
+		// marker to a warning and deregister the project over that row. Retry the
+		// durable write; only its success claims committed, with the pushed
+		// branch preserved (#3235). A second failure keeps the plain shape whose
+		// message still names the branch for manual recovery.
+		if retryErr := archivePersist(m, repoID, instance); retryErr != nil {
+			return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, errors.Join(perr, retryErr))
+		}
+		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but its durable record initially failed to write: %w", title, branch, perr)}
 	}
 	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil

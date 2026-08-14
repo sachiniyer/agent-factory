@@ -106,6 +106,46 @@ func TestArchiveSession_PersistNeverHeals_StaysPlainFailure(t *testing.T) {
 	}
 }
 
+// TestArchiveRemoteSession_PersistNeverHeals_StaysPlainFailure is the remote
+// half of the durability rule (#3335 review): ArchiveSandbox records the pushed
+// branch only in memory, so if no durable write ever lands, a restart loads a
+// row whose branch is empty or stale — the Lost re-provision then clones the
+// default branch and strands the pushed work — and a committed marker would let
+// DeleteProject deregister the project over that row. The plain error (whose
+// message still names the branch) is what stops both.
+func TestArchiveRemoteSession_PersistNeverHeals_StaysPlainFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	srv := newSandboxProbeServer(t, "af/pushed-branch")
+	_, _, _ = registerStartedRemoteWithReap(t, manager, repoID, repoPath, "remote-undurable", srv.url, session.Running)
+
+	prev := archivePersist
+	archivePersist = func(*Manager, string, *session.Instance) error {
+		return errors.New("no space left on device")
+	}
+	t.Cleanup(func() { archivePersist = prev })
+
+	_, ch := manager.events.subscribe()
+	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "remote-undurable", RepoID: repoID})
+	require.Error(t, err)
+	assert.False(t, isMutationCommitted(err),
+		"an undurable remote archive must not claim committed: the branch exists only in memory and DeleteProject would deregister over the stale row")
+	assert.Contains(t, err.Error(), "af/pushed-branch",
+		"the plain shape must still name the pushed branch for manual recovery")
+	assert.Empty(t, archivedPath)
+	assert.Empty(t, archived.ID)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type == agentproto.EventSessionArchived {
+				t.Fatal("no archived event may be published for a remote archive whose durable claim never landed")
+			}
+			continue
+		default:
+		}
+		break
+	}
+}
+
 // TestKeepUnrollableArchiveCommitted_RefusesWhenBytesLeftTheArchive pins the
 // #3335 review guard: a rollback error is not proof the archive stayed put.
 // The move home can land the bytes and then fail registration repair — which
@@ -154,7 +194,15 @@ func TestArchiveRemoteSession_PersistFailure_ReportsCommittedArchiveWithBranch(t
 	inst, _, _ := registerStartedRemoteWithReap(t, manager, repoID, repoPath, "remote-committed", srv.url, session.Running)
 
 	prev := archivePersist
-	archivePersist = func(*Manager, string, *session.Instance) error {
+	calls := 0
+	archivePersist = func(m *Manager, rid string, inst *session.Instance) error {
+		calls++
+		if calls > 1 {
+			// The disk heals for the durable retry: only a LANDED Archived row —
+			// which is what makes the pushed branch durable at all — may claim
+			// committed (#3335 review).
+			return prev(m, rid, inst)
+		}
 		return errors.New("no space left on device")
 	}
 	t.Cleanup(func() { archivePersist = prev })
