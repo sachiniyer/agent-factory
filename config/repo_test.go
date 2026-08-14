@@ -83,6 +83,43 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	assert.Equal(t, repoFromMain.Root, repoFromWT.Root)
 }
 
+// TestResolveMainRepoRoot_BareCloneWorktree pins #3358: a linked worktree's
+// common directory is itself the repository when core.bare=true. Its identity
+// root is therefore the bare directory, never that directory's non-repository
+// parent.
+func TestResolveMainRepoRoot_BareCloneWorktree(t *testing.T) {
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+
+	run(parent, "init", source)
+	run(source, "config", "user.email", "test@test.com")
+	run(source, "config", "user.name", "Test")
+	run(source, "commit", "--allow-empty", "-m", "init")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	root, err := resolveMainRepoRoot("-C", worktree)
+	require.NoError(t, err)
+	assert.Equal(t, bare, root)
+
+	repo, err := RepoFromPath(worktree)
+	require.NoError(t, err)
+	assert.Equal(t, bare, repo.Root)
+	assert.Equal(t, RepoIDFromRoot(bare), repo.ID)
+	assert.NotEqual(t, RepoIDFromRoot(parent), repo.ID)
+}
+
 func TestResolveMainRepoRoot_Public(t *testing.T) {
 	// Verify the exported wrapper works the same as the internal function.
 	mainDir := testguard.CanonicalTempDir(t)
