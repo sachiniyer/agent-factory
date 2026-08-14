@@ -35,6 +35,7 @@ func setupResolveTest(t *testing.T, globalConfig string) string {
 func captureLog(t *testing.T, logger **stdlog.Logger) *bytes.Buffer {
 	t.Helper()
 	resetRemovedAutoYesWarnings()
+	resetLegacyRootAgentsWarnings()
 	var buf bytes.Buffer
 	old := *logger
 	*logger = stdlog.New(&buf, "", 0)

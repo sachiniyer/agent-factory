@@ -408,6 +408,33 @@ func TestRenderBriefingCoversEveryTierAndKey(t *testing.T) {
 	}
 }
 
+// TestRootAgentManifestDistinguishesLegacyMapFromCurrentProfile pins the copy
+// shared by the manifest, TUI/web editors, and config assistant. The two
+// permanent spellings must never be presented as unlabeled peer tables.
+func TestRootAgentManifestDistinguishesLegacyMapFromCurrentProfile(t *testing.T) {
+	entries := map[string]ManifestEntry{}
+	for _, entry := range Manifest() {
+		entries[entry.Key] = entry
+	}
+
+	if !strings.Contains(entries["root_agents"].Purpose, "Legacy path map") {
+		t.Errorf("root_agents purpose does not label the legacy path map: %q", entries["root_agents"].Purpose)
+	}
+	if !strings.Contains(entries["root_agent"].Purpose, "Current project profile") {
+		t.Errorf("root_agent purpose does not label the current project profile: %q", entries["root_agent"].Purpose)
+	}
+
+	briefing := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	for _, want := range []string{"Legacy path map", "Current project profile"} {
+		if !strings.Contains(briefing, want) {
+			t.Errorf("briefing does not contain %q:\n%s", want, briefing)
+		}
+	}
+	if strings.Contains(briefing, "root_agents_by_path") {
+		t.Error("the migration must not introduce a third spelling")
+	}
+}
+
 // TestRenderBriefingShowsCurrentValues is the reason the briefing takes a *Config
 // at all: an agent asked to change a setting needs to know what it is NOW, not
 // just what it defaults to. It uses values that differ from every default, so a

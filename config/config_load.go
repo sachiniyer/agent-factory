@@ -307,7 +307,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return nil
 		}
 
-		cfg, err := parseConfig(data, prettyConfigPath)
+		cfg, err := parseConfigForConversion(data, prettyConfigPath)
 		if err != nil {
 			return err // invalid config.json: do not convert or rename it.
 		}
@@ -346,6 +346,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
 				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
 		}
+		warnConvertedLegacyRootAgents(cfg.RootAgents, prettyConfigPath, prettyTomlPath)
 		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)
 		if err != nil {
 			return fmt.Errorf("failed to reload converted config %s: %w", prettyTomlPath, err)

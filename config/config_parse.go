@@ -20,9 +20,21 @@ import (
 // but every key added after the swap (starting with [keys]) lives only in the
 // TOML decoder. Any key this reader does not recognize is warned about rather
 // than silently dropped, so "I added the new option to my old config.json"
-// fails loud. Reachable only from convertJSONToTOML now that first-run and
-// lost-race materialization write TOML.
+// fails loud. Reachable from convertJSONToTOML and read-only diagnostics now
+// that first-run and lost-race materialization write TOML.
 func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
+	return parseConfigJSON(data, prettyConfigPath, true)
+}
+
+// parseConfigForConversion is the frozen JSON reader on the one path that is
+// about to replace config.json with config.toml. The conversion emits one
+// write-aware root_agents notice after its atomic TOML write; suppressing the
+// generic read-only notice here avoids two contradictory warnings.
+func parseConfigForConversion(data []byte, prettyConfigPath string) (*Config, error) {
+	return parseConfigJSON(data, prettyConfigPath, false)
+}
+
+func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
@@ -40,6 +52,9 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		if warnRootAgents {
+			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
+		}
 	}
 
 	// Warn about keys the frozen reader ignores so they are not silently lost
@@ -99,6 +114,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 	}
 	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
