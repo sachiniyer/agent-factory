@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -269,8 +271,17 @@ func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("an enabled bare-clone worktree project must get its root once its mount returns, got %d creates — a non-repository create path fails before the backend", len(*seen))
 	}
-	if got := (*seen)[0].Path; got != worktree {
-		t.Fatalf("the root must be created at the recorded worktree, got %q (repo.Root for a bare clone is the non-repository parent)", got)
+	// The created workspace follows af's repo identity, which for a bare
+	// clone's linked worktree is the parent of the bare dir — a pre-existing,
+	// af-wide limitation (#3358) shared by every create in such a repo. What
+	// this PR owns is PARITY: re-attribution must produce exactly the create
+	// a boot-time resolution of the same project produces.
+	bootRepo, err := config.RepoFromPath(worktree)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if got := (*seen)[0].Path; got != bootRepo.Root {
+		t.Fatalf("the re-attributed create must land where a boot-resolved one would (%q), got %q", bootRepo.Root, got)
 	}
 	if got := (*seen)[0].Program; got != "/opt/bare-root" {
 		t.Fatalf("the personal program must reach the create verbatim, got %q", got)
@@ -389,5 +400,162 @@ func TestReattributionCarriesDeletionTombstone(t *testing.T) {
 	}
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentProjectDeleted {
 		t.Fatalf("the re-attributed identity must report the deletion, got reason %d", got)
+	}
+}
+
+// TestReattributionBoundsStalledProbes pins the #3299 review's round-4 P1:
+// time.After delivers exactly one value, so with two stalled probes the first
+// consumed the shared deadline and the second blocked the poll goroutine
+// forever. Two never-completing probes must cost one grace, not a wedge.
+func TestReattributionBoundsStalledProbes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoA := setupControlRepo(t)
+	repoB := setupControlRepo(t)
+	registerTestProject(t, repoA)
+	registerTestProject(t, repoB)
+
+	for _, p := range []string{repoA, repoB} {
+		if err := os.Rename(p, p+".hidden"); err != nil {
+			t.Fatalf("hide repo dir: %v", err)
+		}
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Both probes are permanently stalled (their done channels never close),
+	// standing in for recorded roots on unresponsive mounts.
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoA)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoB)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.mu.Unlock()
+
+	finished := make(chan struct{})
+	go func() {
+		manager.EnsureRootAgents()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("EnsureRootAgents wedged on the second stalled probe — the shared per-pass deadline fires once and must not be received twice")
+	}
+}
+
+// TestReattributionDiscardsStaleProbeResult pins the #3299 review's round-4
+// P1: a probe that finishes after its pass's grace expired describes a
+// filesystem from a previous cadence. Consuming it later would re-attribute a
+// checkout nobody has re-verified — here the verified clone was replaced by a
+// marker-less stranger in the interim. And with the mismatch established, the
+// consumer-facing verdict must name the rebind remedy, not "bring the path
+// back" (round-4 P2): the path is present.
+func TestReattributionDiscardsStaleProbeResult(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/stale\"")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The checkout at the recorded path is now a DIFFERENT clone…
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init swapped clone: %v", err)
+	}
+	// …but a cached probe from an earlier pass still says the original
+	// verified checkout is there.
+	stale := &rootReattributionProbe{
+		done:    make(chan struct{}),
+		matches: true,
+		repo:    &config.RepoContext{Root: repoPath, ID: config.RepoIDFromRoot(repoPath)},
+	}
+	close(stale.done)
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = stale
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a stale probe result must be discarded, not published — the checkout it verified is gone; got %d creates", len(*seen))
+	}
+	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath))
+	if verdict.reason != rootAgentProjectUnresolved {
+		t.Fatalf("the swapped clone must stay unresolved after the fresh re-check, got reason %d", verdict.reason)
+	}
+	detail := rootAgentUnavailableDetail(verdict)
+	if !strings.Contains(detail, "rebind") || !strings.Contains(detail, project.ID) {
+		t.Fatalf("an identity mismatch must prescribe the rebind (naming the project), not \"bring the path back\"; got: %s", detail)
+	}
+	if strings.Contains(detail, "bring the path back") {
+		t.Fatalf("the path is present — the detail must not claim it is absent; got: %s", detail)
+	}
+}
+
+// TestDeleteAfterReattributionStillSuppresses pins the #3299 review's round-4
+// P1: a delete that starts AFTER the identity transition normalizes the (again
+// unavailable) recorded path to the derived ID, and no carry-at-transition can
+// see it. The snapshot's reattributedFrom alias must bridge the identities for
+// every deletion-state consumer.
+func TestDeleteAfterReattributionStillSuppresses(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	rewriteRecordRoot(t, project.ID, worktree)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	// The mount returns and the project re-attributes onto its real identity…
+	manager.EnsureRootAgents()
+
+	// …then the mount vanishes again and the user deletes the project: the
+	// unavailable path normalizes to the derived recorded-path ID.
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent again: %v", err)
+	}
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+		t.Fatalf("DeleteProject after re-attribution: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent again: %v", err)
+	}
+
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentProjectDeleted {
+		t.Fatalf("a derived-ID delete landing after the identity transition must suppress the real identity through the snapshot alias, got reason %d", got)
 	}
 }

@@ -279,8 +279,24 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	// daemon's life: DeleteProject already stopped its root and removed it from
 	// root_agents on disk, so respawning it here from the still-immutable
 	// in-memory config would resurrect the project the user just deleted.
+	// Deletion state may be keyed by EITHER identity: a project deleted while
+	// its recorded root was unavailable keys the fence and tombstone by the
+	// derived recorded-path ID, and the snapshot's reattributedFrom alias is
+	// the durable bridge — checked here, at admission time, so a derived-ID
+	// delete suppresses no matter when it landed relative to the identity
+	// transition (#3299 review round 4). An ACTIVE derived-ID delete
+	// (projectDeletes) skips this tick the same way; when it finishes, its
+	// tombstone holds through this alias.
+	alias, hasAlias := m.rootAgentLayers.Load().reattributedFrom[repo.ID]
 	m.mu.Lock()
 	_, deleted := m.deletedRootRepos[repo.ID]
+	if !deleted && hasAlias {
+		if _, ok := m.deletedRootRepos[alias]; ok {
+			deleted = true
+		} else if _, ok := m.projectDeletes[alias]; ok {
+			deleted = true
+		}
+	}
 	m.mu.Unlock()
 	if deleted {
 		m.rootEnsureSucceeded(st)

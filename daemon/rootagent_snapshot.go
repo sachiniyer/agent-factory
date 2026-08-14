@@ -41,7 +41,18 @@ type rootAgentSnapshot struct {
 	// their layers sit in personal/personalUnreadable — so consumer verdicts
 	// must not call them unconfigured and advise adding config that already
 	// exists (#3264 review).
-	unresolvedRoots    map[string]unresolvedProjectRecord
+	unresolvedRoots map[string]unresolvedProjectRecord
+	// reattributedFrom maps a re-attributed repo's REAL ID to the derived
+	// recorded-path ID it was attributed under while unresolved (#3299 review
+	// round 4). Deletion state can be keyed by either identity — DeleteProject
+	// normalizes an unavailable path to the derived ID at whatever moment it
+	// runs — so every consumer of deletedRootRepos/projectDeletes checks both.
+	// Carrying tombstones across at transition time was inherently racy: a
+	// delete starting after the transition's sample landed its tombstone under
+	// a derived ID nothing looked at any more. The alias travels with the
+	// immutable snapshot, so a derived-ID delete suppresses no matter when it
+	// lands relative to the transition.
+	reattributedFrom   map[string]string
 	legacyRepoIDs      map[string]bool
 	registryUnreadable bool
 }
@@ -61,6 +72,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		personalUnreadable: map[string]string{},
 		projectRoots:       map[string]string{},
 		unresolvedRoots:    map[string]unresolvedProjectRecord{},
+		reattributedFrom:   map[string]string{},
 		legacyRepoIDs:      map[string]bool{},
 	}
 
@@ -158,6 +170,12 @@ type unresolvedProjectRecord struct {
 	root       string
 	projectID  string
 	checkoutID string
+	// identityMismatch records that the recorded path RESOLVES but the
+	// checkout there does not carry the project's marker — a different clone
+	// occupying the path. Consumers word the remedy differently: an absent
+	// path needs bringing back, a mismatched one needs a rebind and a daemon
+	// restart (#3299 review round 4).
+	identityMismatch bool
 }
 
 func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {

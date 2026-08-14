@@ -260,46 +260,23 @@ func projectRecordDirPresent(projectID string) bool {
 	return err == nil && info.IsDir()
 }
 
-// reattributeUnresolvedRoots re-attempts git resolution for recorded project
-// roots that did not resolve at snapshot time (#3247 arm 2, residue closed by
-// #3299). A successful RepoFromPath is content-bearing evidence — a mount
-// flap cannot fabricate a resolved toplevel — but AVAILABILITY IS NOT
-// IDENTITY (#3299 review): the resolved checkout must also carry the
-// project's checkout marker (config.ProjectCheckoutMatches), or a different
-// clone reusing the recorded path would inherit the project's personal layer
-// and an autonomous root the user never opted that clone into; without the
-// marker the project simply stays unresolved, and the log names the rebind
-// remedy. The marker is probed at the RECORDED path, never at repo.Root
-// (#3299 review round 2): for a linked worktree of a bare clone, RepoFromPath
-// resolves repo.Root to the parent of the bare common directory — not a
-// worktree at all — while the recorded path binds to the same common dir the
-// marker lives in, exactly how Register/Rebind probe it. A deletion tombstone
-// recorded under the derived ID while the root was unresolved is carried onto
-// the real ID (#3299 review): DeleteProject keyed deletedRootRepos by the
-// only identity it had, and losing it across re-attribution would resurrect
-// an explicitly deleted project's root. An entry whose derived ID sits behind
-// an ACTIVE delete fence (projectDeletes) is skipped outright: the fence is
-// installed before the tombstone, so re-attributing inside that window would
-// publish the project under a real ID the in-flight delete has never heard
-// of; left unresolved, the fence and the tombstone that follows it both keep
-// applying to the derived ID, and the next pass carries the finished
-// tombstone across.
-//
-// On acceptance the project's layers move from the recorded-path derived ID
-// to the repo's REAL identity — which also differs when the recorded root is
-// a linked worktree of a bare clone or a subdirectory registration, the
-// residue the derived key cannot cover — and the resolved root joins
-// projectRoots, so the singleton sweep can create the root this run instead
-// of waiting for a daemon start. Mutates the candidate snapshot in place; the
-// caller publishes.
 // rootReattributionProbe is one asynchronous git/marker check for an
 // unresolved recorded root. Its result fields are written only by the probe
 // goroutine, strictly before done is closed; the poll goroutine reads them
 // only after observing that close, so no lock guards them.
 type rootReattributionProbe struct {
-	done    chan struct{}
+	done chan struct{}
+	// pass is the heal pass that spawned this probe. Only that pass may
+	// consume the result: a probe completing after its pass moved on
+	// describes a filesystem nobody has looked at since, and the next pass
+	// re-verifies with a fresh probe instead (#3299 review round 4).
+	pass    uint64
 	repo    *config.RepoContext
 	matches bool
+	// mismatch distinguishes "the path resolves but carries the wrong (or
+	// no) marker" from "the path does not resolve": the former needs a
+	// rebind and restart, the latter needs the path back.
+	mismatch bool
 }
 
 // rootHealProbeGrace bounds how long one heal pass waits for its probes: long
@@ -309,27 +286,110 @@ type rootReattributionProbe struct {
 // rather than wedging it (#3299 review).
 const rootHealProbeGrace = 2 * time.Second
 
+// reattributeUnresolvedRoots re-attempts git resolution for recorded project
+// roots that did not resolve at snapshot time (#3247 arm 2, residue closed by
+// #3299). A successful RepoFromPath is content-bearing evidence — a mount
+// flap cannot fabricate a resolved toplevel — but AVAILABILITY IS NOT
+// IDENTITY (#3299 review): the resolved checkout must also carry the
+// project's checkout marker (config.ProjectCheckoutMatches), or a different
+// clone reusing the recorded path would inherit the project's personal layer
+// and an autonomous root the user never opted that clone into; without the
+// marker the project stays unresolved with its mismatch recorded, and the
+// log and verdict name the rebind-then-restart remedy. The marker is probed
+// at the RECORDED path, never at repo.Root (#3299 review round 2): for a
+// linked worktree of a bare clone, RepoFromPath resolves repo.Root to the
+// parent of the bare common directory — not a worktree at all — while the
+// recorded path binds to the same common dir the marker lives in, exactly
+// how Register/Rebind probe it.
+//
+// Both checks touch the recorded path's filesystem, so they run in per-entry
+// probe goroutines and this pass consumes only completed results, waiting at
+// most rootHealProbeGrace in total (#3299 review rounds 3-4): a healthy
+// mount recovers within its own tick, a stalled one costs a bounded wait and
+// stays fail-closed unresolved. Results are pass-scoped — a probe finishing
+// after its pass's grace describes a filesystem from a previous cadence and
+// is discarded for a fresh re-check rather than trusted late.
+//
+// Deletion state may be keyed by EITHER identity. An entry whose derived ID
+// sits behind an ACTIVE delete fence (projectDeletes) is skipped outright,
+// and on acceptance the snapshot records realID→derivedID in
+// reattributedFrom: DeleteProject normalizes an unavailable path to the
+// derived ID at whatever moment it runs — including after this pass — so
+// every deletion-state consumer checks both identities through the published
+// alias instead of relying on a carry-at-transition a concurrent delete
+// could miss (#3299 review round 4).
+//
+// On acceptance the project's layers move from the recorded-path derived ID
+// to the repo's REAL identity — which also differs when the recorded root is
+// a linked worktree of a bare clone or a subdirectory registration, the
+// residue the derived key cannot cover — and the recorded root joins
+// projectRoots, so the singleton sweep can create the root this run instead
+// of waiting for a daemon start. Mutates the candidate snapshot in place; the
+// caller publishes.
 func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 	if len(healed.unresolvedRoots) == 0 {
 		return false
 	}
+	m.rootHealPassSeq++
+	pass := m.rootHealPassSeq
 	deadline := time.After(rootHealProbeGrace)
+	expired := false
 	changed := false
+	cloneForWrite := func() {
+		if changed {
+			return
+		}
+		// Copy-on-first-write: the maps in the candidate snapshot are shared
+		// with the published value until replaced.
+		healed.personal = cloneLayerMap(healed.personal)
+		healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
+		healed.projectRoots = cloneStringMap(healed.projectRoots)
+		healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
+		healed.reattributedFrom = cloneStringMap(healed.reattributedFrom)
+		changed = true
+	}
 	for derivedID, record := range healed.unresolvedRoots {
 		m.mu.Lock()
 		probe := m.rootHealProbes[derivedID]
+		if probe != nil && probe.pass != pass {
+			select {
+			case <-probe.done:
+				// Completed, but for an earlier pass — stale. Discard it; the
+				// fresh probe below re-verifies the current filesystem.
+				probe = nil
+			default:
+				// Still running (a stalled mount). Keep waiting for it.
+			}
+		}
 		if probe == nil {
-			probe = &rootReattributionProbe{done: make(chan struct{})}
+			probe = &rootReattributionProbe{done: make(chan struct{}), pass: pass}
 			m.rootHealProbes[derivedID] = probe
 			go runRootReattributionProbe(probe, record)
 		}
 		m.mu.Unlock()
-		select {
-		case <-probe.done:
-		case <-deadline:
-			// Still running — a stalled mount must cost the poll loop a bounded
-			// wait, not a wedge. The entry stays unresolved (fail closed) and
-			// the probe is consumed on a later pass.
+		if expired {
+			// The pass's grace is spent: consume nothing that is not already
+			// finished, and never block again — time.After delivers exactly
+			// one value, so a second blocked receive would wait forever
+			// (#3299 review round 4).
+			select {
+			case <-probe.done:
+			default:
+				continue
+			}
+		} else {
+			select {
+			case <-probe.done:
+			case <-deadline:
+				// Still running — a stalled mount must cost the poll loop a
+				// bounded wait, not a wedge. The entry stays unresolved (fail
+				// closed) and the probe is re-checked on a later pass.
+				expired = true
+				continue
+			}
+		}
+		if probe.pass != pass {
+			// Finished while this pass was already past it; re-verified next pass.
 			continue
 		}
 		m.mu.Lock()
@@ -337,31 +397,25 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 		m.mu.Unlock()
 		if !probe.matches {
 			// Resolution failed or the marker did not verify; the probe logged
-			// the specifics. A fresh probe next pass keeps re-checking.
+			// the specifics. A fresh probe next pass keeps re-checking. Record
+			// the mismatch shape so verdict consumers can word the remedy
+			// (rebind + restart, not "bring the path back").
+			if record.identityMismatch != probe.mismatch {
+				cloneForWrite()
+				record.identityMismatch = probe.mismatch
+				healed.unresolvedRoots[derivedID] = record
+			}
 			continue
 		}
 		repo := probe.repo
 		m.mu.Lock()
 		_, fenced := m.projectDeletes[derivedID]
-		if !fenced && derivedID != repo.ID {
-			if _, tombstoned := m.deletedRootRepos[derivedID]; tombstoned {
-				m.deletedRootRepos[repo.ID] = struct{}{}
-			}
-		}
 		m.mu.Unlock()
 		if fenced {
-			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete's fence and tombstone keep their derived-ID target", record.root, record.projectID)
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its derived-ID target", record.root, record.projectID)
 			continue
 		}
-		if !changed {
-			// Copy-on-first-write: the maps in the candidate snapshot are
-			// shared with the published value until replaced.
-			healed.personal = cloneLayerMap(healed.personal)
-			healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
-			healed.projectRoots = cloneStringMap(healed.projectRoots)
-			healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
-			changed = true
-		}
+		cloneForWrite()
 		if layer, ok := healed.personal[derivedID]; ok && derivedID != repo.ID {
 			healed.personal[repo.ID] = layer
 			delete(healed.personal, derivedID)
@@ -369,6 +423,15 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) bool {
 		if projectID, ok := healed.personalUnreadable[derivedID]; ok && derivedID != repo.ID {
 			healed.personalUnreadable[repo.ID] = projectID
 			delete(healed.personalUnreadable, derivedID)
+		}
+		if derivedID != repo.ID {
+			// The alias is the deletion bridge: DeleteProject keys its fence
+			// and tombstone by the derived ID whenever the path is unavailable
+			// at delete time — including a delete that starts after this very
+			// pass — so every deletion-state consumer checks both identities
+			// through the published snapshot rather than relying on a
+			// carry-at-transition that a concurrent delete could miss.
+			healed.reattributedFrom[repo.ID] = derivedID
 		}
 		// The RECORDED root is the create path (see projectRootAgentLayers):
 		// repo.Root for a bare-clone linked worktree is not a repository.
@@ -392,10 +455,12 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	}
 	matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
 	if err != nil {
+		probe.mismatch = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be verified; leaving project %s unresolved: %v", record.root, record.projectID, err)
 		return
 	}
 	if !matches {
+		probe.mismatch = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
 		return
 	}

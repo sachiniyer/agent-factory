@@ -255,6 +255,13 @@ type Manager struct {
 	// results. Guarded by mu; each probe's fields are written solely by its
 	// goroutine before done is closed.
 	rootHealProbes map[string]*rootReattributionProbe
+	// rootHealPassSeq numbers the heal passes. A probe carries the pass that
+	// spawned it, and a result is only consumed by that same pass: a probe
+	// finishing after its pass's grace expired describes a filesystem from a
+	// previous cadence, and publishing it later would attribute a checkout
+	// nobody has re-verified (#3299 review round 4). Touched only by the poll
+	// goroutine.
+	rootHealPassSeq uint64
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config

@@ -73,6 +73,12 @@ type rootAgentMaterializeVerdict struct {
 	// remedy that only says "enable it and restart" is incomplete when the
 	// path must also come back before any restart can create the root.
 	rootUnresolved bool
+	// rootIdentityMismatch narrows rootUnresolved: the recorded path RESOLVES,
+	// but the checkout there does not carry the project's registry marker.
+	// "Bring the path back" is an impossible remedy there — the path is
+	// present; the fix is a rebind plus a daemon restart (#3299 review
+	// round 4).
+	rootIdentityMismatch bool
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -84,15 +90,22 @@ type rootAgentMaterializeVerdict struct {
 // legacy lookup below, whose result could not change the answer; then
 // candidacy; then the layered resolution the ensure sweeps share.
 func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMaterializeVerdict {
+	// One Load for the whole verdict, so the flags, the candidacy sets, and the
+	// resolution are read from a single consistent snapshot value. Loaded
+	// before the deletion check because deletion state may be keyed by the
+	// derived recorded-path ID a re-attributed repo used to carry — the
+	// snapshot's reattributedFrom alias bridges the two (#3299 review round 4).
+	layers := m.rootAgentLayers.Load()
+	alias, hasAlias := layers.reattributedFrom[repoID]
 	m.mu.Lock()
 	_, deleted := m.deletedRootRepos[repoID]
+	if !deleted && hasAlias {
+		_, deleted = m.deletedRootRepos[alias]
+	}
 	m.mu.Unlock()
 	if deleted {
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectDeleted}
 	}
-	// One Load for the whole verdict, so the flags, the candidacy sets, and the
-	// resolution are read from a single consistent snapshot value.
-	layers := m.rootAgentLayers.Load()
 	if layers.registryUnreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentRegistryUnreadable}
 	}
@@ -101,7 +114,7 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	legacy := m.legacyRootAgentForRepo(repoID)
 	_, isProject := layers.projectRoots[repoID]
-	_, isUnresolved := layers.unresolvedRoots[repoID]
+	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
 			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
@@ -110,13 +123,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
 		// start and no legacy entry's per-tick retry covers the repo: nothing
 		// can create this root until a daemon start where the path resolves.
-		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true}
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, projectID: unresolved.projectID}
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
@@ -140,6 +153,12 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentRecordsUnreadable:
 		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
 	case rootAgentProjectUnresolved:
+		if v.rootIdentityMismatch {
+			// The path is PRESENT — "bring it back" is an impossible remedy.
+			// What blocks the root is identity: the checkout there does not
+			// carry the project's registry marker.
+			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout at the recorded project root does not carry the project's registry marker — a different clone may occupy the path; run `af projects rebind %s <path>` if that checkout replaces the original, then restart the daemon", v.enabledSource, v.projectID)
+		}
 		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back — the daemon re-checks it on its ensure cadence and resumes the project without a restart", v.enabledSource)
 	case rootAgentDisabled:
 		// A disable on a project whose recorded root is also unresolvable needs
