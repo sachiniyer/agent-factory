@@ -185,31 +185,41 @@ func TestRestoreSession_RecoversDeadInstanceOnDemand(t *testing.T) {
 	}
 }
 
-// TestRestoreLostSessions_KeepsRetryingAndHeals mirrors the #1128 root-ensure
-// guarantee for the general loop: failures past the escalation threshold never
-// park the retry permanently, and the first pass after the cause clears heals.
-func TestRestoreLostSessions_KeepsRetryingAndHeals(t *testing.T) {
+// TestRestoreLostSessions_GivesUpAtAttemptBudget pins the terminal half of the
+// retry contract: automatic recovery stops at the bounded budget, while an
+// explicit user restore remains the off-ramp after the cause is repaired.
+func TestRestoreLostSessions_GivesUpAtAttemptBudget(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	zeroRestoreBackoff(t)
 	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: errors.New("worktree unavailable")}
 	inst := registerStarted(t, manager, repoID, repoPath, "unlucky", backend, true, session.Lost)
 
-	attempts := lostRestoreEscalationThreshold + 3
+	attempts := lostRestoreMaxAttempts + 3
 	for i := 0; i < attempts; i++ {
 		manager.RestoreLostSessions()
 	}
-	if got := backend.recoverCalls(); got != attempts {
-		t.Fatalf("loop must keep attempting past the escalation threshold: want %d attempts, got %d", attempts, got)
+	if got := backend.recoverCalls(); got != lostRestoreMaxAttempts {
+		t.Fatalf("automatic loop calls = %d, want terminal stop at %d", got, lostRestoreMaxAttempts)
 	}
 
-	// The cause clears (the outage ends): the very next pass must heal.
+	// The cause clears, but the automatic loop stays stopped until the operator
+	// explicitly resumes this session.
 	backend.mu.Lock()
 	backend.failWith = nil
 	backend.mu.Unlock()
 	manager.RestoreLostSessions()
+	if got := backend.recoverCalls(); got != lostRestoreMaxAttempts {
+		t.Fatalf("gave-up loop retried after its cause cleared: calls = %d", got)
+	}
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, RepoID: repoID}); err != nil {
+		t.Fatalf("explicit restore after give-up: %v", err)
+	}
 
 	if got := inst.GetStatus(); got != session.Running {
-		t.Fatalf("status = %v, want Running on the first pass after the cause cleared", got)
+		t.Fatalf("status = %v, want Running after explicit restore", got)
+	}
+	if failure := inst.ToInstanceData().LostRestoreFailure; failure != nil {
+		t.Fatalf("explicit runtime replacement retained terminal failure: %#v", failure)
 	}
 }
 

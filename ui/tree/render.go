@@ -498,8 +498,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 	description := branch
-	if reason, churnAt := i.IdleReasonSnapshot(); reason != session.IdleReasonNone {
+	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, time.Now())
+		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
+			detail = restoreFailure.Detail()
+		}
 		if branch == "" {
 			description = detail
 		} else {

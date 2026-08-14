@@ -1,11 +1,16 @@
 package daemon
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	stdlog "log"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -54,6 +59,94 @@ func (b *diesOnSpawnBackend) recoverCount() int {
 }
 
 func (b *diesOnSpawnBackend) Type() string { return "local" }
+
+func TestRestoreLostSessions_ImmediateExitLogsTerminalGiveUp(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &diesOnSpawnBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "always-exits", backend, true, session.Lost)
+	zeroRestoreBackoff(t)
+
+	var errors bytes.Buffer
+	previous := aflog.ErrorLog
+	aflog.ErrorLog = stdlog.New(&errors, "ERROR: ", 0)
+	t.Cleanup(func() { aflog.ErrorLog = previous })
+
+	for i := 0; i < 2*lostRestoreMaxAttempts+4; i++ {
+		manager.RestoreLostSessions()
+	}
+
+	want := fmt.Sprintf("giving up after %d attempts: %v", lostRestoreMaxAttempts, errRestoreDiedBeforeConfirm)
+	if !strings.Contains(errors.String(), want) {
+		t.Fatalf("missing terminal %q log after an always-exiting program; logs:\n%s", want, errors.String())
+	}
+	if got := backend.recoverCount(); got != lostRestoreMaxAttempts {
+		t.Fatalf("recovery spawns = %d, want terminal stop after %d", got, lostRestoreMaxAttempts)
+	}
+	data := inst.ToInstanceData()
+	if data.Liveness != session.LiveLost || data.LostRestoreFailure == nil {
+		t.Fatalf("terminal session = %#v, want LiveLost with surfaced restore failure", data)
+	}
+	if data.LostRestoreFailure.Attempts != lostRestoreMaxAttempts || data.LostRestoreFailure.Error != errRestoreDiedBeforeConfirm.Error() {
+		t.Fatalf("surfaced failure = %#v, want %d attempts and last startup error", data.LostRestoreFailure, lostRestoreMaxAttempts)
+	}
+	if data.IdleReason != session.IdleReasonRestoreGaveUp {
+		t.Fatalf("idle reason = %q, want %q", data.IdleReason, session.IdleReasonRestoreGaveUp)
+	}
+
+	manager.RestoreLostSessions()
+	if got := backend.recoverCount(); got != lostRestoreMaxAttempts {
+		t.Fatalf("gave-up session retried again: recovery spawns = %d", got)
+	}
+}
+
+func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend()}
+	inst := registerStarted(t, manager, repoID, repoPath, "healed", backend, true, session.Lost)
+
+	var info bytes.Buffer
+	previous := aflog.InfoLog
+	aflog.InfoLog = stdlog.New(&info, "INFO: ", 0)
+	t.Cleanup(func() { aflog.InfoLog = previous })
+
+	manager.RestoreLostSessions()
+	if strings.Contains(info.String(), "restored after") {
+		t.Fatalf("spawn was logged as terminal recovery before liveness confirmation:\n%s", info.String())
+	}
+	observeAlive(manager, repoID, inst)
+	manager.RestoreLostSessions()
+
+	want := fmt.Sprintf("restore of lost session %q (repo %s): restored after 1 attempt", inst.Title, repoID)
+	if !strings.Contains(info.String(), want) {
+		t.Fatalf("missing terminal %q log after confirmed recovery; logs:\n%s", want, info.String())
+	}
+}
+
+func TestRestoreSession_FailureAfterPersistedGiveUpStaysTerminal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	newFailure := errors.New("agent still exits at startup")
+	backend := &recoverFakeBackend{FakeBackend: session.NewFakeBackend(), failWith: newFailure}
+	inst := registerStarted(t, manager, repoID, repoPath, "still-broken", backend, true, session.Lost)
+	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("previous startup failure"))
+
+	var terminal bytes.Buffer
+	previous := aflog.ErrorLog
+	aflog.ErrorLog = stdlog.New(&terminal, "ERROR: ", 0)
+	t.Cleanup(func() { aflog.ErrorLog = previous })
+
+	if _, _, err := manager.RestoreSession(RestoreSessionRequest{ID: inst.ID, RepoID: repoID}); !errors.Is(err, newFailure) {
+		t.Fatalf("RestoreSession error = %v, want %v", err, newFailure)
+	}
+	wantAttempts := lostRestoreMaxAttempts + 1
+	want := fmt.Sprintf("giving up after %d attempts: %v", wantAttempts, newFailure)
+	if !strings.Contains(terminal.String(), want) {
+		t.Fatalf("missing terminal %q after explicit retry failed; logs:\n%s", want, terminal.String())
+	}
+	failure := inst.ToInstanceData().LostRestoreFailure
+	if failure == nil || failure.Attempts != wantAttempts || failure.Error != newFailure.Error() {
+		t.Fatalf("surfaced failure = %#v, want updated terminal attempt", failure)
+	}
+}
 
 // TestRestoreLostSessions_SpawnSucceedsButRuntimeDies_BacksOff drives many poll
 // passes against a session that can never stay up, and asserts the loop does NOT

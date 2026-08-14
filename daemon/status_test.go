@@ -184,6 +184,27 @@ func TestRefreshStatuses_LiveIdleSessionBecomesReady(t *testing.T) {
 	}
 }
 
+func TestRefreshStatuses_ConfirmedAliveClearsTerminalRestoreFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "healed", session.NewFakeBackend(), true, session.Lost)
+	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("agent exited at startup"))
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist terminal restore failure: %v", err)
+	}
+
+	manager.RefreshStatuses()
+
+	if got := inst.GetStatus(); got != session.Ready {
+		t.Fatalf("in-memory status = %v, want Ready after the runtime answered alive", got)
+	}
+	if failure := inst.LostRestoreFailureSnapshot(); failure != nil {
+		t.Fatalf("confirmed-alive runtime retained stale restore failure: %#v", failure)
+	}
+	if failure := persistedInstanceByTitle(t, repoID, inst.Title).LostRestoreFailure; failure != nil {
+		t.Fatalf("persisted runtime retained stale restore failure: %#v", failure)
+	}
+}
+
 func TestRefreshStatuses_ReattachBaselineDoesNotSettleActiveTaskRun(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{

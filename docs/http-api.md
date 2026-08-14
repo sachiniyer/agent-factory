@@ -228,11 +228,19 @@ work. The vocabulary is closed:
 |-------|---------------------|
 | `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
 | `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
+| `restore-gave-up` | The process is gone and automatic Lost-session recovery exhausted its attempt budget. See `lost_restore_failure` below. |
 | `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
 | `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
 | `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |
 | `no-pane-change-since-delivery` | The last prompt was delivered, and the pane has not changed since. |
 | `settled-after-pane-change` | The row settled back to Ready, and the pane changed *after* the last prompt attempt. When later churn resolves an unconfirmed send, this is all af reports — it never retroactively claims delivery (#3162). |
+
+**`lost_restore_failure`** (object, omitted unless automatic recovery gave up) —
+the durable terminal restore result: `{ "attempts": 6, "error": "..." }`. The
+session remains Lost, and the daemon does not automatically retry it again. An
+explicit restore remains available; a successful runtime replacement clears the
+field. Because it is stored on the session record, daemon restarts and the TUI,
+web, and HTTP clients retain the same last error.
 
 **`last_pane_churn_at`** (RFC 3339 timestamp, omitted when no churn is on
 record) — when the daemon last observed the session's pane **render different
