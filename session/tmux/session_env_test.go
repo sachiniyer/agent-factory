@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -156,6 +157,12 @@ func TestLaunchEnvironmentRefusesCrossAgentAccountRewrite(t *testing.T) {
 func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	forceSessionEnvExecutable(t, "/opt/af")
 	forceNewSessionEnvMarkers(t, true)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CODEX_HOME", "/ambient/codex")
 	t.Setenv("OPENAI_API_KEY", "ambient-secret")
 
@@ -171,12 +178,15 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 		t.Fatalf("process sibling launch is not scoped to the parent account: %q", wrapped)
 	}
 	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
-		if launchEnvironmentHasName(environ, name) {
-			t.Fatalf("process sibling exposed ambient %s to the tmux session environment", name)
-		}
 		if !slices.Contains(imports, name) {
 			t.Fatalf("process sibling did not explicitly unset stale tmux %s", name)
 		}
+	}
+	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); !ok || got != accountDir {
+		t.Fatalf("process sibling tmux CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
+	}
+	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
+		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
 
 	shell, err := agent.NewShellSiblingSession("account-shell", "/bin/sh")
@@ -191,12 +201,15 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 		t.Fatalf("shell sibling launch is not scoped to the parent account: %q", wrapped)
 	}
 	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
-		if launchEnvironmentHasName(environ, name) {
-			t.Fatalf("shell sibling exposed ambient %s to the tmux session environment", name)
-		}
 		if !slices.Contains(imports, name) {
 			t.Fatalf("shell sibling did not explicitly unset stale tmux %s", name)
 		}
+	}
+	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); !ok || got != accountDir {
+		t.Fatalf("shell sibling tmux CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
+	}
+	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
+		t.Fatal("shell sibling exposed the competing ambient API key to the tmux session environment")
 	}
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
@@ -228,13 +241,18 @@ func TestInlineClaudeCloudModeImportsProviderCredentials(t *testing.T) {
 }
 
 func launchEnvironmentHasName(environ []string, name string) bool {
+	_, ok := launchEnvironmentValue(environ, name)
+	return ok
+}
+
+func launchEnvironmentValue(environ []string, name string) (string, bool) {
 	prefix := name + "="
 	for _, entry := range environ {
 		if strings.HasPrefix(entry, prefix) {
-			return true
+			return strings.TrimPrefix(entry, prefix), true
 		}
 	}
-	return false
+	return "", false
 }
 
 func TestStartImportsAllowedEnvironmentIntoExistingTmuxServer(t *testing.T) {

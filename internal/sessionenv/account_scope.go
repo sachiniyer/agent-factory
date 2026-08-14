@@ -28,13 +28,22 @@ func applyAccountEnvironmentScope(environ []string, agent, account, command stri
 	return applyNamedAccountScope(environ, agent, account, command, AccountLaunchProof{}, false)
 }
 
-func applyNamedAccountScope(environ []string, agent, account, command string, proof AccountLaunchProof, validateCommand bool) ([]string, error) {
-	if AccountLookup == nil {
-		return nil, fmt.Errorf("account-scoped launch requested but no account lookup is installed")
-	}
-	scope, err := AccountLookup(agent, account)
+// ResolveAccountEnvironment returns the non-secret environment entries that
+// identify a selected account. Launchers use them for inherited process
+// boundaries such as tmux-created windows; the child exec shim still repeats
+// the lookup and applies the complete boundary before the initial pane starts.
+func ResolveAccountEnvironment(agent, account string) ([]string, error) {
+	scope, err := lookupNamedAccount(agent, account)
 	if err != nil {
-		return nil, fmt.Errorf("resolve account %q for %s: %w", account, agent, err)
+		return nil, err
+	}
+	return ApplyAccountEnvironment(nil, "", scope)
+}
+
+func applyNamedAccountScope(environ []string, agent, account, command string, proof AccountLaunchProof, validateCommand bool) ([]string, error) {
+	scope, err := lookupNamedAccount(agent, account)
+	if err != nil {
+		return nil, err
 	}
 	// The launcher's claim about its OWN executable/arguments, attached to the scope the
 	// lookup resolved. AccountLookup answers "which directory", never "which
@@ -51,4 +60,15 @@ func applyNamedAccountScope(environ []string, agent, account, command string, pr
 		return nil, fmt.Errorf("scope session to account %q: %w", account, err)
 	}
 	return scoped, nil
+}
+
+func lookupNamedAccount(agent, account string) (Account, error) {
+	if AccountLookup == nil {
+		return Account{}, fmt.Errorf("account-scoped launch requested but no account lookup is installed")
+	}
+	scope, err := AccountLookup(agent, account)
+	if err != nil {
+		return Account{}, fmt.Errorf("resolve account %q for %s: %w", account, agent, err)
+	}
+	return scope, nil
 }

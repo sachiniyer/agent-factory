@@ -252,11 +252,13 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect shell tab tmux environment: %v", err)
 	}
-	for _, name := range []string{"CODEX_HOME", "OPENAI_API_KEY"} {
-		for _, line := range strings.Split(string(storedEnvironment), "\n") {
-			if strings.HasPrefix(line, name+"=") {
-				t.Fatalf("tmux stored ambient identity %s for the account shell: %q", name, line)
-			}
+	stored := strings.Split(string(storedEnvironment), "\n")
+	if !slices.Contains(stored, "CODEX_HOME="+accountDir) {
+		t.Fatalf("tmux did not store the selected account root; environment:\n%s", storedEnvironment)
+	}
+	for _, line := range stored {
+		if strings.HasPrefix(line, "OPENAI_API_KEY=") {
+			t.Fatalf("tmux stored the ambient API identity for the account shell: %q", line)
 		}
 	}
 	reportCommand := "printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "; " +

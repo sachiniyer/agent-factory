@@ -173,6 +173,11 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 	if account != "" {
 		identityNames := sessionenv.AccountIdentityNames(accountAgent)
 		launchEnv = removeEnvironmentNames(launchEnv, identityNames)
+		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
+		if resolveErr != nil {
+			return "", nil, nil, resolveErr
+		}
+		launchEnv = append(launchEnv, selectedEnv...)
 		importNames = appendMissingEnvironmentNames(importNames, identityNames)
 	}
 	return wrapped, launchEnv, importNames, nil

@@ -2,6 +2,7 @@ package sessionenv
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -127,7 +128,7 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		// require a second parser pass with runtime expansion, so a scoped sibling
 		// refuses them.
 		return true
-	case shellCommandExecutesString(words):
+	case shellCommandIsUnproven(words):
 		return true
 	default:
 		return false
@@ -243,36 +244,28 @@ func envCallMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 			return true
 		}
 	}
-	if invocation.CommandIndex >= 0 && shellCommandExecutesString(words[invocation.CommandIndex:]) {
+	if invocation.CommandIndex >= 0 && shellCommandIsUnproven(words[invocation.CommandIndex:]) {
 		return true
 	}
 	return false
 }
 
-func shellCommandExecutesString(words []*syntax.Word) bool {
-	if len(words) < 2 {
+func shellCommandIsUnproven(words []*syntax.Word) bool {
+	if len(words) == 0 {
 		return false
 	}
 	command, literal := literalShellWord(words[0])
 	if !literal || !knownShellName(filepath.Base(command)) {
 		return false
 	}
-	for _, word := range words[1:] {
-		arg, literal := literalShellWord(word)
-		if !literal {
-			// A dynamic shell option could resolve to -c, so its effect is
-			// unprovable before execution.
-			return true
-		}
-		switch {
-		case arg == "-c", arg == "--command", strings.HasPrefix(arg, "--command="):
-			return true
-		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
-			strings.ContainsRune(strings.TrimPrefix(arg, "-"), 'c'):
-			return true
-		}
+	// A sibling shell may read profiles, stdin, a script, or a command string.
+	// The only statically proven form is the same absolute, startup-free command
+	// AccountShellCommand generates for a dedicated shell tab.
+	args, literal := literalCommandArgs(words)
+	if !literal || !filepath.IsAbs(command) {
+		return true
 	}
-	return false
+	return !slices.Equal(args[1:], trustedAccountShellArgs(command))
 }
 
 func knownShellName(name string) bool {
@@ -310,7 +303,7 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 			options = false
 		}
 		if !functionsOnly {
-			if _, denied := names[value]; denied {
+			if accountEnvironmentOperandDenied(value, names) {
 				return true
 			}
 		}
@@ -331,7 +324,7 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 	options := true
 	for _, word := range words {
 		if name, assignment := shellWordAssignmentName(word); assignment {
-			if _, denied := names[name]; denied {
+			if accountEnvironmentOperandDenied(name, names) {
 				return true
 			}
 			options = false
@@ -347,6 +340,9 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 				continue
 			}
 			if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
+				if value == "-n" || value == "+n" || value == "--nameref" {
+					return true
+				}
 				if len(value) != 2 {
 					return true
 				}
@@ -354,7 +350,7 @@ func declarationMutatesAccountEnvironment(words []*syntax.Word, names map[string
 			}
 			options = false
 		}
-		if _, denied := names[value]; denied {
+		if accountEnvironmentOperandDenied(value, names) {
 			return true
 		}
 	}
@@ -373,7 +369,7 @@ func readMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 		if strings.HasPrefix(value, "-") {
 			return true
 		}
-		if _, denied := names[value]; denied {
+		if accountEnvironmentOperandDenied(value, names) {
 			return true
 		}
 	}
@@ -388,8 +384,7 @@ func getoptsMutatesAccountEnvironment(words []*syntax.Word, names map[string]str
 	if !literal {
 		return true
 	}
-	_, denied := names[name]
-	return denied
+	return accountEnvironmentOperandDenied(name, names)
 }
 
 func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
@@ -410,6 +405,16 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 	if !literal {
 		return true
 	}
-	_, denied := names[name]
-	return denied
+	return accountEnvironmentOperandDenied(name, names)
+}
+
+func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bool {
+	name := value
+	if bracket := strings.IndexByte(name, '['); bracket >= 0 {
+		name = name[:bracket]
+	}
+	if equal := strings.IndexByte(name, '='); equal >= 0 {
+		name = name[:equal]
+	}
+	return accountEnvironmentNameDenied(name, names)
 }
