@@ -231,35 +231,13 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 		return true
 	case "sudo", "doas", "pkexec", "su", "runuser":
 		return true
+	case "make", "gmake":
+		return true
 	}
 	if commandName == "go" && len(words) > 1 && words[1] == "run" {
 		return true
 	}
-	if (commandName == "make" || commandName == "gmake") && makeCommandEvaluatesProgram(words[1:]) {
-		return true
-	}
 	return accountEnvironmentInterpreter(commandName)
-}
-
-// makeCommandEvaluatesProgram identifies the make forms that explicitly select
-// or inject executable makefile text. Ordinary flags such as -j remain valid
-// sibling-process arguments; -f/--file/--makefile and -E/--eval introduce a
-// second launch program that the shell parser cannot inspect.
-func makeCommandEvaluatesProgram(args []string) bool {
-	for _, arg := range args {
-		switch arg {
-		case "-f", "--file", "--makefile", "-E", "--eval":
-			return true
-		}
-		if strings.HasPrefix(arg, "--file=") || strings.HasPrefix(arg, "--makefile=") ||
-			strings.HasPrefix(arg, "--eval=") {
-			return true
-		}
-		if len(arg) > 2 && (strings.HasPrefix(arg, "-f") || strings.HasPrefix(arg, "-E")) {
-			return true
-		}
-	}
-	return false
 }
 
 // accountEnvironmentInterpreter identifies executables whose ordinary

@@ -289,7 +289,7 @@ func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
 		require.Error(t, err, "bare shell %q can reload ambient identity from startup files", command)
 		require.Contains(t, err.Error(), "cannot prove")
 	}
-	require.NoError(t, ValidateAccountEnvironmentCommand("make", account),
+	require.NoError(t, ValidateAccountEnvironmentCommand("git status", account),
 		"an ordinary literal process remains a valid account-scoped sibling")
 }
 
@@ -363,7 +363,7 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentArguments(t *testi
 		require.Contains(t, err.Error(), "arguments")
 		require.Contains(t, err.Error(), "cli_auth_credentials_store")
 	}
-	require.NoError(t, ValidateAccountEnvironmentCommand("make -j4", account),
+	require.NoError(t, ValidateAccountEnvironmentCommand("git status --short", account),
 		"arguments to an ordinary non-agent process remain valid in a scoped sibling")
 }
 
@@ -386,6 +386,8 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappe
 func TestValidateAccountEnvironmentCommandRefusesMakefileLaunchers(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
+		`make`,
+		`make -j4`,
 		`make -f launcher.mk`,
 		`make --file=launcher.mk`,
 		`make -E 'launch:; CODEX_HOME=/other codex' launch`,
@@ -395,8 +397,6 @@ func TestValidateAccountEnvironmentCommandRefusesMakefileLaunchers(t *testing.T)
 		require.Error(t, err, "make invocation %q evaluates a hidden launch program", command)
 		require.Contains(t, err.Error(), "interpreter")
 	}
-	require.NoError(t, ValidateAccountEnvironmentCommand("make -j4", account),
-		"ordinary make parallelism remains a valid scoped sibling")
 }
 
 func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
