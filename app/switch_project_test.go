@@ -106,6 +106,8 @@ func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	repoRoot := initTestGitRepo(t)
 	h.repoRoot = repoRoot
 	h.repoID = config.RepoIDFromRoot(repoRoot)
+	cachedRoot := initTestGitRepo(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{cachedRoot: {}}
 
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
@@ -128,6 +130,90 @@ func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
 	second, err := os.ReadFile(marker)
 	require.NoError(t, err)
 	assert.Len(t, second, len(first), "a successful path resolution must survive the 750ms project poll")
+}
+
+func TestBuildProjectListUsesKnownActiveIdentityAfterProbeBudgetExpires(t *testing.T) {
+	base, bare, _, active := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = active
+	h.repoID = config.RepoIDFromRoot(bare)
+
+	stalled := filepath.Join(base, "stalled-worktree")
+	require.NoError(t, os.MkdirAll(stalled, 0o755))
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_PROJECT\"*) /bin/sleep 2; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_PROJECT", stalled)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "bare-alpha", Path: stalled,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: stalled},
+	}})
+	require.False(t, degraded)
+	for _, project := range projects {
+		if project.SessionCount == 1 {
+			assert.Equal(t, active, project.Root,
+				"the known active workspace must merge with its bare identity even after an earlier probe exhausts the budget")
+			return
+		}
+	}
+	t.Fatalf("session-bearing project missing after a stalled probe: %+v", projects)
+}
+
+func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
+	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	data := []session.InstanceData{{
+		Title: "bare-alpha", Path: liveRoot,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+	}}
+
+	first, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	require.Contains(t, h.projectPathResolutions, registeredRoot, "the first poll must cache the successful registry root")
+	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
+		"the live registered root is the preferred spelling before it disappears")
+
+	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
+	second, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
+		"a vanished cached registry root must not replace the surviving live workspace")
+}
+
+func projectWithCountHasRoot(projects []overlay.Project, count int, root string) bool {
+	for _, project := range projects {
+		if project.SessionCount == count && project.Root == root {
+			return true
+		}
+	}
+	return false
+}
+
+func setupBareProjectWorktrees(t *testing.T) (base, bare, first, second string) {
+	t.Helper()
+	base = testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare = filepath.Join(base, "origin.git")
+	first = filepath.Join(base, "first")
+	second = filepath.Join(base, "second")
+	runGit(t, base, "init", "-b", "main", source)
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "commit", "--allow-empty", "-m", "initial")
+	runGit(t, base, "clone", "--bare", source, bare)
+	runGit(t, bare, "worktree", "add", first)
+	runGit(t, bare, "worktree", "add", "-b", "second", second)
+	return base, bare, first, second
 }
 
 func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {

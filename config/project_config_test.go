@@ -245,3 +245,21 @@ func TestProjectForRepoBoundsUnrelatedRegistryIdentityProbe(t *testing.T) {
 	assert.Less(t, elapsed, 2*time.Second,
 		"one unrelated stalled registry root must not block config resolution for a healthy sibling")
 }
+
+func TestProjectForRepoRejectsRegisteredRootAdoptedByAncestor(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	outer := initProjectRegistryRepo(t, filepath.Join(base, "outer"))
+	nested := initProjectRegistryRepo(t, filepath.Join(outer, "nested"))
+	registered, err := RegisterProject(nested)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(nested, ".git")))
+	target, err := RepoFromPath(outer)
+	require.NoError(t, err)
+
+	got, found, err := projectForRepo(target)
+	require.NoError(t, err)
+	assert.False(t, found,
+		"a stale nested registration must not lend its personal config to the ancestor repository")
+	assert.NotEqual(t, registered.ID, got.ID)
+}

@@ -76,6 +76,12 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	}
 	projectsByID := map[string]*projectAggregate{}
 	resolvedPaths := map[string]projectPathResolution{}
+	// The active repo identity was already resolved while opening this home.
+	// Seed it before any bounded registry/session probes so a slow stale path
+	// cannot make the active bare worktree fall back to its raw path identity.
+	if m.repoRoot != "" && m.repoID != "" {
+		resolvedPaths[m.repoRoot] = projectPathResolution{id: m.repoID, root: m.repoRoot}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
 	defer cancel()
 	resolvePath := func(path string) projectPathResolution {
@@ -170,6 +176,13 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	registryDegraded := false
 	if projects, err := config.ListProjects(); err == nil {
 		for _, p := range projects {
+			if !p.PathExists {
+				// Successful resolutions persist across the 750ms sidebar poll, but
+				// a registry root that has disappeared must not keep overriding a
+				// live sibling worktree for the same bare repository.
+				delete(m.projectPathResolutions, p.Root)
+				delete(resolvedPaths, p.Root)
+			}
 			ensure(resolvePath(p.Root), 2)
 		}
 	} else {
@@ -186,8 +199,9 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	ensure(resolvePath(m.repoRoot), 3)
 
 	projects := make([]overlay.Project, 0, len(projectsByID))
-	for _, aggregate := range projectsByID {
+	for repoID, aggregate := range projectsByID {
 		projects = append(projects, overlay.Project{
+			RepoID:       repoID,
 			Name:         filepath.Base(aggregate.root),
 			Root:         aggregate.root,
 			SessionCount: aggregate.count,
@@ -209,6 +223,7 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
+			RepoID:       p.RepoID,
 			Name:         p.Name,
 			Root:         p.Root,
 			SessionCount: p.SessionCount,
@@ -427,11 +442,13 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 // this message is the entire basis on which the user consents to a destructive
 // action. On confirm it dispatches the async daemon archive-then-remove.
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
-	repoID := config.RepoIDForPath(proj.Root)
+	if proj.RepoID == "" {
+		return m, m.handleError(fmt.Errorf("cannot delete project %q: repository identity is unavailable", proj.Name))
+	}
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
 	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
-		return startDeleteProjectMsg{root: proj.Root, repoID: repoID, name: proj.Name}
+		return startDeleteProjectMsg{root: proj.Root, repoID: proj.RepoID, name: proj.Name}
 	})
 }
 

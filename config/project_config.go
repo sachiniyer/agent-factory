@@ -270,6 +270,13 @@ func registeredProjectRepoID(parent context.Context, root string) (string, bool)
 	if err != nil {
 		return "", false
 	}
+	// A registered root is identity evidence only when Git still recognizes that
+	// exact workspace. If a nested checkout disappears, resolving its old path
+	// may discover an enclosing repository; never lend the nested registration's
+	// personal config to that ancestor.
+	if !sameProjectPath(repo.WorkspacePath(), root) {
+		return "", false
+	}
 	return repo.ID, true
 }
 
