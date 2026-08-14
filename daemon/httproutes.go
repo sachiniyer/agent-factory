@@ -308,9 +308,16 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetPRInfo",
-		Description: "Record or clear the GitHub PR info for a session. Address the session by id when available: it is authoritative over title/repo_id, so an asynchronous result cannot land on a different session that reused the title.",
+		Description: "Compatibility route for older clients to record or clear GitHub PR info. New clients should call RefreshPRInfo with session identity only so discovery and projected fields stay daemon-owned.",
 		requestType: reflect.TypeOf(SetPRInfoRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RefreshPRInfo",
+		Description: "Ask the daemon to refresh a session's GitHub PR projection. The request carries session identity only; discovery is cancellable and server-side debounced. Returns an error when gh is unavailable in the daemon environment.",
+		requestType: reflect.TypeOf(RefreshPRInfoRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.refreshPRInfo) },
 	},
 
 	// Config. The read/write pair behind the web config editor; both are thin

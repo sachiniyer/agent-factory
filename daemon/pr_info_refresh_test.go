@@ -108,9 +108,8 @@ func TestPRInfoSweepDiscoversWithoutAnyClient(t *testing.T) {
 		"the #921 provenance must survive the write path — a branchless record is never trusted for destructive decisions")
 }
 
-// TestPRInfoSweepSkipsFreshEntries pins the debounce that keeps the sweep from
-// duplicating a client's just-made refresh: SetPRInfo (the write every producer
-// funnels through) bumps the freshness clock, so a fresh entry costs no fetch.
+// TestPRInfoSweepSkipsFreshEntries pins the shared freshness clock that keeps
+// the background sweep from duplicating a selected-session refresh poke.
 func TestPRInfoSweepSkipsFreshEntries(t *testing.T) {
 	f := newPRSweepFixture(t)
 	calls := stubPRFetch(t, nil, nil)
@@ -122,6 +121,129 @@ func TestPRInfoSweepSkipsFreshEntries(t *testing.T) {
 	f.instance.SetPRInfoFetchedAtForTest(time.Now().Add(-time.Hour))
 	f.manager.refreshStalePRInfo(context.Background())
 	require.Equal(t, int32(1), calls.Load(), "a stale entry must be fetched")
+}
+
+// TestRefreshPRInfoPokeDiscoversAndDebounces pins #3296's ownership boundary:
+// a client supplies only session identity, the daemon performs discovery and
+// records the projection, and another poke inside the selected-session window
+// does not launch a second gh lookup.
+func TestRefreshPRInfoPokeDiscoversAndDebounces(t *testing.T) {
+	f := newPRSweepFixture(t)
+	calls := stubPRFetch(t, &sessiongit.PRInfo{
+		Number: 42, Title: "daemon-owned", URL: "https://example.com/pr/42", State: "OPEN",
+	}, nil)
+
+	err := f.manager.RefreshPRInfo(context.Background(), RefreshPRInfoRequest{
+		RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), calls.Load())
+	require.Equal(t, 42, f.instance.GetPRInfo().Number,
+		"the daemon must discover and project PR data; the client never supplies it")
+
+	err = f.manager.RefreshPRInfo(context.Background(), RefreshPRInfoRequest{
+		RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), calls.Load(),
+		"a second poke inside the server-owned debounce window must not fetch")
+
+	// The TUI ticks every minute. Leave enough margin that scheduler jitter does
+	// not turn a nominally minute-old entry into an every-other-tick refresh.
+	f.instance.SetPRInfoFetchedAtForTest(time.Now().Add(-59 * time.Second))
+	err = f.manager.RefreshPRInfo(context.Background(), RefreshPRInfoRequest{
+		RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), calls.Load(), "a minute-cadence poke must refresh on every tick")
+}
+
+// TestRefreshPRInfoPokeClaimsDebounceAtomically covers concurrent clients. The
+// first poke claims freshness before gh starts; a second TUI/web client that
+// arrives while that lookup is blocked must return without launching another.
+func TestRefreshPRInfoPokeClaimsDebounceAtomically(t *testing.T) {
+	f := newPRSweepFixture(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	prev := prInfoFetchFn
+	prInfoFetchFn = func(context.Context, string, string) (*sessiongit.PRInfo, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+		}
+		<-release
+		return nil, nil
+	}
+	t.Cleanup(func() { prInfoFetchFn = prev })
+
+	req := RefreshPRInfoRequest{RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- f.manager.RefreshPRInfo(context.Background(), req) }()
+	<-entered
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- f.manager.RefreshPRInfo(context.Background(), req) }()
+	select {
+	case err := <-secondDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("a debounced poke must return without waiting for the in-flight fetch")
+	}
+	require.Equal(t, int32(1), calls.Load(), "the debounce claim must be atomic")
+	close(release)
+	require.NoError(t, <-firstDone)
+}
+
+func TestRefreshPRInfoPokeStopsOnCancel(t *testing.T) {
+	f := newPRSweepFixture(t)
+	entered := make(chan struct{})
+	prev := prInfoFetchFn
+	prInfoFetchFn = func(ctx context.Context, _, _ string) (*sessiongit.PRInfo, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { prInfoFetchFn = prev })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- f.manager.RefreshPRInfo(ctx, RefreshPRInfoRequest{
+			RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+		})
+	}()
+	<-entered
+	cancel()
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("a cancelled refresh poke must stop its in-flight discovery")
+	}
+	require.Nil(t, f.instance.GetPRInfo(), "an abandoned lookup must project nothing")
+
+	var retryCalls atomic.Int32
+	prInfoFetchFn = func(context.Context, string, string) (*sessiongit.PRInfo, error) {
+		retryCalls.Add(1)
+		return nil, nil
+	}
+	require.NoError(t, f.manager.RefreshPRInfo(context.Background(), RefreshPRInfoRequest{
+		RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+	}))
+	require.Equal(t, int32(1), retryCalls.Load(),
+		"cancellation must release its claim so another producer can retry immediately")
+}
+
+func TestRefreshPRInfoPokeReportsGhUnavailable(t *testing.T) {
+	f := newPRSweepFixture(t)
+	t.Setenv("PATH", t.TempDir())
+
+	err := f.manager.RefreshPRInfo(context.Background(), RefreshPRInfoRequest{
+		RepoID: f.repoID, Title: f.instance.Title, ID: f.instance.ID,
+	})
+	require.ErrorContains(t, err, "gh")
+	require.Nil(t, f.instance.GetPRInfo())
 }
 
 // TestPRInfoSweepUnchangedResultWritesNothing pins the churn guard: re-learning
@@ -234,8 +356,8 @@ func TestPRInfoSweepDiscardsResultWhenNewerProducerLanded(t *testing.T) {
 
 // TestPRInfoSweepRechecksAdmissionBeforeRecording pins the quiesce race (#3287
 // review): upgrade activation can close admission while `gh` runs, and the
-// sweep's write goes through Manager.SetPRInfo directly — no RPC gate fronts
-// it — so the recheck immediately before recording is what keeps a mutation
+// sweep's guarded write is a direct Manager call — no RPC gate fronts it — so
+// the recheck immediately before recording is what keeps a mutation
 // from persisting after admission closed.
 func TestPRInfoSweepRechecksAdmissionBeforeRecording(t *testing.T) {
 	f := newPRSweepFixture(t)

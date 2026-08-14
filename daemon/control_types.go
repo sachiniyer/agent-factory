@@ -605,6 +605,20 @@ type SetPRInfoResponse struct {
 	OK bool `json:"ok"`
 }
 
+// RefreshPRInfoRequest asks the daemon to refresh its GitHub PR projection for
+// one session. The client supplies identity only: discovery, eligibility, and
+// the projected fields are daemon-owned (#3296). ID is authoritative when
+// present; legacy callers may address the row by {Title, RepoID}.
+type RefreshPRInfoRequest struct {
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+	ID     string `json:"id"`
+}
+
+type RefreshPRInfoResponse struct {
+	OK bool `json:"ok"`
+}
+
 // PauseStatusPollRequest asks the daemon to pause its per-instance capture-pane
 // liveness poll for ONE session while a TUI is attached full-screen to it
 // (#1160, Fix A follow-up to #1157). ID identifies the lease owner when

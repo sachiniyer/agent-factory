@@ -844,21 +844,21 @@
     },
     {
       "id": "session.pr.set",
-      "title": "Record a session's GitHub PR info",
+      "title": "Refresh a session's GitHub PR info",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_control.go:308 (auto-fetched on sync, not a user verb)"
+        "pointer": "app/sync.go refreshPRInfoCmd (identity-only selection/tick poke, not a user verb)"
       },
       "web": {
         "status": "no",
-        "pointer": "no SetPRInfo call in web/src"
+        "pointer": "no RefreshPRInfo call in web/src"
       },
       "cli": {
         "status": "no",
         "pointer": "no PR verb in the cobra tree (derived)"
       },
       "verdict": "deliberate",
-      "notes": "Discovery is daemon-side since #3232 (daemon/pr_info_refresh.go): the daemon sweeps every local session and records through the same SetPRInfo write path, so web/CLI-only use gets pr_info with no client producer. The TUI's faster selected-session fetch remains as an accelerator over the same route; the web and CLI need no set verb."
+      "notes": "The daemon is the sole PR-info producer (#3232/#3296): it sweeps every local session, while RefreshPRInfo lets the TUI accelerate its selected session using identity only. Every surface reads the same projected pr_info; web and CLI need no refresh verb. SetPRInfo remains served only for wire compatibility with older clients."
     },
     {
       "id": "session.preview",
@@ -1532,6 +1532,7 @@
       "POST /v1/ListPrograms": "enum.agent-programs",
       "POST /v1/ListTasks": "task.list",
       "POST /v1/RegisterProject": "project.add",
+      "POST /v1/RefreshPRInfo": "session.pr.set",
       "POST /v1/RemoveTask": "task.remove",
       "POST /v1/RestartTask": "task.restart",
       "POST /v1/RenameTab": "session.tab.rename",

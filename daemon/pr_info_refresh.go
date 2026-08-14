@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"sync"
 	"time"
@@ -12,19 +13,11 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
-// PR discovery is daemon-side (#3232). Before this loop the only producer of
-// the pr_info projection was the TUI's background fetch for its selected
-// session, so a session used only from the web or the CLI never had its PR
-// discovered at all — the daemon persisted whatever a TUI happened to hand it,
-// and no TUI meant nothing. The daemon now discovers PR info itself, through
-// the same `gh` lookup and the same Manager.SetPRInfo write path (op-lock,
-// archived-row refusal, persist-then-publish), so every surface reads a
-// projection the daemon keeps current on its own.
-//
-// The TUI still fetches its SELECTED session faster (60s); both producers
-// funnel through Manager.SetPRInfo, whose instance write bumps the shared
-// freshness clock — which is exactly what keeps this sweep from re-fetching a
-// session a TUI just refreshed.
+// PR discovery is daemon-side (#3232/#3296). The daemon is the only producer of
+// the pr_info projection: its background sweep covers every local session, and
+// clients may poke RefreshPRInfo for a selected session without supplying or
+// deriving any PR fields. Both paths use the same fenced fetch and guarded
+// persist-then-publish write, so every surface reads one authoritative value.
 
 const (
 	// prInfoSweepInterval is how often the daemon scans sessions for stale PR
@@ -32,18 +25,22 @@ const (
 	// what bounds the network work.
 	prInfoSweepInterval = time.Minute
 	// prInfoSweepStaleAfter is how old a session's PR info may grow before the
-	// sweep refreshes it. Deliberately lazier than the TUI's 60s
-	// selected-session refresh: the sweep covers EVERY local session, each
+	// sweep refreshes it. Deliberately lazier than the selected-session window:
+	// the sweep covers EVERY local session, each
 	// refresh is a `gh` network call against the shared GitHub API budget, so
 	// the window caps background usage at sessions × 6 calls/hour while a
 	// web/CLI-only workflow still converges within minutes.
 	prInfoSweepStaleAfter = 10 * time.Minute
+	// prInfoPokeStaleAfter keeps a selected session fresher without allowing
+	// several clients (or rapid selection events) to multiply gh calls. Leave
+	// margin below the TUI's minute tick so scheduler jitter cannot suppress
+	// every other refresh.
+	prInfoPokeStaleAfter = 55 * time.Second
 )
 
-// prInfoFetchFn is the discovery seam, a package var for the same reason as
-// the TUI's fetcher seam: the real function shells out to `gh`, which tests
-// must not do. Context-taking so the sweep can abandon an in-flight lookup
-// the moment the daemon shuts down.
+// prInfoFetchFn is the daemon discovery seam. The real function shells out to
+// `gh`, which tests must not do. Context-taking so either a request disconnect
+// or daemon shutdown can abandon an in-flight lookup immediately.
 var prInfoFetchFn = git.FetchPRInfoContext
 
 // startPRInfoRefreshLoop runs the PR-info sweep until stopCh closes, mirroring
@@ -120,59 +117,114 @@ func (m *Manager) refreshStalePRInfo(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		m.refreshInstancePRInfo(ctx, e.repoID, e.instance)
+		if err := m.refreshInstancePRInfo(ctx, e.repoID, e.instance, prInfoSweepStaleAfter); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+				IsDaemonQuiescingErr(err) || IsDaemonUpgradeProbationErr(err) {
+				return
+			}
+			log.WarningLog.Printf("PR info sweep: refresh for %q failed: %v", e.instance.Title, err)
+		}
 	}
 }
 
+// RefreshPRInfo handles a client poke for one session. It deliberately accepts
+// no PR payload: the daemon resolves the canonical row, owns the eligibility
+// decision, runs discovery with the caller's cancellation context, and records
+// through the same guarded write as the background sweep.
+func (m *Manager) RefreshPRInfo(ctx context.Context, req RefreshPRInfoRequest) error {
+	if m.lifecycle != nil {
+		if err := m.lifecycle.mutationAdmissionError(); err != nil {
+			return err
+		}
+	}
+	inst, repoID, _, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
+	if err != nil {
+		return err
+	}
+	if inst == nil {
+		return errors.New("failed to resolve session for PR-info refresh")
+	}
+	// Missing gh means discovery is unavailable, not an authoritative "no PR".
+	// Preserve the last projection, but tell the requesting client: unlike the
+	// sweep, it has a user-facing error path and no fallback producer (#3296).
+	if _, err := exec.LookPath("gh"); err != nil {
+		return fmt.Errorf("PR info discovery requires gh in the daemon PATH: %w", err)
+	}
+	return m.refreshInstancePRInfo(ctx, repoID, inst, prInfoPokeStaleAfter)
+}
+
+// RefreshPRInfo is the net/rpc entrypoint. The HTTP route calls refreshPRInfo
+// directly so a disconnected client cancels the gh subprocess.
+func (s *controlServer) RefreshPRInfo(req RefreshPRInfoRequest, resp *RefreshPRInfoResponse) error {
+	return s.refreshPRInfo(context.Background(), req, resp)
+}
+
+func (s *controlServer) refreshPRInfo(
+	ctx context.Context,
+	req RefreshPRInfoRequest,
+	resp *RefreshPRInfoResponse,
+) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	if err := validateRPCRepoID(req.RepoID); err != nil {
+		return err
+	}
+	if err := s.manager.RefreshPRInfo(ctx, req); err != nil {
+		return err
+	}
+	resp.OK = true
+	return nil
+}
+
 // refreshInstancePRInfo fetches and records one session's PR info if it is
-// eligible and stale. Eligibility mirrors the TUI's fetch gate: PR info comes
-// from `gh` against a local branch, so only a started local-worktree session
+// eligible and stale. PR info comes from `gh` against a local branch, so only a
+// started local-worktree session
 // with a branch qualifies, and rows that are archived, tearing down, or killed
 // have no use for a badge (their write would be refused anyway).
-func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst *session.Instance) {
+func (m *Manager) refreshInstancePRInfo(
+	ctx context.Context,
+	repoID string,
+	inst *session.Instance,
+	staleAfter time.Duration,
+) error {
 	if inst.Capabilities().Workspace != session.WorkspaceLocalWorktree {
-		return
+		return nil
 	}
 	if inst.IsArchived() || inst.IsTearingDown() || inst.UserKilled() {
-		return
-	}
-	if inst.PRInfoAge() < prInfoSweepStaleAfter {
-		return
+		return nil
 	}
 	repoPath, branch := inst.FetchPRInfoSnapshot()
 	if repoPath == "" || branch == "" {
-		return
+		return nil
 	}
-	// Bump the freshness clock at kickoff, exactly as the TUI does: a failed or
-	// empty fetch then waits out a full staleness window instead of retrying on
-	// every sweep while the network is down.
-	inst.MarkPRInfoFetched()
-	// The generation after our own bump is the fence: any producer that lands
-	// while `gh` runs (a TUI selected-session refresh, another SetPRInfo)
-	// advances it, and this sweep's now-older result must be discarded rather
-	// than overwrite the newer state (#3287 review).
-	fetchGeneration := inst.PRInfoGeneration()
+	// Claim freshness and capture the write fence in one critical section. This
+	// is server-side because several TUI/web clients may poke the same session;
+	// only one may launch gh inside the window.
+	fetchClaim, claimed := inst.BeginPRInfoFetch(staleAfter)
+	if !claimed {
+		return nil
+	}
 	info, err := prInfoFetchFn(ctx, repoPath, branch)
 	if ctx.Err() != nil {
-		// Shutdown abandoned the lookup; a cancelled fetch is not a failure
-		// worth a warning, and nothing must be recorded from it.
-		return
+		inst.CancelPRInfoFetch(fetchClaim)
+		return ctx.Err()
 	}
 	if err != nil {
-		log.WarningLog.Printf("PR info sweep: fetch for %q failed: %v", inst.Title, err)
-		return
+		return fmt.Errorf("fetch PR info for %q: %w", inst.Title, err)
 	}
 	if info != nil {
-		// Bind the result to the ref it was looked up for, like the TUI's
-		// fetch: a PR state without provenance must never authorize anything.
+		// Bind the result to the exact ref the daemon looked up: a PR state
+		// without provenance must never authorize anything.
 		bound := *info
 		bound.Branch = branch
 		info = &bound
 	}
 	// The branch can move while `gh` runs; a result for the old ref must not be
-	// recorded against the new one (the TUI drops this case too).
+	// recorded against the new one.
 	if _, current := inst.FetchPRInfoSnapshot(); current != branch {
-		return
+		inst.CancelPRInfoFetch(fetchClaim)
+		return nil
 	}
 	var data session.PRInfoData
 	if info != nil {
@@ -193,18 +245,19 @@ func (m *Manager) refreshInstancePRInfo(ctx context.Context, repoID string, inst
 	// the op-lock). The refusals are expected outcomes, not failures.
 	err = m.setPRInfoGuarded(ctx,
 		SetPRInfoRequest{RepoID: repoID, Title: inst.Title, ID: inst.ID, PRInfo: data},
-		&prInfoWriteGuard{expectGeneration: fetchGeneration},
+		&prInfoWriteGuard{expectGeneration: fetchClaim.Generation()},
 	)
 	switch {
 	case err == nil:
-	case errors.Is(err, errPRInfoResultRaced),
-		errors.Is(err, context.Canceled),
-		errors.Is(err, context.DeadlineExceeded),
-		IsDaemonQuiescingErr(err),
-		IsDaemonUpgradeProbationErr(err):
-		// Expected refusals: raced by a newer producer, shutdown, or admission.
+		return nil
+	case errors.Is(err, errPRInfoResultRaced):
+		// A newer producer already won; its generation prevents rollback.
+		return nil
 	default:
-		log.WarningLog.Printf("PR info sweep: record for %q failed: %v", inst.Title, err)
+		// No result was recorded. Release this claim unless a newer producer won
+		// while the guarded write was waiting.
+		inst.CancelPRInfoFetch(fetchClaim)
+		return err
 	}
 }
 

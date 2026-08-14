@@ -352,9 +352,10 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 	return false
 }
 
-// SetPRInfo records (or clears) the GitHub PR info for the target session and
-// persists it (#960 PR 1). A zero-value PRInfo (Number 0) clears the recorded
-// info. It mirrors CloseTab's discipline — resolve stable identity first, take
+// SetPRInfo is the compatibility write for clients predating daemon-owned
+// discovery (#3296). First-class clients call RefreshPRInfo and never supply
+// projected fields. A zero-value PRInfo (Number 0) clears the recorded info.
+// The compatibility path mirrors CloseTab's discipline — resolve stable identity first, take
 // the per-session op-lock so a concurrent kill/archive teardown can't replace
 // the session out from under us, re-verify the tracked instance hasn't been
 // swapped for a same-titled recreate, then mutate+persist under the per-repo
@@ -365,9 +366,8 @@ func instanceHasVSCodeTab(instance *session.Instance) bool {
 // its stale stable id) over the new instance's disk record, corrupting the
 // persisted identity (#1723). It also refuses an archived session under that
 // same lock, which the stale-instance check cannot substitute for (#2437 — see
-// the gate below). This is the daemon-side write used by the TUI's async PR-info
-// fetch (#921); admission for this unconditional form is the RPC gate in front
-// of it.
+// the gate below). Admission for this unconditional form is the RPC gate in
+// front of it.
 func (m *Manager) SetPRInfo(req SetPRInfoRequest) error {
 	return m.setPRInfoGuarded(context.Background(), req, nil)
 }
