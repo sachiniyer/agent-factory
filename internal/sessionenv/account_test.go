@@ -382,6 +382,20 @@ func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappe
 	}
 }
 
+func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`eval 'CODEX_HOME=/other exec codex'`,
+		`. ./launcher.sh`,
+		`source ./launcher.sh`,
+		`trap 'CODEX_HOME=/other exec codex' EXIT`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "shell builtin %q evaluates hidden program text", command)
+		require.Contains(t, err.Error(), "shell wrapper")
+	}
+}
+
 func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
@@ -394,6 +408,7 @@ func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *
 		`fish -c 'set -x CODEX_HOME /other; exec codex'`,
 		`csh -c 'setenv CODEX_HOME /other; exec codex'`,
 		`tcsh -c 'setenv CODEX_HOME /other; exec codex'`,
+		`go run ./launcher.go`,
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "interpreter %q can hide an identity-changing agent launch in program text", command)

@@ -37,6 +37,18 @@ func TestSelectAccountCandidate_ExplicitAccountPinIsNeverOverridden(t *testing.T
 	}
 }
 
+func TestSelectAccountCandidate_CurrentAutomaticAccountIsNotAReplacement(t *testing.T) {
+	got, ok := SelectAccountCandidate(AccountSelection{
+		CurrentAccount:      "work",
+		CurrentAutoSelected: true,
+		Candidates:          []string{"work"},
+		Registered:          []string{"work"},
+	})
+	if ok || got != "" {
+		t.Fatalf("SelectAccountCandidate = (%q, %v), want ordinary same-account resume", got, ok)
+	}
+}
+
 func TestSelectAccountCandidates_PriorAutomaticSelectionThenConfiguredOrder(t *testing.T) {
 	got := SelectAccountCandidates(AccountSelection{
 		CurrentAccount:      "personal",
