@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // This file backs `af config get root_agent --explain` (#2216 Phase 6). The
@@ -64,7 +65,7 @@ func ResolveRootAgentForInspection(projectSelector string, strictProjectLookup b
 		return ResolvedValue{}, err
 	}
 	if assembly.failClosed != "" {
-		return rootAgentFailClosedValue(assembly.inputs, assembly.locs, assembly.failClosed), nil
+		return rootAgentFailClosedValue(assembly), nil
 	}
 	resolved := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, projectSelector != "")
 	if assembly.ignoredGlobal != nil {
@@ -93,6 +94,12 @@ type rootAgentInspectionAssembly struct {
 	// merge would confidently explain a decision the failed read already
 	// overrode (#3264).
 	failClosed string
+	// personalUnreadable narrows failClosed: the cause is THIS project's
+	// personal config, so the trace must render the personal layer as present
+	// but unreadable — its file exists at locs.personalPath — rather than as
+	// "this project has no entry", which would deny the very source the cause
+	// names.
+	personalUnreadable bool
 }
 
 // assembleRootAgentInspectionInputs builds the RootAgentInputs the --explain
@@ -170,6 +177,7 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 					out.locs.personalPath = p
 				}
 				out.failClosed = fmt.Sprintf("personal config %s exists but cannot be loaded, so the daemon fails this project's root agent closed at its next start; fix or remove that file", path)
+				out.personalUnreadable = true
 				return out, nil
 			}
 			if layer := pc.RootAgentLayer(); layer != nil {
@@ -193,20 +201,89 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 // #3247): the effective profile is disabled regardless of what the layers say,
 // every present layer is shown ignored with the cause, and no field claims a
 // config origin — no config source decided this, the failed read did (the same
-// zero-provenance rule as the daemon's resolvedRootAgentFor).
-func rootAgentFailClosedValue(inputs RootAgentInputs, locs rootAgentLocations, cause string) ResolvedValue {
-	rv := rootAgentResolvedValue(ResolveRootAgent(inputs), locs, true)
+// zero-provenance rule as the daemon's resolvedRootAgentFor). Layers stay
+// Allowed: manifest policy permits them everywhere they appear; it is the
+// failed read that ignores them, and Result/Reason carry that. The
+// zero-provenance shape doubles as the marker RootAgentValueFailsClosed keys
+// on.
+//
+// The personal row needs its own truth per cause. When the personal config
+// itself is the unreadable source, the layer is PRESENT — its file exists at
+// the recorded location — just undecodable, so the row shows present with no
+// leaves and the cause; rendering it "this project has no entry" would deny
+// the very source the cause names. When the registry is the unreadable
+// source, whether this project even has a personal entry is unknowable, and
+// the row says that instead of asserting absence.
+func rootAgentFailClosedValue(assembly rootAgentInspectionAssembly) ResolvedValue {
+	rv := rootAgentResolvedValue(ResolveRootAgent(assembly.inputs), assembly.locs, true)
 	rv.Value = RootAgent{}
 	for i := range rv.Candidates {
-		if !rv.Candidates[i].Present {
+		candidate := &rv.Candidates[i]
+		if candidate.Layer == string(RootAgentSourcePersonal) {
+			if assembly.personalUnreadable {
+				candidate.Present = true
+				candidate.Value = nil
+				candidate.Result = "ignored"
+				candidate.Reason = assembly.failClosed
+				continue
+			}
+			if !candidate.Present {
+				candidate.Result = "unknown"
+				candidate.Reason = "cannot be determined: " + assembly.failClosed
+				continue
+			}
+		}
+		if !candidate.Present {
 			continue
 		}
-		rv.Candidates[i].Allowed = false
-		rv.Candidates[i].Result = "ignored"
-		rv.Candidates[i].Reason = cause
+		candidate.Result = "ignored"
+		candidate.Reason = assembly.failClosed
 	}
 	rv.Origins = nil
 	return rv
+}
+
+// RootAgentValueFailsClosed reports whether rv is the fail-closed rendering
+// (#3264). The zero-provenance shape is the marker: every layered root_agent
+// resolution carries at least Origins["enabled"] (ResolveRootAgent always
+// sets EnabledSource), and the fail-closed verdict deliberately carries none,
+// because no config source decided it.
+func RootAgentValueFailsClosed(rv ResolvedValue) bool {
+	return rv.Key == "root_agent" && len(rv.Origins) == 0
+}
+
+// ProjectFailClosedRootAgentLeaf projects one leaf of a fail-closed
+// root_agent table for a dotted read (`af config get root_agent.enabled`).
+// The generic ResolvedValuePath cannot serve this shape: it keys the
+// projection on Origins — which a fail-closed verdict deliberately lacks —
+// and it relabels every candidate against the winner's layer, overwriting the
+// cause this rendering exists to surface. Here the effective leaf comes from
+// the disabled profile and every candidate keeps its row verbatim, values
+// leaf-projected.
+func ProjectFailClosedRootAgentLeaf(parent ResolvedValue, keyPath string) (ResolvedValue, bool) {
+	leaf, ok := strings.CutPrefix(keyPath, "root_agent.")
+	if !ok || leaf == "" {
+		return ResolvedValue{}, false
+	}
+	effective, ok := configLeafValue(parent.Value, leaf)
+	if !ok {
+		return ResolvedValue{}, false
+	}
+	projected := parent
+	projected.Key = keyPath
+	projected.Value = effective
+	projected.Default = ""
+	projected.Candidates = make([]CandidateTrace, len(parent.Candidates))
+	for i, candidate := range parent.Candidates {
+		candidate.KeyPath = keyPath
+		if leafValue, present := configLeafValue(candidate.Value, leaf); present && candidate.Present {
+			candidate.Value = leafValue
+		} else {
+			candidate.Value = nil
+		}
+		projected.Candidates[i] = candidate
+	}
+	return projected, true
 }
 
 // LegacyRootAgentForRepo returns the root_agents entry whose path resolves to

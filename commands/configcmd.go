@@ -254,7 +254,19 @@ resolved value with the complete source trace.`,
 		if configGetExplainFlag || projectSelector != "" || strings.Contains(args[0], ".") {
 			resolved, err := loadResolvedConfig(projectSelector)
 			if err != nil {
-				return jsonWrapError(cmd, configJSONFlag, err)
+				// The layered load fails on exactly the states the specialized
+				// root_agent resolution absorbs into a fail-closed explanation
+				// (#3264): an unloadable personal config, an unlistable project
+				// registry. For root_agent keys, degrade the surrounding
+				// explanation context to global scope and let the specialized
+				// value below answer; every other key keeps the loud error.
+				if !isRootAgentExplainKey(args[0]) {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				resolved, err = loadResolvedConfig("")
+				if err != nil {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
 			}
 			value, ok := resolved.ResolvedValuePath(args[0])
 			if !ok {
