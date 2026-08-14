@@ -37,6 +37,24 @@ var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationD
 	)
 }
 
+// accountLimitEvidencePass memoizes the expensive durable scan only for one
+// scheduler pass. Admission deliberately does not use this snapshot: it calls
+// accountSwapOpportunityFromFacts again under the operation fence so a swap can
+// never commit from evidence that predates the destructive boundary.
+type accountLimitEvidencePass struct {
+	loaded       bool
+	observations []session.AccountLimitObservationData
+	err          error
+}
+
+func (p *accountLimitEvidencePass) load() ([]session.AccountLimitObservationData, error) {
+	if !p.loaded {
+		p.observations, p.err = loadAccountLimitEvidenceForSwap()
+		p.loaded = true
+	}
+	return p.observations, p.err
+}
+
 // committedAccountSwap recognizes a replacement whose identity checkpoint
 // landed but whose prompt/notice transaction did not finish. It is independent
 // of current config: disabling future choices cannot make a completed move
@@ -64,6 +82,14 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 // successfully. "Unblocked" means only that none of those complete sources has
 // a live or unexpired limit observation; it is not a provider quota claim.
 func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, global *config.Config) (*autoAccountSwap, error) {
+	return m.accountSwapOpportunityFromFactsWithEvidence(instance, global, loadAccountLimitEvidenceForSwap)
+}
+
+func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
+	instance *session.Instance,
+	global *config.Config,
+	loadEvidence accountLimitEvidenceLoader,
+) (*autoAccountSwap, error) {
 	if instance == nil || !instance.LimitReached() || !instance.SupportsAutomaticAccountSwap() {
 		return nil, nil
 	}
@@ -104,7 +130,7 @@ func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, gl
 	m.mu.Unlock()
 	limitedSet := make(map[string]struct{})
 	now := nowFunc()
-	retained, err := loadAccountLimitEvidenceForSwap()
+	retained, err := loadEvidence()
 	if err != nil {
 		return nil, fmt.Errorf("load durable account-limit evidence for %q: %w", instance.Title, err)
 	}

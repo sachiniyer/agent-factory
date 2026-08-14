@@ -223,7 +223,7 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 	}
 	commandName := filepath.Base(words[0])
 	switch commandName {
-	case "sh", "bash", "dash", "ksh", "mksh", "zsh":
+	case "sh", "bash", "csh", "dash", "fish", "ksh", "mksh", "tcsh", "zsh":
 		return true
 	case "command", "nice", "nohup", "setsid", "timeout", "chrt", "ionice", "stdbuf", "xargs":
 		return true

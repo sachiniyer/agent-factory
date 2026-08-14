@@ -148,8 +148,9 @@ func (m *Manager) ResumeLimitedSessions() {
 	m.mu.Unlock()
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+	evidence := &accountLimitEvidencePass{}
 	for _, e := range entries {
-		m.resumeLimitedSession(e.key, e.repoID, e.instance, cfg, retryInterval)
+		m.resumeLimitedSession(e.key, e.repoID, e.instance, cfg, retryInterval, evidence.load)
 	}
 }
 
@@ -161,7 +162,13 @@ func (m *Manager) ResumeLimitedSessions() {
 // shared resumeFromLimitLocked body; the op lock is only TryLock'd so the poll
 // goroutine never stalls behind a kill teardown, and everything is re-verified
 // under the locks because the checks above are point-in-time.
-func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instance, cfg *config.Config, retryInterval time.Duration) {
+func (m *Manager) resumeLimitedSession(
+	key, repoID string,
+	inst *session.Instance,
+	cfg *config.Config,
+	retryInterval time.Duration,
+	loadEvidence accountLimitEvidenceLoader,
+) {
 	if inst == nil || !inst.Started() || inst.GetLiveness() != session.LiveLimitReached {
 		return
 	}
@@ -180,7 +187,7 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	// which is what a resume episode is about (#2876).
 	now := nowFunc()
 	stateKey := stableSessionKey(repoID, inst)
-	accountSwap, swapErr := m.accountSwapOpportunityFromFacts(inst, cfg)
+	accountSwap, swapErr := m.accountSwapOpportunityFromFactsWithEvidence(inst, cfg, loadEvidence)
 	if swapErr != nil {
 		log.WarningLog.Printf("account-swap check for limit-blocked session %q failed; retaining the existing wait: %v", inst.Title, swapErr)
 	}
@@ -279,8 +286,12 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
-	if err := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap); err != nil {
-		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, err)
+	resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
+	if accountSwap != nil && accountSwap.fellBack && !hadReset && retryInterval > 0 {
+		wait = m.limitResumeFixedFallbackScheduled(st, now, retryInterval)
+	}
+	if resumeErr != nil {
+		log.WarningLog.Printf("auto-resume of limit-blocked session %q failed (attempt %d), backing off %s: %v", inst.Title, attempts, wait, resumeErr)
 		return
 	}
 	if accountSwap != nil && !accountSwap.fellBack {
@@ -295,6 +306,19 @@ func (m *Manager) resumeLimitedSession(key, repoID string, inst *session.Instanc
 		}
 		log.InfoLog.Printf("auto-resumed limit-blocked session %q (repo %s) %s (attempt %d)", inst.Title, repoID, trigger, attempts)
 	}
+}
+
+// limitResumeFixedFallbackScheduled corrects the provisional candidate backoff
+// after replacement admission yields to an already-due ordinary retry. A limit
+// with no parsed reset time repeats on the configured fixed interval regardless
+// of whether the same scheduler fire first explored an account replacement.
+func (m *Manager) limitResumeFixedFallbackScheduled(
+	st *limitResumeState, now time.Time, retryInterval time.Duration,
+) time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st.nextAttempt = now.Add(retryInterval)
+	return retryInterval
 }
 
 // limitResumeAttempted records one auto-resume attempt and sets the gate for the
