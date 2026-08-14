@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 // These pin #2098: the TUI task pane loads through LoadTasksForRepo, which used
@@ -158,7 +159,7 @@ func TestLoadTasksForRepo_LinkedWorktree(t *testing.T) {
 }
 
 func TestLoadTasksForRepo_BareCloneLinkedWorktree(t *testing.T) {
-	parent := t.TempDir()
+	parent := testguard.CanonicalTempDir(t)
 	source := filepath.Join(parent, "source")
 	bare := filepath.Join(parent, "bare.git")
 	worktree := filepath.Join(parent, "worktree")
