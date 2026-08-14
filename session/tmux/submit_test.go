@@ -1109,7 +1109,8 @@ func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
 }
 
 func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
-	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	defer withPasteDeliveryTiming(4*time.Millisecond, time.Millisecond)()
+	useFakePasteDeliveryClock(t)
 	captures := 0
 	cmdExec := cmd_test.MockCmdExec{
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
@@ -1127,6 +1128,8 @@ func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
 	got := session.waitForPasteDelivered(newDeliveryProbe("ok"))
 	require.Equal(t, deliveryCouldNotObserve, got.outcome,
 		"two weak sightings separated by a failed probe are not consecutive delivery evidence")
+	require.Equal(t, 4, captures,
+		"the virtual poll budget must include the separating and terminal capture failures")
 }
 
 // TestPriorVisibleDeliveryDoesNotAuthorizeALaterNegative pins the payload scope
@@ -1185,6 +1188,20 @@ func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
 	savedMax, savedPoll := pasteDeliveryMaxWait, pasteDeliveryPollInterval
 	pasteDeliveryMaxWait, pasteDeliveryPollInterval = maxWait, poll
 	return func() { pasteDeliveryMaxWait, pasteDeliveryPollInterval = savedMax, savedPoll }
+}
+
+// useFakePasteDeliveryClock makes sleeps advance logical delivery time instead
+// of waiting for scheduler turns. Tests can therefore pin an exact observed
+// poll sequence even when the host is under CPU contention (#3333).
+func useFakePasteDeliveryClock(t *testing.T) {
+	t.Helper()
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	savedNow, savedSleep := pasteDeliveryNow, pasteDeliverySleep
+	pasteDeliveryNow = func() time.Time { return now }
+	pasteDeliverySleep = func(d time.Duration) { now = now.Add(d) }
+	t.Cleanup(func() {
+		pasteDeliveryNow, pasteDeliverySleep = savedNow, savedSleep
+	})
 }
 
 // TestSubmitWaitsForPasteBeforeEnter is the #1982 regression: the submit path

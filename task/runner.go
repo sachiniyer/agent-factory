@@ -543,9 +543,26 @@ func (t instanceReadinessTarget) HooksDone() <-chan struct{} {
 	return postWorktreeHooksDoneForWait(t.inst)
 }
 
+type readinessClock struct {
+	after     func(time.Duration) <-chan time.Time
+	newTicker func(time.Duration) (<-chan time.Time, func())
+}
+
+var wallReadinessClock = readinessClock{
+	after: time.After,
+	newTicker: func(interval time.Duration) (<-chan time.Time, func()) {
+		ticker := time.NewTicker(interval)
+		return ticker.C, ticker.Stop
+	},
+}
+
 // WaitForReadyOn is WaitForReady against any ReadinessTarget — the seam a bare
 // tmux session uses. See WaitForReady for the cancellation contract.
 func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
+	return waitForReadyOn(ctx, target, wallReadinessClock)
+}
+
+func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readinessClock) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -577,16 +594,16 @@ func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 	var timeout <-chan time.Time
 	var hookGrace <-chan time.Time
 	if hooksDone == nil {
-		timeout = time.After(waitForReadyTimeout)
+		timeout = clock.after(waitForReadyTimeout)
 	} else {
 		// Safety valve: a misconfigured non-terminating post_worktree_command
 		// (e.g. a foreground server) would otherwise hold the deadline open
 		// forever and wedge session startup. Cap how long hooks may defer the
 		// readiness clock; normal provisioning builds finish well within it.
-		hookGrace = time.After(waitForReadyHookGrace)
+		hookGrace = clock.after(waitForReadyHookGrace)
 	}
-	ticker := time.NewTicker(waitForReadyPollInterval)
-	defer ticker.Stop()
+	ticker, stopTicker := clock.newTicker(waitForReadyPollInterval)
+	defer stopTicker()
 
 	for {
 		// Observe cancellation at the top of every iteration, before starting
@@ -609,12 +626,12 @@ func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 			// Provisioning finished: arm the full readiness budget from here and
 			// stop watching the hooks channels.
 			hooksDone, hookGrace = nil, nil
-			timeout = time.After(waitForReadyTimeout)
+			timeout = clock.after(waitForReadyTimeout)
 		case <-hookGrace:
 			// Hooks ran too long to be normal provisioning; stop deferring to
 			// them and enforce the readiness budget so startup can't hang forever.
 			hooksDone, hookGrace = nil, nil
-			timeout = time.After(waitForReadyTimeout)
+			timeout = clock.after(waitForReadyTimeout)
 		case <-timeout:
 			content, err := target.PreviewContent(ctx)
 			if err != nil {
@@ -649,7 +666,7 @@ func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 			}
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
 			return formatWaitForReadyTimeoutError(waitForReadyTimeout, content)
-		case <-ticker.C:
+		case <-ticker:
 			content, err := target.PreviewContent(ctx)
 			if err != nil {
 				// A cancelled/timed-out create surfaces here as context.Canceled /
