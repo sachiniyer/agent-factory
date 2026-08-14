@@ -475,6 +475,10 @@ type byteRange struct {
 // table as one expression, so replacing session_env_passthrough cannot strand
 // half of the old value in the file. Unrelated expressions stay byte-identical.
 func setTOMLStructured(content, key, definition string) (string, error) {
+	definition, err := preserveUnknownStructuredMembers(content, key, definition)
+	if err != nil {
+		return "", err
+	}
 	cleaned, err := removeTOMLTopLevelValue(content, key)
 	if err != nil {
 		return "", err
@@ -495,6 +499,146 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 		return "", fmt.Errorf("invalid root definition for %s", key)
 	}
 	return setTOMLScalar(cleaned, "", key, strings.TrimSuffix(strings.TrimPrefix(definition, prefix), "\n")), nil
+}
+
+// preserveUnknownStructuredMembers carries fields this binary does not know
+// from the old target table into its replacement. The loader deliberately
+// ignores such fields for rollback tolerance; dropping them during an edit of a
+// known sibling would make that tolerance destructive. Dynamic map keys remain
+// ordinary user values, so omission still removes them. Only unknown members
+// inside a typed struct (including a struct stored in a map) are retained.
+func preserveUnknownStructuredMembers(content, key, definition string) (string, error) {
+	var existingDoc, replacementDoc map[string]any
+	if err := toml.Unmarshal([]byte(content), &existingDoc); err != nil {
+		return "", err
+	}
+	if err := toml.Unmarshal([]byte(definition), &replacementDoc); err != nil {
+		return "", err
+	}
+	existing, exists := existingDoc[key]
+	replacement, replaces := replacementDoc[key]
+	if !exists || !replaces {
+		return definition, nil
+	}
+
+	field, ok := writableConfigFieldByTomlKey(&Config{}, key)
+	if !ok {
+		return definition, nil
+	}
+	merged, changed, err := mergeUnknownStructuredMembers(existing, replacement, field.Type(), key)
+	if err != nil {
+		return "", err
+	}
+	if !changed {
+		return definition, nil
+	}
+	encoded, err := toml.Marshal(map[string]any{key: merged})
+	if err != nil {
+		return "", fmt.Errorf("preserve unknown members of %s: %w", key, err)
+	}
+	return string(encoded), nil
+}
+
+func mergeUnknownStructuredMembers(existing, replacement any, schema reflect.Type, path string) (any, bool, error) {
+	for schema.Kind() == reflect.Pointer {
+		schema = schema.Elem()
+	}
+	switch schema.Kind() {
+	case reflect.Struct:
+		existingMap, existingIsMap := existing.(map[string]any)
+		if !existingIsMap {
+			return replacement, false, nil
+		}
+		replacementMap, replacementIsMap := replacement.(map[string]any)
+		if !replacementIsMap {
+			if unknownPath, ok := firstUnknownStructuredMember(existingMap, schema, path); ok {
+				return nil, false, fmt.Errorf("cannot replace %s while preserving newer config member %s; update af or remove that member manually", path, unknownPath)
+			}
+			return replacement, false, nil
+		}
+		known := tomlStructFieldTypes(schema)
+		changed := false
+		for name, oldValue := range existingMap {
+			fieldType, isKnown := known[name]
+			if !isKnown {
+				if _, alreadyPresent := replacementMap[name]; !alreadyPresent {
+					replacementMap[name] = oldValue
+					changed = true
+				}
+				continue
+			}
+			newValue, stillPresent := replacementMap[name]
+			if !stillPresent {
+				continue
+			}
+			merged, nestedChanged, err := mergeUnknownStructuredMembers(oldValue, newValue, fieldType, path+"."+name)
+			if err != nil {
+				return nil, false, err
+			}
+			if nestedChanged {
+				replacementMap[name] = merged
+				changed = true
+			}
+		}
+		return replacementMap, changed, nil
+	case reflect.Map:
+		existingMap, existingIsMap := existing.(map[string]any)
+		replacementMap, replacementIsMap := replacement.(map[string]any)
+		if !existingIsMap || !replacementIsMap || schema.Key().Kind() != reflect.String {
+			return replacement, false, nil
+		}
+		changed := false
+		for name, newValue := range replacementMap {
+			oldValue, existed := existingMap[name]
+			if !existed {
+				continue
+			}
+			merged, nestedChanged, err := mergeUnknownStructuredMembers(oldValue, newValue, schema.Elem(), path+"."+name)
+			if err != nil {
+				return nil, false, err
+			}
+			if nestedChanged {
+				replacementMap[name] = merged
+				changed = true
+			}
+		}
+		return replacementMap, changed, nil
+	default:
+		return replacement, false, nil
+	}
+}
+
+func firstUnknownStructuredMember(value map[string]any, schema reflect.Type, path string) (string, bool) {
+	known := tomlStructFieldTypes(schema)
+	for name, nested := range value {
+		fieldType, ok := known[name]
+		if !ok {
+			return path + "." + name, true
+		}
+		for fieldType.Kind() == reflect.Pointer {
+			fieldType = fieldType.Elem()
+		}
+		if fieldType.Kind() == reflect.Struct {
+			if nestedMap, ok := nested.(map[string]any); ok {
+				if unknown, found := firstUnknownStructuredMember(nestedMap, fieldType, path+"."+name); found {
+					return unknown, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func tomlStructFieldTypes(schema reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type)
+	for i := range schema.NumField() {
+		field := schema.Field(i)
+		name, _, skip := tomlFieldName(field)
+		if !skip {
+			fields[name] = field.Type
+		}
+	}
+	return fields
 }
 
 func removeTOMLTopLevelValue(content, key string) (string, error) {

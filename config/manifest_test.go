@@ -517,6 +517,7 @@ func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
 	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
 	for _, want := range []string{
 		"Every global key can be changed with `af config set <key> <value>`",
+		"leaves unrelated comments and the file's ordering untouched",
 		"Each successful set reports when that key takes effect",
 	} {
 		if !strings.Contains(out, want) {
@@ -524,6 +525,7 @@ func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
 		}
 	}
 	for _, obsolete := range []string{
+		"leaves every comment",
 		"tables you edit in the file by hand",
 		"Either way the change applies the next time af and its background service start",
 	} {

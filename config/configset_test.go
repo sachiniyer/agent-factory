@@ -263,6 +263,68 @@ func TestSetTOMLStructuredPreservesUnrelatedTrailingBlankLines(t *testing.T) {
 	}
 }
 
+func TestSetGlobalConfigValuePreservesUnknownStructuredMembers(t *testing.T) {
+	cases := []struct {
+		name, input, key, value, preserved string
+	}{
+		{
+			name:      "theme direct member",
+			input:     "[theme]\nfuture_policy = 'keep'\n",
+			key:       "theme",
+			value:     `{"accent":"#112233"}`,
+			preserved: "future_policy = 'keep'",
+		},
+		{
+			name:      "root agent direct member",
+			input:     "[root_agent]\nprogram = 'claude'\nfuture_policy = 'keep'\n",
+			key:       "root_agent",
+			value:     `{"enabled":true,"program":"codex"}`,
+			preserved: "future_policy = 'keep'",
+		},
+		{
+			name:      "root agents nested member",
+			input:     "[root_agents.'/tmp/repo']\nprogram = 'claude'\nfuture_policy = 'keep'\n",
+			key:       "root_agents",
+			value:     `{"/tmp/repo":{"program":"codex"}}`,
+			preserved: "future_policy = 'keep'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, tc.input)
+			if _, err := SetGlobalConfigValue(tc.key, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			written, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(written), tc.preserved) {
+				t.Fatalf("structured write dropped unknown member %q:\n%s", tc.preserved, written)
+			}
+		})
+	}
+}
+
+func TestSetGlobalConfigValueRefusesToDiscardUnknownMemberOnShapeChange(t *testing.T) {
+	path := writeTempConfig(t, "[theme]\nfuture_policy = 'keep'\n")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = SetGlobalConfigValue("theme", "zenburn")
+	if err == nil || !strings.Contains(err.Error(), "theme.future_policy") {
+		t.Fatalf("shape-changing set error = %v, want unknown member path", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("refused shape change modified the file:\n%s", after)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)

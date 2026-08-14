@@ -56,7 +56,7 @@ func RenderBriefing(cfg *Config, configPath string) string {
 	fmt.Fprintf(&b, "These are the settings in `%s`, which apply to every repository. ", configPath)
 	b.WriteString("Keys are grouped by how likely you are to need them.\n\n")
 	b.WriteString("Every global key can be changed with `af config set <key> <value>`, which edits that one value in place ")
-	b.WriteString("and leaves every comment and the file's ordering untouched. ")
+	b.WriteString("and leaves unrelated comments and the file's ordering untouched. ")
 	b.WriteString("Each successful set reports when that key takes effect; follow that per-key notice instead of assuming a restart.\n")
 
 	for _, tier := range ManifestTiers {

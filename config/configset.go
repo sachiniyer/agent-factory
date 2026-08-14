@@ -370,7 +370,7 @@ func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok
 
 // SetGlobalConfigValue validates key+rawValue against the settable-key allowlist
 // and the loader's validators, then surgically writes the value into the global
-// config.toml under a file lock, preserving all comments and ordering. It
+// config.toml under a file lock, preserving unrelated comments and ordering. It
 // guarantees the written file still loads. Returns an actionable error for an
 // unknown key, a wrong-typed or invalid value, or an I/O failure.
 func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
