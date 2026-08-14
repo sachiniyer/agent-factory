@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -29,6 +30,12 @@ const (
 	// rootAgentNotConfigured: no legacy root_agents entry and no registered
 	// project — nothing opts this repo in.
 	rootAgentNotConfigured
+	// rootAgentRecordsUnreadable: no READABLE config covers this repo, and at
+	// least one registry record could not be read — its repo is
+	// unattributable, so it may be this one (#3297/#3316 review). Advising
+	// "add a root_agents entry" here would misdirect toward the fail-open
+	// residue instead of the record repair.
+	rootAgentRecordsUnreadable
 	// rootAgentProjectUnresolved: the repo's registered project is configured
 	// and resolves to enabled, but its recorded root did not resolve to a git
 	// repository at daemon start and no legacy entry exists, so nothing can
@@ -58,6 +65,9 @@ type rootAgentMaterializeVerdict struct {
 	// true — attributing a global enable to the project's own config would be
 	// a false cause). #3304 review, both.
 	enabledSource config.RootAgentSource
+	// unreadableRecords names the registry record directories the snapshot
+	// could not read, for rootAgentRecordsUnreadable messages.
+	unreadableRecords []string
 	// rootUnresolved marks that the repo's registered project root did not
 	// resolve at daemon start. Carried on rootAgentDisabled too: a disable
 	// remedy that only says "enable it and restart" is incomplete when the
@@ -93,6 +103,9 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	_, isProject := layers.projectRoots[repoID]
 	_, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && !isProject && !isUnresolved {
+		if len(layers.recordFailureIDs) > 0 {
+			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
+		}
 		return rootAgentMaterializeVerdict{reason: rootAgentNotConfigured}
 	}
 	resolution := layers.resolve(repoID, legacy)
@@ -124,6 +137,8 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		return "its project was deleted this daemon run (a completed delete also removes the root_agents opt-in); confirm the project's registration and root-agent enable are as intended, then restart the daemon"
 	case rootAgentNotConfigured:
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
+	case rootAgentRecordsUnreadable:
+		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
 	case rootAgentProjectUnresolved:
 		return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)", v.enabledSource)
 	case rootAgentDisabled:

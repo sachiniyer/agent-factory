@@ -49,7 +49,7 @@ func (m *Manager) healRootAgentLayers() {
 		// A latched registry PROVABLY existed at daemon start — plain absence
 		// never sets the latch — so during recovery an ABSENT directory is a
 		// transition, not proof of zero projects: a repair mv in flight, a
-		// mount blip. ListProjectsIfPresent makes that distinction explicit
+		// mount blip. ListProjectsDetailed makes that distinction explicit
 		// and binds an empty result to a present registry. On top of that,
 		// recovery publishes only on the SECOND consecutive MATCHING present-
 		// and-listable snapshot, one backoff cadence apart, and re-verifies
@@ -60,13 +60,17 @@ func (m *Manager) healRootAgentLayers() {
 		// (#3315 review, rounds 2-3). A flap now has to defeat two spaced
 		// passes plus the post-read binding; that residue is indistinguishable
 		// without filesystem transactions and is accepted, in writing, here.
-		if projects, present, err := config.ListProjectsIfPresent(); err == nil && present {
+		// Per-record failures and strays take the #3297 granularity treatment
+		// exactly as at boot.
+		if projects, failures, strays, present, err := config.ListProjectsDetailed(); err == nil && present {
 			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
+				logRegistryRecordProblems(failures, strays)
 				personal, personalUnreadable, projectRoots, unresolvedRoots := projectRootAgentLayers(projects)
-				verifiedProjects, stillPresent, perr := config.ListProjectsIfPresent()
+				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
+					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
 					healed.registryUnreadable = false
 					changed = true
 					m.resetRootHealRegistryObservation()

@@ -146,28 +146,17 @@ func TestEnsureRootAgentsHealsUnlistableRegistry(t *testing.T) {
 				project := registerTestProject(t, repoPath)
 				writePersonalRootAgent(t, project.ID, "enabled = false")
 			}
-			corruptProjectRegistry(t)
+			repair := breakProjectRegistryEnumeration(t)
 
 			manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
 			}
 			if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentRegistryUnreadable {
-				t.Fatalf("fixture: the corrupt registry must fail closed at start, got reason %d", got)
+				t.Fatalf("fixture: the unenumerable registry must fail closed at start, got reason %d", got)
 			}
 
-			// Repair: remove the stray entry, prove the registry lists again.
-			dir, err := config.ProjectRegistryDir()
-			if err != nil {
-				t.Fatalf("ProjectRegistryDir: %v", err)
-			}
-			if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
-				t.Fatalf("repair registry: %v", err)
-			}
-			if _, err := config.ListProjects(); err != nil {
-				t.Fatalf("fixture: registry must list after repair: %v", err)
-			}
-
+			repair()
 			// Registry recovery publishes on the SECOND consecutive good pass
 			// (the applyHomeCheck two-strike rule), so two ensure ticks.
 			manager.EnsureRootAgents()
@@ -194,7 +183,7 @@ func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
-	corruptProjectRegistry(t)
+	repair := breakProjectRegistryEnumeration(t)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
@@ -224,13 +213,7 @@ func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 		t.Fatalf("a live root must be left alone while the registry fails closed, got %d creates", len(*seen))
 	}
 
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
-		t.Fatalf("repair registry: %v", err)
-	}
+	repair()
 	manager.EnsureRootAgents()
 	manager.EnsureRootAgents()
 	if len(*seen) != 1 {
@@ -255,17 +238,17 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
-	corruptProjectRegistry(t)
+	_ = breakProjectRegistryEnumeration(t)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentRegistryUnreadable {
-		t.Fatalf("fixture: the corrupt registry must fail closed at start, got reason %d", got)
+		t.Fatalf("fixture: the unenumerable registry must fail closed at start, got reason %d", got)
 	}
 
-	// The registry path vanishes entirely: ListProjects now reports an empty
+	// The registry path vanishes entirely: the listing now reports an empty
 	// success, which recovery must refuse to freeze.
 	dir, err := config.ProjectRegistryDir()
 	if err != nil {
@@ -307,7 +290,7 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 	repoPath := setupControlRepo(t)
 	project := registerTestProject(t, repoPath)
 	writePersonalRootAgent(t, project.ID, "enabled = false")
-	corruptProjectRegistry(t)
+	repair := breakProjectRegistryEnumeration(t)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
@@ -315,16 +298,14 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 	}
 	rid := repoID(t, repoPath)
 	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentRegistryUnreadable {
-		t.Fatalf("fixture: the corrupt registry must fail closed at start, got reason %d", got)
+		t.Fatalf("fixture: the unenumerable registry must fail closed at start, got reason %d", got)
 	}
 
 	dir, err := config.ProjectRegistryDir()
 	if err != nil {
 		t.Fatalf("ProjectRegistryDir: %v", err)
 	}
-	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
-		t.Fatalf("repair registry: %v", err)
-	}
+	repair()
 	manager.EnsureRootAgents() // first successful observation includes the disable
 
 	// The mounted registry disappears and exposes a present, empty mountpoint.
@@ -376,19 +357,13 @@ func TestRootAgentHealSnapshotAgreementIgnoresPathAvailability(t *testing.T) {
 	repoPath := setupControlRepo(t)
 	project := registerTestProject(t, repoPath)
 	writePersonalRootAgent(t, project.ID, "enabled = false")
-	corruptProjectRegistry(t)
+	repair := breakProjectRegistryEnumeration(t)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
-		t.Fatalf("repair registry: %v", err)
-	}
+	repair()
 	manager.EnsureRootAgents() // first observation: recorded checkout is available
 
 	hidden := repoPath + ".hidden"
@@ -424,7 +399,7 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 	if err := os.Rename(repoPath, hidden); err != nil {
 		t.Fatalf("hide repo dir: %v", err)
 	}
-	corruptProjectRegistry(t)
+	repair := breakProjectRegistryEnumeration(t)
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -434,13 +409,7 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 	if err := os.Rename(hidden, repoPath); err != nil {
 		t.Fatalf("restore repo dir: %v", err)
 	}
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
-		t.Fatalf("repair registry: %v", err)
-	}
+	repair()
 	manager.EnsureRootAgents()
 	manager.EnsureRootAgents()
 
