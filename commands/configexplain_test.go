@@ -342,6 +342,17 @@ func TestConfigListExplainJSONContainsEveryProjectResolution(t *testing.T) {
 	}
 }
 
+func TestConfigListExplainLabelsRootAgentMigrationShapes(t *testing.T) {
+	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\n")
+	t.Chdir(t.TempDir())
+	setConfigListReadFlags(t, "", true, false)
+
+	output, err := runConfigListForTest(t)
+	require.NoError(t, err)
+	assert.Contains(t, output, "root_agents: legacy path map")
+	assert.Contains(t, output, "root_agent: current project profile")
+}
+
 func TestConfigExplainPreservesSelectedPathSpellingForEverySourceReference(t *testing.T) {
 	container := t.TempDir()
 	realParent := filepath.Join(container, "real")

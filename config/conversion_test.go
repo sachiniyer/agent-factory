@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,6 +72,11 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	rootAgent := cfg.RootAgents["/tmp/repo"]
 	assert.Equal(t, "codex", rootAgent.Program)
 	assert.NotContains(t, warnBuf.String(), "worktree_root", "worktree_root must be recognized and preserved, not warned as dropped")
+	assert.Equal(t, 1, strings.Count(warnBuf.String(), "root_agents is the legacy path map"),
+		"one JSON-to-TOML conversion must emit one migration notice")
+	assert.Contains(t, warnBuf.String(), "conversion wrote")
+	assert.NotContains(t, warnBuf.String(), "no file was rewritten",
+		"the conversion warning must describe the write that just occurred")
 
 	// config.toml is now canonical; config.json is moved aside to .bak.
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
@@ -94,6 +100,9 @@ func TestConversion_MigratesLegacyJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "codex", cfg2.DefaultProgram)
 	assert.Equal(t, WorktreeRootSubdirectory, cfg2.WorktreeRoot)
+	require.Contains(t, cfg2.RootAgents, "/tmp/repo",
+		"the legacy path map must survive the JSON upgrade and canonical TOML reload")
+	assert.Equal(t, "codex", cfg2.RootAgents["/tmp/repo"].Program)
 	assert.NotContains(t, reloadWarnBuf.String(), "both", "a clean conversion leaves no duplicate-config warning")
 }
 

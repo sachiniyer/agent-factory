@@ -3,6 +3,7 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -377,7 +378,10 @@ or null. JSON output preserves the typed effective values.`,
 					}
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(output))
 				}
-				return writeConfigExplanations(cmd.OutOrStdout(), resolved, values)
+				if err := writeConfigExplanations(cmd.OutOrStdout(), resolved, values); err != nil {
+					return err
+				}
+				return writeRootAgentShapeLegend(cmd.OutOrStdout())
 			}
 			entries := configEntriesFromResolution(values)
 			if configJSONFlag {
@@ -387,7 +391,10 @@ or null. JSON output preserves the typed effective values.`,
 			for _, entry := range entries {
 				fmt.Fprintf(tw, "%s\t%s\n", entry.Key, formatConfigListValue(entry))
 			}
-			return tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			return writeRootAgentShapeLegend(cmd.OutOrStdout())
 		}
 
 		entries, err := loadGlobalConfigEntries()
@@ -401,8 +408,16 @@ or null. JSON output preserves the typed effective values.`,
 		for _, e := range entries {
 			fmt.Fprintf(tw, "%s\t%s\n", e.Key, formatConfigListValue(e))
 		}
-		return tw.Flush()
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		return writeRootAgentShapeLegend(cmd.OutOrStdout())
 	},
+}
+
+func writeRootAgentShapeLegend(w io.Writer) error {
+	_, err := fmt.Fprintln(w, "# root_agents: legacy path map; root_agent: current project profile")
+	return err
 }
 
 func unknownConfigKeyError(key string) error {

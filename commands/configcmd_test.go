@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -206,6 +207,35 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	if got := valueFor(list(), "limit_patterns"); got != "(unset)" {
 		t.Fatalf("ignored nonempty limit_patterns = %q, want (unset)", got)
 	}
+}
+
+func TestConfigListLabelsRootAgentMigrationShapes(t *testing.T) {
+	tempAFHome(t)
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := configListCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("config list: %v", err)
+	}
+
+	for _, want := range []string{"root_agents: legacy path map", "root_agent: current project profile"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("config list does not contain %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestRootAgentShapeLegendReturnsWriteError(t *testing.T) {
+	err := writeRootAgentShapeLegend(closedPipeWriter{})
+	if !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("legend error = %v, want io.ErrClosedPipe", err)
+	}
+}
+
+type closedPipeWriter struct{}
+
+func (closedPipeWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
 }
 
 // configEntriesInternalKeys are the toml-tagged config.Config fields that are
