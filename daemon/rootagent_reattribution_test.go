@@ -344,6 +344,21 @@ func TestReattributionRespectsActiveDeleteFence(t *testing.T) {
 	if layers := manager.rootAgentLayers.Load(); len(layers.unresolvedRoots) != 1 {
 		t.Fatalf("a fenced entry must stay unresolved so the finished delete's tombstone keeps its derived-ID target, got %d unresolved entries", len(layers.unresolvedRoots))
 	}
+	// The fenced probe must stay in place — retiring it would release the
+	// pending gate without ever publishing the alias (#3299 review round
+	// 12) — and once the fence clears it must still carry the transition.
+	derivedID := config.RepoIDForRecordedRoot(worktree)
+	manager.mu.Lock()
+	_, probeKept := manager.rootHealProbes[derivedID]
+	delete(manager.projectDeletes, derivedID)
+	manager.mu.Unlock()
+	if !probeKept {
+		t.Fatalf("the fenced probe must not be retired — its presence is the pending gate and its result is the alias-bearing transition")
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("once the fence clears, the retained probe must complete the transition, got %d creates", len(*seen))
+	}
 }
 
 // TestReattributionCarriesDeletionTombstone pins the #3299 review's deletion
@@ -1348,5 +1363,103 @@ func TestAbsenceStrikesStaySpacedAcrossSiblingHeals(t *testing.T) {
 
 	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoA)).reason; got != rootAgentPersonalUnreadable {
 		t.Fatalf("two unspaced ENOENT observations are one flap — the fail-closed latch must hold, got reason %d", got)
+	}
+}
+
+// TestVanishedMidVerificationReportsPathRemedy pins the #3299 review's
+// round-12 P2: a path that vanished between git resolution and the marker
+// read is unknowable-BECAUSE-ABSENT — the verdict must send the user after
+// the path, not after a marker that does not exist to be made readable.
+func TestVanishedMidVerificationReportsPathRemedy(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	if err := os.Rename(repoPath, repoPath+".hidden"); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	realID := config.RepoIDFromRoot(repoPath)
+	vanished := &rootReattributionProbe{
+		done:             make(chan struct{}),
+		markerUnreadable: true,
+		vanished:         true,
+		repo:             &config.RepoContext{Root: repoPath, ID: realID},
+		completedAt:      time.Now(),
+	}
+	close(vanished.done)
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = vanished
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	verdict := manager.rootAgentMaterializeVerdictFor(realID)
+	if verdict.reason != rootAgentProjectUnresolved || !verdict.rootPathVanished {
+		t.Fatalf("a vanished-mid-verification path must report unresolved with the vanished shape, got reason %d (vanished=%v)", verdict.reason, verdict.rootPathVanished)
+	}
+	detail := rootAgentUnavailableDetail(verdict)
+	if !strings.Contains(detail, "vanished") || !strings.Contains(detail, "bring the path back") {
+		t.Fatalf("the remedy is the path, not the marker; got: %s", detail)
+	}
+	if strings.Contains(detail, "make the marker readable") {
+		t.Fatalf("there is no marker to make readable — the path is gone; got: %s", detail)
+	}
+}
+
+// TestDeletedClaimantMismatchReadsNotConfigured pins the #3299 review's
+// round-12 P2: when the project claiming a recorded path was DELETED and the
+// checkout now there is a PROVEN different clone, the occupant's repo is
+// simply unconfigured — neither the dead project's deletion guidance nor a
+// rebind of a dead project applies.
+func TestDeletedClaimantMismatchReadsNotConfigured(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	other := filepath.Join(parent, "other")
+	for _, r := range []string{repoPath, other} {
+		if err := exec.Command("git", "init", r).Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+		for _, args := range [][]string{
+			{"-C", r, "config", "user.email", "t@t"},
+			{"-C", r, "config", "user.name", "t"},
+			{"-C", r, "commit", "--allow-empty", "-m", "init"},
+		} {
+			if err := exec.Command("git", args...).Run(); err != nil {
+				t.Fatalf("git %v: %v", args, err)
+			}
+		}
+	}
+	recorded := filepath.Join(parent, "occupied")
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	rewriteRecordRoot(t, project.ID, recorded)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The user deletes the project while its recorded path is absent…
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: recorded}); err != nil {
+		t.Fatalf("DeleteProject while unresolved: %v", err)
+	}
+	// …then an unrelated repository's worktree occupies the path.
+	if err := exec.Command("git", "-C", other, "worktree", "add", recorded).Run(); err != nil {
+		t.Fatalf("git worktree add occupant: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("neither the dead project nor the occupant may gain a root here, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, other)).reason; got != rootAgentNotConfigured {
+		t.Fatalf("a proven-unrelated occupant of a deleted project's path is simply unconfigured, got reason %d", got)
 	}
 }

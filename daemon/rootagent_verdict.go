@@ -90,6 +90,10 @@ type rootAgentMaterializeVerdict struct {
 	// Neither "bring the path back" nor a rebind applies; the readability
 	// problem is the remedy (#3299 review round 5).
 	rootMarkerUnreadable bool
+	// rootPathVanished narrows rootMarkerUnreadable: the recorded path itself
+	// disappeared mid-verification — the remedy is the path, not marker
+	// readability (#3299 review round 12).
+	rootPathVanished bool
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -149,14 +153,26 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && !isProject && !isUnresolved {
 		if derived, ok := layers.unresolvedResolvedIDs[repoID]; ok {
-			// The queried identity is what a REJECTED checkout at some
-			// project's recorded root resolves to (#3299 review round 5).
-			// The project's record, layers, and failure shape all live under
-			// the derived ID; answer as that record, or the rebind remedy
-			// stays invisible to every consumer keyed by the real repo ID.
-			// The derived ID hits unresolvedRoots directly, so this cannot
-			// recurse further.
-			return m.rootAgentMaterializeVerdictFor(derived)
+			m.mu.Lock()
+			_, claimantDeleted := m.deletedRootRepos[derived]
+			m.mu.Unlock()
+			rec := layers.unresolvedRoots[derived]
+			if claimantDeleted && rec.identityMismatch {
+				// The claimant project was deleted AND the checkout here is a
+				// PROVEN different clone: nothing claims this repo any more,
+				// and neither the deletion guidance nor a rebind of a dead
+				// project applies (#3299 review round 12). Fall through to
+				// the ordinary not-configured answer.
+			} else {
+				// The queried identity is what a REJECTED checkout at some
+				// project's recorded root resolves to (#3299 review round 5).
+				// The project's record, layers, and failure shape all live
+				// under the derived ID; answer as that record, or the rebind
+				// remedy stays invisible to every consumer keyed by the real
+				// repo ID. The derived ID hits unresolvedRoots directly, so
+				// this cannot recurse further.
+				return m.rootAgentMaterializeVerdictFor(derived)
+			}
 		}
 		if len(layers.recordFailureIDs) > 0 {
 			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
@@ -165,13 +181,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, projectID: unresolved.projectID}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, rootPathVanished: unresolved.pathVanished, projectID: unresolved.projectID}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
 		// start and no legacy entry's per-tick retry covers the repo: nothing
 		// can create this root until a daemon start where the path resolves.
-		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, projectID: unresolved.projectID}
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, rootPathVanished: unresolved.pathVanished, projectID: unresolved.projectID}
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
@@ -197,6 +213,9 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentAttributionPending:
 		return "identity verification for its recorded project root is in progress — the daemon is confirming the checkout's registry marker on its ensure cadence; retry shortly"
 	case rootAgentProjectUnresolved:
+		if v.rootPathVanished {
+			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root vanished while its identity was being verified; bring the path back — the daemon re-checks and re-verifies it on its ensure cadence", v.enabledSource)
+		}
 		if v.rootMarkerUnreadable {
 			// Identity is unknowable, not disproven: no rebind advice — a
 			// transiently unreadable ORIGINAL checkout rebound over would be
@@ -216,6 +235,8 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		// still cannot create (#3304 review).
 		pathClause := ""
 		switch {
+		case v.rootPathVanished:
+			pathClause = " — and its recorded project root vanished while its identity was being verified, so bring that path back before the restart too"
 		case v.rootMarkerUnreadable:
 			pathClause = " — and the checkout marker at its recorded project root cannot be read, so make that marker readable before the restart too"
 		case v.rootIdentityMismatch:

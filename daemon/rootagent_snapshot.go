@@ -191,6 +191,11 @@ type unresolvedProjectRecord struct {
 	// there could destroy a transiently unreadable original (#3299 review
 	// round 5).
 	markerUnreadable bool
+	// pathVanished narrows markerUnreadable further: the path itself
+	// disappeared mid-verification, so renderers prescribe restoring the
+	// path rather than fixing marker readability (#3299 review round 12).
+	// The fail-closed gating is markerUnreadable's; this only words it.
+	pathVanished bool
 }
 
 func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {

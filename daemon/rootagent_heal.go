@@ -338,6 +338,10 @@ type rootReattributionProbe struct {
 	// itself failed (EACCES, EIO): identity unknowable, no rebind advice.
 	mismatch         bool
 	markerUnreadable bool
+	// vanished narrows markerUnreadable: the recorded path itself
+	// disappeared between git resolution and the marker read, so the remedy
+	// is the path, not marker readability (#3299 review round 12).
+	vanished bool
 	// settled marks a consumed NEGATIVE result held in place until retryAt:
 	// per-entry pacing, so a stalled sibling's hot pass cadence cannot make
 	// this entry respawn a git probe every poll tick (#3299 review round 7).
@@ -526,19 +530,6 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				deferredProbe.settled = true
 				m.mu.Unlock()
 			})
-		} else {
-			// Deferred like the negative settle (#3299 review round 10): the
-			// probe's presence is what keeps the candidate repo attribution-
-			// pending, and releasing it before the healed snapshot publishes
-			// would let a concurrent verdict resolve against the OLD snapshot
-			// — personal layers still under the derived ID — for an instant.
-			retiredID := derivedID
-			settles = append(settles, func() {
-				m.mu.Lock()
-				delete(m.rootHealProbes, retiredID)
-				delete(m.rootHealProbeFailures, retiredID)
-				m.mu.Unlock()
-			})
 		}
 		if !probe.matches {
 			// The probe logged the specifics; a fresh probe next pass keeps
@@ -559,10 +550,12 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				}
 			}
 			if record.identityMismatch != probe.mismatch || record.markerUnreadable != probe.markerUnreadable ||
+				record.pathVanished != probe.vanished ||
 				staleBridge || (resolvedID != "" && healed.unresolvedResolvedIDs[resolvedID] != derivedID) {
 				cloneForWrite()
 				record.identityMismatch = probe.mismatch
 				record.markerUnreadable = probe.markerUnreadable
+				record.pathVanished = probe.vanished
 				healed.unresolvedRoots[derivedID] = record
 				// Retire every bridge this record held before recording the
 				// current one (if any): a path that went absent again, or that
@@ -590,10 +583,27 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		m.mu.Unlock()
 		if fenced {
 			// The next unconditional pass re-checks once the delete settles;
-			// the completed match stays consumable while fresh.
+			// the completed match stays consumable while fresh, and the probe
+			// deliberately stays IN the map: retiring it here would release
+			// the pending gate without ever publishing the alias, and the
+			// same pass's legacy sweep could recreate the mid-delete root
+			// (#3299 review round 12).
 			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its derived-ID target", record.root, record.projectID)
 			continue
 		}
+		// Retirement is deferred past publication (#3299 review round 10)
+		// and queued only now, after the fence check: the probe's presence
+		// is what keeps the candidate repo attribution-pending, and
+		// releasing it before the alias-bearing snapshot is visible would
+		// let a concurrent verdict resolve against the OLD layers for an
+		// instant.
+		retiredID := derivedID
+		settles = append(settles, func() {
+			m.mu.Lock()
+			delete(m.rootHealProbes, retiredID)
+			delete(m.rootHealProbeFailures, retiredID)
+			m.mu.Unlock()
+		})
 		cloneForWrite()
 		if layer, ok := healed.personal[derivedID]; ok && derivedID != repo.ID {
 			healed.personal[repo.ID] = layer
@@ -664,6 +674,7 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 			// prescription for a checkout nobody disproved (#3299 review
 			// round 11).
 			probe.markerUnreadable = true
+			probe.vanished = true
 			log.WarningLog.Printf("root agent snapshot: recorded project root %s vanished during identity verification; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, statErr)
 			return
 		}
