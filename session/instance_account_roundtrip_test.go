@@ -123,6 +123,58 @@ func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) 
 		"ordinary status/lost recovery must not consume the pending swap")
 }
 
+type preAccountSwapInstanceData struct {
+	ID                  string          `json:"id,omitempty"`
+	Title               string          `json:"title"`
+	Path                string          `json:"path"`
+	Branch              string          `json:"branch"`
+	Status              Status          `json:"status"`
+	Liveness            Liveness        `json:"liveness,omitempty"`
+	Program             string          `json:"program"`
+	Account             string          `json:"account,omitempty"`
+	BackendType         string          `json:"backend_type,omitempty"`
+	StartupStateUnknown bool            `json:"startup_state_unknown,omitempty"`
+	Worktree            GitWorktreeData `json:"worktree"`
+	Tabs                []TabData       `json:"tabs,omitempty"`
+}
+
+func TestPendingAccountSwapStorageProjectionKeepsPreviousReleaseInert(t *testing.T) {
+	original := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	original.Title = "pending-swap-rollback"
+	original.Prompt = "finish the migration"
+	require.NoError(t, original.ValidateAccountSwap("work"))
+	_, err := original.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	original.EndLimitResume()
+
+	stored := original.ToInstanceData().ForStorage()
+	require.True(t, stored.StartupStateUnknown,
+		"the immediately previous release must see a lifecycle fence it understands")
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var previousWire preAccountSwapInstanceData
+	require.NoError(t, json.Unmarshal(payload, &previousWire),
+		"the previous release ignored additive account-swap fields")
+	previousPayload, err := json.Marshal(previousWire)
+	require.NoError(t, err)
+	var previousView InstanceData
+	require.NoError(t, json.Unmarshal(previousPayload, &previousView))
+	previous, err := FromInstanceData(previousView)
+	require.NoError(t, err)
+	require.True(t, previous.StartupStateUnknown(),
+		"rollback must not resume an unrelated conversation under the replacement account")
+
+	current, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	require.False(t, current.StartupStateUnknown(),
+		"the current reader must remove its compatibility projection")
+	_, to, pending := current.PendingAccountSwap()
+	require.True(t, pending)
+	require.Equal(t, "work", to)
+	require.True(t, current.Started(),
+		"the current scheduler must retain the pending delivery obligation")
+}
+
 // Unsupported combinations must REFUSE at create time with an actionable error,
 // not start a session that dies in the pane or silently uses another identity
 // (#3051 review).

@@ -425,6 +425,7 @@ func TestValidateAccountEnvironmentCommandRefusesCargoLaunchers(t *testing.T) {
 		`cargo build`,
 		`rustup run stable cargo run`,
 		`cross run`,
+		`rustc main.rs --extern evil=./libevil.so`,
 	} {
 		err := ValidateAccountEnvironmentCommand(command, account)
 		require.Error(t, err, "Rust launcher %q can execute package-owned program text", command)

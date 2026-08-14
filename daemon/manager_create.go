@@ -15,6 +15,12 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
+// testHookCreateLimitObservedBeforePublication pauses a limit-parked create
+// after its observation is installed but before the row is published. Tests use
+// it to exercise account-swap admission at that exact boundary. No-op in
+// production.
+var testHookCreateLimitObservedBeforePublication = func() {}
+
 func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
@@ -245,6 +251,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 				title, errors.Join(serr, killErr))}
 		}
 		return session.InstanceData{}, fmt.Errorf("failed to start instance: %w", serr)
+	}
+	if instance.LimitReached() {
+		testHookCreateLimitObservedBeforePublication()
 	}
 	// A heal (the root-agent ensure loop replacing a record it just reaped) marks
 	// what became of the prior conversation, so a root that came back without its

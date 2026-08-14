@@ -188,6 +188,18 @@ func TestValidateAccountSwapRefusesSiblingConversationSelector(t *testing.T) {
 	require.ErrorContains(t, err, "--resume sibling-chat")
 }
 
+func TestValidateAccountSwapRefusesRestoredTmuxTabWithoutBinding(t *testing.T) {
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	inst.Tabs = append(inst.Tabs, &Tab{
+		ID: "worker", Name: "worker", Kind: TabKindProcess, Command: "git status --short",
+	})
+
+	err := inst.ValidateAccountSwap("work")
+	require.ErrorContains(t, err, `tab "worker"`)
+	require.ErrorContains(t, err, "no tmux binding",
+		"preflight must reject an unrestorable sibling before the old runtime is stopped")
+}
+
 type failAccountSwapProcessPty struct {
 	t       *testing.T
 	cmdExec cmd_test.MockCmdExec
