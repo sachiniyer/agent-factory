@@ -225,7 +225,12 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 	switch commandName {
 	case "sh", "bash", "csh", "dash", "fish", "ksh", "mksh", "tcsh", "zsh":
 		return true
-	case "command", "nice", "nohup", "setsid", "timeout", "chrt", "ionice", "stdbuf", "xargs":
+	case ".", "eval", "source", "trap":
+		return true
+	case "builtin", "command", "nice", "nohup", "setsid", "timeout", "chrt", "ionice", "stdbuf", "xargs":
+		return true
+	}
+	if commandName == "go" && len(words) > 1 && words[1] == "run" {
 		return true
 	}
 	return accountEnvironmentInterpreter(commandName)

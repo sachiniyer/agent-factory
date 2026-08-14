@@ -49,7 +49,7 @@ func TestSelectAccountCandidate_CurrentAutomaticAccountIsNotAReplacement(t *test
 	}
 }
 
-func TestSelectAccountCandidates_PriorAutomaticSelectionThenConfiguredOrder(t *testing.T) {
+func TestSelectAccountCandidates_SkipsCurrentAutomaticSelectionAndKeepsConfiguredOrder(t *testing.T) {
 	got := SelectAccountCandidates(AccountSelection{
 		CurrentAccount:      "personal",
 		CurrentAutoSelected: true,
@@ -57,7 +57,7 @@ func TestSelectAccountCandidates_PriorAutomaticSelectionThenConfiguredOrder(t *t
 		Registered:          []string{"personal", "work", "backup"},
 		Limited:             []string{"backup"},
 	})
-	want := []string{"personal", "work"}
+	want := []string{"work"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SelectAccountCandidates = %q, want %q", got, want)
 	}

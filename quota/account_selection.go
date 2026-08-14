@@ -14,8 +14,8 @@ type AccountSelection struct {
 
 // SelectAccountCandidates returns the explicitly configured, registered
 // accounts that are not currently observed at a usage limit, in selection
-// order. A prior automatic selection stays first so an interrupted move is
-// finished before another identity is chosen.
+// order. The current identity is never a replacement candidate: interrupted
+// committed moves are resumed by the daemon's separate pending-swap path.
 func SelectAccountCandidates(selection AccountSelection) []string {
 	current := strings.TrimSpace(selection.CurrentAccount)
 	if current != "" && !selection.CurrentAutoSelected {
@@ -47,7 +47,7 @@ func SelectAccountCandidates(selection AccountSelection) []string {
 	seen := make(map[string]struct{}, len(selection.Candidates))
 	appendEligible := func(candidate string) {
 		candidate = strings.TrimSpace(candidate)
-		if candidate == "" || !eligible(candidate) {
+		if candidate == "" || candidate == current || !eligible(candidate) {
 			return
 		}
 		if _, exists := seen[candidate]; exists {
@@ -55,14 +55,6 @@ func SelectAccountCandidates(selection AccountSelection) []string {
 		}
 		seen[candidate] = struct{}{}
 		selected = append(selected, candidate)
-	}
-	if current != "" && eligible(current) {
-		for _, candidate := range selection.Candidates {
-			if strings.TrimSpace(candidate) == current {
-				appendEligible(current)
-				break
-			}
-		}
 	}
 	for _, candidate := range selection.Candidates {
 		appendEligible(candidate)

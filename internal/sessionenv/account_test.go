@@ -386,6 +386,7 @@ func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
 		`eval 'CODEX_HOME=/other exec codex'`,
+		`builtin eval 'CODEX_HOME=/other exec codex'`,
 		`. ./launcher.sh`,
 		`source ./launcher.sh`,
 		`trap 'CODEX_HOME=/other exec codex' EXIT`,
