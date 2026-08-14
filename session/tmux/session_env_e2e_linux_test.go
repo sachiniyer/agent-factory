@@ -189,7 +189,7 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		t.Fatal("pane push did not create the expected remote branch")
 	}
 	t.Logf("pane environment: count=%d names=%s", len(names), strings.Join(names, ","))
-	for _, want := range []string{"PATH", "HOME", "AF_SESSION", "GH_TOKEN", "OPENAI_API_KEY", customName} {
+	for _, want := range []string{"PATH", "HOME", "AF_SESSION", "AF_SESSION_GEN", "GH_TOKEN", "OPENAI_API_KEY", customName} {
 		if want == "GH_TOKEN" && os.Getenv(want) == "" {
 			continue
 		}

@@ -314,16 +314,16 @@ has-session)     exit 1 ;;`)
 	}
 }
 
-// The vanished-session sweep, round 5 (Codex on #2966). Round 4 answered "did
-// anything outlive this session?" with a marker scan, but matched on AF_SESSION
-// ALONE and only REPORTED what it found. Both were wrong, in opposite
-// directions, and these three cases pin the corrected split.
+// The vanished-session sweep, round 5 (Codex on #2966), plus generation safety
+// from #3309. A blind marker scan can still classify foreign and unattributable
+// homes, but without captured generation identity it cannot safely signal a
+// same-home process that may be a replacement.
 
-// TestVanishedSessionReapsAnOwnedSurvivor: a descendant carrying THIS home's
-// markers is a real escaped process. Reporting it is not enough — the tombstone
-// is retried by finishUserKill, and a scan that never signals leaves the leak and
-// the stuck worktree forever. It must be reaped, and cleanup may then proceed.
-func TestVanishedSessionReapsAnOwnedSurvivor(t *testing.T) {
+// TestBlindVanishedSessionRefusesOwnedNameWithoutGenerationIdentity: a process
+// carrying THIS home's markers may be an escaped process OR a replacement that
+// reused the name after both tmux reads observed absence. With no captured
+// predecessor generation, teardown must leave it alive and keep cleanup unsafe.
+func TestBlindVanishedSessionRefusesOwnedNameWithoutGenerationIdentity(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	const name = "af_vanished_owned"
@@ -337,13 +337,12 @@ has-session)     exit 1 ;;`)
 
 	state, err := NewTmuxSessionFromSanitizedName(name, "").CloseAndWaitForPaneExit()
 
-	if state != PaneStateKnown || err != nil {
-		t.Fatalf("state=%v err=%v: the survivor was this home's, so the bounded reap should have "+
-			"eliminated it and authorized cleanup — refusing instead leaves the tombstone retrying "+
-			"forever without ever signalling the process", state, err)
+	if state == PaneStateKnown {
+		t.Fatalf("state=Known err=%v: a blind name scan cannot prove whether this home's process is "+
+			"the vanished session or a same-named replacement", err)
 	}
-	if proctree.AliveSame(survivor) {
-		t.Errorf("pid %d survived the sweep; reporting a leak without reaping it is what round 4 got wrong", survivor.PID)
+	if !proctree.AliveSame(survivor) {
+		t.Errorf("pid %d was killed without a captured predecessor generation", survivor.PID)
 	}
 }
 

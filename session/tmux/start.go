@@ -47,7 +47,7 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName)...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
 	args = append(args, wrappedProgram)
 	// Bootstrap before deciding whether new-session needs a temporary
 	// update-environment override. Otherwise the no-server probe below omits

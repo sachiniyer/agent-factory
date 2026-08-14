@@ -197,7 +197,7 @@ func TmuxTripwire() func() error {
 // t.Setenv their own home still win for their duration; this is the default
 // for tests that never set one.
 //
-// It also scrubs the AF_SESSION/AF_HOME ancestry markers (#1120,
+// It also scrubs the AF_SESSION/AF_SESSION_GEN/AF_HOME ancestry markers (#1120,
 // session/tmux/envmarker.go — string literals here because testguard stays
 // dependency-free). A test run launched from inside a production af pane
 // inherits the pane's markers, so every child a test spawns would otherwise
@@ -214,8 +214,10 @@ func SandboxHome() func() {
 		panic("testguard: cannot set sandbox AGENT_FACTORY_HOME: " + err.Error())
 	}
 	prevSession, hadSession := os.LookupEnv("AF_SESSION")
+	prevGeneration, hadGeneration := os.LookupEnv("AF_SESSION_GEN")
 	prevAFHome, hadAFHome := os.LookupEnv("AF_HOME")
 	_ = os.Unsetenv("AF_SESSION")
+	_ = os.Unsetenv("AF_SESSION_GEN")
 	_ = os.Unsetenv("AF_HOME")
 	return func() {
 		if had {
@@ -227,6 +229,11 @@ func SandboxHome() func() {
 			_ = os.Setenv("AF_SESSION", prevSession)
 		} else {
 			_ = os.Unsetenv("AF_SESSION")
+		}
+		if hadGeneration {
+			_ = os.Setenv("AF_SESSION_GEN", prevGeneration)
+		} else {
+			_ = os.Unsetenv("AF_SESSION_GEN")
 		}
 		if hadAFHome {
 			_ = os.Setenv("AF_HOME", prevAFHome)
