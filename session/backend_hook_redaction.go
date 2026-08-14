@@ -141,7 +141,10 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 	for {
 		token, err := decoder.Token()
 		if err != nil {
-			return false
+			// A malformed value can stop Decoder.Token before a later object member.
+			// Fall back to the narrower lexical shape of a valid JSON string named
+			// "token" followed by a colon; arbitrary token-looking text is ignored.
+			return malformedHookJSONDocumentContainsTokenKey(document)
 		}
 
 		if delimiter, ok := token.(json.Delim); ok {
@@ -194,4 +197,34 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 		}
 		container.expectingKey = true
 	}
+}
+
+func malformedHookJSONDocumentContainsTokenKey(document string) bool {
+	for index := 0; index < len(document); {
+		if document[index] != '"' {
+			index++
+			continue
+		}
+
+		end := index + 1
+		for end < len(document) && document[end] != '"' {
+			if document[end] == '\\' {
+				end++
+			}
+			end++
+		}
+		if end >= len(document) {
+			return false
+		}
+
+		var value string
+		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err == nil && strings.EqualFold(value, "token") {
+			after := strings.TrimLeft(document[end+1:], " \t\r\n")
+			if strings.HasPrefix(after, ":") {
+				return true
+			}
+		}
+		index = end + 1
+	}
+	return false
 }

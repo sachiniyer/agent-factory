@@ -99,6 +99,11 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"\"{\\\"token\\\":\\\"deep-secret\\\"}\" trailing"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "serialized document with a token after a syntax error",
+			output: `{"message":"{\"level\":INVALID,\"token\":\"post-error-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
