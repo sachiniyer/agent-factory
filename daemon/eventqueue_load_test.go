@@ -246,9 +246,11 @@ func TestEventQueue_LoadFailureErrorsCarryTypedSentinel(t *testing.T) {
 // throttle, so the run loop's immediate pendingCount answers from the recorded
 // error instead of issuing a second consecutive blocking disk attempt — on a
 // hung network mount that doubles every watcher's startup stall. Observable
-// consequence pinned here: even if storage heals right after construction,
-// recovery waits out eventQueueLoadRetryInterval rather than landing on the
-// very next call.
+// consequence pinned here: even if storage heals right after construction, the
+// OBSERVER path waits out eventQueueLoadRetryInterval rather than recovering on
+// the very next call. Scope: pendingCount only — the mutating entry points
+// retry unthrottled on purpose (each call stands for a real event, and refusing
+// its heal would drop it), which the replay regressions above pin.
 func TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle(t *testing.T) {
 	dir := t.TempDir()
 	// A huge interval makes the assertion airtight: any disk retry inside this

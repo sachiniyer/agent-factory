@@ -222,25 +222,39 @@ func (q *eventQueue) loadLocked() {
 	}
 }
 
-// retryLoadLocked re-attempts recovery after a failed load and reports the
-// still-unknown state; a no-op once a load has succeeded. At most one disk
-// attempt per eventQueueLoadRetryInterval — between attempts it answers with
-// the recorded error, so hot callers stay cheap during an outage. Callers
-// hold q.mu.
-func (q *eventQueue) retryLoadLocked() error {
+// retryLoadNowLocked re-attempts recovery unconditionally after a failed load;
+// a no-op once a load has succeeded. The mutating and consuming entry points
+// (enqueue, peek) use it: each call stands for a real event or replay attempt —
+// already bounded by the delivery rate window and the drain backoff — and each
+// is a designed recovery point (#3242), where refusing a heal to save one disk
+// attempt would drop a deliverable event. Loss beats latency the wrong way
+// around; those callers never wait out the throttle. Callers hold q.mu.
+func (q *eventQueue) retryLoadNowLocked() error {
 	if q.loadErr == nil {
 		return nil
 	}
-	now := time.Now()
-	if now.Sub(q.lastLoadRetry) < eventQueueLoadRetryInterval {
-		return q.loadErr
-	}
-	q.lastLoadRetry = now
+	q.lastLoadRetry = time.Now()
 	q.loadLocked()
 	if q.loadErr == nil {
 		log.InfoLog.Printf("watch task %s: event-queue storage recovered; %d pending event(s) restored", q.taskID, q.pending)
 	}
 	return q.loadErr
+}
+
+// retryLoadLocked is the throttled flavor for pure observers — pendingCount,
+// which the snapshot RPC polls — at most one disk attempt per
+// eventQueueLoadRetryInterval, answering the recorded error between attempts so
+// hot read-only callers stay cheap during an outage. A failed constructor load
+// arms the throttle too (loadLocked), so startup performs one blocking disk
+// attempt, not two back to back. Callers hold q.mu.
+func (q *eventQueue) retryLoadLocked() error {
+	if q.loadErr == nil {
+		return nil
+	}
+	if time.Since(q.lastLoadRetry) < eventQueueLoadRetryInterval {
+		return q.loadErr
+	}
+	return q.retryLoadNowLocked()
 }
 
 // scanDiskStateLocked reads the on-disk queue state into memory, returning an
@@ -374,7 +388,7 @@ func (q *eventQueue) enqueue(line string) error {
 	// a live cursor, and a torn-write recovery would truncate to the wrong
 	// boundary. Retry the load; refuse (caller drops the event, logged) only
 	// while the state stays unknown.
-	if err := q.retryLoadLocked(); err != nil {
+	if err := q.retryLoadNowLocked(); err != nil {
 		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
@@ -547,7 +561,7 @@ func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, e
 	// A failed load must surface as an ERROR here, never as a drained-empty
 	// queue (#3242): the drainer parks on it and retries via the next
 	// enqueue/reload, instead of concluding there is nothing to replay.
-	if err := q.retryLoadLocked(); err != nil {
+	if err := q.retryLoadNowLocked(); err != nil {
 		return queuedEvent{}, eventQueueCursor{}, false, fmt.Errorf("%w: %w", errEventQueueLoadFailed, err)
 	}
 	for q.pending > 0 {
