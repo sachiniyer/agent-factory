@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -192,6 +193,68 @@ func TestDeliverToReemergingRootNamesFailClosedCause(t *testing.T) {
 				t.Fatalf("the delivery error must name the cause (%q); got: %v", tc.wantIn, derr)
 			}
 		})
+	}
+}
+
+// TestVerdictNamesUnresolvedProjectRoot: a registered project whose recorded
+// root does not resolve at daemon start — with a personal enable and no
+// legacy entry — is CONFIGURED but uncreatable this run (#3247 arm 2). The
+// verdict must say that, not "no root agent is configured", which would send
+// the user to add config that already exists (#3264 review).
+func TestVerdictNamesUnresolvedProjectRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	rid := repoID(t, repoPath)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Rename(hidden, repoPath) })
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentProjectUnresolved {
+		t.Fatalf("verdict reason = %d, want rootAgentProjectUnresolved — an enabled project with an unresolvable root is not 'unconfigured'", got)
+	}
+	ctx := manager.prepareTaskTargetValidation(rid, session.RootSessionTitle, true)
+	verr := manager.validateEnabledTaskTarget(rootTargetTask("cause003", repoPath, rid), ctx)
+	if verr == nil {
+		t.Fatalf("an uncreatable root must still refuse the task target")
+	}
+	if !strings.Contains(verr.Error(), "does not currently resolve") {
+		t.Fatalf("the refusal must name the unresolved root, got: %v", verr)
+	}
+	if strings.Contains(verr.Error(), "no root agent is configured") {
+		t.Fatalf("the refusal must not advise adding config that exists, got: %v", verr)
+	}
+}
+
+// TestDeliverToReemergingRootVariantTitleKeepsFallthrough: a reserved-title
+// VARIANT ("Root") can never be delivered to — the ensure loop creates only
+// the exact title — so the cause-bearing branch must not intercept it and
+// promise that a policy fix will make it deliverable. It falls through to the
+// reserved-name guard, whose "pick another name" is the correct advice.
+func TestDeliverToReemergingRootVariantTitleKeepsFallthrough(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	_, _, handled, _ := manager.deliverToReemergingRoot(repo, DeliverPromptRequest{Title: "Root", Prompt: "ping"})
+	if handled {
+		t.Fatalf("a reserved-title variant must keep the reserved-name fallthrough — no policy remedy can make %q deliverable", "Root")
 	}
 }
 

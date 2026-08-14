@@ -256,6 +256,13 @@ type Manager struct {
 	// project with no legacy root_agents entry — and supplies the repo root
 	// CreateSession needs. Restart-to-apply, like RootAgents.
 	rootAgentProjectRoots map[string]string
+	// rootAgentUnresolvedRoots maps the derived repo ID of each registered
+	// project whose recorded root did not resolve at daemon start to that
+	// recorded path (#3247 arm 2). These are configured projects the singleton
+	// sweep cannot visit; verdicts name them as unresolved rather than
+	// unconfigured (#3264). Same immutability discipline as the rest of the
+	// snapshot.
+	rootAgentUnresolvedRoots map[string]string
 	// rootAgentLegacyRepoIDs is the set of repo IDs a root_agents path resolved to
 	// at daemon start. The singleton-project sweep skips these so a repo named by
 	// both a legacy entry and a registered project is ensured once — by the legacy
@@ -509,6 +516,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		rootAgentPersonalUnreadable: rootAgents.personalUnreadable,
 		rootAgentRegistryUnreadable: rootAgents.registryUnreadable,
 		rootAgentProjectRoots:       rootAgents.projectRoots,
+		rootAgentUnresolvedRoots:    rootAgents.unresolvedRoots,
 		rootAgentLegacyRepoIDs:      rootAgents.legacyRepoIDs,
 		rootKilledAt:                make(map[string]time.Time),
 		deletedRootRepos:            make(map[string]struct{}),
