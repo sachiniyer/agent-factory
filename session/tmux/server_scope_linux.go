@@ -159,7 +159,7 @@ func stopAndReapDedicatedScope(cmd *exec.Cmd, done <-chan error) error {
 	defer cancel()
 	unit := dedicatedServerScopeName() + ".scope"
 	out, scopeErr := exec.CommandContext(
-		ctx, "systemctl", "--user", "kill", "--kill-whom=all", "--signal=KILL", unit,
+		ctx, "systemctl", "--user", "kill", "--kill-who=all", "--signal=KILL", unit,
 	).CombinedOutput()
 
 	killErr := cmd.Process.Kill()
@@ -304,15 +304,18 @@ func runDedicatedServer() error {
 // fallback only. Once the daemon observes or creates the shared server, this
 // new-session is a plain client and therefore cannot own the server's cgroup.
 func newTmuxServerCommand(args ...string) (*exec.Cmd, bool) {
+	return newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), args...)
+}
+
+func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd, bool) {
 	if !systemdunit.RunningDaemonProcess() {
 		return exec.Command("tmux", args...), false
 	}
 	if _, configured := configuredDaemonServerHome(); configured {
-		if err := EnsureDaemonServer(); err == nil {
+		if serverErr == nil || tmuxServerRunning() {
 			return exec.Command("tmux", args...), false
-		} else {
-			log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", err)
 		}
+		log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", serverErr)
 	}
 
 	scopeArgs := []string{"--user", "--scope", "--quiet", "--collect", "--", "tmux"}

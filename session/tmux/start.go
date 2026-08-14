@@ -49,13 +49,19 @@ func (t *TmuxSession) Start(workDir string) error {
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName)...)
 	args = append(args, wrappedProgram)
+	// Bootstrap before deciding whether new-session needs a temporary
+	// update-environment override. Otherwise the no-server probe below omits
+	// the override, the bootstrap creates a filtered server, and the first pane
+	// loses its agent-specific environment. Thread the result into command
+	// selection so a failed bootstrap falls back without repeating its timeout.
+	serverErr := EnsureDaemonServer()
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
 	}
-	cmd, systemdScoped := newTmuxServerCommand(args...)
+	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
 	// client as well as the pane so a server created here never stores unrelated
 	// credentials in its global environment. The pane exec shim filters again

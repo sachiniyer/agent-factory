@@ -197,7 +197,7 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read systemctl args: %v", err)
 	}
-	wantStopArgs := "--user kill --kill-whom=all --signal=KILL " + dedicatedServerScopeName() + ".scope"
+	wantStopArgs := "--user kill --kill-who=all --signal=KILL " + dedicatedServerScopeName() + ".scope"
 	if got := strings.TrimSpace(string(stopArgs)); got != wantStopArgs {
 		t.Fatalf("systemctl cleanup args = %q, want %q", got, wantStopArgs)
 	}
