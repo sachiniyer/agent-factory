@@ -514,8 +514,15 @@ func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
 		if err != nil {
 			return err
 		}
+		// The origin's REAL metadata directory, not the `.git` pathname: a
+		// separate-git-dir origin redirects it, and comparing against the
+		// redirect file's path would refuse every ordinary kill of such an
+		// archived session (#3278 review).
+		expectedRoot, err := resolveRepoMetadataRoot(repoPath)
+		if err != nil {
+			return err
+		}
 		targetRoot := filepath.Dir(filepath.Dir(target))
-		expectedRoot := filepath.Join(repoPath, ".git")
 		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
 			return fmt.Errorf(
 				"worktree pointer under %s resolves into %s, not this origin's metadata %s — the occupant belongs to a different repository",
@@ -593,61 +600,87 @@ func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFli
 	}
 }
 
-// verifyWorktreePointerShape performs the occupant-side structural check
-// shared by both pointer verifications: a regular, bounded `.git` file whose
-// gitdir line names a `.git/worktrees/<name>` metadata directory. It returns
-// the cleaned, absolute gitdir target for the caller's own target rules.
-func verifyWorktreePointerShape(worktreePath string) (string, error) {
-	pointerPath := filepath.Join(worktreePath, ".git")
-	// One descriptor, opened without following links, carries every check and
-	// the read (#3278 review): a separate stat-then-read pair could be raced
-	// by a same-UID process swapping in a symlink or a special file between
-	// the two lookups, and an unbounded read of a swapped-in file could stall
-	// or exhaust memory on the kill path. O_NONBLOCK keeps the open itself
-	// from blocking on a FIFO; the fstat below rejects every non-regular file
-	// before any read, and regular-file reads ignore the flag.
+// readGitdirPointerFile reads a `gitdir:` redirect file — a worktree's `.git`
+// pointer or a separate-git-dir repository's `.git` file — and returns the
+// cleaned, absolute target. One descriptor, opened without following links,
+// carries every check and the read (#3278 review): a separate stat-then-read
+// pair could be raced by a same-UID process swapping in a symlink or a special
+// file between the two lookups, and an unbounded read of a swapped-in file
+// could stall or exhaust memory on the kill path. O_NONBLOCK keeps the open
+// itself from blocking on a FIFO; the fstat below rejects every non-regular
+// file before any read, and regular-file reads ignore the flag.
+func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 	f, err := os.OpenFile(pointerPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return "", fmt.Errorf("archived worktree pointer %s could not be opened without following links: %w", pointerPath, err)
+		return "", fmt.Errorf("%s %s could not be opened without following links: %w", label, pointerPath, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return "", fmt.Errorf("archived worktree pointer %s could not be inspected: %w", pointerPath, err)
+		return "", fmt.Errorf("%s %s could not be inspected: %w", label, pointerPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("archived worktree pointer %s is not a regular file", pointerPath)
+		return "", fmt.Errorf("%s %s is not a regular file", label, pointerPath)
 	}
 	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
 	if err != nil {
-		return "", fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+		return "", fmt.Errorf("%s %s could not be read: %w", label, pointerPath, err)
 	}
 	if len(content) > archivedWorktreePointerMaxSize {
-		return "", fmt.Errorf("archived worktree pointer %s is too large to be a worktree pointer", pointerPath)
+		return "", fmt.Errorf("%s %s is too large to be a gitdir pointer", label, pointerPath)
 	}
 	line, _, _ := strings.Cut(string(content), "\n")
 	target, ok := strings.CutPrefix(line, "gitdir:")
 	if !ok {
-		return "", fmt.Errorf("archived worktree pointer %s does not begin with a gitdir line", pointerPath)
+		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
 	}
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return "", fmt.Errorf("archived worktree pointer %s names no gitdir", pointerPath)
+		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
 	}
 	if !filepath.IsAbs(target) {
-		target = filepath.Join(worktreePath, target)
+		target = filepath.Join(baseDir, target)
 	}
-	target = filepath.Clean(target)
+	return filepath.Clean(target), nil
+}
+
+// verifyWorktreePointerShape performs the occupant-side structural check
+// shared by both pointer verifications: a regular, bounded `.git` file whose
+// gitdir line names a `.git/worktrees/<name>`-shaped metadata directory (the
+// leaf lives under a "worktrees" parent for every layout, separate git dirs
+// included). It returns the cleaned, absolute gitdir target for the caller's
+// own target rules.
+func verifyWorktreePointerShape(worktreePath string) (string, error) {
+	pointerPath := filepath.Join(worktreePath, ".git")
+	target, err := readGitdirPointerFile("archived worktree pointer", pointerPath, worktreePath)
+	if err != nil {
+		return "", err
+	}
 	name := filepath.Base(target)
 	if name == "" || name == "." || name == string(filepath.Separator) ||
-		filepath.Base(filepath.Dir(target)) != "worktrees" ||
-		filepath.Base(filepath.Dir(filepath.Dir(target))) != ".git" {
+		filepath.Base(filepath.Dir(target)) != "worktrees" {
 		return "", fmt.Errorf(
 			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
 			pointerPath, target,
 		)
 	}
 	return target, nil
+}
+
+// resolveRepoMetadataRoot returns the origin's actual git metadata directory:
+// `<repoPath>/.git` when that is a directory, or the target of its gitdir
+// redirect for a `git init --separate-git-dir` layout (#3278 review) — the
+// repo is present in the callers' mode, so the redirect is readable.
+func resolveRepoMetadataRoot(repoPath string) (string, error) {
+	dotGit := filepath.Join(repoPath, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", dotGit, err)
+	}
+	if info.IsDir() {
+		return dotGit, nil
+	}
+	return readGitdirPointerFile("origin metadata redirect", dotGit, repoPath)
 }
 
 func verifyArchivedWorktreePointer(worktreePath string) error {

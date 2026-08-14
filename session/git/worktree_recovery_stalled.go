@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // BoundedLstat runs os.Lstat through the shared identity-probe deadline (#3278
@@ -77,6 +79,73 @@ func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, 
 		boundedLstatFlights.Unlock()
 		<-flight.done
 		return flight.info, flight.err
+	}
+}
+
+// boundedResolveForCompare runs pathutil.ResolveForCompare through the shared
+// identity-probe deadline with a per-path flight and timed-out latch (#3278
+// review): symlink resolution stats real directories, so a permanently
+// stalled mount must neither wedge the caller nor accumulate one blocked
+// worker per retry. Joining by path is sound here — resolution depends only
+// on the path, not on any per-call snapshot.
+func boundedResolveForCompare(path string) (string, error) {
+	resolveFlights.Lock()
+	if active := resolveFlights.byPath[path]; active != nil {
+		if active.timedOut {
+			resolveFlights.Unlock()
+			return "", fmt.Errorf(
+				"path normalization for %s is still running after an earlier deadline: %w",
+				path, context.DeadlineExceeded,
+			)
+		}
+		resolveFlights.Unlock()
+		return waitForResolveFlight(path, active)
+	}
+	flight := &resolveFlight{done: make(chan struct{})}
+	resolveFlights.byPath[path] = flight
+	resolveFlights.Unlock()
+	go func() {
+		flight.resolved = pathutil.ResolveForCompare(path)
+		resolveFlights.Lock()
+		if resolveFlights.byPath[path] == flight {
+			delete(resolveFlights.byPath, path)
+		}
+		close(flight.done)
+		resolveFlights.Unlock()
+	}()
+	return waitForResolveFlight(path, flight)
+}
+
+type resolveFlight struct {
+	done     chan struct{}
+	resolved string
+	timedOut bool
+}
+
+var resolveFlights = struct {
+	sync.Mutex
+	byPath map[string]*resolveFlight
+}{byPath: map[string]*resolveFlight{}}
+
+func waitForResolveFlight(path string, flight *resolveFlight) (string, error) {
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case <-flight.done:
+		return flight.resolved, nil
+	case <-timer.C:
+		resolveFlights.Lock()
+		if resolveFlights.byPath[path] == flight {
+			flight.timedOut = true
+			resolveFlights.Unlock()
+			return "", fmt.Errorf(
+				"timed out after %s while normalizing path %s: %w",
+				relocationIdentityTimeout, path, context.DeadlineExceeded,
+			)
+		}
+		resolveFlights.Unlock()
+		<-flight.done
+		return flight.resolved, nil
 	}
 }
 

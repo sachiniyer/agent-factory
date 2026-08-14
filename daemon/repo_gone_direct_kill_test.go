@@ -514,6 +514,40 @@ func TestKillSession_ArchivedForeignRepoWorktreeAtPathRefused(t *testing.T) {
 		"the refused kill must retain the record")
 }
 
+// TestKillSession_ArchivedSeparateGitDirKillStaysOrdinary: a `git init
+// --separate-git-dir` origin redirects `<repo>/.git` to its real metadata
+// directory, and the occupant binding must compare against that resolved root
+// (#3278 review) — comparing against the redirect file's path refused every
+// ordinary kill of such an archived session, retaining it forever.
+func TestKillSession_ArchivedSeparateGitDirKillStaysOrdinary(t *testing.T) {
+	manager, repoID, _ := newStatusTestManager(t)
+	root := t.TempDir()
+	sepRepo := filepath.Join(root, "sep-repo")
+	sepMeta := filepath.Join(root, "sep-meta")
+	require.NoError(t, exec.Command("git", "init", "-b", "main",
+		"--separate-git-dir", sepMeta, sepRepo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(sepRepo, "f.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", sepRepo, "add", "f.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", sepRepo,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+
+	inst, _ := registerArchivable(t, manager, repoID, sepRepo, "direct-separate-gitdir")
+	inst.SetBackend(&recoverFakeBackend{FakeBackend: session.NewFakeBackend()})
+	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{
+		Title: "direct-separate-gitdir", RepoID: repoID,
+	})
+	require.NoError(t, err)
+	archivedPath := inst.GetWorktreePath()
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-separate-gitdir", RepoID: repoID})
+	require.NoError(t, err,
+		"an ordinary archived kill must work for a separate-git-dir origin")
+	assert.False(t, exists(archivedPath), "the archived worktree must be removed")
+	assert.Nil(t, recordFor(t, repoID, "direct-separate-gitdir"),
+		"the settled kill must delete the session row")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a

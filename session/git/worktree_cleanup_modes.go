@@ -1,9 +1,9 @@
 package git
 
 import (
-	"context"
 	"fmt"
-	"time"
+	"path/filepath"
+	"strings"
 )
 
 // Cleanup removes the worktree and associated branch. It reports whether it
@@ -125,30 +125,44 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 	return nil
 }
 
-// worktreeListedBranchBounded runs worktreeListedBranch under the shared
-// identity-probe deadline: entry normalization resolves symlinks, so a stalled
-// mount hosting an UNRELATED listed worktree must surface as a timeout here
-// rather than an unbounded wedge (#3278 review). No flight: each call parses
-// its own porcelain snapshot, so joining distinct inputs would be wrong.
+// worktreeListedBranchBounded finds the listing entry for worktreePath and its
+// recorded branch without unbounded filesystem work (#3278 review). Symlink
+// resolution of ancestors preserves a real directory's leaf name, so entries
+// whose basename differs from the target's are skipped with no filesystem
+// lookups at all — an unrelated entry on a stalled mount costs nothing. The
+// resolutions that do run go through boundedResolveForCompare's per-path
+// flight, so a stalled candidate times out once and latches instead of
+// stacking one blocked worker per retry.
 func worktreeListedBranchBounded(porcelain, worktreePath string) (string, bool, error) {
-	type result struct {
-		branch string
-		listed bool
+	targetResolved, err := boundedResolveForCompare(worktreePath)
+	if err != nil {
+		return "", false, err
 	}
-	resultC := make(chan result, 1)
-	go func() {
-		branch, listed := worktreeListedBranch(porcelain, worktreePath)
-		resultC <- result{branch: branch, listed: listed}
-	}()
-	timer := time.NewTimer(relocationIdentityTimeout)
-	defer timer.Stop()
-	select {
-	case observed := <-resultC:
-		return observed.branch, observed.listed, nil
-	case <-timer.C:
-		return "", false, fmt.Errorf(
-			"timed out after %s while normalizing the worktree listing for %s: %w",
-			relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
-		)
+	targetBase := filepath.Base(filepath.Clean(worktreePath))
+	matched := false
+	branch := ""
+	for _, line := range strings.Split(porcelain, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			if matched {
+				return branch, true, nil
+			}
+			branch = ""
+			entry := strings.TrimPrefix(line, "worktree ")
+			if filepath.Base(filepath.Clean(entry)) != targetBase {
+				matched = false
+				continue
+			}
+			resolved, resolveErr := boundedResolveForCompare(entry)
+			if resolveErr != nil {
+				return "", false, fmt.Errorf(
+					"cannot normalize listed worktree %s: %w", entry, resolveErr,
+				)
+			}
+			matched = resolved == targetResolved
+		case matched && strings.HasPrefix(line, "branch "):
+			branch = strings.TrimPrefix(line, "branch ")
+		}
 	}
+	return branch, matched, nil
 }
