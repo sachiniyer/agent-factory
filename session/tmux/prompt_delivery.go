@@ -59,8 +59,10 @@ func (t *TmuxSession) SendKeysCommand(text string) error {
 // exception is the observed-ABSENT outcome, which is redelivered once (#3293)
 // before the final observation is reported.
 func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus, error) {
-	status, err := t.deliverPromptOnce(text)
-	if err != nil || status != PromptNotDelivered {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	status, retryAuthorized, err := t.sendKeysPasteBuffer(text)
+	if err != nil || status != PromptNotDelivered || !retryAuthorized {
 		return status, err
 	}
 
@@ -76,7 +78,10 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 	// first prompt may have SUBMITTED, and a redelivery would hand the agent the
 	// same instruction twice. sendKeysPasteBuffer pairs PromptNotDelivered
 	// exclusively with a nil error (every error path reports could-not-confirm),
-	// so the gate above is exact.
+	// and retryAuthorized additionally requires the post-Enter boundary frame to
+	// still lack this payload's completion tail — see the authorization comment
+	// in sendKeysPasteBuffer for why absence must hold at the submit itself, not
+	// only at the observation deadline before it.
 	//
 	// The redelivery is the SAME full clear-observe submit, never a bare
 	// re-paste: sendKeysPasteBuffer's unconditional pre-paste clear removes
@@ -91,23 +96,20 @@ func (t *TmuxSession) SendKeysCommandObserved(text string) (PromptDeliveryStatus
 	// persistent condition the caller must hear about: the second attempt's
 	// observation is reported as-is and nothing loops.
 	//
-	// inputMu is deliberately NOT held across the wait. Each attempt is
-	// self-contained — the clear makes it idempotent — and holding the input
-	// lock for seconds would starve the handlers that serialize on it (trust
-	// prompt, codex safety). A delivery that interleaves during the wait is
-	// harmless for the same reason the retry is: its own pre-paste clear removes
-	// this attempt's strand before pasting.
-	log.WarningLog.Printf("submit: redelivering prompt to session %q once in %s; delivery was observed absent and the pre-paste clear makes redelivery safe (#3293)",
+	// inputMu IS held across the wait, on purpose: the strand and its
+	// replacement must stay adjacent. Released, a concurrent same-session
+	// submission could run inside the gap — its unconditional clear consumes
+	// this attempt's strand, and if that delivery then strands too, THIS retry's
+	// clear would destroy a newer prompt whose Enter may still be pending, and
+	// the older instruction would submit after the newer one. Both violate the
+	// serialization inputMu exists to provide (#2178/#2181): the two attempts
+	// are one submission transaction, not two. The cost is that the handlers
+	// sharing this lock (trust prompt, codex safety) wait out the seconds-scale
+	// delay — only on the rare stranded path, and strictly shorter than the
+	// stall a wedged tmux server can already impose here.
+	log.WarningLog.Printf("submit: redelivering prompt to session %q once in %s; delivery was observed absent through the submit boundary and the pre-paste clear makes redelivery safe (#3293)",
 		t.sanitizedName, redeliverAfterAbsentDelay)
 	time.Sleep(redeliverAfterAbsentDelay)
-	return t.deliverPromptOnce(text)
-}
-
-// deliverPromptOnce is one full submit attempt under the input lock. Named
-// without a *Locked suffix on purpose: it TAKES inputMu rather than expecting
-// the caller to hold it.
-func (t *TmuxSession) deliverPromptOnce(text string) (PromptDeliveryStatus, error) {
-	t.inputMu.Lock()
-	defer t.inputMu.Unlock()
-	return t.sendKeysPasteBuffer(text)
+	status, _, err = t.sendKeysPasteBuffer(text)
+	return status, err
 }

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,17 +28,23 @@ const redeliverStrandRender = "WITNESS_PREFIX_MARKER inspect the build logs and"
 // redeliverPaneModel is a minimal composer state machine behind MockCmdExec.
 // C-u empties the composer (the property that makes redelivery safe: the
 // pre-paste clear removes a stranded draft, #2070), and each paste renders
-// whatever renderForPaste scripts for that attempt. Enter is deliberately
-// absorbed — the composer keeps its content — which is exactly the #1982 end
-// state the redelivery exists for.
+// whatever renderForPaste scripts for that attempt and payload. Enter is
+// deliberately absorbed — the composer keeps its content — which is exactly the
+// #1982 end state the redelivery exists for. A non-empty boundaryPane overrides
+// the frame the Enter boundary command captures, so a test can model a paste
+// that visibly drained only in the gap between the last observation poll and
+// Enter.
 type redeliverPaneModel struct {
 	mu             sync.Mutex
 	loads          int
 	pastes         int
 	enters         int
 	composer       string
+	lastLoaded     string
+	pasteOrder     []string
 	captureFails   bool
-	renderForPaste func(n int) string
+	boundaryPane   string
+	renderForPaste func(n int, payload string) string
 }
 
 func (m *redeliverPaneModel) pane() string {
@@ -48,16 +55,23 @@ func (m *redeliverPaneModel) exec() cmd_test.MockCmdExec {
 	return cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
+			var stdin string
+			if c.Stdin != nil {
+				b, _ := io.ReadAll(c.Stdin)
+				stdin = string(b)
+			}
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			switch {
 			case strings.Contains(joined, "load-buffer"):
 				m.loads++
+				m.lastLoaded = stdin
 			case strings.Contains(joined, "send-keys") && hasArg(c.Args, "C-u"):
 				m.composer = ""
 			case strings.Contains(joined, "paste-buffer"):
 				m.pastes++
-				m.composer = m.renderForPaste(m.pastes)
+				m.pasteOrder = append(m.pasteOrder, m.lastLoaded)
+				m.composer = m.renderForPaste(m.pastes, m.lastLoaded)
 			}
 			return nil
 		},
@@ -66,7 +80,11 @@ func (m *redeliverPaneModel) exec() cmd_test.MockCmdExec {
 			defer m.mu.Unlock()
 			if isDeliveryBoundaryCommand(c) {
 				m.enters++
-				return []byte(deliveryBoundarySentinel + "\n" + m.pane()), nil
+				frame := m.pane()
+				if m.boundaryPane != "" {
+					frame = m.boundaryPane
+				}
+				return []byte(deliveryBoundarySentinel + "\n" + frame), nil
 			}
 			if m.captureFails {
 				return nil, exec.ErrNotFound
@@ -92,7 +110,7 @@ func TestObservedAbsentPromptIsRedeliveredOnceAndConfirms(t *testing.T) {
 	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
 
-	model := &redeliverPaneModel{renderForPaste: func(n int) string {
+	model := &redeliverPaneModel{renderForPaste: func(n int, _ string) string {
 		if n == 1 {
 			return redeliverStrandRender
 		}
@@ -121,7 +139,7 @@ func TestPromptStrandedTwiceReportsNotDeliveredAfterExactlyTwoAttempts(t *testin
 	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
 
-	model := &redeliverPaneModel{renderForPaste: func(int) string {
+	model := &redeliverPaneModel{renderForPaste: func(int, string) string {
 		return redeliverStrandRender
 	}}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
@@ -146,7 +164,7 @@ func TestPromptStrandedTwiceReportsNotDeliveredAfterExactlyTwoAttempts(t *testin
 func TestSentUnverifiedIsNotRedelivered(t *testing.T) {
 	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 
-	model := &redeliverPaneModel{renderForPaste: func(int) string {
+	model := &redeliverPaneModel{renderForPaste: func(int, string) string {
 		return "[Pasted text #1 +10 lines]"
 	}}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
@@ -167,7 +185,7 @@ func TestSentUnverifiedIsNotRedelivered(t *testing.T) {
 func TestCouldNotConfirmIsNotRedelivered(t *testing.T) {
 	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
 
-	model := &redeliverPaneModel{captureFails: true, renderForPaste: func(int) string {
+	model := &redeliverPaneModel{captureFails: true, renderForPaste: func(int, string) string {
 		return redeliverPrompt
 	}}
 	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
@@ -179,6 +197,79 @@ func TestCouldNotConfirmIsNotRedelivered(t *testing.T) {
 	_, pastes, _ := model.counts()
 	require.Equal(t, 1, pastes,
 		"an unobservable pane cannot authorize a redelivery: the first paste may have delivered fine")
+}
+
+// TestObservedAbsentWithDrainedBoundaryFrameIsNotRedelivered pins the retry's
+// post-Enter authorization. The observation deadline saw only the prompt's
+// prefix (observed absent), but by the time Enter was enqueued the paste had
+// visibly drained: the boundary frame — captured in the same tmux command queue
+// as Enter — shows the completion tail. That Enter may well have submitted the
+// full prompt, so the redelivery must be withheld: one paste, and the honest
+// not-delivered report stands on its authorizing pre-Enter frame.
+func TestObservedAbsentWithDrainedBoundaryFrameIsNotRedelivered(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	model := &redeliverPaneModel{
+		boundaryPane: "╭─ composer ─╮\n│ > " + redeliverPrompt + " │\n╰────────────╯",
+		renderForPaste: func(int, string) string {
+			return redeliverStrandRender
+		},
+	}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
+
+	status, err := session.SendKeysCommandObserved(redeliverPrompt)
+	require.NoError(t, err)
+	require.Equal(t, PromptNotDelivered, status,
+		"the pre-Enter frame authorized observed-absent and remains the reported evidence")
+
+	_, pastes, _ := model.counts()
+	require.Equal(t, 1, pastes,
+		"a boundary frame showing the completion tail means the paste drained by Enter time — the Enter may have submitted it, so redelivery must be withheld")
+}
+
+// TestRedeliveryHoldsTheInputLockAcrossBothAttempts pins the two attempts as
+// ONE submission transaction. If the input lock were released across the
+// redelivery wait, a concurrent same-session submission could run inside the
+// gap: its unconditional pre-paste clear consumes the first attempt's strand,
+// and the retry's clear can then destroy the newer prompt if it also stranded —
+// or at minimum submit the older instruction after the newer one. Serialized,
+// the paste order must be strand, its replacement, then the second caller.
+func TestRedeliveryHoldsTheInputLockAcrossBothAttempts(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+	redeliverAfterAbsentDelay = 400 * time.Millisecond
+
+	const secondPrompt = "SECOND-CALLER-PROMPT-DELIVERS-CLEAN"
+	model := &redeliverPaneModel{renderForPaste: func(_ int, payload string) string {
+		if payload == secondPrompt {
+			return payload
+		}
+		return redeliverStrandRender
+	}}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
+
+	firstDone := make(chan PromptDeliveryStatus, 1)
+	go func() {
+		status, _ := session.SendKeysCommandObserved(redeliverPrompt)
+		firstDone <- status
+	}()
+
+	// Launch the second caller once the first attempt's paste has happened, so
+	// it arrives during the redelivery wait — the window under test.
+	waitFor(t, func() bool {
+		_, pastes, _ := model.counts()
+		return pastes >= 1
+	}, "the first caller's initial paste never happened")
+	secondStatus, err := session.SendKeysCommandObserved(secondPrompt)
+	require.NoError(t, err)
+	require.Equal(t, PromptDelivered, secondStatus)
+	require.Equal(t, PromptNotDelivered, <-firstDone,
+		"the doubly-stranded first caller still reports the honest terminal negative")
+
+	model.mu.Lock()
+	order := append([]string(nil), model.pasteOrder...)
+	model.mu.Unlock()
+	require.Equal(t, []string{redeliverPrompt, redeliverPrompt, secondPrompt}, order,
+		"the redelivery must complete before a concurrent submission may run: strand, replacement, then the second caller")
 }
 
 // TestSentUnverifiedRealPaneDeliversExactlyOnce is the boundary proven against a

@@ -179,7 +179,7 @@ func (s *remoteAgentServer) SendPrompt(prompt string) error {
 
 func (s *remoteAgentServer) SendPromptWithStatus(prompt string) (PromptDeliveryStatus, error) {
 	var resp agentSendPromptResp
-	if err := s.rc.call("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp); err != nil {
+	if err := s.rc.callWithin("/v1/agent/send-prompt", agentSendPromptReq{Prompt: prompt}, &resp, agentSendPromptCallTimeout); err != nil {
 		return PromptCouldNotConfirm, err
 	}
 	if !resp.Status.Valid() {
@@ -591,6 +591,18 @@ func newRemoteAgentClient(ep AgentServerEndpoint, title string) (*remoteAgentCli
 // Exported so the daemon's own pre-reap bound can be ordered ABOVE it: a caller
 // that gave up first would leave the in-sandbox git work running unbounded.
 const AgentArchiveCallTimeout = 3 * time.Minute
+
+// agentSendPromptCallTimeout is the send-prompt route's own budget. The
+// in-sandbox submit may now perform TWO independently bounded delivery
+// attempts plus the seconds-scale #3293 redelivery wait, so it gets the shared
+// ceiling per attempt plus that wait. Under the shared 30s ceiling alone, a
+// degraded first attempt could push the combined call past the budget: the
+// daemon would see a transport error while the in-sandbox handler kept going
+// and possibly delivered the retry — leaving the caller likely to re-send an
+// already-delivered instruction, the exact double prompt the #3293 boundary
+// exists to prevent. The 5s term is tmux's redeliverAfterAbsentDelay; anyone
+// growing that delay must grow this budget with it.
+const agentSendPromptCallTimeout = 2*remoteAgentCallTimeout + 5*time.Second
 
 func (c *remoteAgentClient) call(path string, req, resp any) error {
 	return c.callWithin(path, req, resp, remoteAgentCallTimeout)
