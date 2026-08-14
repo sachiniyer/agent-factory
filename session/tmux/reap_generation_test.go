@@ -1,7 +1,11 @@
 package tmux
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,4 +63,76 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 	require.NoError(t, probeErr)
 	require.True(t, known && exists,
 		"the vanished generation's sweep reaped the fresh same-named session")
+}
+
+// With no captured predecessor identity, a post-absence marker scan cannot
+// distinguish an escaped process from a replacement that reused the name. It
+// must refuse cleanup without signalling either one.
+func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_blind_vanished_recreated"
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	replacement := spawnMarkedSessionWithEscapee(t, name, home, "replacement")
+
+	err := reapVanishedSessionProcesses(name, home, nil, nil)
+	require.True(t, proctree.AliveSame(replacement),
+		"a blind vanished-session sweep reaped a same-named replacement")
+	require.ErrorContains(t, err, "generation",
+		"blind recovery must refuse when it cannot identify the predecessor generation")
+}
+
+// Captured ancestry remains authoritative even if a descendant execs with a
+// different generation marker. Silently treating that process as a replacement
+// would lose the last proof that it came from the vanished pane tree.
+func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T) {
+	shrinkReapWaits(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("exact detached-child fixture requires setsid")
+	}
+
+	const name = "af_vanished_changed_generation"
+	home := t.TempDir()
+	dir := t.TempDir()
+	trigger := filepath.Join(dir, "fork")
+	pidFile := filepath.Join(dir, "child.pid")
+	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
+		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; sleep 0.15",
+		trigger, EnvMarkerGeneration, pidFile)
+	parentCmd := exec.Command("sh", "-c", script)
+	parentCmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		EnvMarkerSession + "=" + name,
+		EnvMarkerHome + "=" + home,
+		EnvMarkerGeneration + "=vanished",
+	}
+	parentCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, parentCmd.Start())
+	t.Cleanup(func() {
+		_ = parentCmd.Process.Kill()
+		_, _ = parentCmd.Process.Wait()
+	})
+
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	parent, ok := snap[parentCmd.Process.Pid]
+	require.True(t, ok, "parent %d not in process snapshot", parentCmd.Process.Pid)
+
+	sweepDone := make(chan error, 1)
+	go func() {
+		sweepDone <- reapVanishedSessionProcesses(name, home, []proctree.Process{parent}, nil)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, os.WriteFile(trigger, []byte("go"), 0o600))
+	waitForPIDFile(t, pidFile)
+	child := processFromPIDFile(t, pidFile)
+	t.Cleanup(func() { _ = proctree.Signal(child, syscall.SIGKILL) })
+
+	err = <-sweepDone
+	require.ErrorContains(t, err, "generation",
+		"a generation mismatch on captured ancestry must remain a refusal")
+	require.True(t, proctree.AliveSame(child),
+		"an ambiguously re-marked descendant must not be signalled")
 }

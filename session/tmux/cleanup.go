@@ -549,8 +549,14 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// home's sweep.
 	preMarkerProcesses := make(map[string][]proctree.Process, len(prefixed))
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
+	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
 		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		// Retain the generation while the captured pane tree is still alive.
+		// Waiting until a vanished-session recovery begins may be too late to
+		// read its immutable environment, especially when a helper starts after
+		// this snapshot and the pane root then exits (#3309 review).
+		preMarkerGenerations[match] = orphanGenerations(preMarkerProcesses[match], match)
 		if errors.Is(preMarkerCaptureErrs[match], ErrTmuxTimeout) {
 			// The server is already known to be wedged. Do not launch the
 			// ownership probe against it and pay another full timeout for an
@@ -585,7 +591,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// reaper, so the absent branch performs an ownership-scoped process sweep.
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
-				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match], preMarkerCaptureErrs[match]); reapErr != nil {
+				if reapErr := reapVanishedSessionProcessCohort(match, ownHome, preMarkerProcesses[match],
+					preMarkerCaptureErrs[match], preMarkerGenerations[match]); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -642,6 +649,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				markerCandidates:   preMarkerProcesses[match],
 				markerCaptureError: preMarkerCaptureErrs[match],
 				captureError:       captureErr,
+				generations:        preMarkerGenerations[match],
 			})
 			continue
 		}
@@ -736,6 +744,7 @@ type vanishedSessionRecovery struct {
 	markerCandidates   []proctree.Process
 	markerCaptureError error
 	captureError       error
+	generations        orphanGenerationSet
 }
 
 func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome string) error {
@@ -747,31 +756,36 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 	candidates := make([]proctree.Process, 0, len(recovery.markerCandidates)+len(recovery.verifiedProcesses))
 	candidates = append(candidates, recovery.markerCandidates...)
 	candidates = append(candidates, recovery.verifiedProcesses...)
-	return reapVanishedSessionProcesses(recovery.match, ownHome, candidates, recovery.markerCaptureError)
+	return reapVanishedSessionProcessCohort(recovery.match, ownHome, candidates,
+		recovery.markerCaptureError, recovery.generations)
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
+	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,
+		orphanGenerations(candidates, match))
+}
+
+func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
+	generations orphanGenerationSet,
+) error {
 	var sweepErr error
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
 	}
-	// Establish the generation cohort once, before the grace window opens. Prefer
-	// the captured predecessor evidence; only a blind recovery with no marked
-	// candidate uses the first refresh to discover its initial cohort. Later
-	// refreshes may follow only those generations, so a same-named re-create cannot
-	// become the vanished session merely by appearing while this sweep is waiting
-	// (#3309).
-	generations := orphanGenerations(candidates, match)
-	var initialFilter *orphanGenerationSet
-	if !generations.empty() {
-		initialFilter = &generations
+	// Establish the generation cohort once, before the grace window opens, from
+	// captured predecessor evidence. A blind recovery cannot manufacture that
+	// identity from a post-absence marker scan: the first process it finds may be
+	// a same-named replacement. In that case inspect only to distinguish harmless
+	// foreign-home processes from a local or unattributable occupant, then refuse
+	// without signalling anything (#3309 review).
+	if generations.empty() {
+		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
+		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations)
+		return errors.Join(sweepErr, refreshErr, inspectErr)
 	}
-	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, initialFilter)
+	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
 	sweepErr = errors.Join(sweepErr, initialErr)
 	candidates = initialCandidates
-	if generations.empty() {
-		generations = orphanGenerations(candidates, match)
-	}
 	// Two refresh/reap passes cover a helper that appears after the pre-marker
 	// snapshot and a child it forks during the first bounded grace period. A
 	// final non-destructive refresh below is the evidence that cleanup finished.

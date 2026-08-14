@@ -233,17 +233,6 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 				process.PID, processSession, sanitizedName))
 			continue
 		}
-		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
-		switch {
-		case hasGeneration && !generations.values[processGeneration]:
-			// A different generation under the reusable name is a replacement,
-			// not an orphan of the vanished session (#3309).
-			continue
-		case !hasGeneration && !generations.legacy:
-			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s generation marker",
-				process.PID, sanitizedName, EnvMarkerGeneration))
-			continue
-		}
 		processHome, hasHome := processEnvValue(environ, EnvMarkerHome)
 		if !hasHome {
 			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s ownership marker",
@@ -251,6 +240,22 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 			continue
 		}
 		if filepath.Clean(processHome) != cleanHome {
+			continue
+		}
+		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		switch {
+		case hasGeneration && !generations.values[processGeneration]:
+			// Marker scans are filtered before they enter this bounded set. A
+			// different generation already present here may be a descendant that
+			// changed its environment after capture, so absence is not proved. It
+			// must remain a refusal rather than being silently reclassified as a
+			// replacement (#3309 review).
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks generation %s outside the vanished session %s generation cohort",
+				process.PID, processGeneration, sanitizedName))
+			continue
+		case !hasGeneration && !generations.legacy:
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s generation marker",
+				process.PID, sanitizedName, EnvMarkerGeneration))
 			continue
 		}
 		if selfChain[process.PID] {
