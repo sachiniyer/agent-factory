@@ -166,6 +166,6 @@ func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
 			[]byte("gitdir: "+live+"\n"), 0o644))
 		err := VerifyArchivedWorktreePointer(dir)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "belongs to a live repository")
+		assert.Contains(t, err.Error(), "which still exists")
 	})
 }
