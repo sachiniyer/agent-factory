@@ -129,6 +129,11 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"child\":\"{\\\"token\\\":\\\"truncated-string-secret\\\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "escaped serialized child after a raw newline",
+			output: `{"message":"{\"message\":\"unterminated\n{\\\"token\\\":\\\"invalid-string-child-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {

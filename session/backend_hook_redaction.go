@@ -228,11 +228,17 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 				hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
 				return true
 			}
+			if malformedHookJSONStringContentsContainToken(document[index+1:]) {
+				return true
+			}
 			continue
 		}
 
 		var value string
 		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
+			if malformedHookJSONStringContentsContainToken(document[index+1 : end]) {
+				return true
+			}
 			continue
 		}
 		// Inspect serialized values before using the following colon to classify a
@@ -248,6 +254,32 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			}
 			continue
 		}
+	}
+	return false
+}
+
+func malformedHookJSONStringContentsContainToken(contents string) bool {
+	for len(contents) > 0 {
+		control := strings.IndexFunc(contents, func(character rune) bool {
+			return character < ' '
+		})
+		segment := contents
+		if control >= 0 {
+			segment = contents[:control]
+		}
+
+		if opener := strings.IndexAny(segment, "{["); opener >= 0 {
+			var nested string
+			if err := json.Unmarshal([]byte("\""+segment[opener:]+"\""), &nested); err == nil &&
+				malformedHookJSONDocumentContainsToken(nested) {
+				return true
+			}
+		}
+
+		if control < 0 {
+			return false
+		}
+		contents = contents[control+1:]
 	}
 	return false
 }
