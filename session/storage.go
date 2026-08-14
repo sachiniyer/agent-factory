@@ -301,6 +301,7 @@ func (d InstanceData) RestoreArchiveRollbackFence() InstanceData {
 // unavailable.
 func (d InstanceData) ForClientRead() InstanceData {
 	d = d.RestoreArchiveRollbackFence()
+	d = d.RestoreAccountSwapRollbackFence()
 	if d.ArchiveReport != nil && !d.ArchiveReport.Empty() {
 		d.ArchiveWarning = d.ArchiveReport.Warning(archiveWarningOperation(livenessFromData(d)))
 	}
@@ -377,6 +378,7 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.TabKinds = nil
 	d.TabRosterMutable = nil
 	d.ArchiveWarning = ""
+	d = d.projectPendingAccountSwapForPreviousRelease()
 	// The compatibility projection must capture original values before either it
 	// or the relocation fence below overwrites them. Older binaries ignore
 	// ArchiveReport, but the previous release understands the inert/ownership

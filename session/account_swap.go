@@ -70,6 +70,7 @@ func cloneAccountSwapData(data *AccountSwapData) *AccountSwapData {
 		return nil
 	}
 	copy := *data
+	copy.OriginalStartupStateUnknown = cloneBoolPointer(data.OriginalStartupStateUnknown)
 	return &copy
 }
 
@@ -155,8 +156,11 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 		if idx == 0 {
 			continue
 		}
-		if tab == nil || !tab.Kind.HasTmux() || tab.tmux == nil {
+		if tab == nil || !tab.Kind.HasTmux() {
 			continue
+		}
+		if tab.tmux == nil {
+			return fmt.Errorf("cannot switch session %q to account %q because tab %q has no tmux binding to replace", i.Title, name, tab.Name)
 		}
 		replacementProgram := tab.tmux.Program()
 		if tab.Kind == TabKindShell {

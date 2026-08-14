@@ -148,8 +148,21 @@ func TestPendingAccountSwapStorageProjectionKeepsPreviousReleaseInert(t *testing
 	original.EndLimitResume()
 
 	stored := original.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: original.Path, WorktreePath: original.Path,
+		SessionName: original.Title, BranchName: "main", ExternalWorktree: true,
+	}
 	require.True(t, stored.StartupStateUnknown,
 		"the immediately previous release must see a lifecycle fence it understands")
+	require.NotNil(t, stored.PendingAccountSwap.OriginalStartupStateUnknown)
+	require.False(t, *stored.PendingAccountSwap.OriginalStartupStateUnknown)
+	reprojected := stored.ForStorage()
+	require.False(t, *reprojected.PendingAccountSwap.OriginalStartupStateUnknown,
+		"rewriting a projected row must retain the real lifecycle value")
+	clientView := stored.ForClientRead()
+	require.False(t, clientView.StartupStateUnknown,
+		"disk fallback clients must see the pending-swap lifecycle, not its old-reader fence")
+	require.Nil(t, clientView.PendingAccountSwap.OriginalStartupStateUnknown)
 	payload, err := json.Marshal(stored)
 	require.NoError(t, err)
 	var previousWire preAccountSwapInstanceData

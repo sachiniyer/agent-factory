@@ -238,9 +238,10 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 		// package metadata or fetched entrypoints. The literal argv cannot prove
 		// that hidden program preserves the selected account identity.
 		return true
-	case "cargo", "rustup", "cross":
+	case "cargo", "rustc", "rustup", "cross":
 		// Cargo package targets, build scripts, tests, and toolchain wrappers are
-		// another hidden launch boundary; even a build can execute build.rs.
+		// another hidden launch boundary; even a build can execute build.rs, and
+		// rustc can load an arbitrary procedural macro through --extern.
 		return true
 	}
 	if commandName == "go" && len(words) > 1 && words[1] == "run" {

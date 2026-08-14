@@ -10,6 +10,11 @@ type AccountSwapData struct {
 	To                      string `json:"to"`
 	ConversationID          string `json:"conversation_id,omitempty"`
 	ReplacementPanesStarted bool   `json:"replacement_panes_started,omitempty"`
+	// OriginalStartupStateUnknown preserves the real lifecycle value while
+	// ForStorage projects a pending replacement through the startup-unknown
+	// fence understood by the immediately previous release. A current reader
+	// restores the value and clears this compatibility-only marker.
+	OriginalStartupStateUnknown *bool `json:"original_startup_state_unknown,omitempty"`
 }
 
 // AccountLimitObservationData is durable evidence that one named identity hit

@@ -183,7 +183,26 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// marked external — not the flow itself. finishCreateStart marks the instance
 	// live, PARKS it at a usage-limit wall (#1146 PR4), or returns a fatal error.
 	conversationCapture, startErr := task.StartAndSendPromptWithConversationCapture(ctx, instance, req.Prompt)
+	// A startup usage-limit result becomes candidate evidence in
+	// finishCreateStart. Take the publication fence BEFORE installing it and keep
+	// it until the row is both visible and durable, so final account-swap
+	// admission cannot scan between those two facts. The same errors.As
+	// classification is the one finishCreateStart uses below.
+	limitPublicationFenceHeld := false
+	var limitErr *task.LimitReachedError
+	if errors.As(startErr, &limitErr) {
+		m.accountLimitMu.Lock()
+		limitPublicationFenceHeld = true
+	}
+	releaseLimitPublicationFence := func() {
+		if limitPublicationFenceHeld {
+			m.accountLimitMu.Unlock()
+			limitPublicationFenceHeld = false
+		}
+	}
+	defer releaseLimitPublicationFence()
 	if serr := finishCreateStart(instance, req.Prompt, startErr); serr != nil {
+		releaseLimitPublicationFence()
 		// An unknown startup outcome is already a teardown boundary. Launch may have
 		// failed because the name it probed is not the name tmux stored; asking Kill
 		// through that same binding can then answer "absent" for the wrong name and
@@ -274,13 +293,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// not in memory would let refresh construct a duplicate Instance
 	// (opening a fresh PTY in the tmux backend) that gets orphaned when
 	// the original is later stored under the same key.
-	// An unregistered create is not live evidence yet. Serialize the roster
-	// insertion of a limit-parked account with final account-swap admission, so
-	// the candidate is either absent for the whole commit or visible as limited.
-	limitPublication := instance.LimitReached()
-	if limitPublication {
-		m.accountLimitMu.Lock()
-	}
+	// An unregistered create is not live evidence yet. The limit-publication
+	// fence acquired before finishCreateStart stays held through this insertion,
+	// so the candidate is either absent for the whole commit or visible as
+	// limited.
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -296,9 +312,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.startConversationCaptureLocked(repo.ID, key, instance, conversationCapture, conversationToken)
 		return nil
 	}()
-	if limitPublication {
-		m.accountLimitMu.Unlock()
-	}
+	releaseLimitPublicationFence()
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the
