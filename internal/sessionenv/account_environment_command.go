@@ -67,7 +67,7 @@ func arithmeticAssignmentMutatesAccountEnvironment(expr *syntax.BinaryArithm, na
 		syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
 		syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
 		name, ok := arithmeticAccountEnvironmentName(expr.X)
-		return ok && accountEnvironmentNameDenied(name, names)
+		return ok && accountEnvironmentOperandDenied(name, names)
 	default:
 		return false
 	}
@@ -78,7 +78,7 @@ func arithmeticIncrementMutatesAccountEnvironment(expr *syntax.UnaryArithm, name
 		return false
 	}
 	name, ok := arithmeticAccountEnvironmentName(expr.X)
-	return ok && accountEnvironmentNameDenied(name, names)
+	return ok && accountEnvironmentOperandDenied(name, names)
 }
 
 func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
@@ -120,6 +120,10 @@ func callMutatesAccountEnvironment(call *syntax.CallExpr, names map[string]struc
 		return getoptsMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "printf"):
 		return printfMutatesAccountEnvironment(words[1:], names)
+	case isBareName(words[0], "let"):
+		return letMutatesAccountEnvironment(words[1:], names)
+	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
+		return arrayReadMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
 		isBareName(words[0], "source"), isBareName(words[0], "trap"),
 		isBareName(words[0], "alias"):

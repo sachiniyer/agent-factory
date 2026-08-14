@@ -222,6 +222,12 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	ambientHome := filepath.Join(home, "ambient-codex")
 	t.Setenv("CODEX_HOME", ambientHome)
 	t.Setenv("OPENAI_API_KEY", "ambient-must-not-reach-tab")
+	t.Setenv("HOME", home)
+	profile := "export CODEX_HOME=" + shellquote.Quote(ambientHome) + "\n" +
+		"export OPENAI_API_KEY=ambient-must-not-reach-tab\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o600); err != nil {
+		t.Fatalf("write ambient login profile: %v", err)
+	}
 
 	dir := t.TempDir()
 	agentPath := filepath.Join(dir, ProgramCodex)
@@ -289,5 +295,43 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	}
 	if !strings.Contains(got, "OPENAI_API_KEY=absent\n") {
 		t.Fatalf("shell tab inherited ambient API credentials; report:\n%s", got)
+	}
+
+	// An unqualified tmux new-window uses the session's default command. It must
+	// not fall back to a login shell that can restore ambient credentials from a
+	// profile after af established the account boundary.
+	if output, err := exec.Command("tmux", "set-option", "-t", exactTarget(shell.SanitizedName()), "default-shell", "/bin/bash").CombinedOutput(); err != nil {
+		t.Fatalf("select profile-reading default shell: %v: %s", err, output)
+	}
+	newPane, err := exec.Command(
+		"tmux", "new-window", "-dP", "-F", "#{pane_id}", "-t", "="+shell.SanitizedName()+":",
+	).Output()
+	if err != nil {
+		t.Fatalf("open tmux-created shell window: %v", err)
+	}
+	newWindowReport := filepath.Join(dir, "new-window-environment")
+	newWindowCommand := "printf 'CODEX_HOME=%s\\nOPENAI_API_KEY=%s\\n' \"${CODEX_HOME-<unset>}\" \"${OPENAI_API_KEY-<unset>}\" > " +
+		shellquote.Quote(newWindowReport)
+	target := strings.TrimSpace(string(newPane))
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "-l", newWindowCommand).CombinedOutput(); err != nil {
+		t.Fatalf("write new-window probe: %v: %s", err, output)
+	}
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "Enter").CombinedOutput(); err != nil {
+		t.Fatalf("submit new-window probe: %v: %s", err, output)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		report, err = os.ReadFile(newWindowReport)
+		if err == nil && len(report) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("tmux-created window did not report its environment: %v", err)
+	}
+	got = string(report)
+	if got != "CODEX_HOME="+accountDir+"\nOPENAI_API_KEY=<unset>\n" {
+		t.Fatalf("tmux-created window escaped account scoping; report:\n%s", got)
 	}
 }

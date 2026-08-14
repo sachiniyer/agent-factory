@@ -74,6 +74,13 @@ func isAccountShellCommand(command string) bool {
 	return want != nil && slices.Equal(words[1:], want)
 }
 
+// IsAccountShellCommand reports whether command is the exact startup-free
+// shell form AccountShellCommand generates. Tmux uses this proof when choosing
+// the default command for additional windows in an account-scoped shell tab.
+func IsAccountShellCommand(command string) bool {
+	return isAccountShellCommand(command)
+}
+
 func literalAccountShellWords(command string) ([]string, bool) {
 	call, ok := singleSimpleCall(strings.TrimSpace(command))
 	if !ok || len(call.Assigns) > 0 || !callIsLiteral(call) {
