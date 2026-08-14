@@ -74,8 +74,11 @@ func writeRootClaudeTranscript(t *testing.T, configDir, repoPath, id string) str
 // root, it was a root that came back as somebody else.
 func TestEnsureRootAgentsCarriesConversationAcrossTmuxVanish(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)

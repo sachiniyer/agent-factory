@@ -71,6 +71,8 @@ func TestEnsureRootAgentsCarriesTabsAcrossTmuxVanish(t *testing.T) {
 // or recovering from one loss would silently cause the other.
 func TestEnsureRootAgentsKeepsTheTabCarryWhenTheConversationCannotResume(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	var seen []session.InstanceOptions
 	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
 		seen = append(seen, opts)
@@ -83,6 +85,7 @@ func TestEnsureRootAgentsKeepsTheTabCarryWhenTheConversationCannotResume(t *test
 	})
 	t.Cleanup(restore)
 	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
 
 	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
 	require.NoError(t, err)
