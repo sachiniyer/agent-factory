@@ -162,6 +162,15 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 			return m.rootAgentMaterializeVerdictFor(derived)
 		}
 	}
+	// A direct unresolved record whose marker is unreadable (or whose path
+	// vanished mid-verification) makes the decision unknowable for BOTH
+	// same-ID and bridged shapes — decisionUnknown fails the sweeps closed —
+	// and the verdict names that cause directly rather than falling through
+	// to a resolution that would misreport it as an ordinary disable (#3299
+	// review round 15).
+	if record, ok := layers.unresolvedRoots[repoID]; ok && record.markerUnreadable {
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, rootUnresolved: true, rootMarkerUnreadable: true, rootPathVanished: record.pathVanished, projectID: record.projectID}
+	}
 	legacy := m.legacyRootAgentForRepo(repoID)
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
@@ -228,13 +237,15 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		return "identity verification for its recorded project root is in progress — the daemon is confirming the checkout's registry marker on its ensure cadence; retry shortly"
 	case rootAgentProjectUnresolved:
 		if v.rootPathVanished {
-			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the recorded project root vanished while its identity was being verified; bring the path back — the daemon re-checks and re-verifies it on its ensure cadence", v.enabledSource)
+			// Source-agnostic on purpose: an unknowable identity blocks the
+			// root whatever layer enables it.
+			return "its recorded project root vanished while its identity was being verified; bring the path back — the daemon re-checks and re-verifies it on its ensure cadence"
 		}
 		if v.rootMarkerUnreadable {
 			// Identity is unknowable, not disproven: no rebind advice — a
 			// transiently unreadable ORIGINAL checkout rebound over would be
 			// data loss.
-			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout marker at the recorded project root cannot be read or holds an invalid id (permissions, I/O, or corruption), so the checkout's identity cannot be verified; repair the marker — the daemon re-checks it on its ensure cadence", v.enabledSource)
+			return "the checkout marker at its recorded project root cannot be read or holds an invalid id (permissions, I/O, or corruption), so the checkout's identity cannot be verified and no root agent will start for this repo; repair the marker — the daemon re-checks it on its ensure cadence"
 		}
 		if v.rootIdentityMismatch {
 			// The path is PRESENT — "bring it back" is an impossible remedy.
