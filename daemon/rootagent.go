@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -443,7 +444,11 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
-			// and whoever created it — is the root agent. Nothing to do.
+			// and whoever created it — is the root agent. The one mutation is
+			// refreshing a recorded Claude conversation from durable transcript
+			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			m.refreshRootClaudeConversation(repo.ID, key, repo.Root,
+				rootAgentProgramForProfile(repo.Root, resolution.RootAgent), inst)
 			m.rootEnsureSucceeded(st)
 			return
 		}
@@ -483,6 +488,27 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	}
 
 	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
+	skipRecordedResume := false
+	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
+		state, inspectErr := session.InspectClaudeProjectConversations(program, repo.Root, carried.conversation)
+		switch {
+		case inspectErr != nil:
+			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
+				repo.Root, carried.conversation.ID, inspectErr)
+		case !state.RecordedExists && state.Latest.HasID():
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
+				repo.Root, carried.conversation.ID, state.Latest.ID)
+			carried.conversation = state.Latest
+		case !state.RecordedExists:
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
+				repo.Root, carried.conversation.ID)
+			skipRecordedResume = true
+		case state.Latest.HasID() && !strings.EqualFold(state.Latest.ID, carried.conversation.ID):
+			log.WarningLog.Printf("root agent for %s recorded claude conversation %s is stale; substituting newer on-disk project conversation %s",
+				repo.Root, carried.conversation.ID, state.Latest.ID)
+			carried.conversation = state.Latest
+		}
+	}
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: repo.Root,
@@ -517,6 +543,9 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 	}
+	if skipRecordedResume {
+		req.resumeConversation = session.AgentConversationData{}
+	}
 	data, err := m.CreateSession(context.Background(), req)
 	if err != nil && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
@@ -526,8 +555,23 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// what keeps an unresumable id from costing the root a backoff interval of
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
+		if req.resumeConversation.Agent == tmux.ProgramClaude {
+			state, inspectErr := session.InspectClaudeProjectConversations(program, repo.Root, req.resumeConversation)
+			if inspectErr != nil {
+				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
+					repo.Root, req.resumeConversation.ID, inspectErr)
+			} else if !state.RecordedExists && state.Latest.HasID() && !strings.EqualFold(state.Latest.ID, req.resumeConversation.ID) {
+				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
+					repo.Root, req.resumeConversation.ID, err, state.Latest.ID)
+				req.resumeConversation = state.Latest
+				carried.conversation = state.Latest
+				data, err = m.CreateSession(context.Background(), req)
+			}
+		}
+	}
+	if err != nil && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			repo.Root, carried.conversation.Agent, carried.conversation.ID, err)
+			repo.Root, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.CreateSession(context.Background(), req)
 	}
@@ -541,6 +585,68 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		reportRootTabCarry(repo.Root, carried.tabs, data.Tabs)
 	}
 	m.rootEnsureSucceeded(st)
+}
+
+// refreshRootClaudeConversation keeps the live root's durable conversation id
+// aligned with Claude's newest transcript for the in-place project. Claude can
+// rotate to a new transcript without telling af; persisting only an id whose
+// file is visible prevents the next tmux outage from carrying stale state.
+func (m *Manager) refreshRootClaudeConversation(repoID, key, repoRoot, program string, inst *session.Instance) {
+	recorded := inst.AgentConversation()
+	if recorded.Agent != tmux.ProgramClaude || !recorded.HasID() {
+		return
+	}
+	state, err := session.InspectClaudeProjectConversations(program, repoRoot, recorded)
+	if err != nil {
+		log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v",
+			repoRoot, recorded.ID, err)
+		return
+	}
+	if !state.Latest.HasID() || strings.EqualFold(state.Latest.ID, recorded.ID) {
+		return
+	}
+
+	opLock := m.opLockFor(key)
+	if !opLock.TryLock() {
+		return
+	}
+	defer opLock.Unlock()
+
+	m.mu.Lock()
+	current := m.instances[key]
+	m.mu.Unlock()
+	if current != inst || inst.AgentConversation() != recorded {
+		return
+	}
+	status := inst.GetStatus()
+	if status == session.Dead || status == session.Lost || status == session.Archived {
+		return
+	}
+	if !inst.SetAgentConversation(state.Latest) {
+		return
+	}
+
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	data := inst.ToInstanceData()
+	err = persistInstanceData(repoID, data)
+	if err == nil {
+		m.publishEvent(agentproto.EventSessionUpdated, data)
+	}
+	repoStartLock.Unlock()
+	if err != nil {
+		inst.SetAgentConversation(recorded)
+		log.WarningLog.Printf("root agent for %s could not persist replacement claude conversation %s: %v",
+			repoRoot, state.Latest.ID, err)
+		return
+	}
+	if state.RecordedExists {
+		log.InfoLog.Printf("root agent for %s updated recorded claude conversation %s to newer on-disk project conversation %s",
+			repoRoot, recorded.ID, state.Latest.ID)
+		return
+	}
+	log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; persisted newest on-disk project conversation %s instead",
+		repoRoot, recorded.ID, state.Latest.ID)
 }
 
 // reportRootTabCarry records what became of the reaped root's non-agent tabs

@@ -214,9 +214,21 @@ func firstCommandTokenStrict(tokens []string) (int, error) {
 // cwd model as GNU env itself, so receipt/capture callers never silently watch
 // the daemon's store while a wrapped Codex writes somewhere else.
 func CodexHomeFromCommand(command, workingDir string) (string, error) {
+	return providerHomeFromCommand("Codex", "CODEX_HOME", ".codex", command, workingDir)
+}
+
+// ClaudeConfigDirFromCommand resolves the transcript/config store used by the
+// launched Claude command. CLAUDE_CONFIG_DIR follows the same command-local
+// environment rules as CODEX_HOME; when it is unset Claude falls back to
+// $HOME/.claude.
+func ClaudeConfigDirFromCommand(command, workingDir string) (string, error) {
+	return providerHomeFromCommand("Claude", "CLAUDE_CONFIG_DIR", ".claude", command, workingDir)
+}
+
+func providerHomeFromCommand(provider, configVar, defaultDir, command, workingDir string) (string, error) {
 	launch, err := CommandEnvironmentFromCommand(command, workingDir)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve Codex environment: %w", err)
+		return "", fmt.Errorf("cannot resolve %s environment: %w", provider, err)
 	}
 	effective := func(name string) (string, bool, error) {
 		override := launch.Override(name)
@@ -225,7 +237,7 @@ func CodexHomeFromCommand(command, workingDir string) (string, error) {
 			return value, set, nil
 		}
 		if !override.Literal {
-			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so Codex storage can be followed", name)
+			return "", false, fmt.Errorf("%s uses shell expansion; use a literal path so %s storage can be followed", name, provider)
 		}
 		return override.Value, override.Set, nil
 	}
@@ -236,19 +248,19 @@ func CodexHomeFromCommand(command, workingDir string) (string, error) {
 		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
 	}
 
-	if codexHome, set, err := effective("CODEX_HOME"); err != nil {
+	if providerHome, set, err := effective(configVar); err != nil {
 		return "", err
-	} else if set && strings.TrimSpace(codexHome) != "" {
-		return resolve(codexHome), nil
+	} else if set && strings.TrimSpace(providerHome) != "" {
+		return resolve(providerHome), nil
 	}
 	home, set, err := effective("HOME")
 	if err != nil {
 		return "", err
 	}
 	if !set || strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("CODEX_HOME is unset and the launched command has no literal HOME fallback")
+		return "", fmt.Errorf("%s is unset and the launched command has no literal HOME fallback", configVar)
 	}
-	return filepath.Join(resolve(home), ".codex"), nil
+	return filepath.Join(resolve(home), defaultDir), nil
 }
 
 func resolveCommandDir(current, requested string) (string, error) {
