@@ -254,23 +254,55 @@ resolved value with the complete source trace.`,
 		if configGetExplainFlag || projectSelector != "" || strings.Contains(args[0], ".") {
 			resolved, err := loadResolvedConfig(projectSelector)
 			if err != nil {
-				return jsonWrapError(cmd, configJSONFlag, err)
+				// The layered load fails on exactly the states the specialized
+				// root_agent resolution absorbs into a fail-closed explanation
+				// (#3264): an unloadable personal config, an unlistable project
+				// registry. For root_agent keys, degrade the surrounding
+				// explanation context to global scope and let the specialized
+				// value below answer; every other key keeps the loud error.
+				if !isRootAgentExplainKey(args[0]) {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				resolved, err = loadResolvedConfig("")
+				if err != nil {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				// Keep the explanation header honest: the value shown below is
+				// resolved for the SELECTED repository even though the layered
+				// load degraded to global scope — a "global defaults" header
+				// would contradict the project-specific fail-closed candidates
+				// (#3264 review). projectSelector is non-empty here: a global
+				// load cannot fail on a project layer, so the degraded branch is
+				// only reachable with a repository in scope.
+				if abs, pathErr := config.ResolveUserPath(projectSelector); pathErr == nil {
+					if repo, repoErr := config.RepoFromPath(abs); repoErr == nil {
+						// selectedProjectDisplayRoot keeps the user-selected
+						// spelling, exactly as the normal load path does.
+						resolved.ProjectRoot = selectedProjectDisplayRoot(abs, repo.Root)
+					} else {
+						resolved.ProjectRoot = abs
+					}
+				}
 			}
 			value, ok := resolved.ResolvedValuePath(args[0])
-			if !ok {
-				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
-			}
 			// root_agent resolves through FOUR layers in the daemon
 			// (built-in/global/legacy/personal), but the generic resolver only
 			// knows its two singleton layers. Use the daemon's real four-layer
 			// resolution for both the concise value and --explain, or the two
-			// read modes can contradict each other (#2607).
+			// read modes can contradict each other (#2607). The specialized path
+			// also OWNS unknown-key detection for these keys: gating on the
+			// generic resolution first would reject valid fail-closed leaves —
+			// root_agent.program has no generic origin when no global program is
+			// configured, so the generic lookup reports it unknown before the
+			// fail-closed projector can answer (#3264 review).
 			if isRootAgentExplainKey(args[0]) {
 				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				value = specialized
+			} else if !ok {
+				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {

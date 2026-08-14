@@ -171,7 +171,13 @@ func TestConfigGetRootAgentGlobalSingletonRequiresRegisteredProject(t *testing.T
 // daemon resolver's additive fallback for a cwd-derived project. An unreadable
 // registry must not hide a legacy root_agents opt-in; an explicit selector
 // remains strict because the user asked to inspect that project.
-func TestConfigGetRootAgentImplicitScopeToleratesCorruptRegistry(t *testing.T) {
+// TestConfigGetRootAgentImplicitScopeFailsClosedOnCorruptRegistry: the
+// implicit-scope concise read mirrors the daemon's fail-closed verdict
+// (#3247/#3264) — before, it tolerated the corrupt registry and printed the
+// legacy layer's enabled=true for a root the daemon refuses to start. An
+// explicit --project selector keeps erroring: it asked about one project, and
+// an unlistable registry has no trustworthy answer for it.
+func TestConfigGetRootAgentImplicitScopeFailsClosedOnCorruptRegistry(t *testing.T) {
 	home, repoRoot := setupRootAgentProject(t, "schema_version = 1\n", true, "")
 	badRecordDir := filepath.Join(home, config.ProjectRegistryDirName, "corrupt")
 	require.NoError(t, os.MkdirAll(badRecordDir, 0o755))
@@ -181,7 +187,8 @@ func TestConfigGetRootAgentImplicitScopeToleratesCorruptRegistry(t *testing.T) {
 	setConfigGetReadFlags(t, "", false, false)
 	out, err := runConfigGetForTest(t, "root_agent")
 	require.NoError(t, err)
-	assert.Equal(t, "{\"enabled\":true}\n", out)
+	assert.Equal(t, "{\"enabled\":false}\n", out,
+		"the concise read must report the fail-closed verdict, not the legacy layer the daemon no longer honors in this state")
 
 	configGetProjectFlag = repoRoot
 	_, err = runConfigGetForTest(t, "root_agent")
