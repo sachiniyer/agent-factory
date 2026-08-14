@@ -213,11 +213,11 @@ func requireTaskInScope(t *task.Task, scope projectScope) error {
 // intended project, and leaving the automation invisible from that project's
 // view.
 //
-// This deliberately keys off the RESOLVED repo root, not the cwd. Sessions run
-// in linked worktrees under af's home (worktrees/, archived/) and those resolve
-// back to the real project root (config.CurrentRepo), so agents working inside
-// a normal session never trip this — only a self-contained clone does, which is
-// precisely the accident being guarded.
+// This deliberately keys off the RESOLVED repo identity, not the cwd or
+// operational workspace. Sessions run in linked worktrees under af's home
+// (worktrees/, archived/), and a bare repository has no main checkout to put in
+// Root, so IdentityPath is the one value that distinguishes those legitimate
+// workspaces from a self-contained clone under the home.
 //
 // An explicit --repo is the escape hatch: a caller who names the path has
 // stated the binding rather than inherited it, so legitimate uses stay open.
@@ -229,11 +229,12 @@ func guardProjectBinding(repo *config.RepoContext, explicit bool) error {
 	if err != nil {
 		return nil // cannot tell; never block on an unrelated failure
 	}
-	if !pathIsInside(home, repo.Root) {
+	identity := repo.IdentityPath()
+	if !pathIsInside(home, identity) {
 		return nil
 	}
 	return fmt.Errorf("--repo is required here: the current directory resolves to the git repository %s, which is inside af's home (%s) — that is a stray clone, not a project, and binding to it hides the automation from the intended project's view. Pass --repo <project path> to name the project explicitly",
-		repo.Root, home)
+		identity, home)
 }
 
 // pathIsInside reports whether child is parent or lives beneath it, comparing

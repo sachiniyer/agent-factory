@@ -224,6 +224,33 @@ func projectForRoot(root string) (Project, bool, error) {
 	return Project{}, false, nil
 }
 
+// projectForRepo finds a registered project by usable workspace first, then by
+// repository identity. The identity pass matters for bare repositories: each
+// linked worktree is a different path, while personal configuration belongs to
+// the shared bare common directory. Unresolvable stale registry roots do not
+// match by inference; their recorded path remains the only evidence available.
+func projectForRepo(repo *RepoContext) (Project, bool, error) {
+	if repo == nil {
+		return Project{}, false, nil
+	}
+	projects, err := ListProjects()
+	if err != nil {
+		return Project{}, false, err
+	}
+	for _, project := range projects {
+		if sameProjectPath(project.Root, repo.WorkspacePath()) {
+			return project, true, nil
+		}
+	}
+	for _, project := range projects {
+		candidate, err := RepoFromPath(project.Root)
+		if err == nil && candidate.ID == repo.ID {
+			return project, true, nil
+		}
+	}
+	return Project{}, false, nil
+}
+
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a
 // filesystem path — to a registered project. It never registers or mutates: a
 // path is normalized to its canonical checkout root (so any subdirectory selects

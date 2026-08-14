@@ -63,6 +63,66 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 	assert.Equal(t, repoBRoot, h.repoRoot)
 }
 
+func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	worktree := filepath.Join(base, "worktree")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	run(base, "init", "-b", "main", source)
+	run(source, "commit", "--allow-empty", "-m", "initial")
+	run(base, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	h := newTestHome(t)
+	h.repoRoot = worktree
+	h.repoID = config.RepoIDFromRoot(bare)
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "bare-alpha", Path: worktree,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: filepath.Join(base, "managed")},
+	}})
+	require.False(t, degraded)
+	require.Len(t, projects, 1,
+		"one bare repository must not split into identity and workspace project rows")
+	assert.Equal(t, worktree, projects[0].Root, "project switching must retain a usable linked workspace")
+	assert.Equal(t, 1, projects[0].SessionCount)
+	rows := h.projectRows(projects)
+	require.Len(t, rows, 1)
+	assert.True(t, rows[0].Active)
+}
+
+func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
+	h := newTestHome(t)
+	ancestor := initTestGitRepo(t)
+	legacyRoot := filepath.Join(ancestor, "recorded-parent")
+	require.NoError(t, os.Mkdir(legacyRoot, 0o755))
+	require.NotEqual(t, config.RepoIDForRecordedRoot(legacyRoot), config.RepoIDForPath(legacyRoot),
+		"fixture must place the retained root inside another repository")
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "legacy", Path: legacyRoot,
+		Worktree: session.GitWorktreeData{RepoPath: legacyRoot, WorktreePath: "/archive/legacy"},
+	}})
+	require.False(t, degraded)
+	for _, project := range projects {
+		if project.Root == legacyRoot {
+			assert.Equal(t, 1, project.SessionCount)
+			return
+		}
+	}
+	t.Fatalf("retained legacy project %s was silently reattributed: %+v", legacyRoot, projects)
+}
+
 // TestProjectsSectionEscReturnsToTree: Esc on the focused Projects section moves
 // the ring back to the tree (mirrors the Automations Esc flow), without touching
 // the active project.

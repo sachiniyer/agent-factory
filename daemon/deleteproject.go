@@ -127,7 +127,11 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 	}
 	var root string
 	for _, project := range projects {
-		if config.RepoIDForRecordedRoot(project.Root) != repoID {
+		// A reachable registered worktree resolves through Git so a bare
+		// repository's linked workspace matches the bare-derived repo ID. A
+		// missing path retains its recorded-root fallback instead of being
+		// guessed into a different project.
+		if config.RepoIDForPath(project.Root) != repoID {
 			continue
 		}
 		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {

@@ -26,6 +26,13 @@ func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, filepath.Join(repo, ".git"), got)
 	})
+	t.Run("bare directory", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "repo.git")
+		require.NoError(t, exec.Command("git", "init", "--bare", repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		assert.Equal(t, repo, got)
+	})
 	t.Run("symlinked directory", func(t *testing.T) {
 		root := t.TempDir()
 		repo := filepath.Join(root, "repo")
@@ -66,6 +73,25 @@ func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
 			"a .git symlink to a gitdir redirect file must be resolved, not refused with ELOOP")
 		assert.Equal(t, pathutil.ResolveForCompare(meta), pathutil.ResolveForCompare(got))
 	})
+}
+
+func TestVerifyRegisteredWorktreeOccupant_BareOrigin(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	bare := filepath.Join(root, "origin.git")
+	worktree := filepath.Join(root, "worktree")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", source).Run())
+	commit := exec.Command("git", "-C", source, "commit", "--allow-empty", "-m", "initial")
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	require.NoError(t, commit.Run())
+	require.NoError(t, exec.Command("git", "clone", "--bare", source, bare).Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", worktree).Run())
+
+	require.NoError(t, VerifyRegisteredWorktreeOccupant(worktree, bare),
+		"a linked worktree pointer into a bare origin must authorize its own occupant")
 }
 
 // TestVerifyWorktreePointerShape_NewlinePathPreserved: git writes filesystem

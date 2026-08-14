@@ -801,11 +801,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 			!data.StartupStateUnknown && !durableRetention && !pendingTabs {
 			continue
 		}
-		root := inst.GetRepoPath()
-		if root == "" {
-			root = inst.Path
-		}
-		rid := config.RepoIDForPath(root)
+		rid := inst.repoIDForStorage()
 		grouped[rid] = append(grouped[rid], data.ForStorage())
 	}
 
@@ -853,7 +849,7 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 	}
 
 	var instances []*Instance
-	for _, jsonData := range allJSON {
+	for repoID, jsonData := range allJSON {
 		if jsonData == nil || string(jsonData) == "[]" || string(jsonData) == "null" {
 			continue
 		}
@@ -875,6 +871,7 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
 				continue
 			}
+			instance.rememberStorageRepoID(repoID)
 			instances = append(instances, instance)
 		}
 	}

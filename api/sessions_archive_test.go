@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -201,6 +202,36 @@ func TestSessionsArchiveSelf_ScopesByResolvedRepoNotCwd(t *testing.T) {
 	if gotReq.Title != "me" {
 		t.Fatalf("archive --self Title = %q, want %q", gotReq.Title, "me")
 	}
+}
+
+func TestSessionsArchiveSelf_PreservesMissingRecordedRepoIdentity(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	ancestor := mkRepo(t, "ancestor")
+	missingOrigin := filepath.Join(ancestor, "deleted-nested-repo")
+
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			Title: "me", TmuxName: "af_me_agent",
+			Worktree: session.GitWorktreeData{RepoPath: missingOrigin},
+		}}, nil
+	})
+
+	var gotReq daemon.ArchiveSessionRequest
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+		gotReq = req
+		return "/archived/me", nil
+	}
+	t.Cleanup(func() { archiveSessionViaDaemon = prev })
+	sessionsArchiveSelf = true
+	t.Cleanup(func() { sessionsArchiveSelf = false })
+
+	_, err := runCmdCaptureStdout(t, sessionsArchiveCmd, nil)
+	require.NoError(t, err)
+	assert.Equal(t, config.RepoIDFromRoot(missingOrigin), gotReq.RepoID,
+		"a missing recorded origin must keep its own storage identity, not adopt a Git ancestor")
 }
 
 // TestSessionsArchiveSelf_OutsideSessionErrors: `--self` run outside an af

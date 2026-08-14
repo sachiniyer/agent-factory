@@ -236,23 +236,10 @@ func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string) (source
 	if identityRoot == workspaceRoot {
 		return projectPersonalDocument(workspaceRoot)
 	}
-	projects, err := ListProjects()
-	if err != nil {
-		return projectPersonalDocumentFromLookup(Project{}, false, err)
-	}
-	for _, project := range projects {
-		if sameProjectPath(project.Root, workspaceRoot) {
-			return projectPersonalDocumentFromLookup(project, true, nil)
-		}
-	}
-	repoID := RepoIDFromRoot(identityRoot)
-	for _, project := range projects {
-		repo, err := RepoFromPath(project.Root)
-		if err == nil && repo.ID == repoID {
-			return projectPersonalDocumentFromLookup(project, true, nil)
-		}
-	}
-	return emptyProjectPersonalDocument(), nil
+	project, found, err := projectForRepo(&RepoContext{
+		Root: workspaceRoot, IdentityRoot: identityRoot, ID: RepoIDFromRoot(identityRoot),
+	})
+	return projectPersonalDocumentFromLookup(project, found, err)
 }
 
 // projectPersonalDocument builds the SourceProjectPersonal document for

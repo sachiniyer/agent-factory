@@ -165,3 +165,35 @@ func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T
 	other, _ := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(filepath.Join(t.TempDir(), "elsewhere")))
 	assert.Nil(t, other, "the fallback matches only the recorded spelling's own identity")
 }
+
+func TestRootAgentInspectionFindsRegisteredBareRepoFromSiblingWorktree(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	seed := initProjectRegistryRepo(t, filepath.Join(base, "seed"))
+	runProjectRegistryGit(t, seed, "config", "user.email", "test@example.com")
+	runProjectRegistryGit(t, seed, "config", "user.name", "Test")
+	runProjectRegistryGit(t, seed, "commit", "--allow-empty", "--quiet", "-m", "initial")
+	bare := filepath.Join(base, "origin.git")
+	first := filepath.Join(base, "first-worktree")
+	second := filepath.Join(base, "second-worktree")
+	runProjectRegistryGit(t, base, "clone", "--quiet", "--bare", seed, bare)
+	runProjectRegistryGit(t, bare, "worktree", "add", "--quiet", "--detach", first)
+	runProjectRegistryGit(t, bare, "worktree", "add", "--quiet", "--detach", second)
+
+	project, err := RegisterProject(first)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, TomlConfigFileName),
+		[]byte("schema_version = 1\n\n[root_agent]\nenabled = true\n"), 0o644))
+	writePersonalConfig(t, project.ID, "[root_agent]\nenabled = false\n")
+
+	rv, err := ResolveRootAgentForInspection(second, true)
+	require.NoError(t, err)
+	personal, ok := rootAgentCandidateByLayer(rv, RootAgentSourcePersonal)
+	require.True(t, ok)
+	assert.True(t, personal.Present,
+		"a sibling linked worktree must find the personal project by shared bare identity")
+	assert.Equal(t, string(RootAgentSourcePersonal), rv.Origins["enabled"].Layer)
+	assert.Equal(t, RootAgent{Enabled: false}, rv.Value)
+}

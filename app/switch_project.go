@@ -59,7 +59,48 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // a failed read shown as an empty result — every registered sessionless
 // project silently vanishes from the picker. Callers surface the degradation.
 func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Project, bool) {
-	counts := map[string]int{}
+	type projectAggregate struct {
+		root         string
+		rootPriority int
+		count        int
+		inPlace      int
+	}
+	type pathResolution struct {
+		id   string
+		root string
+	}
+	projectsByID := map[string]*projectAggregate{}
+	resolvedPaths := map[string]pathResolution{}
+	resolvePath := func(path string) pathResolution {
+		if path == "" {
+			return pathResolution{}
+		}
+		if resolved, ok := resolvedPaths[path]; ok {
+			return resolved
+		}
+		resolved := pathResolution{id: config.RepoIDForRecordedRoot(path), root: filepath.Clean(path)}
+		if repo, err := config.RepoFromPath(path); err == nil {
+			resolved = pathResolution{id: repo.ID, root: repo.WorkspacePath()}
+		}
+		resolvedPaths[path] = resolved
+		return resolved
+	}
+	ensure := func(resolved pathResolution, priority int) *projectAggregate {
+		if resolved.id == "" || resolved.root == "" {
+			return nil
+		}
+		aggregate := projectsByID[resolved.id]
+		if aggregate == nil {
+			aggregate = &projectAggregate{}
+			projectsByID[resolved.id] = aggregate
+		}
+		if aggregate.root == "" || priority > aggregate.rootPriority {
+			aggregate.root = resolved.root
+			aggregate.rootPriority = priority
+		}
+		return aggregate
+	}
+
 	// inPlace counts the subset of each repo's live sessions that delete-project
 	// tears down instead of archiving (#1973). Keyed off the SAME predicate the
 	// daemon applies in deleteProject — Instance.IsExternalWorktree(), which is
@@ -67,18 +108,6 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// gitWorktree.IsExternalWorktree(), and both read false when no worktree is
 	// attached). Deriving it here, from the snapshot that already yields the
 	// total, keeps the dialog's split as faithful as the count beside it.
-	inPlace := map[string]int{}
-	var order []string
-	seen := func(root string) {
-		if root == "" {
-			return
-		}
-		if _, ok := counts[root]; !ok {
-			counts[root] = 0
-			order = append(order, root)
-		}
-	}
-
 	for _, d := range data {
 		// Only LIVE sessions define an "active project" (#1735): a repo whose
 		// sessions are all archived is not an active project — its archived rows
@@ -88,14 +117,32 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		if session.IsArchivedData(d) {
 			continue
 		}
-		root := d.Worktree.RepoPath
-		if root == "" {
+		identityPath := d.Worktree.RepoPath
+		if identityPath == "" {
 			continue
 		}
-		seen(root)
-		counts[root]++
+		// RepoPath is the durable recorded identity. Hash it without walking
+		// through Git so a deliberately retained pre-#3358 row cannot be adopted
+		// by an enclosing, unrelated repository merely because its old parent
+		// path now resolves there.
+		identity := pathResolution{
+			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
+		}
+		// Path is the requested operational workspace. Prefer it only when Git
+		// proves it belongs to the session's recorded identity; this collapses a
+		// bare.git identity and bare-wt workspace into one selectable project
+		// without letting an unrelated stale path relabel the row (#3358).
+		workspace := resolvePath(d.Path)
+		if workspace.id != identity.id {
+			workspace = identity
+		}
+		aggregate := ensure(workspace, 1)
+		if aggregate == nil {
+			continue
+		}
+		aggregate.count++
 		if d.Worktree.ExternalWorktree {
-			inPlace[root]++
+			aggregate.inPlace++
 		}
 	}
 
@@ -108,7 +155,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	registryDegraded := false
 	if projects, err := config.ListProjects(); err == nil {
 		for _, p := range projects {
-			seen(p.Root)
+			ensure(resolvePath(p.Root), 2)
 		}
 	} else {
 		registryDegraded = true
@@ -116,20 +163,20 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
-			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil {
-				seen(repo.Root)
-			}
+			ensure(resolvePath(config.ExpandTilde(path)), 2)
 		}
 	}
-	seen(m.repoRoot)
+	// The active workspace is the best selectable spelling and wins over a
+	// registry or session snapshot that names another linked worktree.
+	ensure(resolvePath(m.repoRoot), 3)
 
-	projects := make([]overlay.Project, 0, len(order))
-	for _, root := range order {
+	projects := make([]overlay.Project, 0, len(projectsByID))
+	for _, aggregate := range projectsByID {
 		projects = append(projects, overlay.Project{
-			Name:         filepath.Base(root),
-			Root:         root,
-			SessionCount: counts[root],
-			InPlaceCount: inPlace[root],
+			Name:         filepath.Base(aggregate.root),
+			Root:         aggregate.root,
+			SessionCount: aggregate.count,
+			InPlaceCount: aggregate.inPlace,
 		})
 	}
 	sort.Slice(projects, func(i, j int) bool {

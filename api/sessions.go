@@ -694,7 +694,7 @@ success.`,
 			// guard still fires with its own clear message.
 			root := sessionRepoRoot(data)
 			if root != "" {
-				repoID = newProjectIDCache().idFor(root)
+				repoID = config.RepoIDForPath(root)
 			}
 		} else {
 			if title == "" {
@@ -909,11 +909,12 @@ var sessionsWhoamiCmd = &cobra.Command{
 			// who IS in the named project, so an unknown project is never an
 			// error — only a known-mismatched one.
 			//
-			// Resolve the session's root through git rather than hashing it
-			// raw: a stored root that was never git-resolved would otherwise
-			// hash differently from the canonical --repo naming the same
-			// project, rejecting a caller who is exactly where they claim.
-			if root := sessionRepoRoot(data); root != "" && newProjectIDCache().idFor(root) != repo.ID {
+			// Resolve the session's root directly through git when it still
+			// exists, otherwise retain its raw recorded identity. Ancestor
+			// inference is correct for task attribution but not for an
+			// authoritative session row: it could make a deleted nested origin
+			// look like an unrelated enclosing project.
+			if root := sessionRepoRoot(data); root != "" && config.RepoIDForPath(root) != repo.ID {
 				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
 			}
 		}
