@@ -90,5 +90,20 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		r.errs = append(r.errs, refusal)
 		return refusal
 	}
+	// The listing is repo-side metadata and keeps reporting the recorded path
+	// and branch after the worktree was moved aside (git merely marks the
+	// entry prunable), so it is stale evidence about the OCCUPANT (#3278
+	// review). Require the occupant itself to carry the linked-worktree
+	// pointer before anything destructive — the writer reap included —
+	// touches it.
+	if err := VerifyRegisteredWorktreeOccupant(r.g.worktreePath); err != nil {
+		r.unknown = true
+		refusal := fmt.Errorf(
+			"refusing to act on %s: its occupant does not carry this worktree's linkage (%v) — the registration is stale evidence about a replaced directory; leaving it and the record in place",
+			r.g.worktreePath, err,
+		)
+		r.errs = append(r.errs, refusal)
+		return refusal
+	}
 	return nil
 }

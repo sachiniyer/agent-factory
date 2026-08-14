@@ -467,6 +467,15 @@ var ghostCleanupWorktree = func(
 			return git.CleanupStateUnknown, recoveryErr, nil
 		}
 	}
+	if recovery != nil && !gw.HasUnresolvedRelocation() {
+		// RestoreRelocationRecovery normalized the identity-unknown
+		// cleanup_stalled record away as process-epoch state (#3278 review).
+		// Mirror that in the loaded row: leaving the raw pointer would let the
+		// caller misclassify this record-free run as a descriptor cleanup
+		// after a boundary refusal and latch "restart before retrying" over a
+		// worker that never ran.
+		data.Worktree.RelocationRecovery = nil
+	}
 	if data.ArchiveReport != nil {
 		gw.RestoreArchiveReport(data.ArchiveReport.Clone())
 	}

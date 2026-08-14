@@ -409,6 +409,75 @@ func TestKillSession_ArchivedSiblingWorktreeAtPathRefused(t *testing.T) {
 		"the refused kill must retain the tombstoned record")
 }
 
+// TestKillSession_ArchivedStaleRegistrationReplacementRefused: a worktree
+// registration is repo-side metadata that keeps reporting the recorded path
+// and branch after the worktree was moved aside — git merely marks the entry
+// prunable — so the listing is stale evidence about the occupant (#3278
+// review). A plain directory at the archived path must be refused before
+// anything destructive touches it, on the occupant's own missing linkage.
+func TestKillSession_ArchivedStaleRegistrationReplacementRefused(t *testing.T) {
+	manager, repoID, _, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-stale-registration")
+
+	// Move the archive aside WITHOUT telling git (registration stays), and
+	// put an unrelated directory at the registered path.
+	require.NoError(t, os.Rename(archivedPath, archivedPath+"-moved-aside"))
+	replacement := filepath.Join(archivedPath, "unrelated")
+	require.NoError(t, os.MkdirAll(replacement, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(replacement, "data.txt"),
+		[]byte("not the archive"), 0o644))
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-stale-registration", RepoID: repoID})
+	require.Error(t, err,
+		"a stale registration must not vouch for an occupant that lacks the worktree linkage")
+	assert.ErrorContains(t, err, "does not carry this worktree's linkage")
+	assert.True(t, exists(filepath.Join(replacement, "data.txt")),
+		"the replacement must be left untouched")
+	require.NotNil(t, recordFor(t, repoID, "direct-stale-registration"),
+		"the refused kill must retain the record")
+}
+
+// TestKillSession_ArchivedGhostGenericStallBoundaryRefusalDoesNotLatch: when a
+// normalized generic-stall ghost is refused at the cleanup boundary, the raw
+// persisted cleanup_stalled pointer must not be reread as evidence of a
+// running descriptor worker (#3278 review) — that installed the
+// restart-required process latch over a worker that never ran, blocking every
+// explicit retry. The retry must instead reach the admission guard's ordinary
+// refusal.
+func TestKillSession_ArchivedGhostGenericStallBoundaryRefusalDoesNotLatch(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-ghost-stall-boundary")
+	data := inst.ToInstanceData()
+	data.Worktree.RelocationRecovery = &session.GitWorktreeRelocationRecoveryData{
+		State: sessiongit.RelocationRecoveryCleanupStalled,
+	}
+	require.NoError(t, persistInstanceData(repoID, data))
+	ghostFor(t, manager, repoID, "direct-ghost-stall-boundary")
+	previousCleanup := ghostCleanupWorktree
+	ghostCleanupWorktree = func(
+		d *session.InstanceData, title string, checkpoint func(*session.InstanceData) error,
+	) (sessiongit.CleanupState, error, <-chan error) {
+		if title == "direct-ghost-stall-boundary" {
+			require.NoError(t, os.RemoveAll(repoPath),
+				"delete the origin between ghost admission and the cleanup boundary")
+		}
+		return previousCleanup(d, title, checkpoint)
+	}
+	t.Cleanup(func() { ghostCleanupWorktree = previousCleanup })
+
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-ghost-stall-boundary", RepoID: repoID})
+	require.Error(t, err, "the vanished origin must refuse the boundary")
+	assert.True(t, exists(archivedPath))
+
+	_, err = manager.KillSession(KillSessionRequest{Title: "direct-ghost-stall-boundary", RepoID: repoID})
+	require.Error(t, err, "the retry must be refused by the admission guard, not a stale process latch")
+	assert.NotContains(t, err.Error(), "restart the daemon",
+		"no descriptor worker ran, so no restart-required latch may be installed")
+	assert.ErrorContains(t, err, "identity-qualified cleanup cannot be authorized")
+	assert.True(t, exists(archivedPath), "the archive must remain intact")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a

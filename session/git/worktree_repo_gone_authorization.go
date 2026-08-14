@@ -492,72 +492,96 @@ const archivedWorktreePointerMaxSize = 1 << 16
 // goroutine and descriptor against the same stalled path, mirroring
 // boundedRepoGoneOriginProbe's per-path flight.
 func VerifyArchivedWorktreePointer(worktreePath string) error {
-	archivedPointerFlights.Lock()
-	if active := archivedPointerFlights.byPath[worktreePath]; active != nil {
-		if active.timedOut {
-			archivedPointerFlights.Unlock()
-			return fmt.Errorf(
-				"archived worktree pointer check under %s is still running after an earlier deadline: %w",
-				worktreePath, context.DeadlineExceeded,
-			)
-		}
-		archivedPointerFlights.Unlock()
-		return waitForArchivedPointerFlight(worktreePath, active)
-	}
-	flight := &archivedPointerFlight{done: make(chan struct{})}
-	archivedPointerFlights.byPath[worktreePath] = flight
-	archivedPointerFlights.Unlock()
-	go func() {
-		flight.err = verifyArchivedWorktreePointer(worktreePath)
-		archivedPointerFlights.Lock()
-		if archivedPointerFlights.byPath[worktreePath] == flight {
-			delete(archivedPointerFlights.byPath, worktreePath)
-		}
-		close(flight.done)
-		archivedPointerFlights.Unlock()
-	}()
-	return waitForArchivedPointerFlight(worktreePath, flight)
+	return boundedPointerCheck("archived", worktreePath, verifyArchivedWorktreePointer)
 }
 
-// archivedPointerFlight dedupes concurrent pointer verifications of one path
-// and latches after a deadline so retries cannot accumulate workers against a
-// stalled mount. No cancel: the worker's raw syscalls are not context-aware,
-// so the latch — refuse new callers until the stuck worker finally returns
-// and unpublishes itself — is the containment.
-type archivedPointerFlight struct {
+// VerifyRegisteredWorktreeOccupant checks that the directory currently
+// occupying worktreePath carries a linked-worktree `.git` pointer at all
+// (#3278 review). A worktree registration is repo-side metadata and keeps
+// reporting the recorded path and branch after the worktree was moved aside —
+// git merely marks the entry prunable — so the listing alone is stale evidence
+// about the OCCUPANT. This is the repo-present sibling of
+// VerifyArchivedWorktreePointer: the same structural shape check, without the
+// gone-target rule, since a live origin's metadata legitimately exists.
+func VerifyRegisteredWorktreeOccupant(worktreePath string) error {
+	return boundedPointerCheck("occupant", worktreePath, func(path string) error {
+		_, err := verifyWorktreePointerShape(path)
+		return err
+	})
+}
+
+// pointerCheckFlight dedupes concurrent pointer verifications of one path per
+// check kind and latches after a deadline so retries cannot accumulate workers
+// against a stalled mount. No cancel: the worker's raw syscalls are not
+// context-aware, so the latch — refuse new callers until the stuck worker
+// finally returns and unpublishes itself — is the containment.
+type pointerCheckFlight struct {
 	done     chan struct{}
 	err      error
 	timedOut bool
 }
 
-var archivedPointerFlights = struct {
+var pointerCheckFlights = struct {
 	sync.Mutex
-	byPath map[string]*archivedPointerFlight
-}{byPath: map[string]*archivedPointerFlight{}}
+	byKey map[string]*pointerCheckFlight
+}{byKey: map[string]*pointerCheckFlight{}}
 
-func waitForArchivedPointerFlight(worktreePath string, flight *archivedPointerFlight) error {
+func boundedPointerCheck(kind, worktreePath string, check func(string) error) error {
+	key := kind + "\x00" + worktreePath
+	pointerCheckFlights.Lock()
+	if active := pointerCheckFlights.byKey[key]; active != nil {
+		if active.timedOut {
+			pointerCheckFlights.Unlock()
+			return fmt.Errorf(
+				"worktree pointer check under %s is still running after an earlier deadline: %w",
+				worktreePath, context.DeadlineExceeded,
+			)
+		}
+		pointerCheckFlights.Unlock()
+		return waitForPointerCheckFlight(key, worktreePath, active)
+	}
+	flight := &pointerCheckFlight{done: make(chan struct{})}
+	pointerCheckFlights.byKey[key] = flight
+	pointerCheckFlights.Unlock()
+	go func() {
+		flight.err = check(worktreePath)
+		pointerCheckFlights.Lock()
+		if pointerCheckFlights.byKey[key] == flight {
+			delete(pointerCheckFlights.byKey, key)
+		}
+		close(flight.done)
+		pointerCheckFlights.Unlock()
+	}()
+	return waitForPointerCheckFlight(key, worktreePath, flight)
+}
+
+func waitForPointerCheckFlight(key, worktreePath string, flight *pointerCheckFlight) error {
 	timer := time.NewTimer(relocationIdentityTimeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
 		return flight.err
 	case <-timer.C:
-		archivedPointerFlights.Lock()
-		if archivedPointerFlights.byPath[worktreePath] == flight {
+		pointerCheckFlights.Lock()
+		if pointerCheckFlights.byKey[key] == flight {
 			flight.timedOut = true
-			archivedPointerFlights.Unlock()
+			pointerCheckFlights.Unlock()
 			return fmt.Errorf(
-				"timed out after %s while verifying archived worktree pointer under %s: %w",
+				"timed out after %s while verifying worktree pointer under %s: %w",
 				relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
 			)
 		}
-		archivedPointerFlights.Unlock()
+		pointerCheckFlights.Unlock()
 		<-flight.done
 		return flight.err
 	}
 }
 
-func verifyArchivedWorktreePointer(worktreePath string) error {
+// verifyWorktreePointerShape performs the occupant-side structural check
+// shared by both pointer verifications: a regular, bounded `.git` file whose
+// gitdir line names a `.git/worktrees/<name>` metadata directory. It returns
+// the cleaned, absolute gitdir target for the caller's own target rules.
+func verifyWorktreePointerShape(worktreePath string) (string, error) {
 	pointerPath := filepath.Join(worktreePath, ".git")
 	// One descriptor, opened without following links, carries every check and
 	// the read (#3278 review): a separate stat-then-read pair could be raced
@@ -568,31 +592,31 @@ func verifyArchivedWorktreePointer(worktreePath string) error {
 	// before any read, and regular-file reads ignore the flag.
 	f, err := os.OpenFile(pointerPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return fmt.Errorf("archived worktree pointer %s could not be opened without following links: %w", pointerPath, err)
+		return "", fmt.Errorf("archived worktree pointer %s could not be opened without following links: %w", pointerPath, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("archived worktree pointer %s could not be inspected: %w", pointerPath, err)
+		return "", fmt.Errorf("archived worktree pointer %s could not be inspected: %w", pointerPath, err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("archived worktree pointer %s is not a regular file", pointerPath)
+		return "", fmt.Errorf("archived worktree pointer %s is not a regular file", pointerPath)
 	}
 	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
 	if err != nil {
-		return fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
+		return "", fmt.Errorf("archived worktree pointer %s could not be read: %w", pointerPath, err)
 	}
 	if len(content) > archivedWorktreePointerMaxSize {
-		return fmt.Errorf("archived worktree pointer %s is too large to be a worktree pointer", pointerPath)
+		return "", fmt.Errorf("archived worktree pointer %s is too large to be a worktree pointer", pointerPath)
 	}
 	line, _, _ := strings.Cut(string(content), "\n")
 	target, ok := strings.CutPrefix(line, "gitdir:")
 	if !ok {
-		return fmt.Errorf("archived worktree pointer %s does not begin with a gitdir line", pointerPath)
+		return "", fmt.Errorf("archived worktree pointer %s does not begin with a gitdir line", pointerPath)
 	}
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return fmt.Errorf("archived worktree pointer %s names no gitdir", pointerPath)
+		return "", fmt.Errorf("archived worktree pointer %s names no gitdir", pointerPath)
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(worktreePath, target)
@@ -602,11 +626,20 @@ func verifyArchivedWorktreePointer(worktreePath string) error {
 	if name == "" || name == "." || name == string(filepath.Separator) ||
 		filepath.Base(filepath.Dir(target)) != "worktrees" ||
 		filepath.Base(filepath.Dir(filepath.Dir(target))) != ".git" {
-		return fmt.Errorf(
+		return "", fmt.Errorf(
 			"archived worktree pointer %s names gitdir %s, which is not a linked-worktree metadata directory",
 			pointerPath, target,
 		)
 	}
+	return target, nil
+}
+
+func verifyArchivedWorktreePointer(worktreePath string) error {
+	target, err := verifyWorktreePointerShape(worktreePath)
+	if err != nil {
+		return err
+	}
+	pointerPath := filepath.Join(worktreePath, ".git")
 	// A gitdir that still exists cannot belong to the gone origin: when the
 	// origin probed conclusively absent or non-Git, its .git/worktrees metadata
 	// went with it — recorded and resolved forms of the same directory vanish
