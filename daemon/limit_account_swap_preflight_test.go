@@ -118,3 +118,37 @@ func TestResumeLimitedSessions_CandidateBackoffCannotDelayOrdinaryDeadline(t *te
 		t.Fatalf("ordinary fallback changed identity to (%q, %v), want ambient", account, automatic)
 	}
 }
+
+func TestResumeLimitedSessions_FixedRetryFallbackKeepsConfiguredCadence(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, repoID, inst, backend := newAutoResumeManager(
+		t, "30m", true, "continue on the original account", time.Time{})
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agentaccount.Register(home, tmux.ProgramClaude, "broken"); err != nil {
+		t.Fatal(err)
+	}
+	writeLimitAccountCandidates(t, "limit_account_candidates = [\"broken\"]\n"+
+		"[program_overrides]\nclaude = \"claude --continue\"\n")
+	manager.Config().LimitAccountCandidates = []string{"broken"}
+
+	// Candidate preflight fails immediately. When the independent fixed fallback
+	// becomes due, that same refusal yields to an ordinary resume.
+	manager.ResumeLimitedSessions()
+	advance(30 * time.Minute)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 || prompts[0] != "continue on the original account" {
+		t.Fatalf("fixed fallback did not resume the original identity: prompts=%q", prompts)
+	}
+
+	manager.mu.Lock()
+	nextAttempt := manager.limitResumeStates[stableSessionKey(repoID, inst)].nextAttempt
+	manager.mu.Unlock()
+	want := base.Add(60 * time.Minute)
+	if !nextAttempt.Equal(want) {
+		t.Fatalf("next retry after fixed fallback = %v, want configured cadence at %v", nextAttempt, want)
+	}
+}

@@ -30,6 +30,13 @@ type autoAccountSwap struct {
 	global               *config.Config
 }
 
+var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+	return loadAccountLimitEvidenceSnapshot(
+		loadPersistedAccountLimitObservations,
+		loadAccountLimitLedger,
+	)
+}
+
 // committedAccountSwap recognizes a replacement whose identity checkpoint
 // landed but whose prompt/notice transaction did not finish. It is independent
 // of current config: disabling future choices cannot make a completed move
@@ -97,10 +104,7 @@ func (m *Manager) accountSwapOpportunityFromFacts(instance *session.Instance, gl
 	m.mu.Unlock()
 	limitedSet := make(map[string]struct{})
 	now := nowFunc()
-	retained, err := loadAccountLimitEvidenceSnapshot(
-		loadPersistedAccountLimitObservations,
-		loadAccountLimitLedger,
-	)
+	retained, err := loadAccountLimitEvidenceForSwap()
 	if err != nil {
 		return nil, fmt.Errorf("load durable account-limit evidence for %q: %w", instance.Title, err)
 	}

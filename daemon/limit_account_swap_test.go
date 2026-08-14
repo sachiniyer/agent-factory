@@ -125,6 +125,32 @@ func TestResumeLimitedSessions_AllConfiguredAccountsLimitedKeepsWaiting(t *testi
 	}
 }
 
+func TestResumeLimitedSessions_LoadsDurableAccountLimitEvidenceOncePerPass(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "wait", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	otherBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	other := registerStarted(t, manager, repoID, inst.Path, "also-limited", otherBackend, true, session.Running)
+	other.SetTmuxSession(tmux.NewTmuxSession(other.Title, tmux.ProgramClaude))
+	other.SetLimitReached(base.Add(time.Hour))
+
+	previous := loadAccountLimitEvidenceForSwap
+	loads := 0
+	loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+		loads++
+		return []session.AccountLimitObservationData{{
+			Agent: tmux.ProgramClaude, Account: "work", ResetAt: base.Add(time.Hour),
+		}}, nil
+	}
+	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
+
+	manager.ResumeLimitedSessions()
+	if loads != 1 {
+		t.Fatalf("durable account-limit evidence loads = %d, want 1 shared by the scheduler pass", loads)
+	}
+}
+
 func TestAccountSwapOpportunityRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
 	home, err := config.GetConfigDir()
