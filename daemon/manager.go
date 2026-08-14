@@ -235,9 +235,16 @@ type Manager struct {
 	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
 	// clock): while every retried read keeps failing the pass backs off to
 	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
-	// Guarded by m.mu, like rootEnsureStates.
-	rootHealFailures    int
-	rootHealNextAttempt time.Time
+	// rootHealRegistryStreak and rootHealAbsenceStreaks carry the two-strike
+	// counters for absence-classified observations (the applyHomeCheck
+	// discipline): registry recovery publishes on the second consecutive
+	// present-and-listable pass, and an ENOENT personal config heals to
+	// "removed" on the second consecutive dir-present observation. All
+	// guarded by m.mu, like rootEnsureStates.
+	rootHealFailures       int
+	rootHealNextAttempt    time.Time
+	rootHealRegistryStreak int
+	rootHealAbsenceStreaks map[string]int
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -459,45 +466,46 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	configAgents := newConfigAgentSupervisor()
 	rootAgentLayers := buildRootAgentSnapshot(cfg)
 	mgr := &Manager{
-		cfg:                  cfg,
-		previewSecret:        previewSecret,
-		previewOrigins:       newPreviewOriginRegistry(),
-		editorOriginSecret:   editorSecret,
-		editorLabels:         newEditorLabelIndex(),
-		pollReloadCh:         make(chan struct{}, 1),
-		ready:                make(chan struct{}),
-		lifecycle:            lifecycle,
-		storage:              storage,
-		instances:            make(map[string]*session.Instance),
-		pendingCreates:       make(map[string]session.InstanceData),
-		reservedTitles:       make(map[string]struct{}),
-		projectDeletes:       make(map[string]struct{}),
-		projectDeleteLastSeq: make(map[string]uint64),
-		reservedTmuxNames:    make(map[string]string),
-		reservedRemoteNames:  make(map[string]struct{}),
-		reservedTaskRuns:     make(map[string]int),
-		ghostTaskRuns:        make(map[string]int),
-		repoStartLocks:       make(map[string]*sync.Mutex),
-		aliveObservations:    make(map[string]uint64),
-		targetLocks:          make(map[string]*sync.Mutex),
-		rootEnsureStates:     make(map[string]*rootEnsureState),
-		rootKilledAt:         make(map[string]time.Time),
-		deletedRootRepos:     make(map[string]struct{}),
-		killsInFlight:        make(map[string]struct{}),
-		killRetries:          make(map[string]*session.CleanupRetry),
-		ghostCleanupStalls:   make(map[string]string),
-		restoresInFlight:     make(map[string]struct{}),
-		lostRestoreStates:    make(map[string]*lostRestoreState),
-		limitResumeStates:    make(map[string]*limitResumeState),
-		handoffRetryDue:      make(map[string]time.Time),
-		settleOwed:           make(map[string]settleOwedEntry),
-		remoteLossStates:     make(map[string]*remoteLossState),
-		instanceOpLocks:      make(map[string]*sync.Mutex),
-		pausedPolls:          make(map[string]map[string]time.Time),
-		taskRunProbeDue:      make(map[string]time.Time),
-		events:               newEventsHub(),
-		vscode:               vscode,
-		configAgents:         configAgents,
+		cfg:                    cfg,
+		previewSecret:          previewSecret,
+		previewOrigins:         newPreviewOriginRegistry(),
+		editorOriginSecret:     editorSecret,
+		editorLabels:           newEditorLabelIndex(),
+		pollReloadCh:           make(chan struct{}, 1),
+		ready:                  make(chan struct{}),
+		lifecycle:              lifecycle,
+		storage:                storage,
+		instances:              make(map[string]*session.Instance),
+		pendingCreates:         make(map[string]session.InstanceData),
+		reservedTitles:         make(map[string]struct{}),
+		projectDeletes:         make(map[string]struct{}),
+		projectDeleteLastSeq:   make(map[string]uint64),
+		reservedTmuxNames:      make(map[string]string),
+		reservedRemoteNames:    make(map[string]struct{}),
+		reservedTaskRuns:       make(map[string]int),
+		ghostTaskRuns:          make(map[string]int),
+		repoStartLocks:         make(map[string]*sync.Mutex),
+		aliveObservations:      make(map[string]uint64),
+		targetLocks:            make(map[string]*sync.Mutex),
+		rootEnsureStates:       make(map[string]*rootEnsureState),
+		rootKilledAt:           make(map[string]time.Time),
+		deletedRootRepos:       make(map[string]struct{}),
+		killsInFlight:          make(map[string]struct{}),
+		killRetries:            make(map[string]*session.CleanupRetry),
+		ghostCleanupStalls:     make(map[string]string),
+		restoresInFlight:       make(map[string]struct{}),
+		lostRestoreStates:      make(map[string]*lostRestoreState),
+		limitResumeStates:      make(map[string]*limitResumeState),
+		handoffRetryDue:        make(map[string]time.Time),
+		settleOwed:             make(map[string]settleOwedEntry),
+		remoteLossStates:       make(map[string]*remoteLossState),
+		instanceOpLocks:        make(map[string]*sync.Mutex),
+		pausedPolls:            make(map[string]map[string]time.Time),
+		taskRunProbeDue:        make(map[string]time.Time),
+		rootHealAbsenceStreaks: make(map[string]int),
+		events:                 newEventsHub(),
+		vscode:                 vscode,
+		configAgents:           configAgents,
 	}
 	// Publish the start-of-day root-agent snapshot; healRootAgentLayers is the
 	// only later writer, and it republishes wholesale (#3264).

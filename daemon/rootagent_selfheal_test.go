@@ -137,6 +137,9 @@ func TestEnsureRootAgentsHealsUnlistableRegistry(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			prevBase := rootEnsureBackoffBase
+			rootEnsureBackoffBase = 0
+			t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 			seen := installOptionsRecordingBackend(t)
 			repoPath := setupControlRepo(t)
 			if tc.disable {
@@ -165,6 +168,9 @@ func TestEnsureRootAgentsHealsUnlistableRegistry(t *testing.T) {
 				t.Fatalf("fixture: registry must list after repair: %v", err)
 			}
 
+			// Registry recovery publishes on the SECOND consecutive good pass
+			// (the applyHomeCheck two-strike rule), so two ensure ticks.
+			manager.EnsureRootAgents()
 			manager.EnsureRootAgents()
 
 			if len(*seen) != tc.wantCreates {
@@ -183,6 +189,9 @@ func TestEnsureRootAgentsHealsUnlistableRegistry(t *testing.T) {
 // the registry fails closed or by the pass that heals it.
 func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	corruptProjectRegistry(t)
@@ -223,8 +232,9 @@ func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 		t.Fatalf("repair registry: %v", err)
 	}
 	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
 	if len(*seen) != 1 {
-		t.Fatalf("a live root must be adopted, not re-created, by the pass that heals the registry, got %d creates", len(*seen))
+		t.Fatalf("a live root must be adopted, not re-created, by the passes that heal the registry, got %d creates", len(*seen))
 	}
 	if got := findRootInstance(t, manager, repoPath); got != root {
 		t.Fatalf("the healed pass must keep the same adopted root instance")
@@ -277,6 +287,7 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 		t.Fatalf("restore registry dir: %v", err)
 	}
 	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
 	if len(*seen) != 1 {
 		t.Fatalf("a present registry must heal the latch and let the legacy root start, got %d creates", len(*seen))
 	}
@@ -289,6 +300,9 @@ func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
 // layer.
 func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
 	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
 	registerTestProject(t, repoPath)
@@ -315,6 +329,7 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
 		t.Fatalf("repair registry: %v", err)
 	}
+	manager.EnsureRootAgents()
 	manager.EnsureRootAgents()
 
 	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
@@ -420,5 +435,53 @@ func TestRootAgentPersonalHealRecomputesLegacyDedup(t *testing.T) {
 	}
 	if len(*seen) != 1 {
 		t.Fatalf("the repo must be ensured exactly once across both sweeps, got %d creates", len(*seen))
+	}
+}
+
+// TestRootAgentHealAbsentPersonalConfigNeedsTwoStrikes pins the #3315
+// round-3 P1: an ENOENT read is content-free — a vanished mount can spoof it
+// — so healing a latched personal config to "deliberately removed" requires
+// two consecutive spaced observations of record-dir-present with the file
+// absent, the applyHomeCheck two-strike discipline. A content-bearing read
+// (the parseable-disable heal elsewhere in this suite) stays single-pass: a
+// flap cannot fabricate parsed content.
+func TestRootAgentHealAbsentPersonalConfigNeedsTwoStrikes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	breakPersonalRootAgentToml(t, project.ID)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+
+	// The user deletes the broken file: the first observation must not heal.
+	path, err := config.ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove personal config: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("one absence observation must not release the latch, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("the latch must hold after a single absence strike, got reason %d", got)
+	}
+
+	// The second consecutive observation proves the removal was deliberate:
+	// the latch releases and the legacy opt-in proceeds.
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("the second absence strike must heal the latch and let the legacy root start, got %d creates", len(*seen))
 	}
 }
