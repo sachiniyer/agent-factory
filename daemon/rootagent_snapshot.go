@@ -52,9 +52,17 @@ type rootAgentSnapshot struct {
 	// a derived ID nothing looked at any more. The alias travels with the
 	// immutable snapshot, so a derived-ID delete suppresses no matter when it
 	// lands relative to the transition.
-	reattributedFrom   map[string]string
-	legacyRepoIDs      map[string]bool
-	registryUnreadable bool
+	reattributedFrom map[string]string
+	// unresolvedResolvedIDs maps the REAL repo ID a rejected (mismatched or
+	// unverifiable) checkout resolved to back to the derived ID of the
+	// unresolved record claiming that path (#3299 review round 5). Verdict
+	// consumers are keyed by the resolved identity; without this bridge a
+	// worktree-recorded mismatch reads as "not configured" and the rebind
+	// remedy never surfaces. It never moves any layer — the checkout stays
+	// unverified.
+	unresolvedResolvedIDs map[string]string
+	legacyRepoIDs         map[string]bool
+	registryUnreadable    bool
 }
 
 // buildRootAgentSnapshot reads the registry once at daemon start, matching the
@@ -67,13 +75,14 @@ type rootAgentSnapshot struct {
 // enabled=false, so none of them may quietly become "no personal layer".
 func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	snap := rootAgentSnapshot{
-		global:             config.GlobalRootAgentLayer(cfg),
-		personal:           map[string]*config.RootAgentLayer{},
-		personalUnreadable: map[string]string{},
-		projectRoots:       map[string]string{},
-		unresolvedRoots:    map[string]unresolvedProjectRecord{},
-		reattributedFrom:   map[string]string{},
-		legacyRepoIDs:      map[string]bool{},
+		global:                config.GlobalRootAgentLayer(cfg),
+		personal:              map[string]*config.RootAgentLayer{},
+		personalUnreadable:    map[string]string{},
+		projectRoots:          map[string]string{},
+		unresolvedRoots:       map[string]unresolvedProjectRecord{},
+		reattributedFrom:      map[string]string{},
+		unresolvedResolvedIDs: map[string]string{},
+		legacyRepoIDs:         map[string]bool{},
 	}
 
 	snap.legacyRepoIDs = legacyRepoIDSet(cfg)
@@ -170,12 +179,18 @@ type unresolvedProjectRecord struct {
 	root       string
 	projectID  string
 	checkoutID string
-	// identityMismatch records that the recorded path RESOLVES but the
-	// checkout there does not carry the project's marker — a different clone
-	// occupying the path. Consumers word the remedy differently: an absent
-	// path needs bringing back, a mismatched one needs a rebind and a daemon
-	// restart (#3299 review round 4).
+	// identityMismatch records that the recorded path RESOLVES, the marker
+	// READ SUCCEEDED, and the checkout there does not carry the project's
+	// marker — a different clone occupying the path. Consumers word the
+	// remedy differently: an absent path needs bringing back, a mismatched
+	// one needs a rebind and a daemon restart (#3299 review round 4).
 	identityMismatch bool
+	// markerUnreadable records that the recorded path RESOLVES but the
+	// marker could not be READ (permissions, I/O): identity is unknowable,
+	// which is neither absence nor a proven mismatch — prescribing a rebind
+	// there could destroy a transiently unreadable original (#3299 review
+	// round 5).
+	markerUnreadable bool
 }
 
 func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {

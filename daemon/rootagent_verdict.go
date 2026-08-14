@@ -79,6 +79,11 @@ type rootAgentMaterializeVerdict struct {
 	// present; the fix is a rebind plus a daemon restart (#3299 review
 	// round 4).
 	rootIdentityMismatch bool
+	// rootMarkerUnreadable narrows rootUnresolved the other way: the recorded
+	// path resolves but the marker could not be READ — identity unknowable.
+	// Neither "bring the path back" nor a rebind applies; the readability
+	// problem is the remedy (#3299 review round 5).
+	rootMarkerUnreadable bool
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -116,6 +121,16 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	_, isProject := layers.projectRoots[repoID]
 	unresolved, isUnresolved := layers.unresolvedRoots[repoID]
 	if legacy == nil && !isProject && !isUnresolved {
+		if derived, ok := layers.unresolvedResolvedIDs[repoID]; ok {
+			// The queried identity is what a REJECTED checkout at some
+			// project's recorded root resolves to (#3299 review round 5).
+			// The project's record, layers, and failure shape all live under
+			// the derived ID; answer as that record, or the rebind remedy
+			// stays invisible to every consumer keyed by the real repo ID.
+			// The derived ID hits unresolvedRoots directly, so this cannot
+			// recurse further.
+			return m.rootAgentMaterializeVerdictFor(derived)
+		}
 		if len(layers.recordFailureIDs) > 0 {
 			return rootAgentMaterializeVerdict{reason: rootAgentRecordsUnreadable, unreadableRecords: layers.recordFailureIDs}
 		}
@@ -123,13 +138,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	}
 	resolution := layers.resolve(repoID, legacy)
 	if !resolution.Enabled {
-		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch}
+		return rootAgentMaterializeVerdict{reason: rootAgentDisabled, enabledSource: resolution.EnabledSource, rootUnresolved: isUnresolved, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable}
 	}
 	if legacy == nil && !isProject {
 		// Enabled on paper, but the recorded root did not resolve at daemon
 		// start and no legacy entry's per-tick retry covers the repo: nothing
 		// can create this root until a daemon start where the path resolves.
-		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, projectID: unresolved.projectID}
+		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, projectID: unresolved.projectID}
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
@@ -153,6 +168,12 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentRecordsUnreadable:
 		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
 	case rootAgentProjectUnresolved:
+		if v.rootMarkerUnreadable {
+			// Identity is unknowable, not disproven: no rebind advice — a
+			// transiently unreadable ORIGINAL checkout rebound over would be
+			// data loss.
+			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout marker at the recorded project root cannot be read (permissions or I/O), so the checkout's identity cannot be verified; make the marker readable — the daemon re-checks it on its ensure cadence", v.enabledSource)
+		}
 		if v.rootIdentityMismatch {
 			// The path is PRESENT — "bring it back" is an impossible remedy.
 			// What blocks the root is identity: the checkout there does not

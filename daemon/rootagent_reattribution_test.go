@@ -559,3 +559,212 @@ func TestDeleteAfterReattributionStillSuppresses(t *testing.T) {
 		t.Fatalf("a derived-ID delete landing after the identity transition must suppress the real identity through the snapshot alias, got reason %d", got)
 	}
 }
+
+// TestDeleteTranslatesReattributedIdentity pins the #3299 review's round-5
+// P1: after re-attribution, every piece of live state sits under the REAL
+// repo ID. A path-only delete of the again-unavailable recorded path hashes
+// to the derived ID — the delete must translate through the snapshot alias
+// and tear down the real identity, not deregister the record while the
+// real-ID root keeps running.
+func TestDeleteTranslatesReattributedIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/translated\"")
+	rewriteRecordRoot(t, project.ID, worktree)
+	realID := repoID(t, repoPath)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("setup: the re-attributed enabled root must be created, got %d creates", len(*seen))
+	}
+
+	// The mount vanishes again, and the user deletes by the recorded path.
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent again: %v", err)
+	}
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if err != nil {
+		t.Fatalf("DeleteProject by unavailable recorded path: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent again: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("the delete must translate to the re-attributed real identity %s, got %s — live state lives there", realID, result.RepoID)
+	}
+	manager.mu.Lock()
+	_, suppressed := manager.deletedRootRepos[realID]
+	manager.mu.Unlock()
+	if !suppressed {
+		t.Fatalf("the ensure loop must be suppressed under the REAL identity after the translated delete")
+	}
+}
+
+// TestMarkerReadFailureIsNotAMismatch pins the #3299 review's round-5 P2: a
+// marker that cannot be READ (permissions, I/O) leaves identity unknowable —
+// prescribing a rebind there could destroy a transiently unreadable original
+// checkout. The verdict must say the marker is unreadable, not that a
+// different clone occupies the path.
+func TestMarkerReadFailureIsNotAMismatch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/unreadable\"")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	// The checkout is back — the ORIGINAL — but its marker file is
+	// unreadable.
+	markers, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
+	if err != nil || len(markers) != 1 {
+		t.Fatalf("expected exactly one checkout marker, got %v (err %v)", markers, err)
+	}
+	if err := os.Chmod(markers[0], 0o000); err != nil {
+		t.Fatalf("chmod marker: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(markers[0], 0o644) })
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("an unverifiable checkout must not be re-attributed, got %d creates", len(*seen))
+	}
+	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath))
+	if verdict.reason != rootAgentProjectUnresolved {
+		t.Fatalf("an unverifiable checkout must stay unresolved, got reason %d", verdict.reason)
+	}
+	detail := rootAgentUnavailableDetail(verdict)
+	if strings.Contains(detail, "rebind") {
+		t.Fatalf("an unreadable marker is not a proven mismatch — the detail must not prescribe a rebind; got: %s", detail)
+	}
+	if !strings.Contains(detail, "cannot be read") {
+		t.Fatalf("the detail must name the unreadable marker; got: %s", detail)
+	}
+}
+
+// TestWorktreeMismatchVisibleUnderResolvedID pins the #3299 review's round-5
+// P2: when the recorded root is occupied by a checkout of a DIFFERENT
+// repository, consumers query by the identity that checkout resolves to. The
+// mismatch record lives under the derived ID; without the resolved-ID bridge
+// the verdict reads "not configured" and the rebind remedy never surfaces.
+func TestWorktreeMismatchVisibleUnderResolvedID(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	other := filepath.Join(parent, "other")
+	for _, r := range []string{repoPath, other} {
+		if err := exec.Command("git", "init", r).Run(); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+		for _, args := range [][]string{
+			{"-C", r, "config", "user.email", "t@t"},
+			{"-C", r, "config", "user.name", "t"},
+			{"-C", r, "commit", "--allow-empty", "-m", "init"},
+		} {
+			if err := exec.Command("git", args...).Run(); err != nil {
+				t.Fatalf("git %v: %v", args, err)
+			}
+		}
+	}
+	recorded := filepath.Join(parent, "occupied")
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/occupied\"")
+	rewriteRecordRoot(t, project.ID, recorded)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A worktree of a DIFFERENT repository now occupies the recorded path.
+	if err := exec.Command("git", "-C", other, "worktree", "add", recorded).Run(); err != nil {
+		t.Fatalf("git worktree add occupant: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a foreign occupant must not inherit the project's root agent, got %d creates", len(*seen))
+	}
+	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, other))
+	if verdict.reason != rootAgentProjectUnresolved {
+		t.Fatalf("the identity the occupant resolves to must surface the unresolved mismatch through the bridge, got reason %d", verdict.reason)
+	}
+	detail := rootAgentUnavailableDetail(verdict)
+	if !strings.Contains(detail, "rebind") || !strings.Contains(detail, project.ID) {
+		t.Fatalf("the bridged verdict must carry the rebind remedy naming the project; got: %s", detail)
+	}
+}
+
+// TestPendingProbeKeepsHealCadenceClose pins the #3299 review's round-5 P1:
+// an in-flight (or freshly landed) probe is progress, not a failed read. If
+// it fed the failure backoff, a responsive-but-slow mount would wait minutes
+// between passes and its completed results would expire before consumption —
+// unresolved forever.
+func TestPendingProbeKeepsHealCadenceClose(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	registerTestProject(t, repoPath)
+
+	if err := os.Rename(repoPath, repoPath+".hidden"); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The entry's probe is permanently in flight (a stalled mount).
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	manager.mu.Lock()
+	next := manager.rootHealNextAttempt
+	manager.mu.Unlock()
+	if next.After(time.Now().Add(time.Second)) {
+		t.Fatalf("a pending probe must keep the next heal pass one tick away, not on the failure backoff curve; next attempt is %v away", time.Until(next))
+	}
+}

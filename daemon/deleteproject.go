@@ -206,6 +206,23 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
 	}
+	// A recorded path that no longer resolves hashes to the DERIVED
+	// recorded-path ID — but if the daemon re-attributed that project while
+	// its path was available, every piece of live state (sessions, the
+	// autonomous root, suppression) lives under the repo's REAL identity
+	// (#3299 review round 5). The snapshot's reattributedFrom alias maps
+	// real→derived; translate the target so the delete tears down and
+	// suppresses the identity the state actually carries, rather than
+	// deregistering the record while the real-ID root keeps running.
+	if layers := m.rootAgentLayers.Load(); layers != nil {
+		for realID, derived := range layers.reattributedFrom {
+			if derived == repoID {
+				log.InfoLog.Printf("delete project %s: recorded path is unavailable, but the project was re-attributed to repo %s while it resolved; deleting under that identity", repoID, realID)
+				repoID = realID
+				break
+			}
+		}
+	}
 	result := DeleteProjectResult{RepoID: repoID}
 
 	// FAIL CLOSED, before mutating ANY state, if a session for this repo is still being
