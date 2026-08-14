@@ -64,7 +64,7 @@ func (m *Manager) healRootAgentLayers() {
 			if streak >= 2 {
 				personal, personalUnreadable, projectRoots, unresolvedRoots := projectRootAgentLayers(projects)
 				verifiedProjects, stillPresent, perr := config.ListProjectsIfPresent()
-				if perr == nil && stillPresent && slices.Equal(projects, verifiedProjects) {
+				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
 					healed.registryUnreadable = false
 					changed = true
@@ -115,19 +115,35 @@ func (m *Manager) healRootAgentLayers() {
 // observeRootHealRegistrySnapshot records one successful registry read. A
 // changed project set starts a new streak: two individually successful reads
 // cannot prove recovery when a mount transition made them observe different
-// registries. config.ListProjects returns projects in registry-entry order, so
-// direct slice equality also binds every identity and recorded-path field used
-// to build the root-agent snapshot.
+// registries. config.ListProjects returns projects in registry-entry order.
+// Agreement deliberately excludes Project.PathExists: it is recomputed from a
+// live stat on every read, not stored in the registry, and projectRootAgentLayers
+// resolves availability for itself when building the candidate snapshot.
 func (m *Manager) observeRootHealRegistrySnapshot(projects []config.Project) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.rootHealRegistryStreak == 0 || !slices.Equal(m.rootHealRegistryProjects, projects) {
+	if m.rootHealRegistryStreak == 0 || !sameRootHealRegistryProjects(m.rootHealRegistryProjects, projects) {
 		m.rootHealRegistryProjects = slices.Clone(projects)
 		m.rootHealRegistryStreak = 1
 		return m.rootHealRegistryStreak
 	}
 	m.rootHealRegistryStreak++
 	return m.rootHealRegistryStreak
+}
+
+func sameRootHealRegistryProjects(left, right []config.Project) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].ID != right[i].ID ||
+			left[i].CheckoutID != right[i].CheckoutID ||
+			left[i].Root != right[i].Root ||
+			left[i].RelativeRoot != right[i].RelativeRoot {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) resetRootHealRegistryObservation() {

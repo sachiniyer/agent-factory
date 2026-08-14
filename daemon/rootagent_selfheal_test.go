@@ -362,6 +362,49 @@ func TestRootAgentHealRequiresConsecutiveMatchingRegistrySnapshots(t *testing.T)
 	}
 }
 
+// TestRootAgentHealSnapshotAgreementIgnoresPathAvailability pins the #3322
+// review: PathExists is live filesystem state derived while listing, not part
+// of the durable registry record. An independently mounted checkout going
+// away between otherwise identical observations must not keep the
+// machine-wide registry latch closed.
+func TestRootAgentHealSnapshotAgreementIgnoresPathAvailability(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	corruptProjectRegistry(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.EnsureRootAgents() // first observation: recorded checkout is available
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide recorded checkout: %v", err)
+	}
+	manager.EnsureRootAgents() // same durable record, PathExists now false
+
+	if manager.rootAgentLayers.Load().registryUnreadable {
+		t.Fatalf("transient checkout availability must not reset agreement for an unchanged registry record")
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("the recovered personal disable must keep the root down, got %d creates", len(*seen))
+	}
+}
+
 // TestRootAgentHealRecomputesLegacyDedup pins the #3315 review's stale-dedup
 // finding: a legacy path that resolved only AFTER boot must be in the healed
 // snapshot's dedup set, or the singleton sweep can double-visit its repo
