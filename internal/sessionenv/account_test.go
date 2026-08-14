@@ -86,11 +86,17 @@ func TestApplyAccountEnvironment_ScopesSiblingAndRemovesAmbientIdentity(t *testi
 		"PATH=/usr/bin",
 		"CODEX_HOME=/home/op/.codex",
 		"OPENAI_API_KEY=sk-ambient",
+		"BASH_ENV=/tmp/ambient-bashrc",
+		"PS1=$((CODEX_HOME=42))",
 	}, "make -j4", account)
 	require.NoError(t, err)
 	require.Contains(t, scoped, "CODEX_HOME="+account.Dir)
 	_, leaked := envValue(scoped, "OPENAI_API_KEY")
 	require.False(t, leaked, "a process sibling must not inherit the ambient API identity")
+	_, startupHook := envValue(scoped, "BASH_ENV")
+	require.False(t, startupHook, "the outer /bin/sh -c must not source an admitted startup hook")
+	_, executablePrompt := envValue(scoped, "PS1")
+	require.False(t, executablePrompt, "a later interactive shell must not inherit executable prompt text")
 }
 
 func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
@@ -154,6 +160,29 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 	require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
 }
 
+func TestApplyAccountEnvironment_RefusesTimeoutWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"timeout 10 sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/timeout 10 sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "timeout must not hide a nested identity mutation in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesBashArithmeticCommand(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "(( 0, CODEX_HOME=42 )); codex", account)
+	require.Error(t, err, "Bash arithmetic-command syntax must not bypass identity mutation checks")
+}
+
+func TestApplyAccountEnvironment_RefusesArraySubscriptSideEffect(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "unset 'arr[CODEX_HOME=42]'; codex", account)
+	require.Error(t, err, "array-subscript arithmetic must not mutate identity through an unrelated base name")
+}
+
 func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
@@ -169,6 +198,7 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"readarray -t DATA </dev/null; make",
 		"nohup make",
 		"nice -n 5 make",
+		"timeout 10 make",
 		"for PORT in 3000; do make; done",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",

@@ -204,9 +204,10 @@ func ApplyAccountEnvironment(env []string, command string, account Account) ([]s
 	if err != nil {
 		return nil, err
 	}
-	if isAccountShellCommand(command) {
-		scoped = stripAccountShellStartupEnvironment(scoped)
-	}
+	// Every environment-only command is launched by the exec shim through
+	// /bin/sh -c. Strip shell startup code before that outer shell runs, not only
+	// when the user's command is itself an interactive shell.
+	scoped = stripAccountShellStartupEnvironment(scoped)
 	return scoped, nil
 }
 

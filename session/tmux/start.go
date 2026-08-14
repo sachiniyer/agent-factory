@@ -39,7 +39,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// No separate program read here: launchEnvironment snapshots the command and
 	// its generated-args declaration together, so the two cannot be torn apart by a
 	// concurrent rewrite (#3083 review).
-	wrappedProgram, launchEnv, importNames, defaultCommand, envErr := t.prepareLaunchEnvironment()
+	wrappedProgram, launchEnv, importNames, sessionEnv, defaultCommand, envErr := t.prepareLaunchEnvironment()
 	if envErr != nil {
 		// Nothing has run new-session, so if the name is DETERMINATELY absent no pane
 		// can exist behind it and a teardown need not gate on liveness (#2985).
@@ -48,6 +48,9 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
 	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
+	for _, entry := range sessionEnv {
+		args = append(args, "-e", entry)
+	}
 	args = append(args, wrappedProgram)
 	if defaultCommand != "" {
 		args = append(args, ";", "set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand)

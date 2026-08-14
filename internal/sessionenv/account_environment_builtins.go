@@ -51,6 +51,43 @@ func unwrapNice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
+func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			words = words[1:]
+			if len(words) < 2 {
+				return nil, false
+			}
+			return words[1:], false
+		case option == "-k" || option == "--kill-after" || option == "-s" || option == "--signal":
+			if len(words) < 2 {
+				return nil, true
+			}
+			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			words = words[2:]
+		case option == "--foreground" || option == "--preserve-status" || option == "-v" || option == "--verbose":
+			words = words[1:]
+		case strings.HasPrefix(option, "--kill-after=") || strings.HasPrefix(option, "--signal="):
+			words = words[1:]
+		case strings.HasPrefix(option, "-"):
+			return nil, true
+		default:
+			if len(words) < 2 {
+				return nil, false
+			}
+			return words[1:], false
+		}
+	}
+	return nil, false
+}
+
 func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for _, word := range words {
 		expression, literal := literalShellWord(word)

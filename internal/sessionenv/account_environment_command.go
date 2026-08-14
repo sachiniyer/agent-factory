@@ -19,19 +19,24 @@ func commandMutatesAccountEnvironment(command string, names map[string]struct{})
 	if command == "" {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
-	if err != nil {
-		return true
-	}
-	mutates := false
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if nodeMutatesAccountEnvironment(node, names) {
-			mutates = true
-			return false
+	for _, variant := range []syntax.LangVariant{syntax.LangPOSIX, syntax.LangBash} {
+		file, err := syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
+		if err != nil {
+			return true
 		}
-		return true
-	})
-	return mutates
+		mutates := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if nodeMutatesAccountEnvironment(node, names) {
+				mutates = true
+				return false
+			}
+			return true
+		})
+		if mutates {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) bool {
@@ -200,6 +205,12 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 		case isAccountCommandName(words[0], "nice"):
 			var unsafe bool
 			words, unsafe = unwrapNice(words[1:])
+			if unsafe {
+				return nil, true
+			}
+		case isAccountCommandName(words[0], "timeout"):
+			var unsafe bool
+			words, unsafe = unwrapTimeout(words[1:])
 			if unsafe {
 				return nil, true
 			}
@@ -451,8 +462,11 @@ func printfMutatesAccountEnvironment(words []*syntax.Word, names map[string]stru
 
 func accountEnvironmentOperandDenied(value string, names map[string]struct{}) bool {
 	name := value
-	if bracket := strings.IndexByte(name, '['); bracket >= 0 {
-		name = name[:bracket]
+	if strings.IndexByte(name, '[') >= 0 {
+		// Bash evaluates indexed-array subscripts as arithmetic and can assign a
+		// protected variable while resolving an unrelated base name. Proving the
+		// subscript is side-effect-free requires runtime semantics, so fail closed.
+		return true
 	}
 	if equal := strings.IndexByte(name, '='); equal >= 0 {
 		name = name[:equal]

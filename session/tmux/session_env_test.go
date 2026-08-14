@@ -182,15 +182,18 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 			t.Fatalf("process sibling did not explicitly unset stale tmux %s", name)
 		}
 	}
-	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); !ok || got != accountDir {
-		t.Fatalf("process sibling tmux CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
+	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); ok {
+		t.Fatalf("process sibling exposed selected CODEX_HOME %q through the tmux client environment", got)
 	}
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("process sibling exposed the competing ambient API key to the tmux session environment")
 	}
-	_, _, _, processDefault, err := process.prepareLaunchEnvironment()
+	_, _, _, processSessionEnv, processDefault, err := process.prepareLaunchEnvironment()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got, ok := launchEnvironmentValue(processSessionEnv, "CODEX_HOME"); !ok || got != accountDir {
+		t.Fatalf("process sibling session CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
 	}
 	if !strings.Contains(processDefault, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(processDefault, "/bin/sh -i") {
 		t.Fatalf("process sibling default window command is not a scoped startup-free shell: %q", processDefault)
@@ -212,8 +215,8 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 			t.Fatalf("shell sibling did not explicitly unset stale tmux %s", name)
 		}
 	}
-	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); !ok || got != accountDir {
-		t.Fatalf("shell sibling tmux CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
+	if got, ok := launchEnvironmentValue(environ, "CODEX_HOME"); ok {
+		t.Fatalf("shell sibling exposed selected CODEX_HOME %q through the tmux client environment", got)
 	}
 	if launchEnvironmentHasName(environ, "OPENAI_API_KEY") {
 		t.Fatal("shell sibling exposed the competing ambient API key to the tmux session environment")
@@ -221,9 +224,12 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 	if shell.Program() != "/bin/sh -i" {
 		t.Fatalf("account shell program = %q, want startup-file-free interactive shell", shell.Program())
 	}
-	_, _, _, shellDefault, err := shell.prepareLaunchEnvironment()
+	_, _, _, shellSessionEnv, shellDefault, err := shell.prepareLaunchEnvironment()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got, ok := launchEnvironmentValue(shellSessionEnv, "CODEX_HOME"); !ok || got != accountDir {
+		t.Fatalf("shell sibling session CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
 	}
 	if shellDefault != wrapped {
 		t.Fatalf("account shell default window command = %q, want initial scoped shell %q", shellDefault, wrapped)

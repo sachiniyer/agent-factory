@@ -126,16 +126,16 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	wrapped, launchEnv, importNames, _, err := t.prepareLaunchEnvironment()
+	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment()
 	return wrapped, launchEnv, importNames, err
 }
 
-func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, string, error) {
+func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
 	program, proof, extra, account, accountAgent, accountEnvironmentOnly := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
-		return "", nil, nil, "", err
+		return "", nil, nil, nil, "", err
 	}
 	var wrapped string
 	if account != "" {
@@ -144,7 +144,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, st
 			if resolved == "" {
 				resolved = "an unrecognized command"
 			}
-			return "", nil, nil, "", fmt.Errorf(
+			return "", nil, nil, nil, "", fmt.Errorf(
 				"account %q was selected for %s, but the launch program resolves to %s; refusing rather than "+
 					"looking up the same account name in another agent's namespace",
 				account, accountAgent, resolved)
@@ -153,7 +153,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, st
 		// the ambient account while every visible signal reported the selected one,
 		// spending someone else's quota (#3051).
 		if !newSessionEnvSupportedForAccounts() {
-			return "", nil, nil, "", fmt.Errorf(
+			return "", nil, nil, nil, "", fmt.Errorf(
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
@@ -166,7 +166,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, st
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}
 	if err != nil {
-		return "", nil, nil, "", err
+		return "", nil, nil, nil, "", err
 	}
 	filterAgent := agent
 	if accountEnvironmentOnly {
@@ -175,14 +175,17 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, st
 	source := os.Environ()
 	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
+	var sessionEnv []string
 	if account != "" {
 		identityNames := sessionenv.AccountIdentityNames(accountAgent)
 		launchEnv = removeEnvironmentNames(launchEnv, identityNames)
 		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
 		if resolveErr != nil {
-			return "", nil, nil, "", resolveErr
+			return "", nil, nil, nil, "", resolveErr
 		}
-		launchEnv = append(launchEnv, selectedEnv...)
+		// Selected roots belong to this tmux session, not the client environment:
+		// a fresh server copies its first client's environment globally.
+		sessionEnv = selectedEnv
 		importNames = appendMissingEnvironmentNames(importNames, identityNames)
 	}
 	defaultCommand := ""
@@ -195,19 +198,19 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, st
 		if !sessionenv.IsAccountShellCommand(defaultProgram) {
 			defaultProgram, err = sessionenv.AccountShellCommand("/bin/sh")
 			if err != nil {
-				return "", nil, nil, "", err
+				return "", nil, nil, nil, "", err
 			}
 			defaultCommand, err = sessionenv.WrapAccountEnvironmentCommand(
 				executable, accountAgent, account, extra, defaultProgram,
 			)
 			if err != nil {
-				return "", nil, nil, "", err
+				return "", nil, nil, nil, "", err
 			}
 		} else {
 			defaultCommand = wrapped
 		}
 	}
-	return wrapped, launchEnv, importNames, defaultCommand, nil
+	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, nil
 }
 
 func removeEnvironmentNames(environ, names []string) []string {
