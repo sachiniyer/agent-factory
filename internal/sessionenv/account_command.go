@@ -56,6 +56,76 @@ func commandOverridesName(command string, proof commandProof) (overrides, provab
 	return callOverridesName(call, proof, 0)
 }
 
+// commandMutatesAccountEnvironment recognizes the command-local mutations that
+// can replace a sibling tab's selected account. Unlike commandOverridesName,
+// this path launches arbitrary user processes rather than an agent binary, so
+// unrelated process configuration such as PORT=3000 is allowed.
+func commandMutatesAccountEnvironment(command string, names map[string]struct{}) bool {
+	if command == "" {
+		return false
+	}
+	call, ok := singleSimpleCall(command)
+	if !ok {
+		return false
+	}
+	for _, assign := range call.Assigns {
+		if assign != nil && assign.Name != nil {
+			if _, denied := names[assign.Name.Value]; denied {
+				return true
+			}
+		}
+	}
+
+	words := call.Args
+	if len(words) > 0 && wordEquals(words[0], "exec") {
+		words = words[1:]
+		if len(words) > 0 && wordEquals(words[0], "--") {
+			words = words[1:]
+		}
+		for len(words) > 0 {
+			name, assignment := shellWordAssignmentName(words[0])
+			if !assignment {
+				break
+			}
+			if _, denied := names[name]; denied {
+				return true
+			}
+			words = words[1:]
+		}
+	}
+	if len(words) == 0 || !isBareName(words[0], "env") {
+		return false
+	}
+	literals := make([]string, 0, len(words)-1)
+	for _, word := range words[1:] {
+		value, literal := literalShellWord(word)
+		if !literal {
+			name, assignment := shellWordAssignmentName(word)
+			if !assignment {
+				return false
+			}
+			// envcommand only needs a literal placeholder to preserve the
+			// mutation's name and position; a dynamic value is still an
+			// explicit override and must be rejected.
+			value = name + "=AF_DYNAMIC_VALUE"
+		}
+		literals = append(literals, value)
+	}
+	invocation, err := envcommand.Parse(literals, envcommand.Policy{AllowAssignments: true})
+	if err != nil {
+		return false
+	}
+	if invocation.ClearEnvironment {
+		return true
+	}
+	for _, mutation := range invocation.Mutations {
+		if _, denied := names[mutation.Name]; denied {
+			return true
+		}
+	}
+	return false
+}
+
 func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (overrides, provable bool) {
 	if depth > maxNestedProgramDepth {
 		return false, false

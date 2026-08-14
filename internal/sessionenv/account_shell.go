@@ -29,7 +29,7 @@ func AccountShellCommand(shell string) (string, error) {
 
 	args := accountShellArgs(filepath.Base(words[0]))
 	if args == nil {
-		return "", fmt.Errorf("shell %q has no startup-file-free account launch mode; supported shells: bash, csh, dash, fish, ksh, mksh, sh, tcsh, zsh", words[0])
+		return "", fmt.Errorf("shell %q has no credential-safe account launch mode; supported shells: bash, csh, dash, ksh, mksh, sh, tcsh", words[0])
 	}
 	command := shellquote.Quote(words[0])
 	for _, arg := range args {
@@ -42,10 +42,6 @@ func accountShellArgs(name string) []string {
 	switch name {
 	case "bash":
 		return []string{"--noprofile", "--norc", "-i"}
-	case "zsh":
-		return []string{"--no-rcs", "--no-globalrcs", "-i"}
-	case "fish":
-		return []string{"--no-config", "--interactive"}
 	case "csh", "tcsh":
 		return []string{"-f", "-i"}
 	case "sh", "dash", "ksh", "mksh":

@@ -95,17 +95,41 @@ func TestApplyAccountEnvironment_ScopesSiblingAndRemovesAmbientIdentity(t *testi
 
 func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
-	_, err := ApplyAccountEnvironment(nil, "OPENAI_API_KEY=other make", account)
-	require.Error(t, err)
+	for _, command := range []string{
+		"OPENAI_API_KEY=other make",
+		"env CODEX_HOME=/other make",
+		"env CODEX_HOME=$HOME/.codex make",
+		"env -uCODEX_HOME make",
+		"env -i make",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "command %q must not replace the sibling account environment", command)
+		require.Contains(t, err.Error(), "sets an identity variable")
+	}
+	_, err := ApplyAccountEnvironment(nil, "CLAUDE_CODE_USE_BEDROCK=$MODE make",
+		Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+	require.Error(t, err, "a dynamic provider selector can redirect a sibling away from the selected account")
 	require.Contains(t, err.Error(), "sets an identity variable")
+}
+
+func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"PORT=3000 npm start",
+		"NODE_ENV=test make",
+		"env PORT=3000 npm start",
+	} {
+		scoped, err := ApplyAccountEnvironment(nil, command, account)
+		require.NoError(t, err, "command %q only sets process configuration", command)
+		require.Contains(t, scoped, "CODEX_HOME="+account.Dir)
+	}
 }
 
 func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for shell, want := range map[string]string{
 		"/bin/bash": "/bin/bash --noprofile --norc -i",
-		"/bin/fish": "/bin/fish --no-config --interactive",
-		"/bin/zsh":  "/bin/zsh --no-rcs --no-globalrcs -i",
+		"/bin/csh":  "/bin/csh -f -i",
 	} {
 		command, err := AccountShellCommand(shell)
 		require.NoError(t, err)
@@ -119,6 +143,14 @@ func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
 		}, command, account)
 		require.NoError(t, err)
 		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+	}
+}
+
+func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing.T) {
+	for _, shell := range []string{"/bin/fish", "/bin/zsh"} {
+		_, err := AccountShellCommand(shell)
+		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
+		require.Contains(t, err.Error(), "no credential-safe account launch mode")
 	}
 }
 
