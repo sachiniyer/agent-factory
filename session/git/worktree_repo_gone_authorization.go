@@ -635,7 +635,11 @@ func readGitdirPointerFile(label, pointerPath, baseDir string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%s %s does not begin with a gitdir line", label, pointerPath)
 	}
-	target = strings.TrimSpace(target)
+	// Strip only the format's single separator space (#3278 review): git
+	// writes the path literally after "gitdir: ", and a path that genuinely
+	// ends (or continues) with whitespace must survive the parse — TrimSpace
+	// truncated real separate-git-dir names ending in a space.
+	target = strings.TrimPrefix(target, " ")
 	if target == "" {
 		return "", fmt.Errorf("%s %s names no gitdir", label, pointerPath)
 	}
@@ -654,7 +658,9 @@ func readWorktreeBackpointer(registrationLeaf string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	target := strings.TrimSpace(line)
+	// The backpointer file is the raw path plus a terminating newline; the
+	// path itself is preserved literally, whitespace included.
+	target := line
 	if target == "" {
 		return "", fmt.Errorf("worktree registration backpointer %s is empty", backpointerPath)
 	}

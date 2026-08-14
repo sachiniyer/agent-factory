@@ -81,6 +81,22 @@ func TestVerifyWorktreePointerShape_NewlinePathPreserved(t *testing.T) {
 	assert.Equal(t, target, got)
 }
 
+// TestVerifyWorktreePointerShape_TrailingWhitespacePreserved: a separate git
+// dir whose name ends in whitespace is a layout git creates and operates on
+// (#3278 review); only the format's single separator space and terminating
+// newline may be stripped, never the path's own whitespace.
+func TestVerifyWorktreePointerShape_TrailingWhitespacePreserved(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "meta ") + "/worktrees/wt"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+		[]byte("gitdir: "+target+"\n"), 0o644))
+	got, err := verifyWorktreePointerShape(dir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Clean(target), got,
+		"whitespace inside the gitdir path must survive the parse")
+	assert.Contains(t, got, "meta ", "the trailing space of the metadata dir name is path content")
+}
+
 // TestVerifyArchivedWorktreePointer_Shapes pins the pointer check's refusal
 // polarity (#3278 review): only a regular, bounded .git file with a
 // linked-worktree gitdir line whose target is conclusively absent passes.
