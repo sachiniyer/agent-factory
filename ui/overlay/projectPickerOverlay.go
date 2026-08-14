@@ -55,6 +55,12 @@ type ProjectPickerOverlay struct {
 	// TakeAddRequest consumes it. Kept separate from submitted so the caller can
 	// reject an invalid path (SetAddError) and keep the overlay open.
 	addRequested bool
+
+	// degraded marks a failed project-registry read (#3298): the rows still
+	// render from the other discovery sources, but every registered
+	// sessionless project may be missing, and the picker must say so instead
+	// of presenting the list as complete.
+	degraded bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -76,6 +82,10 @@ func NewProjectPickerOverlay(projects []Project, currentRoot string) *ProjectPic
 
 // SetWidth sets the overlay width.
 func (p *ProjectPickerOverlay) SetWidth(width int) { p.width = width }
+
+// SetDegraded records whether the project registry read failed (#3298), so
+// the picker warns that the list may be incomplete.
+func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degraded }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
@@ -227,6 +237,13 @@ func (p *ProjectPickerOverlay) Render() string {
 	var lines []string
 	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
 	lines = append(lines, "")
+	warnStyle := lipgloss.NewStyle().Foreground(t.Warning)
+	if p.degraded && !p.adding {
+		// A failed registry read may hide every registered sessionless
+		// project — say so rather than render the remainder as complete
+		// (#3298).
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("registry unreadable · list may be incomplete"), cw))
+	}
 
 	if p.adding {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render("Add project — enter a repo path:"), cw))
@@ -240,20 +257,24 @@ func (p *ProjectPickerOverlay) Render() string {
 		return finishRender(style, fit, textRect, lines)
 	}
 
-	// Reserve rows for the fixed chrome (title, blank, blank, hint) and window
-	// the navigable rows into what remains.
+	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
+	// degraded notice when present) and window the navigable rows into what
+	// remains.
 	avail := textRect.H - 4
+	if p.degraded {
+		avail--
+	}
 	if avail < 1 {
 		avail = 1
 	}
-	start, end := p.visibleWindow(avail)
-	if start > 0 {
+	start, end, showAbove, showBelow := p.windowForAvailableRows(avail)
+	if showAbove {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
-	if end < p.rowCount() {
+	if showBelow {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 
@@ -265,6 +286,35 @@ func (p *ProjectPickerOverlay) Render() string {
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))
 
 	return finishRender(style, fit, textRect, lines)
+}
+
+// windowForAvailableRows mirrors searchOverlay's budgeting discipline: shrink
+// the data window until the rows PLUS their scroll indicators fit within
+// available, so an indicator can never push the frame past SetMaxSize —
+// PlaceOverlay returns an oversized foreground uncomposited, which drops the
+// whole TUI background for one extra row (#3331 review). When even one row
+// plus indicators cannot fit, show the single selected row and let the
+// indicators go: a cramped-but-composited frame beats a full-screen takeover.
+func (p *ProjectPickerOverlay) windowForAvailableRows(available int) (startIdx, endIdx int, showAbove, showBelow bool) {
+	rows := available
+	for rows > 0 {
+		startIdx, endIdx = p.visibleWindow(rows)
+		showAbove = startIdx > 0
+		showBelow = endIdx < p.rowCount()
+		need := endIdx - startIdx
+		if showAbove {
+			need++
+		}
+		if showBelow {
+			need++
+		}
+		if need <= available {
+			return startIdx, endIdx, showAbove, showBelow
+		}
+		rows--
+	}
+	startIdx, endIdx = p.visibleWindow(1)
+	return startIdx, endIdx, false, false
 }
 
 // renderRow renders one navigable row: a project ("name (N)") or the trailing

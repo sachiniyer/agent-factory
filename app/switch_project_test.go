@@ -527,7 +527,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
 
-	got := h.buildProjectList()
+	got, _ := h.buildProjectList()
 	byRoot := map[string]overlay.Project{}
 	for _, p := range got {
 		byRoot[p.Root] = p
@@ -566,7 +566,7 @@ func TestBuildProjectListUnionsTheRegistry(t *testing.T) {
 	_, err := config.RegisterProject(repoRoot)
 	require.NoError(t, err)
 
-	got := h.buildProjectList()
+	got, _ := h.buildProjectList()
 	var registered *overlay.Project
 	for i := range got {
 		if got[i].Root == repoRoot {
@@ -679,4 +679,34 @@ func runGit(t *testing.T, dir string, args ...string) {
 	c.Dir = dir
 	out, err := c.CombinedOutput()
 	require.NoError(t, err, "git %v: %s", args, string(out))
+}
+
+// TestBuildProjectListReportsDegradedRegistry pins #3298: a failed registry
+// read must be REPORTED, not silently rendered as a complete union — every
+// registered sessionless project vanishes from the switcher in that state,
+// and the only pre-#3298 trace was a log line.
+func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/repos/active"
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	// A healthy (absent) registry is not degraded.
+	_, degraded := h.buildProjectList()
+	assert.False(t, degraded, "an absent registry lists as zero projects, not as a failed read")
+
+	// A corrupt registry is: the strict read fails, and the union may be
+	// missing every registered project.
+	dir, err := config.ProjectRegistryDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stray"), []byte("not a record"), 0o644))
+	_, err = config.ListProjects()
+	require.Error(t, err, "fixture: the strict registry read must fail")
+
+	got, degraded := h.buildProjectList()
+	assert.True(t, degraded, "a failed registry read must be reported to the switcher surfaces")
+	require.NotEmpty(t, got, "the union still renders from the other sources")
 }

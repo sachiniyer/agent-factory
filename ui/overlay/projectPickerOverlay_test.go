@@ -1,10 +1,12 @@
 package overlay
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func pickerFixture() *ProjectPickerOverlay {
@@ -219,4 +221,48 @@ func (p *ProjectPickerOverlay) selectedProjectForTest() (Project, bool) {
 		return p.all[p.selectedIdx], true
 	}
 	return Project{}, false
+}
+
+// TestProjectPickerDegradedNotice pins #3298 in the picker: a failed registry
+// read renders the incompleteness warning above the rows, and a healthy read
+// does not.
+func TestProjectPickerDegradedNotice(t *testing.T) {
+	p := NewProjectPickerOverlay([]Project{{Name: "alpha", Root: "/repos/alpha"}}, "")
+	p.SetMaxSize(60, 20)
+	if out := p.Render(); strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a healthy picker must not warn, got:\n%s", out)
+	}
+	p.SetDegraded(true)
+	out := p.Render()
+	if !strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a degraded picker must warn that the list may be incomplete, got:\n%s", out)
+	}
+}
+
+// TestProjectPickerStaysWithinMaxHeight pins the #3331 review P2: the scroll
+// indicators and the degraded warning must be budgeted inside the frame,
+// because PlaceOverlay refuses to composite an oversized foreground — one
+// extra row makes the whole TUI background disappear. Sweep list sizes,
+// cursor positions, and degraded state at heights where the chrome fits; no
+// rendered frame may exceed the configured maximum.
+func TestProjectPickerStaysWithinMaxHeight(t *testing.T) {
+	for _, maxH := range []int{10, 14, 20} {
+		for n := 1; n <= 18; n++ {
+			for _, degraded := range []bool{false, true} {
+				projects := make([]Project, n)
+				for i := range projects {
+					projects[i] = Project{Name: fmt.Sprintf("p%02d", i), Root: fmt.Sprintf("/repos/p%02d", i)}
+				}
+				p := NewProjectPickerOverlay(projects, "")
+				p.SetMaxSize(60, maxH)
+				p.SetDegraded(degraded)
+				for step := 0; step <= n+1; step++ {
+					if got := lipgloss.Height(p.Render()); got > maxH {
+						t.Fatalf("picker rendered %d rows with maxHeight=%d (n=%d degraded=%v cursor step %d)", got, maxH, n, degraded, step)
+					}
+					p.HandleKeyPress(keyRune('j'))
+				}
+			}
+		}
+	}
 }
