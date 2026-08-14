@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -880,6 +881,14 @@ type GetConfigResponse struct {
 	Path string `json:"path"`
 }
 
+// GetTheme is the palette read used by renderer clients. Config remains the
+// source of truth; the response carries only its resolved semantic slots, never
+// browser mode or renderer-specific derivatives.
+type GetThemeRequest struct{}
+type GetThemeResponse struct {
+	Theme apiproto.Theme `json:"theme"`
+}
+
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.
 // Value is the raw string form; the daemon hands it to the same validator, so an
 // invalid value is rejected here with the identical message rather than being
@@ -931,4 +940,13 @@ type ApplyConfigResponse struct {
 	// whose live rebind failed, so the CLI can report THAT key's change as deferred
 	// rather than falsely applied.
 	FailedListenerKeys []string `json:"failed_listener_keys,omitempty"`
+}
+
+// ApplyThemeRequest asks a running daemon to reload only the global palette.
+// Unlike ApplyConfig, it cannot change auth, listeners, or any other live key.
+type ApplyThemeRequest struct{}
+
+// ApplyThemeResponse reports whether the live palette generation advanced.
+type ApplyThemeResponse struct {
+	Changed bool `json:"changed"`
 }

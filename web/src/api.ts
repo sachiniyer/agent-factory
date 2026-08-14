@@ -33,6 +33,8 @@ import type {
   ProjectExpectation,
   SessionData,
   SnapshotResponse,
+  DaemonTheme,
+  ThemeResponse,
   TaskData,
   TaskMutationRef,
   TasksResponse,
@@ -266,6 +268,13 @@ export async function af<T>(method: string, body: unknown, token: string): Promi
 export async function fetchSnapshot(token: string): Promise<SessionData[]> {
   const resp = await af<SnapshotResponse>("Snapshot", { repo_id: "" }, token);
   return resp.instances ?? [];
+}
+
+/** Fetches the daemon's resolved semantic palette. The browser owns only the
+ * light/dark choice; it never substitutes a second product palette. */
+export async function getTheme(token: string): Promise<DaemonTheme> {
+  const resp = await af<ThemeResponse>("GetTheme", {}, token);
+  return resp.theme;
 }
 
 /**

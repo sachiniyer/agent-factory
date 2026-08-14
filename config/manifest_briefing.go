@@ -118,7 +118,7 @@ func tierBlurb(tier ConfigTier) string {
 func renderBriefingEntry(cfg *Config, e ManifestEntry) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n### `%s`\n\n%s\n\n", e.Key, e.Purpose)
-	fmt.Fprintf(&b, "- type: %s\n", e.Type)
+	fmt.Fprintf(&b, "- type: %s\n", e.typeLabel())
 	fmt.Fprintf(&b, "- default: %s\n", e.Default)
 	fmt.Fprintf(&b, "- current: %s\n", currentConfigValue(cfg, e.Key))
 	if len(e.Enum) > 0 {
@@ -150,6 +150,9 @@ func briefingSetHint(e ManifestEntry) string {
 	spec, ok := settableKeySpecs[e.Key]
 	if !ok || !e.Settable {
 		hint := "edit `" + e.Key + "` in `config.toml` by hand"
+		if len(e.AcceptedTypes) > 1 {
+			return hint + " · accepts a " + e.typeLabel()
+		}
 		// Name the actual shape — calling the cors_allowed_origins list a
 		// "table" would be a small lie in the one sentence telling a reader
 		// what to go and do.

@@ -455,6 +455,24 @@ func isRPCMethodMissing(err error) bool {
 		strings.HasPrefix(string(srv), "rpc: can't find service")
 }
 
+// RequestApplyTheme asks a RUNNING daemon to reload only the palette. Like the
+// full apply path it never starts a daemon; a later daemon start reads the file.
+// No daemon and a pre-ApplyTheme daemon are therefore benign. Once a daemon
+// answers the socket, however, its refusal is final: ping distinguishes that
+// active answer from absence so the caller cannot mount a TUI with a palette
+// newer than the one the daemon is still serving to web clients.
+func RequestApplyTheme() (ApplyThemeResponse, error) {
+	var resp ApplyThemeResponse
+	err := callDaemonNoEnsure("ApplyTheme", ApplyThemeRequest{}, &resp)
+	if err == nil || isRPCMethodMissing(err) {
+		return resp, nil
+	}
+	if _, pingErr := pingDaemonResponse(); pingErr != nil {
+		return resp, nil
+	}
+	return resp, err
+}
+
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	var resp CreateSessionResponse

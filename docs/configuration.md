@@ -12,7 +12,7 @@ Config is [TOML](https://toml.io) — chosen so it is easy to hand-edit. If you 
 
 You can also read and write config from the CLI. Bare `af config get <key>` / `af config list` read the current repository's effective config; outside Git they fall back to global values. Add `--repo <repository-path>` to inspect another repository, and add `--explain` to see every candidate, whether it was present and allowed, and why it won or lost. Dotted reads such as `af config get program_overrides.codex --repo . --explain` show the source of one merged-table leaf. `--project` remains accepted as a deprecated read alias. The repository path is only a read-time selector: these commands do not register a project or write project identity. Displayed source locations preserve the selected/configured path spelling; symlinks are resolved only when paths must be compared for identity.
 
-`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `on_archive_command`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`, `docker_mount_agent_credentials`, `ssh_host_key_verification`, `sandbox_ssh`, and the comma-separated `cors_allowed_origins` list (which replaces the whole allow-list; each entry is validated as a `scheme://host[:port]` origin, `""` clears it); the structural tables (`root_agents`, `[root_agent]`, `[theme]`, `[keys]`) have no single-scalar shape — the config assistant edits them for you (and validates), or edit `config.toml` directly and run `af config validate`. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write is applied to a running daemon in place — no restart and no session loss — and the command prints when the key you just set takes effect: most keys are live at once, `branch_prefix` waits for the next daemon start, and the keys af itself reads (`auto_update`, `update_channel`, `detach_keys`) wait for your next `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config.
+`af config set <key> <value>` writes a single settable scalar key **in place**, preserving all comments and ordering (it never regenerates the file) and validating the value first. Settable keys are the scalar tunables — `default_program`, `program_overrides.<agent>`, `auto_update`, `listen_addr`, `require_token`, `require_loopback_token`, `preview_listen_addr`, `daemon_poll_interval`, `log_max_size_mb`, `log_max_backups`, `branch_prefix`, `on_archive_command`, `worktree_root`, `detach_keys`, `update_channel`, `vscode_server_binary`, `limit_auto_resume`, `limit_retry_interval`, `limit_patterns.<agent>`, `global_agent_skills`, `docker_mount_agent_credentials`, `ssh_host_key_verification`, `sandbox_ssh`, and the comma-separated `cors_allowed_origins` list (which replaces the whole allow-list; each entry is validated as a `scheme://host[:port]` origin, `""` clears it); the structural config (`root_agents`, `[root_agent]`, `theme`, `[keys]`) is not writable through that command — the config assistant edits it for you (and validates), or edit `config.toml` directly and run `af config validate`. Without `--project` it edits the global config; with `--project <id-or-path>` it writes a personal per-project override instead (see [Personal per-project config](#personal-per-project-config)). See [`af config`](reference/cli.md#af-config) in the CLI reference. A global write is applied to a running daemon in place — no restart and no session loss — and the command prints when the key you just set takes effect: most keys are live at once, `branch_prefix` waits for the next daemon start, and the keys af itself reads (`auto_update`, `update_channel`, `detach_keys`) wait for your next `af` launch. A `--project` write and a raw hand-edit are read the next time the relevant operation resolves that project's config.
 
 ## Global config
 
@@ -33,30 +33,10 @@ limit_auto_resume = false
 global_agent_skills = false
 limit_retry_interval = "30m"
 session_env_passthrough = []
+theme = "nord"
 
 [program_overrides]
 claude = "/home/me/.local/bin/claude --dangerously-skip-permissions"
-
-[theme]
-foreground = "#DCDCCC"
-foreground_strong = "#FFFFEF"
-foreground_muted = "#989890"
-foreground_dim = "#656555"
-background = "#3F3F3F"
-background_subtle = "#494949"
-background_panel = "#4F4F4F"
-accent = "#8CD0D3"
-success = "#7F9F7F"
-warning = "#F0DFAF"
-error = "#CC9393"
-info = "#93E0E3"
-purple = "#DC8CC3"
-selection_background = "#4F4F4F"
-selection_foreground = "#FFFFEF"
-pane_border_default = "#989890"
-pane_border_selected = "#8CD0D3"
-pane_border_interactive = "#7F9F7F"
-pane_border_preview = "#DC8CC3"
 ```
 
 | Field | Description |
@@ -87,7 +67,7 @@ pane_border_preview = "#DC8CC3"
 | `docker_mount_agent_credentials` | Opt in to a `backend = "docker"` session bind-mounting the operator's on-disk credential file for **that session's own agent** (only), read-only, so a containerised agent can authenticate (default: `false`). Global-only: a repo selects the docker image, but only the operator grants it credential access. See [backends.md → Agent credentials in a container](backends.md#agent-credentials-in-a-container). |
 | `ssh_host_key_verification` | How the `backend = "ssh"` runtime verifies a remote host key: `strict` (default — verify, refuse an unknown or changed key), `accept-new` (trust-on-first-use: record an unknown key, still refuse a changed one), or `insecure` (no verification). Global-only: a repo selects `ssh.host`, but only the operator relaxes verification (a repo-settable waiver + repo-settable host would be a one-commit MITM). `accept-new` writes learned keys to an af-owned store under the AF home, never `~/.ssh/known_hosts`. See [backends.md → SSH backend](backends.md#ssh-backend). |
 | `limit_patterns` | Optional map from agent enum to a regex that overrides the built-in usage-limit **detection** banner for that agent (the built-in reset-time parser is kept). Default: none. See [Custom usage-limit detection](#custom-usage-limit-detection-limit_patterns). |
-| `theme` | Optional TUI color table. Defaults to a Zenburn-derived palette and validates each value as `#RRGGBB`; invalid values fall back to the corresponding default with a warning. See [Theme colors](#theme-colors-theme). |
+| `theme` | Optional interface palette. Defaults to the named Nord preset; `zenburn` preserves the previous default, and a custom table accepts `#RRGGBB` values. The TUI and web share the palette while the browser keeps its local light/dark choice. See [Theme colors](#theme-colors-theme). |
 | `keys` | Optional keymap overrides for the TUI. See [Key bindings](#key-bindings-keys). |
 
 ### Agent approval behavior
@@ -265,23 +245,36 @@ environment it started with until that process is restarted.
 
 ### Theme colors (`theme`)
 
-The TUI palette defaults to Zenburn: low-contrast foreground/background colors
-with muted green, red, yellow, blue, cyan, and purple accents. Override any
-slot in the global `[theme]` table; omitted slots keep their defaults.
+The terminal and browser palettes default to Nord, whose Polar Night surfaces,
+Snow Storm text, and Frost cyan accent form the shared semantic source. Choose
+the former default by name without copying its nineteen slots:
+
+```toml
+theme = "zenburn"
+```
+
+The browser derives both light and dark tokens from the same daemon palette;
+its Auto/Light/Dark choice remains a local browser preference. For a custom
+palette, override any slot in the global `[theme]` table. Omitted or malformed
+slots fall back independently to the readable Nord default rather than making
+the configuration or interface unusable.
 
 ```toml
 [theme]
-accent = "#8CD0D3"
-success = "#7F9F7F"
-warning = "#F0DFAF"
-error = "#CC9393"
-pane_border_preview = "#DC8CC3"
+accent = "#88C0D0"
+success = "#A3BE8C"
+warning = "#EBCB8B"
+error = "#CC8A91"
+pane_border_preview = "#B48EAD"
 ```
 
-All values must be `#RRGGBB`. Invalid values are ignored with a warning and the
-default for that slot is used, so a bad color cannot prevent the TUI from
-starting. `[theme]` is global-only and TOML-only, like `[keys]`: in-repo configs
-reject it so a cloned repository cannot recolor your terminal.
+All custom values must be `#RRGGBB`. Unknown preset names fail validation with
+the available names; invalid custom values are ignored with a warning and the
+Nord default for that slot is used. The web additionally checks derived text
+colors against WCAG AA and state/focus colors against the 3:1 non-text floor,
+falling back to a readable built-in value when a custom combination misses it.
+`theme` is global-only and TOML-only, like `[keys]`: in-repo configs reject it
+so a cloned repository cannot recolor your interfaces.
 
 ### Root agents (always-ensured)
 

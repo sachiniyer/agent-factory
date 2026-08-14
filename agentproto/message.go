@@ -146,6 +146,9 @@ const (
 	EventSessionKilled   EventType = "session.killed"
 	EventSessionArchived EventType = "session.archived"
 	EventSessionRestored EventType = "session.restored"
+	// EventThemeChanged invalidates renderer palette caches. It carries no
+	// payload: GetTheme remains the authoritative semantic palette snapshot.
+	EventThemeChanged EventType = "theme.changed"
 	// EventProjectsChanged signals that the set of "active projects" (repos with
 	// live sessions or a root_agents opt-in) changed as a whole — e.g. a
 	// DeleteProject archived a repo's sessions and dropped its opt-in (#1735). It

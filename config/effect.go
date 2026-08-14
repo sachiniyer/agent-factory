@@ -34,8 +34,8 @@ const (
 	EffectNextDaemonStart
 	// EffectNextAfLaunch: nothing a running daemon does with the key changes what
 	// the user just asked to change — af's own CLI or TUI does, on its next launch
-	// (auto_update and update_channel are read by the updater; theme, keys, and
-	// detach_keys by the TUI). A notice for these must NOT imply a running daemon
+	// (auto_update and update_channel are read by the updater; keys and detach_keys
+	// by the TUI). A notice for these must NOT imply a running daemon
 	// applied the change, because the thing the key controls is not the daemon's to
 	// apply.
 	//
@@ -75,6 +75,10 @@ var keyEffectClasses = map[string]EffectClass{
 	"docker_mount_agent_credentials": EffectAppliedLive,
 	"ssh_host_key_verification":      EffectAppliedLive,
 	"sandbox_ssh":                    EffectAppliedLive,
+	// The daemon exposes theme to browser renderers from its live config. An
+	// ApplyConfig request makes it live immediately; a direct file edit gets that
+	// request when the next TUI launches against an already-running daemon.
+	"theme": EffectAppliedLive,
 	// The network listener keys apply live since #2480 PR2: require_token /
 	// require_loopback_token / cors_allowed_origins are read per request
 	// (livePosture), and listen_addr / preview_listen_addr rebind in place
@@ -95,7 +99,6 @@ var keyEffectClasses = map[string]EffectClass{
 	// release; installing is still af's, at launch. See EffectNextAfLaunch.
 	"auto_update":    EffectNextAfLaunch,
 	"update_channel": EffectNextAfLaunch,
-	"theme":          EffectNextAfLaunch,
 	"keys":           EffectNextAfLaunch,
 	"detach_keys":    EffectNextAfLaunch,
 }

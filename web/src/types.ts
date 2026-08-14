@@ -240,8 +240,38 @@ export interface WorktreeData {
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */
 export interface SnapshotResponse {
-  instances: SessionData[] | null;
-  delivery_alarms?: unknown[];
+	instances: SessionData[] | null;
+	delivery_alarms?: unknown[];
+}
+
+/** apiproto.Theme: the daemon-resolved semantic palette. Browser light/dark is
+ * deliberately absent; theme.ts derives both modes from these source slots. */
+export interface DaemonTheme {
+  name?: string;
+  foreground: string;
+  foreground_strong: string;
+  foreground_muted: string;
+  foreground_dim: string;
+  background: string;
+  background_subtle: string;
+  background_panel: string;
+  accent: string;
+  success: string;
+  warning: string;
+  error: string;
+  info: string;
+  purple: string;
+  selection_background: string;
+  selection_foreground: string;
+  pane_border_default: string;
+  pane_border_selected: string;
+  pane_border_interactive: string;
+  pane_border_preview: string;
+}
+
+/** GetThemeResponse (daemon/control_types.go). */
+export interface ThemeResponse {
+  theme: DaemonTheme;
 }
 
 /**
@@ -342,6 +372,7 @@ export type EventType =
   | "session.killed"
   | "session.archived"
   | "session.restored"
+  | "theme.changed"
   | "projects.changed"
   | "task.created"
   | "task.updated"
@@ -375,6 +406,9 @@ export interface WireEvent {
 export interface ConfigEntry {
   key: string;
   type: string;
+  /** Every accepted config shape when the normalized `type` alone is
+   *  incomplete, such as theme's named string preset or custom table. */
+  accepted_types?: string[];
   default: string;
   purpose: string;
   tier: number;

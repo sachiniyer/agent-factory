@@ -316,6 +316,21 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 		if !validTypes[e.Type] {
 			t.Errorf("%s: type %q is not one of string/bool/int/duration/table/list", e.Key, e.Type)
 		}
+		if len(e.AcceptedTypes) > 0 {
+			seen := make(map[string]bool, len(e.AcceptedTypes))
+			for _, acceptedType := range e.AcceptedTypes {
+				if !validTypes[acceptedType] {
+					t.Errorf("%s: accepted type %q is not one of string/bool/int/duration/table/list", e.Key, acceptedType)
+				}
+				if seen[acceptedType] {
+					t.Errorf("%s: accepted type %q is duplicated", e.Key, acceptedType)
+				}
+				seen[acceptedType] = true
+			}
+			if !seen[e.Type] {
+				t.Errorf("%s: accepted types %v omit primary type %q", e.Key, e.AcceptedTypes, e.Type)
+			}
+		}
 		if !validTiers[e.Tier] {
 			t.Errorf("%s: tier %d is not one of TierCore/TierCommon/TierAdvanced", e.Key, e.Tier)
 		}
@@ -496,6 +511,37 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 	for _, key := range []string{"theme", "root_agents", "keys"} {
 		if strings.Contains(out, "`af config set "+key+" <value>`") {
 			t.Errorf("briefing advertises `af config set %s`, which the CLI rejects — %s is hand-edited", key, key)
+		}
+	}
+}
+
+func TestRenderBriefingDescribesThemeAsScalarOrTable(t *testing.T) {
+	entry := manifestKeyIndex(t)["theme"]
+	if !reflect.DeepEqual(entry.AcceptedTypes, []string{"string", "table"}) {
+		t.Fatalf("theme accepted types = %v, want string and table", entry.AcceptedTypes)
+	}
+
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	themeStart := strings.Index(out, "### `theme`")
+	if themeStart < 0 {
+		t.Fatal("briefing has no theme section")
+	}
+	themeEnd := strings.Index(out[themeStart+1:], "\n### `")
+	if themeEnd < 0 {
+		themeEnd = len(out) - themeStart - 1
+	}
+	theme := out[themeStart : themeStart+1+themeEnd]
+
+	if !strings.Contains(theme, "- type: string or table") {
+		t.Errorf("theme briefing does not describe both accepted shapes:\n%s", theme)
+	}
+	if strings.Contains(theme, "not a single value") {
+		t.Errorf("theme briefing contradicts the scalar preset syntax:\n%s", theme)
+	}
+
+	for _, rendered := range ManifestWithValues(DefaultConfig()) {
+		if rendered.Key == "theme" && !reflect.DeepEqual(rendered.AcceptedTypes, entry.AcceptedTypes) {
+			t.Errorf("rendered theme accepted types = %v, want %v", rendered.AcceptedTypes, entry.AcceptedTypes)
 		}
 	}
 }

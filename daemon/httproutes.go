@@ -325,6 +325,13 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/GetTheme",
+		Description: "Return the daemon's resolved semantic color palette for renderer clients.",
+		requestType: reflect.TypeOf(GetThemeRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetTheme) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",
 		Description: "Set one global config key, exactly as `af config set` does (validated, locked, atomic).",
 		requestType: reflect.TypeOf(SetConfigValueRequest{}),

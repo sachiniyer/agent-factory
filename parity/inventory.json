@@ -165,6 +165,24 @@
       "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. TUI/web exposure is tracked by #2216."
     },
     {
+      "id": "theme.apply",
+      "title": "Apply the configured semantic theme palette",
+      "tui": {
+        "status": "yes",
+        "pointer": "app/home_model.go:434 -> app/theme.go applyTheme -> ui/theme.go ApplyTheme"
+      },
+      "web": {
+        "status": "yes",
+        "pointer": "web/src/api.ts:273 GetTheme -> web/src/index.ts refreshDaemonPalette -> web/src/theme.ts deriveTheme"
+      },
+      "cli": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "verdict": "parity",
+      "notes": "#3220 deliverable 1 makes the daemon-owned semantic palette reach both visual clients. The TUI applies config.Theme directly; the web reads the same resolved palette through POST /v1/GetTheme and derives its CSS and xterm tokens from it. Auto/Light/Dark remains a browser-local mode choice, not a second palette. CLI is n/a because it has no persistent visual renderer; its config commands already expose the shared configuration data under config.read/config.write."
+    },
+    {
       "id": "config.validate",
       "title": "Check that the global config parses and validates",
       "tui": {
@@ -1505,6 +1523,7 @@
       "POST /v1/DeleteProject": "project.delete",
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/GetConfig": "config.read",
+      "POST /v1/GetTheme": "theme.apply",
       "POST /v1/HandoffSession": "session.handoff",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListBackends": "backend.list",
@@ -1588,6 +1607,7 @@
       "CreateTab": "session.tab.create",
       "DeleteProject": "project.delete",
       "GetConfig": "config.read",
+      "GetTheme": "theme.apply",
       "HandoffSession": "session.handoff",
       "KillSession": "session.kill",
       "ListBackends": "backend.list",

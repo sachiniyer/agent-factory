@@ -9,11 +9,11 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/tree"
 )
 
-// TestAccentColorValue pins the default shared accent to the Zenburn blue
-// approved in #1389. Custom configs can override it through [theme].accent.
+// TestAccentColorValue pins the default shared accent to Nord's Frost cyan.
+// Custom configs can override it through [theme].accent.
 func TestAccentColorValue(t *testing.T) {
-	if got := string(AccentColor); got != "#8CD0D3" {
-		t.Fatalf("AccentColor = %q, want %q", got, "#8CD0D3")
+	if got := string(AccentColor); got != "#88C0D0" {
+		t.Fatalf("AccentColor = %q, want %q", got, "#88C0D0")
 	}
 }
 

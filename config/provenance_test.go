@@ -306,6 +306,49 @@ accent = "#8cd0d3"
 	assert.Contains(t, candidateForLayer(t, accent, SourceGlobal).Reason, "load-time normalization changed")
 }
 
+func TestResolveConfigTreatsNamedThemePresetAsConfiguredPalette(t *testing.T) {
+	repoRoot := setupProvenanceTest(t, "schema_version = 1\ntheme = \"zenburn\"\n")
+
+	for _, resolve := range []struct {
+		name string
+		fn   func() (*ResolvedConfig, error)
+	}{
+		{name: "global", fn: ResolveGlobalConfig},
+		{name: "project", fn: func() (*ResolvedConfig, error) { return ResolveConfig(repoRoot) }},
+	} {
+		t.Run(resolve.name, func(t *testing.T) {
+			resolved, err := resolve.fn()
+			require.NoError(t, err)
+			assert.Equal(t, "zenburn", resolved.Theme.Preset())
+			assert.Equal(t, "#3F3F3F", resolved.Theme.Background)
+			assert.Equal(t, "#8CD0D3", resolved.Theme.Accent)
+			written, err := marshalConfigTOML(&resolved.Config)
+			require.NoError(t, err)
+			assert.Contains(t, string(written), "theme = 'zenburn'")
+			assert.NotContains(t, string(written), "[theme]")
+
+			value := requireResolvedValue(t, resolved, "theme")
+			for _, leaf := range []string{"background", "accent", "selection_background"} {
+				origin, present := value.Origins[leaf]
+				require.True(t, present, "missing origin for preset-derived theme.%s", leaf)
+				assert.Equal(t, SourceGlobal.String(), origin.Layer)
+			}
+			global := candidateForLayer(t, value, SourceGlobal)
+			assert.Equal(t, "zenburn", global.Value)
+			assert.Equal(t, "contributed", global.Result)
+		})
+	}
+}
+
+func TestResolveGlobalConfigPreservesBuiltInThemePresetIdentity(t *testing.T) {
+	setupProvenanceTest(t, "schema_version = 1\n")
+
+	resolved, err := ResolveGlobalConfig()
+	require.NoError(t, err)
+	assert.Equal(t, DefaultThemePreset, resolved.Theme.Preset())
+	assert.Equal(t, DefaultThemeConfig(), resolved.Theme)
+}
+
 func TestResolveGlobalConfigExplainsNormalizedKeyBindingLeaves(t *testing.T) {
 	setupProvenanceTest(t, "schema_version = 1\n[keys]\nquit = \"Q\"\n")
 

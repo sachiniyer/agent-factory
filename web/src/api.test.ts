@@ -16,6 +16,7 @@ import {
   createTab,
   errorText,
   fetchPreviewOrigin,
+  getTheme,
   handoffSession,
   isMutationCommittedError,
   killSession,
@@ -194,6 +195,29 @@ test("suggestSessionName asks the daemon and returns the name", async () => {
   assert.equal(cap.auth, "Bearer tok");
   assert.deepEqual(cap.body, {}, "the suggestion takes no arguments");
   assert.equal(name, "shell", "the resolved name is read from the envelope");
+});
+
+test("getTheme returns the daemon palette instead of a browser-owned default", async () => {
+  const theme = { name: "nord", accent: "#88C0D0", background: "#2E3440" };
+  const cap: Captured = { url: "", body: {}, auth: undefined, calls: 0 };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.calls += 1;
+    cap.url = url;
+    cap.body = JSON.parse(String(init.body));
+    cap.auth = (init.headers as Record<string, string>).Authorization;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ data: { theme }, error: null }),
+    } as unknown as Response;
+  };
+
+  const got = await getTheme("tok");
+  assert.equal(cap.url, "/v1/GetTheme");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.deepEqual(cap.body, {});
+  assert.deepEqual(got, theme);
 });
 
 test("killSession posts the stable id as the primary key alongside the title", async () => {

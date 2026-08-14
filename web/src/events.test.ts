@@ -8,7 +8,7 @@
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { EventStream } from "./events.js";
+import { eventRequestsPaletteRefresh, EventStream } from "./events.js";
 
 // A minimal WebSocket stand-in the test drives: it records the URL, exposes the
 // handlers events.ts assigns, and lets the test fire open/close synchronously.
@@ -70,6 +70,11 @@ beforeEach(() => {
 afterEach(() => {
   delete (globalThis as unknown as { window?: unknown }).window;
   delete (globalThis as unknown as { WebSocket?: unknown }).WebSocket;
+});
+
+test("theme.changed asks an open client to refresh its daemon palette", () => {
+  assert.equal(eventRequestsPaletteRefresh({ type: "theme.changed" }), true);
+  assert.equal(eventRequestsPaletteRefresh({ type: "session.updated" }), false);
 });
 
 test("onResync fires on the FIRST open, closing the login-window race", () => {

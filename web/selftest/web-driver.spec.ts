@@ -1111,6 +1111,45 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   await expect(p.locator(".af-app")).toHaveCount(0);
 
   await ctx.close();
+
+  // The same decision can change while a tokenless client is already open: a
+  // live config apply may begin requiring tokens and publish theme.changed. The
+  // resulting palette 401 must return to a paste-token form, not preserve the
+  // stale auth_required=false choice and offer an empty-credential retry loop.
+  const transitionCtx = await browser.newContext();
+  const live = await transitionCtx.newPage();
+  let rejectTheme = false;
+  await live.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket = socket;
+        }
+        return socket;
+      },
+    });
+  });
+  await live.route("**/v1/GetTheme", (route) => {
+    if (!rejectTheme) return route.continue();
+    return route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: failureBody("token required after live config apply"),
+    });
+  });
+  await openTokenless(live);
+  rejectTheme = true;
+  await live.evaluate(() => {
+    const socket = (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect(live.locator("#af-token")).toBeVisible();
+  await expect(live.locator(".af-login-form button[type=submit]")).toContainText("Connect");
+  await expect(live.locator(".af-app")).toHaveCount(0);
+  await transitionCtx.close();
 });
 
 test("a failed login renders the daemon's real message, never [object Object]", async ({ browser }) => {
@@ -6280,9 +6319,154 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the white token (#ffffff → rgb(255, 255, 255)).
-  expect(lightRail).toBe("rgb(255, 255, 255)");
+  // The light rail surface is the Snow Storm-derived token.
+  expect(lightRail).toBe("rgb(227, 231, 239)");
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+
+  // The palette comes from the daemon, not this toggle. Replace GetTheme with the
+  // named legacy palette, reload, and prove the same web tokens now follow it.
+  let servedPalette: "zenburn" | "nord" = "zenburn";
+  let themeRequestCount = 0;
+  let themeFailuresRemaining = 0;
+  let holdNextTheme = false;
+  let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
+  await page.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    const TrackingWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket = socket;
+        }
+        return socket;
+      },
+    });
+    window.WebSocket = TrackingWebSocket;
+  });
+  const fulfillTheme = (route: Route, palette: "zenburn" | "nord"): Promise<void> => {
+    const theme =
+      palette === "zenburn"
+        ? {
+            name: "zenburn",
+            foreground: "#DCDCCC",
+            foreground_strong: "#FFFFEF",
+            foreground_muted: "#989890",
+            foreground_dim: "#656555",
+            background: "#3F3F3F",
+            background_subtle: "#494949",
+            background_panel: "#4F4F4F",
+            accent: "#8CD0D3",
+          }
+        : {
+            name: "nord",
+            foreground: "#D8DEE9",
+            foreground_strong: "#ECEFF4",
+            foreground_muted: "#C3CBD6",
+            foreground_dim: "#A7B0BE",
+            background: "#2E3440",
+            background_subtle: "#3B4252",
+            background_panel: "#434C5E",
+            accent: "#88C0D0",
+          };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { theme }, error: null }),
+    });
+  };
+  await page.route("**/v1/GetTheme", (route) => {
+    themeRequestCount += 1;
+    const palette = servedPalette;
+    if (themeFailuresRemaining > 0) {
+      themeFailuresRemaining -= 1;
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "temporary palette read failure" } }),
+      });
+    }
+    if (holdNextTheme) {
+      holdNextTheme = false;
+      heldTheme = { route, palette };
+      return;
+    }
+    return fulfillTheme(route, palette);
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
+
+  // A daemon restart can change config without reloading this page. Force the
+  // self-healing events socket through its real reconnect path, switch the mocked
+  // daemon palette meanwhile, and require both chrome and open xterms to be
+  // refreshed by the reconnect's resync callback.
+  const requestsBeforeReconnect = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeReconnect);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  // Frost cyan is lifted just enough to stay AA on every Nord elevation.
+  await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
+
+  // Two quick reconnects can overlap GetTheme reads under the same credential.
+  // Hold the older Zenburn response, let a newer Nord response win, then release
+  // the stale response and prove it cannot rewind the palette generation.
+  holdNextTheme = true;
+  servedPalette = "zenburn";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => heldTheme !== null).toBe(true);
+  const requestsBeforeNewerRefresh = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("reconnected events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeNewerRefresh);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  const staleTheme = heldTheme;
+  if (!staleTheme) throw new Error("older GetTheme request was not held");
+  await fulfillTheme(staleTheme.route, staleTheme.palette);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+
+  // Establish Zenburn as the last good palette, then prove a healthy socket can
+  // outlive one failed additive HTTP read. The failure must not reset to Nord;
+  // retry without another socket reconnect and apply Nord only on real success.
+  servedPalette = "zenburn";
+  const requestsBeforeZenburn = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry setup");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeZenburn);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+
+  themeFailuresRemaining = 1;
+  servedPalette = "nord";
+  const requestsBeforeTransientFailure = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry check");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure + 1);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.
   // Auto removes data-theme entirely (follow prefers-color-scheme).
@@ -6291,6 +6475,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
     .toBe(false);
   await page.evaluate(() => localStorage.removeItem("af-theme"));
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
 });
 
 interface TerminalGeometry {
@@ -7532,25 +7718,25 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
 
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
   await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#141a22");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#ffffff");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#E3E7EF");
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
   await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
   await ctx.close();
 });
 
@@ -8109,6 +8295,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             await expect(p.locator(".af-rail")).toBeVisible();
           }
 
+          // Exercise a deterministic set of live placements. Session status icons
+          // legitimately come and go as the seeded agent moves between Needs you and
+          // Working, so they cannot be the reason this coverage happens to exceed its
+          // floor. The default filter always exposes four checked semantic groups.
+          await p.getByRole("button", { name: "Filter sessions" }).click();
+          await expect(p.locator(".af-filter-menu")).toBeVisible();
+          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
           const projectIcon = p.locator(".af-project-glyph");
           const filterIcon = p.locator(".af-rail-filter-glyph");
           await expect(projectIcon).toBeVisible();
@@ -8155,6 +8349,13 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             }).length;
             return {
               count: visible.length,
+              placements: visible.map(
+                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
+              ),
+              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+                className: row.className,
+                text: (row.innerText ?? "").trim(),
+              })),
               allHiddenFromAT: visible.every(
                 (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
               ),
@@ -8167,7 +8368,11 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
                 .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
             };
           });
-          expect(audit.count, "the live shell must exercise several real icon placements").toBeGreaterThan(5);
+          expect(
+            audit.count,
+            `the live shell must exercise several real icon placements; ` +
+              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
+          ).toBeGreaterThan(5);
           expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
           expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
           expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);

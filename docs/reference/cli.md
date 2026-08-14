@@ -701,12 +701,13 @@ Settable keys:
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Structural keys (root_agents, [theme], the [keys] rebind table) and the
+Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
 here. Ask the config assistant to change them (it edits the file and validates), or
 edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480); only the
-structural keys above take effect on the next daemon start.
+A settable key applies to a running daemon in place (#2480). Of the structural
+keys above, theme is applied to the daemon palette when af next launches, [keys]
+applies to that TUI launch, and root_agents waits for the next daemon start.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
@@ -788,9 +789,9 @@ This is the companion to a hand-edit. Most keys go through "af config set",
 which validates before it writes and so can never leave a broken file; but the
 structured settings (theme, the [keys] rebinds, root_agents, and the
 session_env_passthrough list) are edited in the file directly, and a broken edit
-there is a hard startup failure with no fallback to defaults. Run this after such
-an edit: exit 0 means the next start will load it, a non-zero exit names what is
-wrong so it can be fixed before restarting.
+there is a hard load failure with no fallback to defaults. Run this after such an
+edit: exit 0 means af can load it, while a non-zero exit names what is wrong so it
+can be fixed before the next launch.
 
 ```
 af config validate [flags]

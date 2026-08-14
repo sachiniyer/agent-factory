@@ -18,10 +18,11 @@ type Manager struct {
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
-	// branch_prefix (the title-reservation helpers). The network listener keys
-	// used to read it too; #2480 PR2 made them applied-live (livePosture per
+	// branch_prefix (the title-reservation helpers). The network listener keys used
+	// to read it too; #2480 PR2 made them applied-live (livePosture per
 	// request; listen_addr/preview_listen_addr rebind in place). Everything
-	// hot-reloadable reads live via Config() instead.
+	// hot-reloadable, including GetTheme's renderer generation, reads live via
+	// Config() instead.
 	cfg *config.Config
 	// live is the hot-reloadable global config (#2480). ApplyConfig swaps it in
 	// place so a running daemon applies saved config without a restart or session
@@ -30,6 +31,9 @@ type Manager struct {
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
 	live atomic.Pointer[config.Config]
+	// configApplyMu serializes full and theme-only live-config swaps so a launch
+	// cannot restore unrelated fields from a generation an ApplyConfig just replaced.
+	configApplyMu sync.Mutex
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never

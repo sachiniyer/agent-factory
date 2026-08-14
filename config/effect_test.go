@@ -67,3 +67,9 @@ func TestKeyEffectClassClassifiesDottedLeavesByBase(t *testing.T) {
 		t.Errorf("a dotted leaf should inherit its base key's class")
 	}
 }
+
+func TestThemeIsAppliedLiveToTheDaemonPaletteProjection(t *testing.T) {
+	if KeyEffectClass("theme") != EffectAppliedLive {
+		t.Fatalf("theme effect class = %v, want EffectAppliedLive", KeyEffectClass("theme"))
+	}
+}

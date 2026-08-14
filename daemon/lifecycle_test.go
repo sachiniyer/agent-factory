@@ -258,8 +258,13 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// write config.toml around the gate, and an apply is not inert — it swaps the
 	// live config, rebinds listeners, and changes auth posture, mutating the very
 	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
-	"ApplyConfig":  blockedDuringProbation,
+	"ApplyConfig": blockedDuringProbation,
+	// ApplyTheme also swaps the live config and publishes a repaint event. It is
+	// narrower than ApplyConfig, but it is still a mutation of the candidate the
+	// upgrade supervisor is validating, so it follows the same admission rule.
+	"ApplyTheme":   blockedDuringProbation,
 	"GetConfig":    allowedDuringProbation,
+	"GetTheme":     allowedDuringProbation,
 	"ListBackends": allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects

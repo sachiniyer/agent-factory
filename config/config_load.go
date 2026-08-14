@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -312,7 +310,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return err // invalid config.json: do not convert or rename it.
 		}
 
-		tomlBytes, err := toml.Marshal(cfg)
+		tomlBytes, err := marshalConfigTOML(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
@@ -398,7 +396,7 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// defaults without another write attempt.
 	}
 	if created {
-		data, err := toml.Marshal(defaultCfg)
+		data, err := marshalConfigTOML(defaultCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal materialized config metadata: %w", err)
 		}
@@ -437,7 +435,7 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 	if err := ensureStorageParent(configPath); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
-	data, err := toml.Marshal(config)
+	data, err := marshalConfigTOML(config)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal config: %w", err)
 	}

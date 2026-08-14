@@ -102,12 +102,13 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 //     renders" (web/src/config.test.ts) — the web control is chosen from the
 //     entry's own description, so a key the bundle predates still renders.
 type ConfigEntry struct {
-	Key      string `json:"key"`
-	Type     string `json:"type"`
-	Default  string `json:"default"`
-	Purpose  string `json:"purpose"`
-	Tier     int    `json:"tier"`
-	TierName string `json:"tier_name"`
+	Key           string   `json:"key"`
+	Type          string   `json:"type"`
+	AcceptedTypes []string `json:"accepted_types,omitempty"`
+	Default       string   `json:"default"`
+	Purpose       string   `json:"purpose"`
+	Tier          int      `json:"tier"`
+	TierName      string   `json:"tier_name"`
 	// Settable is the MANIFEST's claim: `af config set` accepts this key — or,
 	// for a dynamic family, its LEAVES (`af config set program_overrides.claude
 	// …`). It is pinned against the real allowlist by
@@ -146,10 +147,10 @@ type ConfigEntry struct {
 	//
 	// It no longer answers WHEN the change takes effect: #2480 made that per-key and
 	// honest (config.EffectClass / EffectNotice in effect.go), because the answer is
-	// not uniform — a running daemon applies most keys in place, the listener keys
-	// and root_agents wait for the next daemon start, and the client-side keys
-	// (update_channel, theme, …) are picked up by af's own next launch. The old
-	// per-key boolean could not express those three outcomes; the notice does.
+	// not uniform — a running daemon applies most keys (including theme) in place,
+	// root_agents and branch_prefix wait for the next daemon start, and client-only
+	// keys such as update_channel are picked up by af's own next launch. The old
+	// per-key boolean could not express those outcomes; the notice does.
 	RequiresRestart bool `json:"requires_restart"`
 }
 
@@ -167,17 +168,18 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 		value, _ := CurrentValue(cfg, e.Key)
 		editable, hint := editability(e)
 		out = append(out, ConfigEntry{
-			Key:      e.Key,
-			Type:     e.Type,
-			Default:  e.Default,
-			Purpose:  e.Purpose,
-			Tier:     int(e.Tier),
-			TierName: TierName(e.Tier),
-			Settable: e.Settable,
-			Editable: editable,
-			EditHint: hint,
-			Enum:     e.Enum,
-			Value:    value,
+			Key:           e.Key,
+			Type:          e.Type,
+			AcceptedTypes: e.AcceptedTypes,
+			Default:       e.Default,
+			Purpose:       e.Purpose,
+			Tier:          int(e.Tier),
+			TierName:      TierName(e.Tier),
+			Settable:      e.Settable,
+			Editable:      editable,
+			EditHint:      hint,
+			Enum:          e.Enum,
+			Value:         value,
 			// Uniformly true — see the field's comment.
 			RequiresRestart: true,
 		})
@@ -230,9 +232,10 @@ func editability(e ManifestEntry) (editable bool, hint string) {
 // constant: #2480 made it PER-KEY (config.EffectNotice / KeyEffectClass in
 // effect.go), because the honest answer differs by key — a running daemon applies
 // some in place (the network listener keys among them since #2480 PR2), root_agents
-// and branch_prefix wait for the next daemon start, and the client-side keys
-// (update_channel, theme, …) are picked up by af's own next launch and never touch
-// the daemon at all. It deliberately never tells the user to run a command (#2479).
+// and branch_prefix wait for the next daemon start, and client-only keys such as
+// update_channel are picked up by af's own next launch. Theme is applied live to
+// the daemon palette projection so browser and TUI renderers do not diverge. It
+// deliberately never tells the user to run a command (#2479).
 
 // editorValue renders one config field in the editor form. It deliberately does
 // NOT share renderConfigValue's briefing decorations (`""`, "none") — see the

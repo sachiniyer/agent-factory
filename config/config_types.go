@@ -255,10 +255,10 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel" toml:"update_channel"`
-	// Theme is the global-only TOML [theme] table (#1389): editable TUI color
-	// slots defaulting to the Zenburn palette. It is intentionally TOML-only
-	// because legacy config.json is frozen and a cloned repo must never be able
-	// to recolor a user's TUI.
+	// Theme is the global-only TOML palette (#1389): either a named preset or a
+	// custom [theme] table, shared by the TUI and web. It is intentionally
+	// TOML-only because legacy config.json is frozen and a cloned repo must never
+	// be able to recolor a user's interfaces.
 	Theme ThemeConfig `json:"-" toml:"theme"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
