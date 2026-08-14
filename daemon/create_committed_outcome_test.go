@@ -57,8 +57,11 @@ func TestCreateSession_UnknownStart_ReportsCommittedWithRetainedIdentity(t *test
 	if created.ID != rec.ID || created.Title != "uncertain-start" {
 		t.Fatalf("CreateSession identity = %+v, want the retained row's {%s uncertain-start} preserved", created, rec.ID)
 	}
-	if created.Worktree.WorktreePath == "" {
-		t.Fatalf("the retained workspace path must be preserved for the caller, got %+v", created)
+	// The projection carries whatever workspace facts the retained row has; a
+	// FakeBackend create records no git worktree, so the repo path is the
+	// payload beyond identity this fixture can pin.
+	if created.Path == "" || !created.StartupStateUnknown {
+		t.Fatalf("the retained projection must carry the row's workspace facts, got %+v", created)
 	}
 }
 
