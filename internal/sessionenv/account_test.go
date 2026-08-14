@@ -99,9 +99,17 @@ func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
 		"OPENAI_API_KEY=other make",
 		"OPENAI_API_KEY=other make >build.log",
 		"OPENAI_API_KEY=other make &",
+		"unset CODEX_HOME; make",
+		"command unset CODEX_HOME; make",
+		"export OPENAI_API_KEY=other; make",
+		"readonly OPENAI_API_KEY=other; make",
+		"read CODEX_HOME </dev/null; make",
+		"printf -v CODEX_HOME other; make",
+		"eval 'unset CODEX_HOME'; make",
 		"env CODEX_HOME=/other make",
 		"env CODEX_HOME=$HOME/.codex make",
 		"env -S 'CODEX_HOME=/other make'",
+		"command env CODEX_HOME=/other make",
 		"env -uCODEX_HOME make",
 		"env -i make",
 	} {
@@ -121,8 +129,13 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"PORT=3000 npm start",
 		"PORT=3000 npm start >server.log",
 		"PORT=3000 npm start &",
+		"unset PORT; make",
+		"command unset PORT; make",
+		"export PORT=3000; make",
+		"readonly PORT=3000; make",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",
+		"command env PORT=3000 npm start",
 	} {
 		scoped, err := ApplyAccountEnvironment(nil, command, account)
 		require.NoError(t, err, "command %q only sets process configuration", command)
