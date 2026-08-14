@@ -478,6 +478,47 @@ func TestKillSession_ArchivedGhostGenericStallBoundaryRefusalDoesNotLatch(t *tes
 	assert.True(t, exists(archivedPath), "the archive must remain intact")
 }
 
+// TestKillSession_ForeignSeparateGitDirWorktreeRefused: a foreign
+// separate-git-dir repository's metadata root is not named .git either, and
+// git worktree move gives its parked worktree a matching backpointer — so the
+// basename rule alone would authorize deleting the foreign checkout (#3368
+// review). Only the core.worktree backlink to the RECORDED origin separates
+// the genuine survivor from a live foreign repository; the foreign one must
+// refuse.
+func TestKillSession_ForeignSeparateGitDirWorktreeRefused(t *testing.T) {
+	manager, repoID, repoPath, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-foreign-sepdir")
+	require.NoError(t, os.RemoveAll(repoPath))
+
+	// A live foreign separate-git-dir repository parks a real worktree at the
+	// archived path.
+	root := t.TempDir()
+	foreignRepo := filepath.Join(root, "foreign-sep-repo")
+	foreignMeta := filepath.Join(root, "foreign-sep-meta")
+	require.NoError(t, exec.Command("git", "init", "-b", "main",
+		"--separate-git-dir", foreignMeta, foreignRepo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(foreignRepo, "keep.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", foreignRepo, "add", "keep.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+	foreignWorktree := filepath.Join(root, "foreign-sep-wt")
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "add", "-b", "wt", foreignWorktree).Run())
+	require.NoError(t, os.RemoveAll(archivedPath))
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "move", foreignWorktree, archivedPath).Run())
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-foreign-sepdir", RepoID: repoID})
+	require.Error(t, err,
+		"a foreign separate-git-dir repository's worktree at the archived path must be refused")
+	assert.ErrorContains(t, err, "belongs to a live repository")
+	assert.True(t, exists(filepath.Join(archivedPath, "keep.txt")),
+		"the foreign checkout must be left untouched")
+	require.NotNil(t, recordFor(t, repoID, "direct-foreign-sepdir"),
+		"the refused kill must retain the record")
+}
+
 // TestKillSession_ArchivedForeignRepoWorktreeAtPathRefused: a genuine linked
 // worktree of a DIFFERENT live repository parked at the archived path
 // satisfies the generic pointer shape while the recorded origin's stale

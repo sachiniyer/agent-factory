@@ -312,7 +312,7 @@ func (m *Manager) prepareDirectRepoGoneKillCleanup(
 	// path the claim actually selected, not the pre-claim snapshot: resolving
 	// a stalled record may have chosen its identity-qualified alternate and
 	// moved the worktree location there.
-	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(claim.Path); pointerErr != nil {
+	if pointerErr := sessiongit.VerifyArchivedWorktreePointer(claim.Path, repoPath); pointerErr != nil {
 		refusal := fmt.Errorf(
 			"refusing to authorize repo-gone cleanup for session %q: %v — inspect %s manually, or run a restore first: a failed repo-gone restore installs the cleanup authorization kill needs",
 			title, pointerErr, claim.Path,

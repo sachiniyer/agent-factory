@@ -493,8 +493,56 @@ const archivedWorktreePointerMaxSize = 1 << 16
 // the stuck worker is still in flight is refused instead of stacking another
 // goroutine and descriptor against the same stalled path, mirroring
 // boundedRepoGoneOriginProbe's per-path flight.
-func VerifyArchivedWorktreePointer(worktreePath string) error {
-	return boundedPointerCheck("archived", worktreePath, verifyArchivedWorktreePointer)
+func VerifyArchivedWorktreePointer(worktreePath, repoPath string) error {
+	return boundedPointerCheck("archived\x00"+repoPath, worktreePath, func(path string) error {
+		return verifyArchivedWorktreePointer(path, repoPath)
+	})
+}
+
+// metadataRootDescribesRecordedOrigin reports whether a surviving separate
+// metadata directory's config names the recorded (now deleted) working-tree
+// root via core.worktree — the backlink `git init --separate-git-dir` writes —
+// binding the survivor to THIS origin rather than any live foreign
+// separate-git-dir or bare repository (#3368 review). Comparison resolves
+// through the deepest existing ancestor on both sides, so it stays sound for
+// the deleted leaf. Any parse failure or mismatch reports false, which the
+// caller treats as a refusal.
+func metadataRootDescribesRecordedOrigin(targetRoot, repoPath string) bool {
+	if repoPath == "" {
+		return false
+	}
+	configPath := filepath.Join(targetRoot, "config")
+	f, err := os.OpenFile(configPath, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	content, err := io.ReadAll(io.LimitReader(f, archivedWorktreePointerMaxSize+1))
+	if err != nil || len(content) > archivedWorktreePointerMaxSize {
+		return false
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "worktree")
+		if !ok {
+			continue
+		}
+		rest = strings.TrimSpace(rest)
+		value, ok := strings.CutPrefix(rest, "=")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		// Paths with config-special characters are written quoted; a quoted or
+		// otherwise unparseable value simply fails to match, which refuses.
+		if pathutil.ResolveForCompare(value) == pathutil.ResolveForCompare(repoPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyRegisteredWorktreeOccupant checks that the directory currently
@@ -747,7 +795,7 @@ func resolveRepoMetadataRoot(repoPath string) (string, error) {
 	return readGitdirPointerFile("origin metadata redirect", resolved, repoPath)
 }
 
-func verifyArchivedWorktreePointer(worktreePath string) error {
+func verifyArchivedWorktreePointer(worktreePath, repoPath string) error {
 	target, err := verifyWorktreePointerShape(worktreePath)
 	if err != nil {
 		return err
@@ -759,14 +807,18 @@ func verifyArchivedWorktreePointer(worktreePath string) error {
 	// one legitimate survivor is a separate-git-dir origin whose working-tree
 	// root was deleted while its external metadata lives on (#3278 review):
 	// accept that exact case — the surviving leaf must point back at THIS
-	// occupant and must not sit under a live repository's .git — and refuse
-	// everything else.
+	// occupant AND the surviving metadata's own core.worktree backlink must
+	// name the RECORDED origin root (#3368 review: a foreign separate-git-dir
+	// or bare repository's metadata is not named .git either, so only the
+	// recorded-origin binding separates the survivor from a live foreign
+	// repository) — and refuse everything else.
 	if _, err := os.Lstat(target); err == nil {
 		backpointer, backErr := readWorktreeBackpointer(target)
 		targetRoot := filepath.Dir(filepath.Dir(target))
 		if backErr == nil &&
 			pathutil.ResolveForCompare(backpointer) == pathutil.ResolveForCompare(pointerPath) &&
-			filepath.Base(targetRoot) != ".git" {
+			filepath.Base(targetRoot) != ".git" &&
+			metadataRootDescribesRecordedOrigin(targetRoot, repoPath) {
 			return nil
 		}
 		return fmt.Errorf(
