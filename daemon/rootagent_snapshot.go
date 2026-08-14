@@ -41,9 +41,28 @@ type rootAgentSnapshot struct {
 	// their layers sit in personal/personalUnreadable — so consumer verdicts
 	// must not call them unconfigured and advise adding config that already
 	// exists (#3264 review).
-	unresolvedRoots    map[string]string
-	legacyRepoIDs      map[string]bool
-	registryUnreadable bool
+	unresolvedRoots map[string]unresolvedProjectRecord
+	// reattributedFrom maps a re-attributed repo's REAL ID to the derived
+	// recorded-path ID it was attributed under while unresolved (#3299 review
+	// round 4). Deletion state can be keyed by either identity — DeleteProject
+	// normalizes an unavailable path to the derived ID at whatever moment it
+	// runs — so every consumer of deletedRootRepos/projectDeletes checks both.
+	// Carrying tombstones across at transition time was inherently racy: a
+	// delete starting after the transition's sample landed its tombstone under
+	// a derived ID nothing looked at any more. The alias travels with the
+	// immutable snapshot, so a derived-ID delete suppresses no matter when it
+	// lands relative to the transition.
+	reattributedFrom map[string]string
+	// unresolvedResolvedIDs maps the REAL repo ID a rejected (mismatched or
+	// unverifiable) checkout resolved to back to the derived ID of the
+	// unresolved record claiming that path (#3299 review round 5). Verdict
+	// consumers are keyed by the resolved identity; without this bridge a
+	// worktree-recorded mismatch reads as "not configured" and the rebind
+	// remedy never surfaces. It never moves any layer — the checkout stays
+	// unverified.
+	unresolvedResolvedIDs map[string]string
+	legacyRepoIDs         map[string]bool
+	registryUnreadable    bool
 }
 
 // buildRootAgentSnapshot reads the registry once at daemon start, matching the
@@ -56,12 +75,14 @@ type rootAgentSnapshot struct {
 // enabled=false, so none of them may quietly become "no personal layer".
 func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	snap := rootAgentSnapshot{
-		global:             config.GlobalRootAgentLayer(cfg),
-		personal:           map[string]*config.RootAgentLayer{},
-		personalUnreadable: map[string]string{},
-		projectRoots:       map[string]string{},
-		unresolvedRoots:    map[string]string{},
-		legacyRepoIDs:      map[string]bool{},
+		global:                config.GlobalRootAgentLayer(cfg),
+		personal:              map[string]*config.RootAgentLayer{},
+		personalUnreadable:    map[string]string{},
+		projectRoots:          map[string]string{},
+		unresolvedRoots:       map[string]unresolvedProjectRecord{},
+		reattributedFrom:      map[string]string{},
+		unresolvedResolvedIDs: map[string]string{},
+		legacyRepoIDs:         map[string]bool{},
 	}
 
 	snap.legacyRepoIDs = legacyRepoIDSet(cfg)
@@ -149,16 +170,50 @@ func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []
 // do not load. Shared by the start-of-day builder and the safe-direction heal
 // (#3264), so a healed registry read produces exactly the snapshot a daemon
 // start would have.
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots, unresolvedRoots map[string]string) {
+// unresolvedProjectRecord retains what re-attribution needs from a project
+// whose recorded root did not resolve: the recorded path, and the identity
+// evidence (#3299 review) — the project ID and the checkout marker id that
+// proves a returning path holds the SAME clone, not a different checkout
+// reusing it.
+type unresolvedProjectRecord struct {
+	root       string
+	projectID  string
+	checkoutID string
+	// identityMismatch records that the recorded path RESOLVES, the marker
+	// READ SUCCEEDED, and the checkout there does not carry the project's
+	// marker — a different clone occupying the path. Consumers word the
+	// remedy differently: an absent path needs bringing back, a mismatched
+	// one needs a rebind and a daemon restart (#3299 review round 4).
+	identityMismatch bool
+	// markerUnreadable records that the recorded path RESOLVES but the
+	// marker could not be READ (permissions, I/O): identity is unknowable,
+	// which is neither absence nor a proven mismatch — prescribing a rebind
+	// there could destroy a transiently unreadable original (#3299 review
+	// round 5).
+	markerUnreadable bool
+	// pathVanished narrows markerUnreadable further: the path itself
+	// disappeared mid-verification, so renderers prescribe restoring the
+	// path rather than fixing marker readability (#3299 review round 12).
+	// The fail-closed gating is markerUnreadable's; this only words it.
+	pathVanished bool
+}
+
+func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]string{}
-	unresolvedRoots = map[string]string{}
+	unresolvedRoots = map[string]unresolvedProjectRecord{}
 	for _, p := range projects {
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
 			repoID, repoRoot = repo.ID, repo.Root
-			projectRoots[repoID] = repo.Root
+			// Publish the RECORDED root as the create path, not repo.Root: for a
+			// linked worktree of a bare clone, repo.Root is the parent of the
+			// bare common directory — a non-repository the singleton sweep could
+			// never create a session at — while the recorded root is the
+			// checkout the user registered (#3299 review). Identity still comes
+			// from repo.ID; only the working path differs.
+			projectRoots[repoID] = p.Root
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
 			// checkout deleted or no longer a git repository. The singleton sweep
@@ -179,8 +234,8 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// path returns.
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
-			unresolvedRoots[repoID] = p.Root
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", p.ID, p.Root, repoErr)
+			unresolvedRoots[repoID] = unresolvedProjectRecord{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
+			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", p.ID, p.Root, repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {

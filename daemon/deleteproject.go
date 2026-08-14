@@ -196,14 +196,96 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		if err != nil {
 			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
+		if repoPath == "" {
+			// A re-attributed project's record still carries its recorded
+			// path, whose derived ID is what the record lookup keys on. A
+			// real-ID-only request must follow the alias to find that record,
+			// or the delete removes sessions and reports success while the
+			// durable registration survives a restart (#3299 review round 6).
+			if layers := m.rootAgentLayers.Load(); layers != nil {
+				if derived, ok := layers.reattributedFrom[repoID]; ok {
+					repoPath, err = registeredProjectRootForRepoID(derived)
+					if err != nil {
+						return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+					}
+				}
+			}
+		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
 		// sessions/root-agent state while RepoPath chooses a potentially different
 		// registry row — a split-target partial delete hidden behind success.
 		var pathRepoID string
 		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
-		if pathRepoID != repoID {
+		if pathRepoID != repoID && !m.sameProjectByReattribution(repoID, pathRepoID) {
+			// The alias check keeps the documented both-selector shape working
+			// for a re-attributed project whose recorded path is unavailable
+			// again: the real repo_id and the derived path hash then describe
+			// the SAME registered project (#3299 review round 7).
 			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
+		}
+	}
+	// A recorded path that no longer resolves hashes to the DERIVED
+	// recorded-path ID — but if the daemon re-attributed that project while
+	// its path was available, every piece of live state (sessions, the
+	// autonomous root, suppression) lives under the repo's REAL identity
+	// (#3299 review round 5). The snapshot's reattributedFrom alias maps
+	// real→derived; translate the target so the delete tears down and
+	// suppresses the identity the state actually carries, rather than
+	// deregistering the record while the real-ID root keeps running.
+	derivedAliasID := ""
+	if layers := m.rootAgentLayers.Load(); layers != nil {
+		// A reused path can make an alias's derived ID collide with a NEW
+		// occupant's real identity (a repository later main-rooted at the
+		// old recorded path hashes to the same ID). Only translate when the
+		// path does NOT currently resolve as the requested identity — if it
+		// does, the caller is deleting the occupant, and rewriting the
+		// target would tear down the old project instead (#3299 review
+		// round 14).
+		for realID, derived := range layers.reattributedFrom {
+			if derived != repoID {
+				continue
+			}
+			if repoPath != "" {
+				if occupant, err := config.RepoFromPath(repoPath); err == nil && occupant.ID == repoID {
+					// The caller is deleting the OCCUPANT. The registry row
+					// matching this path belongs to the re-attributed project
+					// (this loop is standing at its alias), so the occupant's
+					// delete must not deregister it (#3299 review round 15).
+					repoPath = ""
+					break
+				}
+			}
+			log.InfoLog.Printf("delete project %s: recorded path is unavailable, but the project was re-attributed to repo %s while it resolved; deleting under that identity", repoID, realID)
+			derivedAliasID = repoID
+			repoID = realID
+			break
+		}
+		if derivedAliasID == "" {
+			// A real-ID target for a re-attributed project keeps its derived
+			// twin in hand too: durable state written before the transition —
+			// a legacy root_agents key spelled as the unavailable recorded
+			// path hashes to the derived ID — must not survive the delete
+			// (#3299 review round 6).
+			if derived, ok := layers.reattributedFrom[repoID]; ok {
+				derivedAliasID = derived
+			}
+		}
+	}
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		// The registry record still carries the RECORDED root. A selector
+		// path that RESOLVED was rewritten to the repo root by the
+		// normalization above — for a re-attributed worktree/subdirectory
+		// registration those differ, and the final DeregisterProject would
+		// silently miss the record (#3299 review round 8). Recover the
+		// recorded root from the registry; a read failure here is an unknown
+		// outcome and nothing has been mutated yet, so refuse.
+		recorded, err := registeredProjectRootForRepoID(derivedAliasID)
+		if err != nil {
+			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not resolve its recorded root for deregistration; nothing was changed: %w", repoID, err)
+		}
+		if recorded != "" {
+			repoPath = recorded
 		}
 	}
 	result := DeleteProjectResult{RepoID: repoID}
@@ -262,10 +344,19 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// in-memory change also keeps the failure ATOMIC: on error nothing is archived
 	// AND no in-memory suppression is left behind, so a failed delete leaves the
 	// project fully intact. A project with no opt-in is a nil, nil no-op.
-	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
+	// BOTH identities in ONE durable mutation (#3299 review rounds 6-7): a
+	// re-attributed project's legacy key spelled as the unavailable recorded
+	// path matches only its derived hash, and two separate writes could
+	// remove one opt-in and then fail — falsifying the nothing-was-changed
+	// guarantee below.
+	optInIDs := []string{repoID}
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		optInIDs = append(optInIDs, derivedAliasID)
+	}
+	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
-		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)
+		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s) across its identities %v: %v", repoID, len(removed), optInIDs, removed)
 	}
 
 	// The repo's durable #2355 registry record is dropped LATER, only after every
@@ -278,7 +369,33 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// after start). Doing it before the teardown guarantees no poll tick respawns
 	// the root we are about to tear down; doing it only AFTER the persist means a
 	// failed write above never leaves a dangling suppression (#1740 review).
-	m.suppressRootAgent(repoID)
+	// The tombstone records WHOSE delete this was, so a later proven
+	// mismatch can release it only for the deleted claimant itself (#3299
+	// review round 15). A registry read failure degrades to "" — an
+	// unreleasable tombstone, the conservative direction.
+	claimantProjectID := ""
+	if repoPath != "" {
+		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
+			for _, p := range projects {
+				if filepath.Clean(p.Root) == filepath.Clean(repoPath) {
+					claimantProjectID = p.ID
+					break
+				}
+			}
+		}
+	}
+	m.suppressRootAgent(repoID, claimantProjectID)
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		m.suppressRootAgent(derivedAliasID, claimantProjectID)
+	}
+	// A re-attribution probe for the deleted project is deliberately LEFT
+	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
+	// is unfinished, the attribution-pending gate fails the candidate repo
+	// closed — which doubles as this delete's suppression — and its eventual
+	// completion publishes the reattributedFrom alias that carries the
+	// tombstones above to the real identity. Retiring or exempting the probe
+	// (both tried) opened a window where an in-memory legacy entry could
+	// resurrect the deleted root before the alias existed.
 
 	// Archive/kill every live session for the repo BEFORE removing its durable identity,
 	// so no session outlives the project's registry entry (#2549). The phase-1 gate above
@@ -462,7 +579,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// config becomes readable again — the exact hazard this preflight refuses.
 	if !hasRoot {
 		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable:
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending:
 			titles = append(titles, session.RootSessionTitle)
 		}
 	}
@@ -489,14 +606,26 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	return taskTargets, nil
 }
 
+// sameProjectByReattribution reports whether two differing delete selectors
+// describe one re-attributed project: one names the real identity, the other
+// the derived recorded-path hash, and the published snapshot's alias links
+// them in either direction.
+func (m *Manager) sameProjectByReattribution(a, b string) bool {
+	layers := m.rootAgentLayers.Load()
+	if layers == nil {
+		return false
+	}
+	return layers.reattributedFrom[a] == b || layers.reattributedFrom[b] == a
+}
+
 // suppressRootAgent marks repoID's project as deleted for the rest of this
 // daemon's life so the ensure loop stops (re-)creating its always-on root agent,
 // and clears the kill-grace record so no stale grace window survives (#1735). The
 // ensure loop is keyed by config path, not repoID, so the deletedRootRepos check
 // (which resolves each path to its repoID) is where suppression takes effect.
-func (m *Manager) suppressRootAgent(repoID string) {
+func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.deletedRootRepos[repoID] = struct{}{}
+	m.deletedRootRepos[repoID] = claimantProjectID
 	delete(m.rootKilledAt, repoID)
 }

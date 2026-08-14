@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -32,20 +34,34 @@ import (
 // ensure curve and the injectable clock.
 func (m *Manager) healRootAgentLayers() {
 	layers := m.rootAgentLayers.Load()
-	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 {
+	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 && len(layers.unresolvedRoots) == 0 {
 		return
 	}
+	// Two independent cadences (#3299 review round 8). The registry and
+	// personal-config retries pace on rootHealNextAttempt's failure backoff —
+	// and ONLY on it: the two-strike absence discipline (#3315) needs its
+	// observations SPACED by that backoff, so nothing else may drag these
+	// reads onto the per-tick cadence. Re-attribution runs on every pass
+	// unconditionally: its pacing is per entry (a settled negative rests
+	// until its own retryAt; an in-flight probe is checked without blocking),
+	// so an idle visit costs a map walk, not filesystem work, and a probe
+	// landing between ticks is consumed on the next tick.
 	m.mu.Lock()
 	due := !nowFunc().Before(m.rootHealNextAttempt)
 	m.mu.Unlock()
-	if !due {
-		return
-	}
 
 	healed := *layers
 	changed := false
+	// rpAttempted/rpChanged track only the backoff-paced reads; the clock
+	// below must not move when this pass did none of them.
+	rpAttempted := false
+	rpChanged := false
 
 	if layers.registryUnreadable {
+		if !due {
+			return
+		}
+		rpAttempted = true
 		// A latched registry PROVABLY existed at daemon start — plain absence
 		// never sets the latch — so during recovery an ABSENT directory is a
 		// transition, not proof of zero projects: a repair mv in flight, a
@@ -73,6 +89,7 @@ func (m *Manager) healRootAgentLayers() {
 					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
 					healed.registryUnreadable = false
 					changed = true
+					rpChanged = true
 					m.resetRootHealRegistryObservation()
 					log.InfoLog.Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
 				} else if perr == nil && stillPresent {
@@ -88,12 +105,28 @@ func (m *Manager) healRootAgentLayers() {
 			m.resetRootHealRegistryObservation()
 		}
 	} else {
-		personal, personalUnreadable, healedCount := m.retryUnreadablePersonalConfigs(layers)
-		if healedCount > 0 {
-			healed.personal = personal
-			healed.personalUnreadable = personalUnreadable
+		if due && len(layers.personalUnreadable) > 0 {
+			rpAttempted = true
+			personal, personalUnreadable, healedCount := m.retryUnreadablePersonalConfigs(layers)
+			if healedCount > 0 {
+				healed.personal = personal
+				healed.personalUnreadable = personalUnreadable
+				changed = true
+				rpChanged = true
+			}
+		}
+		reattrChanged, settles := m.reattributeUnresolvedRoots(&healed)
+		if reattrChanged {
 			changed = true
 		}
+		// Applied AFTER the publish below: a settle releases the
+		// attribution-pending gate, which must not happen before the
+		// snapshot carrying the corresponding bridge/flags is visible.
+		defer func() {
+			for _, settle := range settles {
+				settle()
+			}
+		}()
 	}
 
 	if changed {
@@ -106,15 +139,17 @@ func (m *Manager) healRootAgentLayers() {
 		healed.legacyRepoIDs = legacyRepoIDSet(m.cfg)
 		m.rootAgentLayers.Store(&healed)
 	}
-	m.mu.Lock()
-	if changed {
-		m.rootHealFailures = 0
-		m.rootHealNextAttempt = nowFunc()
-	} else {
-		m.rootHealFailures++
-		m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
+	if rpAttempted {
+		m.mu.Lock()
+		if rpChanged {
+			m.rootHealFailures = 0
+			m.rootHealNextAttempt = nowFunc()
+		} else {
+			m.rootHealFailures++
+			m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
+		}
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 }
 
 // observeRootHealRegistrySnapshot records one successful registry read. A
@@ -201,6 +236,18 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 				continue
 			}
 			m.mu.Lock()
+			// Per-project spacing, independent of the shared retry clock: an
+			// observation landing within one backoff base of the previous
+			// strike is IGNORED (not counted, not a reset) — two ticks one
+			// second apart must never satisfy a discipline that exists to
+			// survive mount flaps (#3299 review round 9).
+			now := nowFunc()
+			if last, ok := m.rootHealAbsenceLastStrike[projectID]; ok && now.Sub(last) < rootEnsureBackoffBase {
+				m.mu.Unlock()
+				personalUnreadable[repoID] = projectID
+				continue
+			}
+			m.rootHealAbsenceLastStrike[projectID] = now
 			m.rootHealAbsenceStreaks[projectID]++
 			strikes := m.rootHealAbsenceStreaks[projectID]
 			m.mu.Unlock()
@@ -226,6 +273,7 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 // resetPersonalAbsenceStreak clears a project's ENOENT two-strike counter.
 func (m *Manager) resetPersonalAbsenceStreak(projectID string) {
 	m.mu.Lock()
+	delete(m.rootHealAbsenceLastStrike, projectID)
 	delete(m.rootHealAbsenceStreaks, projectID)
 	m.mu.Unlock()
 }
@@ -254,4 +302,449 @@ func projectRecordDirPresent(projectID string) bool {
 	}
 	info, err := os.Stat(filepath.Dir(path))
 	return err == nil && info.IsDir()
+}
+
+// rootReattributionProbe is one asynchronous git/marker check for an
+// unresolved recorded root. Its result fields are written only by the probe
+// goroutine, strictly before done is closed; the poll goroutine reads them
+// only after observing that close, so no lock guards them.
+type rootReattributionProbe struct {
+	done chan struct{}
+	// pass is the heal pass that spawned this probe. A pass gives its own
+	// probes a bounded blocking wait; probes inherited from earlier passes
+	// already had theirs, so they are only ever checked non-blockingly.
+	pass uint64
+	// completedAt stamps the probe's finish. A completed result is consumed
+	// only while fresh (rootHealProbeResultTTL): freshness by completion
+	// time, not by pass identity, is what lets a responsive-but-slow mount
+	// heal on the next tick instead of being discarded forever, while still
+	// bounding how stale an accepted identity check can be (#3299 review
+	// rounds 4-5).
+	completedAt time.Time
+	// repo is set whenever git resolution succeeded, even for rejected
+	// checkouts: the resolved identity keys the verdict bridge.
+	repo    *config.RepoContext
+	matches bool
+	// candidate publishes the resolved identity the moment git resolution
+	// succeeds, BEFORE the marker verdict: while this probe is unfinished or
+	// unconsumed, that repo's root-agent decision is unknowable — the
+	// project's personal layer (possibly enabled=false) still sits under the
+	// derived ID — so the resolution choke points fail it closed rather than
+	// let a legacy entry start the root mid-verification (#3299 review
+	// round 8).
+	candidate atomic.Pointer[config.RepoContext]
+	// mismatch means the marker READ SUCCEEDED and the marker differs or is
+	// absent — a proven different checkout. markerUnreadable means the read
+	// itself failed (EACCES, EIO): identity unknowable, no rebind advice.
+	mismatch         bool
+	markerUnreadable bool
+	// vanished narrows markerUnreadable: the recorded path itself
+	// disappeared between git resolution and the marker read, so the remedy
+	// is the path, not marker readability (#3299 review round 12).
+	vanished bool
+	// settled marks a consumed NEGATIVE result held in place until retryAt:
+	// per-entry pacing, so a stalled sibling's hot pass cadence cannot make
+	// this entry respawn a git probe every poll tick (#3299 review round 7).
+	// Written only by the poll goroutine, after done is closed.
+	settled bool
+	retryAt time.Time
+}
+
+// rootHealProbeGrace bounds how long one heal pass waits for its probes: long
+// enough that a healthy local filesystem completes within the same pass (so
+// recovery still lands the tick the mount returns), short enough that a
+// stalled network mount delays the poll loop by at most this much per tick
+// rather than wedging it (#3299 review).
+const rootHealProbeGrace = 2 * time.Second
+
+// rootHealProbeResultTTL bounds how stale a completed probe result may be
+// when consumed. It must comfortably cover the gap between a probe finishing
+// just after its pass's grace and the next poll tick's pass — the
+// responsive-but-slow-mount case — while keeping the window in which a
+// checkout could be swapped after verification to seconds. The residual
+// (a swap landing inside the TTL after a completed probe) is accepted, in
+// writing, here: no probe-then-publish design closes it entirely, and the
+// alternative — synchronous re-verification at consume time — is exactly the
+// poll-goroutine filesystem stall the probes exist to avoid.
+const rootHealProbeResultTTL = 30 * time.Second
+
+// reattributeUnresolvedRoots re-attempts git resolution for recorded project
+// roots that did not resolve at snapshot time (#3247 arm 2, residue closed by
+// #3299). A successful RepoFromPath is content-bearing evidence — a mount
+// flap cannot fabricate a resolved toplevel — but AVAILABILITY IS NOT
+// IDENTITY (#3299 review): the resolved checkout must also carry the
+// project's checkout marker (config.ProjectCheckoutMatches), or a different
+// clone reusing the recorded path would inherit the project's personal layer
+// and an autonomous root the user never opted that clone into; without the
+// marker the project stays unresolved with its mismatch recorded, and the
+// log and verdict name the rebind-then-restart remedy. The marker is probed
+// at the RECORDED path, never at repo.Root (#3299 review round 2): for a
+// linked worktree of a bare clone, RepoFromPath resolves repo.Root to the
+// parent of the bare common directory — not a worktree at all — while the
+// recorded path binds to the same common dir the marker lives in, exactly
+// how Register/Rebind probe it.
+//
+// Both checks touch the recorded path's filesystem, so they run in per-entry
+// probe goroutines and this pass consumes only completed results, waiting at
+// most rootHealProbeGrace in total (#3299 review rounds 3-4): a healthy
+// mount recovers within its own tick, a stalled one costs a bounded wait and
+// stays fail-closed unresolved. Results are pass-scoped — a probe finishing
+// after its pass's grace describes a filesystem from a previous cadence and
+// is discarded for a fresh re-check rather than trusted late.
+//
+// Deletion state may be keyed by EITHER identity. An entry whose derived ID
+// sits behind an ACTIVE delete fence (projectDeletes) is skipped outright,
+// and on acceptance the snapshot records realID→derivedID in
+// reattributedFrom: DeleteProject normalizes an unavailable path to the
+// derived ID at whatever moment it runs — including after this pass — so
+// every deletion-state consumer checks both identities through the published
+// alias instead of relying on a carry-at-transition a concurrent delete
+// could miss (#3299 review round 4).
+//
+// On acceptance the project's layers move from the recorded-path derived ID
+// to the repo's REAL identity — which also differs when the recorded root is
+// a linked worktree of a bare clone or a subdirectory registration, the
+// residue the derived key cannot cover — and the recorded root joins
+// projectRoots, so the singleton sweep can create the root this run instead
+// of waiting for a daemon start. Mutates the candidate snapshot in place; the
+// caller publishes.
+// reattributeUnresolvedRoots returns the snapshot mutations' companion
+// actions in settles: every probe-state transition that RELEASES a fail-closed
+// gate (a negative settling, a successful probe retiring) runs only after the
+// caller publishes the healed snapshot, so no concurrent reader can observe
+// the release before the state that justifies it (#3299 review rounds 9-10).
+func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed bool, settles []func()) {
+	if len(healed.unresolvedRoots) == 0 {
+		return false, nil
+	}
+	m.rootHealPassSeq++
+	pass := m.rootHealPassSeq
+	cloneForWrite := func() {
+		if changed {
+			return
+		}
+		// Copy-on-first-write: the maps in the candidate snapshot are shared
+		// with the published value until replaced.
+		healed.personal = cloneLayerMap(healed.personal)
+		healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
+		healed.projectRoots = cloneStringMap(healed.projectRoots)
+		healed.unresolvedRoots = cloneUnresolvedMap(healed.unresolvedRoots)
+		healed.reattributedFrom = cloneStringMap(healed.reattributedFrom)
+		healed.unresolvedResolvedIDs = cloneStringMap(healed.unresolvedResolvedIDs)
+		changed = true
+	}
+
+	// Spawn phase: start (or refresh) every missing probe BEFORE waiting on
+	// any result, so one stalled mount cannot starve its siblings of the
+	// shared grace — probes run concurrently while the consume phase waits
+	// (#3299 review round 5). A completed-but-expired result is replaced by a
+	// fresh probe here; a still-running probe is left alone (one outstanding
+	// goroutine per entry, however long its mount stalls).
+	m.mu.Lock()
+	for derivedID, record := range healed.unresolvedRoots {
+		probe := m.rootHealProbes[derivedID]
+		if probe != nil {
+			select {
+			case <-probe.done:
+				if probe.settled {
+					// A consumed negative rests until its own backoff
+					// expires; only then does a fresh probe re-check.
+					if !nowFunc().Before(probe.retryAt) {
+						probe = nil
+					}
+				} else if nowFunc().Sub(probe.completedAt) > rootHealProbeResultTTL {
+					probe = nil
+				}
+			default:
+				// Still running; keep it.
+			}
+		}
+		if probe == nil {
+			probe = &rootReattributionProbe{done: make(chan struct{}), pass: pass}
+			m.rootHealProbes[derivedID] = probe
+			go runRootReattributionProbe(probe, record)
+		}
+	}
+	m.mu.Unlock()
+
+	// Consume phase: only completed, fresh results mutate the snapshot. A
+	// probe spawned by THIS pass gets a bounded blocking wait against the
+	// shared once-only deadline; a probe inherited from an earlier pass
+	// already had its grace and is checked non-blockingly — its result is
+	// consumed the tick after it lands (the pending return keeps that tick
+	// close instead of on the failure backoff curve).
+	deadline := time.After(rootHealProbeGrace)
+	expired := false
+	for derivedID, record := range healed.unresolvedRoots {
+		m.mu.Lock()
+		probe := m.rootHealProbes[derivedID]
+		settled := probe != nil && probe.settled
+		m.mu.Unlock()
+		if probe == nil || settled {
+			// A settled negative neither pends nor re-consumes: it waits out
+			// its own retryAt, invisible to the pass.
+			continue
+		}
+		ready := false
+		select {
+		case <-probe.done:
+			ready = true
+		default:
+		}
+		if !ready && probe.pass == pass && !expired {
+			select {
+			case <-probe.done:
+				ready = true
+			case <-deadline:
+				// time.After delivers exactly one value; never receive from
+				// it twice (#3299 review round 4). Later entries fall through
+				// to non-blocking checks only.
+				expired = true
+			}
+		}
+		if !ready {
+			// Genuinely in flight: the next unconditional pass (every poll
+			// tick) consumes the result the tick after it lands.
+			continue
+		}
+		if nowFunc().Sub(probe.completedAt) > rootHealProbeResultTTL {
+			// Completed, but stale — the filesystem it verified is from a
+			// previous cadence. The spawn phase next pass replaces it.
+			continue
+		}
+		if !probe.matches {
+			// Hold the settled negative in place under its own backoff
+			// (#3299 review round 7). The settle itself is DEFERRED to after
+			// the caller publishes the healed snapshot, and applied under
+			// m.mu (#3299 review round 9): settled releases the
+			// attribution-pending gate, and a concurrent verdict observing
+			// that release before the unreadable-marker bridge is published
+			// would resolve fail-open for an instant; the unsynchronized
+			// write also races rootAttributionPendingFor's locked read.
+			deferredProbe := probe
+			deferredID := derivedID
+			settles = append(settles, func() {
+				m.mu.Lock()
+				m.rootHealProbeFailures[deferredID]++
+				deferredProbe.retryAt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealProbeFailures[deferredID]))
+				deferredProbe.settled = true
+				m.mu.Unlock()
+			})
+		}
+		if !probe.matches {
+			// The probe logged the specifics; a fresh probe next pass keeps
+			// re-checking. Record the failure shape for verdict consumers —
+			// a proven mismatch prescribes a rebind, an unreadable marker
+			// does not — and bridge the rejected checkout's resolved identity
+			// to this record so consumers keyed by the real repo ID see the
+			// remedy (#3299 review round 5). No layer moves: the checkout
+			// stays unverified.
+			resolvedID := ""
+			if probe.repo != nil && probe.repo.ID != derivedID {
+				resolvedID = probe.repo.ID
+			}
+			staleBridge := false
+			for rid, derived := range healed.unresolvedResolvedIDs {
+				if derived == derivedID && rid != resolvedID {
+					staleBridge = true
+				}
+			}
+			if record.identityMismatch != probe.mismatch || record.markerUnreadable != probe.markerUnreadable ||
+				record.pathVanished != probe.vanished ||
+				staleBridge || (resolvedID != "" && healed.unresolvedResolvedIDs[resolvedID] != derivedID) {
+				cloneForWrite()
+				record.identityMismatch = probe.mismatch
+				record.markerUnreadable = probe.markerUnreadable
+				record.pathVanished = probe.vanished
+				healed.unresolvedRoots[derivedID] = record
+				// Retire every bridge this record held before recording the
+				// current one (if any): a path that went absent again, or that
+				// now resolves to a DIFFERENT repository, must not leave the
+				// previously observed repo answering for this project forever
+				// (#3299 review round 6).
+				for rid, derived := range healed.unresolvedResolvedIDs {
+					if derived == derivedID && rid != resolvedID {
+						delete(healed.unresolvedResolvedIDs, rid)
+					}
+				}
+				if resolvedID != "" {
+					healed.unresolvedResolvedIDs[resolvedID] = derivedID
+				}
+			}
+			// A COMPLETED negative outcome is a normal failed read: it feeds
+			// the failure backoff rather than the hot pending cadence, or an
+			// unavailable root would fork git on every poll tick forever
+			// (#3299 review round 6).
+			continue
+		}
+		repo := probe.repo
+		m.mu.Lock()
+		_, fenced := m.projectDeletes[derivedID]
+		m.mu.Unlock()
+		if fenced {
+			// The next unconditional pass re-checks once the delete settles;
+			// the completed match stays consumable while fresh, and the probe
+			// deliberately stays IN the map: retiring it here would release
+			// the pending gate without ever publishing the alias, and the
+			// same pass's legacy sweep could recreate the mid-delete root
+			// (#3299 review round 12).
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its derived-ID target", record.root, record.projectID)
+			continue
+		}
+		// Retirement is deferred past publication (#3299 review round 10)
+		// and queued only now, after the fence check: the probe's presence
+		// is what keeps the candidate repo attribution-pending, and
+		// releasing it before the alias-bearing snapshot is visible would
+		// let a concurrent verdict resolve against the OLD layers for an
+		// instant.
+		retiredID := derivedID
+		settles = append(settles, func() {
+			m.mu.Lock()
+			delete(m.rootHealProbes, retiredID)
+			delete(m.rootHealProbeFailures, retiredID)
+			m.mu.Unlock()
+		})
+		cloneForWrite()
+		if layer, ok := healed.personal[derivedID]; ok && derivedID != repo.ID {
+			healed.personal[repo.ID] = layer
+			delete(healed.personal, derivedID)
+		}
+		if projectID, ok := healed.personalUnreadable[derivedID]; ok && derivedID != repo.ID {
+			healed.personalUnreadable[repo.ID] = projectID
+			delete(healed.personalUnreadable, derivedID)
+		}
+		if derivedID != repo.ID {
+			// The alias is the deletion bridge: DeleteProject keys its fence
+			// and tombstone by the derived ID whenever the path is unavailable
+			// at delete time — including a delete that starts after this very
+			// pass — so every deletion-state consumer checks both identities
+			// through the published snapshot rather than relying on a
+			// carry-at-transition that a concurrent delete could miss.
+			healed.reattributedFrom[repo.ID] = derivedID
+		}
+		// A verified match retires any rejected-checkout bridge that pointed
+		// at this record.
+		for resolvedID, derived := range healed.unresolvedResolvedIDs {
+			if derived == derivedID {
+				delete(healed.unresolvedResolvedIDs, resolvedID)
+			}
+		}
+		// The RECORDED root is the create path (see projectRootAgentLayers):
+		// repo.Root for a bare-clone linked worktree is not a repository.
+		healed.projectRoots[repo.ID] = record.root
+		delete(healed.unresolvedRoots, derivedID)
+		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
+	}
+	return changed, settles
+}
+
+// runRootReattributionProbe performs the blocking half of one re-attribution
+// check — git resolution and the checkout-marker probe, both of which touch
+// the recorded path's filesystem — so the poll goroutine never blocks on a
+// stalled mount. It logs its own negative outcomes because the consuming pass
+// only learns pass/fail.
+func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedProjectRecord) {
+	defer func() {
+		probe.completedAt = nowFunc()
+		close(probe.done)
+	}()
+	repo, err := config.RepoFromPath(record.root)
+	if err != nil {
+		return
+	}
+	probe.repo = repo
+	probe.candidate.Store(repo)
+	matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
+	if err != nil {
+		// The marker could not be READ — identity is unknowable, which is
+		// neither absence nor a proven mismatch. No rebind advice: the
+		// original checkout may merely be transiently unreadable, and
+		// rebinding over it would be destructive (#3299 review round 5).
+		probe.markerUnreadable = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but its checkout marker could not be read or holds an invalid id; leaving project %s unresolved until the marker is repaired (re-checked on the ensure cadence): %v", record.root, record.projectID, err)
+		return
+	}
+	// Re-resolve BEFORE trusting either marker outcome (#3299 review rounds
+	// 13-15): a mount flip between the first resolution and the marker read
+	// means the marker was read from a different repository, and binding
+	// that verdict — match OR mismatch — to the first identity releases or
+	// claims the wrong repo. A vanished or changed resolution is unknowable,
+	// re-bound to whatever is at the path now, and re-checked next pass.
+	verify, verr := config.RepoFromPath(record.root)
+	if verr != nil {
+		probe.markerUnreadable = true
+		probe.vanished = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s vanished during identity verification; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, verr)
+		return
+	}
+	if verify.ID != repo.ID {
+		probe.repo = verify
+		probe.candidate.Store(verify)
+		probe.markerUnreadable = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed identity during verification; leaving project %s unresolved (re-checked on the ensure cadence)", record.root, record.projectID)
+		return
+	}
+	if !matches {
+		probe.mismatch = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves, but the checkout there does not carry project %s's marker %s — a different clone may be reusing the path; leaving it unresolved (run `af projects rebind %s <path>` if this checkout replaces it, then restart the daemon: the running snapshot keeps the marker id it captured at start)", record.root, record.projectID, record.checkoutID, record.projectID)
+		return
+	}
+	probe.matches = true
+}
+
+// rootAttributionPendingFor reports that an unconsumed re-attribution probe
+// has RESOLVED repoID as some unresolved project's real identity but not yet
+// delivered its marker verdict into the published snapshot (#3299 review
+// round 8). Until it does, the repo's decision is unknowable: the project's
+// personal layer — possibly enabled=false, possibly itself unreadable — still
+// sits under the derived ID where resolution cannot see it. Settled negatives
+// are NOT pending: a proven mismatch releases the repo (a different project's
+// layers do not govern it) and an unreadable marker holds it closed through
+// the snapshot bridge instead.
+//
+// The gate deliberately applies to DELETED projects' probes too (#3299
+// review rounds 9-11, converged): while a dead project's marker read stalls,
+// fail-closed doubles as the deletion suppression the alias will carry once
+// the probe completes; exempting or retiring the probe (both tried) opened a
+// window where an in-memory legacy entry could resurrect the deleted root
+// before the alias existed. The cost — a replacement checkout at that path
+// waits out the stall before its repo can start legacy roots — is the fail-
+// closed direction, and it clears the moment the probe's marker read
+// finishes (a mismatch settles and releases).
+func (m *Manager) rootAttributionPendingFor(repoID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, probe := range m.rootHealProbes {
+		if probe.settled {
+			continue
+		}
+		if c := probe.candidate.Load(); c != nil && c.ID == repoID {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.RootAgentLayer {
+	out := make(map[string]*config.RootAgentLayer, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneUnresolvedMap(in map[string]unresolvedProjectRecord) map[string]unresolvedProjectRecord {
+	out := make(map[string]unresolvedProjectRecord, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

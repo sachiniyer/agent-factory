@@ -312,7 +312,7 @@ func TestDeleteProject_RootAgentsWriteFailureIsFatal(t *testing.T) {
 	inst, src := registerArchivable(t, manager, repoID, repoPath, "worker")
 
 	orig := deregisterRootAgents
-	deregisterRootAgents = func(string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
+	deregisterRootAgents = func(...string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
 	t.Cleanup(func() { deregisterRootAgents = orig })
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})

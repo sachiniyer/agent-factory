@@ -264,3 +264,13 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 	}
 	return nil
 }
+
+// ProjectCheckoutMatches reports whether the checkout now at root carries the
+// registry's checkout marker for checkoutID — the identity proof that this is
+// the SAME clone the project was registered from, not a different checkout
+// reusing the path (#3299 review). Path availability is never identity:
+// Project.PathExists and a successful git resolution say a repo is THERE, and
+// only the marker says it is the recorded one.
+func ProjectCheckoutMatches(root, checkoutID string) (bool, error) {
+	return projectRootHasCheckoutID(root, checkoutID)
+}

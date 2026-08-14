@@ -101,6 +101,14 @@ type rootEnsureState struct {
 // through it (or through the same snapshot's resolve), so they can never
 // disagree on whether a root should run or what it runs.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
+	if m.rootAttributionPendingFor(repoID) {
+		// Identity verification for a recorded root that resolves to this
+		// repo is still in flight: fail closed exactly like the snapshot's
+		// own unknowable states, or the legacy sweep could start the root
+		// seconds before a personal enabled=false is re-attributed onto it
+		// (#3299 review round 8).
+		return config.RootAgentResolution{}
+	}
 	return m.rootAgentLayers.Load().resolve(repoID, legacy)
 }
 
@@ -117,10 +125,21 @@ func (s *rootAgentSnapshot) resolve(repoID string, legacy *config.RootAgentConfi
 	if s.decisionUnknown(repoID) {
 		return config.RootAgentResolution{}
 	}
+	personal := s.personal[repoID]
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.identityMismatch {
+		// The layer under this ID belongs to a project whose claim on the
+		// recorded path is DISPROVEN — a different clone occupies it (#3299
+		// review round 13; same-path shape, where the derived hash IS the
+		// occupant's real ID). Neither the dead claim's enable (its program
+		// in a stranger's checkout) nor its disable (vetoing the occupant's
+		// own legacy entry) may govern the occupant. Unknowable shapes keep
+		// the layer: while undisproven, fail-closed applies it.
+		personal = nil
+	}
 	return config.ResolveRootAgent(config.RootAgentInputs{
 		Global:   s.global,
 		Legacy:   legacy,
-		Personal: s.personal[repoID],
+		Personal: personal,
 	})
 }
 
@@ -137,8 +156,35 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 	if s.registryUnreadable {
 		return true
 	}
-	_, unreadable := s.personalUnreadable[repoID]
-	return unreadable
+	if _, unreadable := s.personalUnreadable[repoID]; unreadable {
+		// A PROVEN mismatch releases this latch (#3299 review round 14): for
+		// a main-root recording the derived hash is the occupant's real ID,
+		// and the unreadable config belongs to a project whose claim on the
+		// path is disproven — it cannot govern the occupant, whichever value
+		// it holds.
+		if record, ok := s.unresolvedRoots[repoID]; !ok || !record.identityMismatch {
+			return true
+		}
+	}
+	// A checkout at some project's recorded root resolves to this repo, but
+	// its marker could not be READ (#3299 review round 6): the checkout may
+	// BE that project — whose personal layer (possibly enabled=false, or
+	// itself unreadable) sits where this resolution cannot see or trust it.
+	// Identity unknowable means the decision is unknowable; a legacy entry
+	// for the same repo must not start the root off global layers alone. A
+	// PROVEN mismatch deliberately does not gate here: a different project's
+	// layers do not govern this repo. The DIRECT lookup covers main-root
+	// recordings, where the derived hash IS the occupant's real ID and no
+	// bridge is ever recorded (#3299 review round 15).
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.markerUnreadable {
+		return true
+	}
+	if derived, bridged := s.unresolvedResolvedIDs[repoID]; bridged {
+		if record, ok := s.unresolvedRoots[derived]; ok && record.markerUnreadable {
+			return true
+		}
+	}
+	return false
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
@@ -279,8 +325,34 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	// daemon's life: DeleteProject already stopped its root and removed it from
 	// root_agents on disk, so respawning it here from the still-immutable
 	// in-memory config would resurrect the project the user just deleted.
+	// Deletion state may be keyed by EITHER identity: a project deleted while
+	// its recorded root was unavailable keys the fence and tombstone by the
+	// derived recorded-path ID, and the snapshot's reattributedFrom alias is
+	// the durable bridge — checked here, at admission time, so a derived-ID
+	// delete suppresses no matter when it landed relative to the identity
+	// transition (#3299 review round 4). An ACTIVE derived-ID delete
+	// (projectDeletes) skips this tick the same way; when it finishes, its
+	// tombstone holds through this alias.
+	sweepLayers := m.rootAgentLayers.Load()
+	alias, hasAlias := sweepLayers.reattributedFrom[repo.ID]
 	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repo.ID]
+	claimant, deleted := m.deletedRootRepos[repo.ID]
+	if deleted && claimant != "" {
+		// A same-path tombstone releases once the checkout there PROVES to
+		// be a different clone than the deleted claimant's (#3299 review
+		// round 15): the occupant's legitimate opt-ins must not be
+		// suppressed for the daemon's lifetime by a dead third party.
+		if record, ok := sweepLayers.unresolvedRoots[repo.ID]; ok && record.identityMismatch && record.projectID == claimant {
+			deleted = false
+		}
+	}
+	if !deleted && hasAlias {
+		if _, ok := m.deletedRootRepos[alias]; ok {
+			deleted = true
+		} else if _, ok := m.projectDeletes[alias]; ok {
+			deleted = true
+		}
+	}
 	m.mu.Unlock()
 	if deleted {
 		m.rootEnsureSucceeded(st)
