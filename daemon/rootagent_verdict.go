@@ -220,7 +220,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 			// Identity is unknowable, not disproven: no rebind advice — a
 			// transiently unreadable ORIGINAL checkout rebound over would be
 			// data loss.
-			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout marker at the recorded project root cannot be read (permissions or I/O), so the checkout's identity cannot be verified; make the marker readable — the daemon re-checks it on its ensure cadence", v.enabledSource)
+			return fmt.Sprintf("its root agent resolves to enabled (from the %s layer), but the checkout marker at the recorded project root cannot be read or holds an invalid id (permissions, I/O, or corruption), so the checkout's identity cannot be verified; repair the marker — the daemon re-checks it on its ensure cadence", v.enabledSource)
 		}
 		if v.rootIdentityMismatch {
 			// The path is PRESENT — "bring it back" is an impossible remedy.
@@ -238,7 +238,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		case v.rootPathVanished:
 			pathClause = " — and its recorded project root vanished while its identity was being verified, so bring that path back before the restart too"
 		case v.rootMarkerUnreadable:
-			pathClause = " — and the checkout marker at its recorded project root cannot be read, so make that marker readable before the restart too"
+			pathClause = " — and the checkout marker at its recorded project root cannot be read or holds an invalid id, so repair that marker before the restart too"
 		case v.rootIdentityMismatch:
 			pathClause = fmt.Sprintf(" — and the checkout at its recorded project root does not carry the project's registry marker (a different clone may occupy the path), so run `af projects rebind %s <path>` before the restart too if that checkout replaces the original", v.projectID)
 		case v.rootUnresolved:

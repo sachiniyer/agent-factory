@@ -125,10 +125,21 @@ func (s *rootAgentSnapshot) resolve(repoID string, legacy *config.RootAgentConfi
 	if s.decisionUnknown(repoID) {
 		return config.RootAgentResolution{}
 	}
+	personal := s.personal[repoID]
+	if record, ok := s.unresolvedRoots[repoID]; ok && record.identityMismatch {
+		// The layer under this ID belongs to a project whose claim on the
+		// recorded path is DISPROVEN — a different clone occupies it (#3299
+		// review round 13; same-path shape, where the derived hash IS the
+		// occupant's real ID). Neither the dead claim's enable (its program
+		// in a stranger's checkout) nor its disable (vetoing the occupant's
+		// own legacy entry) may govern the occupant. Unknowable shapes keep
+		// the layer: while undisproven, fail-closed applies it.
+		personal = nil
+	}
 	return config.ResolveRootAgent(config.RootAgentInputs{
 		Global:   s.global,
 		Legacy:   legacy,
-		Personal: s.personal[repoID],
+		Personal: personal,
 	})
 }
 
