@@ -287,6 +287,34 @@ func TestScrolledOffBaselineTailCannotAuthorizeRedelivery(t *testing.T) {
 		"a boundary tail that replaced a scrolled-off baseline copy is still this paste, visibly drained — redelivery must be withheld")
 }
 
+// TestStyledPayloadDeliveryConfirmsInsteadOfRetrying pins the probe side of
+// the ANSI asymmetry. A prompt can itself carry escape bytes (colorized logs
+// submitted through the API); the pane interprets them and renders clean text,
+// so witnesses derived from the raw bytes would never match any capture — a
+// fully drained paste would read as absent and, with #3293, be redelivered
+// even though its Enter may already have submitted it. The probe must strip
+// ANSI from the payload: the delivery confirms, in one paste.
+func TestStyledPayloadDeliveryConfirmsInsteadOfRetrying(t *testing.T) {
+	defer withPasteDeliveryTiming(30*time.Millisecond, time.Millisecond)()
+
+	styled := strings.Replace(redeliverPrompt, "COMPLETION_TAIL_MARKER_LANDS",
+		"\x1b[31mCOMPLETION_TAIL_MARKER_LANDS\x1b[0m", 1)
+	model := &redeliverPaneModel{renderForPaste: func(int, string) string {
+		// The pane processed the SGR sequences; only clean text renders.
+		return redeliverPrompt
+	}}
+	session := newTmuxSession("af_proj", ProgramClaude, NewMockPtyFactory(t), model.exec())
+
+	status, err := session.SendKeysCommandObserved(styled)
+	require.NoError(t, err)
+	require.Equal(t, PromptDelivered, status,
+		"a styled payload whose clean text rendered whole must confirm, not read as absent")
+
+	_, pastes, _ := model.counts()
+	require.Equal(t, 1, pastes,
+		"a confirmed styled delivery must never be redelivered")
+}
+
 // TestRedeliveryHoldsTheInputLockAcrossBothAttempts pins the two attempts as
 // ONE submission transaction. If the input lock were released across the
 // redelivery wait, a concurrent same-session submission could run inside the

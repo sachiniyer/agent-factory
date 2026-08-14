@@ -652,7 +652,14 @@ func hasLetterOrNumber(s string) bool {
 // their entire text as the completion and therefore cannot produce a terminal
 // negative. The existing two-capture rule still protects weak short strings.
 func newDeliveryProbe(text string) deliveryProbe {
-	n := []rune(normalizeDelivery(text))
+	// Strip ANSI from the PAYLOAD before deriving witnesses. A prompt can carry
+	// escape bytes of its own (colorized logs submitted through the API); the
+	// pane interprets those as control sequences and renders only the clean
+	// text, so witnesses that retained the raw bytes could never match any
+	// capture — a fully drained paste would read as absent, and with #3293
+	// that misread would authorize a redelivery of an instruction whose Enter
+	// may already have submitted it.
+	n := []rune(normalizeDelivery(xansi.Strip(text)))
 	const (
 		completionRunes = 32
 		witnessRunes    = 24
