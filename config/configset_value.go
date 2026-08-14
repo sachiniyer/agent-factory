@@ -38,12 +38,24 @@ func canonicalizeConfigValue(key string, spec settableKeySpec, structured bool, 
 // boundary, and emits a targeted TOML replacement. CurrentValue is the inverse:
 // its compact JSON is accepted here byte-for-byte for every structured row.
 func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, err error) {
+	return canonicalizeStructuredValueAgainst(key, raw, nil, false)
+}
+
+// canonicalizeStructuredValueAgainst is the global writer's locked variant.
+// A partial theme object overlays the palette that is current inside the file
+// lock, never an unrelated preset. Whole program-overrides maps preserve an
+// omitted auto-detected default as an empty TOML tombstone so the loader cannot
+// seed that command back in after the user removed it.
+func canonicalizeStructuredValueAgainst(key, raw string, current *Config, preserveBuiltInRemovals bool) (canonical, encoded string, err error) {
 	if strings.TrimSpace(raw) == "null" {
 		return "", "", fmt.Errorf("expected compact JSON for %s, got null", key)
 	}
 	holder := &Config{}
 	if key == "theme" {
 		holder.Theme = DefaultThemeConfig()
+		if current != nil {
+			holder.Theme = current.Theme
+		}
 	}
 	field, ok := writableConfigFieldByTomlKey(holder, key)
 	if !ok {
@@ -89,7 +101,21 @@ func canonicalizeStructuredValue(key, raw string) (canonical, encoded string, er
 	}
 
 	canonical = editorValue(field)
-	encoded, err = encodeStructuredTOML(key, field)
+	encodedValue := field
+	if key == "program_overrides" && preserveBuiltInRemovals {
+		requested := field.Interface().(map[string]string)
+		onDisk := make(map[string]string, len(requested)+1)
+		for agent, command := range requested {
+			onDisk[agent] = command
+		}
+		for agent := range DefaultConfig().ProgramOverrides {
+			if _, present := requested[agent]; !present {
+				onDisk[agent] = ""
+			}
+		}
+		encodedValue = reflect.ValueOf(onDisk)
+	}
+	encoded, err = encodeStructuredTOML(key, encodedValue)
 	if err != nil {
 		return "", "", err
 	}

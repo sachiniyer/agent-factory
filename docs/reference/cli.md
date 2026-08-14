@@ -2617,3 +2617,4 @@ af version
 |------|------|-------------|
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+

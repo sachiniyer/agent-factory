@@ -65,6 +65,20 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	if key == "theme" && cfg.Theme.explicitPreset && cfg.Theme.matchesPreset() {
 		return cfg.Theme.Preset(), true
 	}
+	// An empty program override is the on-disk tombstone for removing an
+	// auto-detected built-in command. ResolveProgram already treats it as no
+	// override; hide that storage detail so both panes refresh to the map the
+	// user chose and saving it again reproduces the same deletion.
+	if key == "program_overrides" {
+		visible := make(map[string]string, field.Len())
+		iter := field.MapRange()
+		for iter.Next() {
+			if command := iter.Value().String(); command != "" {
+				visible[iter.Key().String()] = command
+			}
+		}
+		return editorValue(reflect.ValueOf(visible)), true
+	}
 	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
 	// the []string type: a future list whose elements can contain a comma keeps the
 	// unambiguous compact-JSON rendering rather than silently displaying one entry

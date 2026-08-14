@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -687,6 +688,65 @@ func TestSetGlobalConfigValueThemePresetRoundTripsWithoutExpandingToATable(t *te
 	}
 	if shown, ok := CurrentValue(cfg, "theme"); !ok || shown != "zenburn" {
 		t.Fatalf("theme editor value = %q (ok=%v), want zenburn", shown, ok)
+	}
+}
+
+func TestSetGlobalConfigValuePartialThemeMergesTheCurrentPalette(t *testing.T) {
+	writeTempConfig(t, "theme = 'zenburn'\n")
+	before, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := before.Theme
+	want.Accent = "#123456"
+	want.preset = ""
+	want.explicitPreset = false
+
+	res, err := SetGlobalConfigValue("theme", `{"accent":"#123456"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Theme, want) {
+		t.Fatalf("partial theme edit reset omitted slots:\n got: %#v\nwant: %#v\necho: %s", after.Theme, want, res.Value)
+	}
+}
+
+func TestSetGlobalConfigValueWholeProgramOverridesCanRemoveDetectedDefault(t *testing.T) {
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+	writeTempConfig(t, "default_program = 'claude'\n")
+
+	before, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ProgramOverrides["claude"] == "" {
+		t.Fatal("test setup did not produce the auto-detected Claude override")
+	}
+
+	res, err := SetGlobalConfigValue("program_overrides", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(after, "claude"); got != "claude" {
+		t.Fatalf("whole-map deletion restored the detected override: ResolveProgram = %q", got)
+	}
+	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{}` || res.Value != `{}` {
+		t.Fatalf("deleted override refreshed as shown=%q (ok=%v), echo=%q; want {}", shown, ok, res.Value)
 	}
 }
 

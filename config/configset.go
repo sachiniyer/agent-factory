@@ -410,7 +410,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	prettyPath := prettyHomePath(tomlPath)
 
 	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
-		clear: spec.kind == cfgStringList && canonical == ""}
+		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
 	writeErr := WithFileLock(tomlPath, func() error {
@@ -521,6 +521,10 @@ type scalarWrite struct {
 	encoded string
 	// structured replaces a whole table/list value rather than one scalar line.
 	structured bool
+	// rawStructured retains the user's structured JSON until the global file
+	// lock is held. Theme omissions must merge with the palette current inside
+	// that lock, and default program-removal tombstones are encoded there too.
+	rawStructured string
 	// clear removes the key line instead of writing it. Set for an empty list
 	// value (`af config set cors_allowed_origins ""`): a nil/absent list and an
 	// empty one mean the same thing, so clearing keeps config.toml free of a
@@ -561,6 +565,23 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
 	updated := string(current)
+	if w.structured {
+		base := DefaultConfig()
+		if !isEffectivelyEmptyToml(current) {
+			base, err = parseConfigTOML(current, prettyPath)
+			if err != nil {
+				return nil, fmt.Errorf("refusing to write: the current config does not load: %w", err)
+			}
+		}
+		if w.key == "theme" && !strings.HasPrefix(strings.TrimSpace(w.rawStructured), "{") {
+			w.canonical, w.encoded, err = canonicalizeConfigValue(w.key, settableKeySpec{}, true, w.rawStructured)
+		} else {
+			w.canonical, w.encoded, err = canonicalizeStructuredValueAgainst(w.key, w.rawStructured, base, true)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("invalid value for %s: %w", w.key, err)
+		}
+	}
 	switch {
 	case w.structured:
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)
