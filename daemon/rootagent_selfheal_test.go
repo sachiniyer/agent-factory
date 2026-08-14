@@ -324,3 +324,101 @@ func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
 		t.Fatalf("the repo must be ensured exactly once across both sweeps, got %d creates", len(*seen))
 	}
 }
+
+// TestRootAgentHealKeepsPersonalLatchWhileRegistryAbsent pins the #3315
+// round-2 P1: LoadProjectConfig maps ENOENT to an absent layer, so with the
+// whole registry gone mid-outage every latched personal config would read as
+// deliberately removed and the latch would drop exactly when the disable is
+// about to come back. Only a PRESENT record directory proves a removal was
+// deliberate.
+func TestRootAgentHealKeepsPersonalLatchWhileRegistryAbsent(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	breakPersonalRootAgentToml(t, project.ID)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("fixture: the broken personal config must fail closed at start, got reason %d", got)
+	}
+
+	// The registry vanishes mid-outage: the latched config now reads ENOENT,
+	// which must NOT count as a deliberate removal.
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	aside := dir + ".aside"
+	if err := os.Rename(dir, aside); err != nil {
+		t.Fatalf("set registry aside: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("an absent registry must keep the personal latch, got %d creates — a vanished directory is not a deliberate config removal", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("the personal latch must hold while the registry is absent, got reason %d", got)
+	}
+
+	// The registry returns with the config fixed: the latch heals from the
+	// file's actual content.
+	if err := os.Rename(aside, dir); err != nil {
+		t.Fatalf("restore registry: %v", err)
+	}
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("the healed disable must keep the root down, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentDisabled {
+		t.Fatalf("the healed latch must carry the true cause, got reason %d", got)
+	}
+}
+
+// TestRootAgentPersonalHealRecomputesLegacyDedup pins the #3315 round-2 P2:
+// the dedup recompute must ride EVERY published heal, not only the registry
+// branch — a legacy path resolving after boot plus a personal config healing
+// in the same run must still leave the repo deduped out of the singleton
+// sweep.
+func TestRootAgentPersonalHealRecomputesLegacyDedup(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	breakPersonalRootAgentToml(t, project.ID)
+	rid := repoID(t, repoPath)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// The mount returns and the personal config heals to an enable before the
+	// next ensure pass.
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	manager.EnsureRootAgents()
+
+	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
+		t.Fatalf("a personal-config heal must also recompute the legacy dedup set for a path that resolved after boot")
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("the repo must be ensured exactly once across both sweeps, got %d creates", len(*seen))
+	}
+}
