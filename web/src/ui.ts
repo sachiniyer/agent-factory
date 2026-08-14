@@ -45,6 +45,7 @@ import {
   OPERATOR_KIND_LABELS,
   type OperatorKind,
   operatorKind,
+  prBadgeContent,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -816,6 +817,12 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
+  // The PR badge link and the signature of what it currently draws (#3285). Same
+  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
+  // session's PR — or its state flips open → merged — WITHOUT a selection change,
+  // so patchMainHead fills it rather than deciding once at build time.
+  private prBadge: HTMLAnchorElement | null = null;
+  private prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1900,10 +1907,21 @@ export class AppShell {
       return;
     }
     this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    // Title only. The "Live · master" meta that used to sit beside it — terminal
-    // connection state joined to the session's branch — was removed as chrome
-    // nobody wanted to look at (#2458). The wrapper stays: it owns the header's
-    // layout, and the tab bar beside it flexes against it.
+    // The PR badge is the web's session.pr.open (#3285): the daemon-discovered
+    // number + state (#3232/#3287) as a plain link — the browser's native
+    // analogue of the TUI's p/y keys. Built hidden and filled by patchMainHead,
+    // NOT decided here: discovery normally lands while the session is already
+    // selected (the daemon sweep refreshes pr_info with no selection change),
+    // the same render-time trap Retry hit (#1932).
+    const prBadge = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+    prBadge.hidden = true;
+    this.prBadge = prBadge;
+    this.prBadgeSig = "";
+    // The title wrapper remains title-only: the mobile shell hides that repeated
+    // chrome to reclaim its sole control row (#2354), while the PR link must stay
+    // reachable there. The "Live · master" meta that used to sit beside the title
+    // was removed as chrome nobody wanted to look at (#2458); the badge is not
+    // that — it carries an action (follow the PR), not ambient state.
     const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
@@ -1978,7 +1996,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2553,6 +2571,25 @@ export class AppShell {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
+    }
+
+    // Fill/patch the PR badge (#3285) in place, like Retry/Handoff above and for
+    // the same reason: the daemon's sweep discovers a PR while the session is
+    // already selected, which is no selection change, so renderMain never runs.
+    // The sig covers everything the badge draws, so an unrelated snapshot never
+    // touches the DOM and a state flip (open → merged) patches exactly once.
+    if (this.prBadge) {
+      const badge = prBadgeContent(selected);
+      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
+      if (sig !== this.prBadgeSig) {
+        this.prBadgeSig = sig;
+        if (badge) {
+          this.prBadge.textContent = badge.label;
+          this.prBadge.href = badge.url;
+          this.prBadge.title = badge.tooltip;
+        }
+        this.prBadge.hidden = badge === null;
+      }
     }
   }
 

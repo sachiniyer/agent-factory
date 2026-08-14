@@ -1042,6 +1042,23 @@ button:disabled,
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.af-pr-badge {
+  flex: 0 0 auto;
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+  text-decoration: none;
+  border: 1px solid var(--af-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  white-space: nowrap;
+}
+.af-pr-badge:hover {
+  color: var(--af-accent);
+  border-color: var(--af-accent);
+}
+.af-pr-badge[hidden] {
+  display: none;
+}
 .af-archive-warning {
   flex: 0 0 auto;
   max-height: 6rem;

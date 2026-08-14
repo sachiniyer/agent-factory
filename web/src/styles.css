@@ -1351,6 +1351,32 @@ button:disabled,
   text-overflow: ellipsis;
 }
 
+/* The session's daemon-discovered PR, as a static text chip that IS the link
+ * (#3285) — no glyph animation (#1766). It never steals width from the title
+ * (flex 0 0), and the hidden case is pinned as an author rule for the same
+ * reason as .af-term-action[hidden] above: the day this gains a `display`
+ * for icon alignment, the UA default would lose and an empty badge would
+ * appear on every session. */
+.af-pr-badge {
+  flex: 0 0 auto;
+  font-size: var(--af-fs-xs);
+  color: var(--af-text-2);
+  text-decoration: none;
+  border: 1px solid var(--af-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  white-space: nowrap;
+}
+
+.af-pr-badge:hover {
+  color: var(--af-accent);
+  border-color: var(--af-accent);
+}
+
+.af-pr-badge[hidden] {
+  display: none;
+}
+
 /* A durable incomplete-archive notice, sourced from the daemon snapshot rather
  * than from the restore call that may have happened before this client existed.
  * Keep the complete bounded text scrollable so retained source paths remain

@@ -1498,6 +1498,88 @@ test("status semantics (#1766, #3220): action groups are legible and glyphs stay
   await ctx.close();
 });
 
+test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, absent when unknown", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // Synthetic rows again, and for the same reason as the status probes above:
+  // pr_info is a pure projection of the snapshot, no daemon can be coerced into
+  // discovering a PR on demand inside the sandbox, and a synthetic id receives no
+  // deltas, so the pinned state is the only state there will ever be. This drives
+  // the REAL render path — prBadgeContent → renderMain/patchMainHead — end to end.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    list.push(
+      {
+        ...proto,
+        id: "synth-probe-pr",
+        title: "probe-pr",
+        branch: "synth-probe-pr",
+        liveness: 2,
+        in_flight_op: 0,
+        pr_info: {
+          number: 77,
+          state: "OPEN",
+          url: "https://github.com/example/repo/pull/77",
+          title: "Teach the rail to sing",
+        },
+      },
+      // The wire spells "no PR discovered" as pr_info: {} — Go's omitempty cannot
+      // drop a struct field — so the fail-closed side is asserted against that
+      // exact spelling, not against a conveniently absent field.
+      {
+        ...proto,
+        id: "synth-probe-no-pr",
+        title: "probe-no-pr",
+        branch: "synth-probe-no-pr",
+        liveness: 2,
+        in_flight_op: 0,
+        pr_info: {},
+      },
+    );
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  await expect(row(p, "probe-pr")).toBeVisible({ timeout: 15_000 });
+  await row(p, "probe-pr").click();
+  const badge = p.locator(".af-pr-badge");
+  await expect(badge).toBeVisible();
+  // Number + lowercased state, sentence case, the repo's ` · ` separator — and the
+  // chip IS the link, carrying the projected URL.
+  await expect(badge).toHaveText("PR #77 · open");
+  await expect(badge).toHaveAttribute("href", "https://github.com/example/repo/pull/77");
+  // Both halves of the safe-link contract (#3300 delta): _blank alone hands the
+  // opened page a window reference; noopener/noreferrer is what revokes it.
+  await expect(badge).toHaveAttribute("target", "_blank");
+  await expect(badge).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(badge).toHaveAttribute("title", /Teach the rail to sing/);
+
+  // The selected-session mobile shell deliberately hides the repeated title
+  // wrapper to reclaim the only control row (#2354). The PR link is an action,
+  // not repeated chrome, so it must remain reachable when that wrapper vanishes.
+  await p.setViewportSize({ width: 390, height: 844 });
+  await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
+  await p.setViewportSize({ width: 1280, height: 720 });
+
+  // Fail closed: moving the selection to a row whose projection is the empty
+  // struct must withdraw the badge — not leave a stale chip pointing at the
+  // previous session's PR.
+  await row(p, "probe-no-pr").click();
+  await expect(badge).toBeHidden();
+
+  await ctx.close();
+});
+
 test("#2234: creating and id-less rows expose no lifecycle actions; the shared projection chooses the verb", REAL_FIXTURE, async ({
   browser,
 }) => {

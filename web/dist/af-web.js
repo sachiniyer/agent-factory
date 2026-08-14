@@ -10094,6 +10094,16 @@ function isLimitReached(s) {
 function canHandoff(s) {
   return s.can_handoff === true;
 }
+function prBadgeContent(s) {
+  const pr = s.pr_info;
+  if (!pr || !pr.number || pr.number <= 0 || !pr.url) {
+    return null;
+  }
+  const state = (pr.state ?? "").toLowerCase();
+  const label = state === "" ? `PR #${pr.number}` : `PR #${pr.number} \xB7 ${state}`;
+  const tooltip = pr.title ? `${pr.title} \u2014 open on GitHub` : `Open PR #${pr.number} on GitHub`;
+  return { label, url: pr.url, tooltip };
+}
 function isRootSession(s) {
   return s.is_root === true;
 }
@@ -13250,6 +13260,12 @@ var AppShell = class {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   handoffBtn = null;
   handoffVisible = false;
+  // The PR badge link and the signature of what it currently draws (#3285). Same
+  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
+  // session's PR — or its state flips open → merged — WITHOUT a selection change,
+  // so patchMainHead fills it rather than deciding once at build time.
+  prBadge = null;
+  prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -13884,6 +13900,10 @@ var AppShell = class {
       return;
     }
     this.headTitle = h2("span", { class: "af-term-title" }, selected.title);
+    const prBadge = h2("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+    prBadge.hidden = true;
+    this.prBadge = prBadge;
+    this.prBadgeSig = "";
     const titleBox = h2("div", { class: "af-term-head-main" }, this.headTitle);
     const retryBtn = h2("button", { type: "button", class: "af-ghost af-term-action" }, "Retry");
     retryBtn.title = "Resume this session from its usage-limit wall";
@@ -13912,7 +13932,7 @@ var AppShell = class {
     this.attachTabReorder(tabBar);
     this.attachTabRename(tabBar);
     this.attachTabTouchDrag(tabBar);
-    const head = h2("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h2("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h2("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -14326,6 +14346,19 @@ var AppShell = class {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
+    }
+    if (this.prBadge) {
+      const badge = prBadgeContent(selected);
+      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
+      if (sig !== this.prBadgeSig) {
+        this.prBadgeSig = sig;
+        if (badge) {
+          this.prBadge.textContent = badge.label;
+          this.prBadge.href = badge.url;
+          this.prBadge.title = badge.tooltip;
+        }
+        this.prBadge.hidden = badge === null;
+      }
     }
   }
   /** Keeps management reachable when the selected session's rail row is filtered

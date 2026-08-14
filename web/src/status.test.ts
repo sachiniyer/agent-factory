@@ -21,6 +21,7 @@ import {
   operatorKind,
   rowStatus,
   rowTitle,
+  prBadgeContent,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -291,3 +292,44 @@ function isoTodayAt(hour: number, min: number): string {
   d.setHours(hour, min, 0, 0);
   return d.toISOString();
 }
+
+// The PR badge (#3285) CONSUMES the daemon-discovered pr_info projection
+// (#3232/#3287) — number, state, url — never deriving anything in the browser.
+test("prBadgeContent renders number + lowercased state as a sentence-case label with the repo separator", () => {
+  const badge = prBadgeContent(
+    sess({ pr_info: { number: 12, state: "OPEN", url: "https://github.com/o/r/pull/12", title: "Fix the thing" } }),
+  );
+  assert.ok(badge, "a discovered PR with a number and url must render");
+  assert.equal(badge.label, "PR #12 · open");
+  assert.equal(badge.url, "https://github.com/o/r/pull/12");
+  assert.ok(badge.tooltip.includes("Fix the thing"), "the projected PR title rides in the tooltip");
+});
+
+test("prBadgeContent keeps an unknown future state honest instead of hiding it", () => {
+  const badge = prBadgeContent(
+    sess({ pr_info: { number: 7, state: "MERGED", url: "https://github.com/o/r/pull/7" } }),
+  );
+  assert.ok(badge);
+  assert.equal(badge.label, "PR #7 · merged");
+  const stateless = prBadgeContent(sess({ pr_info: { number: 7, url: "https://github.com/o/r/pull/7" } }));
+  assert.ok(stateless);
+  assert.equal(stateless.label, "PR #7", "no state → number alone, no dangling separator");
+});
+
+// Go's omitempty cannot drop a struct field, so a session with no discovered PR
+// arrives as pr_info: {} — the badge must fail CLOSED on it, and on any record
+// missing the link target the badge exists to be followed to.
+test("prBadgeContent fails closed on empty or linkless projections", () => {
+  assert.equal(prBadgeContent(sess()), null, "absent pr_info renders nothing");
+  assert.equal(prBadgeContent(sess({ pr_info: {} })), null, "the wire's empty struct renders nothing");
+  assert.equal(
+    prBadgeContent(sess({ pr_info: { number: 3, state: "OPEN" } })),
+    null,
+    "a PR without a url has nowhere to go — no badge",
+  );
+  assert.equal(
+    prBadgeContent(sess({ pr_info: { url: "https://github.com/o/r/pull/9" } })),
+    null,
+    "a url without a number is not a renderable PR identity",
+  );
+});
