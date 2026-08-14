@@ -55,6 +55,8 @@ func nodeMutatesAccountEnvironment(node syntax.Node, names map[string]struct{}) 
 		return arithmeticAssignmentMutatesAccountEnvironment(node, names)
 	case *syntax.UnaryArithm:
 		return arithmeticIncrementMutatesAccountEnvironment(node, names)
+	case *syntax.UnaryTest:
+		return unaryTestMutatesAccountEnvironment(node)
 	default:
 		return false
 	}
@@ -135,6 +137,8 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "wait"):
 		return waitMutatesAccountEnvironment(words[1:], names)
+	case isBareName(words[0], "test"), isBareName(words[0], "["):
+		return variableTestMutatesAccountEnvironment(words[1:])
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
 		isBareName(words[0], "source"), isBareName(words[0], "trap"),
 		isBareName(words[0], "alias"), isBareName(words[0], "fc"),
@@ -223,11 +227,50 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "stdbuf"):
+			var unsafe bool
+			words, unsafe = unwrapStdbuf(words[1:])
+			if unsafe {
+				return nil, true
+			}
 		default:
 			return words, false
 		}
 	}
 	return nil, false
+}
+
+func variableTestMutatesAccountEnvironment(words []*syntax.Word) bool {
+	for idx := 0; idx < len(words); idx++ {
+		option, literal := literalShellWord(words[idx])
+		if !literal {
+			return true
+		}
+		if option != "-v" {
+			continue
+		}
+		if idx+1 >= len(words) {
+			return true
+		}
+		operand, literal := literalShellWord(words[idx+1])
+		if !literal || strings.Contains(operand, "[") {
+			return true
+		}
+		idx++
+	}
+	return false
+}
+
+func unaryTestMutatesAccountEnvironment(test *syntax.UnaryTest) bool {
+	if test.Op != syntax.TsVarSet {
+		return false
+	}
+	word, ok := test.X.(*syntax.Word)
+	if !ok {
+		return true
+	}
+	operand, literal := literalShellWord(word)
+	return !literal || strings.Contains(operand, "[")
 }
 
 func unwrapCommandBuiltin(words []*syntax.Word) ([]*syntax.Word, bool) {

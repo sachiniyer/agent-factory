@@ -541,10 +541,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 
 	if err := instance.Start(false); err != nil {
 		var unknownScope *accountTabScopeUnknownError
-		if errors.As(err, &unknownScope) {
-			// The agent restore was rolled back, but the sibling probe did not
-			// establish whether its pre-scope pane is live. Keep the row inert and
-			// explicitly killable so storage retains its exact tmux cleanup handle.
+		if errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh) {
+			// A sibling probe or the live agent's in-place scope upgrade did not
+			// establish a safe runtime boundary. Keep the row inert and explicitly
+			// killable so storage retains every exact tmux cleanup handle.
 			instance.MarkStartupStateUnknown()
 			return instance, nil
 		}

@@ -182,6 +182,17 @@ func TestApplyAccountEnvironment_RefusesSetsidWrappedShell(t *testing.T) {
 	}
 }
 
+func TestApplyAccountEnvironment_RefusesStdbufWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"stdbuf -oL sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/stdbuf -oL sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "stdbuf must not hide a nested identity mutation in %q", command)
+	}
+}
+
 func TestApplyAccountEnvironment_RefusesBashArithmeticCommand(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	_, err := ApplyAccountEnvironment(nil, "(( 0, CODEX_HOME=42 )); codex", account)
@@ -223,6 +234,18 @@ func TestApplyAccountEnvironment_RefusesDynamicBuiltinLoading(t *testing.T) {
 	require.Error(t, err, "a dynamically loaded builtin can mutate the current shell environment")
 }
 
+func TestApplyAccountEnvironment_RefusesArrayVariableTests(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"test -v 'arr[CODEX_HOME=42]'; codex",
+		"[ -v 'arr[CODEX_HOME=42]' ]; codex",
+		"[[ -v 'arr[CODEX_HOME=42]' ]]; codex",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "array variable test must not evaluate an identity mutation in %q", command)
+	}
+}
+
 func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
@@ -241,6 +264,7 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"nice -n 5 make",
 		"timeout 10 make",
 		"setsid make",
+		"stdbuf -oL make",
 		"for PORT in 3000; do make; done",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",

@@ -522,6 +522,9 @@ func (t *TmuxSession) RestoreWithResult(workDir string) (RestoreResult, error) {
 	if workDir != "" {
 		monitor = newReattachStatusMonitor()
 	}
+	if err := t.refreshRestoredAccountEnvironment(); err != nil {
+		return RestoreReattached, fmt.Errorf("%w: %w", ErrAccountEnvironmentRefresh, err)
+	}
 	t.setMonitor(monitor)
 	return RestoreReattached, nil
 }

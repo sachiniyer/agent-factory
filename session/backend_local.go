@@ -131,19 +131,6 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-// Launch starts (or restores) the agent PROCESS in the workspace Provision
-// established (#1592 Phase 1 PR4): it materializes the worktree on disk
-// (worktree.Setup on a fresh create), spawns or reconnects the tmux session, and
-// brings up the non-agent tabs. It owns the failure-cleanup scope: a fresh
-// worktree is removed only when the failure positively proves no runtime began,
-// while an unknown post-spawn outcome preserves it; a restore failure releases
-// only the attach PTY. worktree.Setup deliberately stays here rather than in
-// provision because it is the first on-disk mutation and therefore belongs
-// inside this cleanup scope.
-func (b *LocalBackend) Launch(i *Instance, firstTimeSetup bool) error {
-	return b.launch(i, firstTimeSetup, nil)
-}
-
 func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *CreateLaunchPlan) error {
 	i.mu.RLock()
 	tmuxSession := i.tmuxLocked()
@@ -152,6 +139,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	// Setup error handler to cleanup resources on any error.
 	// Kill() acquires its own lock, so we must not hold i.mu here.
 	var setupErr error
+	preserveAgentHandle := false
 	defer func() {
 		if setupErr != nil {
 			if firstTimeSetup {
@@ -179,10 +167,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// has already run, so it must release EVERY tab's PTY.
 				i.mu.Lock()
 				ts := i.tmuxLocked()
-				i.setTmuxLocked(nil)
+				if !preserveAgentHandle {
+					i.setTmuxLocked(nil)
+				}
 				i.started = false
 				i.mu.Unlock()
-				if ts != nil {
+				if ts != nil && !preserveAgentHandle {
 					if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 						setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
 					}
@@ -241,6 +231,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
+			preserveAgentHandle = errors.Is(err, tmux.ErrAccountEnvironmentRefresh)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}

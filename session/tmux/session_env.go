@@ -177,9 +177,7 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
 	var sessionEnv []string
 	if account != "" {
-		identityNames := sessionenv.AccountIdentityNames(accountAgent)
-		boundaryNames := append([]string(nil), identityNames...)
-		boundaryNames = append(boundaryNames, sessionenv.AccountShellStartupNames()...)
+		boundaryNames := accountSessionBoundaryNames(accountAgent)
 		launchEnv = removeEnvironmentNames(launchEnv, boundaryNames)
 		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
 		if resolveErr != nil {
@@ -215,6 +213,57 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		}
 	}
 	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, nil
+}
+
+func accountSessionBoundaryNames(agent string) []string {
+	names := append([]string(nil), sessionenv.AccountIdentityNames(agent)...)
+	names = append(names, sessionenv.AccountShellStartupNames()...)
+	sort.Strings(names)
+	return names
+}
+
+func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
+	_, _, _, account, accountAgent, _ := t.launchSnapshot()
+	if account == "" {
+		return nil
+	}
+	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment()
+	if err != nil {
+		return err
+	}
+	selected := make(map[string]string, len(sessionEnv))
+	for _, entry := range sessionEnv {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			selected[name] = value
+		}
+	}
+	for _, name := range accountSessionBoundaryNames(accountAgent) {
+		args := []string{"set-environment", "-r", "-t", exactTarget(t.sanitizedName), name}
+		if value, ok := selected[name]; ok {
+			args = []string{"set-environment", "-t", exactTarget(t.sanitizedName), name, value}
+		}
+		if err := t.runRestoredAccountCommand(args...); err != nil {
+			return err
+		}
+	}
+	return t.runRestoredAccountCommand(
+		"set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand,
+	)
+}
+
+func (t *TmuxSession) runRestoredAccountCommand(args ...string) error {
+	ctx, cancel := tmuxTimeoutContext()
+	err := t.runTmuxBounded(ctx, args...)
+	timedOut := ctx.Err() != nil
+	cancel()
+	if timedOut {
+		return fmt.Errorf("%w: %s while refreshing %s", ErrTmuxTimeout, args[0], t.sanitizedName)
+	}
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", args[0], t.sanitizedName, err)
+	}
+	return nil
 }
 
 func removeEnvironmentNames(environ, names []string) []string {

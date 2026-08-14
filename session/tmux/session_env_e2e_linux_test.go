@@ -244,6 +244,31 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
 	assertAccountScopedNewWindow(t, agent, accountDir, dir)
+	if output, err := exec.Command(
+		"tmux", "set-option", "-t", exactTarget(agent.SanitizedName()), "default-command", "",
+	).CombinedOutput(); err != nil {
+		t.Fatalf("clear pre-fix agent default command: %v: %s", err, output)
+	}
+	for name, value := range map[string]string{
+		"CODEX_HOME":     ambientHome,
+		"OPENAI_API_KEY": "ambient-must-not-reach-tab",
+	} {
+		if output, err := exec.Command(
+			"tmux", "set-environment", "-t", exactTarget(agent.SanitizedName()), name, value,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("install pre-fix agent environment %s: %v: %s", name, err, output)
+		}
+	}
+	restoredAgent := NewTmuxSessionFromSanitizedName(agent.SanitizedName(), ProgramCodex)
+	restoredAgent.SetAccountForAgent(ProgramCodex, "work")
+	result, err := restoredAgent.RestoreWithResult(dir)
+	if err != nil {
+		t.Fatalf("restore account-scoped parent session: %v", err)
+	}
+	if result != RestoreReattached {
+		t.Fatalf("restored live agent result = %v, want reattached", result)
+	}
+	assertAccountScopedNewWindow(t, restoredAgent, accountDir, dir)
 
 	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", "/bin/sh")
 	if err != nil {
@@ -323,6 +348,9 @@ func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir
 		t.Fatalf("open tmux-created shell window: %v", err)
 	}
 	newWindowReport := filepath.Join(dir, session.SanitizedName()+"-new-window-environment")
+	if err := os.Remove(newWindowReport); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("clear prior new-window report: %v", err)
+	}
 	newWindowCommand := "printf 'CODEX_HOME=%s\\nOPENAI_API_KEY=%s\\n' \"${CODEX_HOME-<unset>}\" \"${OPENAI_API_KEY-<unset>}\" > " +
 		shellquote.Quote(newWindowReport)
 	target := strings.TrimSpace(string(newPane))

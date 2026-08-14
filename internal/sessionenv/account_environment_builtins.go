@@ -117,6 +117,42 @@ func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
+func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			return words[1:], false
+		case option == "--help" || option == "--version":
+			return nil, false
+		case option == "-i" || option == "--input" ||
+			option == "-o" || option == "--output" ||
+			option == "-e" || option == "--error":
+			if len(words) < 2 {
+				return nil, true
+			}
+			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			words = words[2:]
+		case strings.HasPrefix(option, "--input=") ||
+			strings.HasPrefix(option, "--output=") ||
+			strings.HasPrefix(option, "--error="):
+			words = words[1:]
+		case len(option) > 2 && option[0] == '-' && strings.ContainsRune("ioe", rune(option[1])):
+			words = words[1:]
+		case strings.HasPrefix(option, "-"):
+			return nil, true
+		default:
+			return words, false
+		}
+	}
+	return nil, false
+}
+
 func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	sawResultTarget := false
 	for len(words) > 0 {

@@ -349,6 +349,56 @@ func TestLoad_AccountUnknownSiblingProbeRetainsInertRecord(t *testing.T) {
 		"an inconclusive probe is not permission to kill the sibling")
 }
 
+func TestLoad_AccountAgentEnvironmentRefreshFailureRetainsHandle(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_account_refresh_failure"
+	inner := nameKeyedExec(map[string]bool{agentName: true})
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "set-environment") {
+				return errors.New("tmux session environment refused update")
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	instance, err := FromInstanceData(InstanceData{
+		ID:       "account-refresh-failure-id",
+		Title:    "account-refresh-failure",
+		Path:     "/tmp/account-refresh-failure-repo",
+		Program:  tmux.ProgramCodex,
+		Account:  "work",
+		Status:   Running,
+		TmuxName: agentName,
+		Tabs:     []TabData{{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName}},
+		Worktree: GitWorktreeData{
+			RepoPath:     "/tmp/account-refresh-failure-repo",
+			WorktreePath: t.TempDir(),
+			SessionName:  "account-refresh-failure",
+			BranchName:   "af/account-refresh-failure",
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, instance.StartupStateUnknown())
+	require.False(t, instance.Started())
+	stored := instance.ToInstanceData()
+	require.True(t, stored.StartupStateUnknown)
+	require.Len(t, stored.Tabs, 1)
+	require.Equal(t, agentName, stored.Tabs[0].TmuxName,
+		"a failed in-place scope upgrade must retain the live agent cleanup handle")
+}
+
 func TestLoad_AccountRestoreRaceStopsReattachedPreScopeSibling(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()

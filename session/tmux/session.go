@@ -251,6 +251,10 @@ var ErrSessionGone = errors.New("tmux session no longer exists")
 // by hasStableTmuxSpelling can turn a confirmed absence into this marker.
 var ErrSessionNotStarted = errors.New("tmux session definitely did not start")
 
+// ErrAccountEnvironmentRefresh marks a live restored tmux session whose scoped
+// session environment or default command could not be upgraded in place.
+var ErrAccountEnvironmentRefresh = errors.New("account-scoped tmux environment refresh failed")
+
 // DetachKeyByte is the ASCII byte for the key used to detach from attached sessions.
 // Default is 23 (Ctrl-W). Set via SetDetachKey.
 var DetachKeyByte byte = 23
