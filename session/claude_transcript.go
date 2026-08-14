@@ -16,11 +16,11 @@ import (
 var claudeConversationFileRE = regexp.MustCompile(`(?i)^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
 // ClaudeProjectConversationState is the on-disk evidence used to validate a
-// recorded Claude conversation before a root-agent restore. Latest is empty
-// when the project has no transcript; RecordedExists reports the recorded ID
-// independently so a caller can distinguish rotation from a missing carry.
+// recorded Claude conversation before a root-agent restore. Resume is the
+// recorded conversation while its transcript exists, otherwise the newest
+// project transcript; it is empty when the project has no transcript.
 type ClaudeProjectConversationState struct {
-	Latest         AgentConversationData
+	Resume         AgentConversationData
 	RecordedExists bool
 }
 
@@ -60,8 +60,17 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 			continue
 		}
 		id := match[1]
+		conversation := AgentConversationData{
+			Agent:       tmux.ProgramClaude,
+			ID:          id,
+			CapturedAt:  time.Now(),
+			CaptureKind: ConversationCaptureClaudeTranscript,
+		}
 		if recorded.Agent == tmux.ProgramClaude && strings.EqualFold(id, strings.TrimSpace(recorded.ID)) {
-			state.RecordedExists = true
+			return ClaudeProjectConversationState{
+				Resume:         conversation,
+				RecordedExists: true,
+			}, nil
 		}
 		if latestName != "" && (info.ModTime().Before(latestModTime) ||
 			(info.ModTime().Equal(latestModTime) && entry.Name() < latestName)) {
@@ -69,12 +78,7 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 		}
 		latestName = entry.Name()
 		latestModTime = info.ModTime()
-		state.Latest = AgentConversationData{
-			Agent:       tmux.ProgramClaude,
-			ID:          id,
-			CapturedAt:  time.Now(),
-			CaptureKind: ConversationCaptureClaudeTranscript,
-		}
+		state.Resume = conversation
 	}
 	return state, nil
 }
