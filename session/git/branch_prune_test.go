@@ -317,6 +317,28 @@ func TestDeleteLocalBranch_SeparateGitDirUnreadableLooseRefIsErrorNotAbsence(t *
 		"sanity: the branch exists the whole time")
 }
 
+// TestDeleteLocalBranch_WhitespaceSuffixedGitDirIsErrorNotAbsence pins that
+// the common-dir resolution takes git's output verbatim up to its terminating
+// newline: a --separate-git-dir path may legitimately end in whitespace, and
+// trimming it would point the loose-ref observation at a nonexistent path,
+// whose ENOENT then reads as confirmed absence while the ref sits in the real
+// directory. (git prints the path followed by exactly one '\n' — measured.)
+func TestDeleteLocalBranch_WhitespaceSuffixedGitDirIsErrorNotAbsence(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "repo")
+	gitdir := filepath.Join(base, "gitdir ")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	runGit(t, root, "init", "-q", "-b", "master", "--separate-git-dir", gitdir, ".")
+	runGit(t, root, "commit", "-q", "--allow-empty", "-m", "initial")
+	require.NoError(t, os.WriteFile(filepath.Join(gitdir, "refs", "heads", "af-broken"),
+		[]byte("not-a-sha\n"), 0o644))
+
+	deleted, err := DeleteLocalBranch(root, "af-broken")
+	require.Error(t, err,
+		"a present loose ref file must be observed even when the git dir path ends in whitespace")
+	assert.False(t, deleted)
+}
+
 // TestDeleteLocalBranch_LinkedWorktreeMissingBranchIsCleanNoOp guards the
 // resolution against over-retaining: a genuinely absent branch probed from a
 // linked-worktree root must stay a determinate, silent no-op.

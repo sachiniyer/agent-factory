@@ -93,7 +93,11 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 			return false, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
 				repoRoot, err, strings.TrimSpace(commonErr.String()))
 		}
-		commonDir := strings.TrimSpace(commonOut.String())
+		// Strip ONLY the terminating newline: a --separate-git-dir path may
+		// legitimately end in whitespace, and TrimSpace would point the loose-ref
+		// observation at a nonexistent trimmed path, whose ENOENT then fabricates
+		// exactly the confirmed absence this arm exists to prevent.
+		commonDir := strings.TrimSuffix(commonOut.String(), "\n")
 		if !filepath.IsAbs(commonDir) {
 			// Relative output is relative to the -C directory.
 			commonDir = filepath.Join(repoRoot, commonDir)
