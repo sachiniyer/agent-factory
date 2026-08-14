@@ -145,7 +145,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 	candidates := make([]sourceCandidate, 0, len(documents))
 	for _, document := range documents {
 		allowed := sourceInPrecedence(document.layer, entry.Precedence)
-		configured, present := document.metadata.topLevel(entry.Key)
+		configured, present, keyPath := document.metadata.topLevelWithKeyPath(entry.Key)
 		if document.isBuiltIn() {
 			present = allowed
 		}
@@ -153,7 +153,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 			Layer:   document.layer.String(),
 			Path:    document.metadata.path,
 			Format:  sourceFormatName(document.metadata.format),
-			KeyPath: entry.Key,
+			KeyPath: keyPath,
 			Allowed: allowed,
 			Present: present,
 			Value:   nil,
@@ -211,7 +211,7 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 		!jsonEquivalent(winnerTrace.Value, clonedInterface(candidates[winner].typed)) {
 		winnerTrace.Reason += "; load-time normalization changed the configured value before resolution"
 	}
-	ref := sourceReference(candidates[winner].document, entry.Key)
+	ref := sourceReference(candidates[winner].document, winnerTrace.KeyPath)
 	result.Winner = &ref
 
 	for i := range candidates {

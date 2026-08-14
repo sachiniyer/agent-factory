@@ -371,8 +371,8 @@ func TestManifestIsTierOrdered(t *testing.T) {
 // first, so an addition to it is a product decision, not a drive-by.
 func TestManifestTierAssignments(t *testing.T) {
 	wantCore := []string{
-		"default_program", "listen_addr", "require_token",
-		"require_loopback_token", "update_channel", "auto_update",
+		"default_program", "network.listen_addr", "network.require_token",
+		"network.require_loopback_token", "update_channel", "auto_update",
 	}
 	wantCommon := []string{"theme", "vscode_server_binary"}
 
@@ -498,8 +498,8 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 
 	for _, want := range []string{
 		"`af config set default_program <value>`",
-		"`af config set listen_addr <value>`",
-		"`af config set require_loopback_token <value>`",
+		"`af config set network.listen_addr <value>`",
+		"`af config set network.require_loopback_token <value>`",
 		"`af config set program_overrides.<name> <value>`",
 		"`af config set limit_patterns.<name> <value>`",
 	} {

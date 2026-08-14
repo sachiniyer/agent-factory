@@ -721,7 +721,7 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 			}
 			w := res.Warnings[0]
 			// The warning has to say what is wrong AND what to do about it.
-			for _, want := range []string{"require_token", "af config set require_token true"} {
+			for _, want := range []string{"network.require_token", "af config set network.require_token true"} {
 				if !strings.Contains(w, want) {
 					t.Errorf("warning must mention %q, got: %s", want, w)
 				}

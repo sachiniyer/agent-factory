@@ -41,20 +41,20 @@ With af running, open:
     http://localhost:8443
 
 It needs no token by default, so the page connects as soon as it loads. Set
-listen_addr to change the address (or to "" to turn the web server off).
-require_token = true demands a bearer token ('af token show') from network
+network.listen_addr to change the address (or to "" to turn the web server off).
+network.require_token = true demands a bearer token ('af token show') from network
 peers; on the default loopback listener same-host callers stay exempt, so the
-UI keeps opening with no login on this machine. Add require_loopback_token =
+UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
-another machine, either ssh to that host and run 'af' there, or give listen_addr
+another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
 --token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with require_token = false anyone who can reach the
-address drives your agents, so set require_token = true unless you trust the
+once at daemon start: with network.require_token = false anyone who can reach the
+address drives your agents, so set network.require_token = true unless you trust the
 network. That listener speaks plain HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
@@ -267,10 +267,10 @@ func printDaemonStatusHuman(cmd *cobra.Command, info daemonStatusInfo) {
 			fmt.Fprintf(w, "  tcp listener:   %s (not bound)\n", info.Listeners.TCPListenAddr)
 		}
 		// The web-tab preview listener (#1856). Only printed when configured, so an
-		// operator who never set preview_listen_addr sees no extra line.
+		// operator who never set network.preview_listen_addr sees no extra line.
 		switch {
 		case !info.Listeners.PreviewConfigured:
-			// preview_listen_addr unset: omit the line entirely (the common case).
+			// network.preview_listen_addr unset: omit the line entirely (the common case).
 		case info.Listeners.PreviewBound:
 			fmt.Fprintf(w, "  preview listen: %s (bound)\n", info.Listeners.PreviewBoundAddr)
 		default:

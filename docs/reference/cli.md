@@ -248,7 +248,7 @@ listener that requires a bearer token on every request.
 This does not start the web UI, and serves no frontend at all — opening its port
 in a browser returns a 404 saying so. If you want the browser app, run the
 daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its listen_addr; agent-server is only
+is bundled into the daemon and served from its network.listen_addr; agent-server is only
 the headless per-workspace backend that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 
@@ -259,7 +259,7 @@ to host one workspace as a backend for a daemon on another machine.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
-port). Its token is mandatory for every peer, whatever the global require_token
+port). Its token is mandatory for every peer, whatever the global network.require_token
 key says: that key governs only the daemon's own web listener. On startup
 it prints one JSON line to stdout carrying the bound address and the bearer
 token. On SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the
@@ -672,18 +672,18 @@ Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode, devin)
   program_overrides.<agent>  full command string for an agent
   auto_update                true | false
-  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+  network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and require_token defaults to FALSE —
-                             set require_token = true in the same breath, or anyone who can reach the
+                             full control plane on the network, and network.require_token defaults to FALSE —
+                             set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
-  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
-  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
-  preview_listen_addr        host:port for a separate per-tab web-tab preview origin (and, on a loopback
+  network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
-                             Kept apart from listen_addr on purpose: it serves previews/editors only, never
-                             the control API. Same address grammar as listen_addr.
+                             Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
+                             the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -699,11 +699,13 @@ Settable keys:
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
-  cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Legacy CLI aliases docker_mount_agent_credentials, ssh_host_key_verification,
-and sandbox_ssh remain accepted and edit the same canonical grouped values.
+Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
+require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
+ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
+canonical grouped values.
 
 Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
@@ -834,20 +836,20 @@ With af running, open:
     http://localhost:8443
 
 It needs no token by default, so the page connects as soon as it loads. Set
-listen_addr to change the address (or to "" to turn the web server off).
-require_token = true demands a bearer token ('af token show') from network
+network.listen_addr to change the address (or to "" to turn the web server off).
+network.require_token = true demands a bearer token ('af token show') from network
 peers; on the default loopback listener same-host callers stay exempt, so the
-UI keeps opening with no login on this machine. Add require_loopback_token =
+UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
-another machine, either ssh to that host and run 'af' there, or give listen_addr
+another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
 --token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with require_token = false anyone who can reach the
-address drives your agents, so set require_token = true unless you trust the
+once at daemon start: with network.require_token = false anyone who can reach the
+address drives your agents, so set network.require_token = true unless you trust the
 network. That listener speaks plain HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
@@ -1308,7 +1310,7 @@ autostart unit is only paused when it serves this AGENT_FACTORY_HOME; a daemon
 or unit for a different AF home is never touched.
 
 KEEPS your real git repositories (working tree, .git, and your own branches),
-and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
+and KEEPS the daemon configuration (config.toml: network.listen_addr, defaults,
 root_agents, update_channel, and per-repo config). After the wipe the
 supervised daemon restarts with empty session/task state and the same config;
 root_agents in config re-register, which is intended.
@@ -2466,7 +2468,7 @@ Manage the daemon's bearer token for the direct-TCP API
 Manage the bearer token that authenticates the daemon's direct-TCP HTTP API.
 
 The token grants full access under the single-owner auth model. It is only used
-by the TCP listener (enabled with the listen_addr config key); the local unix
+by the TCP listener (enabled with the network.listen_addr config key); the local unix
 socket stays unauthenticated (its 0600 filesystem perms are the local auth).
 The token is stored in the af home (~/.agent-factory) with 0600 permissions.
 

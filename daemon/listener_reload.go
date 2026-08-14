@@ -12,19 +12,19 @@ import (
 )
 
 // webListeners owns the daemon's two restartable TCP listeners — the control-plane
-// web listener (listen_addr) and the web-tab preview listener (preview_listen_addr)
-// — so #2480 PR2 can apply a listen_addr / preview_listen_addr change in place
+// web listener (network.listen_addr) and the web-tab preview listener (network.preview_listen_addr)
+// — so #2480 PR2 can apply a network.listen_addr / network.preview_listen_addr change in place
 // without a daemon restart. It is the ONE bind path: startHTTPServer does the
 // initial bind through it, and ApplyConfig's reconcile does the rebinds, so the
 // two can never drift.
 //
 // It handles ONLY the two socket keys. The auth/CORS keys
-// (require_token / require_loopback_token / cors_allowed_origins) read live config
+// (network.require_token / network.require_loopback_token / network.cors_allowed_origins) read live config
 // per request (livePosture) and never rebind. Two reasons, and the first is a
 // CONSTRAINT — much harder for a future refactor to argue away than a preference:
 //
-//  1. Mechanically, they CANNOT rebind. The common change — require_token flipped
-//     with listen_addr UNCHANGED — would have to bind a new listener on the SAME
+//  1. Mechanically, they CANNOT rebind. The common change — network.require_token flipped
+//     with network.listen_addr UNCHANGED — would have to bind a new listener on the SAME
 //     address the old one still holds, which fails with "address already in use".
 //     The only way to bind that same port is to close the old FIRST — the exact
 //     close-then-bind ordering that bricks the daemon when the new bind then fails.
@@ -55,7 +55,7 @@ type webListeners struct {
 	// unexpected Serve exit does not make it stale. webConfigAddr describes only
 	// the live binding: it is the CONFIG value that produced the listener (not the
 	// resolved bound address), so reconcile compares like-for-like. "" means not
-	// accepting (or the listen_addr="" opt-out).
+	// accepting (or the network.listen_addr="" opt-out).
 	webClose      func() error
 	webConfigAddr string
 	// webGen distinguishes listener generations so a superseded listener's Serve
@@ -94,21 +94,21 @@ func (wl *webListeners) reconcile(newCfg *config.Config) (failed []string, err e
 		(newCfg.ListenAddr == "" && wl.webClose != nil) {
 		if e := wl.bindWebLocked(newCfg.ListenAddr); e != nil {
 			errs = append(errs, e)
-			failed = append(failed, "listen_addr")
+			failed = append(failed, "network.listen_addr")
 		}
 	}
 	if newCfg.PreviewListenAddr != wl.previewConfigAddr ||
 		(newCfg.PreviewListenAddr == "" && wl.previewClose != nil) {
 		if e := wl.bindPreviewLocked(newCfg.PreviewListenAddr); e != nil {
 			errs = append(errs, e)
-			failed = append(failed, "preview_listen_addr")
+			failed = append(failed, "network.preview_listen_addr")
 		}
 	}
 	return failed, errors.Join(errs...)
 }
 
 // bindWebLocked (re)binds the control-plane web listener to the config address
-// addr, BIND-NEW-BEFORE-CLOSE. addr=="" tears it down (the listen_addr="" opt-out).
+// addr, BIND-NEW-BEFORE-CLOSE. addr=="" tears it down (the network.listen_addr="" opt-out).
 //
 // The ordering is the whole safety property: a new listener is bound FIRST, and the
 // old is closed ONLY after the new is serving. If the new bind fails — port taken,
@@ -139,14 +139,14 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// is current, and a torn-down listener must not have its state cleared twice.
 		wl.webGen++
 		if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-			log.WarningLog.Printf("listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
+			log.WarningLog.Printf("network.listen_addr is now empty: revoked %d sandbox callback credential(s) — the control listener is closed, so nothing can call back until it is re-enabled and those sessions are re-provisioned", n)
 		}
 		return nil
 	}
 	cfg := wl.manager.Config()
 	// policy/notice are snapshotted only for the one-time enable banner below; under
-	// livePosture{policyFromConfig:true} the gate derives require_token /
-	// require_loopback_token live per request, so this value never enforces auth.
+	// livePosture{policyFromConfig:true} the gate derives network.require_token /
+	// network.require_loopback_token live per request, so this value never enforces auth.
 	policy := webListenerPolicy(cfg)
 	notice := config.ListenerExposureNotice(cfg)
 	closer, info, err := startTCPListenerWithListen(wl.webMux, addr, cfg, policy, withWebShell, nil,
@@ -156,7 +156,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			sandboxTokens:    &wl.manager.sandboxTokens,
 		}, wl.listenTCP)
 	if err != nil {
-		return fmt.Errorf("apply listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
+		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
 	}
 	// New listener is live. Swap it in, update lifecycle to the new address, THEN
 	// close the old — never before, or a same-host client races an unreachable gap.
@@ -213,7 +213,7 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// a credential does not outlive the listener it was issued against. Affected
 	// sessions regain callback when they are re-provisioned.
 	if n := wl.manager.sandboxTokens.revokeAll(); n > 0 {
-		log.WarningLog.Printf("listen_addr moved to %s: revoked %d sandbox callback credential(s) minted against the previous listener; those sessions lose callback until they are re-provisioned", addr, n)
+		log.WarningLog.Printf("network.listen_addr moved to %s: revoked %d sandbox callback credential(s) minted against the previous listener; those sessions lose callback until they are re-provisioned", addr, n)
 	}
 	// The enable banner + posture, logged once per bind (initial and rebind). The
 	// bearer-token line is the operator's only channel to a network listener's
@@ -228,13 +228,13 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// being read (#2168: warn, never refuse).
 		log.WarningLog.Printf("%s", notice)
 	case policy.tokenDisabled:
-		log.InfoLog.Printf("  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)")
+		log.InfoLog.Printf("  all peers connect with NO token (network.require_token defaults to false; set network.require_token = true to require auth)")
 	case policy.loopbackExempt:
 		log.InfoLog.Printf("  loopback peers (127.0.0.1/::1) connect with no token; network peers must present the token above")
 	case config.IsLoopbackListenAddr(addr):
-		log.InfoLog.Printf("  require_loopback_token=true: every peer (loopback included) must present the token above")
+		log.InfoLog.Printf("  network.require_loopback_token=true: every peer (loopback included) must present the token above")
 	default:
-		log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set require_token=false only on a fully trusted network)")
+		log.InfoLog.Printf("  listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests — a same-host reverse proxy is NOT exempt (front it and let the proxy pass the token, or set network.require_token=false only on a fully trusted network)")
 	}
 	return nil
 }
@@ -264,7 +264,7 @@ func (wl *webListeners) bindPreviewLocked(addr string) error {
 		&livePosture{snapshot: wl.manager.Config, policyFromConfig: false, previewOrigin: true,
 			previewWarmingUp: func() bool { return !wl.manager.Ready() }}, wl.listenTCP)
 	if err != nil {
-		return fmt.Errorf("apply preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
+		return fmt.Errorf("apply network.preview_listen_addr %q: %w — daemon still serving preview on %s", addr, err, servingOn(wl.previewConfigAddr))
 	}
 	old := wl.previewClose
 	wl.previewClose = closer

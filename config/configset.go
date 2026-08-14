@@ -97,16 +97,16 @@ var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
 	}},
-	"auto_update":            {kind: cfgBool},
-	"require_token":          {kind: cfgBool},
-	"require_loopback_token": {kind: cfgBool},
-	"listen_addr": {kind: cfgString, validate: func(_, v string) error {
+	"auto_update":                    {kind: cfgBool},
+	"network.require_token":          {kind: cfgBool, section: "network"},
+	"network.require_loopback_token": {kind: cfgBool, section: "network"},
+	"network.listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
 	// The preview origin's bind address (#1856). Same address grammar as
 	// listen_addr, so the identical validator — an empty value disables the
 	// second listener, any host:port binds it.
-	"preview_listen_addr": {kind: cfgString, validate: func(_, v string) error {
+	"network.preview_listen_addr": {kind: cfgString, section: "network", validate: func(_, v string) error {
 		return validateListenAddrValue(v)
 	}},
 	// A []string written as a single-line TOML array, comma-separated on the CLI
@@ -116,7 +116,7 @@ var settableKeySpecs = map[string]settableKeySpec{
 	// loader stays lenient on a hand-edit — validation lives here at the typed-input
 	// boundary, the same asymmetry #2562 and #2565 preserved. There is no default
 	// origin, so no fallback value to keep valid.
-	"cors_allowed_origins": {kind: cfgStringList, validate: func(_, v string) error {
+	"network.cors_allowed_origins": {kind: cfgStringList, section: "network", validate: func(_, v string) error {
 		for _, origin := range splitListValue(v) {
 			if err := validateCORSOrigin(origin); err != nil {
 				return err
@@ -228,7 +228,7 @@ func splitListValue(v string) []string {
 // `af config set`, makes that an immediate, actionable error; the loader stays
 // lenient for a hand-edit.
 func validateCORSOrigin(origin string) error {
-	shape := fmt.Errorf("cors_allowed_origins entry %q is not a valid browser origin; use scheme://host[:port] with no path or trailing slash (e.g. https://af.example.com)", origin)
+	shape := fmt.Errorf("network.cors_allowed_origins entry %q is not a valid browser origin; use scheme://host[:port] with no path or trailing slash (e.g. https://af.example.com)", origin)
 	u, err := url.Parse(origin)
 	if err != nil {
 		return shape
@@ -254,6 +254,7 @@ func validateCORSOrigin(origin string) error {
 // would silently mangle a value whose elements can contain a comma. A dynamic
 // family is never a comma list (its leaves are scalars).
 func isCommaListKey(key string) bool {
+	key = canonicalConfigKey(key)
 	spec, ok := settableKeySpecs[key]
 	return ok && !spec.dynamic && spec.kind == cfgStringList
 }
@@ -335,17 +336,18 @@ func exposureWarning(cfg *Config, key string) string {
 	if cfg == nil {
 		return ""
 	}
-	if key != "listen_addr" && key != "require_token" {
+	key = canonicalConfigKey(key)
+	if key != "network.listen_addr" && key != "network.require_token" {
 		return ""
 	}
 	addr := cfg.ListenAddr
 	if !ListenerServesUnauthenticatedNetwork(addr, cfg.RequireToken) {
 		return ""
 	}
-	return fmt.Sprintf("WARNING: %s is reachable from the network and require_token is false, which puts a "+
+	return fmt.Sprintf("WARNING: network.listen_addr %q is reachable from the network and network.require_token is false, which puts a "+
 		"plain-HTTP control plane with no authentication in front of anyone who can reach it — including "+
 		"DeliverPrompt, which runs instructions through your agents. The daemon will serve this on its next start. "+
-		"Run `af config set require_token true` to require a token (`af token show` prints it), or set listen_addr "+
+		"Run `af config set network.require_token true` to require a token (`af token show` prints it), or set network.listen_addr "+
 		"back to a loopback address such as 127.0.0.1:8443, or \"\" to turn the web server off.", addr)
 }
 
@@ -482,6 +484,7 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 // single authority on which keys may live where, so the write path checks it
 // before editing rather than maintaining a second per-project allowlist.
 func resolveProjectSettable(key string) (section, leaf string, spec settableKeySpec, err error) {
+	key = canonicalConfigKey(key)
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
 		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
@@ -779,13 +782,14 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 		// same text under another header would name a different key.
 		if dottedKeyRe != nil && curSection == "" {
 			if m := dottedKeyRe.FindStringSubmatch(line); m != nil {
-				_, comment := splitTrailingComment(m[2])
-				ls[i] = m[1] + encoded + comment
-				return rebuild()
+				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+					ls = updated
+					return rebuild()
+				}
 			}
 			if tomlScalarLineMatches(line, section, leaf) {
-				if updated, ok := replaceTOMLAssignmentValue(line, encoded); ok {
-					ls[i] = updated
+				if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+					ls = updated
 					return rebuild()
 				}
 			}
@@ -798,13 +802,14 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 			continue
 		}
 		if m := keyRe.FindStringSubmatch(line); m != nil {
-			_, comment := splitTrailingComment(m[2])
-			ls[i] = m[1] + encoded + comment
-			return rebuild()
+			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+				ls = updated
+				return rebuild()
+			}
 		}
 		if tomlScalarLineMatches(line, "", leaf) {
-			if updated, ok := replaceTOMLAssignmentValue(line, encoded); ok {
-				ls[i] = updated
+			if updated, ok := replaceTOMLAssignmentLines(ls, i, encoded); ok {
+				ls = updated
 				return rebuild()
 			}
 		}
@@ -873,6 +878,7 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 
 	curSection := ""
 	removeAt := -1
+	removeThrough := -1
 	rebuild := func() string {
 		out := strings.Join(ls, "\n")
 		if hadTrailingNewline && out != "" {
@@ -891,6 +897,7 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		// Top-level dotted form (section.leaf = …), valid only at the root.
 		if dottedKeyRe != nil && curSection == "" && (dottedKeyRe.MatchString(line) || tomlScalarLineMatches(line, section, leaf)) {
 			removeAt = i
+			removeThrough = tomlAssignmentEnd(ls, i)
 			break
 		}
 		if curSection == "" && section != "" {
@@ -904,6 +911,7 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		}
 		if keyRe.MatchString(line) || tomlScalarLineMatches(line, "", leaf) {
 			removeAt = i
+			removeThrough = tomlAssignmentEnd(ls, i)
 			break
 		}
 	}
@@ -911,7 +919,9 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		return content, false
 	}
 
-	ls = append(ls[:removeAt], ls[removeAt+1:]...)
+	kept := preservedTOMLAssignmentComments(ls, removeAt, removeThrough)
+	kept = append(kept, ls[removeThrough+1:]...)
+	ls = append(ls[:removeAt], kept...)
 	return rebuild(), true
 }
 

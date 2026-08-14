@@ -165,8 +165,8 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 	initial := list()
 	for _, key := range []string{
 		"session_env_passthrough",
-		"preview_listen_addr",
-		"cors_allowed_origins",
+		"network.preview_listen_addr",
+		"network.cors_allowed_origins",
 		"on_archive_command",
 		"vscode_server_binary",
 		"root_agents",
@@ -178,8 +178,8 @@ func TestConfigListDistinguishesUnsetFromConfiguredEmpty(t *testing.T) {
 			t.Errorf("default %s = %q, want (unset)", key, got)
 		}
 	}
-	if got := valueFor(initial, "require_token"); got != "false" {
-		t.Errorf("require_token = %q, want false", got)
+	if got := valueFor(initial, "network.require_token"); got != "false" {
+		t.Errorf("network.require_token = %q, want false", got)
 	}
 
 	if _, err := config.SetGlobalConfigValue("on_archive_command", ""); err != nil {
@@ -381,8 +381,8 @@ func TestConfigGetReadsEveryEntry(t *testing.T) {
 func TestConfigGetDocumentedGlobalOnlyKeys(t *testing.T) {
 	tempAFHome(t)
 	cases := []struct{ key, want string }{
-		{"listen_addr", "127.0.0.1:8443"},
-		{"require_loopback_token", "false"},
+		{"network.listen_addr", "127.0.0.1:8443"},
+		{"network.require_loopback_token", "false"},
 		{"limit_auto_resume", "false"},
 		{"limit_retry_interval", "30m"},
 		{"vscode_server_binary", ""},
@@ -399,6 +399,87 @@ func TestConfigGetDocumentedGlobalOnlyKeys(t *testing.T) {
 				t.Errorf("config get %s = %q, want %q", c.key, got, c.want)
 			}
 		})
+	}
+}
+
+func TestConfigGetNetworkFlatAliasesMatchCanonicalKeys(t *testing.T) {
+	tempAFHome(t)
+	for _, tc := range []struct{ legacy, canonical string }{
+		{legacy: "listen_addr", canonical: "network.listen_addr"},
+		{legacy: "preview_listen_addr", canonical: "network.preview_listen_addr"},
+		{legacy: "require_token", canonical: "network.require_token"},
+		{legacy: "require_loopback_token", canonical: "network.require_loopback_token"},
+		{legacy: "cors_allowed_origins", canonical: "network.cors_allowed_origins"},
+	} {
+		t.Run(tc.legacy, func(t *testing.T) {
+			read := func(key string) string {
+				t.Helper()
+				var out bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetOut(&out)
+				if err := configGetCmd.RunE(cmd, []string{key}); err != nil {
+					t.Fatalf("config get %s: %v", key, err)
+				}
+				return out.String()
+			}
+			if canonical, legacy := read(tc.canonical), read(tc.legacy); canonical != legacy {
+				t.Errorf("config get %s = %q, but alias %s = %q", tc.canonical, canonical, tc.legacy, legacy)
+			}
+		})
+	}
+}
+
+func TestConfigListUsesCanonicalNetworkRowsForFlatAndGroupedSources(t *testing.T) {
+	tempAFHome(t)
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	if home == "" {
+		t.Fatal("tempAFHome did not set AGENT_FACTORY_HOME")
+	}
+	if err := os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(`
+listen_addr = "0.0.0.0:8443"
+preview_listen_addr = "0.0.0.0:8444"
+require_token = true
+require_loopback_token = true
+cors_allowed_origins = ["https://old.example.com"]
+
+[network]
+listen_addr = ""
+preview_listen_addr = ""
+require_token = false
+require_loopback_token = false
+cors_allowed_origins = []
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := configListCmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("config list: %v", err)
+	}
+	rows := make(map[string]string)
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			rows[fields[0]] = strings.Join(fields[1:], " ")
+		}
+	}
+	for key, want := range map[string]string{
+		"network.listen_addr":            `""`,
+		"network.preview_listen_addr":    `""`,
+		"network.require_token":          "false",
+		"network.require_loopback_token": "false",
+		"network.cors_allowed_origins":   "[]",
+	} {
+		if got := rows[key]; got != want {
+			t.Errorf("canonical grouped winner for %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, legacy := range []string{"listen_addr", "preview_listen_addr", "require_token", "require_loopback_token", "cors_allowed_origins"} {
+		if _, duplicate := rows[legacy]; duplicate {
+			t.Errorf("flat alias %s produced a second list row", legacy)
+		}
 	}
 }
 
@@ -693,7 +774,7 @@ func TestConfigListJSONEnvelope(t *testing.T) {
 		switch e.Key {
 		case "default_program":
 			haveDefaultProgram = true
-		case "preview_listen_addr":
+		case "network.preview_listen_addr":
 			haveEmptyString = e.Value == ""
 		case "session_env_passthrough":
 			haveNilList = e.Value == nil

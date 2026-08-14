@@ -119,9 +119,9 @@ func TestBriefingCouplesListenAddrToRequireToken(t *testing.T) {
 		out := BuildBriefing(mode, briefingConfig(), "/tmp/af/config.toml")
 
 		for _, want := range []string{
-			"af config set require_token true",
-			"Never write a non-loopback listen_addr with require_token = false on your own",
-			"require_token = false",
+			"af config set network.require_token true",
+			"Never write a non-loopback network.listen_addr with network.require_token = false on your own",
+			"network.require_token = false",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("mode %s: briefing is missing the listen_addr/require_token coupling text %q", mode, want)
@@ -161,8 +161,8 @@ func TestBriefingStatesTheApplyRules(t *testing.T) {
 
 // TestBriefingEditsStructuredKeysByFileThenValidates is the #2453/#2454 reversal.
 //
-// The five structured keys (theme, keys, root_agents, session_env_passthrough,
-// cors_allowed_origins) have no `af config set` scalar form, and the assistant is
+// The four structured keys (theme, keys, root_agents, session_env_passthrough)
+// have no `af config set` scalar form, and the assistant is
 // now the editor for them: it edits the GLOBAL config file directly and then
 // validates. The briefing must both authorize that and require the validate step,
 // because a broken structured edit is a hard startup failure with no default
@@ -175,7 +175,7 @@ func TestBriefingEditsStructuredKeysByFileThenValidates(t *testing.T) {
 
 	// Every structured key must be named as file-editable in the new section.
 	for _, key := range []string{
-		"theme", "keys", "root_agents", "session_env_passthrough", "cors_allowed_origins",
+		"theme", "keys", "root_agents", "session_env_passthrough",
 	} {
 		if !strings.Contains(out, "`"+key+"`") {
 			t.Errorf("briefing must name the structured key %q as file-editable", key)
@@ -201,6 +201,9 @@ func TestBriefingEditsStructuredKeysByFileThenValidates(t *testing.T) {
 	// slots in chat. That is UX, not a prohibition on editing.
 	if !strings.Contains(out, "do not offer to pick hex values") {
 		t.Error("briefing should still tell the agent not to pick hex values slot by slot in conversation")
+	}
+	if !strings.Contains(out, "`af config set network.cors_allowed_origins <value>`") {
+		t.Error("the assistant must use the canonical settable network key for the CORS list")
 	}
 }
 
@@ -271,9 +274,9 @@ func TestModesDifferOnlyInTheOpening(t *testing.T) {
 
 	// The manifest and the non-negotiable rules are identical in both.
 	for _, shared := range []string{
-		"### `listen_addr`",
+		"### `network.listen_addr`",
 		"### `default_program`",
-		"af config set require_token true",
+		"af config set network.require_token true",
 		"Do not run git.",
 		"current: codex",
 	} {

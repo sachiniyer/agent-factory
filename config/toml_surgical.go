@@ -125,6 +125,77 @@ func replaceTOMLAssignmentValue(line, encoded string) (string, bool) {
 	return line[:valueStart] + encoded + value[valueEnd:] + comment, true
 }
 
+// tomlAssignmentEnd returns the final line occupied by the assignment that
+// starts at start. Asking the TOML parser for the shortest valid prefix keeps
+// this syntax-aware for multiline arrays and strings without inventing a
+// second bracket/string parser here.
+func tomlAssignmentEnd(lines []string, start int) int {
+	for end := start; end < len(lines); end++ {
+		var shape map[string]any
+		if err := toml.Unmarshal([]byte(strings.Join(lines[start:end+1], "\n")+"\n"), &shape); err == nil {
+			return end
+		}
+	}
+	return start
+}
+
+func preservedTOMLAssignmentComments(lines []string, start, end int) []string {
+	_, equal, ok := tomlAssignmentPath(lines[start])
+	if !ok {
+		return nil
+	}
+	valueStart := equal + 1
+	for valueStart < len(lines[start]) && (lines[start][valueStart] == ' ' || lines[start][valueStart] == '\t') {
+		valueStart++
+	}
+	array := strings.HasPrefix(strings.TrimSpace(lines[start][valueStart:]), "[")
+	comments := make([]string, 0)
+	for i := start; i <= end; i++ {
+		if !array && i != end {
+			continue
+		}
+		segment := lines[i]
+		if i == start {
+			segment = segment[valueStart:]
+		}
+		_, comment := splitTrailingComment(segment)
+		if comment == "" {
+			continue
+		}
+		indent := lines[i][:len(lines[i])-len(strings.TrimLeft(lines[i], " \t"))]
+		comments = append(comments, indent+strings.TrimLeft(comment, " \t"))
+	}
+	return comments
+}
+
+func replaceTOMLAssignmentLines(lines []string, start int, encoded string) ([]string, bool) {
+	_, equal, ok := tomlAssignmentPath(lines[start])
+	if !ok {
+		return lines, false
+	}
+	end := tomlAssignmentEnd(lines, start)
+	if end == start {
+		updated, replaced := replaceTOMLAssignmentValue(lines[start], encoded)
+		if replaced {
+			lines[start] = updated
+		}
+		return lines, replaced
+	}
+	valueStart := equal + 1
+	for valueStart < len(lines[start]) && (lines[start][valueStart] == ' ' || lines[start][valueStart] == '\t') {
+		valueStart++
+	}
+	replacement := lines[start][:valueStart] + encoded
+	replacements := []string{replacement}
+	// Comments inside a multiline value are not values. Keep them as
+	// standalone comments after the compact replacement so a targeted edit never
+	// silently erases operator notes.
+	replacements = append(replacements, preservedTOMLAssignmentComments(lines, start, end)...)
+	replacements = append(replacements, lines[end+1:]...)
+	lines = append(lines[:start], replacements...)
+	return lines, true
+}
+
 type tomlInlineMember struct {
 	start     int
 	end       int

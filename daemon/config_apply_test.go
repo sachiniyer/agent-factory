@@ -99,16 +99,27 @@ func TestApplyConfigRebuildsLimitDetector(t *testing.T) {
 // (The live-read enforcement and the rebind/brick-prevention behavior are pinned
 // with real listeners in listener_reload_test.go; this pins the classification the
 // save-surface notice reads.)
-func TestApplyConfigReportsNetworkKeysApplied(t *testing.T) {
+func TestApplyConfigReportsCanonicalNetworkKeysApplied(t *testing.T) {
 	m := applyConfigTestManager(t)
 
-	_, err := config.SetGlobalConfigValue("require_token", "true")
-	require.NoError(t, err)
+	values := map[string]string{
+		"network.listen_addr":            "127.0.0.1:0",
+		"network.preview_listen_addr":    "127.0.0.1:0",
+		"network.require_token":          "true",
+		"network.require_loopback_token": "true",
+		"network.cors_allowed_origins":   "https://af.example.com",
+	}
+	for key, value := range values {
+		_, err := config.SetGlobalConfigValue(key, value)
+		require.NoError(t, err)
+	}
 
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
-	require.Contains(t, result.Applied, "require_token", "a network key applies live since PR2, so it is reported applied, not pending")
-	require.NotContains(t, result.Pending, "require_token")
+	for key := range values {
+		require.Contains(t, result.Applied, key, "a network key applies live, so it is reported under its canonical name")
+		require.NotContains(t, result.Pending, key)
+	}
 }
 
 func TestApplyConfigReportsCanonicalBackendSettingsApplied(t *testing.T) {
@@ -204,7 +215,7 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	// And the operator must be TOLD, including that this does not re-isolate the
 	// sandboxes — revoking without saying so would read as a security action.
 	joined := strings.Join(result.Warnings, "\n")
-	assert.Contains(t, joined, "require_token is now false")
+	assert.Contains(t, joined, "network.require_token is now false")
 	assert.Contains(t, joined, "does not re-isolate")
 }
 

@@ -194,9 +194,9 @@ the daemon that answered, and whether that daemon has applied the config on disk
 ## Exposing it beyond localhost
 
 The web UI and HTTP API listen on `127.0.0.1:8443` and skip auth on loopback.
-Pointing `listen_addr` at a routable address exposes them to your network, so
-set `require_token = true` or keep it behind a VPN or proxy — the listener is
-plain HTTP. Turn the web UI off entirely with `listen_addr = ""`. See
+Pointing `network.listen_addr` at a routable address exposes them to your network, so
+set `network.require_token = true` or keep it behind a VPN or proxy — the listener is
+plain HTTP. Turn the web UI off entirely with `network.listen_addr = ""`. See
 [remote daemon access](docs/remote-http-auth.md).
 
 ## Maintenance

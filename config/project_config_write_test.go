@@ -66,7 +66,7 @@ func TestSetProjectConfigValueRejectsGlobalOnlyKey(t *testing.T) {
 	_, err := SetProjectConfigValue(project.ID, "listen_addr", "0.0.0.0:8443")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "global setting")
-	require.Contains(t, err.Error(), "af config set listen_addr", "the error names how to set it correctly")
+	require.Contains(t, err.Error(), "af config set network.listen_addr", "the error names how to set it correctly")
 }
 
 func TestSetProjectConfigValueRejectsStructuralKey(t *testing.T) {
