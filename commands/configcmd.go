@@ -106,9 +106,9 @@ var globalConfigReadOrder = []string{
 	"root_agent",
 	"limit_auto_resume",
 	"global_agent_skills",
-	"docker_mount_agent_credentials",
-	"ssh_host_key_verification",
-	"sandbox_ssh",
+	"docker.mount_agent_credentials",
+	"ssh.host_key_verification",
+	"sandbox.ssh",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
@@ -219,13 +219,14 @@ inspect another project. Outside a git repository they fall back to global
 defaults. --explain shows every candidate and why it did or did not supply the
 effective value.
 
-"set"/"unset" write config. Without --project they edit the global config,
-changing a single settable key in place so all comments and ordering are
-preserved. With --project <id-or-path> they edit that registered project's
-machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. "af config set" applies a change to
-a running daemon in place where the key allows it (#2480), so most take effect
-without a restart; a raw hand-edit of config.toml still applies on the next start.`,
+"set"/"unset" write config in place so all comments and ordering are preserved.
+Without --project, set changes one settable global key and unset clears one
+migrated grouped/flat alias pair. With --project <id-or-path> they edit that
+registered project's machine-local override instead (built-in < global <
+in-repo < personal project), which is never checked into the repository. "af
+config set" applies a change to a running daemon in place where the key allows
+it (#2480), so most take effect without a restart; a raw hand-edit of config.toml
+still applies on the next start.`,
 }
 
 var configGetCmd = &cobra.Command{
@@ -252,7 +253,9 @@ resolved value with the complete source trace.`,
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
-		if configGetExplainFlag || projectSelector != "" || strings.Contains(args[0], ".") {
+		canonicalKey := config.CanonicalConfigKey(args[0])
+		globalAliasKey := config.LegacyConfigKey(canonicalKey) != canonicalKey
+		if configGetExplainFlag || !globalAliasKey && (projectSelector != "" || strings.Contains(args[0], ".")) {
 			resolved, err := loadResolvedConfig(projectSelector)
 			if err != nil {
 				// The layered load fails on exactly the states the specialized
@@ -327,8 +330,9 @@ resolved value with the complete source trace.`,
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
+		requestedKey := config.CanonicalConfigKey(args[0])
 		for _, e := range entries {
-			if e.Key == args[0] {
+			if e.Key == requestedKey {
 				if configJSONFlag {
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(e))
 				}
@@ -465,10 +469,13 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
-  docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
-  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
+  docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
   cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
-  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+
+Legacy CLI aliases docker_mount_agent_credentials, ssh_host_key_verification,
+and sandbox_ssh remain accepted and edit the same canonical grouped values.
 
 Structural keys (root_agents, theme, the [keys] rebind table) and the
 session_env_passthrough list have no single-scalar shape, so they are not settable
@@ -594,29 +601,47 @@ can be fixed before the next launch.`,
 }
 
 var configUnsetCmd = &cobra.Command{
-	Use:   "unset <key> --project <id-or-path>",
-	Short: "Clear a per-project config override",
+	Use:   "unset <key>",
+	Short: "Clear a config override or migrated global setting",
 	Long: `Remove one key's personal override for a project so the value falls back to
 the lower layers again (built-in < global < in-repo). Clearing an override is
 deliberately different from setting a value equal to the lower layer, which is
 still a present, winning override.
 
---project <id-or-path> is required: unset targets a project's machine-local
-config (a prj_ id from 'af projects list', or a path inside a registered
-repository). It edits only the target key, preserving every other comment and
-value, and is a clean no-op when there is no override to clear. There is no
-global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. The cleared override stops applying to sessions created in that project
-from now on.`,
+With --project, unset targets a project's machine-local config (a prj_ id from
+'af projects list', or a path inside a registered repository). Without
+--project, it clears one migrated global backend setting: docker.mount_agent_credentials,
+ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+accepted aliases. Global unset removes both on-disk spellings together, so a
+conflicting legacy value cannot silently reappear. Every path edits only the
+target setting, preserves unknown keys and comments, and is a clean no-op when
+there is nothing to clear.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
 		if configUnsetProjectFlag == "" {
-			return jsonWrapError(cmd, configJSONFlag,
-				fmt.Errorf("unset requires --project <id-or-path>; there is no global unset (edit config.toml by hand or `af config set` a new value)"))
+			resp, err := daemon.UnsetGlobalConfigValue(args[0])
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			res := resp.Result
+			if configJSONFlag {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+			}
+			if !res.Removed {
+				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, prettyPath(res.Path))
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "cleared %s in %s\n", res.Key, prettyPath(res.Path))
+			fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+			for _, warning := range resp.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), warning)
+			}
+			return nil
 		}
+
 		res, err := config.UnsetProjectConfigValue(configUnsetProjectFlag, args[0])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)

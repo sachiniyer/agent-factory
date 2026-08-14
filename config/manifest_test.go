@@ -69,6 +69,7 @@ func configTomlFields(t *testing.T) map[string]string {
 				"or `toml:\"-\"` if it must not be config at all.", f.Name, tag)
 			continue
 		}
+		key = canonicalConfigKey(key)
 		fields[key] = f.Name
 	}
 	if len(fields) == 0 {

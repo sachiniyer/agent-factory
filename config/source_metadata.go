@@ -51,6 +51,15 @@ func (m sourceMetadata) topLevel(key string) (any, bool) {
 	if m.shape == nil {
 		return nil, false
 	}
+	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
+		if m.format == FormatTOML {
+			if value, present := aliasGroupedValue(m.shape, alias); present {
+				return value, true
+			}
+		}
+		value, present := m.shape[alias.legacy]
+		return value, present
+	}
 	value, present := m.shape[key]
 	return value, present
 }

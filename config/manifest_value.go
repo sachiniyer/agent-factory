@@ -37,19 +37,7 @@ func configFieldByTomlKey(cfg *Config, key string) (reflect.Value, bool) {
 	if cfg == nil {
 		return reflect.Value{}, false
 	}
-	rv := reflect.ValueOf(*cfg)
-	rt := rv.Type()
-	for i := range rt.NumField() {
-		f := rt.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		if structTagName(f.Tag.Get("toml")) != key {
-			continue
-		}
-		return rv.Field(i), true
-	}
-	return reflect.Value{}, false
+	return taggedFieldByKey(reflect.ValueOf(cfg), canonicalConfigKey(key))
 }
 
 // CurrentValue returns cfg's live value for one global manifest key in the form

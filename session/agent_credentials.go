@@ -89,7 +89,7 @@ func agentCredentialMounts(agent, homeDir string, exists func(string) bool) []st
 func resolveAgentCredentialMounts(agent string) []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		log.WarningLog.Printf("backend=docker: docker_mount_agent_credentials: cannot resolve the home dir; mounting no credential for %q: %v", agent, err)
+		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials: cannot resolve the home dir; mounting no credential for %q: %v", agent, err)
 		return nil
 	}
 	mounts := agentCredentialMounts(agent, home, func(p string) bool {
@@ -97,11 +97,11 @@ func resolveAgentCredentialMounts(agent string) []string {
 		return statErr == nil
 	})
 	if len(mounts) == 0 {
-		log.WarningLog.Printf("backend=docker: docker_mount_agent_credentials is set, but no credential file for agent %q was found under %s; the session may start unauthenticated", agent, home)
+		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials is set, but no credential file for agent %q was found under %s; the session may start unauthenticated", agent, home)
 		return nil
 	}
 	// Each mount is two args ("-v", "<spec>"), so the file count is len/2.
-	log.InfoLog.Printf("backend=docker: docker_mount_agent_credentials: mounting %d credential file(s) for agent %q read-only into the container", len(mounts)/2, agent)
+	log.InfoLog.Printf("backend=docker: docker.mount_agent_credentials: mounting %d credential file(s) for agent %q read-only into the container", len(mounts)/2, agent)
 	return mounts
 }
 

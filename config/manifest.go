@@ -397,7 +397,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "docker_mount_agent_credentials",
+		Key:        "docker.mount_agent_credentials",
 		Type:       "bool",
 		Default:    "false",
 		Purpose:    "Let a docker-backend session mount the operator's on-disk credential file for that session's own agent, read-only, so it can authenticate · global-only: a repo selects the image but only the operator grants it credential access.",
@@ -409,7 +409,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "ssh_host_key_verification",
+		Key:        "ssh.host_key_verification",
 		Type:       "string",
 		Default:    "strict",
 		Purpose:    "How the ssh backend verifies a remote host key · strict (default) refuses an unknown or changed key; accept-new trusts an unknown key on first connect (still refuses a changed one); insecure skips verification · global-only: a repo selects ssh.host but only the operator relaxes verification.",
@@ -422,7 +422,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "sandbox_ssh",
+		Key:        "sandbox.ssh",
 		Type:       "string",
 		Default:    `""`,
 		Purpose:    "The free-form ssh command the `sandbox` backend runs to reach the sandbox host (jump hosts, ProxyCommand, custom flags) · global-only: af executes it on the daemon host, so a repo selecting backend=sandbox cannot dictate what command runs — only the operator can.",
@@ -636,6 +636,9 @@ func manifestGlobalOnlyKeySet() map[string]bool {
 	for _, entry := range configManifest {
 		if entry.Sources.Has(SourceGlobal) && !entry.Sources.Has(SourceRepoShared) {
 			keys[entry.Key] = true
+			if alias, ok := configAliasForCanonical(entry.Key); ok {
+				keys[alias.legacy] = true
+			}
 		}
 	}
 	return keys
@@ -646,6 +649,13 @@ func manifestTOMLOnlyGlobalKeySet() map[string]bool {
 	for _, entry := range configManifest {
 		if entry.Sources.Has(SourceGlobal) && !entry.Formats.Has(FormatJSON) {
 			keys[entry.Key] = true
+		}
+		if entry.Sources.Has(SourceGlobal) {
+			if _, ok := configAliasForCanonical(entry.Key); ok {
+				// The setting remains available to JSON under its flat alias, but
+				// its canonical dotted spelling is a TOML table leaf.
+				keys[entry.Key] = true
+			}
 		}
 	}
 	return keys

@@ -41,6 +41,9 @@ func manifestSchemaFields(t *testing.T, schema manifestSchema) map[string]reflec
 				schema.name, field.Name)
 			continue
 		}
+		if schema.source == SourceGlobal {
+			key = canonicalConfigKey(key)
+		}
 		if previous, duplicate := fields[key]; duplicate {
 			t.Errorf("config.%s fields %s and %s both decode top-level key %q",
 				schema.name, previous.Name, field.Name, key)
@@ -323,6 +326,10 @@ func TestManifestDerivedInRepoPolicyViews(t *testing.T) {
 		}
 		if _, shared := repoFields[key]; !shared {
 			wantGlobalOnly[key] = true
+			if alias, ok := configAliasForCanonical(key); ok {
+				wantGlobalOnly[alias.legacy] = true
+				wantTOMLOnly[key] = true
+			}
 		}
 		if structTagName(field.Tag.Get("json")) == "-" {
 			wantTOMLOnly[key] = true

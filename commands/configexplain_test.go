@@ -234,7 +234,7 @@ func TestConfigSetUnsetProjectRoundTrip(t *testing.T) {
 	_ = home
 }
 
-func TestConfigUnsetRequiresProject(t *testing.T) {
+func TestConfigGlobalUnsetRejectsNonMigratedKey(t *testing.T) {
 	tempAFHome(t)
 	oldUnset := configUnsetProjectFlag
 	t.Cleanup(func() { configUnsetProjectFlag = oldUnset })
@@ -243,8 +243,8 @@ func TestConfigUnsetRequiresProject(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 	err := configUnsetCmd.RunE(cmd, []string{"default_program"})
-	require.Error(t, err, "there is no global unset")
-	require.Contains(t, err.Error(), "--project")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a globally unsettable migrated config key")
 }
 
 func TestConfigGetDottedLeafUsesResolvedProvenance(t *testing.T) {

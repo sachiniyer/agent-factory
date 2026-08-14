@@ -941,6 +941,21 @@ type SetConfigValueResponse struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// UnsetConfigValueRequest clears one globally unsettable migrated setting.
+// It is a separate RPC from SetConfigValue so an older daemon cannot mistake
+// an additive "unset" bit for a request to set an empty value.
+type UnsetConfigValueRequest struct {
+	Key string `json:"key"`
+}
+
+type UnsetConfigValueResponse struct {
+	Result        *config.UnsetResult `json:"result"`
+	RestartNotice string              `json:"restart_notice"`
+	Applied       []string            `json:"applied"`
+	Pending       []string            `json:"pending"`
+	Warnings      []string            `json:"warnings,omitempty"`
+}
+
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
 // to itself in place (#2480). The config was already written (by `af config set`,
 // the web form's SetConfigValue, or a hand-edit); this only makes the running

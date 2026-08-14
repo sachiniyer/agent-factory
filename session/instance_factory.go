@@ -615,7 +615,7 @@ func offBoxAccountRefusal(kind BackendKind) string {
 		// sandbox runs through sandboxProvisioner, which creates the session directory
 		// itself, so af controls the location there too (#3103 review).
 		//
-		// And like hook, the workaround must NOT name an identity. sandbox_ssh is the
+		// And like hook, the workaround must NOT name an identity. sandbox.ssh is the
 		// operator's own command and this backend deliberately preserves their
 		// ssh_config — so a `SendEnv OPENAI_API_KEY` block copies the DAEMON's value
 		// to the sandbox verbatim (measured in #3092), and the session would run on
@@ -623,7 +623,7 @@ func offBoxAccountRefusal(kind BackendKind) string {
 		// backend=ssh is immune, because af pins -F none there.
 		return offBoxRoundTripReason +
 			" Use the docker or local backend for account-scoped sessions, or omit --account — though which " +
-			"identity the session then runs as depends on your sandbox_ssh command and the ssh_config it " +
+			"identity the session then runs as depends on your sandbox.ssh command and the ssh_config it " +
 			"reads, which af does not override"
 
 	case BackendHook:

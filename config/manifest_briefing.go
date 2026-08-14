@@ -136,6 +136,9 @@ func renderBriefingEntry(cfg *Config, e ManifestEntry) string {
 		fmt.Fprintf(&b, "- %s: %s\n", label, strings.Join(quoted, ", "))
 	}
 	fmt.Fprintf(&b, "- to change: %s\n", briefingSetHint(e))
+	if alias, ok := configAliasForCanonical(e.Key); ok {
+		fmt.Fprintf(&b, "- permanent alias: `%s` remains accepted by TOML, JSON, and the CLI; when both TOML spellings are present, `%s` wins\n", alias.legacy, alias.canonical)
+	}
 	return b.String()
 }
 

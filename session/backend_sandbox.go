@@ -367,7 +367,7 @@ func sandboxTransportConfigKey(label string) string {
 	if label == string(BackendSSH) {
 		return "ssh.host"
 	}
-	return "sandbox_ssh"
+	return "sandbox.ssh"
 }
 
 // waitForSandboxTunnel probes the local end until it answers. Without this the

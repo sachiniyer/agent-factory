@@ -78,14 +78,14 @@ func BackendConfigError(kind BackendKind, cfg *config.ResolvedConfig) error {
 			return fmt.Errorf("backend=ssh: %w", err)
 		}
 	case BackendSandbox:
-		// sandbox_ssh is GLOBAL-only, so this error must point at the operator's
+		// sandbox.ssh is GLOBAL-only, so this error must point at the operator's
 		// own config, NOT the repo's — a contributor reading a docker/ssh-shaped
 		// message would edit a checked-in file that can never carry this key
 		// (af executes the command on the daemon host, so a repo-settable version
 		// would be code execution from a clone; #2476).
 		if cfg == nil || strings.TrimSpace(cfg.SandboxSSH) == "" {
-			return fmt.Errorf("backend=sandbox requires sandbox_ssh to be set in the OPERATOR's global config " +
-				"(~/.agent-factory/config.toml, or `af config set sandbox_ssh '<your ssh command>'`) — the ssh " +
+			return fmt.Errorf("backend=sandbox requires sandbox.ssh to be set in the OPERATOR's global config " +
+				"(~/.agent-factory/config.toml, or `af config set sandbox.ssh '<your ssh command>'`) — the ssh " +
 				"invocation af runs to reach the sandbox host. It is global-only on purpose: af executes it on " +
 				"this machine, so a repository cannot choose it")
 		}

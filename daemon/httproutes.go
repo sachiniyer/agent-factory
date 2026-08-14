@@ -344,7 +344,6 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(SetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConfigValue) },
 	},
-
 	// Tasks.
 	{
 		Method:      http.MethodPost,

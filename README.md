@@ -125,7 +125,7 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
 - **Backends** — sessions run locally by default. Set a repo's `backend` key to
   `docker` to run in a container (with `docker.image`), to `ssh` to run on
   another machine (with `ssh.host`), to `sandbox` through the operator's
-  `sandbox_ssh` command, or to `hook` to launch on your own infrastructure. See
+  global `sandbox.ssh` command, or to `hook` to launch on your own infrastructure. See
   [backends](docs/backends.md).
 - **Account scoping** — register separate Claude or Codex credential homes with
   `af accounts add`, then select one for a local or docker session with
