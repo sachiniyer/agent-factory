@@ -102,8 +102,7 @@ func redactHookJSONValue(value any) (any, bool) {
 		// field, while a string can wrap either one through further serialization.
 		// Those three openers are the closed set that can eventually reach a token
 		// field; ordinary diagnostic strings are not reinterpreted as payloads.
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[' && trimmed[0] != '"') {
+		if !hookJSONStringMayContainJSONDocument(value) {
 			return value, false
 		}
 		redacted, parsed := redactHookJSONDocument(value)
@@ -121,6 +120,11 @@ func redactHookJSONValue(value any) (any, bool) {
 	default:
 		return value, false
 	}
+}
+
+func hookJSONStringMayContainJSONDocument(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"')
 }
 
 type hookJSONContainer struct {
@@ -169,14 +173,14 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 		}
 
 		if len(containers) == 0 {
-			if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
+			if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
 				return true
 			}
 			continue
 		}
 		container := &containers[len(containers)-1]
 		if !container.object {
-			if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
+			if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
 				return true
 			}
 			continue
@@ -192,7 +196,7 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 			container.expectingKey = false
 			continue
 		}
-		if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
+		if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
 			return true
 		}
 		container.expectingKey = true
@@ -200,9 +204,11 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 }
 
 func malformedHookJSONDocumentContainsTokenKey(document string) bool {
-	for index := 0; index < len(document); {
-		if document[index] != '"' {
-			index++
+	for index := 0; index < len(document); index++ {
+		// Examine every unescaped quote as a possible recovery boundary. Advancing
+		// only to a previously assumed closing quote can consume the opening quote
+		// of a later key when an earlier string contains an illegal raw newline.
+		if document[index] != '"' || hookJSONQuoteEscaped(document, index) {
 			continue
 		}
 
@@ -214,17 +220,32 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			end++
 		}
 		if end >= len(document) {
-			return false
+			continue
 		}
 
 		var value string
-		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err == nil && strings.EqualFold(value, "token") {
-			after := strings.TrimLeft(document[end+1:], " \t\r\n")
-			if strings.HasPrefix(after, ":") {
+		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
+			continue
+		}
+		after := strings.TrimLeft(document[end+1:], " \t\r\n")
+		if strings.HasPrefix(after, ":") {
+			if strings.EqualFold(value, "token") {
 				return true
 			}
+			continue
 		}
-		index = end + 1
+		if hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
+			return true
+		}
 	}
 	return false
+}
+
+func hookJSONQuoteEscaped(document string, index int) bool {
+	backslashes := 0
+	for index > 0 && document[index-1] == '\\' {
+		backslashes++
+		index--
+	}
+	return backslashes%2 != 0
 }

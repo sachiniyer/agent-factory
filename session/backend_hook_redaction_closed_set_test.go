@@ -104,6 +104,21 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"level\":INVALID,\"token\":\"post-error-secret\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "serialized child with a token after a syntax error",
+			output: `{"message":"{\"level\":INVALID,\"child\":\"{\\\"token\\\":\\\"nested-post-error-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "token after a raw newline in a malformed string",
+			output: `{"message":"{\"message\":\"unterminated\n,\"token\":\"newline-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "quoted token prose after a syntax error",
+			output: `{"message":"{\"message\":\"diagnostic says \\\"token\\\": unavailable\""}`,
+			want:   `{"message":"{\"message\":\"diagnostic says \\\"token\\\": unavailable\""}`,
+		},
 	}
 
 	for _, test := range tests {
