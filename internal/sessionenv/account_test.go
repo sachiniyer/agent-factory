@@ -171,6 +171,17 @@ func TestApplyAccountEnvironment_RefusesTimeoutWrappedShell(t *testing.T) {
 	}
 }
 
+func TestApplyAccountEnvironment_RefusesSetsidWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"setsid sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/setsid sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "setsid must not hide a nested identity mutation in %q", command)
+	}
+}
+
 func TestApplyAccountEnvironment_RefusesBashArithmeticCommand(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	_, err := ApplyAccountEnvironment(nil, "(( 0, CODEX_HOME=42 )); codex", account)
@@ -217,6 +228,7 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"nohup make",
 		"nice -n 5 make",
 		"timeout 10 make",
+		"setsid make",
 		"for PORT in 3000; do make; done",
 		"NODE_ENV=test make",
 		"env PORT=3000 npm start",

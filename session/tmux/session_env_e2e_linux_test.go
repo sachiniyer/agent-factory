@@ -243,6 +243,7 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 		t.Fatalf("start account-scoped parent session: %v", err)
 	}
 	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
+	assertAccountScopedNewWindow(t, agent, accountDir, dir)
 
 	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", "/bin/sh")
 	if err != nil {

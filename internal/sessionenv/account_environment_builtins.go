@@ -88,6 +88,35 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
+func unwrapSetsid(words []*syntax.Word) ([]*syntax.Word, bool) {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch option {
+		case "--":
+			return words[1:], false
+		case "-h", "--help", "-V", "--version":
+			return nil, false
+		case "-c", "--ctty", "-f", "--fork", "-w", "--wait":
+			words = words[1:]
+		default:
+			if strings.HasPrefix(option, "-") && len(option) > 1 {
+				for _, flag := range option[1:] {
+					if flag != 'c' && flag != 'f' && flag != 'w' {
+						return nil, true
+					}
+				}
+				words = words[1:]
+				continue
+			}
+			return words, false
+		}
+	}
+	return nil, false
+}
+
 func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	sawResultTarget := false
 	for len(words) > 0 {

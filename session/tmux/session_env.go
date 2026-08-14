@@ -189,13 +189,13 @@ func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []
 		importNames = appendMissingEnvironmentNames(importNames, identityNames)
 	}
 	defaultCommand := ""
-	if account != "" && accountEnvironmentOnly {
+	if account != "" {
 		// tmux otherwise starts its default shell as a login shell for an empty
-		// new-window command. Every scoped sibling needs an account shim and proven
-		// startup-free shell here, including process tabs whose primary command is
-		// not itself a shell.
+		// new-window command. Every scoped session needs an account shim and proven
+		// startup-free shell here, including the main agent session and process tabs
+		// whose primary command is not itself a shell.
 		defaultProgram := program
-		if !sessionenv.IsAccountShellCommand(defaultProgram) {
+		if !accountEnvironmentOnly || !sessionenv.IsAccountShellCommand(defaultProgram) {
 			defaultProgram, err = sessionenv.AccountShellCommand("/bin/sh")
 			if err != nil {
 				return "", nil, nil, nil, "", err

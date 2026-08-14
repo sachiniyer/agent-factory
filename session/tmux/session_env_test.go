@@ -168,6 +168,16 @@ func TestSiblingSessionsInheritAccountEnvironmentMode(t *testing.T) {
 
 	agent := NewTmuxSession("account-parent", "codex")
 	agent.SetAccountForAgent("codex", "work")
+	_, _, _, agentSessionEnv, agentDefault, err := agent.prepareLaunchEnvironment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := launchEnvironmentValue(agentSessionEnv, "CODEX_HOME"); !ok || got != accountDir {
+		t.Fatalf("agent session CODEX_HOME = %q, %v; want selected root %q", got, ok, accountDir)
+	}
+	if !strings.Contains(agentDefault, sessionenv.AccountEnvironmentExecMarker) || !strings.Contains(agentDefault, "/bin/sh -i") {
+		t.Fatalf("agent default window command is not a scoped startup-free shell: %q", agentDefault)
+	}
 
 	process := agent.NewSiblingSession("account-process", "make -j4")
 	wrapped, environ, imports, err := process.launchEnvironment()

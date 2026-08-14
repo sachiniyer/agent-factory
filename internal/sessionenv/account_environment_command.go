@@ -217,6 +217,12 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 			if unsafe {
 				return nil, true
 			}
+		case isAccountCommandName(words[0], "setsid"):
+			var unsafe bool
+			words, unsafe = unwrapSetsid(words[1:])
+			if unsafe {
+				return nil, true
+			}
 		default:
 			return words, false
 		}
