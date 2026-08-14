@@ -399,6 +399,24 @@ func TestValidateAccountEnvironmentCommandRefusesMakefileLaunchers(t *testing.T)
 	}
 }
 
+func TestValidateAccountEnvironmentCommandRefusesPackageScriptLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`npm run launch`,
+		`npx hidden-launcher`,
+		`pnpm run launch`,
+		`pnpx hidden-launcher`,
+		`yarn run launch`,
+		`yarn launch`,
+		`bun run launch`,
+		`bunx hidden-launcher`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "package launcher %q can execute hidden program text", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
 func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{

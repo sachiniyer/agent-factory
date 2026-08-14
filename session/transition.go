@@ -592,6 +592,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case limitResetFromEvent:
 		i.limitResetAt = ev.resetAt
 	}
+	if ev.kind == tkParkHandoff {
+		// The incoming runtime, not the retired predecessor, produced this wall.
+		// Publish its identity and durable negative quota evidence in the same
+		// critical section as LiveLimitReached so account-swap admission cannot
+		// observe a limit without its provider/account attribution.
+		i.limitAccount = i.Account
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
+	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).
 	i.noteStateChangeLocked(from.liveness, from.op, prevResetAt)

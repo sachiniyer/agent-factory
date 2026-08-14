@@ -233,6 +233,11 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 		return true
 	case "make", "gmake":
 		return true
+	case "npm", "npx", "pnpm", "pnpx", "yarn", "bun", "bunx":
+		// Package managers and their one-shot runners execute program text from
+		// package metadata or fetched entrypoints. The literal argv cannot prove
+		// that hidden program preserves the selected account identity.
+		return true
 	}
 	if commandName == "go" && len(words) > 1 && words[1] == "run" {
 		return true
