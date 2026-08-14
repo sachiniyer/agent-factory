@@ -5,6 +5,7 @@ package tmux
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -84,6 +85,9 @@ func ensureDedicatedServer(home string) error {
 		return fmt.Errorf("create AF home for tmux server log: %w", err)
 	}
 	logPath := filepath.Join(home, dedicatedServerLogName)
+	if err := secureExistingServerLog(logPath); err != nil {
+		return fmt.Errorf("secure existing tmux server log: %w", err)
+	}
 	// Apply the configured bound before systemd-run gets a direct append fd. The
 	// long-lived helper reopens the same path through NewRotatingFile and owns
 	// write-time rotation after startup.
@@ -95,6 +99,10 @@ func ensureDedicatedServer(home string) error {
 	launchLog, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open tmux server launch log: %w", err)
+	}
+	if err := launchLog.Chmod(0o600); err != nil {
+		_ = launchLog.Close()
+		return fmt.Errorf("secure tmux server launch log: %w", err)
 	}
 	cmd := dedicatedServerScopeCommand(logPath)
 	cmd.Stdout = launchLog
@@ -129,9 +137,41 @@ func ensureDedicatedServer(home string) error {
 			}
 		case <-ticker.C:
 		case <-deadline.C:
-			return fmt.Errorf("dedicated tmux server did not become ready within %s", serverStartupTimeout)
+			timeoutErr := fmt.Errorf("dedicated tmux server did not become ready within %s", serverStartupTimeout)
+			if done != nil {
+				if stopErr := stopAndReapLauncher(cmd, done); stopErr != nil {
+					return fmt.Errorf("%w (failed to stop its launcher: %v)", timeoutErr, stopErr)
+				}
+			}
+			return timeoutErr
 		}
 	}
+}
+
+func stopAndReapLauncher(cmd *exec.Cmd, done <-chan error) error {
+	killErr := cmd.Process.Kill()
+	// Stdout/stderr are direct files, not pipes, so SIGKILL makes Wait return
+	// promptly. Always receive the result: that both reaps the process and lets
+	// the goroutine terminate before fail-open returns to session creation.
+	<-done
+	if killErr != nil && !errors.Is(killErr, os.ErrProcessDone) {
+		return killErr
+	}
+	return nil
+}
+
+func secureExistingServerLog(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular path with mode %s", info.Mode())
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func tmuxServerRunning() bool {
@@ -230,6 +270,9 @@ func runDedicatedServer() error {
 	logPath := os.Getenv(dedicatedServerLogEnv)
 	if logPath == "" {
 		return fmt.Errorf("tmux server log path is missing")
+	}
+	if err := secureExistingServerLog(logPath); err != nil {
+		return fmt.Errorf("secure existing tmux server log: %w", err)
 	}
 	writer, err := log.NewRotatingFile(logPath, 0o600)
 	if err != nil {

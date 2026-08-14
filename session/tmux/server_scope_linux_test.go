@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
@@ -155,6 +156,73 @@ func TestDedicatedServerFailureFallsBackToSessionScope(t *testing.T) {
 	want := "systemd-run --user --scope --quiet --collect -- tmux new-session -d -s af_worker"
 	if got := strings.Join(cmd.Args, " "); got != want {
 		t.Fatalf("fallback command = %q, want %q", got, want)
+	}
+}
+
+func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	pidPath := systemdRun + ".pid"
+	script := "#!/bin/sh\nprintf '%s\\n' \"$$\" >\"$0.pid\"\nexec sleep 60\n"
+	if err := os.WriteFile(systemdRun, []byte(script), 0o700); err != nil {
+		t.Fatalf("write blocking systemd-run shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	if err := EnsureDaemonServer(); err == nil || !strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("EnsureDaemonServer error = %v, want readiness timeout", err)
+	}
+	rawPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read launcher pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatalf("parse launcher pid: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("timed-out dedicated server launcher %d is still alive", pid)
+	} else if err != syscall.ESRCH {
+		t.Fatalf("probe timed-out launcher %d: %v", pid, err)
+	}
+}
+
+func TestDedicatedServerTightensExistingLogPermissions(t *testing.T) {
+	testguard.IsolateTmux(t)
+	dir := t.TempDir()
+	systemdRun := filepath.Join(dir, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nexit 77\n"), 0o700); err != nil {
+		t.Fatalf("write systemd-run shim: %v", err)
+	}
+	home := t.TempDir()
+	logPath := filepath.Join(home, dedicatedServerLogName)
+	if err := os.WriteFile(logPath, []byte("preexisting diagnostics\n"), 0o644); err != nil {
+		t.Fatalf("write existing tmux server log: %v", err)
+	}
+	if err := os.Chmod(logPath, 0o644); err != nil {
+		t.Fatalf("make existing tmux server log permissive: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(home)
+	t.Cleanup(restore)
+
+	if err := EnsureDaemonServer(); err == nil {
+		t.Fatal("refusing systemd-run shim unexpectedly launched a server")
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("stat existing tmux server log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("existing tmux server log mode = %04o, want 0600", got)
 	}
 }
 
