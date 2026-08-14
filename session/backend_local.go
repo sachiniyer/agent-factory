@@ -658,13 +658,10 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 		}
 		if tab.tmux != nil {
 			refreshUnknownScope := account != "" && tab.accountScopeProvenanceUnknown
-			if err := refreshTabSessionEnvironment(i, tab); err != nil {
-				if account != "" {
-					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
-				}
-				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
-				continue
-			}
+			// A persisted sibling with unknown scope may still be running on the
+			// daemon's ambient identity. Stop it before preparing the replacement:
+			// shell validation can refuse (for example, an unsupported $SHELL), and
+			// returning first would discard the record while leaving that pane live.
 			if refreshUnknownScope {
 				exists, known := tab.tmux.ProbeSession()
 				if !known {
@@ -675,6 +672,13 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 						return fmt.Errorf("restore account-scoped tab %q for %q: stop the pre-scope process: %w", tab.Name, i.Title, err)
 					}
 				}
+			}
+			if err := refreshTabSessionEnvironment(i, tab); err != nil {
+				if account != "" {
+					return fmt.Errorf("prepare account-scoped tab %q for %q: %w", tab.Name, i.Title, err)
+				}
+				log.WarningLog.Printf("refresh tab %q for %q failed: %v", tab.Name, i.Title, err)
+				continue
 			}
 			restoreResult, err := tab.tmux.RestoreWithResult(worktreePath)
 			if err == nil && account != "" && restoreResult == tmux.RestoreRespawned {

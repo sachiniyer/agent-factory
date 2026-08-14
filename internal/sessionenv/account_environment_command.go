@@ -133,13 +133,16 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		return letMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "mapfile"), isBareName(words[0], "readarray"):
 		return arrayReadMutatesAccountEnvironment(words[1:], names)
+	case isBareName(words[0], "wait"):
+		return waitMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "eval"), isBareName(words[0], "."),
 		isBareName(words[0], "source"), isBareName(words[0], "trap"),
-		isBareName(words[0], "alias"):
+		isBareName(words[0], "alias"), isBareName(words[0], "fc"),
+		isBareName(words[0], "history"):
 		// These builtins execute or schedule another shell program in the same
-		// environment, or define commands that do. Proving their effects would
-		// require a second parser pass with runtime expansion, so a scoped sibling
-		// refuses them.
+		// environment, define commands that do, or load/replay unparsed history.
+		// Proving their effects would require a second parser pass with runtime
+		// expansion, so a scoped sibling refuses them.
 		return true
 	case shellCommandIsUnproven(words):
 		return true

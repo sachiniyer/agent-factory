@@ -88,6 +88,46 @@ func unwrapTimeout(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
+func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+	sawResultTarget := false
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			// Before an explicit -p, an expanded leading operand can become -p
+			// at runtime. After one, it is the customary expanded job spec.
+			return !sawResultTarget
+		}
+		if option == "--" || option == "-" || !strings.HasPrefix(option, "-") {
+			return false
+		}
+		flags := option[1:]
+		consumed := 1
+		for idx, flag := range flags {
+			switch flag {
+			case 'f', 'n':
+			case 'p':
+				// Bash documents -p varname as a separate operand. Refuse
+				// attached or dynamic spellings whose assignment target cannot
+				// be proven, and keep scanning because repeated -p options use
+				// the last target.
+				if idx != len(flags)-1 || len(words) < 2 {
+					return true
+				}
+				target, literal := literalShellWord(words[1])
+				if !literal || accountEnvironmentOperandDenied(target, names) {
+					return true
+				}
+				sawResultTarget = true
+				consumed = 2
+			default:
+				return true
+			}
+		}
+		words = words[consumed:]
+	}
+	return false
+}
+
 func letMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
 	for _, word := range words {
 		expression, literal := literalShellWord(word)

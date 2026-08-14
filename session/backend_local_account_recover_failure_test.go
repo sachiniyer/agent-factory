@@ -235,6 +235,55 @@ func TestLoad_AccountLaterTabFailureStopsEarlierRespawnedSibling(t *testing.T) {
 		"a later restore failure must tear down every sibling this discarded load already respawned")
 }
 
+func TestLoad_AccountShellPreparationFailureStopsPreScopeSibling(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/zsh")
+	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
+
+	const agentName = "af_account_shell_prepare_failure"
+	shellName := agentName + shellTmuxSuffix
+	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			commands = append(commands, cmd.String())
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	pty := persistPtyFactory{t: t, cmdExec: cmdExec}
+	previous := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, cmdExec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = previous })
+
+	_, err := FromInstanceData(InstanceData{
+		Title:    "account-shell-prepare-failure",
+		Path:     "/tmp/account-shell-prepare-failure-repo",
+		Program:  tmux.ProgramCodex,
+		Account:  "work",
+		Status:   Running,
+		TmuxName: agentName,
+		Tabs: []TabData{
+			{Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
+			{Name: shellTabName, Kind: TabKindShell, TmuxName: shellName},
+		},
+		Worktree: GitWorktreeData{
+			RepoPath:     "/tmp/account-shell-prepare-failure-repo",
+			WorktreePath: t.TempDir(),
+			SessionName:  "account-shell-prepare-failure",
+			BranchName:   "af/account-shell-prepare-failure",
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no credential-safe account launch mode")
+	require.True(t, commandIncludesSession(commands, "kill-session", shellName),
+		"a persisted pre-scope sibling must be stopped before shell preparation refuses the load")
+}
+
 func TestLoad_AccountRestoreRaceStopsReattachedPreScopeSibling(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()

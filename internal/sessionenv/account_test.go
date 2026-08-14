@@ -183,6 +183,23 @@ func TestApplyAccountEnvironment_RefusesArraySubscriptSideEffect(t *testing.T) {
 	require.Error(t, err, "array-subscript arithmetic must not mutate identity through an unrelated base name")
 }
 
+func TestApplyAccountEnvironment_RefusesWaitResultIdentity(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"sleep 0 & wait -p CODEX_HOME $!; codex",
+		"sleep 0 & wait -p RESULT -p CODEX_HOME -n; codex",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "wait -p must not replace the selected identity variable in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesHistoryReplay(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "set -o history; history -r ./commands; fc -s; codex", account)
+	require.Error(t, err, "history replay must not execute an unvalidated identity mutation")
+}
+
 func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for _, command := range []string{
@@ -196,6 +213,7 @@ func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
 		"let PORT=42; make",
 		"mapfile DATA </dev/null; make",
 		"readarray -t DATA </dev/null; make",
+		"sleep 0 & wait -p PID $!; make",
 		"nohup make",
 		"nice -n 5 make",
 		"timeout 10 make",
