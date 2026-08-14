@@ -378,8 +378,22 @@ func (t *TmuxSession) sendKeysPasteBuffer(text string) (PromptDeliveryStatus, bo
 		// capturePaneForDelivery avoid -e. Strip them before comparing, or the
 		// veto goes blind on styled composers and authorizes the retry against
 		// a tail that HAS visibly drained.
+		//
+		// The comparison anchor is the ABSENT observation frame, not the
+		// pre-paste baseline. An identical tail can already sit in the
+		// transcript at baseline — the #1146 limit resume redelivers the SAME
+		// prompt, so that is a designed-for case, not a corner — and if that
+		// old copy scrolls off while the new tail drains, the total against the
+		// baseline never increases and a <= baseline check would authorize the
+		// retry against a visibly drained paste. The absent frame is
+		// milliseconds from the boundary and is the frame in which the new
+		// tail was PROVEN missing, so a count that grows from it is evidence
+		// about this paste. Replacement within that ms window is still
+		// invisible to any count comparison — narrower again, still not
+		// closed, same residual honesty as above.
 		retryAuthorized = boundaryOK && probe.baselineCaptured &&
-			strings.Count(normalizeDelivery(xansi.Strip(boundary)), probe.completion) <= probe.completionBaseline
+			strings.Count(normalizeDelivery(xansi.Strip(boundary)), probe.completion) <=
+				strings.Count(normalizeDelivery(observation.pane), probe.completion)
 	}
 	return observation.outcome.promptDeliveryStatus(), retryAuthorized, nil
 }
