@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +43,66 @@ func (*waitingPTYSubscription) NextEvent(ctx context.Context) (session.PTYEvent,
 func (*waitingPTYSubscription) Seq() session.Seq { return 0 }
 func (*waitingPTYSubscription) Close() error     { return nil }
 
+type delayedPTYWriteConn struct {
+	net.Conn
+	mu             sync.Mutex
+	upgraded       bool
+	delayOnce      sync.Once
+	releaseOnce    sync.Once
+	frameWritten   chan struct{}
+	releaseFrame   chan struct{}
+	transportClose chan struct{}
+	closeOnce      sync.Once
+}
+
+func (c *delayedPTYWriteConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+
+	c.mu.Lock()
+	upgraded := c.upgraded
+	if bytes.HasPrefix(p[:n], []byte("HTTP/1.1 101")) {
+		c.upgraded = true
+	}
+	c.mu.Unlock()
+
+	if upgraded && n > 0 {
+		c.delayOnce.Do(func() {
+			close(c.frameWritten)
+			<-c.releaseFrame
+		})
+	}
+	return n, err
+}
+
+func (c *delayedPTYWriteConn) Close() error {
+	c.closeOnce.Do(func() { close(c.transportClose) })
+	return c.Conn.Close()
+}
+
+func (c *delayedPTYWriteConn) release() {
+	c.releaseOnce.Do(func() { close(c.releaseFrame) })
+}
+
+type delayedPTYWriteListener struct {
+	net.Listener
+	accepted chan *delayedPTYWriteConn
+}
+
+func (l *delayedPTYWriteListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	delayed := &delayedPTYWriteConn{
+		Conn:           conn,
+		frameWritten:   make(chan struct{}),
+		releaseFrame:   make(chan struct{}),
+		transportClose: make(chan struct{}),
+	}
+	l.accepted <- delayed
+	return delayed, nil
+}
+
 // TestServePTYStreamInputErrorClosesWebSocket proves a failed input delivery is
 // observable to the web terminal. The reconnecting client can hold subsequent
 // keys only if the server closes this failed stream instead of silently reading
@@ -49,13 +112,16 @@ func TestServePTYStreamInputErrorClosesWebSocket(t *testing.T) {
 		err:    errors.New("tmux rejected input"),
 		called: make(chan []byte, 1),
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
 			return
 		}
 		servePTYStream(binding, &waitingPTYSubscription{}, conn)
 	}))
+	listener := &delayedPTYWriteListener{Listener: srv.Listener, accepted: make(chan *delayedPTYWriteConn, 1)}
+	srv.Listener = listener
+	srv.Start()
 	defer srv.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -64,8 +130,15 @@ func TestServePTYStreamInputErrorClosesWebSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial PTY stream: %v", err)
 	}
+	serverConn := <-listener.accepted
+	defer serverConn.release()
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 
+	select {
+	case <-serverConn.frameWritten:
+	case <-ctx.Done():
+		t.Fatalf("server did not write stream hello: %v", ctx.Err())
+	}
 	hello, err := agentproto.ReadMessage(ctx, conn)
 	if err != nil {
 		t.Fatalf("read stream hello: %v", err)
@@ -86,6 +159,16 @@ func TestServePTYStreamInputErrorClosesWebSocket(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("binding did not receive input: %v", ctx.Err())
 	}
+
+	// Hold the completed hello write inside websocket.Write while the input
+	// failure cancels the stream. coder/websocket closes the transport when a
+	// context passed to an in-flight write is cancelled; the explicit close
+	// frame must remain possible even in this scheduling window.
+	select {
+	case <-serverConn.transportClose:
+	case <-time.After(100 * time.Millisecond):
+	}
+	serverConn.release()
 
 	_, _, err = conn.Read(ctx)
 	if got := websocket.CloseStatus(err); got != websocket.StatusInternalError {

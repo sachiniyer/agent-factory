@@ -333,7 +333,10 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 	// byte-identical to the streamSeqHeader value set at handshake. Additive: Go
 	// stream consumers (TUI/apiclient) decode the frame cleanly and skip it — no
 	// behavior change (see agentproto OpHello).
-	hctx, hcancel := context.WithTimeout(ctx, wsWriteTimeout)
+	// Keep outbound operation deadlines independent from stream cancellation.
+	// coder/websocket closes the transport when a context passed to an active
+	// write is cancelled; that would race the explicit close frame below.
+	hctx, hcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 	err := agentproto.WriteFrame(hctx, conn, agentproto.HelloFrame(uint64(sub.Seq())))
 	hcancel()
 	if err != nil {
@@ -376,7 +379,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 			}
 			return
 		}
-		wctx, wcancel := context.WithTimeout(ctx, wsWriteTimeout)
+		wctx, wcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
 		switch ev.Kind {
 		case session.PTYData:
 			err = agentproto.WriteFrame(wctx, conn, agentproto.PTYOutFrame(ev.Data))
@@ -465,7 +468,7 @@ func keepalivePTY(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pctx, pcancel := context.WithTimeout(ctx, wsKeepaliveInterval)
+			pctx, pcancel := context.WithTimeout(context.Background(), wsKeepaliveInterval)
 			err := conn.Ping(pctx)
 			pcancel()
 			if err != nil {
