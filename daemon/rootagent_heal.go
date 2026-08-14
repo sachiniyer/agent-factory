@@ -70,6 +70,7 @@ func (m *Manager) healRootAgentLayers() {
 				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
+					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
 					healed.registryUnreadable = false
 					changed = true
 					m.resetRootHealRegistryObservation()

@@ -155,3 +155,36 @@ func TestEnsureRootAgentsCorruptRecordKeepsLegacyOptIn(t *testing.T) {
 		t.Fatalf("the legacy opt-in must survive its project's corrupt record (the accepted #3297 residue), got %d creates", len(*seen))
 	}
 }
+
+// TestVerdictNamesUnreadableRecordsForUnattributedRepos pins the #3316
+// round-2 review: with a corrupt record present, a repo no readable config
+// covers must not answer "not configured — add a root_agents entry" (advice
+// that walks the user into the fail-open residue); it names the unreadable
+// record directories that may be its own, and the delete preflight treats the
+// state as blocking.
+func TestVerdictNamesUnreadableRecordsForUnattributedRepos(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	corruptRegistryRecord(t, project.ID)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+
+	verdict := manager.rootAgentMaterializeVerdictFor(rid)
+	if verdict.reason != rootAgentRecordsUnreadable {
+		t.Fatalf("verdict reason = %d, want rootAgentRecordsUnreadable — an unattributed repo with corrupt records present is not simply unconfigured", verdict.reason)
+	}
+	detail := rootAgentUnavailableDetail(verdict)
+	if !strings.Contains(detail, project.ID) {
+		t.Fatalf("the refusal must name the unreadable record directory, got: %s", detail)
+	}
+	if strings.Contains(detail, "add a root_agents entry") {
+		t.Fatalf("the refusal must not steer toward the fail-open residue, got: %s", detail)
+	}
+}
