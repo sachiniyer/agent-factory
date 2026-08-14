@@ -303,7 +303,12 @@ the TUI:
   archived),
 - the **title**, with the TUI's `[lost]` / `[deleting]` / `[limit]` / `[remote]`
   prefixes, and
-- the **branch** as a secondary `⎇` line.
+- the **branch** as a secondary `⎇` line — prefixed, when the session is idle
+  for a mechanically known reason, by the same idle detail the TUI shows
+  (`no change after delivery · pane changed 12m ago`). No reason claims the
+  agent finished, asked a question, or is wedged — the daemon observes pane
+  bytes changing, not what the agent meant. See the
+  [`idle_reason` vocabulary](http-api.md#session-idle-diagnosis).
 
 Rows are ordered exactly like the TUI: the reserved root agent is pinned to the
 top, then live sessions (oldest created first), the archived group last

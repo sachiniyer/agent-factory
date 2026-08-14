@@ -24,6 +24,16 @@ you can select a known project or add one.
   works — so you can follow progress across several agents without attaching to
   any of them. Toggle it with `s` (open) and `x` (hide).
 
+An idle row also says **why** it's idle, as far as the daemon can mechanically
+tell — `usage limit`, `process exited`, `no change after delivery`,
+`pane changed · 12m ago` — next to its branch name. The detail reports observed
+facts only: prompt-delivery evidence, and when the pane's rendered bytes last
+changed. No reason ever claims the agent *finished*, *asked a question*, or is
+*wedged* — those can render identically in a terminal, so af reports the
+observation and leaves reading the pane to you (#3168). The full `idle_reason`
+vocabulary is in the
+[HTTP API guide](../http-api.md#session-idle-diagnosis).
+
 ## Interacting with a session
 
 There are two ways in, split deliberately:
