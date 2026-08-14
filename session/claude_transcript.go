@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,11 +28,11 @@ type ClaudeProjectConversationState struct {
 // by program and returns the newest direct transcript for workingDir. Claude
 // encodes every non-alphanumeric character in an absolute project path as '-'.
 func InspectClaudeProjectConversations(program, workingDir string, recorded AgentConversationData) (ClaudeProjectConversationState, error) {
-	configDir, err := claudeConfigDirFromCommand(program, workingDir)
+	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workingDir)
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	projectDir := filepath.Join(configDir, "projects", claudeProjectName(workingDir))
+	projectDir := filepath.Join(configDir, "projects", claudeProjectName(launchDir))
 	entries, err := os.ReadDir(projectDir)
 	if os.IsNotExist(err) {
 		return ClaudeProjectConversationState{}, nil
@@ -78,10 +79,16 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 	return state, nil
 }
 
-func claudeConfigDirFromCommand(command, workingDir string) (string, error) {
+func claudeTranscriptLaunchContext(command, workingDir string) (string, string, error) {
 	launch, err := tmux.CommandEnvironmentFromCommand(command, workingDir)
 	if err != nil {
-		return "", err
+		return "", "", err
+	}
+	if launch.Agent != tmux.ProgramClaude {
+		return "", "", fmt.Errorf("command does not resolve to claude")
+	}
+	if !launch.WorkingDirKnown() {
+		return "", "", fmt.Errorf("claude launch directory cannot be resolved statically")
 	}
 	effective := func(name string) (string, bool) {
 		override := launch.Override(name)
@@ -98,12 +105,12 @@ func claudeConfigDirFromCommand(command, workingDir string) (string, error) {
 		return filepath.Clean(filepath.Join(launch.WorkingDir, path))
 	}
 	if configDir, set := effective("CLAUDE_CONFIG_DIR"); set && strings.TrimSpace(configDir) != "" {
-		return resolve(configDir), nil
+		return resolve(configDir), launch.WorkingDir, nil
 	}
 	if home, set := effective("HOME"); set && strings.TrimSpace(home) != "" {
-		return filepath.Join(resolve(home), ".claude"), nil
+		return filepath.Join(resolve(home), ".claude"), launch.WorkingDir, nil
 	}
-	return "", os.ErrNotExist
+	return "", "", os.ErrNotExist
 }
 
 func claudeProjectName(path string) string {

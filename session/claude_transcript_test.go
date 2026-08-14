@@ -56,3 +56,23 @@ func TestInspectClaudeProjectConversationsFindsNewestAndChecksRecorded(t *testin
 	require.False(t, state.RecordedExists)
 	require.Equal(t, latestID, state.Latest.ID)
 }
+
+func TestInspectClaudeProjectConversationsUsesEffectiveLaunchDirectory(t *testing.T) {
+	configDir := t.TempDir()
+	repoDir := t.TempDir()
+	launchDir := filepath.Join(t.TempDir(), "actual")
+	require.NoError(t, os.MkdirAll(launchDir, 0o700))
+
+	const id = "5299e00d-1111-4222-8333-f7045e07a242"
+	projectDir := filepath.Join(configDir, "projects", claudeProjectName(launchDir))
+	require.NoError(t, os.MkdirAll(projectDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(projectDir, id+".jsonl"), []byte("{}\n"), 0o600))
+
+	state, err := InspectClaudeProjectConversations(
+		"env -C "+launchDir+" CLAUDE_CONFIG_DIR="+configDir+" claude", repoDir,
+		AgentConversationData{Agent: tmux.ProgramClaude, ID: id},
+	)
+	require.NoError(t, err)
+	require.True(t, state.RecordedExists)
+	require.Equal(t, id, state.Latest.ID)
+}

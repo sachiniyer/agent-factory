@@ -305,6 +305,37 @@ func TestEnsureRootAgentsSubstitutesNewestClaudeTranscriptForMissingCarry(t *tes
 		"the stale-to-newer conversation substitution must be visible in the log")
 }
 
+func TestEnsureRootAgentsUsesResolvedProgramOverrideForClaudeTranscripts(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	ambientConfigDir := t.TempDir()
+	overrideConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", ambientConfigDir)
+	repoPath := setupControlRepo(t)
+
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{Program: tmux.ProgramClaude})
+	cfg.ProgramOverrides = map[string]string{
+		tmux.ProgramClaude: "CLAUDE_CONFIG_DIR=" + overrideConfigDir + " claude",
+	}
+	require.NoError(t, config.SaveConfig(cfg))
+	const newestConversationID = "5299e00d-1111-4222-8333-f7045e07a242"
+	writeRootClaudeTranscript(t, overrideConfigDir, repoPath, newestConversationID)
+	seen := installOptionsRecordingBackend(t)
+
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	seedRootConversation(t, first)
+
+	first.SetStatusForTest(session.Lost)
+	manager.EnsureRootAgents()
+
+	require.Len(t, *seen, 2)
+	require.Equal(t, newestConversationID, (*seen)[1].ResumeConversation.ID,
+		"transcript inspection must use the same program_overrides command as launch")
+}
+
 // A transcript can disappear after the preflight stat but before Claude has
 // finished its resume attempt. Re-check the store on that failure and consume
 // a newly rotated transcript before the fresh fallback.
@@ -347,8 +378,9 @@ func TestEnsureRootAgentsRechecksClaudeTranscriptsAfterResumeFailure(t *testing.
 
 // The ensure poll keeps the persisted root id aligned before an outage, not
 // only while reacting to one. Each replacement id comes from an existing file.
-func TestEnsureRootAgentsPersistsRotatedClaudeConversation(t *testing.T) {
+func TestEnsureRootAgentsOnlyReplacesAMissingClaudeConversationAfterThePollInterval(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	advance := withFrozenClock(t)
 	claudeConfigDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 	seen := installOptionsRecordingBackend(t)
@@ -372,10 +404,50 @@ func TestEnsureRootAgentsPersistsRotatedClaudeConversation(t *testing.T) {
 	manager.EnsureRootAgents()
 
 	require.Len(t, *seen, 1, "refreshing conversation metadata must not restart a healthy root")
+	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
+		"a still-valid root conversation must not be replaced by another process's newer transcript")
+
+	require.NoError(t, os.Remove(oldPath))
+	manager.EnsureRootAgents()
+	require.Equal(t, priorRootConversationID, root.AgentConversation().ID,
+		"the one-second ensure loop must not rescan every project transcript on every tick")
+	advance(time.Hour)
+	manager.EnsureRootAgents()
+
 	require.Equal(t, newestConversationID, root.AgentConversation().ID)
 	repo, err := config.RepoFromPath(repoPath)
 	require.NoError(t, err)
 	require.Equal(t, newestConversationID, persistedConversationID(t, repo.ID))
+}
+
+func TestEnsureRootAgentsDeduplicatesClaudeTranscriptInspectionWarnings(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	advance := withFrozenClock(t)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	cfg := rootTestConfig(repoPath, config.RootAgentConfig{
+		Program: "CLAUDE_CONFIG_DIR=$HOME/.claude claude",
+	})
+
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	manager.EnsureRootAgents()
+	require.Len(t, *seen, 1)
+	root := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, root)
+	seedRootConversation(t, root)
+
+	var warning bytes.Buffer
+	previousWarning := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warning)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previousWarning) })
+
+	manager.EnsureRootAgents()
+	advance(time.Hour)
+	manager.EnsureRootAgents()
+
+	require.Equal(t, 1, strings.Count(warning.String(), "could not verify its recorded claude conversation"),
+		"a persistent inspection error must not flood the one-second daemon poll log")
 }
 
 // TestReportRootConversationCarryDistinguishesTheThreeOutcomes: whichever way
