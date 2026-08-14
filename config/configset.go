@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// This file implements `af config set` (#1192). It writes a single scalar key
+// This file implements `af config set` (#1192). It writes one config key
 // into the global config.toml with three deliberate properties:
 //
 //  1. Comment/ordering-preserving: it does a SURGICAL in-place edit of the file
@@ -19,10 +19,9 @@ import (
 //     toml.Marshal regenerates the file and would strip the comments, blank
 //     lines, and key ordering of a file the README tells users to hand-edit —
 //     an external-user footgun. Only the target value's bytes change.
-//  2. Allowlisted: only a curated set of safe, documented scalar keys is
-//     settable (settableKeySpecs). Unknown or structural keys (root_agents, the
-//     [keys] rebinds) are rejected with the settable list — they stay
-//     hand-edited.
+//  2. Manifest-complete: every global manifest key is settable. Scalars retain
+//     their native CLI syntax; tables and non-comma lists use compact JSON, the
+//     exact form CurrentValue returns to both config panes (#3345).
 //  3. Validated with the loader's own rules BEFORE writing: the same
 //     ValidateProgramEnum / enum / range checks the loader applies, plus a final
 //     parseConfigTOML gate on the edited bytes, so `config set` can never write
@@ -64,35 +63,20 @@ type settableKeySpec struct {
 	// dynamic marks a family whose leaf is user-supplied (program_overrides.<x>,
 	// limit_patterns.<x>); the registry key is then the section/prefix name.
 	dynamic bool
+	// structured admits the bare key as one whole compact-JSON value. A dynamic
+	// family may support both forms: program_overrides accepts a whole JSON map,
+	// while program_overrides.<agent> keeps its convenient scalar leaf writer.
+	structured bool
 	// validate runs the loader's own validation on the parsed value before the
 	// write, returning the loader's error verbatim where possible. leaf is the
 	// sub-key for a dynamic family (the program name), else the key itself.
 	validate func(leaf, value string) error
 }
 
-// settableKeySpecs is the allowlist. Scalars + the two simple string maps only.
-//
-// Every EXCLUSION is deliberate and stated here, because an unexplained gap is
-// indistinguishable from drift — and was: listen_addr, require_loopback_token,
-// vscode_server_binary, limit_auto_resume and limit_retry_interval were all
-// missing for no stated reason, which left the config agent unable
-// to set two of the keys a new user most needs (listen_addr,
-// require_loopback_token). TestManifestAgreesWithSettableKeys now pins this map
-// against the config manifest, so a key can no longer go missing quietly: adding
-// a Settable entry to the manifest without an entry here fails the test, and
-// vice versa.
-//
-// Structural values stay hand-edited, and the manifest marks them Settable:false:
-//   - root_agents — a nested table (path → {program}); no scalar shape.
-//   - theme — a named preset or color table (see ThemeConfig); switching its
-//     representation or setting one slot at a time needs a structural editor.
-//   - keys — array-capable rebinds (an action may map to a list of keys).
-//   - session_env_passthrough / post_worktree_commands — []string lists left
-//     hand-edited for now. The comma-separated cfgStringList writer added for
-//     cors_allowed_origins (#2564) generalizes to session_env_passthrough (env var
-//     names carry no commas), but NOT to post_worktree_commands, whose
-//     shell-command elements may contain a comma the writer would mis-split.
-//     Wiring either is a separate per-key settability decision, not required here.
+// settableKeySpecs is the global writer registry. TestManifestAgreesWithSettableKeys
+// pins it bidirectionally to Manifest(), so a new pane row without a real writer
+// is a test failure rather than a read-only row. Repo-only manifest entries are
+// written through their repository config surface and never enter the global panes.
 var settableKeySpecs = map[string]settableKeySpec{
 	"default_program": {kind: cfgString, validate: func(_, v string) error {
 		return ValidateProgramEnum("default_program", "default_program", v, "")
@@ -169,10 +153,10 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
-	"program_overrides": {kind: cfgString, section: "program_overrides", dynamic: true, validate: func(leaf, v string) error {
+	"program_overrides": {kind: cfgString, section: "program_overrides", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		return ValidateProgramEnum("program_overrides key", "program_overrides key", leaf, v)
 	}},
-	"limit_patterns": {kind: cfgString, section: "limit_patterns", dynamic: true, validate: func(leaf, v string) error {
+	"limit_patterns": {kind: cfgString, section: "limit_patterns", dynamic: true, structured: true, validate: func(leaf, v string) error {
 		if err := ValidateProgramEnum("limit_patterns key", "limit_patterns key", leaf, v); err != nil {
 			return err
 		}
@@ -181,6 +165,11 @@ var settableKeySpecs = map[string]settableKeySpec{
 		}
 		return nil
 	}},
+	"theme":                   {structured: true},
+	"session_env_passthrough": {structured: true},
+	"root_agents":             {structured: true},
+	"root_agent":              {structured: true},
+	"keys":                    {structured: true},
 }
 
 func requirePositiveInt(name, v string) error {
@@ -262,12 +251,13 @@ func isCommaListKey(key string) bool {
 // SettableKeys returns the sorted, human-facing list of keys `config set`
 // accepts; dynamic families are rendered as prefix.<name>.
 func SettableKeys() []string {
-	out := make([]string, 0, len(settableKeySpecs))
+	out := make([]string, 0, len(settableKeySpecs)+2)
 	for k, s := range settableKeySpecs {
+		if !s.dynamic || s.structured {
+			out = append(out, k)
+		}
 		if s.dynamic {
 			out = append(out, k+".<name>")
-		} else {
-			out = append(out, k)
 		}
 	}
 	sort.Strings(out)
@@ -355,13 +345,19 @@ func exposureWarning(cfg *Config, key string) string {
 // to its spec, section, and leaf. ok is false for anything not on the allowlist.
 func resolveSettable(key string) (section, leaf string, spec settableKeySpec, ok bool) {
 	key = canonicalConfigKey(key)
-	if s, found := settableKeySpecs[key]; found && !s.dynamic {
-		leaf := key
-		if s.section != "" {
-			prefix := s.section + "."
-			leaf = strings.TrimPrefix(key, prefix)
+	if s, found := settableKeySpecs[key]; found {
+		if s.dynamic {
+			if s.structured {
+				return "", key, s, true
+			}
+		} else {
+			leaf := key
+			if s.section != "" {
+				prefix := s.section + "."
+				leaf = strings.TrimPrefix(key, prefix)
+			}
+			return s.section, leaf, s, true
 		}
-		return s.section, leaf, s, true
 	}
 	if i := strings.IndexByte(key, '.'); i > 0 {
 		prefix, rest := key[:i], key[i+1:]
@@ -383,17 +379,16 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
-			"Structural keys (root_agents, theme, [keys] rebinds) are edited directly in config.toml",
+		return nil, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
 			key, strings.Join(SettableKeys(), ", "))
 	}
-
 	key = canonicalConfigKey(key)
-	canonical, encoded, err := canonicalizeScalar(spec.kind, rawValue)
+	structured := spec.structured && section == ""
+	canonical, encoded, err := canonicalizeConfigValue(key, spec, structured, rawValue)
 	if err != nil {
 		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
-	if spec.validate != nil {
+	if !structured && spec.validate != nil {
 		if err := spec.validate(leaf, canonical); err != nil {
 			return nil, err
 		}
@@ -414,7 +409,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyPath := prettyHomePath(tomlPath)
 
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded,
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured,
 		clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
@@ -450,11 +445,12 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 
-	canonical, encoded, err := canonicalizeScalar(spec.kind, rawValue)
+	structured := spec.structured && section == ""
+	canonical, encoded, err := canonicalizeConfigValue(key, spec, structured, rawValue)
 	if err != nil {
 		return nil, fmt.Errorf("invalid value for %s: %w", key, err)
 	}
-	if spec.validate != nil {
+	if !structured && spec.validate != nil {
 		if err := spec.validate(leaf, canonical); err != nil {
 			return nil, err
 		}
@@ -465,7 +461,7 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 		return nil, err
 	}
 	prettyPath := prettyHomePath(path)
-	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded}
+	write := scalarWrite{key: key, section: section, leaf: leaf, canonical: canonical, encoded: encoded, structured: structured}
 
 	var result *SetResult
 	writeErr := WithFileLock(path, func() error {
@@ -487,12 +483,11 @@ func resolveProjectSettable(key string) (section, leaf string, spec settableKeyS
 	key = canonicalConfigKey(key)
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
-		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s. "+
-			"Structural keys (root_agents, theme, [keys] rebinds) are edited directly in config.toml",
+		return "", "", settableKeySpec{}, fmt.Errorf("%q is not a settable config key. Settable keys: %s",
 			key, strings.Join(SettableKeys(), ", "))
 	}
 	scopeKey := key
-	if spec.dynamic {
+	if spec.dynamic && section != "" {
 		scopeKey = section
 	}
 	if !isProjectPersonalKey(scopeKey) {
@@ -524,6 +519,8 @@ type scalarWrite struct {
 	canonical string
 	// encoded is its TOML encoding — the bytes that actually land in the file.
 	encoded string
+	// structured replaces a whole table/list value rather than one scalar line.
+	structured bool
 	// clear removes the key line instead of writing it. Set for an empty list
 	// value (`af config set cors_allowed_origins ""`): a nil/absent list and an
 	// empty one mean the same thing, so clearing keeps config.toml free of a
@@ -564,9 +561,15 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
 	updated := string(current)
-	if w.clear {
+	switch {
+	case w.structured:
+		updated, err = setTOMLStructured(updated, w.key, w.encoded)
+		if err != nil {
+			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
+		}
+	case w.clear:
 		updated, _ = deleteTOMLScalar(updated, w.section, w.leaf)
-	} else {
+	default:
 		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
 	}
 	// If this file already carries the flat compatibility spelling, keep it in
@@ -600,7 +603,11 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	if err := AtomicWriteFile(tomlPath, []byte(updated), 0644); err != nil {
 		return nil, err
 	}
-	result := &SetResult{Key: w.key, Value: w.canonical, Path: tomlPath, RequiresRestart: true}
+	value := w.canonical
+	if w.structured {
+		value, _ = CurrentValue(resulting, w.key)
+	}
+	result := &SetResult{Key: w.key, Value: value, Path: tomlPath, RequiresRestart: true}
 	if warn := exposureWarning(resulting, w.key); warn != "" {
 		result.Warnings = append(result.Warnings, warn)
 	}
@@ -619,7 +626,15 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
-	updated := setTOMLScalar(string(current), w.section, w.leaf, w.encoded)
+	updated := string(current)
+	if w.structured {
+		updated, err = setTOMLStructured(updated, w.key, w.encoded)
+		if err != nil {
+			return nil, fmt.Errorf("failed to edit %s in %s: %w", w.key, prettyPath, err)
+		}
+	} else {
+		updated = setTOMLScalar(updated, w.section, w.leaf, w.encoded)
+	}
 	if _, err := parseProjectConfig([]byte(updated), path); err != nil {
 		return nil, fmt.Errorf("internal error: edited personal project config would not load (no changes written): %w", err)
 	}
@@ -627,74 +642,6 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 		return nil, err
 	}
 	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: true}, nil
-}
-
-// canonicalizeScalar parses rawValue per kind and returns both the canonical
-// string form (for echo/validation) and its TOML encoding (for the file).
-func canonicalizeScalar(kind cfgValueKind, raw string) (canonical, encoded string, err error) {
-	switch kind {
-	case cfgBool:
-		b, perr := strconv.ParseBool(strings.TrimSpace(raw))
-		if perr != nil {
-			return "", "", fmt.Errorf("expected a boolean (true/false), got %q", raw)
-		}
-		s := strconv.FormatBool(b)
-		return s, s, nil
-	case cfgInt:
-		n, perr := strconv.Atoi(strings.TrimSpace(raw))
-		if perr != nil {
-			return "", "", fmt.Errorf("expected an integer, got %q", raw)
-		}
-		s := strconv.Itoa(n)
-		return s, s, nil
-	case cfgDuration:
-		return canonicalizeDurationScalar(raw)
-	case cfgStringList:
-		elems := splitListValue(raw)
-		encoded := "[]"
-		if len(elems) > 0 {
-			quoted := make([]string, len(elems))
-			for i, e := range elems {
-				quoted[i] = encodeTOMLString(e)
-			}
-			encoded = "[" + strings.Join(quoted, ", ") + "]"
-		}
-		// Canonical is the comma-joined trimmed elements — exactly the form the
-		// editor shows and `af config get` prints back, so a set→get round-trips.
-		return strings.Join(elems, ","), encoded, nil
-	default:
-		return raw, encodeTOMLString(raw), nil
-	}
-}
-
-// encodeTOMLString renders s as a TOML string, preferring a literal single-quoted
-// string (matching go-toml's output style and leaving backslashes in paths
-// untouched). It falls back to a basic double-quoted string only when s contains
-// a single quote or a newline, which a literal string cannot represent.
-func encodeTOMLString(s string) string {
-	if !strings.ContainsAny(s, "'\n\r") {
-		return "'" + s + "'"
-	}
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch r {
-		case '"':
-			b.WriteString(`\"`)
-		case '\\':
-			b.WriteString(`\\`)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		case '\t':
-			b.WriteString(`\t`)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }
 
 var (

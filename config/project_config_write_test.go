@@ -69,11 +69,12 @@ func TestSetProjectConfigValueRejectsGlobalOnlyKey(t *testing.T) {
 	require.Contains(t, err.Error(), "af config set network.listen_addr", "the error names how to set it correctly")
 }
 
-func TestSetProjectConfigValueRejectsStructuralKey(t *testing.T) {
+func TestSetProjectConfigValueRejectsGlobalOnlyStructuredKey(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	_, err := SetProjectConfigValue(project.ID, "root_agents", "x")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "not a settable config key")
+	require.Contains(t, err.Error(), "global setting")
+	require.Contains(t, err.Error(), "af config set root_agents")
 }
 
 func TestSetProjectConfigValueValidatesValue(t *testing.T) {

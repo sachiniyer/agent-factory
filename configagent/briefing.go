@@ -91,11 +91,9 @@ func BuildBriefing(mode Mode, cfg *config.Config, configPath string) string {
   in a {data,error} envelope and errors come back on stderr, so the exit code alone
   only tells you whether it worked.
 
-A few settings have no ` + "`af config set`" + ` form because they are not one scalar value —
-` + "`theme`" + ` and the ` + "`[keys]`" + ` rebinds are tables, ` + "`root_agents`" + ` is a table, and
-` + "`session_env_passthrough`" + ` is a list. You edit those by
-editing the global config file directly. See "Editing the structured settings" below;
-the same immediate-apply and echo rules hold, and you validate after every such edit.`)
+Tables and lists use one compact JSON value with ` + "`af config set`" + `. See "Editing the
+structured settings" below for their exact shapes. They follow the same validated,
+immediate-apply and echo rules as scalar settings.`)
 	fmt.Fprintf(&b, "- Say once, near the start, that all of this lives in `%s` and stays\n"+
 		"  hand-editable, so anything can be undone by opening that file. Say it once · not per setting.\n",
 		configPath)
@@ -116,10 +114,8 @@ work, are on this machine. Do not go looking for them. Specifically:
 - Do not create sessions, tabs or tasks.
 - The only files you may write are the GLOBAL config file named above and nothing
   else — never a file in a repository, never a repository's own ` + "`.agent-factory`" + `
-  config. The writes you make are ` + "`af config set`" + ` and, for the structured
-  settings, direct edits to that one global file. The only reads you need are
-  ` + "`af config get`" + `, ` + "`af config list`" + `, and — only to check your own edit —
-  ` + "`af config validate`" + ` and reading back the global file you just wrote.
+  config. Every write you make goes through ` + "`af config set`" + `. The only reads you
+  need are ` + "`af config get`" + ` and ` + "`af config list`" + `.
 
 If the user asks for anything outside configuration — even something small, even
 something helpful — tell them this session only does configuration, and that a normal
@@ -163,41 +159,32 @@ reverse proxy that terminates TLS (nginx, caddy), or a VPN such as Tailscale.
 
 `)
 
-	// The slot count is read from ThemeConfig rather than written here: a slot
-	// added to the struct would otherwise leave this sentence quietly wrong.
 	fmt.Fprintf(&b, `
 ## Editing the structured settings
 
-Four settings have no `+"`af config set`"+` form because they are not one scalar value.
-You edit these by editing the global config file at `+"`%s`"+` directly — and ONLY that
-file, never a repository's config. They are:
+Structured settings use one compact JSON value. Read the current JSON with
+`+"`af config get <key>`"+`, change only what the user requested, then pass the whole value
+to `+"`af config set <key> '<json>'`"+`. Shell-quote the JSON so it remains one argument.
+The structured settings are:
 
-- `+"`theme`"+` — a table of %d colors, one `+"`#RRGGBB`"+` per slot, under a `+"`[theme]`"+` section.
-- `+"`keys`"+` — the keybinding table, under `+"`[keys]`"+`; each entry rebinds one action.
-- `+"`root_agents`"+` — a table under `+"`[root_agents]`"+`, one entry per repository path that
-  should always keep a session named root running.
-- `+"`session_env_passthrough`"+` — a list of exact environment variable NAMES a session may
-  inherit. Names only — never put a value here. This is a security setting.
-
-How to edit one:
-
-1. Read the current file first so you edit in place and preserve every other section,
-   comment, and blank line. Change only what the user asked for.
-2. Make the edit.
-3. Run `+"`af config validate`"+`. It re-reads the file exactly as af does at startup and
-   reports whether it loads. This step is not optional: a broken structured edit is a
-   HARD startup failure with no fallback to defaults, so an unvalidated edit can wedge
-   af and the daemon. `+"`af config set`"+` validates before it writes and so is always safe
-   — a direct edit is not, which is why you check.
-4. If validate fails, it names what is wrong. FIX IT before moving on — never leave the
-   file in a state that does not load. If you cannot get it valid, restore what was
-   there before and tell the user.
+- `+"`theme`"+` — the `+"`nord`"+` or `+"`zenburn`"+` preset name, or an object
+  containing all %d color slots as `+"`#RRGGBB`"+` strings.
+- `+"`keys`"+` — an object whose entries rebind TUI actions.
+- `+"`root_agents`"+` — an object keyed by repository path, with one root-agent profile
+  per value.
+- `+"`root_agent`"+` — one object containing the default root-agent profile.
+- `+"`program_overrides`"+` — an object keyed by agent; a single entry may also be set
+  with `+"`program_overrides.<agent>`"+`.
+- `+"`limit_patterns`"+` — an object keyed by agent; a single entry may also be set with
+  `+"`limit_patterns.<agent>`"+`.
+- `+"`session_env_passthrough`"+` — an array of exact environment variable NAMES a
+  session may inherit. Names only — never put a value here. This is a security setting.
 
 For `+"`theme`"+` specifically: do not offer to pick hex values slot by slot in
 conversation — that is a miserable way to choose colors. Ask what they want (a darker
-background, a different accent), set those slots, and validate.
+background, a different accent), update those slots in the current object, and set it.
 
-`, configPath, config.ThemeSlotCount())
+`, config.ThemeSlotCount())
 
 	fmt.Fprintf(&b, "## The settings\n\nEvery setting below is shown with its current value on this machine.\n"+
 		"Recommend from these values · do not guess at what is set.\n\n%s\n",

@@ -490,9 +490,8 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 }
 
 // TestRenderBriefingTellsAgentHowToSet checks the actionable half of the
-// briefing: a settable key must carry its real `af config set` form (with the
-// ".<name>" leaf for a dynamic family), and a hand-edited key must say so rather
-// than advertise a command that would be rejected.
+// briefing: every global manifest key must carry its real bare `af config set`
+// form. Structured values use the compact JSON rendered in their current value.
 func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
 
@@ -500,18 +499,16 @@ func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 		"`af config set default_program <value>`",
 		"`af config set network.listen_addr <value>`",
 		"`af config set network.require_loopback_token <value>`",
-		"`af config set program_overrides.<name> <value>`",
-		"`af config set limit_patterns.<name> <value>`",
+		"`af config set program_overrides <value>`",
+		"`af config set limit_patterns <value>`",
+		"`af config set theme <value>`",
+		"`af config set session_env_passthrough <value>`",
+		"`af config set root_agents <value>`",
+		"`af config set root_agent <value>`",
+		"`af config set keys <value>`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("briefing is missing the set hint %s", want)
-		}
-	}
-
-	// The structural tables must not be advertised as settable.
-	for _, key := range []string{"theme", "root_agents", "keys"} {
-		if strings.Contains(out, "`af config set "+key+" <value>`") {
-			t.Errorf("briefing advertises `af config set %s`, which the CLI rejects — %s is hand-edited", key, key)
 		}
 	}
 }

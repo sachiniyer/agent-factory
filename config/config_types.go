@@ -275,9 +275,8 @@ type Config struct {
 	// applies to registered projects only (never by scanning disk for repos);
 	// the built-in Enabled=false keeps root agents opt-in. A per-project personal
 	// override (ProjectConfig.RootAgent) and the legacy RootAgents entries layer
-	// with it in config.ResolveRootAgent. Structured [root_agent] table, so
-	// (like [theme]) it is hand-edited or set through the config assistant, not
-	// `af config set`.
+	// with it in config.ResolveRootAgent. Its structured value is accepted as
+	// compact JSON by `af config set root_agent`.
 	RootAgent RootAgent `json:"root_agent,omitempty" toml:"root_agent,omitempty"`
 	// LimitPatterns optionally overrides, per agent, the built-in usage-limit
 	// banner-detection regex (#1146) so drifting vendor banners can be patched

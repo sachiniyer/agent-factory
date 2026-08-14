@@ -58,6 +58,13 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	// Preserve a user's named theme choice as the string shape they wrote. The
+	// normalized ThemeConfig still carries the complete palette for consumers,
+	// but turning "zenburn" into a large custom table in an editor would erase
+	// the preset choice on the next save.
+	if key == "theme" && cfg.Theme.explicitPreset && cfg.Theme.matchesPreset() {
+		return cfg.Theme.Preset(), true
+	}
 	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
 	// the []string type: a future list whose elements can contain a comma keeps the
 	// unambiguous compact-JSON rendering rather than silently displaying one entry
@@ -102,26 +109,10 @@ type ConfigEntry struct {
 	// …`). It is pinned against the real allowlist by
 	// TestManifestAgreesWithSettableKeys.
 	//
-	// A UI must NOT drive a control off this field. "The CLI accepts this key's
-	// leaves" is not "this row can be edited as one value", and conflating the
-	// two makes the editor offer program_overrides as a text field pre-filled
-	// with the map's JSON — which the writer then refuses, because the bare key
-	// is not settable. Use Editable.
+	// Since #3345 every global manifest entry is directly settable. Dynamic maps
+	// retain their convenient leaf form and also accept the whole compact-JSON
+	// value CurrentValue returns to the panes.
 	Settable bool `json:"settable"`
-	// Editable is the EDITOR's question: can this row be edited directly, as a
-	// single scalar value the write path will accept?
-	//
-	// It is Settable minus the dynamic families, derived from the real
-	// settableKeySpecs allowlist rather than restated, so it cannot promise a
-	// shape `af config set` does not take. A false renders read-only with
-	// EditHint, which is the honest outcome: an editable-looking field whose save
-	// can only ever be refused is a dead end the user finds by pressing save.
-	Editable bool `json:"editable"`
-	// EditHint says how to change a key that is not directly editable. It is not
-	// always "hand-edit the file": a dynamic family's leaves ARE settable from
-	// the CLI, so the hint names that command instead of sending the user to a
-	// text editor for something af can do.
-	EditHint string `json:"edit_hint,omitempty"`
 	// Enum drives a picker instead of a free-text field when non-empty. For a
 	// table it constrains the entry NAMES, not the value (see the briefing's
 	// same distinction), which is why a UI must not offer it as a value picker
@@ -154,7 +145,6 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 	out := make([]ConfigEntry, 0, len(entries))
 	for _, e := range entries {
 		value, _ := CurrentValue(cfg, e.Key)
-		editable, hint := editability(e)
 		out = append(out, ConfigEntry{
 			Key:           e.Key,
 			Type:          e.Type,
@@ -164,8 +154,6 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 			Tier:          int(e.Tier),
 			TierName:      TierName(e.Tier),
 			Settable:      e.Settable,
-			Editable:      editable,
-			EditHint:      hint,
 			Enum:          e.Enum,
 			Value:         value,
 			// Uniformly true — see the field's comment.
@@ -173,47 +161,6 @@ func ManifestWithValues(cfg *Config) []ConfigEntry {
 		})
 	}
 	return out
-}
-
-// editability answers, for one manifest entry, whether an editor may offer it as
-// a single editable value — and if not, what to tell the user instead.
-//
-// It reads settableKeySpecs (the REAL `af config set` allowlist) rather than
-// restating which keys are dynamic, so it cannot drift from what the writer
-// actually accepts. That matters because the two "not editable" cases are
-// different, and telling a user the wrong one wastes their time:
-//
-//   - A dynamic family (program_overrides, limit_patterns) holds a table. The
-//     bare key is NOT settable, but its leaves are — so the honest hint names
-//     the command that works, rather than sending someone to a text editor for
-//     something af can do for them.
-//   - A structural key (theme, root_agents, keys, session_env_passthrough) has no
-//     single-scalar `af config set` shape. The hint
-//     points at the config assistant, which edits these in the file for the user
-//     — the whole reason "hand-edit the file yourself" is no longer the answer
-//     (#2453 / #2454).
-//
-// assistantEditHint is the one string for that second case, so both editor
-// surfaces (TUI pane, web pane) say the same thing and TestStructuralKeysPointAtTheAssistant
-// pins it. It is surface-neutral on purpose: the TUI opens the assistant with a
-// key and the web with a button, so the hint names neither and describes the
-// capability instead.
-const assistantEditHint = "the config assistant can change this for you"
-
-func editability(e ManifestEntry) (editable bool, hint string) {
-	if !e.Settable {
-		return false, assistantEditHint
-	}
-	spec, ok := settableKeySpecs[e.Key]
-	if !ok {
-		// Unreachable while TestManifestAgreesWithSettableKeys passes; fail
-		// closed rather than offer a field the writer has no spec for.
-		return false, assistantEditHint
-	}
-	if spec.dynamic {
-		return false, "set one entry: af config set " + e.Key + ".<name> <value>"
-	}
-	return true, ""
 }
 
 // The one sentence a save surface shows after a write is no longer a single

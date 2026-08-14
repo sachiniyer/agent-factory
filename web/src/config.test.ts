@@ -49,7 +49,6 @@ const entry = (over: Partial<ConfigEntry> = {}): ConfigEntry => ({
   tier: 1,
   tier_name: "core",
   settable: true,
-  editable: true,
   value: "claude",
   requires_restart: true,
   ...over,
@@ -128,7 +127,7 @@ test("setConfigValue sends no Authorization header for the tokenless credential"
 // (TestManifestCoversEveryConfigKey) and that the TUI renders every entry
 // (TestConfigPaneRendersEveryManifestKey). This is the third link: the web form's
 // control choice is driven ENTIRELY by the manifest's own description of a key —
-// its `type`, `enum`, and `settable` — so an unfamiliar key still renders a
+// its `type` and `enum` — so an unfamiliar key still renders a
 // sensible control instead of being dropped or crashing the view.
 //
 // That is what lets a key added to config_types.go reach this surface with no
@@ -145,20 +144,15 @@ test("the control for a key is decided by the manifest, so an unknown key still 
   assert.equal(controlFor(entry({ type: "string", enum: ["stable", "preview"] })), "select");
   assert.equal(controlFor(entry({ type: "string" })), "text");
   assert.equal(controlFor(entry({ type: "int" })), "text");
-  // A structured key with no scalar `af config set` form is never offered as a
-  // field: the write would be refused, so an editable-looking control would be a
-  // dead end. Its hint points at the config assistant (#2454), but the CONTROL is
-  // still read-only regardless of the copy.
-  assert.equal(controlFor(entry({ settable: false, editable: false, type: "table" })), "readonly");
-  // A DYNAMIC FAMILY is the subtle one, and the reason the control reads
-  // `editable` rather than `settable`. program_overrides is settable — its
-  // LEAVES are (`af config set program_overrides.claude …`) — but the bare key
-  // holds a table the writer refuses. Keyed off `settable` this rendered a text
-  // field pre-filled with the map's JSON that failed on save.
+  // Structured keys use a text field for the compact JSON value supplied by the
+  // manifest and accepted by the same config-set writer.
+  assert.equal(controlFor(entry({ type: "table" })), "text");
+  // A dynamic family keeps the same whole-value JSON control even though its
+  // entry-name enum is metadata rather than a picker value list.
   assert.equal(
-    controlFor(entry({ key: "program_overrides", type: "table", enum: ["claude", "codex"], settable: true, editable: false })),
-    "readonly",
-    "a dynamic table must never be offered as one editable value",
+    controlFor(entry({ key: "program_overrides", type: "table", enum: ["claude", "codex"] })),
+    "text",
+    "a dynamic table is editable as one validated JSON value",
   );
   // A key type this bundle has never heard of still gets a usable field rather
   // than disappearing from the form.

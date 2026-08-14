@@ -81,12 +81,11 @@ type ManifestEntry struct {
 	// Tier ranks the key for ordering and for what an agent surfaces first.
 	Tier ConfigTier
 	// Settable reports whether the current global `af config set` accepts this
-	// key — for a dynamic family (program_overrides, limit_patterns) that means
-	// its leaves, e.g.
-	// `af config set program_overrides.claude …`. It is pinned against the real
-	// allowlist by TestManifestAgreesWithSettableKeys, so it can never become a
-	// claim the CLI does not honor. A false here means the key must be changed
-	// through another writer or by hand in an allowed config location.
+	// whole key. Dynamic families (program_overrides, limit_patterns) additionally
+	// retain their leaf form, e.g. `af config set program_overrides.claude …`.
+	// It is pinned against the real allowlist by TestManifestAgreesWithSettableKeys,
+	// so it can never become a claim the CLI does not honor. Global entries are
+	// uniformly true; false is reserved for repo-only keys outside these panes.
 	Settable bool
 	// Enum is the allowed values, when they are enumerated. Nil when the value
 	// is free-form (a path, a duration, an address) or a plain bool.
@@ -217,7 +216,7 @@ var configManifest = []ManifestEntry{
 		Default:    "nord",
 		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
 		Tier:       TierCommon,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeTableByField,
@@ -353,7 +352,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none",
 		Purpose:    "Extra environment variable names an agent session may inherit · exact names only, values stay out of config, and each name explicitly trusts a repo-selected Docker image.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
@@ -463,7 +462,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none",
 		Purpose:    "Legacy path map: repositories that always keep a session named root running · accepted forever for compatibility; use the current root_agent project profile for new configuration.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeMapByKey,
@@ -475,7 +474,7 @@ var configManifest = []ManifestEntry{
 		Default:    "not enabled",
 		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · the singleton successor to the legacy root_agents path map, settable per project.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalPersonal,
 		Precedence: precedenceGlobalPersonal,
 		Merge:      MergeTableByField,
@@ -487,7 +486,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none · the built-in bindings are used",
 		Purpose:    "Which key triggers each action in the terminal interface · one entry per action, replacing that action's default.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeMapByKey,

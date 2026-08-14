@@ -157,6 +157,66 @@ func TestConfigPaneEditWritesThroughTheRealPathAndEchoes(t *testing.T) {
 	}
 }
 
+// TestConfigPaneFormerlyImmutableKeysRoundTrip proves the TUI half of #3345
+// through the real config-set path. Each row that used to be read-only must
+// open a field, save, survive a real load, and refresh to the saved value.
+func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
+	want := config.DefaultConfig()
+	want.Theme.Accent = "#112233"
+	if want.ProgramOverrides == nil {
+		want.ProgramOverrides = map[string]string{}
+	}
+	want.ProgramOverrides["codex"] = "codex --model gpt-5"
+	want.SessionEnvPassthrough = []string{"AF_TEST_ONE", "AF_TEST_TWO"}
+	want.LimitPatterns = map[string]string{"claude": "usage limit reached"}
+	want.RootAgents = map[string]config.RootAgentConfig{"/tmp/repo": {Program: "codex"}}
+	want.RootAgent = config.RootAgent{Enabled: true, Program: "codex"}
+	want.Keys = map[string]any{"quit": "Q"}
+
+	for _, key := range []string{
+		"theme",
+		"program_overrides",
+		"session_env_passthrough",
+		"limit_patterns",
+		"root_agents",
+		"root_agent",
+		"keys",
+	} {
+		t.Run(key, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("# hand-written\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			value, ok := config.CurrentValue(want, key)
+			if !ok {
+				t.Fatalf("CurrentValue cannot render %s", key)
+			}
+
+			c := newTestConfigPane(t)
+			selectKey(t, c, key)
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			if !c.IsEditing() {
+				t.Fatalf("enter did not open %s for editing", key)
+			}
+			c.input.SetValue(value)
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			if c.IsEditing() || c.statusIsError {
+				t.Fatalf("save %s failed: %s", key, c.status)
+			}
+
+			got, err := config.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, ok := config.CurrentValue(got, key)
+			if !ok || roundTrip != value {
+				t.Fatalf("%s round-tripped as %q (ok=%v), want %q", key, roundTrip, ok, value)
+			}
+		})
+	}
+}
+
 // TestConfigPaneSurfacesRestartNoticeAtTheMomentOfTheEdit is requirement 3 for
 // the TUI.
 //
@@ -231,72 +291,25 @@ func TestConfigPaneRejectsInvalidValueWithTheValidatorsOwnError(t *testing.T) {
 	}
 }
 
-// TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse pins that the pane trusts
-// ConfigEntry.Editable — the honest, allowlist-derived answer — rather than the
-// manifest's Settable.
-//
-// The distinction is the whole finding: program_overrides is Settable, because
-// its LEAVES are settable. The bare key holds a table. Keying the cursor off
-// Settable let it land there, opened a field pre-filled with the map's JSON, and
-// had the writer refuse it on save — a dead end found only by pressing enter.
-//
-// So: the cursor must never come to rest on a non-editable row, and every such
-// row must say what to do instead.
-//
-// HONEST LIMIT: this test cannot catch the drift itself. It iterates rows that
-// are ALREADY marked non-editable, so a regression that wrongly marks a key
-// editable simply removes it from this loop and the test stays green — watched
-// doing exactly that. What catches the drift is
-// config.TestEditableIsNeverAKeyTheWriterWouldRefuse, which comes from the other
-// direction: it asks the REAL writer to accept the value every Editable key
-// shows, and fails when one is refused. This test's job is narrower and still
-// worth having — it pins that clampSelection and beginEdit actually honor the
-// flag once it is right.
-func TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse(t *testing.T) {
+// TestConfigPaneOffersEveryManifestRowForEditing pins the TUI half of the
+// removed read-only class: every entry row accepts the cursor and Enter opens
+// its complete CurrentValue, including structured JSON values.
+func TestConfigPaneOffersEveryManifestRowForEditing(t *testing.T) {
 	c := newTestConfigPane(t)
-
-	var readOnly int
 	for i, row := range c.rows {
-		if row.entry == nil || row.entry.Editable {
+		if row.entry == nil {
 			continue
 		}
-		readOnly++
-
-		// Park the cursor on it and let the pane settle: it must move away.
 		c.selectedIdx = i
 		c.clampSelection()
-		if landed := c.selectedEntry(); landed != nil && !landed.Editable {
-			t.Errorf("the cursor rested on %q, which the writer would refuse — enter there can only dead-end", landed.Key)
+		if landed := c.selectedEntry(); landed == nil || landed.Key != row.entry.Key {
+			t.Errorf("the cursor skipped editable row %q", row.entry.Key)
 		}
-
-		// And pressing enter on it must not open a field.
-		c.selectedIdx = i
 		c.beginEdit()
-		if c.IsEditing() {
-			t.Errorf("enter opened an edit field on %q, whose save the writer would refuse", row.entry.Key)
-			c.cancelEdit()
+		if !c.IsEditing() {
+			t.Errorf("enter did not open editable row %q", row.entry.Key)
 		}
-
-		if row.entry.EditHint == "" {
-			t.Errorf("%q is read-only but says nothing about how to change it", row.entry.Key)
-		}
-	}
-	if readOnly == 0 {
-		t.Fatal("no read-only rows found — this test is asserting nothing")
-	}
-}
-
-// TestConfigPaneNamesTheCommandForDynamicTables pins the COPY for a dynamic
-// family. "hand-edited in config.toml" would be false here: `af config set
-// program_overrides.claude …` works, and sending a user to a text editor for
-// something af does for them is a smaller lie than the dead-end field, but still
-// one.
-func TestConfigPaneNamesTheCommandForDynamicTables(t *testing.T) {
-	c := newTestConfigPane(t)
-	view := c.String()
-
-	if !strings.Contains(view, "af config set program_overrides.<name>") {
-		t.Errorf("the editor must name the command that WORKS for a dynamic table.\n--- view ---\n%s", view)
+		c.cancelEdit()
 	}
 }
 

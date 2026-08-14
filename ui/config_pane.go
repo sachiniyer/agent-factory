@@ -114,17 +114,10 @@ type configRow struct {
 	entry   *config.ConfigEntry
 }
 
-// isSelectable reports whether the cursor may land on this row. Headings and
-// rows that cannot be edited here are skipped: stopping on a row whose only
-// possible action is "you cannot edit this here" wastes the user's keystrokes.
-//
-// It reads Editable, NOT the manifest's Settable. Settable is true for a dynamic
-// family (program_overrides), meaning its LEAVES are settable — the bare key is
-// not. Keying off Settable let the cursor land on program_overrides, opened a
-// field pre-filled with the map's JSON, and had the writer refuse it on save:
-// a dead end the user only discovered by pressing enter.
+// isSelectable reports whether the cursor may land on this row. Every manifest
+// entry is editable since #3345; only tier headings are skipped.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil && r.entry.Editable
+	return r.entry != nil
 }
 
 var (
@@ -133,7 +126,6 @@ var (
 	configKeyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	configValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
 	configPurposeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	configReadOnlyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	configErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	configOKStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
@@ -341,7 +333,7 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 // so saving an untouched field is a no-op rather than a corruption.
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
-	if entry == nil || !entry.Editable {
+	if entry == nil {
 		return
 	}
 	c.editing = true
@@ -589,26 +581,12 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	b.WriteString(key)
 	b.WriteString("  ")
 
-	switch {
-	case selected && c.editing:
+	if selected && c.editing {
 		b.WriteString(c.input.View())
-	case !e.Editable:
-		b.WriteString(configValueStyle.Render(c.displayValue(e)))
-	default:
+	} else {
 		b.WriteString(configValueStyle.Render(c.displayValue(e)))
 	}
 	b.WriteString("\n")
-
-	if !e.Editable && e.EditHint != "" {
-		// Say WHY it cannot be edited here, and what to do instead — on its own
-		// wrapped line, not inline. The hint is derived from the real allowlist,
-		// so for a dynamic family it names the command that DOES work rather than
-		// sending the user to a text editor for something af can do. That makes it
-		// long ("set one entry: af config set program_overrides.<name> <value>"),
-		// and inline it pushed the row to 106 cells in a 72-cell pane — which the
-		// frame would wrap, breaking the height window's line count.
-		b.WriteString(c.wrapIndented("· "+e.EditHint, configReadOnlyStyle))
-	}
 
 	if selected {
 		b.WriteString(c.wrapIndented(e.Purpose, configPurposeStyle))
@@ -629,8 +607,7 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 //     bug; the empty edit field it opens does not.
 //   - A long value is truncated. A [theme] table serializes to ~700 characters
 //     of JSON — rendered whole it wraps over the entire pane and buries every
-//     row after it. Truncating is honest here precisely because the key is
-//     read-only: the file is where you edit it, and the row says so.
+//     row after it. The edit field still receives the complete value.
 //
 // This is the same split CurrentValue documents: what you SHOW and what you can
 // SAVE BACK are different, and conflating them is how `""` ends up in a user's
@@ -639,8 +616,7 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	if e.Value == "" {
 		return "(unset)"
 	}
-	// Leave room for the cursor and the key. The read-only hint no longer shares
-	// this line (it wraps onto its own), so the only competition is the key.
+	// Leave room for the cursor and the key.
 	budget := c.width - len(e.Key) - 8
 	if budget < 12 {
 		budget = 12

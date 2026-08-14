@@ -142,13 +142,12 @@ func renderBriefingEntry(cfg *Config, e ManifestEntry) string {
 	return b.String()
 }
 
-// briefingSetHint tells the agent how to change a key: the `af config set`
-// invocation, or that it is hand-edited.
+// briefingSetHint tells the agent which `af config set` invocation changes a key.
 //
 // The settable FORM is derived from settableKeySpecs, not restated here, so the
-// hint cannot promise a command shape the CLI does not accept. A dynamic family
-// renders its leaf form (`af config set program_overrides.claude …`) because the
-// bare key is not settable on its own.
+// hint cannot promise a command shape the CLI does not accept. Since #3345 a
+// structured row's compact JSON is accepted at the bare key; dynamic families
+// additionally retain their leaf convenience form.
 func briefingSetHint(e ManifestEntry) string {
 	spec, ok := settableKeySpecs[e.Key]
 	if !ok || !e.Settable {
@@ -165,7 +164,7 @@ func briefingSetHint(e ManifestEntry) string {
 		}
 		return hint
 	}
-	if spec.dynamic {
+	if spec.dynamic && !spec.structured {
 		return "`af config set " + e.Key + ".<name> <value>`"
 	}
 	return "`af config set " + e.Key + " <value>`"

@@ -75,7 +75,7 @@ function tiersInOrder(entries: ConfigEntry[]): { tier: number; name: string }[] 
 const TIER_ADVANCED = 3;
 
 /** The kind of control a key gets. */
-export type ControlKind = "readonly" | "checkbox" | "select" | "text";
+export type ControlKind = "checkbox" | "select" | "text";
 
 /**
  * Chooses the control for a key FROM THE MANIFEST'S OWN DESCRIPTION of it —
@@ -87,11 +87,6 @@ export type ControlKind = "readonly" | "checkbox" | "select" | "text";
  * locks the REAL decision rather than a copy of it — a copy would drift from
  * renderControl, which is the very failure this whole design is avoiding.
  *
- *  - `editable: false` → read-only, with `edit_hint` saying what to do instead.
- *    NOT `settable`: that is true for a dynamic family (program_overrides),
- *    meaning its LEAVES are settable, and offering the bare key as one field
- *    dead-ends at a save the writer refuses. `editable` is derived Go-side from
- *    the real allowlist.
  *  - `bool` → checkbox.
  *  - enumerated → picker. Excluded for a table, where the enum constrains entry
  *    NAMES rather than the value; offering it as a value picker would be a small
@@ -99,9 +94,6 @@ export type ControlKind = "readonly" | "checkbox" | "select" | "text";
  *  - anything else → text.
  */
 export function controlKind(e: ConfigEntry): ControlKind {
-  if (!e.editable) {
-    return "readonly";
-  }
   if (e.type === "bool") {
     return "checkbox";
   }
@@ -362,28 +354,14 @@ export class ConfigPane {
   }
 
   /** The control for one key, chosen from the manifest's own description of it:
-   *  a picker when the values are enumerated, a checkbox for a bool, a text
-   *  field otherwise — and a read-only value when `af config set` will not take
-   *  the key at all.
+   *  a picker when the values are enumerated, a checkbox for a bool, and a text
+   *  field otherwise. Structured rows use the compact JSON CurrentValue emits.
    *
-   *  The mapping reads `settable` and `enum` from the manifest rather than
-   *  deciding locally, because both are pinned Go-side against the real
-   *  allowlist. A form that offered a field the writer would refuse is a dead
-   *  end the user only discovers by pressing save. */
+   *  The enum and type come from the manifest; Go-side coverage separately pins
+   *  every global row to the real writer so a rendered field cannot dead-end at
+   *  a save the writer refuses. */
   private renderControl(e: ConfigEntry): HTMLElement {
     const kind = controlKind(e);
-
-    if (kind === "readonly") {
-      return h(
-        "div",
-        { class: "af-config-control" },
-        h("code", { class: "af-config-value" }, e.value),
-        // edit_hint is always populated for a read-only row (the manifest's
-        // assistantEditHint since #2454); the fallback only guards a malformed
-        // payload and must not resurrect the retired "hand-edit the file" copy.
-        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "the config assistant can change this for you"),
-      );
-    }
 
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
