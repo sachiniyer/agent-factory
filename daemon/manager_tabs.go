@@ -186,12 +186,16 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 			// is a landed side effect, not an untouched failure (#3237): report it
 			// committed and hand back the minted identity so the caller can
 			// explain or target the survivor. Only a CONFIRMED rollback below
-			// keeps the clean, freely retryable shape.
+			// keeps the clean, freely retryable shape. The tmux name rides the
+			// MESSAGE too, not just the response: the interactive clients render
+			// only the warning text, and that name is what an operator targets
+			// (#3359 review).
+			tmuxName := tabTmuxNameByID(data.Tabs, tab.ID)
 			return CreateTabResponse{
-					ID: tab.ID, Name: tab.Name, TmuxName: tabTmuxNameByID(data.Tabs, tab.ID),
+					ID: tab.ID, Name: tab.Name, TmuxName: tmuxName,
 				}, &mutationCommittedError{err: fmt.Errorf(
-					"failed to persist new tab %q, and rolling back its just-spawned tmux session could not confirm it closed (%v); the tab may still be live and its cleanup is retained for retry: %w",
-					tab.Name, closeErr, err)}
+					"failed to persist new tab %q, and rolling back its just-spawned tmux session %q could not confirm it closed (%v); the tab may still be live and its cleanup is retained for retry: %w",
+					tab.Name, tmuxName, closeErr, err)}
 		}
 		return CreateTabResponse{}, fmt.Errorf("failed to persist new tab: %w", err)
 	}

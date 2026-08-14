@@ -144,6 +144,11 @@ func TestCreateTab_PersistAndRollbackFailure_ReportsCommittedTab(t *testing.T) {
 	if created.TmuxName != agentName+"__btop" {
 		t.Fatalf("the surviving tmux session's name = %q, want %q so the operator can target it", created.TmuxName, agentName+"__btop")
 	}
+	// The interactive clients render only the warning text, so the surviving
+	// session's tmux name must ride the MESSAGE too (#3359 review).
+	if !strings.Contains(err.Error(), agentName+"__btop") {
+		t.Fatalf("the committed warning must name the surviving tmux session for the operator, got: %v", err)
+	}
 }
 
 // TestCreateTab_PersistFailureWithConfirmedRollback_StaysPlainFailure pins the
