@@ -101,6 +101,14 @@ type rootEnsureState struct {
 // through it (or through the same snapshot's resolve), so they can never
 // disagree on whether a root should run or what it runs.
 func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentConfig) config.RootAgentResolution {
+	if m.rootAttributionPendingFor(repoID) {
+		// Identity verification for a recorded root that resolves to this
+		// repo is still in flight: fail closed exactly like the snapshot's
+		// own unknowable states, or the legacy sweep could start the root
+		// seconds before a personal enabled=false is re-attributed onto it
+		// (#3299 review round 8).
+		return config.RootAgentResolution{}
+	}
 	return m.rootAgentLayers.Load().resolve(repoID, legacy)
 }
 

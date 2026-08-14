@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -36,18 +37,31 @@ func (m *Manager) healRootAgentLayers() {
 	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 && len(layers.unresolvedRoots) == 0 {
 		return
 	}
+	// Two independent cadences (#3299 review round 8). The registry and
+	// personal-config retries pace on rootHealNextAttempt's failure backoff —
+	// and ONLY on it: the two-strike absence discipline (#3315) needs its
+	// observations SPACED by that backoff, so nothing else may drag these
+	// reads onto the per-tick cadence. Re-attribution runs on every pass
+	// unconditionally: its pacing is per entry (a settled negative rests
+	// until its own retryAt; an in-flight probe is checked without blocking),
+	// so an idle visit costs a map walk, not filesystem work, and a probe
+	// landing between ticks is consumed on the next tick.
 	m.mu.Lock()
 	due := !nowFunc().Before(m.rootHealNextAttempt)
 	m.mu.Unlock()
-	if !due {
-		return
-	}
 
 	healed := *layers
 	changed := false
-	pending := false
+	// rpAttempted/rpChanged track only the backoff-paced reads; the clock
+	// below must not move when this pass did none of them.
+	rpAttempted := false
+	rpChanged := false
 
 	if layers.registryUnreadable {
+		if !due {
+			return
+		}
+		rpAttempted = true
 		// A latched registry PROVABLY existed at daemon start — plain absence
 		// never sets the latch — so during recovery an ABSENT directory is a
 		// transition, not proof of zero projects: a repair mv in flight, a
@@ -75,6 +89,7 @@ func (m *Manager) healRootAgentLayers() {
 					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
 					healed.registryUnreadable = false
 					changed = true
+					rpChanged = true
 					m.resetRootHealRegistryObservation()
 					log.InfoLog.Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
 				} else if perr == nil && stillPresent {
@@ -90,17 +105,19 @@ func (m *Manager) healRootAgentLayers() {
 			m.resetRootHealRegistryObservation()
 		}
 	} else {
-		personal, personalUnreadable, healedCount := m.retryUnreadablePersonalConfigs(layers)
-		if healedCount > 0 {
-			healed.personal = personal
-			healed.personalUnreadable = personalUnreadable
+		if due && len(layers.personalUnreadable) > 0 {
+			rpAttempted = true
+			personal, personalUnreadable, healedCount := m.retryUnreadablePersonalConfigs(layers)
+			if healedCount > 0 {
+				healed.personal = personal
+				healed.personalUnreadable = personalUnreadable
+				changed = true
+				rpChanged = true
+			}
+		}
+		if m.reattributeUnresolvedRoots(&healed) {
 			changed = true
 		}
-		reattrChanged, reattrPending := m.reattributeUnresolvedRoots(&healed)
-		if reattrChanged {
-			changed = true
-		}
-		pending = reattrPending
 	}
 
 	if changed {
@@ -113,25 +130,17 @@ func (m *Manager) healRootAgentLayers() {
 		healed.legacyRepoIDs = legacyRepoIDSet(m.cfg)
 		m.rootAgentLayers.Store(&healed)
 	}
-	m.mu.Lock()
-	switch {
-	case changed:
-		m.rootHealFailures = 0
-		m.rootHealNextAttempt = nowFunc()
-	case pending:
-		// A probe is in flight or freshly completed: that is progress being
-		// made, not a failed read. Keep the next pass one poll tick away — a
-		// responsive-but-slow mount heals on the tick after its probe lands,
-		// which the failure backoff (minutes deep after a long outage) would
-		// otherwise defer indefinitely (#3299 review round 5). The failure
-		// streak is left untouched so a still-broken registry or personal
-		// config keeps its own pacing.
-		m.rootHealNextAttempt = nowFunc()
-	default:
-		m.rootHealFailures++
-		m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
+	if rpAttempted {
+		m.mu.Lock()
+		if rpChanged {
+			m.rootHealFailures = 0
+			m.rootHealNextAttempt = nowFunc()
+		} else {
+			m.rootHealFailures++
+			m.rootHealNextAttempt = nowFunc().Add(rootEnsureBackoffFor(m.rootHealFailures))
+		}
+		m.mu.Unlock()
 	}
-	m.mu.Unlock()
 }
 
 // observeRootHealRegistrySnapshot records one successful registry read. A
@@ -294,6 +303,14 @@ type rootReattributionProbe struct {
 	// checkouts: the resolved identity keys the verdict bridge.
 	repo    *config.RepoContext
 	matches bool
+	// candidate publishes the resolved identity the moment git resolution
+	// succeeds, BEFORE the marker verdict: while this probe is unfinished or
+	// unconsumed, that repo's root-agent decision is unknowable — the
+	// project's personal layer (possibly enabled=false) still sits under the
+	// derived ID — so the resolution choke points fail it closed rather than
+	// let a legacy entry start the root mid-verification (#3299 review
+	// round 8).
+	candidate atomic.Pointer[config.RepoContext]
 	// mismatch means the marker READ SUCCEEDED and the marker differs or is
 	// absent — a proven different checkout. markerUnreadable means the read
 	// itself failed (EACCES, EIO): identity unknowable, no rebind advice.
@@ -365,9 +382,9 @@ const rootHealProbeResultTTL = 30 * time.Second
 // projectRoots, so the singleton sweep can create the root this run instead
 // of waiting for a daemon start. Mutates the candidate snapshot in place; the
 // caller publishes.
-func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed, pending bool) {
+func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed bool) {
 	if len(healed.unresolvedRoots) == 0 {
-		return false, false
+		return false
 	}
 	m.rootHealPassSeq++
 	pass := m.rootHealPassSeq
@@ -454,15 +471,13 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			}
 		}
 		if !ready {
-			// Genuinely in flight: progress, not failure — keep the cadence
-			// close so the result is consumed the tick after it lands.
-			pending = true
+			// Genuinely in flight: the next unconditional pass (every poll
+			// tick) consumes the result the tick after it lands.
 			continue
 		}
 		if nowFunc().Sub(probe.completedAt) > rootHealProbeResultTTL {
 			// Completed, but stale — the filesystem it verified is from a
 			// previous cadence. The spawn phase next pass replaces it.
-			pending = true
 			continue
 		}
 		if !probe.matches {
@@ -527,8 +542,9 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		_, fenced := m.projectDeletes[derivedID]
 		m.mu.Unlock()
 		if fenced {
+			// The next unconditional pass re-checks once the delete settles;
+			// the completed match stays consumable while fresh.
 			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its derived-ID target", record.root, record.projectID)
-			pending = true
 			continue
 		}
 		cloneForWrite()
@@ -562,7 +578,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
-	return changed, pending
+	return changed
 }
 
 // runRootReattributionProbe performs the blocking half of one re-attribution
@@ -580,6 +596,7 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		return
 	}
 	probe.repo = repo
+	probe.candidate.Store(repo)
 	matches, err := config.ProjectCheckoutMatches(record.root, record.checkoutID)
 	if err != nil {
 		// The marker could not be READ — identity is unknowable, which is
@@ -596,6 +613,29 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 		return
 	}
 	probe.matches = true
+}
+
+// rootAttributionPendingFor reports that an unconsumed re-attribution probe
+// has RESOLVED repoID as some unresolved project's real identity but not yet
+// delivered its marker verdict into the published snapshot (#3299 review
+// round 8). Until it does, the repo's decision is unknowable: the project's
+// personal layer — possibly enabled=false, possibly itself unreadable — still
+// sits under the derived ID where resolution cannot see it. Settled negatives
+// are NOT pending: a proven mismatch releases the repo (a different project's
+// layers do not govern it) and an unreadable marker holds it closed through
+// the snapshot bridge instead.
+func (m *Manager) rootAttributionPendingFor(repoID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, probe := range m.rootHealProbes {
+		if probe.settled {
+			continue
+		}
+		if c := probe.candidate.Load(); c != nil && c.ID == repoID {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneLayerMap(in map[string]*config.RootAgentLayer) map[string]*config.RootAgentLayer {

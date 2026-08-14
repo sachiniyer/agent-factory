@@ -36,6 +36,12 @@ const (
 	// "add a root_agents entry" here would misdirect toward the fail-open
 	// residue instead of the record repair.
 	rootAgentRecordsUnreadable
+	// rootAgentAttributionPending: a re-attribution probe has resolved this
+	// repo as some unresolved project's real identity but not yet delivered
+	// its marker verdict — the project's layers still sit under the derived
+	// ID, so the decision is unknowable for the moment (#3299 review
+	// round 8).
+	rootAgentAttributionPending
 	// rootAgentProjectUnresolved: the repo's registered project is configured
 	// and resolves to enabled, but its recorded root did not resolve to a git
 	// repository at daemon start and no legacy entry exists, so nothing can
@@ -117,6 +123,12 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
 		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
 	}
+	if m.rootAttributionPendingFor(repoID) {
+		// Mirror the resolvedRootAgentFor gate: an in-flight identity
+		// verification fails closed, and the verdict names it rather than
+		// reporting a resolution that cannot yet see the project's layers.
+		return rootAgentMaterializeVerdict{reason: rootAgentAttributionPending, rootUnresolved: true}
+	}
 	// An unreadable-marker bridge makes this repo's decision unknowable
 	// (decisionUnknown fails it closed for both sweeps): report the true
 	// cause — the project's unverifiable checkout — rather than falling
@@ -179,6 +191,8 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
 	case rootAgentRecordsUnreadable:
 		return fmt.Sprintf("no readable root-agent config covers this repo, and %d project registry record(s) (%s) cannot be read — one of them may be this repo's; repair or remove those record directories, then restart the daemon", len(v.unreadableRecords), strings.Join(v.unreadableRecords, ", "))
+	case rootAgentAttributionPending:
+		return "identity verification for its recorded project root is in progress — the daemon is confirming the checkout's registry marker on its ensure cadence; retry shortly"
 	case rootAgentProjectUnresolved:
 		if v.rootMarkerUnreadable {
 			// Identity is unknowable, not disproven: no rebind advice — a

@@ -752,16 +752,17 @@ func TestWorktreeMismatchVisibleUnderResolvedID(t *testing.T) {
 	}
 }
 
-// TestPendingProbeKeepsHealCadenceClose pins the #3299 review's round-5 P1:
-// an in-flight (or freshly landed) probe is progress, not a failed read. If
-// it fed the failure backoff, a responsive-but-slow mount would wait minutes
-// between passes and its completed results would expire before consumption —
-// unresolved forever.
-func TestPendingProbeKeepsHealCadenceClose(t *testing.T) {
+// TestProbeConsumedDespitePersonalBackoff pins the #3299 review's rounds 5+8
+// invariant pair: re-attribution runs on every pass, ungated by
+// rootHealNextAttempt, so a responsive-but-slow mount's completed probe is
+// consumed the tick after it lands even while the registry/personal clock is
+// minutes deep in backoff.
+func TestProbeConsumedDespitePersonalBackoff(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
+	seen := installOptionsRecordingBackend(t)
 	repoPath := setupControlRepo(t)
-	registerTestProject(t, repoPath)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/slowmount\"")
 
 	if err := os.Rename(repoPath, repoPath+".hidden"); err != nil {
 		t.Fatalf("hide repo dir: %v", err)
@@ -770,18 +771,117 @@ func TestPendingProbeKeepsHealCadenceClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	// The entry's probe is permanently in flight (a stalled mount).
+	if err := os.Rename(repoPath+".hidden", repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	// The registry/personal clock is deep in backoff — re-attribution must
+	// not care.
 	manager.mu.Lock()
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.rootHealNextAttempt = time.Now().Add(5 * time.Minute)
 	manager.mu.Unlock()
 
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 1 {
+		t.Fatalf("re-attribution must run ungated by the registry/personal backoff clock, got %d creates", len(*seen))
+	}
+}
+
+// TestInflightProbeLeavesPersonalCadenceAlone pins the #3299 review's round-8
+// P1: a permanently in-flight probe must not pull the personal-config retry
+// onto the per-tick cadence — its two-strike ENOENT observations are only
+// meaningful when SPACED by the failure backoff (#3315), and consecutive
+// one-second ticks could release a fail-closed latch during a mount flap.
+func TestInflightProbeLeavesPersonalCadenceAlone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	unresolvedRepo := setupControlRepo(t)
+	brokenRepo := setupControlRepo(t)
+	registerTestProject(t, unresolvedRepo)
+	broken := registerTestProject(t, brokenRepo)
+	writePersonalRootAgent(t, broken.ID, "enabled = tr\nue = nonsense")
+
+	if err := os.Rename(unresolvedRepo, unresolvedRepo+".hidden"); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(unresolvedRepo)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.mu.Unlock()
+
+	// Pass 1 attempts the still-broken personal config and must land its
+	// NEXT attempt on the failure backoff, stalled sibling or not.
 	manager.EnsureRootAgents()
 
 	manager.mu.Lock()
 	next := manager.rootHealNextAttempt
 	manager.mu.Unlock()
-	if next.After(time.Now().Add(time.Second)) {
-		t.Fatalf("a pending probe must keep the next heal pass one tick away, not on the failure backoff curve; next attempt is %v away", time.Until(next))
+	if !next.After(time.Now().Add(5 * time.Second)) {
+		t.Fatalf("an in-flight probe must not drag the personal-config retry onto the per-tick cadence; next attempt is only %v away", time.Until(next))
+	}
+}
+
+// TestLegacyFailsClosedWhileAttributionPending pins the #3299 review's
+// round-8 P1: a probe that has RESOLVED a repo as some unresolved project's
+// real identity but not yet delivered its marker verdict leaves that repo's
+// decision unknowable — the project's personal layer still sits under the
+// derived ID. The legacy sweep must fail closed for exactly that window
+// instead of starting the root off global layers.
+func TestLegacyFailsClosedWhileAttributionPending(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	rewriteRecordRoot(t, project.ID, worktree)
+	realID := repoID(t, repoPath)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	// The probe has resolved the real identity but its marker verdict is
+	// still in flight (a slow marker read on a flaky mount).
+	stuck := &rootReattributionProbe{done: make(chan struct{})}
+	stuck.candidate.Store(&config.RepoContext{Root: repoPath, ID: realID})
+	manager.mu.Lock()
+	manager.rootHealProbes[config.RepoIDForRecordedRoot(worktree)] = stuck
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 0 {
+		t.Fatalf("the legacy sweep must fail closed while identity verification is in flight, got %d creates — the personal disable sits under the derived ID", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentAttributionPending {
+		t.Fatalf("the verdict must name the pending verification, got reason %d", got)
 	}
 }
 
@@ -807,10 +907,13 @@ func TestNegativeProbeFeedsBackoffNotHotLoop(t *testing.T) {
 	manager.EnsureRootAgents()
 
 	manager.mu.Lock()
-	next := manager.rootHealNextAttempt
+	probe := manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)]
 	manager.mu.Unlock()
-	if !next.After(time.Now().Add(5 * time.Second)) {
-		t.Fatalf("a completed negative probe must land on the failure backoff, not the hot per-tick cadence; next attempt is only %v away", time.Until(next))
+	if probe == nil || !probe.settled {
+		t.Fatalf("a completed negative probe must settle in place under its own backoff, got %+v", probe)
+	}
+	if !probe.retryAt.After(time.Now().Add(5 * time.Second)) {
+		t.Fatalf("the settled negative's retry must sit on the backoff curve, not the per-tick cadence; retry is only %v away", time.Until(probe.retryAt))
 	}
 }
 
@@ -949,12 +1052,16 @@ func TestStaleBridgeRetired(t *testing.T) {
 		t.Fatalf("setup: the occupant's identity must be bridged, got reason %d", got)
 	}
 
-	// The occupant leaves; the bridge must go with it.
+	// The occupant leaves; the bridge must go with it. The settled negative
+	// rests under its own retry backoff (round 7), so expire it — the test
+	// stands in for the backoff elapsing.
 	if err := os.RemoveAll(recorded); err != nil {
 		t.Fatalf("remove occupant: %v", err)
 	}
 	manager.mu.Lock()
-	manager.rootHealNextAttempt = time.Time{}
+	if p := manager.rootHealProbes[config.RepoIDForRecordedRoot(recorded)]; p != nil {
+		p.retryAt = time.Time{}
+	}
 	manager.mu.Unlock()
 	manager.EnsureRootAgents()
 

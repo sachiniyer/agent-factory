@@ -254,6 +254,22 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 			}
 		}
 	}
+	if derivedAliasID != "" && derivedAliasID != repoID {
+		// The registry record still carries the RECORDED root. A selector
+		// path that RESOLVED was rewritten to the repo root by the
+		// normalization above — for a re-attributed worktree/subdirectory
+		// registration those differ, and the final DeregisterProject would
+		// silently miss the record (#3299 review round 8). Recover the
+		// recorded root from the registry; a read failure here is an unknown
+		// outcome and nothing has been mutated yet, so refuse.
+		recorded, err := registeredProjectRootForRepoID(derivedAliasID)
+		if err != nil {
+			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not resolve its recorded root for deregistration; nothing was changed: %w", repoID, err)
+		}
+		if recorded != "" {
+			repoPath = recorded
+		}
+	}
 	result := DeleteProjectResult{RepoID: repoID}
 
 	// FAIL CLOSED, before mutating ANY state, if a session for this repo is still being
@@ -512,7 +528,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// config becomes readable again — the exact hazard this preflight refuses.
 	if !hasRoot {
 		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable:
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending:
 			titles = append(titles, session.RootSessionTitle)
 		}
 	}
