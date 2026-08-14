@@ -140,17 +140,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		legacyRepoIDs:      map[string]bool{},
 	}
 
-	for path := range cfg.RootAgents {
-		repo, err := config.RepoFromPath(config.ExpandTilde(path))
-		if err != nil {
-			// A not-yet-cloned legacy path is normal (#1122): the per-path ensure
-			// sweep retries it. It is simply not part of the dedup set until it
-			// resolves — and while it does not resolve it cannot collide with a
-			// registered project (which did resolve at start).
-			continue
-		}
-		snap.legacyRepoIDs[repo.ID] = true
-	}
+	snap.legacyRepoIDs = legacyRepoIDSet(cfg)
 
 	projects, err := config.ListProjects()
 	if err != nil {
@@ -174,6 +164,27 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	}
 	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots = projectRootAgentLayers(projects)
 	return snap
+}
+
+// legacyRepoIDSet resolves each root_agents path to its repo ID for the
+// singleton sweep's dedup set. A not-yet-cloned legacy path is normal
+// (#1122): the per-path ensure sweep retries it, and it is simply not part of
+// the dedup set until it resolves — while it does not resolve it cannot
+// collide with a registered project that did. Shared by the start-of-day
+// builder and the registry heal, which must RECOMPUTE it (#3315 review): a
+// legacy path that resolved only after boot would otherwise be missing from
+// the healed snapshot's dedup set, letting the singleton sweep double-visit
+// its repo behind a failing legacy attempt.
+func legacyRepoIDSet(cfg *config.Config) map[string]bool {
+	ids := map[string]bool{}
+	for path := range cfg.RootAgents {
+		repo, err := config.RepoFromPath(config.ExpandTilde(path))
+		if err != nil {
+			continue
+		}
+		ids[repo.ID] = true
+	}
+	return ids
 }
 
 // projectRootAgentLayers derives the registry-dependent half of the snapshot

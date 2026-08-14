@@ -230,3 +230,97 @@ func TestRootAgentHealLeavesLiveRootAlone(t *testing.T) {
 		t.Fatalf("the healed pass must keep the same adopted root instance")
 	}
 }
+
+// TestRootAgentHealTreatsAbsentRegistryAsTransition pins the #3315 review's
+// P1: a latched registry provably existed at daemon start, so the directory
+// being ABSENT during recovery is a transition (a repair mv in flight, a
+// mount blip) — ListProjects maps absence to an empty success, and accepting
+// it would clear the latch onto a frozen EMPTY snapshot, failing open against
+// personal disables that may be back moments later. The latch must hold until
+// a PRESENT registry lists.
+func TestRootAgentHealTreatsAbsentRegistryAsTransition(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	corruptProjectRegistry(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentRegistryUnreadable {
+		t.Fatalf("fixture: the corrupt registry must fail closed at start, got reason %d", got)
+	}
+
+	// The registry path vanishes entirely: ListProjects now reports an empty
+	// success, which recovery must refuse to freeze.
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("an absent registry during recovery must keep the latch, got %d creates — absence is not an empty registry", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentRegistryUnreadable {
+		t.Fatalf("the latch must hold while the registry is absent, got reason %d", got)
+	}
+
+	// The registry returns (present, empty): recovery may now proceed.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("restore registry dir: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 1 {
+		t.Fatalf("a present registry must heal the latch and let the legacy root start, got %d creates", len(*seen))
+	}
+}
+
+// TestRootAgentHealRecomputesLegacyDedup pins the #3315 review's stale-dedup
+// finding: a legacy path that resolved only AFTER boot must be in the healed
+// snapshot's dedup set, or the singleton sweep can double-visit its repo
+// behind a failing legacy attempt and create the root without the legacy
+// layer.
+func TestRootAgentHealRecomputesLegacyDedup(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	registerTestProject(t, repoPath)
+	rid := repoID(t, repoPath)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	corruptProjectRegistry(t)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Both come back before the next ensure pass: the mount and the registry.
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "stray")); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
+		t.Fatalf("the healed snapshot must recompute the legacy dedup set for a path that resolved after boot")
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("the repo must be ensured exactly once across both sweeps, got %d creates", len(*seen))
+	}
+}

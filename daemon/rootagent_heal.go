@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -41,8 +43,22 @@ func (m *Manager) healRootAgentLayers() {
 	changed := false
 
 	if layers.registryUnreadable {
-		if projects, err := config.ListProjects(); err == nil {
+		// A latched registry PROVABLY existed at daemon start — plain absence
+		// never sets the latch (ListProjects reports it as zero projects) — so
+		// during recovery an ABSENT directory is a transition, not proof of
+		// zero projects: a repair mv in flight, a mount blip. ListProjects
+		// maps absence to an empty success, and accepting that here would
+		// clear the latch onto a frozen EMPTY snapshot — failing open against
+		// personal disables that may be back moments later (#3315 review, P1).
+		// Require a present registry on both sides of the read; a directory
+		// that vanishes in between just waits out one more cadence.
+		if projects, err := config.ListProjects(); err == nil && projectRegistryPresent() {
 			healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = projectRootAgentLayers(projects)
+			// Recompute the legacy dedup set too (#3315 review): a legacy path
+			// that resolved only after boot must dedup its repo out of the
+			// healed singleton sweep, or a failing legacy attempt lets the
+			// singleton create the root without the legacy layer.
+			healed.legacyRepoIDs = legacyRepoIDSet(m.cfg)
 			healed.registryUnreadable = false
 			changed = true
 			log.InfoLog.Printf("root agent snapshot: project registry is readable again; resuming root-agent resolution with %d personal layer(s), %d project(s) still failing closed", len(healed.personal), len(healed.personalUnreadable))
@@ -95,4 +111,17 @@ func retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map[string]*conf
 		log.InfoLog.Printf("root agent snapshot: project %s personal config loads again; root-agent resolution for repo %s resumes from config", projectID, repoID)
 	}
 	return personal, personalUnreadable, healedCount
+}
+
+// projectRegistryPresent reports whether the registry directory currently
+// exists as a directory. The registry heal gates on it around the read: an
+// absent registry during recovery is a transition to wait out, never an empty
+// success to freeze.
+func projectRegistryPresent() bool {
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(dir)
+	return err == nil && info.IsDir()
 }
