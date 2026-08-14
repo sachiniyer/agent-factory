@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -122,6 +123,67 @@ func TestResumeLimitedSessions_AllConfiguredAccountsLimitedKeepsWaiting(t *testi
 	}
 	if account, _ := inst.AccountSelection(); account != "" {
 		t.Fatalf("subject account changed to %q with no unblocked candidate", account)
+	}
+}
+
+func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	otherBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	other := registerStarted(t, manager, repoID, inst.Path, "work-session", otherBackend, true, session.Running)
+	other.Account = "work"
+
+	admissionPaused := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAdmission) }) }
+	previousHook := testHookAccountSwapBeforeAdmissionReturns
+	testHookAccountSwapBeforeAdmissionReturns = func() {
+		close(admissionPaused)
+		<-releaseAdmission
+	}
+	t.Cleanup(func() {
+		release()
+		testHookAccountSwapBeforeAdmissionReturns = previousHook
+	})
+
+	resumeDone := make(chan struct{})
+	go func() {
+		manager.ResumeLimitedSessions()
+		close(resumeDone)
+	}()
+	select {
+	case <-admissionPaused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final account-swap admission did not reach the publication race window")
+	}
+
+	published := make(chan struct{})
+	go func() {
+		manager.setLimitReached(other, base.Add(time.Hour))
+		close(published)
+	}()
+	select {
+	case <-published:
+		release()
+		<-resumeDone
+		t.Fatal("a competing live limit publication completed between final evidence read and identity commit")
+	case <-time.After(100 * time.Millisecond):
+		// The final admission owns the shared fence until identity commit.
+	}
+
+	release()
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("live limit publication stayed blocked after account identity commit")
+	}
+	select {
+	case <-resumeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("account swap did not finish after releasing final admission")
 	}
 }
 

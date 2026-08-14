@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
@@ -35,6 +36,19 @@ var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationD
 		loadPersistedAccountLimitObservations,
 		loadAccountLimitLedger,
 	)
+}
+
+// testHookAccountSwapBeforeAdmissionReturns pauses the final admission after it
+// has rebuilt quota evidence. Tests use it to publish a competing live limit in
+// the only window that matters: after the final read but before identity commit.
+// No-op in production.
+var testHookAccountSwapBeforeAdmissionReturns = func() {}
+
+// setLimitReached records a live limit through the manager-owned publication
+// boundary. It is deliberately a method even before that boundary needs more
+// coordination, so tests and production cannot bypass the same decision point.
+func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time) {
+	instance.SetLimitReached(resetAt)
 }
 
 // accountLimitEvidencePass memoizes the expensive durable scan only for one
@@ -237,7 +251,11 @@ func (m *Manager) admitAccountSwap(instance *session.Instance, global *config.Co
 	if instanceHasVSCodeTab(instance) {
 		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
 	}
-	return preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
+	admitted, err := preflightAccountSwapCandidates(swap, instance.ValidateAccountSwap)
+	if err == nil {
+		testHookAccountSwapBeforeAdmissionReturns()
+	}
+	return admitted, err
 }
 
 func accountSwapIdentity(agent, account string) string {

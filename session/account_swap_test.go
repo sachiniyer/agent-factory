@@ -377,6 +377,42 @@ func TestStopForAccountSwapStopsEveryCredentialBearingPane(t *testing.T) {
 	}
 }
 
+func TestStopForAccountSwapDoesNotStopSiblingsAfterAgentTeardownFails(t *testing.T) {
+	var mu sync.Mutex
+	var killed []string
+	inner := nameKeyedExec(map[string]bool{
+		"af_swap":        true,
+		"af_swap__shell": true,
+	})
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "kill-session") {
+				joined := strings.Join(cmd.Args, " ")
+				mu.Lock()
+				killed = append(killed, joined)
+				mu.Unlock()
+				if strings.Contains(joined, "af_swap") && !strings.Contains(joined, "af_swap__shell") {
+					return fmt.Errorf("agent teardown could not be confirmed")
+				}
+			}
+			return inner.Run(cmd)
+		},
+		OutputFunc: inner.Output,
+	}
+	inst := lostInstanceForRecover(t, "af_swap", "af_swap__shell", cmdExec)
+	inst.SetLimitReached(time.Time{})
+	require.NoError(t, inst.BeginLimitResume())
+
+	err := inst.StopForAccountSwap()
+	require.ErrorContains(t, err, "agent")
+	mu.Lock()
+	joined := strings.Join(killed, "\n")
+	mu.Unlock()
+	require.Contains(t, joined, "af_swap", "the agent teardown must be attempted first")
+	require.NotContains(t, joined, "af_swap__shell",
+		"an ordinary-resume fallback needs the untouched sibling when the agent teardown is unconfirmed")
+}
+
 func TestPendingAccountSwapFencesArchiveAndHandoffButAllowsDelivery(t *testing.T) {
 	newPending := func() *Instance {
 		inst := accountSwapTestInstance("claude")

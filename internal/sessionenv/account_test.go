@@ -318,6 +318,8 @@ func TestAccountShellCommandRefusesUnprovenShellExecutable(t *testing.T) {
 	_, err := AccountShellCommand("bash")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "absolute")
+	_, err = AccountShellCommand("/tmp/bash")
+	require.Error(t, err, "a path must not become a trusted shell merely because its basename is bash")
 	_, err = AccountShellCommand("/opt/custom-shell")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no startup-file-free")
