@@ -145,3 +145,23 @@ func TestRootAgentInspectionErrorUsesCanonicalProjectWording(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to resolve project path")
 	assert.NotContains(t, err.Error(), "--project")
 }
+
+// TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot: a
+// root_agents key whose path does not resolve (absent mount, not yet cloned)
+// must still be attributed to the repo its recorded spelling names, by the
+// same RepoIDForRecordedRoot rule the daemon snapshot uses — an empty entry
+// means enabled, and dropping it told consumers "no layer enables this repo"
+// about a repo whose opt-in sat in root_agents the whole time (#3264).
+func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "not-mounted", "repo")
+	cfg := DefaultConfig()
+	cfg.RootAgents = map[string]RootAgentConfig{missing: {Program: "custom"}}
+
+	entry, key := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(missing))
+	require.NotNil(t, entry, "an unresolvable key must match by recorded-root identity")
+	assert.Equal(t, missing, key)
+	assert.Equal(t, "custom", entry.Program)
+
+	other, _ := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(filepath.Join(t.TempDir(), "elsewhere")))
+	assert.Nil(t, other, "the fallback matches only the recorded spelling's own identity")
+}

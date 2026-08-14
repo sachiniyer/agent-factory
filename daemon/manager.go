@@ -228,17 +228,19 @@ type Manager struct {
 	// override are absent). It is the highest-precedence root-agent source,
 	// merged over global and legacy in config.ResolveRootAgent.
 	rootAgentPersonal map[string]*config.RootAgentLayer
-	// rootAgentPersonalUnreadable is the set of repo IDs whose registered
-	// project's personal config existed but could not be LOADED at daemon start
-	// (#3241). These repos fail closed: resolvedRootAgentFor resolves them to
-	// disabled without consulting lower layers, because the unloadable file may
-	// hold the highest-precedence enabled=false. Kept as its own set rather than
-	// a synthesized personal layer so consumers can distinguish "the user
-	// disabled this" from "af could not tell". Snapshot-built and immutable
-	// after construction, read without a lock — the rootAgentLegacyRepoIDs
+	// rootAgentPersonalUnreadable maps the repo ID of each registered project
+	// whose personal config existed but could not be LOADED at daemon start
+	// (#3241) to that project's ID. These repos fail closed:
+	// resolvedRootAgentFor resolves them to disabled without consulting lower
+	// layers, because the unloadable file may hold the highest-precedence
+	// enabled=false. Kept as its own map rather than a synthesized personal
+	// layer so consumers can distinguish "the user disabled this" from "af
+	// could not tell" — and the project ID is what lets their refusals name
+	// the config file to fix (#3264). Snapshot-built and immutable after
+	// construction, read without a lock — the rootAgentLegacyRepoIDs
 	// discipline, not the runtime-mutated, mu-guarded deletedRootRepos one.
 	// Restart-to-apply, like the rest of the snapshot.
-	rootAgentPersonalUnreadable map[string]bool
+	rootAgentPersonalUnreadable map[string]string
 	// rootAgentRegistryUnreadable records that the project registry itself
 	// could not be listed at daemon start (#3247). The registry is the only
 	// index of the personal configs that may hold the highest-precedence
@@ -254,6 +256,13 @@ type Manager struct {
 	// project with no legacy root_agents entry — and supplies the repo root
 	// CreateSession needs. Restart-to-apply, like RootAgents.
 	rootAgentProjectRoots map[string]string
+	// rootAgentUnresolvedRoots maps the derived repo ID of each registered
+	// project whose recorded root did not resolve at daemon start to that
+	// recorded path (#3247 arm 2). These are configured projects the singleton
+	// sweep cannot visit; verdicts name them as unresolved rather than
+	// unconfigured (#3264). Same immutability discipline as the rest of the
+	// snapshot.
+	rootAgentUnresolvedRoots map[string]string
 	// rootAgentLegacyRepoIDs is the set of repo IDs a root_agents path resolved to
 	// at daemon start. The singleton-project sweep skips these so a repo named by
 	// both a legacy entry and a registered project is ensured once — by the legacy
@@ -507,6 +516,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		rootAgentPersonalUnreadable: rootAgents.personalUnreadable,
 		rootAgentRegistryUnreadable: rootAgents.registryUnreadable,
 		rootAgentProjectRoots:       rootAgents.projectRoots,
+		rootAgentUnresolvedRoots:    rootAgents.unresolvedRoots,
 		rootAgentLegacyRepoIDs:      rootAgents.legacyRepoIDs,
 		rootKilledAt:                make(map[string]time.Time),
 		deletedRootRepos:            make(map[string]struct{}),

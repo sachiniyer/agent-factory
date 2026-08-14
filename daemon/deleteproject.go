@@ -445,8 +445,16 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// and task delivery waits for that same promise. Include the reserved target
 	// before the empty-roster return, or DeleteProject can suppress re-creation
 	// and strand a root-targeted task behind a title ordinary auto-create refuses.
-	if !hasRoot && m.repoRootAgentWillMaterialize(repoID) {
-		titles = append(titles, session.RootSessionTitle)
+	// For this consumer UNKNOWN behaves like yes (#3264): a fail-closed repo
+	// (unloadable personal config, unlistable registry) reports
+	// willMaterialize=false, but deleting through that answer would drop the
+	// root_agents opt-in and leave the enabled task stranded the moment the
+	// config becomes readable again — the exact hazard this preflight refuses.
+	if !hasRoot {
+		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved:
+			titles = append(titles, session.RootSessionTitle)
+		}
 	}
 	sort.Strings(titles)
 	if len(titles) == 0 {

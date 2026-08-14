@@ -89,10 +89,20 @@ type rootEnsureState struct {
 // the singleton sweep visits, and the repo IDs the legacy root_agents map
 // already covers (so the singleton sweep can dedupe against it).
 type rootAgentSnapshot struct {
-	global             *config.RootAgentLayer
-	personal           map[string]*config.RootAgentLayer
-	personalUnreadable map[string]bool
+	global   *config.RootAgentLayer
+	personal map[string]*config.RootAgentLayer
+	// personalUnreadable maps a fail-closed repo ID to its project ID, so
+	// consumer-facing refusals can name the config file to fix (#3264).
+	personalUnreadable map[string]string
 	projectRoots       map[string]string
+	// unresolvedRoots maps the derived repo ID of each registered project whose
+	// recorded root did not resolve at snapshot time to that recorded path
+	// (#3247 arm 2). The singleton sweep cannot visit these (projectRoots
+	// deliberately excludes them), but they are still CONFIGURED projects —
+	// their layers sit in personal/personalUnreadable — so consumer verdicts
+	// must not call them unconfigured and advise adding config that already
+	// exists (#3264 review).
+	unresolvedRoots    map[string]string
 	legacyRepoIDs      map[string]bool
 	registryUnreadable bool
 }
@@ -109,8 +119,9 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	snap := rootAgentSnapshot{
 		global:             config.GlobalRootAgentLayer(cfg),
 		personal:           map[string]*config.RootAgentLayer{},
-		personalUnreadable: map[string]bool{},
+		personalUnreadable: map[string]string{},
 		projectRoots:       map[string]string{},
+		unresolvedRoots:    map[string]string{},
 		legacyRepoIDs:      map[string]bool{},
 	}
 
@@ -171,6 +182,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 			// path returns.
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
+			snap.unresolvedRoots[repoID] = p.Root
 			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", p.ID, p.Root, repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
@@ -188,7 +200,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 			// healing stop, until the config loads at a daemon start — the same
 			// restart-to-apply contract as the rest of this snapshot.
 			log.WarningLog.Printf("root agent snapshot: project %s (%s) personal config cannot be loaded; failing closed — no root agent will be started or healed for this repo until its config loads at a daemon start: %v", p.ID, repoRoot, err)
-			snap.personalUnreadable[repoID] = true
+			snap.personalUnreadable[repoID] = p.ID
 			continue
 		}
 		if layer := pc.RootAgentLayer(); layer != nil {
@@ -240,7 +252,11 @@ func (m *Manager) resolvedRootAgentFor(repoID string, legacy *config.RootAgentCo
 // does not resolve). Both sets are snapshot-built and immutable, so the answer
 // is stable for the daemon run, restart-to-apply like the snapshot itself.
 func (m *Manager) rootAgentDecisionUnknown(repoID string) bool {
-	return m.rootAgentRegistryUnreadable || m.rootAgentPersonalUnreadable[repoID]
+	if m.rootAgentRegistryUnreadable {
+		return true
+	}
+	_, unreadable := m.rootAgentPersonalUnreadable[repoID]
+	return unreadable
 }
 
 // legacyRootAgentForRepo returns a copy of the root_agents entry whose path
@@ -250,30 +266,6 @@ func (m *Manager) rootAgentDecisionUnknown(repoID string) bool {
 func (m *Manager) legacyRootAgentForRepo(repoID string) *config.RootAgentConfig {
 	entry, _ := config.LegacyRootAgentForRepo(m.cfg, repoID)
 	return entry
-}
-
-// rootAgentResolutionForRepo resolves the effective root-agent profile for one
-// repo ID and reports whether the repo is a candidate at all (named by a legacy
-// entry or a registered project). It is the single authority
-// repoRootAgentWillMaterialize shares with the ensure loop, so a delivery waits
-// for a root exactly when the loop will create one. Layers are merged, so a
-// personal enabled=false disables a legacy-enabled root here too.
-func (m *Manager) rootAgentResolutionForRepo(repoID string) (config.RootAgentResolution, bool) {
-	// Fail-closed short-circuit first: with the decision unknown the answer is
-	// the zero resolution whatever the layers say, and legacyRootAgentForRepo
-	// below forks git per root_agents entry — a real cost on the DeliverPrompt
-	// path. Candidacy reports true, not false: "not a candidate" would be a
-	// second unfounded claim about state that could not be read, and every
-	// caller keys on ok && Enabled, which unknown already forces false.
-	if m.rootAgentDecisionUnknown(repoID) {
-		return config.RootAgentResolution{}, true
-	}
-	legacy := m.legacyRootAgentForRepo(repoID)
-	_, isProject := m.rootAgentProjectRoots[repoID]
-	if legacy == nil && !isProject {
-		return config.RootAgentResolution{}, false
-	}
-	return m.resolvedRootAgentFor(repoID, legacy), true
 }
 
 // EnsureRootAgents runs one ensure pass over every repo that resolves to an
@@ -684,12 +676,38 @@ func reportRootConversationCarry(repoRoot string, carried session.AgentConversat
 // concurrent-create retry) and then sends the prompt into it, so a watch/
 // monitor event is delivered once root returns instead of being dropped by the
 // reserved-name guard the auto-create path would hit. Returns handled=false
-// when the target is not a re-emerging root, so DeliverPrompt falls through to
-// its normal create path; on a wait timeout it returns handled=true with an
-// accurate "being recreated" error rather than the misleading reserved-name one.
+// when the target is not a reserved title at all, or when the repo is simply
+// unconfigured — there the reserved-name guard's "add it to root_agents"
+// advice is the correct answer. Every other refusing verdict is answered HERE
+// with its cause (#3264): falling through would tell a user whose repo IS in
+// root_agents to add it to root_agents, while the actual blocker — a disable,
+// an unloadable personal config, an unlistable registry, a deleted project —
+// went unnamed. On a wait timeout it returns handled=true with an accurate
+// "being recreated" error rather than the misleading reserved-name one.
 func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverPromptRequest) (string, session.PromptDeliveryStatus, bool, error) {
-	if !session.IsReservedTitle(req.Title) || !m.repoRootAgentWillMaterialize(repo.ID) {
+	if !session.IsReservedTitle(req.Title) {
 		return "", session.PromptCouldNotConfirm, false, nil
+	}
+	if req.Title != session.RootSessionTitle {
+		// A reserved-title VARIANT ("Root", " root ") can never be delivered
+		// to: the ensure loop creates only the exact title, so no root-agent
+		// policy fix makes this spelling deliverable. Fall through to the
+		// reserved-name guard, whose "pick another name" is the right advice —
+		// answering with a policy cause here would promise a remedy that
+		// cannot work (#3264 review). This also stops the wait path from
+		// waiting out targetDeliverWait for a title that will never appear.
+		return "", session.PromptCouldNotConfirm, false, nil
+	}
+	verdict := m.rootAgentMaterializeVerdictFor(repo.ID)
+	switch verdict.reason {
+	case rootAgentWillMaterialize:
+		// Fall through to the wait-and-send path below.
+	case rootAgentNotConfigured:
+		return "", session.PromptCouldNotConfirm, false, nil
+	default:
+		// Pre-flight refusal: nothing was sent, so the rate slot is refunded
+		// (#2501), and the error names what actually stops the root.
+		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q will not materialize: %s; event not delivered", repo.Root, rootAgentUnavailableDetail(verdict)))
 	}
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
 		// Pre-flight: the root never reappeared within the wait, so nothing was
@@ -720,31 +738,6 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 // should wait for the ensure loop rather than auto-create it (which the
 // reserved-name guard would reject).
 //
-// It routes through rootAgentResolutionForRepo, the SAME resolution the ensure
-// loop uses, so the two never disagree: a repo the loop will not create (a
-// personal enabled=false over a legacy entry, or a project no singleton turned
-// on) reports false, and a singleton-only project the loop WILL create reports
-// true even with no legacy root_agents entry. Otherwise a send-prompt to such a
-// root is wrongly rejected at the reserved-name gate (#1835).
-//
-// A deleted project (#1735) is the one case where the still-immutable snapshot
-// outlives the truth: DeleteProject removed the opt-in from disk but this
-// in-memory copy keeps listing the repo, and ensureResolvedRoot skips it for the
-// rest of the daemon's life. Answering from config alone would make callers wait
-// out targetDeliverWait for a root that can never come back, then blame a
-// recreation that is not happening, so deletion is checked with the same
-// lock+lookup the ensure loop uses, before the resolution.
-func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
-	m.mu.Lock()
-	_, deleted := m.deletedRootRepos[repoID]
-	m.mu.Unlock()
-	if deleted {
-		return false
-	}
-	resolution, ok := m.rootAgentResolutionForRepo(repoID)
-	return ok && resolution.Enabled
-}
-
 // reapedRootState is what a reaped root record hands to its replacement: the
 // state a fresh CreateSession cannot reconstruct on its own, snapshotted from
 // the exact record the reap is about to delete. It is one value rather than a

@@ -26,6 +26,18 @@ func rootTestConfig(repoPath string, rc config.RootAgentConfig) *config.Config {
 	return cfg
 }
 
+// repoRootAgentWillMaterialize is the boolean face of
+// rootAgentMaterializeVerdictFor, kept as a test-side helper: every production
+// consumer reads the reason-bearing verdict since #3264, but the tests pin the
+// boolean AGREEMENT between the ensure loop and the verdict — a repo the loop
+// will not create (a personal enabled=false over a legacy entry, a project no
+// singleton turned on, #1735 deletion) reports false, and a singleton-only
+// project the loop WILL create reports true, else a send-prompt to it is
+// wrongly rejected at the reserved-name gate (#1835).
+func (m *Manager) repoRootAgentWillMaterialize(repoID string) bool {
+	return m.rootAgentMaterializeVerdictFor(repoID).reason == rootAgentWillMaterialize
+}
+
 // findRootInstance returns the manager's live root instance for the repo, or
 // nil.
 func findRootInstance(t *testing.T, manager *Manager, repoPath string) *session.Instance {
