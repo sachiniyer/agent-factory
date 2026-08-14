@@ -256,7 +256,16 @@ func recordedTmuxNames() (map[string]bool, error) {
 			if inst.TmuxName != "" {
 				names[inst.TmuxName] = true
 			} else if inst.Title != "" {
-				names[tmux.NewTmuxSessionForRepo(inst.Title, inst.Path, "").SanitizedName()] = true
+				repoPath := inst.Path
+				// Derive a missing legacy name from current repository identity only
+				// when it agrees with the record's storage key. That gives a bare
+				// clone's linked worktree its bare identity (#3358), while preserving
+				// the raw-path name for rows retained under an older or otherwise
+				// mismatched key.
+				if repo, err := config.RepoFromPath(inst.Path); err == nil && repo.ID == repoID {
+					repoPath = repo.IdentityPath()
+				}
+				names[tmux.NewTmuxSessionForRepo(inst.Title, repoPath, "").SanitizedName()] = true
 			}
 			for _, tab := range inst.Tabs {
 				if tab.TmuxName != "" {
