@@ -220,6 +220,14 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			end++
 		}
 		if end >= len(document) {
+			// A serialized child can be the final, truncated string in the malformed
+			// document. Close only that string literal for decoding; its decoded value
+			// must still pass the JSON-opener gate before recursive inspection.
+			var value string
+			if err := json.Unmarshal([]byte(document[index:]+"\""), &value); err == nil &&
+				hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
+				return true
+			}
 			continue
 		}
 
@@ -227,15 +235,18 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
 			continue
 		}
+		// Inspect serialized values before using the following colon to classify a
+		// string as a key. Malformed input can put a colon after an otherwise valid
+		// serialized child, and secrecy wins over trusting that broken boundary.
+		if hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
+			return true
+		}
 		after := strings.TrimLeft(document[end+1:], " \t\r\n")
 		if strings.HasPrefix(after, ":") {
 			if strings.EqualFold(value, "token") {
 				return true
 			}
 			continue
-		}
-		if hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
-			return true
 		}
 	}
 	return false
