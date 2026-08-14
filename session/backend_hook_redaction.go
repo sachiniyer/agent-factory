@@ -166,6 +166,9 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 		}
 
 		if len(containers) == 0 {
+			if nested, ok := token.(string); ok && malformedHookJSONDocumentContainsToken(nested) {
+				return true
+			}
 			continue
 		}
 		container := &containers[len(containers)-1]
