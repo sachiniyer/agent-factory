@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -144,10 +145,11 @@ func (m *Manager) retryUnreadablePersonalConfigs(layers *rootAgentSnapshot) (map
 			continue
 		}
 		if pc == nil {
-			// ENOENT: absent only if the record directory is STILL present
-			// after the read (a vanished registry makes the load ENOENT too),
+			// ENOENT: absent only if config.toml has no directory entry and
+			// the record directory is STILL present after the read (a dangling
+			// config symlink or vanished registry makes the load ENOENT too),
 			// and only on the second spaced strike.
-			if !projectRecordDirPresent(projectID) {
+			if !projectConfigEntryAbsent(projectID) || !projectRecordDirPresent(projectID) {
 				personalUnreadable[repoID] = projectID
 				m.resetPersonalAbsenceStreak(projectID)
 				continue
@@ -180,6 +182,18 @@ func (m *Manager) resetPersonalAbsenceStreak(projectID string) {
 	m.mu.Lock()
 	delete(m.rootHealAbsenceStreaks, projectID)
 	m.mu.Unlock()
+}
+
+// projectConfigEntryAbsent distinguishes a removed config.toml from an
+// existing entry whose target cannot be read. Lstat deliberately does not
+// follow symlinks, so a dangling symlink remains an unreadable config state.
+func projectConfigEntryAbsent(projectID string) bool {
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		return false
+	}
+	_, err = os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // projectRecordDirPresent reports whether a project's registry record

@@ -485,3 +485,59 @@ func TestRootAgentHealAbsentPersonalConfigNeedsTwoStrikes(t *testing.T) {
 		t.Fatalf("the second absence strike must heal the latch and let the legacy root start, got %d creates", len(*seen))
 	}
 }
+
+// TestRootAgentHealKeepsPersonalLatchForDanglingConfigSymlink pins #3318: a
+// config.toml symlink whose target is temporarily unavailable still has a
+// directory entry, so its ENOENT read is not proof that the user removed it.
+func TestRootAgentHealKeepsPersonalLatchForDanglingConfigSymlink(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	breakPersonalRootAgentToml(t, project.ID)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("fixture: the broken personal config must fail closed at start, got reason %d", got)
+	}
+
+	path, err := config.ProjectConfigTomlPath(project.ID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove broken personal config: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("install dangling personal-config symlink: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("a dangling personal-config symlink must keep the latch, got %d creates — an unreadable config is not a removal", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentPersonalUnreadable {
+		t.Fatalf("the personal latch must hold while the config symlink dangles, got reason %d", got)
+	}
+
+	if err := os.WriteFile(target, []byte("[root_agent]\nenabled = false\n"), 0o644); err != nil {
+		t.Fatalf("restore personal-config symlink target: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != 0 {
+		t.Fatalf("the restored personal disable must keep the root down, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(rid).reason; got != rootAgentDisabled {
+		t.Fatalf("the healed latch must carry the restored config's true cause, got reason %d", got)
+	}
+}
