@@ -328,7 +328,6 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 	if len(tabs) == 0 || tabs[0].tmux == nil || gw == nil || gw.GetWorktreePath() == "" {
 		return fmt.Errorf("account swap: session %q has no local agent runtime", i.Title)
 	}
-	var failures []error
 	for idx, tab := range tabs {
 		if agentAlreadyAbsent && idx == 0 {
 			continue
@@ -342,15 +341,12 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		state, blind, err := tab.tmux.CloseAndWaitForPaneExitReportingBlindness()
 		switch {
 		case state == tmux.PaneStateKnown && blind:
-			failures = append(failures, fmt.Errorf("tab %q vanished without its pane being observed; a detached child may still be writing the worktree", tab.Name))
+			return fmt.Errorf("account swap: cannot stop credential-bearing tab %q for %q: it vanished without its pane being observed; a detached child may still be writing the worktree", tab.Name, i.Title)
 		case state == tmux.PaneStateUnknown:
-			failures = append(failures, fmt.Errorf("cannot confirm tab %q stopped: %w", tab.Name, err))
+			return fmt.Errorf("account swap: cannot confirm credential-bearing tab %q stopped for %q: %w", tab.Name, i.Title, err)
 		case err != nil:
-			failures = append(failures, fmt.Errorf("failed to stop tab %q: %w", tab.Name, err))
+			return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
 		}
-	}
-	if err := errors.Join(failures...); err != nil {
-		return fmt.Errorf("account swap: cannot stop every credential-bearing pane for %q: %w", i.Title, err)
 	}
 	return nil
 }

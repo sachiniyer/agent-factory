@@ -91,7 +91,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
-		_ = instance.SetLimitReachedAtEpoch(resetAt, epoch)
+		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {
@@ -533,7 +533,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	}()
 
 	forceRespawn := false
+	accountLimitFenceHeld := false
+	releaseAccountLimitFence := func() {
+		if accountLimitFenceHeld {
+			m.accountLimitMu.Unlock()
+			accountLimitFenceHeld = false
+		}
+	}
+	defer releaseAccountLimitFence()
 	if accountSwap != nil && !accountSwap.alreadySet {
+		m.accountLimitMu.Lock()
+		accountLimitFenceHeld = true
 		fallbackDue := accountSwap.fallbackDue
 		admitted, err := m.admitAccountSwap(instance, accountSwap.global)
 		if err != nil {
@@ -541,6 +551,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				return resumeNotPerformed, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
 			}
 			accountSwap = nil
+			releaseAccountLimitFence()
 		} else {
 			admitted.fallbackDue = fallbackDue
 			// Update the scheduler-owned opportunity too: the first candidate can
@@ -555,6 +566,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				return resumeNotPerformed, err
 			}
 			accountSwap = nil
+			releaseAccountLimitFence()
 		}
 	}
 	if accountSwap != nil && !accountSwap.alreadySet {
@@ -571,6 +583,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 				accountSwap.previousAccount, accountSwap.previousAuto, accountSwap.previousConversation)
 			return resumeNotPerformed, err
 		}
+		releaseAccountLimitFence()
 		forceRespawn = true
 	}
 
@@ -668,7 +681,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		if rerr != nil {
 			if accountSwap != nil {
-				if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+				if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
 					rerr = errors.Join(rerr, perr)
 				}
 			}
@@ -712,7 +725,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// through prompt delivery now (#2997), and the plain SetLimitReached refuses
 		// while any op is in flight — it would no-op here and lose this episode's
 		// reset time, which the auto-resume scheduler schedules off.
-		if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+		if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
 		}
 		// Write the respawn's durable state NOW, not at the end of the happy path

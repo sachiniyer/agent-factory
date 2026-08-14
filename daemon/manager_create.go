@@ -265,6 +265,13 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// not in memory would let refresh construct a duplicate Instance
 	// (opening a fresh PTY in the tmux backend) that gets orphaned when
 	// the original is later stored under the same key.
+	// An unregistered create is not live evidence yet. Serialize the roster
+	// insertion of a limit-parked account with final account-swap admission, so
+	// the candidate is either absent for the whole commit or visible as limited.
+	limitPublication := instance.LimitReached()
+	if limitPublication {
+		m.accountLimitMu.Lock()
+	}
 	persistErr := func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -280,6 +287,9 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.startConversationCaptureLocked(repo.ID, key, instance, conversationCapture, conversationToken)
 		return nil
 	}()
+	if limitPublication {
+		m.accountLimitMu.Unlock()
+	}
 	if persistErr != nil {
 		// Same rule as the start-failure path above, minus the remedy: the record
 		// write is what just failed, so keeping a record is not available. Report the

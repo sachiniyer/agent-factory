@@ -45,10 +45,30 @@ var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationD
 var testHookAccountSwapBeforeAdmissionReturns = func() {}
 
 // setLimitReached records a live limit through the manager-owned publication
-// boundary. It is deliberately a method even before that boundary needs more
-// coordination, so tests and production cannot bypass the same decision point.
+// boundary, so a final account-swap admission observes either the whole limit
+// publication or the whole durable identity commit.
 func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time) {
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
 	instance.SetLimitReached(resetAt)
+}
+
+func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, epoch uint64) bool {
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
+	return instance.SetLimitReachedAtEpoch(resetAt, epoch)
+}
+
+func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time) error {
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
+	return instance.Transition(session.ParkHandoff(resetAt))
+}
+
+func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetAt time.Time) error {
+	m.accountLimitMu.Lock()
+	defer m.accountLimitMu.Unlock()
+	return instance.ReparkLimitUnderResumeFence(resetAt)
 }
 
 // accountLimitEvidencePass memoizes the expensive durable scan only for one

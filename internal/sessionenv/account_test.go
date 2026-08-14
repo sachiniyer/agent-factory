@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -292,6 +294,12 @@ func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
 }
 
 func TestAccountShellCommandDisablesStartupFilesAndStripsTheirSelectors(t *testing.T) {
+	trustedShells := filepath.Join(t.TempDir(), "shells")
+	require.NoError(t, os.WriteFile(trustedShells, []byte("/bin/bash\n/bin/sh\n/bin/zsh\n"), 0o600))
+	previousShellsPath := accountShellsPath
+	accountShellsPath = trustedShells
+	t.Cleanup(func() { accountShellsPath = previousShellsPath })
+
 	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
 	for shell, want := range map[string]string{
 		"/bin/bash": "/bin/bash --noprofile --norc -i",
@@ -318,8 +326,27 @@ func TestAccountShellCommandRefusesUnprovenShellExecutable(t *testing.T) {
 	_, err := AccountShellCommand("bash")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "absolute")
-	_, err = AccountShellCommand("/tmp/bash")
-	require.Error(t, err, "a path must not become a trusted shell merely because its basename is bash")
+
+	trustedDir := filepath.Join(t.TempDir(), "trusted")
+	untrustedDir := filepath.Join(t.TempDir(), "untrusted")
+	require.NoError(t, os.MkdirAll(trustedDir, 0o700))
+	require.NoError(t, os.MkdirAll(untrustedDir, 0o700))
+	trusted := filepath.Join(trustedDir, "bash")
+	untrusted := filepath.Join(untrustedDir, "bash")
+	require.NoError(t, os.WriteFile(trusted, []byte("#!/bin/sh\n"), 0o700))
+	require.NoError(t, os.WriteFile(untrusted, []byte("#!/bin/sh\n"), 0o700))
+	trustedShells := filepath.Join(t.TempDir(), "shells")
+	require.NoError(t, os.WriteFile(trustedShells, []byte(trusted+"\n"), 0o600))
+	previousShellsPath := accountShellsPath
+	accountShellsPath = trustedShells
+	t.Cleanup(func() { accountShellsPath = previousShellsPath })
+
+	_, err = AccountShellCommand(trusted)
+	require.NoError(t, err, "a host-listed executable with a supported shell identity is proven")
+	_, err = AccountShellCommand(untrusted)
+	require.Error(t, err, "an executable must not become a trusted shell merely because its basename is bash")
+	_, err = AccountShellCommand(untrusted + " --noprofile --norc -i")
+	require.Error(t, err, "pre-rendered safe-looking flags must not bypass executable provenance")
 	_, err = AccountShellCommand("/opt/custom-shell")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no startup-file-free")
