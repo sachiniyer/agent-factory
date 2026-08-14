@@ -86,10 +86,10 @@ func TestValidateEnabledTaskTargetNamesFailClosedCause(t *testing.T) {
 			},
 		},
 		{
-			name:     "resolved disable says disabled",
+			name:     "resolved disable names the deciding layer",
 			personal: "enabled = false",
 			wantIn: func(t *testing.T, _ config.Project) string {
-				return "disabled"
+				return "enabled=false in the personal project layer"
 			},
 		},
 	}
@@ -108,6 +108,36 @@ func TestValidateEnabledTaskTargetNamesFailClosedCause(t *testing.T) {
 				t.Fatalf("the refusal still guesses instead of naming the cause: %v", err)
 			}
 		})
+	}
+}
+
+// TestValidateEnabledTaskTargetDistinguishesDefaultOffFromExplicitDisable: a
+// registered project with no root-agent config anywhere is a candidate that
+// resolves to the built-in default (disabled). The refusal must say no layer
+// enables it — inventing an "explicit enabled=false" there names a false
+// cause and sends the user hunting for a disable that does not exist
+// (#3304 review).
+func TestValidateEnabledTaskTargetDistinguishesDefaultOffFromExplicitDisable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	registerTestProject(t, repoPath)
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	rid := repoID(t, repoPath)
+
+	ctx := manager.prepareTaskTargetValidation(rid, session.RootSessionTitle, true)
+	verr := manager.validateEnabledTaskTarget(rootTargetTask("cause002", repoPath, rid), ctx)
+	if verr == nil {
+		t.Fatalf("a default-off root must still refuse the task target")
+	}
+	if !strings.Contains(verr.Error(), "no root_agent layer enables") {
+		t.Fatalf("the refusal must say no layer enables the repo; got: %v", verr)
+	}
+	if strings.Contains(verr.Error(), "enabled=false") {
+		t.Fatalf("the refusal must not invent an explicit disable for the built-in default; got: %v", verr)
 	}
 }
 

@@ -277,10 +277,17 @@ const (
 )
 
 // rootAgentMaterializeVerdict pairs the reason with what a message needs to
-// name it: the project whose personal config failed to load.
+// name it: the project whose personal config failed to load, or the layer
+// that decided a disable.
 type rootAgentMaterializeVerdict struct {
 	reason    rootAgentMaterializeReason
 	projectID string
+	// disabledSource is set for rootAgentDisabled: the layer that supplied the
+	// effective enabled=false. The built-in source means NO layer enabled the
+	// repo (a registered project with no root-agent config anywhere) — a
+	// materially different remedy from an explicit disable, and naming an
+	// "explicit enabled=false" there would be a false cause (#3304 review).
+	disabledSource config.RootAgentSource
 }
 
 // rootAgentMaterializeVerdictFor is the single authority for "will the ensure
@@ -309,10 +316,11 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	if legacy == nil && !isProject {
 		return rootAgentMaterializeVerdict{reason: rootAgentNotConfigured}
 	}
-	if m.resolvedRootAgentFor(repoID, legacy).Enabled {
+	resolution := m.resolvedRootAgentFor(repoID, legacy)
+	if resolution.Enabled {
 		return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 	}
-	return rootAgentMaterializeVerdict{reason: rootAgentDisabled}
+	return rootAgentMaterializeVerdict{reason: rootAgentDisabled, disabledSource: resolution.EnabledSource}
 }
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a
@@ -321,11 +329,20 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	switch v.reason {
 	case rootAgentProjectDeleted:
-		return "its project was deleted this daemon run; re-register the project and restart the daemon to bring the root back"
+		// Deleting the project also durably removed its root_agents opt-in
+		// (suppressRootAgent), so re-registering alone leaves the root on the
+		// built-in default (disabled) — the remedy must restore the opt-in too.
+		return "its project was deleted this daemon run, which also removed its root_agents opt-in; re-register the project, re-enable its root agent (a root_agents entry or the project's [root_agent]), and restart the daemon"
 	case rootAgentNotConfigured:
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
 	case rootAgentDisabled:
-		return "its root agent resolves to disabled (an explicit enabled=false wins the layering); enable it and restart the daemon"
+		if v.disabledSource == config.RootAgentSourceBuiltIn || v.disabledSource == "" {
+			// No layer enabled it: a registered project with no root-agent
+			// config anywhere defaults to disabled. There is no enabled=false
+			// to point at, so do not invent one.
+			return "no root_agent layer enables this repo (registered projects default to disabled); enable it in the project's personal [root_agent] or the global [root_agent], or add a root_agents entry, then restart the daemon"
+		}
+		return fmt.Sprintf("its root agent resolves to disabled — an explicit enabled=false in the %s layer wins; enable it and restart the daemon", v.disabledSource)
 	case rootAgentRegistryUnreadable:
 		registry := config.ProjectRegistryDirName
 		if dir, err := config.ProjectRegistryDir(); err == nil {
