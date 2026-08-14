@@ -687,15 +687,12 @@ success.`,
 			// session — scoping by cwd would archive a same-titled namesake in
 			// the wrong repo, or fail "instance not found" while leaving the
 			// caller's real session alive. Mirror Storage's root→repoID
-			// derivation (#667), shared with whoami via sessionRepoRoot so the
+			// derivation (#667), shared with whoami via sessionRepoID so the
 			// two cannot drift.
 			// A worktree-less session (remote backend) leaves repoID empty so
 			// the resolved title is matched all-repo and the daemon's remote
 			// guard still fires with its own clear message.
-			root := sessionRepoRoot(data)
-			if root != "" {
-				repoID = config.RepoIDForPath(root)
-			}
+			repoID = sessionRepoID(data)
 		} else {
 			if title == "" {
 				return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
@@ -909,13 +906,11 @@ var sessionsWhoamiCmd = &cobra.Command{
 			// who IS in the named project, so an unknown project is never an
 			// error — only a known-mismatched one.
 			//
-			// Resolve the session's root directly through git when it still
-			// exists, otherwise retain its raw recorded identity. Ancestor
-			// inference is correct for task attribution but not for an
-			// authoritative session row: it could make a deleted nested origin
-			// look like an unrelated enclosing project.
-			if root := sessionRepoRoot(data); root != "" && config.RepoIDForPath(root) != repo.ID {
-				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
+			// A recorded worktree origin is already authoritative; resolving it
+			// again could adopt an enclosing repository after the original Git
+			// metadata disappears.
+			if recordedID := sessionRepoID(data); recordedID != "" && recordedID != repo.ID {
+				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", sessionRepoRoot(data), repo.Root))
 			}
 		}
 		return jsonOut(*data)

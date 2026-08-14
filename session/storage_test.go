@@ -488,6 +488,37 @@ func TestDaemonSaveRetainsLoadedLegacyStorageKey(t *testing.T) {
 		"a shutdown checkpoint must not duplicate the row under an enclosing repository")
 }
 
+func TestRepoIDForStorageReturnsRememberedIDWithoutGit(t *testing.T) {
+	fakeBin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-called")
+	fakeGit := filepath.Join(fakeBin, "git")
+	require.NoError(t, os.WriteFile(fakeGit, []byte("#!/bin/sh\n: > \"$AF_STORAGE_ID_GIT_MARKER\"\nexit 1\n"), 0o755))
+	t.Setenv("PATH", fakeBin)
+	t.Setenv("AF_STORAGE_ID_GIT_MARKER", marker)
+
+	inst := &Instance{Path: "/recorded/on/unreachable-mount", storageRepoID: "remembered-id"}
+	assert.Equal(t, "remembered-id", inst.repoIDForStorage())
+	_, err := os.Stat(marker)
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"a loaded row already has an authoritative key and must not invoke Git")
+}
+
+func TestRepoIDForStorageKeepsFreshRecordedWorktreeIdentity(t *testing.T) {
+	ancestor := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", ancestor).Run())
+	recordedRoot := filepath.Join(ancestor, "deleted-nested-origin")
+	require.NoError(t, os.Mkdir(recordedRoot, 0o755))
+	require.NotEqual(t, config.RepoIDForRecordedRoot(recordedRoot), config.RepoIDForPath(recordedRoot))
+	gw, err := git.NewGitWorktreeFromStorage(
+		recordedRoot, filepath.Join(t.TempDir(), "managed"), "fresh", "af/fresh", "", false, true,
+	)
+	require.NoError(t, err)
+	inst := &Instance{Path: recordedRoot, gitWorktree: gw}
+
+	assert.Equal(t, config.RepoIDForRecordedRoot(recordedRoot), inst.repoIDForStorage(),
+		"a recorded worktree origin must not adopt an enclosing repository before first save")
+}
+
 // TestDaemonSaveFallsBackToPathForRemoteBackend verifies that the daemon
 // still groups by Instance.Path when no worktree is attached (load-bearing
 // for remote backends where Worktree.RepoPath is empty).

@@ -20,6 +20,10 @@ const inRepoHashFileName = "inrepo-config-hash"
 // once per repo per process.
 var legacyDeprecationLogged sync.Map
 
+// retainedLegacyBareRepoConfigLogged dedupes the ambiguity warning for a
+// pre-#3358 parent-keyed config to once per corrected repository identity.
+var retainedLegacyBareRepoConfigLogged sync.Map
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
@@ -95,10 +99,7 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 // workspace. The distinction matters for a bare repository's linked worktree:
 // the bare directory owns identity but has no checked-out files.
 func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
-	if repo == nil {
-		return nil, fmt.Errorf("repo context is required")
-	}
-	return resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), recordInRepoLoadObservation)
+	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
 }
 
 // ResolveConfigForInspection returns the same effective values and provenance
@@ -113,10 +114,19 @@ func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 // ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
 // in-repo load observation.
 func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, suppressInRepoLoadObservation)
+}
+
+func resolveConfigForRepo(repo *RepoContext, observation inRepoLoadObservation) (*ResolvedConfig, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("repo context is required")
 	}
-	return resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation)
+	resolved, err := resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), observation)
+	if err != nil {
+		return nil, err
+	}
+	warnRetainedLegacyBareRepoConfig(repo)
+	return resolved, nil
 }
 
 type inRepoLoadObservation uint8
@@ -495,4 +505,37 @@ func warnLegacyRepoConfig(repoID, repoRoot string, legacy *RepoConfig, inRepo *I
 	}
 	log.WarningLog.Printf("deprecated: %s is still read from %s; move it to %s — the legacy location stops working in a future release",
 		strings.Join(fields, ", "), prettyHomePath(legacyPath), InRepoConfigPath(repoRoot))
+}
+
+// warnRetainedLegacyBareRepoConfig keeps the pre-#3358 parent-keyed legacy
+// config visible without adopting it. The parent ID can describe multiple
+// sibling bare clones or a real enclosing repository, so applying that file to
+// any one corrected identity would be an unsafe migration.
+func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
+	_, legacyID := repo.LegacyBareRepoIdentity()
+	if legacyID == "" {
+		return
+	}
+	_, legacyPath, err := repoConfigPath(legacyID)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		key := repo.ID + "|" + legacyID
+		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
+			return
+		}
+		log.WarningLog.Printf("bare repository %s now uses repo identity %s, but retained pre-#3358 per-repo config %s under former parent identity %s could not be inspected: %v; inspect it before assuming the corrected repository has no legacy hooks",
+			repo.IdentityPath(), repo.ID, legacyPath, legacyID, err)
+		return
+	}
+	key := repo.ID + "|" + legacyID
+	if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
+		return
+	}
+	log.WarningLog.Printf("bare repository %s now uses repo identity %s; retained pre-#3358 per-repo config %s under former parent identity %s was not applied because that parent key cannot be safely attributed — move its post_worktree_commands or remote_hooks to %s",
+		repo.IdentityPath(), repo.ID, legacyPath, legacyID, InRepoTomlConfigPath(repo.WorkspacePath()))
 }

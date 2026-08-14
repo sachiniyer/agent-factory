@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -204,17 +205,19 @@ func TestSessionsArchiveSelf_ScopesByResolvedRepoNotCwd(t *testing.T) {
 	}
 }
 
-func TestSessionsArchiveSelf_PreservesMissingRecordedRepoIdentity(t *testing.T) {
+func TestSessionsArchiveSelf_PreservesRecordedRepoIdentityInsideAncestor(t *testing.T) {
 	useTempConfig(t)
 	resetScopeFlags(t)
 	ancestor := mkRepo(t, "ancestor")
-	missingOrigin := filepath.Join(ancestor, "deleted-nested-repo")
+	recordedOrigin := filepath.Join(ancestor, "deleted-nested-repo")
+	require.NoError(t, os.Mkdir(recordedOrigin, 0o755),
+		"the recorded root must still exist so Git can wrongly adopt its ancestor")
 
 	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
 		return []session.InstanceData{{
 			Title: "me", TmuxName: "af_me_agent",
-			Worktree: session.GitWorktreeData{RepoPath: missingOrigin},
+			Worktree: session.GitWorktreeData{RepoPath: recordedOrigin},
 		}}, nil
 	})
 
@@ -230,7 +233,7 @@ func TestSessionsArchiveSelf_PreservesMissingRecordedRepoIdentity(t *testing.T) 
 
 	_, err := runCmdCaptureStdout(t, sessionsArchiveCmd, nil)
 	require.NoError(t, err)
-	assert.Equal(t, config.RepoIDFromRoot(missingOrigin), gotReq.RepoID,
+	assert.Equal(t, config.RepoIDFromRoot(recordedOrigin), gotReq.RepoID,
 		"a missing recorded origin must keep its own storage identity, not adopt a Git ancestor")
 }
 

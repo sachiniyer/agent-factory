@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
@@ -152,6 +153,47 @@ func TestResolveMainRepoRoot_BareCloneWorktree(t *testing.T) {
 	assert.Equal(t, secondWorktree, secondResolved.ProjectRoot)
 	assert.Equal(t, "bare-personal", secondResolved.OnArchiveCommand,
 		"personal project config follows bare identity across linked worktrees")
+}
+
+func TestResolveConfigForRepoWarnsAboutRetainedLegacyBareParentConfig(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+	run(parent, "init", source)
+	run(source, "config", "user.email", "test@test.com")
+	run(source, "config", "user.name", "Test")
+	run(source, "commit", "--allow-empty", "-m", "init")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	repo, err := RepoFromPath(worktree)
+	require.NoError(t, err)
+	legacyRoot, legacyID := repo.LegacyBareRepoIdentity()
+	require.Equal(t, parent, legacyRoot)
+	require.NoError(t, SaveRepoConfig(legacyID, &RepoConfig{
+		PostWorktreeCommands: []string{"ambiguous-parent-command"},
+	}))
+	_, legacyPath, err := repoConfigPath(legacyID)
+	require.NoError(t, err)
+	warnings := captureLog(t, &aflog.WarningLog)
+
+	resolved, err := ResolveConfigForRepo(repo)
+	require.NoError(t, err)
+	assert.Empty(t, resolved.PostWorktreeCommands,
+		"an ambiguous parent-keyed config must not be silently adopted")
+	assert.Contains(t, warnings.String(), legacyID)
+	assert.Contains(t, warnings.String(), legacyPath)
+	assert.Contains(t, warnings.String(), "was not applied")
 }
 
 func TestResolveMainRepoRoot_Public(t *testing.T) {
