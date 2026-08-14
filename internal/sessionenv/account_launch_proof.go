@@ -259,7 +259,7 @@ func accountEnvironmentCommandNeedsProof(command string) bool {
 // tools such as python-config.
 func accountEnvironmentInterpreter(commandName string) bool {
 	switch commandName {
-	case "node", "nodejs", "java", "awk", "gawk", "mawk", "nawk", "sed", "Rscript", "julia", "tclsh", "wish", "groovy":
+	case "node", "nodejs", "java", "javac", "awk", "gawk", "mawk", "nawk", "sed", "Rscript", "julia", "tclsh", "wish", "groovy":
 		return true
 	}
 	for _, stem := range []string{"python", "pypy", "perl", "ruby", "php", "lua", "luajit"} {
