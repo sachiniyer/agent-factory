@@ -269,20 +269,24 @@ resolved value with the complete source trace.`,
 				}
 			}
 			value, ok := resolved.ResolvedValuePath(args[0])
-			if !ok {
-				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
-			}
 			// root_agent resolves through FOUR layers in the daemon
 			// (built-in/global/legacy/personal), but the generic resolver only
 			// knows its two singleton layers. Use the daemon's real four-layer
 			// resolution for both the concise value and --explain, or the two
-			// read modes can contradict each other (#2607).
+			// read modes can contradict each other (#2607). The specialized path
+			// also OWNS unknown-key detection for these keys: gating on the
+			// generic resolution first would reject valid fail-closed leaves —
+			// root_agent.program has no generic origin when no global program is
+			// configured, so the generic lookup reports it unknown before the
+			// fail-closed projector can answer (#3264 review).
 			if isRootAgentExplainKey(args[0]) {
 				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				value = specialized
+			} else if !ok {
+				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {

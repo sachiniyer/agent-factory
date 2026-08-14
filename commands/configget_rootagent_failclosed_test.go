@@ -77,6 +77,23 @@ func TestConfigGetRootAgentLeafCommandFailsClosed(t *testing.T) {
 	assert.Contains(t, out, "false")
 }
 
+// TestConfigGetRootAgentProgramLeafCommandFailsClosed: root_agent.program is
+// a valid leaf even while fail-closed with no global program configured. The
+// generic resolution carries no origin for an unset program, so gating on the
+// generic lookup reported the leaf as an unknown key before the fail-closed
+// projector could answer (#3305 review) — the specialized path owns
+// unknown-key detection for root_agent keys.
+func TestConfigGetRootAgentProgramLeafCommandFailsClosed(t *testing.T) {
+	_, repoRoot := setupRootAgentProject(t, "schema_version = 1\n", true, "[root_agent]\nenabled = false\n")
+	breakRegisteredPersonalConfig(t, repoRoot)
+	t.Chdir(repoRoot)
+	setConfigGetReadFlags(t, "", false, false)
+
+	out, err := runConfigGetForTest(t, "root_agent.program")
+	require.NoError(t, err, "root_agent.program is a known leaf of the fail-closed profile, not an unknown key")
+	assert.Equal(t, "\n", out, "the fail-closed profile has no program; the empty value renders as a blank line")
+}
+
 // TestConfigGetRootAgentExplainCommandFailsClosedOnUnlistableRegistry: same
 // round-trip for the registry arm, legacy entry present — the pre-#3264
 // rendering reported the root enabled via the legacy layer.
