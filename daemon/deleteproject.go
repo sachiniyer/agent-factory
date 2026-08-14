@@ -235,13 +235,26 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 	// deregistering the record while the real-ID root keeps running.
 	derivedAliasID := ""
 	if layers := m.rootAgentLayers.Load(); layers != nil {
+		// A reused path can make an alias's derived ID collide with a NEW
+		// occupant's real identity (a repository later main-rooted at the
+		// old recorded path hashes to the same ID). Only translate when the
+		// path does NOT currently resolve as the requested identity — if it
+		// does, the caller is deleting the occupant, and rewriting the
+		// target would tear down the old project instead (#3299 review
+		// round 14).
 		for realID, derived := range layers.reattributedFrom {
-			if derived == repoID {
-				log.InfoLog.Printf("delete project %s: recorded path is unavailable, but the project was re-attributed to repo %s while it resolved; deleting under that identity", repoID, realID)
-				derivedAliasID = repoID
-				repoID = realID
-				break
+			if derived != repoID {
+				continue
 			}
+			if repoPath != "" {
+				if occupant, err := config.RepoFromPath(repoPath); err == nil && occupant.ID == repoID {
+					break
+				}
+			}
+			log.InfoLog.Printf("delete project %s: recorded path is unavailable, but the project was re-attributed to repo %s while it resolved; deleting under that identity", repoID, realID)
+			derivedAliasID = repoID
+			repoID = realID
+			break
 		}
 		if derivedAliasID == "" {
 			// A real-ID target for a re-attributed project keeps its derived

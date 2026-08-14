@@ -526,3 +526,71 @@ func TestDeletedClaimantMismatchReadsNotConfigured(t *testing.T) {
 		t.Fatalf("a proven-unrelated occupant of a deleted project's path is simply unconfigured, got reason %d", got)
 	}
 }
+
+// TestReusedPathDeleteTargetsOccupant pins the #3299 review's round-14 P1:
+// when a re-attributed project's old recorded path is later reused as the
+// MAIN ROOT of a different repository, that occupant's real ID equals the
+// alias's derived ID. Deleting the occupant by its path must not be
+// reverse-translated into tearing down the old project.
+func TestReusedPathDeleteTargetsOccupant(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree := filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	rewriteRecordRoot(t, project.ID, worktree)
+	oldRealID := repoID(t, repoPath)
+
+	aside := parent + ".aside"
+	if err := os.Rename(parent, aside); err != nil {
+		t.Fatalf("hide parent: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(aside, parent); err != nil {
+		t.Fatalf("restore parent: %v", err)
+	}
+	manager.EnsureRootAgents() // re-attributes, alias oldReal→derived
+
+	// The worktree is replaced by an unrelated repository MAIN-ROOTED at the
+	// old recorded path: its real ID is the alias's derived ID.
+	if err := exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktree).Run(); err != nil {
+		t.Fatalf("git worktree remove: %v", err)
+	}
+	if err := exec.Command("git", "init", worktree).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if err != nil {
+		t.Fatalf("DeleteProject of the occupant: %v", err)
+	}
+	if result.RepoID == oldRealID {
+		t.Fatalf("deleting the occupant must not be reverse-translated into the old project's identity %s", oldRealID)
+	}
+	manager.mu.Lock()
+	_, oldSuppressed := manager.deletedRootRepos[oldRealID]
+	manager.mu.Unlock()
+	if oldSuppressed {
+		t.Fatalf("the old project must be untouched by the occupant's delete")
+	}
+}

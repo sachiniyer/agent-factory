@@ -117,8 +117,12 @@ func TestEnsureRootAgentsKeepsSwappedCloneUnresolved(t *testing.T) {
 	if len(*seen) != 0 {
 		t.Fatalf("a marker-less checkout at the recorded path must not inherit the project's root agent, got %d creates", len(*seen))
 	}
-	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got != rootAgentProjectUnresolved {
-		t.Fatalf("an unverified checkout must keep the project unresolved (fail closed), got reason %d", got)
+	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath))
+	if verdict.reason != rootAgentDisabled || !verdict.rootIdentityMismatch {
+		// With the dead claim's enable no longer honored for a PROVEN
+		// mismatch (round 13), the truthful verdict is disabled-with-the-
+		// mismatch-clause: nothing legitimate enables the occupant.
+		t.Fatalf("a proven mismatch must read as disabled with the mismatch shape, got reason %d (mismatch=%v)", verdict.reason, verdict.rootIdentityMismatch)
 	}
 }
 
@@ -372,8 +376,8 @@ func TestReattributionDiscardsStaleProbeResult(t *testing.T) {
 		t.Fatalf("a stale probe result must be discarded, not published — the checkout it verified is gone; got %d creates", len(*seen))
 	}
 	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath))
-	if verdict.reason != rootAgentProjectUnresolved {
-		t.Fatalf("the swapped clone must stay unresolved after the fresh re-check, got reason %d", verdict.reason)
+	if verdict.reason != rootAgentDisabled || !verdict.rootIdentityMismatch {
+		t.Fatalf("the swapped clone must stay rejected after the fresh re-check (disabled + mismatch since round 13 stopped honoring the dead claim's enable), got reason %d (mismatch=%v)", verdict.reason, verdict.rootIdentityMismatch)
 	}
 	detail := rootAgentUnavailableDetail(verdict)
 	if !strings.Contains(detail, "rebind") || !strings.Contains(detail, project.ID) {
@@ -493,8 +497,8 @@ func TestWorktreeMismatchVisibleUnderResolvedID(t *testing.T) {
 		t.Fatalf("a foreign occupant must not inherit the project's root agent, got %d creates", len(*seen))
 	}
 	verdict := manager.rootAgentMaterializeVerdictFor(repoID(t, other))
-	if verdict.reason != rootAgentProjectUnresolved {
-		t.Fatalf("the identity the occupant resolves to must surface the unresolved mismatch through the bridge, got reason %d", verdict.reason)
+	if verdict.reason != rootAgentDisabled || !verdict.rootIdentityMismatch {
+		t.Fatalf("the identity the occupant resolves to must surface the mismatch through the bridge, got reason %d (mismatch=%v)", verdict.reason, verdict.rootIdentityMismatch)
 	}
 	detail := rootAgentUnavailableDetail(verdict)
 	if !strings.Contains(detail, "rebind") || !strings.Contains(detail, project.ID) {
@@ -801,8 +805,8 @@ func TestStaleBridgeRetired(t *testing.T) {
 		t.Fatalf("git worktree add occupant: %v", err)
 	}
 	manager.EnsureRootAgents()
-	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, other)).reason; got != rootAgentProjectUnresolved {
-		t.Fatalf("setup: the occupant's identity must be bridged, got reason %d", got)
+	if v := manager.rootAgentMaterializeVerdictFor(repoID(t, other)); !v.rootIdentityMismatch {
+		t.Fatalf("setup: the occupant's identity must be bridged with the mismatch shape, got reason %d", v.reason)
 	}
 
 	// The occupant leaves; the bridge must go with it. The settled negative
@@ -818,8 +822,8 @@ func TestStaleBridgeRetired(t *testing.T) {
 	manager.mu.Unlock()
 	manager.EnsureRootAgents()
 
-	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, other)).reason; got == rootAgentProjectUnresolved {
-		t.Fatalf("the departed occupant's repository must stop answering for this project — the stale bridge survived")
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, other)).reason; got != rootAgentNotConfigured {
+		t.Fatalf("the departed occupant's repository must stop answering for this project — got reason %d", got)
 	}
 }
 
@@ -993,5 +997,42 @@ func TestSwappedCloneDoesNotInheritPersonalLayer(t *testing.T) {
 		if opts.Program == "/opt/dead-claim" {
 			t.Fatalf("the rejected project's personal program must not style the occupant's root: %+v", opts)
 		}
+	}
+}
+
+// TestMismatchReleasesDeadClaimsUnreadableLatch pins the #3299 review's
+// round-14 P2: a project whose personal config failed to load at boot latches
+// its (derived == occupant-real, for main-root recordings) ID fail-closed —
+// but once the checkout at the path PROVES to be a different clone, the dead
+// claim's unreadable config cannot govern the occupant, whose own legacy
+// opt-in must proceed.
+func TestMismatchReleasesDeadClaimsUnreadableLatch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = tr")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// A different clone occupies the path; the legacy entry is ITS opt-in.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init swapped clone: %v", err)
+	}
+
+	manager.EnsureRootAgents()
+	manager.EnsureRootAgents()
+
+	if len(*seen) != 1 {
+		t.Fatalf("a proven mismatch must release the dead claim's unreadable latch for the occupant's legacy opt-in, got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(repoID(t, repoPath)).reason; got == rootAgentPersonalUnreadable {
+		t.Fatalf("the occupant's verdict must not send users to repair a dead project's config")
 	}
 }

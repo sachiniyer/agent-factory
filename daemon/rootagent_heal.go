@@ -690,6 +690,15 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	// unknowable — re-checked next pass.
 	verify, err := config.RepoFromPath(record.root)
 	if err != nil || verify.ID != repo.ID {
+		if err == nil {
+			// The path now hosts a DIFFERENT repository than the one the
+			// marker was read against: re-bind the result to the current
+			// occupant (#3299 review round 14), so the unknowable verdict —
+			// and the fail-closed gate it feeds — covers the repo actually
+			// at the path, not the one that left.
+			probe.repo = verify
+			probe.candidate.Store(verify)
+		}
 		probe.markerUnreadable = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed identity during verification; leaving project %s unresolved (re-checked on the ensure cadence)", record.root, record.projectID)
 		return

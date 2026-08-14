@@ -134,7 +134,13 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 		return rootAgentMaterializeVerdict{reason: rootAgentRegistryUnreadable}
 	}
 	if projectID, unreadable := layers.personalUnreadable[repoID]; unreadable {
-		return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
+		// Mirror decisionUnknown (#3299 review round 14): a PROVEN mismatch
+		// means the unreadable config's claimant is disproven at this path,
+		// so the occupant's verdict must not send users to repair a dead
+		// project's file.
+		if record, ok := layers.unresolvedRoots[repoID]; !ok || !record.identityMismatch {
+			return rootAgentMaterializeVerdict{reason: rootAgentPersonalUnreadable, projectID: projectID}
+		}
 	}
 	// An unreadable-marker bridge makes this repo's decision unknowable
 	// (decisionUnknown fails it closed for both sweeps): report the true

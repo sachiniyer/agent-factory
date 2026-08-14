@@ -157,7 +157,14 @@ func (s *rootAgentSnapshot) decisionUnknown(repoID string) bool {
 		return true
 	}
 	if _, unreadable := s.personalUnreadable[repoID]; unreadable {
-		return true
+		// A PROVEN mismatch releases this latch (#3299 review round 14): for
+		// a main-root recording the derived hash is the occupant's real ID,
+		// and the unreadable config belongs to a project whose claim on the
+		// path is disproven — it cannot govern the occupant, whichever value
+		// it holds.
+		if record, ok := s.unresolvedRoots[repoID]; !ok || !record.identityMismatch {
+			return true
+		}
 	}
 	// A checkout at some project's recorded root resolves to this repo, but
 	// its marker could not be READ (#3299 review round 6): the checkout may
