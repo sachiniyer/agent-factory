@@ -431,9 +431,10 @@ func (w *taskWatcher) run() {
 	// A backlog recovered from disk (daemon restart, reload, or a prior
 	// crash-looped run) starts replaying immediately, independent of the
 	// script's own lifecycle (#1129). A queue whose load FAILED starts the
-	// drainer too (#3242): its first peek either recovers the real backlog or
-	// parks the replay with an error — unknown state must never read as empty.
-	if w.queue != nil && (w.queue.pendingCount() > 0 || w.queue.loadFailed()) {
+	// drainer too (#3242), decided in ONE atomic read: split count/state
+	// calls race a concurrent snapshot heal into "0, known" — no drainer,
+	// and a healed backlog stranded until the next reload.
+	if w.queue != nil && w.queue.replayNeeded() {
 		w.ensureDrainer()
 	}
 

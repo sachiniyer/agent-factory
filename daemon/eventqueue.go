@@ -395,6 +395,18 @@ func (q *eventQueue) pendingState() (pending int, unknown bool) {
 	return q.pending, q.loadErr != nil
 }
 
+// replayNeeded reports, in one atomic read, whether the drainer has work: a
+// recovered backlog, or UNKNOWN state whose first peek must recover or park
+// (#3242). Split count/state calls race a concurrent snapshot heal into
+// "0, known" — skipping the drainer and stranding the healed backlog until
+// the next reload.
+func (q *eventQueue) replayNeeded() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	_ = q.retryLoadLocked()
+	return q.pending > 0 || q.loadErr != nil
+}
+
 // loadFailed reports whether the queue's on-disk state is currently unknown
 // because its last load attempt failed (#3242).
 func (q *eventQueue) loadFailed() bool {
