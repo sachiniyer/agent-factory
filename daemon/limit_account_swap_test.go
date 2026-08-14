@@ -151,6 +151,25 @@ func TestResumeLimitedSessions_LoadsDurableAccountLimitEvidenceOncePerPass(t *te
 	}
 }
 
+func TestAccountSwapOpportunity_ExpiresLiveNamedAccountAfterResetGrace(t *testing.T) {
+	base := nowFunc()
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "continue", base.Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+
+	otherBackend := &limitResumeBackend{FakeBackend: session.NewFakeBackend(), alive: true}
+	other := registerStarted(t, manager, repoID, inst.Path, "work-expired", otherBackend, true, session.Running)
+	other.Account = "work"
+	other.SetLimitReached(base.Add(-limitResumeGrace - time.Second))
+
+	swap, err := manager.accountSwapOpportunityFromFacts(inst, manager.Config())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swap == nil || swap.to != "work" {
+		t.Fatalf("swap after named account reset grace = %#v, want expired work account eligible", swap)
+	}
+}
+
 func TestAccountSwapOpportunityRetainsEarlierAccountLimitEvidence(t *testing.T) {
 	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Time{})
 	home, err := config.GetConfigDir()

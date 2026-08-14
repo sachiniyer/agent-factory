@@ -361,6 +361,7 @@ func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *
 		`node -e 'process.env.CODEX_HOME="/other"'`,
 		`perl -e '$ENV{CODEX_HOME}="/other"'`,
 		`ruby -e 'ENV["CODEX_HOME"]="/other"'`,
+		`java Launcher.java`,
 		`fish -c 'set -x CODEX_HOME /other; exec codex'`,
 		`csh -c 'setenv CODEX_HOME /other; exec codex'`,
 		`tcsh -c 'setenv CODEX_HOME /other; exec codex'`,
