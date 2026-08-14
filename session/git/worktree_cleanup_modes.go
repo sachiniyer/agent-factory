@@ -1,6 +1,10 @@
 package git
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // Cleanup removes the worktree and associated branch. It reports whether it
 // ESTABLISHED the outcome (see CleanupState) alongside any error: callers that
@@ -70,7 +74,19 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		r.errs = append(r.errs, refusal)
 		return refusal
 	}
-	branch, listed := worktreeListedBranch(output, r.g.worktreePath)
+	branch, listed, parseErr := worktreeListedBranchBounded(output, r.g.worktreePath)
+	if parseErr != nil {
+		// Normalizing listing entries resolves symlinks, and an UNRELATED
+		// entry on a stalled mount must not wedge this kill under its
+		// operation lock after r.git's own deadline already ended (#3278
+		// review). A timed-out parse is an unknown answer.
+		r.unknown = true
+		refusal := fmt.Errorf(
+			"cannot verify the worktree listing for %s: %v", r.g.worktreePath, parseErr,
+		)
+		r.errs = append(r.errs, refusal)
+		return refusal
+	}
 	if !listed {
 		r.unknown = true
 		refusal := fmt.Errorf(
@@ -93,10 +109,11 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 	// The listing is repo-side metadata and keeps reporting the recorded path
 	// and branch after the worktree was moved aside (git merely marks the
 	// entry prunable), so it is stale evidence about the OCCUPANT (#3278
-	// review). Require the occupant itself to carry the linked-worktree
-	// pointer before anything destructive — the writer reap included —
-	// touches it.
-	if err := VerifyRegisteredWorktreeOccupant(r.g.worktreePath); err != nil {
+	// review). Require the occupant itself to carry a linked-worktree pointer
+	// INTO THIS origin's metadata — a genuine foreign repository's worktree
+	// parked at the path satisfies the generic shape — before anything
+	// destructive, the writer reap included, touches it.
+	if err := VerifyRegisteredWorktreeOccupant(r.g.worktreePath, r.g.repoPath); err != nil {
 		r.unknown = true
 		refusal := fmt.Errorf(
 			"refusing to act on %s: its occupant does not carry this worktree's linkage (%v) — the registration is stale evidence about a replaced directory; leaving it and the record in place",
@@ -106,4 +123,32 @@ func (r *cleanupRun) requireRegisteredBranchMatch() error {
 		return refusal
 	}
 	return nil
+}
+
+// worktreeListedBranchBounded runs worktreeListedBranch under the shared
+// identity-probe deadline: entry normalization resolves symlinks, so a stalled
+// mount hosting an UNRELATED listed worktree must surface as a timeout here
+// rather than an unbounded wedge (#3278 review). No flight: each call parses
+// its own porcelain snapshot, so joining distinct inputs would be wrong.
+func worktreeListedBranchBounded(porcelain, worktreePath string) (string, bool, error) {
+	type result struct {
+		branch string
+		listed bool
+	}
+	resultC := make(chan result, 1)
+	go func() {
+		branch, listed := worktreeListedBranch(porcelain, worktreePath)
+		resultC <- result{branch: branch, listed: listed}
+	}()
+	timer := time.NewTimer(relocationIdentityTimeout)
+	defer timer.Stop()
+	select {
+	case observed := <-resultC:
+		return observed.branch, observed.listed, nil
+	case <-timer.C:
+		return "", false, fmt.Errorf(
+			"timed out after %s while normalizing the worktree listing for %s: %w",
+			relocationIdentityTimeout, worktreePath, context.DeadlineExceeded,
+		)
+	}
 }

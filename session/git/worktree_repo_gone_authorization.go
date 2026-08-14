@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 const cleanupGenerationXattr = "user.agent-factory.cleanup-generation"
@@ -496,17 +498,31 @@ func VerifyArchivedWorktreePointer(worktreePath string) error {
 }
 
 // VerifyRegisteredWorktreeOccupant checks that the directory currently
-// occupying worktreePath carries a linked-worktree `.git` pointer at all
-// (#3278 review). A worktree registration is repo-side metadata and keeps
-// reporting the recorded path and branch after the worktree was moved aside —
-// git merely marks the entry prunable — so the listing alone is stale evidence
-// about the OCCUPANT. This is the repo-present sibling of
-// VerifyArchivedWorktreePointer: the same structural shape check, without the
-// gone-target rule, since a live origin's metadata legitimately exists.
-func VerifyRegisteredWorktreeOccupant(worktreePath string) error {
-	return boundedPointerCheck("occupant", worktreePath, func(path string) error {
-		_, err := verifyWorktreePointerShape(path)
-		return err
+// occupying worktreePath carries a linked-worktree `.git` pointer INTO
+// repoPath's metadata (#3278 review). A worktree registration is repo-side
+// metadata and keeps reporting the recorded path and branch after the worktree
+// was moved aside — git merely marks the entry prunable — so the listing alone
+// is stale evidence about the OCCUPANT; and a genuine foreign repository's
+// worktree parked at the path satisfies the generic pointer shape, so the
+// pointer must additionally resolve into THIS origin's metadata root. Both
+// sides exist in this repo-present mode, so symlink-resolved comparison is
+// sound (macOS TMPDIR included). This is the repo-present sibling of
+// VerifyArchivedWorktreePointer.
+func VerifyRegisteredWorktreeOccupant(worktreePath, repoPath string) error {
+	return boundedPointerCheck("occupant\x00"+repoPath, worktreePath, func(path string) error {
+		target, err := verifyWorktreePointerShape(path)
+		if err != nil {
+			return err
+		}
+		targetRoot := filepath.Dir(filepath.Dir(target))
+		expectedRoot := filepath.Join(repoPath, ".git")
+		if pathutil.ResolveForCompare(targetRoot) != pathutil.ResolveForCompare(expectedRoot) {
+			return fmt.Errorf(
+				"worktree pointer under %s resolves into %s, not this origin's metadata %s — the occupant belongs to a different repository",
+				path, targetRoot, expectedRoot,
+			)
+		}
+		return nil
 	})
 }
 

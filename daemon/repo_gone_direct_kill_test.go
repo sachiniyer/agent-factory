@@ -478,6 +478,42 @@ func TestKillSession_ArchivedGhostGenericStallBoundaryRefusalDoesNotLatch(t *tes
 	assert.True(t, exists(archivedPath), "the archive must remain intact")
 }
 
+// TestKillSession_ArchivedForeignRepoWorktreeAtPathRefused: a genuine linked
+// worktree of a DIFFERENT live repository parked at the archived path
+// satisfies the generic pointer shape while the recorded origin's stale
+// registration still reports the expected path and branch (#3278 review). The
+// occupant check must bind the pointer to THIS origin's metadata and refuse
+// before anything destructive touches the foreign checkout's processes.
+func TestKillSession_ArchivedForeignRepoWorktreeAtPathRefused(t *testing.T) {
+	manager, repoID, _, inst, archivedPath :=
+		archivedRecordFreeInstance(t, "direct-foreign-live-worktree")
+
+	// Move the archive aside WITHOUT telling git (stale registration stays),
+	// then park a real worktree of a different live repository at the path.
+	require.NoError(t, os.Rename(archivedPath, archivedPath+"-moved-aside"))
+	foreignRepo := filepath.Join(t.TempDir(), "foreign-live-repo")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", foreignRepo).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(foreignRepo, "keep.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", foreignRepo, "add", "keep.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init").Run())
+	foreignWorktree := filepath.Join(t.TempDir(), "foreign-live-wt")
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "add", "-b", "wt", foreignWorktree).Run())
+	require.NoError(t, exec.Command("git", "-C", foreignRepo,
+		"worktree", "move", foreignWorktree, archivedPath).Run())
+
+	inst.SetBackend(&session.LocalBackend{})
+	_, err := manager.KillSession(KillSessionRequest{Title: "direct-foreign-live-worktree", RepoID: repoID})
+	require.Error(t, err,
+		"a foreign repository's live worktree at the archived path must be refused")
+	assert.ErrorContains(t, err, "belongs to a different repository")
+	assert.True(t, exists(filepath.Join(archivedPath, "keep.txt")),
+		"the foreign worktree must be left untouched")
+	require.NotNil(t, recordFor(t, repoID, "direct-foreign-live-worktree"),
+		"the refused kill must retain the record")
+}
+
 // TestKillSession_DirectRepoGoneStalledIdentityPersistsAndReclaims: a bounded
 // identity probe that times out during the direct-kill claim must leave a
 // durable stalled fence — not an in-memory-only record a crash forgets — and a
