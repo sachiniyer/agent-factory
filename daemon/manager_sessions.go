@@ -24,10 +24,15 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
+	return m.killSessionRequestedBy(req, "internal daemon caller")
+}
+
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
+	log.InfoLog.Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.

@@ -599,13 +599,17 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 }
 
 func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
+	return s.closeTab(context.Background(), req, resp)
+}
+
+func (s *controlServer) closeTab(ctx context.Context, req CloseTabRequest, resp *CloseTabResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	name, err := s.manager.CloseTab(req)
+	name, err := s.manager.closeTabRequestedBy(req, rpcRequester(ctx))
 	if err != nil {
 		return err
 	}
@@ -659,6 +663,10 @@ func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse)
 }
 
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+	return s.killSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -670,7 +678,7 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.KillSession(req)
+	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx))
 	if !resp.record(err) {
 		return err
 	}

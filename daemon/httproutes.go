@@ -187,7 +187,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.KillSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -289,7 +289,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/CloseTab",
 		Description: "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
 		requestType: reflect.TypeOf(CloseTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CloseTab) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTab) },
 	},
 	{
 		Method:      http.MethodPost,
