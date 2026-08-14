@@ -168,6 +168,15 @@ func newEventQueue(dir, taskID string) *eventQueue {
 	return q
 }
 
+// errEventQueueLoadFailed marks every refusal caused by unknown on-disk state
+// after a failed load (#3242). Callers that must distinguish "the queue cannot
+// be read right now" (the transient-outage shape — keep retrying) from record
+// corruption (park until reload) classify with errors.Is on the error they
+// already hold: re-reading queue state after the fact races a concurrent heal
+// from another entry point's retry, and a stale read there would misclassify
+// the outage as corruption and park a recovered backlog permanently.
+var errEventQueueLoadFailed = errors.New("event-queue state unknown after a failed load")
+
 // load recovers the queue state from disk. A missing file is an empty queue; a
 // corrupt or unreadable cursor resets to 0 (redelivering pending events —
 // at-least-once, never silent loss). Any other failure marks the state UNKNOWN
@@ -197,6 +206,11 @@ func (q *eventQueue) loadLocked() {
 	if err != nil {
 		q.offset, q.size, q.pending = 0, 0, 0
 		q.loadErr = err
+		// A failed attempt arms the retry throttle wherever it started — the
+		// constructor's included: without this, the run loop's first
+		// pendingCount would repeat the same blocking disk I/O back to back at
+		// startup, doubling the stall on a hung filesystem.
+		q.lastLoadRetry = time.Now()
 	}
 	if err == nil || prevErr == nil {
 		for _, w := range warns {
@@ -361,7 +375,7 @@ func (q *eventQueue) enqueue(line string) error {
 	// boundary. Retry the load; refuse (caller drops the event, logged) only
 	// while the state stays unknown.
 	if err := q.retryLoadLocked(); err != nil {
-		return fmt.Errorf("event-queue state unknown after a failed load; refusing to append: %w", err)
+		return fmt.Errorf("%w; refusing to append: %w", errEventQueueLoadFailed, err)
 	}
 	if err := q.resetCursorBeforeFreshAppendLocked(); err != nil {
 		return err
@@ -534,7 +548,7 @@ func (q *eventQueue) peek() (ev queuedEvent, cursor eventQueueCursor, ok bool, e
 	// queue (#3242): the drainer parks on it and retries via the next
 	// enqueue/reload, instead of concluding there is nothing to replay.
 	if err := q.retryLoadLocked(); err != nil {
-		return queuedEvent{}, eventQueueCursor{}, false, fmt.Errorf("event-queue state unknown after a failed load: %w", err)
+		return queuedEvent{}, eventQueueCursor{}, false, fmt.Errorf("%w: %w", errEventQueueLoadFailed, err)
 	}
 	for q.pending > 0 {
 		ev, n, rerr := q.readEventAtLocked(q.offset)
@@ -578,7 +592,7 @@ func (q *eventQueue) advance(cursor eventQueueCursor) (bool, error) {
 	// never enumerated, and a future change to the load lifecycle must land on
 	// this refusal, not on a silent (false, nil) "re-peek" answer.
 	if q.loadErr != nil {
-		return false, fmt.Errorf("event-queue state unknown after a failed load; refusing to advance: %w", q.loadErr)
+		return false, fmt.Errorf("%w; refusing to advance: %w", errEventQueueLoadFailed, q.loadErr)
 	}
 	if q.pending == 0 {
 		return false, nil

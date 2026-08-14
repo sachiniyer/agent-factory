@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -206,6 +207,37 @@ func TestWatcherDrainRecoversAfterLoadFailureWithoutNewEvents(t *testing.T) {
 		got := fd2.delivered()
 		return len(got) == 3 && got[0] == "e1" && got[1] == "e2" && got[2] == "e3"
 	})
+}
+
+// TestEventQueue_LoadFailureErrorsCarryTypedSentinel pins the classification
+// contract the drainer relies on (#3242 review round 2): every load-failure
+// refusal must be errors.Is-identifiable from the error value alone, because
+// the drainer classifies transient-outage vs corruption from the error it
+// already holds — re-reading queue state after the fact races a concurrent
+// heal, and a stale read there would park a recovered backlog permanently.
+func TestEventQueue_LoadFailureErrorsCarryTypedSentinel(t *testing.T) {
+	dir := t.TempDir()
+	seed := newEventQueue(dir, "ab324208")
+	if err := seed.enqueue("only"); err != nil {
+		t.Fatalf("seed enqueue: %v", err)
+	}
+	_, cursor, ok, err := seed.peek()
+	if err != nil || !ok {
+		t.Fatalf("seed peek: ok=%v err=%v", ok, err)
+	}
+
+	denyAccess(t, seed.path, seed.path, 0o644)
+	q := newEventQueue(dir, "ab324208")
+
+	if _, _, _, err := q.peek(); !errors.Is(err, errEventQueueLoadFailed) {
+		t.Fatalf("peek error must carry errEventQueueLoadFailed; got %v", err)
+	}
+	if err := q.enqueue("x"); !errors.Is(err, errEventQueueLoadFailed) {
+		t.Fatalf("enqueue error must carry errEventQueueLoadFailed; got %v", err)
+	}
+	if _, err := q.advance(cursor); !errors.Is(err, errEventQueueLoadFailed) {
+		t.Fatalf("advance error must carry errEventQueueLoadFailed; got %v", err)
+	}
 }
 
 // TestEventQueue_InitialLoadFailureCountsAgainstRetryThrottle pins the retry
