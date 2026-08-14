@@ -323,6 +323,16 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 				killed = session.InstanceData{ID: t.id, Title: t.title}
 				err = nil
 			}
+			if isMutationCommitted(err) {
+				// A committed kill is durable but NOT finished: the tombstoned row
+				// was retained, so at the project level this session genuinely was
+				// not removed and the delete must stay a retryable failure. Flatten
+				// the marker before joining — errors.As walks the join, so a
+				// committed member would make the whole project-delete failure read
+				// as mutation_committed on the HTTP envelope, and a delete that
+				// never deregistered would print as ok-with-warning (#3234).
+				err = errors.New(err.Error())
+			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("session %q: %w", t.title, err))
 				continue
