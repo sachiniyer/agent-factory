@@ -302,7 +302,9 @@ func runDedicatedServer() error {
 
 // newTmuxServerCommand keeps the historical per-session scope as a fail-open
 // fallback only. Once the daemon observes or creates the shared server, this
-// new-session is a plain client and therefore cannot own the server's cgroup.
+// new-session is a plain no-autostart client. -N closes the final probe/connect
+// race: if that server exits first, the daemon client fails instead of creating
+// its replacement inside agent-factory-daemon.service.
 func newTmuxServerCommand(args ...string) (*exec.Cmd, bool) {
 	return newTmuxServerCommandAfterEnsure(EnsureDaemonServer(), args...)
 }
@@ -313,7 +315,7 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 	}
 	if _, configured := configuredDaemonServerHome(); configured {
 		if serverErr == nil || tmuxServerRunning() {
-			return exec.Command("tmux", args...), false
+			return exec.Command("tmux", append([]string{"-N"}, args...)...), false
 		}
 		log.WarningLog.Printf("dedicated tmux server launch failed; falling back to a per-session systemd scope: %v", serverErr)
 	}

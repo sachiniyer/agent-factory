@@ -55,7 +55,7 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	if scoped {
 		t.Fatal("session client was put in a transient scope even though the shared server already exists")
 	}
-	want := "tmux new-session -d -s af_worker"
+	want := "tmux -N new-session -d -s af_worker"
 	if got := strings.Join(cmd.Args, " "); got != want {
 		t.Fatalf("existing-server client command = %q, want %q", got, want)
 	}
@@ -65,6 +65,30 @@ func TestNewTmuxServerCommandDoesNotScopeClientWhenServerAlreadyExists(t *testin
 	}
 	if got := strings.TrimSpace(string(out)); got != "on" {
 		t.Fatalf("daemon changed existing server exit-empty to %q, want on", got)
+	}
+}
+
+func TestEnsuredSessionClientCannotRecreateVanishedServer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	// nil records an earlier successful ensure, but the private server is now
+	// absent as if it exited before this client connected. The final client must
+	// fail instead of making the daemon service the replacement server's owner.
+	cmd, scoped := newTmuxServerCommandAfterEnsure(
+		nil, "new-session", "-d", "-s", "af_raced_replacement", "sleep", "60",
+	)
+	if scoped {
+		t.Fatal("successfully ensured client unexpectedly used the fail-open session scope")
+	}
+	if err := cmd.Run(); err == nil {
+		t.Fatal("client recreated a vanished shared server from the daemon cgroup")
+	}
+	if tmuxServerRunning() {
+		t.Fatal("no-autostart client left a replacement tmux server running")
 	}
 }
 
@@ -360,7 +384,7 @@ exec "$@"
 	if scoped {
 		t.Fatal("session spawn still owned a scope after the dedicated server became ready")
 	}
-	if got := strings.Join(cmd.Args, " "); got != "tmux new-session -d -s af_worker sleep 60" {
+	if got := strings.Join(cmd.Args, " "); got != "tmux -N new-session -d -s af_worker sleep 60" {
 		t.Fatalf("session client command = %q", got)
 	}
 }
