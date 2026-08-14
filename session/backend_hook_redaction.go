@@ -124,7 +124,25 @@ func redactHookJSONValue(value any) (any, bool) {
 
 func hookJSONStringMayContainJSONDocument(value string) bool {
 	trimmed := strings.TrimSpace(value)
-	return trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"')
+	if trimmed == "" {
+		return false
+	}
+
+	switch trimmed[0] {
+	case '"':
+		return true
+	case '{':
+		remainder := strings.TrimLeft(trimmed[1:], " \t\r\n")
+		return remainder != "" && (remainder[0] == '"' || remainder[0] == '}')
+	case '[':
+		remainder := strings.TrimLeft(trimmed[1:], " \t\r\n")
+		if remainder == "" {
+			return false
+		}
+		return strings.ContainsRune("\"{[-0123456789tfn]", rune(remainder[0]))
+	default:
+		return false
+	}
 }
 
 type hookJSONContainer struct {
@@ -236,6 +254,10 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 
 		var value string
 		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
+			after := strings.TrimLeft(document[end+1:], " \t\r\n")
+			if strings.HasPrefix(after, ":") && malformedHookJSONKeyEqualsToken(document[index+1:end]) {
+				return true
+			}
 			if malformedHookJSONStringContentsContainToken(document[index+1 : end]) {
 				return true
 			}
@@ -269,8 +291,10 @@ func malformedHookJSONStringContentsContainToken(contents string) bool {
 		}
 
 		if opener := strings.IndexAny(segment, "{["); opener >= 0 {
+			candidate := segment[opener:]
+			candidate = candidate[:validHookJSONStringContentPrefix(candidate)]
 			var nested string
-			if err := json.Unmarshal([]byte("\""+segment[opener:]+"\""), &nested); err == nil &&
+			if candidate != "" && json.Unmarshal([]byte("\""+candidate+"\""), &nested) == nil &&
 				malformedHookJSONDocumentContainsToken(nested) {
 				return true
 			}
@@ -282,6 +306,60 @@ func malformedHookJSONStringContentsContainToken(contents string) bool {
 		contents = contents[control+1:]
 	}
 	return false
+}
+
+func malformedHookJSONKeyEqualsToken(contents string) bool {
+	var normalized strings.Builder
+	normalized.Grow(len(contents))
+	for _, character := range contents {
+		if character >= ' ' {
+			normalized.WriteRune(character)
+		}
+	}
+
+	var key string
+	if err := json.Unmarshal([]byte("\""+normalized.String()+"\""), &key); err != nil {
+		return false
+	}
+	return strings.EqualFold(key, "token")
+}
+
+func validHookJSONStringContentPrefix(contents string) int {
+	for index := 0; index < len(contents); index++ {
+		if contents[index] < ' ' {
+			return index
+		}
+		if contents[index] != '\\' {
+			continue
+		}
+
+		if index+1 >= len(contents) {
+			return index
+		}
+		switch contents[index+1] {
+		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			index++
+		case 'u':
+			if index+5 >= len(contents) {
+				return index
+			}
+			for offset := 2; offset <= 5; offset++ {
+				if !isHookJSONHex(contents[index+offset]) {
+					return index
+				}
+			}
+			index += 5
+		default:
+			return index
+		}
+	}
+	return len(contents)
+}
+
+func isHookJSONHex(character byte) bool {
+	return character >= '0' && character <= '9' ||
+		character >= 'a' && character <= 'f' ||
+		character >= 'A' && character <= 'F'
 }
 
 func hookJSONQuoteEscaped(document string, index int) bool {

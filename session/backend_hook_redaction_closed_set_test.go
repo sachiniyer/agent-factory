@@ -134,6 +134,26 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"message\":\"unterminated\n{\\\"token\\\":\\\"invalid-string-child-secret\\\"}\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "escaped serialized child before a later invalid escape",
+			output: `{"message":"{\"message\":\"unterminated\n{\\\"token\\\":\\\"invalid-escape-secret\\\"}\\q\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "opener-prefixed token prose",
+			output: `{"message":"[INFO] diagnostic says \"token\": unavailable"}`,
+			want:   `{"message":"[INFO] diagnostic says \"token\": unavailable"}`,
+		},
+		{
+			name:   "serialized token key split by a raw newline",
+			output: `{"message":"{\"to\nken\":\"split-key-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "serialized token escape split by a raw newline",
+			output: `{"message":"{\"\\u00\n74oken\":\"split-escape-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
