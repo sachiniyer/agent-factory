@@ -653,17 +653,18 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		resetAt, _ := instance.LimitResetAt()
 		var rerr error
 		var accountConversationCapture session.ConversationCaptureSnapshot
+		beforeLive := func() {
+			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
+				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
+			}
+		}
 		if accountSwap != nil {
 			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
 			if rerr == nil {
-				rerr = instance.RespawnForAccountSwap()
+				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
 			}
 		} else {
-			rerr = instance.RespawnWithLiveBoundary(func() {
-				if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
-					log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
-				}
-			})
+			rerr = instance.RespawnWithLiveBoundary(beforeLive)
 		}
 		if rerr != nil {
 			if accountSwap != nil {

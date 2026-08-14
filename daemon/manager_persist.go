@@ -686,9 +686,38 @@ func (m *Manager) persistGhostCleanupStall(repoID string, data *session.Instance
 }
 
 var (
-	lateGhostDeleteSessionRecord  = (*Manager).deleteSessionRecord
+	lateGhostDeleteSessionRecord  = deleteLateGhostSessionRecord
 	lateGhostCleanupRetryInterval = 10 * time.Second
 )
+
+// deleteLateGhostSessionRecord reloads the exact durable row after the
+// asynchronous cleanup settles. The row is the only remaining source of quota
+// evidence on this path; an unreadable row is unknown, not an empty observation
+// set, so it must fail closed before deletion.
+func deleteLateGhostSessionRecord(
+	m *Manager, repoID, title, stableID string, teardownErr error,
+) (bool, error) {
+	storage, err := session.NewStorage(config.LoadState(), repoID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := storage.LoadInstanceData()
+	if err != nil {
+		return false, fmt.Errorf("load account-limit evidence for late ghost session %q: %w", title, err)
+	}
+	var evidence session.InstanceData
+	for _, row := range rows {
+		if row.Title != title {
+			continue
+		}
+		if stableID != "" && row.ID != "" && row.ID != stableID {
+			continue
+		}
+		evidence = row
+		break
+	}
+	return m.deleteSessionRecord(repoID, title, stableID, teardownErr, evidence)
+}
 
 // reconcileLateGhostCleanup consumes the descriptor worker's definitive result.
 // The row remains the retry handle on any error; only a successful delete plus
