@@ -147,6 +147,11 @@ test("the control for a key is decided by the manifest, so an unknown key still 
   // Structured keys use a text field for the compact JSON value supplied by the
   // manifest and accepted by the same config-set writer.
   assert.equal(controlFor(entry({ type: "table" })), "text");
+  assert.equal(
+    controlFor({ ...entry({ type: "table" }), editable: false } as ConfigEntry & { editable: boolean }),
+    "text",
+    "the retired wire marker must not recreate a read-only control during version skew",
+  );
   // A dynamic family keeps the same whole-value JSON control even though its
   // entry-name enum is metadata rather than a picker value list.
   assert.equal(

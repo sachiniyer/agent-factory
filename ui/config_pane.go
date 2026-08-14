@@ -115,7 +115,11 @@ type configRow struct {
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
-// entry is editable since #3345; only tier headings are skipped.
+// entry is editable since #3345; only tier headings are skipped. A pre-#3345
+// daemon may reject a newly supported structured save during version skew; that
+// rejection stays visible in this real field. Turning the row read-only would
+// restore the class #3345 explicitly removed, while a local-write fallback
+// would bypass the running daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
 	return r.entry != nil
 }

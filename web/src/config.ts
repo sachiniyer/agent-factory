@@ -92,6 +92,11 @@ export type ControlKind = "checkbox" | "select" | "text";
  *    NAMES rather than the value; offering it as a value picker would be a small
  *    lie about what the key takes.
  *  - anything else → text.
+ *
+ * A pre-#3345 daemon's retired `editable: false` wire member is deliberately
+ * absent from ConfigEntry and ignored here. Recreating a read-only fallback
+ * would violate the zero-read-only surface; during version skew the real field
+ * instead shows that old daemon's explicit save rejection verbatim.
  */
 export function controlKind(e: ConfigEntry): ControlKind {
   if (e.type === "bool") {

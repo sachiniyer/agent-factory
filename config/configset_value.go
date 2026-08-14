@@ -480,11 +480,15 @@ func setTOMLStructured(content, key, definition string) (string, error) {
 		return "", err
 	}
 	if strings.HasPrefix(definition, "[") {
-		cleaned = strings.TrimRight(cleaned, "\n")
-		if cleaned != "" {
-			cleaned += "\n\n"
+		body := strings.TrimRight(cleaned, "\n")
+		trailing := cleaned[len(body):]
+		if trailing == "" {
+			trailing = "\n"
 		}
-		return cleaned + definition, nil
+		if body != "" {
+			body += "\n\n"
+		}
+		return body + strings.TrimRight(definition, "\n") + trailing, nil
 	}
 	prefix := key + " = "
 	if !strings.HasPrefix(definition, prefix) {

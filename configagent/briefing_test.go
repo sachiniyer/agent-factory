@@ -196,6 +196,26 @@ func TestBriefingSetsStructuredKeysThroughConfigSet(t *testing.T) {
 	}
 }
 
+func TestBriefingUsesPerKeyEffectNoticeForStructuredSettings(t *testing.T) {
+	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
+	if !strings.Contains(out, "per-key effect notice") {
+		t.Error("briefing must defer structured-setting timing to af config set's per-key effect notice")
+	}
+	if strings.Contains(out, "same validated, immediate-apply") {
+		t.Error("briefing still claims every structured setting applies immediately")
+	}
+}
+
+func TestBriefingAllowsPartialCustomThemeObjects(t *testing.T) {
+	out := BuildBriefing(ModeOnboard, briefingConfig(), "/tmp/af/config.toml")
+	if !strings.Contains(out, "only the requested color slots") {
+		t.Error("briefing must explain that a custom theme object may contain only requested slots")
+	}
+	if strings.Contains(out, "containing all") {
+		t.Error("briefing still requires every color slot in a custom theme object")
+	}
+}
+
 // TestBriefingKeepsRepoConfigOffLimits pins the boundary #2453 deliberately did
 // NOT cross: the assistant may write the GLOBAL config file, but the five
 // repo-scoped keys stay off-limits and the no-repo-files fence is intact. Lifting

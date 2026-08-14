@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 // tomlScalarLineMatches recognizes bare, quoted, and dotted TOML key spellings
@@ -94,21 +95,20 @@ func tomlAssignmentEqual(line string) int {
 }
 
 func tomlHeaderName(line string) (string, bool) {
-	const probe = "__af_config_header_probe__"
-	var shape map[string]any
-	if err := toml.Unmarshal([]byte(line+"\n"+probe+" = true\n"), &shape); err != nil {
+	var parser unstable.Parser
+	parser.Reset([]byte(line))
+	if !parser.NextExpression() {
 		return "", false
 	}
-	for name, value := range shape {
-		table, ok := value.(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, present := table[probe]; present {
-			return name, true
-		}
+	expr := parser.Expression()
+	if expr.Kind != unstable.Table && expr.Kind != unstable.ArrayTable {
+		return "", false
 	}
-	return "", false
+	parts, _ := tomlExpressionKey(expr)
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "."), true
 }
 
 func replaceTOMLAssignmentValue(line, encoded string) (string, bool) {

@@ -665,10 +665,6 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	return &SetResult{Key: w.key, Value: w.canonical, Path: path, RequiresRestart: true}, nil
 }
 
-var (
-	tomlHeaderRe = regexp.MustCompile(`^\s*(?:\[([^\[\]]+)\]|\[\[([^\[\]]+)\]\])\s*(#.*)?$`)
-)
-
 // setTOMLScalar returns content with [section] leaf set to encoded, changing only
 // the target value's bytes. If the key exists its value (and only its value) is
 // replaced, preserving any trailing inline comment. It recognizes both TOML
@@ -732,17 +728,9 @@ func setTOMLScalar(content, section, leaf, encoded string) string {
 	}
 
 	for i, line := range ls {
-		if m := tomlHeaderRe.FindStringSubmatch(line); m != nil {
+		if name, ok := tomlHeaderName(line); ok {
 			if firstHeaderIdx == -1 {
 				firstHeaderIdx = i
-			}
-			name := m[1]
-			if name == "" {
-				name = m[2]
-			}
-			name = strings.TrimSpace(name)
-			if decoded, ok := tomlHeaderName(line); ok {
-				name = decoded
 			}
 			if name == section && targetHeaderIdx == -1 {
 				targetHeaderIdx = i
@@ -859,15 +847,8 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 		return out
 	}
 	for i, line := range ls {
-		if m := tomlHeaderRe.FindStringSubmatch(line); m != nil {
-			curSection = m[1]
-			if curSection == "" {
-				curSection = m[2]
-			}
-			curSection = strings.TrimSpace(curSection)
-			if decoded, ok := tomlHeaderName(line); ok {
-				curSection = decoded
-			}
+		if name, ok := tomlHeaderName(line); ok {
+			curSection = name
 			continue
 		}
 		// Top-level dotted form (section.leaf = …), valid only at the root.

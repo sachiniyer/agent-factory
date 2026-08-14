@@ -95,7 +95,9 @@ Tables and lists other than ` + "`cors_allowed_origins`" + ` use one compact JSO
 ` + "`af config set`" + `. See "Editing the structured settings" below for their exact shapes.
 ` + "`cors_allowed_origins`" + ` remains comma-separated, for example
 ` + "`af config set cors_allowed_origins https://one.example.com,https://two.example.com`" + `.
-They follow the same validated, immediate-apply and echo rules as scalar settings.`)
+They follow the same validation and echo rules as scalar settings. Follow each
+command's per-key effect notice for timing: some changes apply live, while others
+take effect on the next daemon or af launch.`)
 	fmt.Fprintf(&b, "- Say once, near the start, that all of this lives in `%s` and stays\n"+
 		"  hand-editable, so anything can be undone by opening that file. Say it once · not per setting.\n",
 		configPath)
@@ -169,8 +171,9 @@ Structured settings use one compact JSON value. Read the current JSON with
 to `+"`af config set <key> '<json>'`"+`. Shell-quote the JSON so it remains one argument.
 The structured settings are:
 
-- `+"`theme`"+` — the `+"`nord`"+` or `+"`zenburn`"+` preset name, or an object
-  containing all %d color slots as `+"`#RRGGBB`"+` strings.
+- `+"`theme`"+` — the `+"`nord`"+` or `+"`zenburn`"+` preset name, or a partial
+  object containing only the requested color slots as `+"`#RRGGBB`"+` strings;
+  omitted slots keep their current colors (there are %d slots in the full palette).
 - `+"`keys`"+` — an object whose entries rebind TUI actions.
 - `+"`root_agents`"+` — an object keyed by repository path, with one root-agent profile
   per value.
@@ -184,7 +187,7 @@ The structured settings are:
 
 For `+"`theme`"+` specifically: do not offer to pick hex values slot by slot in
 conversation — that is a miserable way to choose colors. Ask what they want (a darker
-background, a different accent), update those slots in the current object, and set it.
+background, a different accent), submit only those slots in a partial object, and set it.
 
 `, config.ThemeSlotCount())
 

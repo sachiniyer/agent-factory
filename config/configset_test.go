@@ -239,6 +239,30 @@ func TestSetTOMLStructuredInsertsRootValueBeforeArrayTable(t *testing.T) {
 	}
 }
 
+func TestSetTOMLStructuredInsertsRootValueBeforeQuotedArrayTable(t *testing.T) {
+	in := "# future extension\n[[\"array]name\"]]\nname = 'one'\n"
+	got, err := setTOMLStructured(in, "session_env_passthrough", "session_env_passthrough = [\"HTTP_PROXY\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# future extension\nsession_env_passthrough = [\"HTTP_PROXY\"]\n[[\"array]name\"]]\nname = 'one'\n"
+	if got != want {
+		t.Fatalf("root value landed inside a quoted array table:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSetTOMLStructuredPreservesUnrelatedTrailingBlankLines(t *testing.T) {
+	in := "[unrelated]\nvalue = 'kept'\n\n\n"
+	got, err := setTOMLStructured(in, "keys", "[keys]\nquit = 'Q'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[unrelated]\nvalue = 'kept'\n\n[keys]\nquit = 'Q'\n\n\n"
+	if got != want {
+		t.Fatalf("structured append normalized unrelated trailing blank lines:\n got: %q\nwant: %q", got, want)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
