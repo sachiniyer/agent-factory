@@ -101,17 +101,31 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 }
 
 // keepUnrollableArchiveCommitted keeps the committed archive when rolling the
-// worktree back home itself failed. The move has landed and cannot be undone,
-// so callers get the archived location, the resolved projection, and the same
-// committed marker keepIncompleteArchiveCommitted returns — a plain error and
-// an empty location here told every transport failed-nothing-committed about
-// an archive that IS committed and kept (#3235).
+// worktree back home itself failed AND the bytes provably stayed at the
+// archived location. In that case callers get the archived location, the
+// resolved projection, and the same committed marker
+// keepIncompleteArchiveCommitted returns — a plain error and an empty location
+// told every transport failed-nothing-committed about an archive that IS
+// committed and kept (#3235).
+//
+// A rollback error is NOT proof the archive stayed put (#3335 review): the
+// move home can land the bytes and then fail registration repair, which
+// commits the pre-archive location while still returning an error — and a
+// cut-off move leaves the directory identity unresolved. Claiming
+// committed-at-archivedPath there would point every client at a vacated path,
+// so those cases keep the prior plain double-failure shape, whose message
+// names both locations for manual recovery.
 func (m *Manager) keepUnrollableArchiveCommitted(
 	repoID, archivedPath string,
 	instance *session.Instance,
 	hookErr error,
 	cause error,
 ) (string, session.InstanceData, error) {
+	if _, _, unresolved := instance.GetWorktreeRelocationCandidates(); unresolved ||
+		instance.GetWorktreePath() != archivedPath {
+		m.persistInstance(repoID, instance)
+		return "", session.InstanceData{}, cause
+	}
 	m.persistInstance(repoID, instance)
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)

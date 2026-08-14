@@ -55,6 +55,42 @@ func TestArchiveSession_PersistAndRollbackFailure_ReportsCommittedArchive(t *tes
 		"a kept-committed archive must publish session.archived like its keepIncompleteArchiveCommitted sibling")
 }
 
+// TestKeepUnrollableArchiveCommitted_RefusesWhenBytesLeftTheArchive pins the
+// #3335 review guard: a rollback error is not proof the archive stayed put.
+// The move home can land the bytes and then fail registration repair — which
+// commits the pre-archive location while still returning an error
+// (session/git's TestMoveWorktree_RepairFailureStillCommitsLocation) — so when
+// the instance's worktree path no longer equals the archived path, the helper
+// must keep the prior plain double-failure shape instead of publishing an
+// Archived projection pointing at a vacated directory.
+func TestKeepUnrollableArchiveCommitted_RefusesWhenBytesLeftTheArchive(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, srcPath := registerArchivable(t, manager, repoID, repoPath, "worker")
+	require.NoError(t, inst.Transition(session.BeginArchive()))
+	require.NoError(t, inst.Transition(session.CommitArchive()))
+
+	dest, derr := archivedWorktreePath(repoID, "worker")
+	require.NoError(t, derr)
+	require.NotEqual(t, dest, inst.GetWorktreePath(),
+		"precondition: the bytes are at the pre-archive path, not the archive")
+	require.Equal(t, srcPath, inst.GetWorktreePath())
+
+	_, ch := manager.events.subscribe()
+	cause := errors.New("registration repair failed after the bytes moved home")
+	archivedPath, archived, err := manager.keepUnrollableArchiveCommitted(repoID, dest, inst, nil, cause)
+
+	require.ErrorIs(t, err, cause)
+	assert.False(t, isMutationCommitted(err),
+		"the committed-archive claim must not be made when the worktree is no longer at the archived path")
+	assert.Empty(t, archivedPath, "no location may be claimed when the real one is not the archive")
+	assert.Empty(t, archived.ID, "no Archived projection may be published for a vacated archive path")
+	select {
+	case ev := <-ch:
+		t.Fatalf("no event may be published on the refused path, got %s", ev.Type)
+	default:
+	}
+}
+
 // TestArchiveRemoteSession_PersistFailure_ReportsCommittedArchiveWithBranch is
 // #3235's remote arm: ArchiveSandbox pushed the branch and reaped the sandbox,
 // and CommitArchive has run — there is nothing left to roll back. A later
