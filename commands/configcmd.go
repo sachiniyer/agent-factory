@@ -267,6 +267,20 @@ resolved value with the complete source trace.`,
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
+				// Keep the explanation header honest: the value shown below is
+				// resolved for the SELECTED repository even though the layered
+				// load degraded to global scope — a "global defaults" header
+				// would contradict the project-specific fail-closed candidates
+				// (#3264 review). projectSelector is non-empty here: a global
+				// load cannot fail on a project layer, so the degraded branch is
+				// only reachable with a repository in scope.
+				if abs, pathErr := config.ResolveUserPath(projectSelector); pathErr == nil {
+					if repo, repoErr := config.RepoFromPath(abs); repoErr == nil {
+						resolved.ProjectRoot = repo.Root
+					} else {
+						resolved.ProjectRoot = abs
+					}
+				}
 			}
 			value, ok := resolved.ResolvedValuePath(args[0])
 			// root_agent resolves through FOUR layers in the daemon

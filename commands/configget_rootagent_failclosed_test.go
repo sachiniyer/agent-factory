@@ -61,6 +61,9 @@ func TestConfigGetRootAgentExplainCommandFailsClosedOnUnloadablePersonal(t *test
 	assert.Contains(t, out, "cannot be loaded", "the explanation must carry the fail-closed cause")
 	assert.Contains(t, out, personalPath, "the explanation must name the file to fix")
 	assert.Contains(t, out, `"enabled":false`, "the effective profile must render disabled")
+	assert.NotContains(t, out, "scope: global defaults",
+		"the degraded context must not claim global scope over project-specific fail-closed candidates")
+	assert.Contains(t, out, "project:", "the header must keep naming the inspected repository")
 }
 
 // TestConfigGetRootAgentLeafCommandFailsClosed: the dotted read projects the
