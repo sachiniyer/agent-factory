@@ -276,7 +276,9 @@ resolved value with the complete source trace.`,
 				// only reachable with a repository in scope.
 				if abs, pathErr := config.ResolveUserPath(projectSelector); pathErr == nil {
 					if repo, repoErr := config.RepoFromPath(abs); repoErr == nil {
-						resolved.ProjectRoot = repo.Root
+						// selectedProjectDisplayRoot keeps the user-selected
+						// spelling, exactly as the normal load path does.
+						resolved.ProjectRoot = selectedProjectDisplayRoot(abs, repo.Root)
 					} else {
 						resolved.ProjectRoot = abs
 					}
