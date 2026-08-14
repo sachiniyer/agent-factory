@@ -152,7 +152,7 @@ func BackendUnusableReason(kind BackendKind, cfg *config.ResolvedConfig, repoRoo
 			return missingOriginError(BackendSandbox, repoRoot)
 		}
 	case BackendHook:
-		// Validate() is what create runs (via loadRemoteHooksForPath): it catches an
+		// Validate() is what create runs (via resolveRepoConfig): it catches an
 		// empty launch_cmd/delete_cmd and a config still carrying the removed
 		// pre-PR7 keys. Reusing it means "configured" can never again mean merely
 		// "the section exists".
