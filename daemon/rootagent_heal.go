@@ -404,6 +404,11 @@ const rootHealProbeResultTTL = 30 * time.Second
 // projectRoots, so the singleton sweep can create the root this run instead
 // of waiting for a daemon start. Mutates the candidate snapshot in place; the
 // caller publishes.
+// reattributeUnresolvedRoots returns the snapshot mutations' companion
+// actions in settles: every probe-state transition that RELEASES a fail-closed
+// gate (a negative settling, a successful probe retiring) runs only after the
+// caller publishes the healed snapshot, so no concurrent reader can observe
+// the release before the state that justifies it (#3299 review rounds 9-10).
 func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed bool, settles []func()) {
 	if len(healed.unresolvedRoots) == 0 {
 		return false, nil
@@ -433,13 +438,6 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	// goroutine per entry, however long its mount stalls).
 	m.mu.Lock()
 	for derivedID, record := range healed.unresolvedRoots {
-		if _, deleted := m.deletedRootRepos[derivedID]; deleted {
-			// The project was deleted while unresolved; the consume loop
-			// below retires the entry. Never spawn for it — a stalled probe
-			// would hold its candidate repo attribution-pending for a
-			// project that no longer exists (#3299 review round 9).
-			continue
-		}
 		probe := m.rootHealProbes[derivedID]
 		if probe != nil {
 			select {
@@ -475,28 +473,9 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	expired := false
 	for derivedID, record := range healed.unresolvedRoots {
 		m.mu.Lock()
-		_, entryDeleted := m.deletedRootRepos[derivedID]
 		probe := m.rootHealProbes[derivedID]
 		settled := probe != nil && probe.settled
 		m.mu.Unlock()
-		if entryDeleted {
-			// DeleteProject tombstoned this project while it sat unresolved:
-			// retire the entry, its verdict bridges, and any probe state, so
-			// nothing keeps answering — or failing closed — for a project
-			// that no longer exists (#3299 review round 9).
-			cloneForWrite()
-			delete(healed.unresolvedRoots, derivedID)
-			for rid, d := range healed.unresolvedResolvedIDs {
-				if d == derivedID {
-					delete(healed.unresolvedResolvedIDs, rid)
-				}
-			}
-			m.mu.Lock()
-			delete(m.rootHealProbes, derivedID)
-			delete(m.rootHealProbeFailures, derivedID)
-			m.mu.Unlock()
-			continue
-		}
 		if probe == nil || settled {
 			// A settled negative neither pends nor re-consumes: it waits out
 			// its own retryAt, invisible to the pass.
@@ -548,10 +527,18 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				m.mu.Unlock()
 			})
 		} else {
-			m.mu.Lock()
-			delete(m.rootHealProbes, derivedID)
-			delete(m.rootHealProbeFailures, derivedID)
-			m.mu.Unlock()
+			// Deferred like the negative settle (#3299 review round 10): the
+			// probe's presence is what keeps the candidate repo attribution-
+			// pending, and releasing it before the healed snapshot publishes
+			// would let a concurrent verdict resolve against the OLD snapshot
+			// — personal layers still under the derived ID — for an instant.
+			retiredID := derivedID
+			settles = append(settles, func() {
+				m.mu.Lock()
+				delete(m.rootHealProbes, retiredID)
+				delete(m.rootHealProbeFailures, retiredID)
+				m.mu.Unlock()
+			})
 		}
 		if !probe.matches {
 			// The probe logged the specifics; a fresh probe next pass keeps
@@ -687,8 +674,18 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 func (m *Manager) rootAttributionPendingFor(repoID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, probe := range m.rootHealProbes {
+	for derivedID, probe := range m.rootHealProbes {
 		if probe.settled {
+			continue
+		}
+		if _, deleted := m.deletedRootRepos[derivedID]; deleted {
+			// The project behind this probe was deleted: its tombstone (and,
+			// once the probe completes and re-attributes, the alias) owns the
+			// suppression. Holding the candidate repo attribution-pending on
+			// a probe that may be stalled forever would fail a dead project's
+			// repo closed indefinitely (#3299 review round 9). The probe
+			// itself keeps running — its eventual match publishes the alias
+			// that lets deletion suppression reach the real identity.
 			continue
 		}
 		if c := probe.candidate.Load(); c != nil && c.ID == repoID {

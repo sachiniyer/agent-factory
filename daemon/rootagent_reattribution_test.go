@@ -1291,9 +1291,12 @@ func TestDeleteRetiresPendingProbe(t *testing.T) {
 	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentAttributionPending {
 		t.Fatalf("a deleted project's stalled probe must not hold its candidate repo pending forever")
 	}
+	// Later passes may respawn a probe for the still-snapshotted entry — the
+	// probe-to-alias chain is what carries deletion suppression to the real
+	// identity — but the pending gate must keep exempting the dead project.
 	manager.EnsureRootAgents()
-	if layers := manager.rootAgentLayers.Load(); len(layers.unresolvedRoots) != 0 {
-		t.Fatalf("the tombstoned unresolved entry must be retired from the snapshot, got %d entries", len(layers.unresolvedRoots))
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentAttributionPending {
+		t.Fatalf("a respawned probe for the deleted project must not re-arm the pending gate")
 	}
 }
 
