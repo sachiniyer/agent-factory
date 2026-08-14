@@ -116,7 +116,7 @@ func rootAgentUnavailableDetail(v rootAgentMaterializeVerdict) string {
 	case rootAgentNotConfigured:
 		return "no root agent is configured for this repo — add a root_agents entry or a registered project's [root_agent], then restart the daemon"
 	case rootAgentProjectUnresolved:
-		return "its registered project's root-agent config enables it, but the recorded project root does not currently resolve to a git repository; the root can be created at a daemon start after the path is back (or add a root_agents entry, whose per-tick retry picks the repo up as soon as it resolves)"
+		return "its registered project's root-agent config enables it, but the recorded project root does not currently resolve to a git repository; bring the path back and restart the daemon (all root-agent config, including any root_agents entry you add, loads at daemon start — an entry present at start then retries the path every tick)"
 	case rootAgentDisabled:
 		if v.disabledSource == config.RootAgentSourceBuiltIn || v.disabledSource == "" {
 			// No layer enabled it: a registered project with no root-agent
