@@ -1265,6 +1265,34 @@ test("reviewer silence with no usage-limit evidence keeps blocking exactly as be
   assert.equal(github.createdChecks[0].conclusion, "failure");
 });
 
+// A usage-limit message proves the reviewer was out of quota when it answered,
+// which says nothing about a head pushed after it: the reviewer may be back in
+// quota and simply not there yet, which is the silence case. Without this the
+// degradation is also sticky — one usage-limit comment would put the PR in
+// manual-merge mode for every later push, forever.
+test("a usage-limit response older than the head is stale evidence and keeps blocking", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:30:00Z",
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "evidence about an older head is not evidence");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /predates this head/);
+});
+
+test("an unknown head timestamp never degrades the gate", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: null,
+    issueComments: [codexRateLimit()],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "an unknown order is not a proven one");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
 test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
   const github = fakeGateGithub({ nativeAutoMergeEnabled: true, issueComments: [codexRateLimit()] });
 

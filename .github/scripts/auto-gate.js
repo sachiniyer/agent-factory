@@ -1696,8 +1696,22 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     // superseded proves nothing about now. A read that fails throws out of
     // retryRead rather than reaching here, so an unreadable comment list can
     // never be mistaken for "no rate limit" — or for a rate limit.
-    reviewerUnavailable = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
-    const suffix = reviewerUnavailable ? "; the latest Codex response was usage-limited" : "";
+    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
+    // …and it has to be evidence about THIS head, on the same freshness rule the
+    // verdict below is held to. A usage-limit answer only proves the reviewer was
+    // out of quota when it answered; a head pushed after it may simply not have
+    // been reached yet, which is the silence case and must keep blocking. Without
+    // this the degradation is sticky: one usage-limit comment would put the PR in
+    // manual-merge mode for every later push, forever. Fails closed on an unknown
+    // order, like every other timestamp comparison in this file.
+    const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexComment) : 0;
+    reviewerUnavailable = rateLimited && lastPushTime != null && rateLimitTime > lastPushTime;
+    const suffix = !rateLimited
+      ? ""
+      : reviewerUnavailable
+        ? "; the latest Codex response was usage-limited"
+        : "; the latest Codex response was usage-limited but predates this head, so it is not " +
+          "evidence about this head";
     reasons.push(`Codex has not reviewed head ${sha} yet${suffix}`);
   } else {
     const verdictTime = reviewArtifactTime(verdict);
