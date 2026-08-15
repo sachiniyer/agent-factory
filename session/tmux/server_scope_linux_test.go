@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -246,7 +247,14 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		t.Fatalf("write blocking systemd-run shim: %v", err)
 	}
 	systemctl := filepath.Join(dir, "systemctl")
-	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\nfor suffix in child parent; do\n  pid=$(cat \"$base.$suffix\")\n  kill -KILL \"$pid\" 2>/dev/null || true\ndone\n"
+	// The kills land after this shim has answered, which is what systemd does:
+	// `systemctl kill` queues the signals and returns, and the kernel finishes
+	// the teardown on its own schedule. Delaying them deterministically is the
+	// regression for #3382 — the assertion below used to probe the pids once,
+	// instantly, so it read a launcher child that was merely on its way out as
+	// one that survived. Its fds are redirected so CombinedOutput does not wait
+	// on the backgrounded subshell.
+	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\n(\n  sleep 0.2\n  for suffix in child parent; do\n    pid=$(cat \"$base.$suffix\")\n    kill -KILL \"$pid\" 2>/dev/null || true\n  done\n) >/dev/null 2>&1 &\n"
 	if err := os.WriteFile(systemctl, []byte(stopScript), 0o700); err != nil {
 		t.Fatalf("write systemctl shim: %v", err)
 	}
@@ -276,13 +284,58 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s pid: %v", label, err)
 		}
-		if err := syscall.Kill(pid, 0); err == nil {
+		gone, probeErr := waitForProcessTeardown(pid, dedicatedServerTeardownWait)
+		switch {
+		case probeErr != nil:
+			t.Errorf("probe timed-out %s %d: %v", label, pid, probeErr)
+		case !gone:
+			// Only now that the wait has genuinely expired: a survivor is a real
+			// failure, and killing it keeps that failure from leaking a process
+			// into the next run.
 			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Errorf("timed-out dedicated server %s %d is still alive", label, pid)
-		} else if err != syscall.ESRCH {
-			t.Errorf("probe timed-out %s %d: %v", label, pid, err)
+			t.Errorf("timed-out dedicated server %s %d is still alive after %s",
+				label, pid, dedicatedServerTeardownWait)
 		}
 	}
+}
+
+// dedicatedServerTeardownWait is how long the assertion above watches for the
+// killed launcher and its child to go away. Large on purpose: the wait returns
+// the instant they are gone, so the budget costs nothing on a passing run, and
+// only a genuine survivor — one that is still there after the whole of it —
+// spends it. A tight bound would be a statement about the CI scheduler rather
+// than about the teardown (#2879).
+const dedicatedServerTeardownWait = 30 * time.Second
+
+// waitForProcessTeardown reports whether pid stopped running within timeout.
+// Signal delivery and process teardown are asynchronous, so there is always a
+// window after the kill in which the pid is still probe-able; the caller's old
+// single instantaneous probe granted that window zero time and failed whenever
+// CI contention widened it past nothing (#3382).
+//
+// "Stopped running" is ESRCH or a corpse. kill(pid, 0) succeeds for a zombie —
+// the orphaned launcher child keeps its /proc entry until whichever process
+// inherited it collects the exit status — and that collection is somebody
+// else's schedule, not evidence the process survived the kill (#2103). A probe
+// error other than ESRCH is returned rather than retried: it is the caller's
+// separate failure mode, and polling cannot resolve it.
+func waitForProcessTeardown(pid int, timeout time.Duration) (bool, error) {
+	var probeErr error
+	gone := eventually(timeout, 10*time.Millisecond, func() bool {
+		switch err := syscall.Kill(pid, 0); {
+		case errors.Is(err, syscall.ESRCH):
+			return true
+		case err != nil:
+			probeErr = err
+			return true
+		}
+		_, err := proctree.Lookup(pid)
+		return errors.Is(err, proctree.ErrProcessExited) || errors.Is(err, os.ErrNotExist)
+	})
+	if probeErr != nil {
+		return false, probeErr
+	}
+	return gone, nil
 }
 
 func TestDedicatedServerTightensExistingLogPermissions(t *testing.T) {
