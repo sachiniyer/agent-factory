@@ -1322,6 +1322,20 @@ test("a usage-limited reviewer does not waive unresolved inline findings", async
   assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
 });
 
+// "Latest response" has to mean latest across comments AND reviews. A review
+// posted after the quota message proves the reviewer answered again, so the
+// quota message is no longer current — reading only issue comments misses it.
+test("a Codex review newer than the quota message means it is no longer current", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+    reviews: [codexReview(OTHER_SHA, "Suggestions for an earlier head.", "2026-07-09T01:25:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "the reviewer answered after the quota message");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
 // The detector is an unanchored substring match, so a review that discusses the
 // gate itself trips it. Such a body already fails parseReviewedCommit, so it is
 // not a verdict either — the safe landing is "keep blocking", never "degrade".

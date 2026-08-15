@@ -1703,13 +1703,18 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
-    const latestCodexComment = codexComments.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0];
     // The reviewer saying it is out of quota is the only accepted evidence, and
-    // only on its latest comment: an older usage-limit note that a later comment
-    // superseded proves nothing about now. A read that fails throws out of
-    // retryRead rather than reaching here, so an unreadable comment list can
-    // never be mistaken for "no rate limit" — or for a rate limit.
-    const latestCodexBody = latestCodexComment?.body || "";
+    // only on its latest response: an older usage-limit note that a later
+    // response superseded proves nothing about now. A read that fails throws out
+    // of retryRead rather than reaching here, so an unreadable list can never be
+    // mistaken for "no rate limit" — or for a rate limit.
+    //
+    // Latest across issue comments AND reviews — the list is already sorted
+    // newest-first. Reading only issue comments would miss a review posted after
+    // a quota message, which proves the reviewer answered again and therefore
+    // that the quota message no longer describes the present.
+    const latestCodexArtifact = codexReviewArtifacts[0];
+    const latestCodexBody = latestCodexArtifact?.body || "";
     // The detector is an unanchored substring match, so a review that merely
     // QUOTES the usage-limit phrase trips it — reviewing this very gate is
     // enough. A body carrying both review markers is a review, not a quota
@@ -1727,7 +1732,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     // this the degradation is sticky: one usage-limit comment would put the PR in
     // manual-merge mode for every later push, forever. Fails closed on an unknown
     // order, like every other timestamp comparison in this file.
-    const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexComment) : 0;
+    const rateLimitTime = rateLimited ? reviewArtifactTime(latestCodexArtifact) : 0;
     reviewerUnavailable = rateLimited && lastPushTime != null && rateLimitTime > lastPushTime;
     const suffix = !rateLimited
       ? ""
