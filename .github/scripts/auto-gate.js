@@ -24,6 +24,16 @@ const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
 // exist, so only the first is checked against the head (#2878).
 const FIX_CLAIM_RE = /\bRESOLVED\b/;
 const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
+const MANUAL_MERGE_AUTHOR_REASON =
+  "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
+  "merge manually.";
+// Read by a human deciding whether to merge, so it has to be impossible to
+// mistake for an approval: it names the degradation and says outright that no
+// review happened.
+const MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON =
+  "The Codex reviewer is usage-limited, so no verdict for this head can arrive; Auto Gate " +
+  "degraded to maintainer review. This PR has NOT been reviewed — a maintainer must review " +
+  "and merge it manually.";
 const RETRY_DELAYS_MS = [250, 1000];
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
@@ -268,7 +278,13 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   const pr = await getPullRequest({ github, context, number });
   const reasons = [];
   const notes = [];
-  const manualMergeRequired = !ALLOWED_AUTHORS.has(pr.author);
+  // Every cause that makes this PR maintainer-merged rather than auto-merged.
+  // Each one is a full sentence because the decision summary is where a human
+  // finds out why the gate stopped short of merging.
+  const manualMergeReasons = [];
+  if (!ALLOWED_AUTHORS.has(pr.author)) {
+    manualMergeReasons.push(MANUAL_MERGE_AUTHOR_REASON);
+  }
 
   core.info(`Evaluating auto-gate for PR #${pr.number}: ${pr.title}`);
   core.info(`PR URL: ${pr.url}`);
@@ -345,11 +361,27 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...codex.notes);
 
+  // A reviewer that is out of quota cannot ever produce the verdict this gate
+  // waits for, so waiting is not caution — it is a permanent stop on the whole
+  // repository (#3378). Degrade to the maintainer-merge path that already
+  // exists for non-auto-merge authors: the decision check passes so branch
+  // protection does not sit red, and nothing merges automatically. This is
+  // reached ONLY on observed evidence — the reviewer's own usage-limit message
+  // on its latest comment. Silence stays blocking, because an absent verdict
+  // with no explanation is unknown, not proven-unavailable.
+  const reviewerUnavailable = Boolean(codex.reviewerUnavailable);
+  if (reviewerUnavailable) {
+    manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
+  }
+  const manualMergeRequired = manualMergeReasons.length > 0;
+
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
     pullRequestId: pr.id,
     shouldMerge: !manualMergeRequired && reasons.length === 0,
     manualMergeRequired,
+    manualMergeReasons,
+    reviewerUnavailable,
     nativeAutoMergeEnabled: pr.nativeAutoMergeEnabled,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
@@ -410,7 +442,9 @@ async function reportDecision({ github, context, core, result, manual = false })
     state === "never-ran"
       ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
       : result.manualMergeRequired
-        ? "PASS: maintainer review and manual merge required"
+        ? result.reviewerUnavailable
+          ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
+          : "PASS: maintainer review and manual merge required"
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
           : "WAITING: Auto Gate requirements are not yet satisfied";
@@ -777,7 +811,7 @@ async function processAggregateHead({
   if (manualMergeRequired) {
     core.notice(
       `Leaving aggregate ${pending.headSha} green for maintainer merge; ` +
-        "Auto Gate does not auto-merge every associated PR author.",
+        "at least one associated PR requires maintainer review and manual merge.",
     );
     return { state: "manual", pending, aggregate };
   }
@@ -1619,6 +1653,9 @@ function formatRunSource(run) {
 async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
   const notes = [];
   const reasons = [];
+  // Set only where it is proven: no exact-head verdict AND the reviewer's own
+  // usage-limit message on its latest comment. Anything else leaves it false.
+  let reviewerUnavailable = false;
   const { owner, repo } = context.repo;
   const lastPushTime = parseTimestamp(lastCommitDate);
 
@@ -1654,8 +1691,13 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
 
   if (!verdict) {
     const latestCodexComment = codexComments.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0];
-    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
-    const suffix = rateLimited ? "; the latest Codex response was usage-limited" : "";
+    // The reviewer saying it is out of quota is the only accepted evidence, and
+    // only on its latest comment: an older usage-limit note that a later comment
+    // superseded proves nothing about now. A read that fails throws out of
+    // retryRead rather than reaching here, so an unreadable comment list can
+    // never be mistaken for "no rate limit" — or for a rate limit.
+    reviewerUnavailable = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
+    const suffix = reviewerUnavailable ? "; the latest Codex response was usage-limited" : "";
     reasons.push(`Codex has not reviewed head ${sha} yet${suffix}`);
   } else {
     const verdictTime = reviewArtifactTime(verdict);
@@ -1743,7 +1785,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     );
   }
 
-  return { ok: reasons.length === 0, reasons, notes };
+  return { ok: reasons.length === 0, reasons, notes, reviewerUnavailable };
 }
 
 function parseReviewedCommit(body) {
@@ -1789,9 +1831,7 @@ function parseTimestamp(value) {
 function finish(core, setOutputs, result) {
   let summary;
   if (result.manualMergeRequired) {
-    const manual =
-      "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
-      "merge manually.";
+    const manual = (result.manualMergeReasons || []).join(" ") || MANUAL_MERGE_AUTHOR_REASON;
     const unmet =
       result.reasons.length === 0
         ? ""

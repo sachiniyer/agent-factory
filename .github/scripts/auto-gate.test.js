@@ -1210,11 +1210,97 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
   assert.equal(settled.shouldMerge, true);
 });
 
-test("a Codex rate-limit message waits without becoming a verdict", async () => {
+test("a Codex rate-limit message never becomes a verdict", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
   assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /has not reviewed head.*usage-limited/);
+});
+
+// #3378: the reviewer account ran out of credits and every open PR became
+// unmergeable, because a usage-limited response was only ever cosmetic suffix
+// text on a reason that waits for a verdict that cannot arrive. Observed
+// usage-limited degrades to the existing manual-merge path; unknown does not.
+test("an observed usage-limited reviewer degrades to maintainer review instead of waiting forever", async () => {
+  const result = await evaluateGate({ issueComments: [codexRateLimit()] });
+
+  assert.equal(result.manualMergeRequired, true, "the gate must degrade, not wait");
+  assert.equal(result.shouldMerge, false, "degrading must never auto-merge");
+  assert.match(result.summary, /^PASS:/);
+  assert.match(result.summary, /usage-limited/);
+  assert.match(result.summary, /has NOT been reviewed/);
+
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "manual");
+  assert.equal(github.createdChecks[0].conclusion, "success");
+  assert.match(github.createdChecks[0].output.title, /usage-limited/);
+});
+
+test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
+  const result = await evaluateGate({ issueComments: [] });
+
+  assert.equal(result.manualMergeRequired, false, "silence is not evidence of a usage limit");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /has not reviewed head/);
+  assert.doesNotMatch(result.reasons.join("\n"), /usage-limited/);
+
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+});
+
+test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
+  const github = fakeGateGithub({ nativeAutoMergeEnabled: true, issueComments: [codexRateLimit()] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.equal(transaction.aggregate.ok, true, "the aggregate must stop sitting red");
+  assert.equal(github.mergedWith, null, "degrading must never merge");
+  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "success");
+  assert.match(exactDecision.output.summary, /has NOT been reviewed/);
+});
+
+test("a usage-limited reviewer does not excuse an exact-head verdict carrying a finding", async () => {
+  const verdictWithFinding = {
+    ...codexVerdict(HEAD_SHA),
+    body: `Codex Review: P1 — unsafe write ordering.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+  };
+  const result = await evaluateGate({
+    issueComments: [verdictWithFinding, codexRateLimit("2026-07-09T01:25:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "a real verdict exists; nothing to degrade");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /P0-P3 finding/);
 });
 
 test("a clean exact-head verdict cannot override live Codex findings", async () => {
@@ -2053,12 +2139,12 @@ function codexVerdict(sha, timestamp = "2026-07-09T01:20:00Z") {
   };
 }
 
-function codexRateLimit() {
+function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: "You have reached your Codex usage limits for code reviews.",
-    created_at: "2026-07-09T01:20:00Z",
-    updated_at: "2026-07-09T01:20:00Z",
+    created_at: timestamp,
+    updated_at: timestamp,
   };
 }
 
