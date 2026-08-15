@@ -1293,6 +1293,52 @@ test("an unknown head timestamp never degrades the gate", async () => {
   assert.match(result.summary, /^BLOCKED:/);
 });
 
+// Degrading waives exactly one requirement: the verdict that cannot arrive.
+// Every other gate is independent of the reviewer, and manualMergeRequired
+// makes the decision pass, so waiving them together would let "the reviewer is
+// down" quietly green-light a PR with a known finding or a missing label.
+test("a usage-limited reviewer does not waive an unrelated blocker", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit()],
+    files: ["app/termpane.go"],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "an unrelated gate must still block");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.match(result.reasons.join("\n"), /usage-limited/);
+});
+
+test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit()],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "a live finding is not the missing verdict");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+});
+
+// The detector is an unanchored substring match, so a review that discusses the
+// gate itself trips it. Such a body already fails parseReviewedCommit, so it is
+// not a verdict either — the safe landing is "keep blocking", never "degrade".
+test("a review body that merely quotes the usage-limit text is not quota evidence", async () => {
+  const quoting = {
+    ...codexVerdict(HEAD_SHA),
+    body:
+      "### Codex Review\n\nThe detector fires on “reached your Codex usage limits for code " +
+      `reviews” anywhere in a body.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+  };
+  const result = await evaluateGate({ issueComments: [quoting] });
+
+  assert.equal(result.manualMergeRequired, false, "a review body is not a quota response");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
 test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
   const github = fakeGateGithub({ nativeAutoMergeEnabled: true, issueComments: [codexRateLimit()] });
 

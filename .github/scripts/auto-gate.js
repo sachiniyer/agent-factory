@@ -369,8 +369,18 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // reached ONLY on observed evidence — the reviewer's own usage-limit message
   // on its latest comment. Silence stays blocking, because an absent verdict
   // with no explanation is unknown, not proven-unavailable.
-  const reviewerUnavailable = Boolean(codex.reviewerUnavailable);
-  if (reviewerUnavailable) {
+  //
+  // It waives exactly ONE requirement: the verdict that cannot arrive. Every
+  // other gate — unresolved findings, the play-tested label, required checks,
+  // mergeability — is independent of the reviewer's quota, and since
+  // manualMergeRequired makes the decision pass, waiving them alongside it
+  // would let "the reviewer is down" green-light a PR with a known finding.
+  const otherBlockers = codex.reviewerUnavailable
+    ? reasons.filter((reason) => reason !== codex.reviewerUnavailableReason)
+    : reasons;
+  const degradedForUnavailableReviewer =
+    Boolean(codex.reviewerUnavailable) && otherBlockers.length === 0;
+  if (degradedForUnavailableReviewer) {
     manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
@@ -381,7 +391,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     shouldMerge: !manualMergeRequired && reasons.length === 0,
     manualMergeRequired,
     manualMergeReasons,
-    reviewerUnavailable,
+    degradedForUnavailableReviewer,
     nativeAutoMergeEnabled: pr.nativeAutoMergeEnabled,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
@@ -442,7 +452,7 @@ async function reportDecision({ github, context, core, result, manual = false })
     state === "never-ran"
       ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
       : result.manualMergeRequired
-        ? result.reviewerUnavailable
+        ? result.degradedForUnavailableReviewer
           ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
           : "PASS: maintainer review and manual merge required"
         : result.shouldMerge
@@ -1655,7 +1665,10 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
   const reasons = [];
   // Set only where it is proven: no exact-head verdict AND the reviewer's own
   // usage-limit message on its latest comment. Anything else leaves it false.
+  // reviewerUnavailableReason is the one reason a degradation may waive; the
+  // caller uses it to tell that reason apart from every independent blocker.
   let reviewerUnavailable = false;
+  let reviewerUnavailableReason = "";
   const { owner, repo } = context.repo;
   const lastPushTime = parseTimestamp(lastCommitDate);
 
@@ -1696,7 +1709,17 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     // superseded proves nothing about now. A read that fails throws out of
     // retryRead rather than reaching here, so an unreadable comment list can
     // never be mistaken for "no rate limit" — or for a rate limit.
-    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexComment?.body || "");
+    const latestCodexBody = latestCodexComment?.body || "";
+    // The detector is an unanchored substring match, so a review that merely
+    // QUOTES the usage-limit phrase trips it — reviewing this very gate is
+    // enough. A body carrying both review markers is a review, not a quota
+    // response; the genuine message carries neither (verified against the real
+    // one on #3371), so requiring their absence cannot suppress it. Such a body
+    // already fails parseReviewedCommit, so it is not a verdict either, and the
+    // gate lands on "keep blocking" rather than on a false degradation.
+    const looksLikeReviewArtifact =
+      CODEX_REVIEW_RE.test(latestCodexBody) && REVIEWED_COMMIT_RE.test(latestCodexBody);
+    const rateLimited = CODEX_RATE_LIMIT_RE.test(latestCodexBody) && !looksLikeReviewArtifact;
     // …and it has to be evidence about THIS head, on the same freshness rule the
     // verdict below is held to. A usage-limit answer only proves the reviewer was
     // out of quota when it answered; a head pushed after it may simply not have
@@ -1712,7 +1735,11 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
         ? "; the latest Codex response was usage-limited"
         : "; the latest Codex response was usage-limited but predates this head, so it is not " +
           "evidence about this head";
-    reasons.push(`Codex has not reviewed head ${sha} yet${suffix}`);
+    const missingVerdictReason = `Codex has not reviewed head ${sha} yet${suffix}`;
+    if (reviewerUnavailable) {
+      reviewerUnavailableReason = missingVerdictReason;
+    }
+    reasons.push(missingVerdictReason);
   } else {
     const verdictTime = reviewArtifactTime(verdict);
     if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
@@ -1799,7 +1826,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     );
   }
 
-  return { ok: reasons.length === 0, reasons, notes, reviewerUnavailable };
+  return { ok: reasons.length === 0, reasons, notes, reviewerUnavailable, reviewerUnavailableReason };
 }
 
 function parseReviewedCommit(body) {
