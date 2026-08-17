@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -647,9 +646,8 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	// `git worktree remove -f` above fails (e.g. the worktree's `.git`
 	// pointer file was removed externally), git still tracks the worktree
 	// internally and `git branch -D` will fail with "branch is checked
-	// out", leaving an orphaned branch behind. Mirrors the ordering in
-	// CleanupWorktreesForRepo (#330). Best-effort: a prune failure here
-	// should not block the branch-delete attempt.
+	// out", leaving an orphaned branch behind. Best-effort: a prune failure
+	// here should not block the branch-delete attempt.
 	r.prune()
 
 	// Only delete the branch if this session actually created it. When we
@@ -672,7 +670,7 @@ func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, erro
 	}
 
 	// Final prune to clean up any remaining references. Usually a no-op
-	// after the prune above, but mirrors CleanupWorktreesForRepo.
+	// after the prune above.
 	r.prune()
 
 	if len(r.errs) > 0 {
@@ -885,109 +883,4 @@ func pathAtOrUnder(root, p string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// CleanupWorktreesForRepo removes all worktrees and their associated branches
-// for the given repo root. The main worktree (the repo itself) is preserved.
-// The repoRoot must be the main repo path; callers should resolve linked
-// worktree paths to the main repo root before invoking this function.
-func CleanupWorktreesForRepo(repoRoot string) error {
-	if repoRoot == "" {
-		return fmt.Errorf("repo root is empty")
-	}
-
-	// Skip cleanup if the repo path no longer exists on disk. `af reset`
-	// iterates over collected repo roots, which may include deleted, moved,
-	// or unmounted paths; without this check, `git -C` would fail and abort
-	// the entire reset before subsequent repos (and DeleteAllInstances) ran.
-	if _, err := os.Stat(repoRoot); os.IsNotExist(err) {
-		log.WarningLog.Printf("skipping cleanup for deleted repo: %s", repoRoot)
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to access repo path: %w", err)
-	}
-
-	// List all worktrees from the repo. If the path exists but is no longer a
-	// git repo (e.g. `.git` was removed), `git -C` exits non-zero. Treat that
-	// like the missing-directory case above: log and skip, so `af reset` can
-	// still clean up other repos and reset storage (issue #370).
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		log.WarningLog.Printf("skipping cleanup for non-git path: %s", repoRoot)
-		return nil
-	}
-
-	// Parse output to get (worktreePath, branchName) pairs.
-	// Each block is separated by a blank line. A worktree may have no branch (detached HEAD).
-	type worktreeInfo struct {
-		path   string
-		branch string // empty if detached HEAD
-	}
-	var worktrees []worktreeInfo
-	currentPath := ""
-	currentBranch := ""
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch ") {
-			branchPath := strings.TrimPrefix(line, "branch ")
-			currentBranch = strings.TrimPrefix(branchPath, "refs/heads/")
-		} else if line == "" {
-			if currentPath != "" {
-				worktrees = append(worktrees, worktreeInfo{path: currentPath, branch: currentBranch})
-			}
-			currentPath = ""
-			currentBranch = ""
-		}
-	}
-	// Handle last entry if output doesn't end with a blank line
-	if currentPath != "" {
-		worktrees = append(worktrees, worktreeInfo{path: currentPath, branch: currentBranch})
-	}
-
-	// Skip the first entry (the main worktree / repo itself)
-	if len(worktrees) > 1 {
-		for _, wt := range worktrees[1:] {
-			// Remove the worktree FIRST (git refuses to delete a branch checked out in a worktree)
-			removeCmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", wt.path)
-			if err := removeCmd.Run(); err != nil {
-				log.ErrorLog.Printf("failed to remove worktree %s: %v", wt.path, err)
-				// Fallback: remove directory manually. Unconditional — no
-				// registration re-check needed here, unlike Cleanup(): wt.path
-				// was emitted by `git worktree list` moments ago, so git
-				// ownership is already established, and `af reset` semantics
-				// are "tear everything down" (#802 audit).
-				if err := os.RemoveAll(wt.path); err != nil {
-					log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
-				}
-			}
-
-			// Prune stale worktree metadata (best-effort) BEFORE deleting the
-			// branch. When the `git worktree remove -f` above fails and we fall
-			// back to os.RemoveAll, git still tracks the worktree internally,
-			// causing `git branch -D` to fail with "branch is checked out".
-			pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
-			if err := pruneCmd.Run(); err != nil {
-				log.ErrorLog.Printf("failed to prune worktree metadata before deleting branch %s: %v", wt.branch, err)
-			}
-
-			// THEN delete the branch
-			if wt.branch != "" {
-				deleteCmd := exec.Command("git", "-C", repoRoot, "branch", "-D", wt.branch)
-				if err := deleteCmd.Run(); err != nil {
-					log.ErrorLog.Printf("failed to delete branch %s: %v", wt.branch, err)
-				}
-			}
-		}
-	}
-
-	// Prune worktree references
-	pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
-	if _, err := pruneCmd.Output(); err != nil {
-		return fmt.Errorf("failed to prune worktrees: %w", err)
-	}
-
-	return nil
 }
