@@ -57,7 +57,7 @@ var testHookPersistInstanceData = func(string, session.InstanceData) error { ret
 // record untouched. It is the targeted, clobber-safe persist primitive for
 // in-place mutations of an existing session (CloseTab, SetPRInfo, status/limit
 // polls, archive) — the single-writer direction of #960 — analogous to
-// appendInstanceData for creates and storage.DeleteInstance for kills. It
+// appendInstanceData for creates and DeleteInstanceByStableID for kills. It
 // deliberately does NOT use a whole-list SaveInstances, which would re-serialize
 // the manager's entire view and reintroduce the dual-writer clobber surface #960
 // is retiring.
