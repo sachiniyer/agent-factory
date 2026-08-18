@@ -325,3 +325,104 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 	require.True(t, foundOwnedServer,
 		"the detached agent-server was not run as the bind-mounted account owner; calls=%v", calls)
 }
+
+// TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase pins the Docker
+// spelling of a mount target rather than one casing of it. Docker reads a
+// --mount value as a single CSV record and lowercases each field's key before
+// matching it, so every spelling below names the same container path that a
+// plain `dst=` does. A case-sensitive comparison let a repo's run_args install
+// `DST=/af-account/.config` over af's account boundary (#3398).
+//
+// Verified against Docker 29.4.0: each value here mounts (an unknown key such
+// as `mydst=` is refused by Docker itself, which is why this check stays an
+// exact whole-key match rather than a substring one).
+func TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "lowercase dst", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}},
+		{name: "lowercase destination", args: []string{"--mount", "type=bind,src=/tmp/other,destination=/af-account"}},
+		{name: "lowercase target", args: []string{"--mount", "type=bind,src=/tmp/other,target=/af-account"}},
+		{name: "uppercase dst", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account"}},
+		{name: "uppercase destination", args: []string{"--mount", "type=bind,src=/tmp/other,DESTINATION=/af-account"}},
+		{name: "uppercase target", args: []string{"--mount", "type=bind,src=/tmp/other,TARGET=/af-account"}},
+		{name: "mixed case dst", args: []string{"--mount", "type=bind,src=/tmp/other,DsT=/af-account"}},
+		{name: "mixed case destination", args: []string{"--mount", "type=bind,src=/tmp/other,DeStInAtIoN=/af-account"}},
+		{name: "mixed case target", args: []string{"--mount", "type=bind,src=/tmp/other,TaRgEt=/af-account"}},
+		{name: "uppercase dst on a subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"}},
+		{name: "mixed case target on a subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,TaRgEt=/af-account/auth.json"}},
+		{name: "uppercase dst on the runtime home", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-home"}},
+		{name: "uppercase destination on a runtime subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,DESTINATION=/af-home/.config"}},
+		{name: "uppercase keys throughout", args: []string{"--mount", "TYPE=bind,SRC=/tmp/other,DST=/af-account"}},
+		{name: "uppercase dst in the inline form", args: []string{"--mount=type=bind,src=/tmp/other,DST=/af-account"}},
+		{name: "uppercase dst before other fields", args: []string{"--mount", "DST=/af-account,type=bind,src=/tmp/other"}},
+		{name: "uppercase dst with readonly", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account,readonly"}},
+		{name: "uppercase dst on a volume mount", args: []string{"--mount", "type=volume,src=repo-vol,DST=/af-account"}},
+		{name: "uppercase dst on a tmpfs mount", args: []string{"--mount", "type=tmpfs,DST=/af-account/.config"}},
+		{name: "quoted lowercase dst", args: []string{"--mount", `type=bind,src=/tmp/other,"dst=/af-account"`}},
+		{name: "quoted uppercase dst", args: []string{"--mount", `type=bind,src=/tmp/other,"DST=/af-account"`}},
+		{name: "quoted target on a subdirectory", args: []string{"--mount", `type=bind,src=/tmp/other,"TARGET=/af-account/.config"`}},
+		{name: "quoted dst in the inline form", args: []string{`--mount=type=bind,src=/tmp/other,"dst=/af-home"`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "repo-controlled run_args mounted over the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsNonProtectedMountTargetsInAnyFieldCase holds the other
+// half of #3398: case-folding the FIELD NAME must not turn this check into a
+// substring or case-insensitive PATH match. Container paths are case-sensitive
+// on Linux, and /af-account-cache is a different directory from /af-account —
+// Docker mounts each exactly where it says, so af refuses neither.
+func TestDockerAccount_AllowsNonProtectedMountTargetsInAnyFieldCase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "uppercase dst on a similarly named path", args: []string{"--mount", "type=bind,src=/tmp/cache,DST=/af-account-cache"}},
+		{name: "mixed case target on a similarly named path", args: []string{"--mount", "type=bind,src=/tmp/cache,TaRgEt=/af-accountant"}},
+		{name: "uppercase destination on a similarly named runtime path", args: []string{"--mount", "type=bind,src=/tmp/cache,DESTINATION=/af-homework"}},
+		{name: "uppercase dst on a differently cased path", args: []string{"--mount", "type=bind,src=/tmp/cache,DST=/AF-ACCOUNT"}},
+		{name: "quoted uppercase dst on a similarly named path", args: []string{"--mount", `type=bind,src=/tmp/cache,"DST=/af-account-cache"`}},
+		{name: "uppercase source only", args: []string{"--mount", "type=bind,SRC=/tmp/af-account,dst=/workspace/cache"}},
+		{name: "volume form on a similarly named path", args: []string{"-v", "/tmp/cache:/af-account-cache"}},
+		{name: "tmpfs form on a similarly named path", args: []string{"--tmpfs", "/af-account-cache"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "harmless mount refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_RejectsProtectedTargetsInColonMountForms guards the ':'
+// halves of the same check against the #3398 fix. --volume and --tmpfs carry no
+// field names to fold, so their targets must keep being refused exactly as
+// before.
+func TestDockerAccount_RejectsProtectedTargetsInColonMountForms(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "short volume", args: []string{"-v", "/tmp/other:/af-account"}},
+		{name: "short volume inline", args: []string{"-v/tmp/other:/af-account/.config"}},
+		{name: "long volume", args: []string{"--volume", "/tmp/other:/af-account/.config"}},
+		{name: "long volume inline", args: []string{"--volume=/tmp/other:/af-home"}},
+		{name: "read-only volume", args: []string{"--volume", "/tmp/other:/af-account/auth.json:ro"}},
+		{name: "relabelled volume", args: []string{"-v", "/tmp/other:/af-home/.config:z"}},
+		{name: "tmpfs", args: []string{"--tmpfs", "/af-account/.config"}},
+		{name: "tmpfs inline with options", args: []string{"--tmpfs=/af-home:size=64m"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a colon-form mount reached the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}

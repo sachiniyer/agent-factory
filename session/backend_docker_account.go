@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/csv"
 	"fmt"
 	"path"
 	"strconv"
@@ -34,6 +35,44 @@ func filterAccountPassthrough(names []string, agent string) []string {
 	return out
 }
 
+// dockerMountFields splits a --mount value into fields the way Docker does.
+// Docker reads the value as a single CSV record, so a quoted field such as
+// `"dst=/af-account"` names the same mount target a bare one does while a plain
+// comma split sees its key as `"dst` and skips it.
+func dockerMountFields(value string) []string {
+	fields, err := csv.NewReader(strings.NewReader(value)).Read()
+	if err != nil {
+		// Docker refuses a value its own CSV reader cannot read, so this
+		// argument installs no mount at all. Check the plain split anyway
+		// rather than nothing, so a value only this reader rejects still has
+		// its targets examined.
+		return strings.Split(value, ",")
+	}
+	return fields
+}
+
+// dockerMountTarget reports the container path a --mount field names, if it
+// names one. Docker lowercases a field's key before matching it, so the
+// comparison here case-folds too: `DST=/af-account/.config` mounts exactly
+// where `dst=` does, and a case-sensitive check let repo-controlled run_args
+// install an overlay on the account boundary (#3398).
+//
+// The key is matched whole, never as a substring, and the TARGET is never
+// folded. That is what keeps a harmless path such as /af-account-cache
+// accepted, and it is also what Docker does: it refuses an unknown key like
+// `mydst=` outright, and container paths are case-sensitive.
+func dockerMountTarget(field string) (string, bool) {
+	key, target, ok := strings.Cut(field, "=")
+	if !ok {
+		return "", false
+	}
+	switch strings.ToLower(key) {
+	case "dst", "destination", "target":
+		return target, true
+	}
+	return "", false
+}
+
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
@@ -60,9 +99,9 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return ""
 		}
 		mountsProtectedPath := func() string {
-			for _, field := range strings.Split(value, ",") {
-				key, target, ok := strings.Cut(field, "=")
-				if !ok || (key != "dst" && key != "destination" && key != "target") {
+			for _, field := range dockerMountFields(value) {
+				target, names := dockerMountTarget(field)
+				if !names {
 					continue
 				}
 				if protected := protectedPath(target); protected != "" {
