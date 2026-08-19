@@ -106,7 +106,7 @@ func TestClampToRectEmptyRect(t *testing.T) {
 func TestClampToRectMatchesGridRegions(t *testing.T) {
 	l := layout.Grid{Panes: 2}.Solve(140, 40)
 	require.False(t, l.Fallback)
-	for id, r := range l.VisibleRegions() {
+	for id, r := range visibleRegions(l) {
 		out := layout.ClampToRect("some\ncontent\nfor "+id, r)
 		requireExactSize(t, out, r.W, r.H)
 	}
