@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -72,6 +73,16 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	if !held {
 		return nil
 	}
+	// A holder that is NOT the archived session gets its own refusal, because the
+	// generic one below would be false (#3404): it blames the archived session for
+	// a branch some other worktree has checked out, sending the user to
+	// `af sessions kill` on a session whose removal would not release anything.
+	// The reclaim declines on the same fact, so branching here does not answer the
+	// question differently — it only says out loud which worktree is in the way.
+	if !archivedWorktreeHoldsBranch(archived, holder) {
+		return fmt.Errorf("cannot create session %q: branch %q is checked out by the worktree at %s — not by the archived session %q holding that name — and the new session would derive that same branch. Moving another worktree's branch aside is not af's call, so freeing the archived name would not free the branch and the create would fail at `git worktree add` — release that branch yourself, or create this session under a different name",
+			title, branch, config.ShellQuotePath(holder), archived.Title)
+	}
 	// The branch is held — but as of #2127 the rename can often take it with it,
 	// which is the whole point of the durable fix. Refuse only when it cannot.
 	//
@@ -127,7 +138,27 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 	// branch off base and the old history would move to a name nobody asked for —
 	// which is a semantic change #2127 never asked for. #2127 is about the case
 	// where the branch is HELD and the create therefore CANNOT proceed at all.
-	if _, blocking := held[current]; !blocking {
+	holder, blocking := held[current]
+	if !blocking {
+		return ""
+	}
+	// Held by WHOM is a second question, and skipping it is what let this rename
+	// somebody else's branch (#3404). The two inputs come from different places and
+	// can disagree: `current` is the branch name CACHED on the archived record,
+	// while `held` is what git reports right now. Detach the archived worktree —
+	// supported, and exactly the case the paragraph above is about — and that cache
+	// outlives the hold, so a wholly unrelated live worktree can be sitting on the
+	// same branch name. "Some worktree holds it" is then true while "the archived
+	// session holds it" is false, and the reclaim renamed the OTHER worktree's
+	// branch from <prefix>foo to <prefix>foo-archived, silently and with no consent
+	// from whoever was working in it.
+	//
+	// So the holder must BE this archived session's worktree, and an unresolvable
+	// answer declines: an empty holder path, or an archived record carrying no
+	// worktree path of its own, is "I cannot tell whose branch this is", which must
+	// never authorize rewriting it. Same fail-closed direction as the published and
+	// candidate-existence probes on either side of this one.
+	if !archivedWorktreeHoldsBranch(archived, holder) {
 		return ""
 	}
 	// The candidate name must be genuinely FREE, and "not checked out" is not the
@@ -145,6 +176,30 @@ func (m *Manager) reclaimArchivedBranchLocked(repoPath string, archived *session
 		return ""
 	}
 	return candidate
+}
+
+// archivedWorktreeHoldsBranch reports whether holder — the worktree path git
+// names as having a branch checked out — is the archived session's OWN worktree
+// (#3404). Callers use it to keep a branch decision inside the session it is
+// about; a false answer means the branch belongs to someone else's worktree, or
+// that af could not tell, and both must be treated the same way.
+//
+// Fail-closed by construction. An empty holder (git reported no path) or an
+// archived record with no worktree path of its own returns false, so "I do not
+// know whose this is" can never read as "it is ours".
+//
+// Both sides go through pathutil.ResolveForCompare rather than being compared
+// verbatim: git reports a worktree by its resolved real path while af stores the
+// spelling the worktree was created with, so on a symlinked root (macOS /var ->
+// /private/var, the #2110 case) a raw string compare says "a different worktree"
+// about the same directory — and here that mistake fails closed into never
+// reclaiming, which is silent rather than loud.
+func archivedWorktreeHoldsBranch(archived *session.Instance, holder string) bool {
+	own := archived.GetWorktreePath()
+	if holder == "" || own == "" {
+		return false
+	}
+	return pathutil.ResolveForCompare(holder) == pathutil.ResolveForCompare(own)
 }
 
 // refuseUnclaimableTitleReuseLocked refuses an explicit-title create BEFORE the
