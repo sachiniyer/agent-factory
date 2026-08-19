@@ -61,10 +61,10 @@ func RemoveWorktreeDir(repoRoot, worktreePath string) (bool, error) {
 	// A repo that registers nothing has no worktree list to consult and no stale
 	// registration that could block a branch delete — there is no repo left to hold
 	// the branch either. Remove AF's orphaned directory and report it, rather than
-	// failing the verification below on a probe that cannot run. This is the same
-	// skip-and-proceed rule CleanupWorktreesForRepo applies to deleted repo roots,
-	// and `af reset` legitimately iterates over records whose repo the user has
-	// since deleted, moved, unmounted, or stripped of its .git.
+	// failing the verification below on a probe that cannot run. This is the
+	// skip-and-proceed rule for deleted repo roots, and `af reset` legitimately
+	// iterates over records whose repo the user has since deleted, moved,
+	// unmounted, or stripped of its .git.
 	if repoRegistersNothing(repoRoot) {
 		if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
 			return false, nil
