@@ -738,7 +738,7 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //
 // Only repos with at least one persistable in-memory instance are rewritten;
 // repos the daemon holds nothing for are left untouched — their records were
-// already removed by the targeted DeleteInstance on kill, or were never loaded.
+// already removed by the targeted DeleteInstanceByStableID on kill, or were never loaded.
 // Generic Loading/Deleting/non-started instances are skipped: their worktree is
 // not yet populated (Loading) or is mid-teardown (Deleting), so FromInstanceData
 // cannot restore them. Explicit durable retention markers override that legacy
@@ -746,7 +746,7 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // staged archive report is the only durable handle to retained source trees.
 //
 // The targeted writers (appendInstanceData / persistInstanceData /
-// DeleteInstance) keep the disk current on every mutation; this full save is the
+// DeleteInstanceByStableID) keep the disk current on every mutation; this full save is the
 // shutdown checkpoint. Records are deduped by title (#808) before marshaling.
 // Because the manager's memory is the source of truth, the save deliberately
 // does NOT read disk first: the file is overwritten with authoritative state, so
@@ -880,20 +880,6 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 	}
 
 	return instances, nil
-}
-
-// DeleteInstance removes an instance from storage by filtering raw JSON
-// directly, avoiding the need to reconstruct live Instance objects (which
-// may fail if tmux/worktree has already been destroyed).
-func (s *Storage) DeleteInstance(title string) error {
-	deleted, err := s.DeleteInstanceByStableID(title, "")
-	if err != nil {
-		return err
-	}
-	if !deleted {
-		return fmt.Errorf("instance not found: %s", title)
-	}
-	return nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for
