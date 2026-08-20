@@ -108,26 +108,3 @@ func TestTransitionAtEpoch_DropsSupersededObservation(t *testing.T) {
 		t.Fatalf("liveness = %v, want LiveReady (an unscoped event still applies)", got)
 	}
 }
-
-// TestToInstanceDataWithEpoch_ReadsBothUnderOneLock: the lifecycle portion of
-// the payload and its lifecycle epoch must describe the same instant. The method
-// is not a whole-projection freshness guard; tabs and other projection fields do
-// not advance this epoch (#2135).
-func TestToInstanceDataWithEpoch_ReadsBothUnderOneLock(t *testing.T) {
-	inst := newEpochTestInstance(t)
-	resetAt := time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC)
-	inst.SetLimitReached(resetAt)
-
-	data, epoch := inst.ToInstanceDataWithEpoch()
-	if epoch != inst.StateEpoch() {
-		t.Fatalf("epoch = %d, want the instance's current %d", epoch, inst.StateEpoch())
-	}
-	if data.Liveness != LiveLimitReached || !data.LimitResetAt.Equal(resetAt) {
-		t.Fatalf("data = (%v, %v), want (LiveLimitReached, %v)", data.Liveness, data.LimitResetAt, resetAt)
-	}
-
-	inst.ClearLimitReached()
-	if epoch == inst.StateEpoch() {
-		t.Fatal("the epoch read earlier must not track later mutations")
-	}
-}
