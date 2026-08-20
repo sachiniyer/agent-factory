@@ -88,7 +88,13 @@ func updateCheckDueForTest(channel string) bool {
 
 func recordCheckForTest(t *testing.T, channel, lastSeenTag, currentVersion string) {
 	t.Helper()
-	if err := autoupdate.RecordCheck(autoupdate.CheckCachePath(), channel, lastSeenTag, currentVersion); err != nil {
+	path := autoupdate.CheckCachePath()
+	if path == "" {
+		return
+	}
+	if err := config.WithFileLock(path, func() error {
+		return autoupdate.ReadCheckCache(path).Record(channel, lastSeenTag, currentVersion, time.Now().UTC())
+	}); err != nil {
 		t.Fatalf("record update check: %v", err)
 	}
 }
