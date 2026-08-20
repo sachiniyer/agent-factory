@@ -56,6 +56,10 @@ func TestHandleKill_NonStarted_UnmergedCommit_StillWarns(t *testing.T) {
 	_, gwErr := inst.GetGitWorktree()
 	require.Error(t, gwErr, "GetGitWorktree is started-gated; the old code skipped the unmerged check for this session")
 	require.NotEmpty(t, inst.GetWorktreePath(), "the ungated worktree-path accessor must still resolve")
+	impact, ok := inst.GetWorktreeCleanupImpact()
+	require.True(t, ok, "GetWorktreeCleanupImpact must resolve for a non-started instance with a worktree (#2209)")
+	require.NotEmpty(t, impact.Branch, "cleanup impact must expose the branch even for a non-started instance")
+	require.NotEmpty(t, impact.BaseCommitSHA, "cleanup impact must expose the base SHA even for a non-started instance")
 
 	_, hm := armKill(t, inst)
 
