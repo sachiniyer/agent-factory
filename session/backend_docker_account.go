@@ -119,12 +119,17 @@ var dockerRunValueShorthands = map[byte]struct{}{
 const dockerGuardedShorthands = "ve"
 
 // dockerShorthandValue reports the value Docker gives the short option at
-// arg[pos], in pflag's own precedence: `-f=value` first, then `-fvalue`, then
-// the next argument. It reports false when the cluster ends the arguments,
-// which is the case Docker itself refuses for want of a value.
+// arg[pos] once the `-f=value` form has been ruled out: the rest of the cluster
+// (`-fvalue`), or else the next argument (`-f value`). It reports false when
+// the cluster ends the arguments, which is the case Docker itself refuses for
+// want of a value.
+//
+// The remainder is taken verbatim, as pflag takes it. The `=` form is resolved
+// by its caller BEFORE this point, because pflag resolves it before consulting
+// the option's kind at all.
 func dockerShorthandValue(arg string, pos int, args []string, index int) (string, bool) {
 	if rest := arg[pos+1:]; rest != "" {
-		return strings.TrimPrefix(rest, "="), true
+		return rest, true
 	}
 	if index+1 < len(args) {
 		return args[index+1], true
@@ -191,20 +196,44 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 	// refuses and names the argument. A refusal is an annoyance with an obvious
 	// remedy — write the options separately — while an accept would hand a
 	// repository the credential boundary (#3401).
+	checkGuardedShorthand := func(character byte, value string) error {
+		if character == 'v' {
+			return checkMount(value)
+		}
+		return checkEnv(value)
+	}
 	checkShorthandCluster := func(arg string, args []string, index int) error {
 		for pos := 1; pos < len(arg); pos++ {
 			character := arg[pos]
-			if strings.IndexByte(dockerGuardedShorthands, character) >= 0 {
+			guarded := strings.IndexByte(dockerGuardedShorthands, character) >= 0
+			// pflag resolves the `-f=value` form BEFORE it consults the
+			// option's kind, so an explicit `=` makes the WHOLE suffix that
+			// option's value — a boolean's included. `-t=false` therefore ends
+			// the cluster; walking on into `false` refused a valid
+			// docker.run_args entry over the `e` in it, which would have kept
+			// the session from starting at all.
+			//
+			// Docker demonstrates the precedence rather than just documenting
+			// it: `-t=v/tmp:/x` fails with "invalid argument ... for -t, --tty
+			// flag: strconv.ParseBool", so the suffix was -t's value and never
+			// a `v` option nested inside it. The `pos+2 < len(arg)` bound is
+			// pflag's own `len(shorthands) > 2` — with nothing after the `=`
+			// there is no value, and Docker reads the `=` as a further option
+			// ("unknown shorthand flag: '=' in -=").
+			if pos+2 < len(arg) && arg[pos+1] == '=' {
+				if guarded {
+					return checkGuardedShorthand(character, arg[pos+2:])
+				}
+				return nil
+			}
+			if guarded {
 				value, present := dockerShorthandValue(arg, pos, args, index)
 				if !present {
 					// Docker refuses an option whose value never arrives, so
 					// this argument installs nothing to check.
 					return nil
 				}
-				if character == 'v' {
-					return checkMount(value)
-				}
-				return checkEnv(value)
+				return checkGuardedShorthand(character, value)
 			}
 			if _, boolean := dockerRunBooleanShorthands[character]; boolean {
 				continue

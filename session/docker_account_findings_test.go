@@ -584,3 +584,58 @@ func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
 		})
 	}
 }
+
+// TestDockerAccount_AllowsExplicitBooleanShortOptions covers the `-f=value`
+// form, which pflag resolves BEFORE it consults an option's own kind: an
+// explicit `=` makes the entire suffix that option's value, boolean included,
+// so `-t=false` ends the cluster rather than continuing into `false`
+// (parseSingleShortArg, pflag v1.0.6). Walking into the suffix rejected
+// `docker.run_args = ["-t=false"]` — a valid configuration — because `false`
+// contains an `e`, which would stop an account session from starting at all.
+//
+// Measured on Docker 29.4.0: every form below runs, and `-t=v/tmp:/probe`
+// fails with "invalid argument ... for -t, --tty flag: strconv.ParseBool",
+// proving the suffix is the boolean's value and never a nested option.
+func TestDockerAccount_AllowsExplicitBooleanShortOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "tty false", args: []string{"-t=false"}},
+		{name: "detach true", args: []string{"-d=true"}},
+		{name: "interactive false", args: []string{"-i=false"}},
+		{name: "quiet true", args: []string{"-q=true"}},
+		{name: "publish-all false", args: []string{"-P=false"}},
+		{name: "explicit boolean after a boolean", args: []string{"-it=false"}},
+		// The suffix is -t's value even when it looks like a mount, so Docker
+		// rejects the value rather than mounting anything.
+		{name: "explicit boolean with a mount-shaped value", args: []string{"-t=v/tmp/other:/af-account"}},
+		{name: "explicit boolean beside a harmless mount", args: []string{"-t=false", "-v", "/tmp/cache:/af-account-cache"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
+				"a valid explicit boolean was refused, which would stop the session from starting: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount is the safety half of
+// the case above: ending the cluster scan at an explicit boolean must not let
+// anything after it through unchecked.
+func TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount(t *testing.T) {
+	tests := [][]string{
+		{"-t=false", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"-t=false", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+		{"-i=false", "-v", "/tmp/other:/af-home"},
+		{"-t=false", "-tv", "/tmp/other:/af-account"},
+		{"-tv=/tmp/other:/af-account"},
+		{"-te=CODEX_API_KEY=repo-identity"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"an explicit boolean shadowed a later guarded option: %v", args)
+		})
+	}
+}
