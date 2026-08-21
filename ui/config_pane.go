@@ -620,16 +620,21 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	if e.Value == "" {
 		return "(unset)"
 	}
-	// Leave room for the cursor and the key.
-	budget := c.width - len(e.Key) - 8
+	// Leave room for the cursor and the key, and measure in terminal CELLS rather
+	// than runes (#3421). A CJK or emoji value renders 2+ cells per rune, so a
+	// rune-count budget under-truncates: at a 72-column pane a CJK path rendered an
+	// 85-cell row, which the overlay frame then wraps — and a wrapped row makes the
+	// height window's line count a lie, so the pane overflows its box (the exact
+	// failure TestConfigPaneNeverRendersALineWiderThanThePane exists to prevent).
+	//
+	// fitLine is the pane's audited truncator: it measures and cuts with the same
+	// ANSI/grapheme-aware arithmetic the width assertions use, so the truncation and
+	// the measurement can never disagree about an emoji cluster.
+	budget := c.width - lipgloss.Width(e.Key) - 8
 	if budget < 12 {
 		budget = 12
 	}
-	runes := []rune(e.Value)
-	if len(runes) <= budget {
-		return e.Value
-	}
-	return string(runes[:budget-1]) + "…"
+	return fitLine(e.Value, budget)
 }
 
 // wrapIndented renders prose wrapped to the pane's width, indented under its key.
