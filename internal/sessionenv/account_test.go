@@ -80,6 +80,233 @@ func TestApplyAccount_ReplacesRatherThanAppendsTheConfigDir(t *testing.T) {
 	require.Equal(t, "/afhome/accounts/codex/personal", dir)
 }
 
+func TestApplyAccountEnvironment_ScopesSiblingAndRemovesAmbientIdentity(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	scoped, err := ApplyAccountEnvironment([]string{
+		"PATH=/usr/bin",
+		"CODEX_HOME=/home/op/.codex",
+		"OPENAI_API_KEY=sk-ambient",
+		"BASH_ENV=/tmp/ambient-bashrc",
+		"PS1=$((CODEX_HOME=42))",
+	}, "make -j4", account)
+	require.NoError(t, err)
+	require.Contains(t, scoped, "CODEX_HOME="+account.Dir)
+	_, leaked := envValue(scoped, "OPENAI_API_KEY")
+	require.False(t, leaked, "a process sibling must not inherit the ambient API identity")
+	_, startupHook := envValue(scoped, "BASH_ENV")
+	require.False(t, startupHook, "the outer /bin/sh -c must not source an admitted startup hook")
+	_, executablePrompt := envValue(scoped, "PS1")
+	require.False(t, executablePrompt, "a later interactive shell must not inherit executable prompt text")
+}
+
+func TestApplyAccountEnvironment_RefusesDirectIdentityOverride(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"OPENAI_API_KEY=other make",
+		"OPENAI_API_KEY=other make >build.log",
+		"OPENAI_API_KEY=other make &",
+		"unset CODEX_HOME; make",
+		"command unset CODEX_HOME; make",
+		"export OPENAI_API_KEY=other; make",
+		"readonly OPENAI_API_KEY=other; make",
+		"read CODEX_HOME </dev/null; make",
+		"printf -v CODEX_HOME other; make",
+		"eval 'unset CODEX_HOME'; make",
+		"alias run='OPENAI_API_KEY=other codex'; run",
+		"exec -c env HOME=$HOME codex",
+		"sh -c 'OPENAI_API_KEY=other codex'",
+		"/bin/bash -lc 'unset CODEX_HOME; codex'",
+		"env sh -c 'OPENAI_API_KEY=other codex'",
+		"sh <<'EOF'\nunset CODEX_HOME\ncodex\nEOF",
+		"bash -i",
+		"PROMPT_COMMAND='export CODEX_HOME=/other' /bin/bash --noprofile --norc -i",
+		"ENV=/tmp/ambient-shrc /bin/sh -i",
+		"env PROMPT_COMMAND='export CODEX_HOME=/other' /bin/bash --noprofile --norc -i",
+		"env PROMPT_COMMAND='export CODEX_HOME=/other' nohup /bin/bash --noprofile --norc -i",
+		"export PROMPT_COMMAND='export CODEX_HOME=/other'; /bin/bash --noprofile --norc -i",
+		"BASH_ENV=/tmp/ambient-bashrc make",
+		"nohup sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/nohup sh -c 'unset CODEX_HOME; codex'",
+		"env nohup sh -c 'unset CODEX_HOME; codex'",
+		"nohup env sh -c 'unset CODEX_HOME; codex'",
+		"nice sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/nice sh -c 'unset CODEX_HOME; codex'",
+		"typeset -n ref=CODEX_HOME; ref=/other; codex",
+		"unset 'CODEX_HOME[0]'; codex",
+		"export 'CODEX_HOME[0]=/other'; codex",
+		"let CODEX_HOME=42; codex",
+		"let 'CODEX_HOME[0]=42'; codex",
+		"mapfile CODEX_HOME </dev/null; codex",
+		"mapfile -t CODEX_HOME </dev/null; codex",
+		"mapfile -O 'CODEX_HOME=42' DATA </dev/null; codex",
+		"readarray CODEX_HOME </dev/null; codex",
+		"for CODEX_HOME in /other; do make; done",
+		"op=unset; $op CODEX_HOME; make",
+		"env CODEX_HOME=/other make",
+		"/usr/bin/env CODEX_HOME=/other make",
+		"env CODEX_HOME=$HOME/.codex make",
+		"env -S 'CODEX_HOME=/other make'",
+		"command env CODEX_HOME=/other make",
+		"env -uCODEX_HOME make",
+		"env -i make",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "command %q must not replace the sibling account environment", command)
+		require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+	}
+	_, err := ApplyAccountEnvironment(nil, "CLAUDE_CODE_USE_BEDROCK=$MODE make",
+		Account{Agent: "claude", Name: "work", Dir: "/afhome/accounts/claude/work"})
+	require.Error(t, err, "a dynamic provider selector can redirect a sibling away from the selected account")
+	require.Contains(t, err.Error(), "sets an identity or shell-startup variable")
+}
+
+func TestApplyAccountEnvironment_RefusesTimeoutWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"timeout 10 sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/timeout 10 sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "timeout must not hide a nested identity mutation in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesSetsidWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"setsid sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/setsid sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "setsid must not hide a nested identity mutation in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesStdbufWrappedShell(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"stdbuf -oL sh -c 'unset CODEX_HOME; codex'",
+		"/usr/bin/stdbuf -oL sh -c 'unset CODEX_HOME; codex'",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "stdbuf must not hide a nested identity mutation in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesBashArithmeticCommand(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "(( 0, CODEX_HOME=42 )); codex", account)
+	require.Error(t, err, "Bash arithmetic-command syntax must not bypass identity mutation checks")
+}
+
+func TestApplyAccountEnvironment_RefusesArraySubscriptSideEffect(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "unset 'arr[CODEX_HOME=42]'; codex", account)
+	require.Error(t, err, "array-subscript arithmetic must not mutate identity through an unrelated base name")
+}
+
+func TestApplyAccountEnvironment_RefusesWaitResultIdentity(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"sleep 0 & wait -p CODEX_HOME $!; codex",
+		"sleep 0 & wait -p RESULT -p CODEX_HOME -n; codex",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "wait -p must not replace the selected identity variable in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_RefusesHistoryReplay(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "set -o history; history -r ./commands; fc -s; codex", account)
+	require.Error(t, err, "history replay must not execute an unvalidated identity mutation")
+}
+
+func TestApplyAccountEnvironment_RefusesIntegerDeclarationSideEffect(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "declare -i x=CODEX_HOME=42; codex", account)
+	require.Error(t, err, "integer-attributed declarations must not evaluate an identity assignment")
+}
+
+func TestApplyAccountEnvironment_RefusesDynamicBuiltinLoading(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	_, err := ApplyAccountEnvironment(nil, "enable -f ./evil.so evil; evil; codex", account)
+	require.Error(t, err, "a dynamically loaded builtin can mutate the current shell environment")
+}
+
+func TestApplyAccountEnvironment_RefusesArrayVariableTests(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"test -v 'arr[CODEX_HOME=42]'; codex",
+		"[ -v 'arr[CODEX_HOME=42]' ]; codex",
+		"[[ -v 'arr[CODEX_HOME=42]' ]]; codex",
+	} {
+		_, err := ApplyAccountEnvironment(nil, command, account)
+		require.Error(t, err, "array variable test must not evaluate an identity mutation in %q", command)
+	}
+}
+
+func TestApplyAccountEnvironment_AllowsNonIdentityAssignments(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		"PORT=3000 npm start",
+		"PORT=3000 npm start >server.log",
+		"PORT=3000 npm start &",
+		"unset PORT; make",
+		"command unset PORT; make",
+		"export PORT=3000; make",
+		"readonly PORT=3000; make",
+		"let PORT=42; make",
+		"mapfile DATA </dev/null; make",
+		"readarray -t DATA </dev/null; make",
+		"sleep 0 & wait -p PID $!; make",
+		"nohup make",
+		"nice -n 5 make",
+		"timeout 10 make",
+		"setsid make",
+		"stdbuf -oL make",
+		"for PORT in 3000; do make; done",
+		"NODE_ENV=test make",
+		"env PORT=3000 npm start",
+		"command env PORT=3000 npm start",
+	} {
+		scoped, err := ApplyAccountEnvironment(nil, command, account)
+		require.NoError(t, err, "command %q only sets process configuration", command)
+		require.Contains(t, scoped, "CODEX_HOME="+account.Dir)
+	}
+}
+
+func TestAccountShellCommandDisablesStartupFiles(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for shell, want := range map[string]string{
+		"/bin/bash": "/bin/bash --noprofile --norc -i",
+		"/bin/csh":  "/bin/csh -f -i",
+	} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err)
+		require.Equal(t, want, command)
+
+		scoped, err := ApplyAccountEnvironment([]string{
+			"PATH=/bin",
+			"ENV=/tmp/ambient-shrc",
+			"BASH_ENV=/tmp/ambient-bashrc",
+			"ZDOTDIR=/tmp/ambient-zdotdir",
+			"PROMPT_COMMAND=export CODEX_HOME=/tmp/ambient-codex",
+			"PS1=$((CODEX_HOME=42))",
+		}, command, account)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+	}
+}
+
+func TestAccountShellCommandRefusesShellsWithoutCredentialSafeStartup(t *testing.T) {
+	for _, shell := range []string{"/bin/fish", "/bin/zsh", "/opt/company/bash"} {
+		_, err := AccountShellCommand(shell)
+		require.Error(t, err, "%s can restore identity variables after the account environment is installed", shell)
+		require.Contains(t, err.Error(), "no credential-safe account launch mode")
+	}
+}
+
 // Two sessions on different accounts must get different roots. This is the
 // assertion an allowlist implementation fails: passthrough carries the daemon's
 // ONE value to every session, so both would be identical while each looked

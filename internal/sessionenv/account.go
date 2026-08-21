@@ -190,6 +190,28 @@ func AccountIdentityNames(agent string) []string {
 // per-session by definition. An allowlist implementation passes a presence check
 // and a smoke test while giving every session the same account (#2983).
 func ApplyAccount(env []string, command string, account Account) ([]string, error) {
+	return applyAccount(env, command, account, true)
+}
+
+// ApplyAccountEnvironment scopes a sibling process to account without requiring
+// that process to be the agent itself. It still rejects a command that directly
+// replaces the selected identity after the environment is installed.
+func ApplyAccountEnvironment(env []string, command string, account Account) ([]string, error) {
+	if err := ValidateAccountEnvironmentCommand(command, account); err != nil {
+		return nil, err
+	}
+	scoped, err := applyAccount(env, command, account, false)
+	if err != nil {
+		return nil, err
+	}
+	// Every environment-only command is launched by the exec shim through
+	// /bin/sh -c. Strip shell startup code before that outer shell runs, not only
+	// when the user's command is itself an interactive shell.
+	scoped = stripAccountShellStartupEnvironment(scoped)
+	return scoped, nil
+}
+
+func applyAccount(env []string, command string, account Account, validateCommand bool) ([]string, error) {
 	configVar, ok := SupportsAccounts(account.Agent)
 	if !ok {
 		return nil, fmt.Errorf(
@@ -233,8 +255,10 @@ func ApplyAccount(env []string, command string, account Account) ([]string, erro
 	// never fires while the shell expands it to a non-empty string and Claude
 	// authenticates through ~/.aws instead. Refusing any command-local assignment
 	// to a selector removes the need to evaluate it (#2983 review).
-	if err := ValidateAccountCommand(command, account); err != nil {
-		return nil, err
+	if validateCommand {
+		if err := ValidateAccountCommand(command, account); err != nil {
+			return nil, err
+		}
 	}
 
 	denied := accountScopedNames(account.Agent, configVar)

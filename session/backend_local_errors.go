@@ -1,6 +1,26 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// accountTabScopeUnknownError marks a persisted account sibling whose tmux
+// existence probe did not answer. The loader retains that instance inert rather
+// than dropping the only handle to a process that may still be live.
+type accountTabScopeUnknownError struct {
+	title string
+	tab   string
+}
+
+func (e *accountTabScopeUnknownError) Error() string {
+	return fmt.Sprintf("restore account-scoped tab %q for %q: tmux session state is unknown", e.tab, e.title)
+}
+
+var probeRestoredTabSession = func(session *tmux.TmuxSession) (bool, bool) {
+	return session.ProbeSession()
+}
 
 // The typed recover/respawn failure shapes LocalBackend hands the daemon, split
 // out of backend_local.go for the file-length lint (#1145). Both exist so the
@@ -41,4 +61,42 @@ func markRecoverRebuilt(rebuilt bool, err error) error {
 		return err
 	}
 	return &RecoverRebuiltWorkspaceError{Err: err}
+}
+
+func finishRecoverTabFailure(
+	title string,
+	rebuilt bool,
+	restoreResult tmux.RestoreResult,
+	tmuxSession *tmux.TmuxSession,
+	err error,
+) error {
+	setupErr := fmt.Errorf("recover: restore tabs for session %q: %w", title, err)
+	if restoreResult == tmux.RestoreRespawned {
+		if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
+			setupErr = fmt.Errorf("%w (cleanup error: %v)", setupErr, cleanupErr)
+		}
+	}
+	return markRecoverRebuilt(rebuilt, setupErr)
+}
+
+func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err error) error {
+	if firstTime || tmuxSession == nil {
+		return err
+	}
+	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {
+		return fmt.Errorf("%w (cleanup error: %v)", err, cleanupErr)
+	}
+	return err
+}
+
+func cleanupRespawnedAccountTabs(setupErr error, sessions []*tmux.TmuxSession) error {
+	if setupErr == nil {
+		return nil
+	}
+	for _, session := range sessions {
+		if _, err := session.CloseAndWaitForPaneExit(); err != nil {
+			setupErr = fmt.Errorf("%w (cleanup respawned account tab: %v)", setupErr, err)
+		}
+	}
+	return setupErr
 }

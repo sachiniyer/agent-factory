@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -527,6 +528,14 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	if err := instance.Start(false); err != nil {
+		var unknownScope *accountTabScopeUnknownError
+		if errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh) {
+			// A sibling probe or the live agent's in-place scope upgrade did not
+			// establish a safe runtime boundary. Keep the row inert and explicitly
+			// killable so storage retains every exact tmux cleanup handle.
+			instance.MarkStartupStateUnknown()
+			return instance, nil
+		}
 		return nil, err
 	}
 
@@ -573,14 +582,15 @@ func restoreLocalTabs(instance *Instance, data InstanceData) {
 				handoffs = append([]AgentHandoff(nil), td.Handoffs...)
 			}
 			instance.Tabs = append(instance.Tabs, &Tab{
-				ID:           id,
-				Name:         td.Name,
-				Kind:         kind,
-				Command:      td.Command,
-				URL:          td.URL,
-				Conversation: conversation,
-				Handoffs:     handoffs,
-				tmux:         ts,
+				ID:                            id,
+				Name:                          td.Name,
+				Kind:                          kind,
+				Command:                       td.Command,
+				URL:                           td.URL,
+				Conversation:                  conversation,
+				Handoffs:                      handoffs,
+				tmux:                          ts,
+				accountScopeProvenanceUnknown: data.Account != "" && idx > 0 && kind.HasTmux() && ts != nil,
 			})
 		}
 		return

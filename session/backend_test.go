@@ -23,6 +23,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	sessionenv.AccountLookup = func(agent, name string) (sessionenv.Account, error) {
+		return sessionenv.Account{
+			Agent: agent,
+			Name:  name,
+			Dir:   filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "accounts", agent, name),
+		}, nil
+	}
 	sessionenv.HandleInternalExec()
 
 	// #837: fail the package loudly if any test touches the real config.json.

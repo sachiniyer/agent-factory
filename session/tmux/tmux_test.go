@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	aflog "github.com/sachiniyer/agent-factory/log"
@@ -24,6 +25,13 @@ import (
 // TestMain initializes the logger so tests that exercise paths writing to
 // InfoLog/ErrorLog (e.g. Restore's re-spawn fallback) do not nil-deref.
 func TestMain(m *testing.M) {
+	// Match main's account lookup before the internal pane shim can consume this
+	// test binary. Real-pane account tests then exercise the same registry-backed
+	// child boundary as the shipped executable rather than a test-only shortcut.
+	sessionenv.AccountLookup = func(agent, name string) (sessionenv.Account, error) {
+		executable, _ := os.Executable()
+		return agentaccount.Selected(os.Getenv("AGENT_FACTORY_HOME"), agent, name, executable)
+	}
 	sessionenv.HandleInternalExec()
 	HandleDedicatedServerExec()
 	// #837: fail the package loudly if any test touches the real config.json.

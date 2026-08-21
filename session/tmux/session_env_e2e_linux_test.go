@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/shellquote"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -201,5 +202,178 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 		if slices.Contains(names, denied) {
 			t.Fatalf("pane environment retained disallowed variable %s", denied)
 		}
+	}
+}
+
+// TestAccountScopedShellTabInheritsSelectedCredentials is the #3340 regression:
+// a shell tab is a sibling tmux session, but its credential identity belongs to
+// the parent agent session. The shell must receive the selected account root and
+// must not receive the daemon's ambient API key.
+func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
+	testguard.IsolateTmux(t)
+	forceNewSessionEnvMarkers(t, true)
+
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	accountDir, err := agentaccount.Register(home, ProgramCodex, "work")
+	if err != nil {
+		t.Fatalf("register fixture account: %v", err)
+	}
+	ambientHome := filepath.Join(home, "ambient-codex")
+	t.Setenv("CODEX_HOME", ambientHome)
+	t.Setenv("OPENAI_API_KEY", "ambient-must-not-reach-tab")
+	t.Setenv("HOME", home)
+	profile := "export CODEX_HOME=" + shellquote.Quote(ambientHome) + "\n" +
+		"export OPENAI_API_KEY=ambient-must-not-reach-tab\n"
+	if err := os.WriteFile(filepath.Join(home, ".bash_profile"), []byte(profile), 0o600); err != nil {
+		t.Fatalf("write ambient login profile: %v", err)
+	}
+
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, ProgramCodex)
+	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nwhile :; do sleep 1; done\n"), 0o700); err != nil {
+		t.Fatalf("write agent fixture: %v", err)
+	}
+	reportPath := filepath.Join(dir, "shell-environment")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	agent := NewTmuxSession("account-tab-parent", ProgramCodex)
+	agent.SetAccountForAgent(ProgramCodex, "work")
+	if err := agent.Start(dir); err != nil {
+		t.Fatalf("start account-scoped parent session: %v", err)
+	}
+	t.Cleanup(func() { _, _ = agent.CloseAndWaitForPaneExit() })
+	assertAccountScopedNewWindow(t, agent, accountDir, dir)
+	if output, err := exec.Command(
+		"tmux", "set-option", "-t", exactTarget(agent.SanitizedName()), "default-command", "",
+	).CombinedOutput(); err != nil {
+		t.Fatalf("clear pre-fix agent default command: %v: %s", err, output)
+	}
+	for name, value := range map[string]string{
+		"CODEX_HOME":     ambientHome,
+		"OPENAI_API_KEY": "ambient-must-not-reach-tab",
+	} {
+		if output, err := exec.Command(
+			"tmux", "set-environment", "-t", exactTarget(agent.SanitizedName()), name, value,
+		).CombinedOutput(); err != nil {
+			t.Fatalf("install pre-fix agent environment %s: %v: %s", name, err, output)
+		}
+	}
+	restoredAgent := NewTmuxSessionFromSanitizedName(agent.SanitizedName(), ProgramCodex)
+	restoredAgent.SetAccountForAgent(ProgramCodex, "work")
+	result, err := restoredAgent.RestoreWithResult(dir)
+	if err != nil {
+		t.Fatalf("restore account-scoped parent session: %v", err)
+	}
+	if result != RestoreReattached {
+		t.Fatalf("restored live agent result = %v, want reattached", result)
+	}
+	assertAccountScopedNewWindow(t, restoredAgent, accountDir, dir)
+
+	shell, err := agent.NewShellSiblingSession("af_account-tab-shell", "/bin/sh")
+	if err != nil {
+		t.Fatalf("prepare shell tab: %v", err)
+	}
+	if err := shell.Start(dir); err != nil {
+		t.Fatalf("open shell tab: %v", err)
+	}
+	t.Cleanup(func() { _, _ = shell.CloseAndWaitForPaneExit() })
+	storedEnvironment, err := exec.Command(
+		"tmux", "show-environment", "-t", "="+shell.SanitizedName(),
+	).Output()
+	if err != nil {
+		t.Fatalf("inspect shell tab tmux environment: %v", err)
+	}
+	stored := strings.Split(string(storedEnvironment), "\n")
+	if !slices.Contains(stored, "CODEX_HOME="+accountDir) {
+		t.Fatalf("tmux did not store the selected account root; environment:\n%s", storedEnvironment)
+	}
+	for _, line := range stored {
+		if strings.HasPrefix(line, "OPENAI_API_KEY=") {
+			t.Fatalf("tmux stored the ambient API identity for the account shell: %q", line)
+		}
+	}
+	reportCommand := "printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "; " +
+		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
+		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n"
+	if err := shell.SendRawKeys([]byte(reportCommand)); err != nil {
+		t.Fatalf("inspect account-scoped shell environment: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var report []byte
+	for time.Now().Before(deadline) {
+		report, err = os.ReadFile(reportPath)
+		if err == nil && len(report) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("shell tab did not report its environment: %v", err)
+	}
+	got := string(report)
+	if !strings.Contains(got, "CODEX_HOME="+accountDir+"\n") {
+		t.Fatalf("shell tab did not inherit selected account root; report:\n%s", got)
+	}
+	if strings.Contains(got, "CODEX_HOME="+ambientHome+"\n") {
+		t.Fatalf("shell tab inherited ambient credential root; report:\n%s", got)
+	}
+	if !strings.Contains(got, "OPENAI_API_KEY=absent\n") {
+		t.Fatalf("shell tab inherited ambient API credentials; report:\n%s", got)
+	}
+
+	assertAccountScopedNewWindow(t, shell, accountDir, dir)
+
+	process := agent.NewSiblingSession("af_account-tab-process", "sleep 30")
+	if err := process.Start(dir); err != nil {
+		t.Fatalf("open process tab: %v", err)
+	}
+	t.Cleanup(func() { _, _ = process.CloseAndWaitForPaneExit() })
+	assertAccountScopedNewWindow(t, process, accountDir, dir)
+}
+
+func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir, dir string) {
+	t.Helper()
+	// An unqualified tmux new-window uses the session's default command. It must
+	// not fall back to a login shell that can restore ambient credentials from a
+	// profile after af established the account boundary.
+	if output, err := exec.Command("tmux", "set-option", "-t", exactTarget(session.SanitizedName()), "default-shell", "/bin/bash").CombinedOutput(); err != nil {
+		t.Fatalf("select profile-reading default shell: %v: %s", err, output)
+	}
+	newPane, err := exec.Command(
+		"tmux", "new-window", "-dP", "-F", "#{pane_id}", "-t", "="+session.SanitizedName()+":",
+	).Output()
+	if err != nil {
+		t.Fatalf("open tmux-created shell window: %v", err)
+	}
+	newWindowReport := filepath.Join(dir, session.SanitizedName()+"-new-window-environment")
+	if err := os.Remove(newWindowReport); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("clear prior new-window report: %v", err)
+	}
+	newWindowCommand := "printf 'CODEX_HOME=%s\\nOPENAI_API_KEY=%s\\n' \"${CODEX_HOME-<unset>}\" \"${OPENAI_API_KEY-<unset>}\" > " +
+		shellquote.Quote(newWindowReport)
+	target := strings.TrimSpace(string(newPane))
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "-l", newWindowCommand).CombinedOutput(); err != nil {
+		t.Fatalf("write new-window probe: %v: %s", err, output)
+	}
+	if output, err := exec.Command("tmux", "send-keys", "-t", target, "Enter").CombinedOutput(); err != nil {
+		t.Fatalf("submit new-window probe: %v: %s", err, output)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	var report []byte
+	for time.Now().Before(deadline) {
+		report, err = os.ReadFile(newWindowReport)
+		if err == nil && len(report) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("tmux-created window did not report its environment: %v", err)
+	}
+	got := string(report)
+	if got != "CODEX_HOME="+accountDir+"\nOPENAI_API_KEY=<unset>\n" {
+		t.Fatalf("tmux-created window escaped account scoping; report:\n%s", got)
 	}
 }
