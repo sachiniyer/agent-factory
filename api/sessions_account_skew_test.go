@@ -22,6 +22,11 @@ import (
 // it raw produced `af sessions kill my session` (fails: too many arguments) or, in
 // the metacharacter case, a command that parses into something else entirely.
 //
+// Quoting alone is not the whole answer: `--name=-worker` is a valid title, and
+// `af sessions kill '-worker'` still exits "unknown shorthand flag", so the
+// suggestion must terminate options too — the convention
+// daemon/sandbox_preserve.go's kill suggestion states.
+//
 // This path is deliberately reachable: a newer CLI sends --account to an older
 // daemon, which drops the field it does not know. It is printed exactly when
 // someone is already cleaning up after a create they did not want.
@@ -37,12 +42,19 @@ func TestSessionsCreate_AccountSkewSuggestsAPasteableKill(t *testing.T) {
 		{
 			name:  "spaces",
 			title: "my session with spaces",
-			want:  "af sessions kill 'my session with spaces'",
+			want:  "af sessions kill -- 'my session with spaces'",
 		},
 		{
 			name:  "shell metacharacters",
 			title: "test;echo pwned",
-			want:  "af sessions kill 'test;echo pwned'",
+			want:  "af sessions kill -- 'test;echo pwned'",
+		},
+		{
+			// A leading dash is a valid title and quoting cannot save it: only the
+			// option terminator can. This is the case Codex raised on #3429.
+			name:  "leading dash",
+			title: "-worker",
+			want:  "af sessions kill -- -worker",
 		},
 		{
 			// A title needing no quoting still prints clean, which is the reason this
@@ -50,7 +62,7 @@ func TestSessionsCreate_AccountSkewSuggestsAPasteableKill(t *testing.T) {
 			// exists to be read as much as pasted.
 			name:  "already shell-safe",
 			title: "captain",
-			want:  "af sessions kill captain",
+			want:  "af sessions kill -- captain",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,7 +102,7 @@ func TestSessionsCreate_AccountSkewSuggestsAPasteableKill(t *testing.T) {
 			// Not just "contains the right string somewhere": the raw title must not
 			// also appear as a bare command, which is how a %s-formatted suggestion
 			// would pass a substring check for a safe title while still being wrong.
-			if tc.title != "captain" {
+			if tc.title != "captain" && tc.title != "-worker" {
 				assert.NotContains(t, msg, "`af sessions kill "+tc.title+"`",
 					"the unquoted command is still in the message:\n  full message: %s", msg)
 			}
