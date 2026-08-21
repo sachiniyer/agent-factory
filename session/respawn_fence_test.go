@@ -149,11 +149,12 @@ func TestRespawnFenceDropsAPollObservationDecidedBeforeItWasRaised(t *testing.T)
 	i := limitBlockedInstance(t, probe)
 
 	// The poll captures the epoch, then probes — slowly, against a remote sandbox.
-	pollEpoch := i.StateEpoch()
+	_, pollEpoch := i.InFlightOpAndEpoch()
 
 	// The resume raises the fence while that probe is still in flight.
 	require.NoError(t, i.Transition(BeginRespawn()))
-	require.NotEqual(t, pollEpoch, i.StateEpoch(), "raising the fence must advance the epoch")
+	_, fenceEpoch := i.InFlightOpAndEpoch()
+	require.NotEqual(t, pollEpoch, fenceEpoch, "raising the fence must advance the epoch")
 
 	// The probe now comes back and settles the death it saw — which was OUR teardown.
 	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(pollEpoch)))
@@ -170,7 +171,8 @@ func TestRespawnFenceDropsAPollObservationDecidedBeforeItWasRaised(t *testing.T)
 // is an epoch check, not a blanket refusal, so real deaths still land.
 func TestAnUnstaleObservationStillLands(t *testing.T) {
 	i := limitBlockedInstance(t, newRespawnProbe())
-	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(i.StateEpoch())))
+	_, epoch := i.InFlightOpAndEpoch()
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(epoch)))
 	require.Equal(t, LiveLost, i.GetLiveness())
 }
 
@@ -305,7 +307,7 @@ func TestInFlightOpAndEpochLeavesNoWindowBetweenTheSkipAndTheEpoch(t *testing.T)
 	// The fence slips in between the two reads.
 	require.Equal(t, OpNone, i.GetInFlightOp(), "the skip passes")
 	require.NoError(t, i.Transition(BeginRespawn()))
-	staleReadEpoch := i.StateEpoch()
+	_, staleReadEpoch := i.InFlightOpAndEpoch()
 
 	// That epoch is post-fence, so the observation settles as CURRENT and lands —
 	// this is the defect, asserted rather than described.
@@ -334,7 +336,8 @@ func TestInFlightOpAndEpochReportsAFenceAlreadyRaised(t *testing.T) {
 
 	op, epoch := i.InFlightOpAndEpoch()
 	require.Equal(t, OpRespawning, op, "the caller must skip on this")
-	require.Equal(t, i.StateEpoch(), epoch)
+	_, rereadEpoch := i.InFlightOpAndEpoch()
+	require.Equal(t, rereadEpoch, epoch)
 }
 
 // #3004 review finding 11 (P1), and the mechanism #2997 actually described: the
@@ -366,7 +369,8 @@ func TestBeginLimitResumeFencesTheWholeSequenceWithoutDisturbingLiveness(t *test
 		"and the precondition the resume validated against survives its own operation")
 
 	// Which is what makes the poll skip for the whole sequence, not just the tail.
-	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(i.StateEpoch()-1)),
+	_, fencedEpoch := i.InFlightOpAndEpoch()
+	require.NoError(t, i.Transition(ObserveLiveness(LiveLost).AtEpoch(fencedEpoch-1)),
 		"an observation from before the fence is dropped")
 	require.Equal(t, LiveLimitReached, i.GetLiveness())
 

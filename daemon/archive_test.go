@@ -709,7 +709,8 @@ func TestRestoreArchived_MovesWorktreeBackAndRespawns(t *testing.T) {
 	inst.SetBackend(backend)
 	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
-	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), inst.StateEpoch())
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), epoch)
 
 	_, _, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, err)
