@@ -205,9 +205,9 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	testHookPollBeforePersistLock()
 	repoStartLock.Lock()
 	// Re-read the WHOLE projection after joining the same ordering domain as tab
-	// mutations and session creation. StateEpoch intentionally covers lifecycle
-	// state only, so using it as a whole-payload change detector lets an untracked
-	// roster mutation publish first and then get erased by this stale event.
+	// mutations and session creation. InFlightOpAndEpoch intentionally covers
+	// lifecycle state only, so using it as a whole-payload change detector lets
+	// an untracked roster mutation publish first and then get erased by this stale event.
 	data = instance.ToInstanceData()
 	var err error
 	if durableChanged {

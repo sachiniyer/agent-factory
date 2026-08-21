@@ -18,7 +18,8 @@ func TestPersistLoadRuntimeReplacementsCheckpointsEvidenceClear(t *testing.T) {
 	inst.SetStatusForTest(session.Ready)
 	attemptedAt := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
-	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), inst.StateEpoch())
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), epoch)
 	seeded, err := json.Marshal([]session.InstanceData{inst.ToInstanceData()})
 	if err != nil {
 		t.Fatal(err)

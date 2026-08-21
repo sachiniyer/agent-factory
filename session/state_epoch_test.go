@@ -25,28 +25,31 @@ func TestStateEpoch_AdvancesOnlyOnRealChange(t *testing.T) {
 	inst := newEpochTestInstance(t)
 	_ = inst.Transition(ObserveLiveness(LiveReady))
 
-	start := inst.StateEpoch()
+	_, start := inst.InFlightOpAndEpoch()
 	if err := inst.Transition(ObserveLiveness(LiveReady)); err != nil {
 		t.Fatalf("Transition: %v", err)
 	}
-	if got := inst.StateEpoch(); got != start {
-		t.Fatalf("epoch = %d after re-observing the same liveness, want %d (unchanged)", got, start)
+	_, reobserved := inst.InFlightOpAndEpoch()
+	if reobserved != start {
+		t.Fatalf("epoch = %d after re-observing the same liveness, want %d (unchanged)", reobserved, start)
 	}
 
 	if err := inst.Transition(ObserveLiveness(LiveRunning)); err != nil {
 		t.Fatalf("Transition: %v", err)
 	}
-	if got := inst.StateEpoch(); got == start {
-		t.Fatalf("epoch = %d after a real liveness change, want it advanced", got)
+	_, changed := inst.InFlightOpAndEpoch()
+	if changed == start {
+		t.Fatalf("epoch = %d after a real liveness change, want it advanced", changed)
 	}
 
 	// The usage-limit reset time is tracked too: a later-parsed reset time on an
 	// already-limit-blocked session is a real change (#1204's persist case).
 	inst.SetLimitReached(time.Time{})
-	parked := inst.StateEpoch()
+	_, parked := inst.InFlightOpAndEpoch()
 	inst.SetLimitReached(time.Date(2026, 7, 20, 18, 0, 0, 0, time.UTC))
-	if got := inst.StateEpoch(); got == parked {
-		t.Fatalf("epoch = %d after the reset time changed, want it advanced", got)
+	_, afterReset := inst.InFlightOpAndEpoch()
+	if afterReset == parked {
+		t.Fatalf("epoch = %d after the reset time changed, want it advanced", afterReset)
 	}
 }
 
@@ -61,7 +64,7 @@ func TestSetLimitReachedAtEpoch_DropsSupersededDecision(t *testing.T) {
 	inst.SetLimitReached(resetAt)
 
 	// An observer captures the epoch, then a resume lands.
-	observed := inst.StateEpoch()
+	_, observed := inst.InFlightOpAndEpoch()
 	inst.ClearLimitReached()
 
 	if applied := inst.SetLimitReachedAtEpoch(resetAt, observed); applied {
@@ -76,7 +79,8 @@ func TestSetLimitReachedAtEpoch_DropsSupersededDecision(t *testing.T) {
 
 	// A decision made about the CURRENT state still applies — the guard is
 	// per-observation, not a window in which detection is suppressed.
-	if applied := inst.SetLimitReachedAtEpoch(resetAt, inst.StateEpoch()); !applied {
+	_, currentEpoch := inst.InFlightOpAndEpoch()
+	if applied := inst.SetLimitReachedAtEpoch(resetAt, currentEpoch); !applied {
 		t.Fatal("a decision at the current epoch must apply")
 	}
 	if !inst.LimitReached() {
@@ -91,7 +95,7 @@ func TestTransitionAtEpoch_DropsSupersededObservation(t *testing.T) {
 	inst := newEpochTestInstance(t)
 	_ = inst.Transition(ObserveLiveness(LiveRunning))
 
-	observed := inst.StateEpoch()
+	_, observed := inst.InFlightOpAndEpoch()
 	inst.SetLimitReached(time.Time{}) // something newer lands
 
 	if err := inst.Transition(ObserveLiveness(LiveReady).AtEpoch(observed)); err != nil {
