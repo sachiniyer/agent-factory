@@ -463,6 +463,23 @@ func isSandboxBackendType(t string) bool {
 	return err == nil
 }
 
+// lostSandboxRecord reports whether a persisted row is a sandbox session that
+// loaded INERT and Lost — the one shape whose started=false says nothing about
+// whether the record is disposable. FromInstanceData skips Start() for a
+// non-archived sandbox row on purpose: its container/remote did not survive the
+// daemon restart and only the branch it pushed to origin did, so the row stays out
+// of the poll and restore loops behind the started=false fence until an explicit
+// restore re-provisions it.
+//
+// That makes the record the user's ONLY pointer to real work on origin, so the
+// storage checkpoint treats this as a durable retention claim rather than
+// never-started junk (#3422). It is scoped to the exact shape the loader produces:
+// a LOCAL session that is Lost loads started=true and already survives, and a
+// local row that never started is the junk the checkpoint's !Started() skip is for.
+func lostSandboxRecord(data InstanceData) bool {
+	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
+}
+
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,
 // for a docker/ssh/hook session loaded from disk (#1592 Phase 4 PR6/PR7). Its
 // Type() and Capabilities() keep the session classified as its runtime so
