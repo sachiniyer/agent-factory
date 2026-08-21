@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -246,7 +247,14 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		t.Fatalf("write blocking systemd-run shim: %v", err)
 	}
 	systemctl := filepath.Join(dir, "systemctl")
-	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\nfor suffix in child parent; do\n  pid=$(cat \"$base.$suffix\")\n  kill -KILL \"$pid\" 2>/dev/null || true\ndone\n"
+	// The kills land after this shim has answered, which is what systemd does:
+	// `systemctl kill` queues the signals and returns, and the kernel finishes
+	// the teardown on its own schedule. Delaying them deterministically is the
+	// regression for #3382 — the assertion below used to probe the pids once,
+	// instantly, so it read a launcher child that was merely on its way out as
+	// one that survived. Its fds are redirected so CombinedOutput does not wait
+	// on the backgrounded subshell.
+	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\n(\n  sleep 0.2\n  for suffix in child parent; do\n    pid=$(cat \"$base.$suffix\")\n    kill -KILL \"$pid\" 2>/dev/null || true\n  done\n) >/dev/null 2>&1 &\n"
 	if err := os.WriteFile(systemctl, []byte(stopScript), 0o700); err != nil {
 		t.Fatalf("write systemctl shim: %v", err)
 	}
@@ -276,12 +284,76 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s pid: %v", label, err)
 		}
-		if err := syscall.Kill(pid, 0); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Errorf("timed-out dedicated server %s %d is still alive", label, pid)
-		} else if err != syscall.ESRCH {
+		// An identity, not a bare pid: (pid, StartID) names a process INSTANCE, so
+		// nothing below can mistake a recycled number for a survivor or aim a kill
+		// at whatever inherited it. Lookup answers three ways and only one of them
+		// has anything left to wait for.
+		process, err := proctree.Lookup(pid)
+		switch {
+		case errors.Is(err, proctree.ErrProcessExited), errors.Is(err, os.ErrNotExist):
+			// Gone already: reaped, or a corpse nobody has collected yet. A zombie
+			// counts, and that is not a concession — it has exited, and who collects
+			// its status is somebody else's schedule (#2103).
+			continue
+		case err != nil:
 			t.Errorf("probe timed-out %s %d: %v", label, pid, err)
+			continue
 		}
+		gone, probeErr := waitForProcessTeardown(process, dedicatedServerTeardownWait)
+		switch {
+		case probeErr != nil:
+			t.Errorf("probe timed-out %s %d: %v", label, pid, probeErr)
+		case !gone:
+			// Only now that the wait has genuinely expired: a survivor is a real
+			// failure, and killing it keeps that failure from leaking a process into
+			// the next run. Signal re-verifies the identity first, so a PID recycled
+			// since the capture above is left alone rather than killed.
+			if killErr := proctree.Signal(process, syscall.SIGKILL); killErr != nil &&
+				!errors.Is(killErr, proctree.ErrIdentityChanged) {
+				t.Errorf("kill surviving %s %d: %v", label, pid, killErr)
+			}
+			t.Errorf("timed-out dedicated server %s %d is still alive after %s",
+				label, pid, dedicatedServerTeardownWait)
+		}
+	}
+}
+
+// dedicatedServerTeardownWait is how long the assertion above watches for the
+// killed launcher and its child to go away. Large on purpose: the wait returns
+// the instant they are gone, so the budget costs nothing on a passing run, and
+// only a genuine survivor — one that is still there after the whole of it —
+// spends it. A tight bound would be a statement about the CI scheduler rather
+// than about the teardown (#2879).
+const dedicatedServerTeardownWait = 30 * time.Second
+
+// waitForProcessTeardown reports whether the captured process instance stopped
+// running within timeout. Signal delivery and process teardown are
+// asynchronous, so there is always a window after the kill in which the pid is
+// still probe-able; the caller's old single instantaneous probe granted that
+// window zero time and failed whenever CI contention widened it past nothing
+// (#3382).
+//
+// SameIdentity rather than kill(pid, 0), because an existence probe answers the
+// wrong question twice over: it accepts a zombie as running (#2103), and it
+// accepts a recycled PID as the process that was supposed to die. It is also
+// the reason a read failure is RETURNED rather than retried or folded into
+// either verdict — "I cannot look" is neither "it is gone" nor "it survived",
+// and this package's standing rule is that those never collapse into each
+// other.
+func waitForProcessTeardown(process proctree.Process, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		alive, err := proctree.SameIdentity(process)
+		if err != nil {
+			return false, err
+		}
+		if !alive {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
