@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 )
 
 // Bounding the SETUP path's speculative worktree cleanup (#3424).
@@ -104,6 +106,36 @@ func (g *GitWorktree) setupCleanupGit(what string, args ...string) error {
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
+	// LATCH THE STALL ON THE WORKSPACE, and do it before anything can return.
+	// Bounding this command without latching leaves the create path strictly
+	// WORSE than the hang it replaces, by a route that is fully reachable:
+	//
+	//   1. `worktree remove -f` deregisters the checkout and THEN stalls unlinking
+	//      files, so the deadline kills it mid-delete: the directory survives and
+	//      git no longer lists it.
+	//   2. Setup returns this error, and backend_local.go's launch runs its
+	//      deferred i.Kill() for a first-time create — a FRESH cleanupRun, whose
+	//      r.unknown starts false.
+	//   3. That run's own `worktree remove -f` now fails FAST ("is not a working
+	//      tree") instead of stalling, because step 1 already deregistered the
+	//      path. Nothing in the run trips a deadline, so it stays "known".
+	//   4. shouldRemoveWorktreeDir asks git, git answers "not registered", and
+	//      that is the #802 branch: git let go of the worktree but the directory
+	//      survived. Cleanup() is cleanup(true), so removeDir is authorized.
+	//   5. os.RemoveAll takes no context. It hangs forever on the very mount that
+	//      just stalled git — and unlike git it cannot be bounded or killed.
+	//
+	// This is #1917 round 6 arriving through a new door, and its lesson verbatim:
+	// "the knowledge that this filesystem stalls would die with the attempt".
+	// markCleanupStalled makes it durable, so cleanup() refuses at its recovery
+	// gate — retaining the directory AND the record for a retry or a daemon
+	// restart, which is recoverable, where a wedged os.RemoveAll is not.
+	//
+	// Latching on ANY of these commands' deadlines, not just the remove's, is the
+	// same rule teardown's chokepoint applies (cleanupRun.git): a stalled prune or
+	// branch delete equally means this workspace's filesystem is not answering,
+	// and an unbounded recursive delete against it is equally unkillable.
+	g.markCleanupStalled()
 	// The message states only what is KNOWN. "Setup added no worktree" is always
 	// true — `worktree add` comes after every one of these steps and the abort is
 	// what stops it. What the killed step itself finished is NOT knowable: a
@@ -111,12 +143,21 @@ func (g *GitWorktree) setupCleanupGit(what string, args ...string) error {
 	// `branch -D` may have taken the ref with it. Claiming otherwise would make
 	// this a bounded failure that lies about what it committed, which is worse
 	// than the hang it replaces (the #3233-#3237 outcome-contract rule).
+	// The suggested command is quoted with shellsuggest, which is the quoter for
+	// commands af PRINTS for a human to paste. Interpolating the path raw made the
+	// suggestion silently WRONG for any repository whose path contains a space:
+	// `git -C /home/me/my repo worktree prune` targets /home/me/my and reads
+	// `repo` as the subcommand. An actionable message that hands the reader a
+	// command which quietly does something else is worse than one that says
+	// nothing. (Not %q — that is GO quoting, and it diverges from shell quoting on
+	// exactly the inputs that matter.)
 	return fmt.Errorf("%w: cannot prepare worktree path %s: the setup step that had to %s made no progress "+
 		"and was killed at its deadline, so setup stopped before adding a worktree there — what that step "+
 		"itself completed before it was killed is unknown; the path is most likely on a stalled filesystem "+
 		"(a hung network mount) or held by a process wedged in an uninterruptible read, so free or unmount it "+
-		"before retrying (`git -C %s worktree prune` reconciles the registration once the path answers again): %w",
-		ErrWorktreeSetupStalled, g.worktreePath, what, g.repoPath, err)
+		"before retrying (`%s` reconciles the registration once the path answers again): %w",
+		ErrWorktreeSetupStalled, g.worktreePath, what,
+		shellsuggest.Command("git", "-C", g.repoPath, "worktree", "prune"), err)
 }
 
 // deleteStaleSetupBranch removes a leftover branch of our own name before

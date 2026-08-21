@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -317,11 +318,12 @@ func TestSetup_StalledCleanupKillsTheGitChild(t *testing.T) {
 	pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
 	require.NoError(t, convErr)
 
-	// The kill is a signal, so the exit is asynchronous; poll rather than
-	// assert once. ESRCH means the process is gone AND reaped.
+	// The kill is a signal, so the exit is asynchronous; poll rather than assert
+	// once.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if terminated, state := processTerminated(pid); terminated {
+			t.Logf("stalled child pid %d terminated (%s)", pid, state)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -331,6 +333,111 @@ func TestSetup_StalledCleanupKillsTheGitChild(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// processTerminated reports whether pid is no longer RUNNING, which is the
+// property the kill test cares about — not whether it has also been reaped.
+//
+// Requiring ESRCH conflates the two and fails on a kill that worked (#3427
+// review). The stalled child is a GRANDchild of the test process: Go reaps the
+// fake git it spawned directly, but the `sleep` beneath it is orphaned onto PID
+// 1, and a container PID 1 that is the image's entrypoint rather than an init
+// never calls wait(). The child then sits in Z forever — killed, holding no
+// pipes, no mount references and no CPU — while kill(pid, 0) keeps succeeding
+// because a zombie still owns its PID slot.
+//
+// So both answers mean terminated, and the state is returned for the log rather
+// than being flattened into the bool.
+func processTerminated(pid int) (terminated bool, state string) {
+	if err := syscall.Kill(pid, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return true, "gone"
+		}
+		// EPERM means it exists and is not ours to signal, which cannot happen for
+		// a child of this test; report it rather than reading it as terminated.
+		return false, "unsignalable: " + err.Error()
+	}
+	if s := processState(pid); strings.HasPrefix(s, "Z") {
+		return true, "zombie"
+	}
+	return false, "running"
+}
+
+// processState returns the kernel's single-letter state for pid, or "" if it
+// cannot be read. procfs first (Linux, where the container case lives), ps as
+// the portable fallback (macOS has no /proc, and CI runs the darwin matrix).
+func processState(pid int) string {
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
+		// comm is parenthesized and may itself contain spaces or parens, so the
+		// state field is the first token after the LAST ')'.
+		if idx := bytes.LastIndexByte(data, ')'); idx >= 0 {
+			if fields := strings.Fields(string(data[idx+1:])); len(fields) > 0 {
+				return fields[0]
+			}
+		}
+		return ""
+	}
+	out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestSetup_StalledCleanupLatchesTheStallForTeardown is the #3427-review P1, and
+// it is the one case where bounding this path without latching would have left
+// the tree WORSE than the hang it replaced.
+//
+// A timed-out `worktree remove -f` deregisters the checkout before it stalls, so
+// the directory survives UNREGISTERED. The deferred i.Kill() after a setup error
+// then starts a fresh cleanup run whose own remove fails FAST ("is not a working
+// tree") rather than stalling — nothing trips a deadline, the run stays "known",
+// git answers "not registered", and Cleanup()'s #802 branch walks into
+// os.RemoveAll. That call takes no context: on the mount that just stalled git it
+// hangs forever and cannot be killed at all.
+//
+// The fixture models the post-stall state exactly — an existing, unregistered
+// directory — and then runs the teardown with REAL git, because a still-stalled
+// git would mark the run unknown by itself and hide the defect. The canary is the
+// assertion that bites: without the latch, cleanup deletes it and reports settled.
+func TestSetup_StalledCleanupLatchesTheStallForTeardown(t *testing.T) {
+	gw, repoRoot, worktreePath, realGit := newStallFixture(t, "af-3424-latch")
+
+	// What step 1 above leaves behind: files present, registration gone.
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	canary := filepath.Join(worktreePath, "uncommitted-work.txt")
+	require.NoError(t, os.WriteFile(canary, []byte("user work"), 0o644))
+	require.False(t, worktreeRegistered(t, realGit, repoRoot, worktreePath),
+		"fixture: the directory must be unregistered, as a timed-out remove leaves it")
+
+	pathBeforeStall := os.Getenv("PATH")
+	stallGitSubcommand(t, "remove", "-f")
+	shortenLocalTimeout(t, 200*time.Millisecond)
+
+	err := runBounded(t, 30*time.Second, "Setup", gw.Setup)
+	requireBoundedStallError(t, err, worktreePath, "worktree remove -f")
+
+	require.True(t, gw.HasUnresolvedRelocation(),
+		"the setup stall must be latched on the WORKSPACE, not just returned: a fresh "+
+			"cleanup run cannot rediscover it, because the stalled remove already "+
+			"deregistered the path and every probe it makes now answers instantly (#1917 round 6)")
+
+	// Real git from here on: the teardown's own commands must ANSWER, or the run
+	// would mark itself unknown and this test would pass without the latch.
+	t.Setenv("PATH", pathBeforeStall)
+	require.False(t, worktreeRegistered(t, realGit, repoRoot, worktreePath))
+
+	state, cleanupErr := gw.Cleanup()
+	assert.Equal(t, CleanupStateUnknown, state,
+		"a workspace af could not establish must never report settled — the caller deletes "+
+			"the session record on settled, orphaning the directory")
+	require.Error(t, cleanupErr, "the refusal must be reported, not swallowed")
+
+	assert.FileExists(t, canary,
+		"cleanup reached the unbounded os.RemoveAll fallback: in production that call has "+
+			"no context and hangs forever on the mount that just stalled git, so the latch "+
+			"must make this refuse instead")
+	assert.DirExists(t, worktreePath)
 }
 
 // TestSetup_OrdinaryCleanupFailureIsStillIgnored is the other half of the
@@ -364,4 +471,37 @@ exec %q "$@"
 	assert.True(t, worktreeRegistered(t, realGit, repoRoot, worktreePath),
 		"the ordinary create must still add the worktree")
 	assert.True(t, branchExists(t, realGit, repoRoot, "af-3424-normal"))
+}
+
+// TestSetup_StallMessageQuotesTheRepositoryPath is the #3427-review P3. This
+// message exists to be READ and pasted, and interpolating the repository path
+// raw made the command it suggests silently target the wrong directory for any
+// repository whose path contains a space: `git -C /home/me/my repo worktree
+// prune` treats /home/me/my as the repo and `repo` as the subcommand. A
+// suggestion that quietly does something else is worse than no suggestion.
+//
+// shellsuggest is the right quoter here — it is the one for commands af PRINTS
+// for a human — and notably NOT %q, which is Go quoting and diverges from shell
+// quoting on exactly these inputs.
+func TestSetup_StallMessageQuotesTheRepositoryPath(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := filepath.Join(t.TempDir(), "my repo")
+	require.NoError(t, os.MkdirAll(repoRoot, 0o755))
+	runGit(t, repoRoot, "init")
+	runGit(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+
+	worktreePath := filepath.Join(t.TempDir(), "wt")
+	gw, err := NewGitWorktreeFromStorage(repoRoot, worktreePath, "stall-3424", "af-3424-quote", "", false, false)
+	require.NoError(t, err)
+
+	stallGitSubcommand(t, "remove", "-f")
+	shortenLocalTimeout(t, 200*time.Millisecond)
+
+	setupErr := runBounded(t, 30*time.Second, "Setup", gw.Setup)
+	requireBoundedStallError(t, setupErr, worktreePath, "worktree remove -f")
+	assert.Contains(t, setupErr.Error(), "git -C '"+repoRoot+"' worktree prune",
+		"the pasteable recovery command must be shell-quoted, or it silently targets a "+
+			"different directory for a repository path containing a space")
+	assert.NotContains(t, setupErr.Error(), "git -C "+repoRoot+" worktree prune",
+		"the raw unquoted form must not survive anywhere in the message")
 }
