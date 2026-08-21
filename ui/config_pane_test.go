@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -766,5 +767,175 @@ func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("unsized, the pane must render everything; %q is missing", e.Key)
 		}
+	}
+}
+
+// configPaneSweepWidths are the widths #3430's measurement table names. A single
+// width is not enough: the pane composes several rows whose arithmetic differs,
+// so a fix can hold at 72 and break at 36 (which is exactly what #3430 was).
+var configPaneSweepWidths = []int{30, 36, 44, 50, 56, 64, 72}
+
+// TestConfigPaneFitsItsBoxAtEveryWidth is #3430: the hard invariant is that the
+// pane NEVER renders a line wider than itself, at any width, in any state.
+//
+// The hint row is what broke it. renderHints composed five hints, shed the one
+// hintDropOrder could shed (#1936), and the remainder was still 43 cells — so
+// below ~44 the hint row was the widest line the pane drew with nothing left to
+// drop. Reachable on a ~70-column terminal, not a pathological one: the config
+// overlay takes the #1821 full-screen fallback there, which hands the pane the
+// terminal width minus the frame.
+//
+// Once the frame wraps that row the height window's line count is a lie — the
+// window budgets by counting the lines renderRowLines produces — so the pane
+// overflows its box and the selection scrolls off, the same mechanism
+// TestConfigPaneNeverRendersALineWiderThanThePane documents at 72.
+//
+// The walk covers the editing hint row too, because it is the same function's
+// other return path and was unconditional.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: a 43-cell hint row at widths 30 and 36.
+func TestConfigPaneFitsItsBoxAtEveryWidth(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
+			c := NewConfigPane()
+			c.SetSize(w, paneHeight)
+			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+			c.SetFocus(true)
+			c.showAdvanced = true
+			c.rebuildRows()
+			c.status = `update_channel must be one of [stable, preview], got "nightly".`
+			c.statusIsError = true
+
+			assertFits := func(step int, state string) {
+				t.Helper()
+				for _, line := range strings.Split(c.String(), "\n") {
+					if got := lipgloss.Width(line); got > w {
+						t.Fatalf("step %d (%s, %s): rendered a %d-cell line into a %d-cell pane — the frame wraps it, which makes the height window's line count a lie (#3430).\n  line: %q",
+							step, c.selectedEntry().Key, state, got, w, line)
+					}
+				}
+			}
+
+			for step := 0; step < 45; step++ {
+				assertFits(step, "list")
+				// The edit hint row is the same function's other return path.
+				c.beginEdit()
+				assertFits(step, "editing")
+				c.cancelEdit()
+				c.move(1)
+			}
+		})
+	}
+}
+
+// TestConfigPaneHintsAlwaysAdvertiseTheExit is the priority half of #3430: what
+// the degradation ladder is allowed to take, and what it must never take.
+//
+// A hint row that has shed everything must still tell the user how to LEAVE. A
+// modal whose escape route is invisible is the #2830 failure — an advertised key
+// that is not live where focus is — run backwards: the key still works, but a
+// user who cannot see it is stuck in a pane they did not know how to close. So
+// `esc` survives every width, and the assistant button (#2453, deliberately
+// always-on) is the last thing dropped before it.
+func TestConfigPaneHintsAlwaysAdvertiseTheExit(t *testing.T) {
+	for _, w := range append([]int{4, 9, 12, 20, 23, 32, 43}, configPaneSweepWidths...) {
+		c := NewConfigPane()
+		c.SetSize(w, paneHeight)
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetFocus(true)
+		c.rebuildRows()
+
+		hints := c.renderHints()
+		if !strings.Contains(hints, "esc") {
+			t.Errorf("w=%d: the hint row shed the exit: %q", w, hints)
+		}
+		c.beginEdit()
+		editing := c.renderHints()
+		if !strings.Contains(editing, "esc") {
+			t.Errorf("w=%d: the editing hint row shed the exit: %q", w, editing)
+		}
+		c.cancelEdit()
+	}
+}
+
+// TestConfigPaneEditFieldFitsItsRowWithoutClipping tests sizeEditField's
+// arithmetic directly, WITHOUT the fitPaneLine backstop in the way.
+//
+// This is the assertion the width sweep cannot make. A field one cell too wide
+// still leaves the pane fitting its box — the backstop clips the row — so the
+// sweep passes while the user loses the last character of the value they are
+// editing. The play-test caught exactly that (`…TAILMAR…` where TAILMARK
+// should have been), which is what a focused textinput's extra cursor cell costs
+// if the budget does not account for it.
+//
+// The floor is the one exemption: at a narrow pane with a long key there is no
+// arithmetic that fits, and the backstop is then the honest answer.
+func TestConfigPaneEditFieldFitsItsRowWithoutClipping(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		c := NewConfigPane()
+		c.SetSize(w, paneHeight)
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetFocus(true)
+		c.showAdvanced = true
+		c.rebuildRows()
+
+		for step := 0; step < 45; step++ {
+			e := c.selectedEntry()
+			if e == nil {
+				c.move(1)
+				continue
+			}
+			c.beginEdit()
+			row := entryRowChromeWidth + lipgloss.Width(e.Key) + lipgloss.Width(c.input.View())
+			atFloor := c.input.Width <= minEditFieldWidth
+			if row > w && !atFloor {
+				t.Errorf("w=%d %s: the open value field composes a %d-cell row — the pane clips it, so the value loses its tail (input.Width=%d, prompt=%d, view=%d)",
+					w, e.Key, row, c.input.Width, lipgloss.Width(c.input.Prompt), lipgloss.Width(c.input.View()))
+			}
+			c.cancelEdit()
+			c.move(1)
+		}
+	}
+}
+
+// TestConfigPaneDisplayRowsStayOneLine covers the height axis of the same
+// invariant: a value holding a newline must not turn one list row into several.
+//
+// An unrestricted string key accepts embedded newlines, and lipgloss.Width
+// reports the WIDEST line of a multi-line string — so a line-oriented clip
+// measures such a value as narrow and passes it through whole. The row count then
+// disagrees with what renderRowLines reported, which is the same way the height
+// window breaks.
+func TestConfigPaneDisplayRowsStayOneLine(t *testing.T) {
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	seeded := false
+	for i := range entries {
+		if entries[i].Key == "on_archive_command" {
+			entries[i].Value = "echo one\necho two\techo three\r\necho four"
+			seeded = true
+		}
+	}
+	if !seeded {
+		t.Fatal("on_archive_command left the manifest — this test is vacuous")
+	}
+
+	c := NewConfigPane()
+	c.SetSize(72, paneHeight)
+	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	for step := 0; step < 45; step++ {
+		for _, line := range strings.Split(c.String(), "\n") {
+			if strings.Contains(line, "echo one") && strings.Contains(line, "echo four") {
+				// Everything on ONE row is the point; the clip may cut it shorter.
+				break
+			}
+			if strings.Contains(line, "echo two") && !strings.Contains(line, "echo one") {
+				t.Fatalf("step %d: a multiline value spilled onto its own row: %q", step, line)
+			}
+		}
+		c.move(1)
 	}
 }
