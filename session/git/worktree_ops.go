@@ -117,8 +117,13 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return err
 	}
 
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+	// Bounded, and it ABORTS the rebuild on a stall rather than continuing into
+	// the unbounded `worktree add` below (#3424). A rebuild reaches this with the
+	// directory already gone from git's point of view but possibly still on a
+	// filesystem that no longer answers, which is exactly the stall.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
 	baseCommit, err := g.rebuildBaseCommit()
 	if err != nil {
@@ -238,21 +243,14 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	// We are reusing a pre-existing branch — Cleanup() must not delete it.
 	g.branchCreatedByUs = false
 
-	// Clean up any existing worktree first. Ignore the error (the worktree
-	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
-	// deleting the directory: at this point the path has not been
-	// established as a session-owned worktree, and a path that stays
-	// blocked surfaces loudly via the `worktree add` below (#802 audit).
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
-
-	// Prune stale worktree metadata BEFORE re-adding. If the worktree
-	// directory was deleted externally (rm -rf, disk cleanup, etc.), git
-	// still tracks it internally and `worktree add <same-path>` fails with
-	// "missing but already registered worktree". Recent git clears that
-	// registration on the `worktree remove -f` above, but older git errors
-	// ("is not a working tree") and leaves it behind; pruning here recovers
-	// either way. Mirrors the prune-before-add ordering in setupNewWorktree.
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+	// Clear the path: remove any worktree still registered there, then prune
+	// stale registrations before re-adding. Both commands are bounded and an
+	// ordinary failure is still ignored (the worktree usually doesn't exist) —
+	// see clearStaleWorktreePath for why a STALL must abort instead (#3424) and
+	// for the #802 rule that keeps this path from deleting the directory.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
@@ -305,22 +303,21 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// We are creating the branch ourselves — Cleanup() may delete it.
 	g.branchCreatedByUs = true
 
-	// Clean up any existing worktree first. Ignore the error (the worktree
-	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
-	// deleting the directory: at this point the path has not been
-	// established as a session-owned worktree, and a path that stays
-	// blocked surfaces loudly via the `worktree add` below (#802 audit).
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
+	// Clear the path: remove any worktree still registered there, then prune
+	// stale registrations BEFORE the branch delete below. Both commands are
+	// bounded and an ordinary failure is still ignored (the worktree usually
+	// doesn't exist) — see clearStaleWorktreePath for why a STALL must abort
+	// instead (#3424), for the prune-before-`branch -D` ordering, and for the
+	// #802 rule that keeps this path from deleting the directory.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
-	// Prune stale worktree metadata BEFORE deleting the branch. If `worktree
-	// remove -f` above failed (corrupted .git pointer, etc.), git still tracks
-	// the worktree internally and `branch -D` will fail with "branch is
-	// checked out", leaving the orphaned branch behind and blocking
-	// `worktree add -b` below.
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
-
-	// Clean up any existing branch using git CLI (much faster than go-git PlainOpen)
-	_, _ = g.runGitCommand(g.repoPath, "branch", "-D", g.branchName) // Ignore error if branch doesn't exist
+	// Clean up any existing branch using git CLI (much faster than go-git
+	// PlainOpen). A missing branch is still ignored; only a stall aborts.
+	if err := g.deleteStaleSetupBranch(); err != nil {
+		return err
+	}
 
 	// Try to base the new branch off origin's default branch for a fresh starting point.
 	// Fall back to HEAD if no remote is available.
