@@ -630,11 +630,33 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	// fitLine is the pane's audited truncator: it measures and cuts with the same
 	// ANSI/grapheme-aware arithmetic the width assertions use, so the truncation and
 	// the measurement can never disagree about an emoji cluster.
+	//
+	// It is LINE-oriented, so the value is flattened to one line first. An
+	// unrestricted string key (on_archive_command) may hold a newline, and
+	// lipgloss.Width reports the WIDEST line of a multi-line string — so a value
+	// made of many short lines would measure as narrow, pass the budget check
+	// whole, and expand one list row into several. The rune budget this replaces
+	// capped the TOTAL, so flattening keeps that cap rather than trading a width
+	// overflow for a height one. A tab is flattened for the matching reason: a
+	// terminal expands it to the next tab stop, which no measurement predicts.
 	budget := c.width - lipgloss.Width(e.Key) - 8
 	if budget < 12 {
 		budget = 12
 	}
-	return fitLine(e.Value, budget)
+	return fitLine(flattenConfigValue(e.Value), budget)
+}
+
+// flattenConfigValue renders a config value as ONE line, turning embedded
+// control whitespace into spaces. Runs are NOT collapsed: the list row is a
+// preview of the real value, and collapsing would misreport what is stored.
+func flattenConfigValue(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t', '\v', '\f':
+			return ' '
+		}
+		return r
+	}, value)
 }
 
 // wrapIndented renders prose wrapped to the pane's width, indented under its key.
