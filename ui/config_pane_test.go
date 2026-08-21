@@ -886,11 +886,18 @@ func TestConfigPaneEditFieldFitsItsRowWithoutClipping(t *testing.T) {
 				continue
 			}
 			c.beginEdit()
-			row := entryRowChromeWidth + lipgloss.Width(e.Key) + lipgloss.Width(c.input.View())
-			atFloor := c.input.Width <= minEditFieldWidth
-			if row > w && !atFloor {
-				t.Errorf("w=%d %s: the open value field composes a %d-cell row — the pane clips it, so the value loses its tail (input.Width=%d, prompt=%d, view=%d)",
-					w, e.Key, row, c.input.Width, lipgloss.Width(c.input.Prompt), lipgloss.Width(c.input.View()))
+			keyBudget, _ := c.editRowSplit(e.Key)
+			row := entryRowChromeWidth + keyBudget + lipgloss.Width(c.input.View())
+			// No exemption: since editRowSplit yields the KEY rather than the field
+			// (#3430 review), every width in the table has a split that fits, so the
+			// backstop must never be what saves this row.
+			if row > w {
+				t.Errorf("w=%d %s: the open value field composes a %d-cell row — the pane clips it, so the value loses its tail (keyBudget=%d, input.Width=%d, prompt=%d, view=%d)",
+					w, e.Key, row, keyBudget, c.input.Width, lipgloss.Width(c.input.Prompt), lipgloss.Width(c.input.View()))
+			}
+			if c.input.Width < minEditFieldWidth {
+				t.Errorf("w=%d %s: the value field was squeezed to %d cells, below the %d-cell floor",
+					w, e.Key, c.input.Width, minEditFieldWidth)
 			}
 			c.cancelEdit()
 			c.move(1)
@@ -937,5 +944,74 @@ func TestConfigPaneDisplayRowsStayOneLine(t *testing.T) {
 			}
 		}
 		c.move(1)
+	}
+}
+
+// TestConfigPaneEditFieldSurvivesTheTightestRow is the #3430 review's P1: making
+// the row fit must not fit it by deleting the thing the user is looking at.
+//
+// af renders normally down to layout.HardMinWidth (40 columns), which
+// app/render.go turns into 34 content cells for this pane. The cursor,
+// network.require_loopback_token (30 cells) and the gap consume all 34 by
+// themselves — so clipping the composed row from the right satisfies the width
+// invariant by removing the entire focused input, and the user types into a field
+// they cannot see. The key yields instead.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the row renders as the full key followed by
+// an ellipsis, with no prompt, no value and no cursor.
+func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
+	const (
+		w   = 34 // a 40-column terminal, af's supported minimum
+		key = "network.require_loopback_token"
+	)
+	c := NewConfigPane()
+	c.SetSize(w, paneHeight)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	found := false
+	for step := 0; step < 60; step++ {
+		e := c.selectedEntry()
+		if e != nil && e.Key == key {
+			found = true
+			break
+		}
+		c.move(1)
+	}
+	if !found {
+		t.Fatalf("%s left the manifest — this test is vacuous", key)
+	}
+
+	c.beginEdit()
+	// Find it by the SELECTION CURSOR, not by the key: the key is truncated by
+	// the fix, and a prefix match would land on the shorter network.require_token.
+	var row string
+	for _, line := range strings.Split(c.String(), "\n") {
+		if strings.Contains(line, "› ") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("the editing row did not render at all")
+	}
+	if got := lipgloss.Width(row); got > w {
+		t.Errorf("the editing row is %d cells in a %d-cell pane: %q", got, w, row)
+	}
+	// The field must be there: its prompt, and the value it was filled with.
+	if !strings.Contains(row, c.input.Prompt) {
+		t.Errorf("the value field's prompt was clipped away — the user cannot see what they are editing: %q", row)
+	}
+	if !strings.Contains(row, "false") {
+		t.Errorf("the value was clipped away, so the field is invisible while focused: %q", row)
+	}
+	// And the key is what paid for it.
+	if strings.Contains(row, key) {
+		t.Errorf("the full key survived, so the field cannot have had room: %q", row)
+	}
+	if !strings.Contains(row, "…") {
+		t.Errorf("the key was not truncated, so nothing yielded: %q", row)
 	}
 }

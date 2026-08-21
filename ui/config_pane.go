@@ -173,9 +173,7 @@ func (c *ConfigPane) SetSize(width, height int) {
 	c.sizeEditField()
 }
 
-// sizeEditField sizes the value field from the row it actually renders into: the
-// cursor, the key, the two-space gap and the field's own prompt all come out of
-// the pane's width before the field gets what is left.
+// sizeEditField sizes the value field from the row it actually renders into.
 //
 // It used to be a flat width-24, which is only correct for a 20-cell key — so
 // editing `network.require_loopback_token` (30 cells) rendered a row wider than
@@ -185,18 +183,54 @@ func (c *ConfigPane) SetSize(width, height int) {
 // Called from SetSize (which runs on every render, so a resize mid-edit is
 // covered) and from beginEdit, where the selected key is what changed.
 func (c *ConfigPane) sizeEditField() {
-	key := 0
+	key := ""
 	if e := c.selectedEntry(); e != nil {
-		key = lipgloss.Width(e.Key)
+		key = e.Key
 	}
-	width := c.width - entryRowChromeWidth - key - lipgloss.Width(c.input.Prompt) - editFieldCursorWidth
-	// A floor keeps the field usable rather than collapsing to nothing; the row
-	// itself is clipped by fitPaneLine if even this does not fit, so the floor
-	// cannot reintroduce an overflow.
-	if width < minEditFieldWidth {
-		width = minEditFieldWidth
-	}
+	_, width := c.editRowSplit(key)
 	c.input.Width = width
+}
+
+// editRowSplit divides an editing row's width between the KEY and the value
+// FIELD, and is the single place that arithmetic lives so the renderer and the
+// field's own Width can never disagree about it.
+//
+// The field is served first, and the key yields (#3430 review). At af's
+// supported minimum — a 40-column terminal, which app/render.go turns into 34
+// content cells — the cursor, `network.require_loopback_token` and the gap
+// consume all 34 by themselves. Clipping the composed row from the right then
+// removes the entire focused input: the width invariant holds, the row ends in
+// an ellipsis, and the user is typing into a field they cannot see. Truncating
+// the KEY instead costs identification the purpose line right below already
+// gives back, and is the only degradation that keeps the row's actual job doable.
+//
+// The key is only ever shortened when it would push the field below its minimum,
+// so at ordinary widths this returns the key untouched and the same field width
+// as before.
+//
+// Note the asymmetry with a non-editing row, which clips the VALUE and keeps the
+// whole key: there the key is the row's identity and the value is a preview, so
+// the preview is what can go. While editing, the field IS the task.
+func (c *ConfigPane) editRowSplit(key string) (keyBudget, fieldWidth int) {
+	keyWidth := lipgloss.Width(key)
+	// Everything the field costs beyond its text: the prompt, plus the cell a
+	// focused textinput renders past its Width for the cursor.
+	fieldChrome := lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
+	available := c.width - entryRowChromeWidth
+	keyBudget = available - minEditFieldWidth - fieldChrome
+	if keyBudget > keyWidth {
+		keyBudget = keyWidth
+	}
+	if keyBudget < 0 {
+		keyBudget = 0
+	}
+	fieldWidth = available - keyBudget - fieldChrome
+	// The floor keeps the field usable at a pane too narrow for any split to fit;
+	// fitPaneLine then clips the row, so the floor cannot reintroduce an overflow.
+	if fieldWidth < minEditFieldWidth {
+		fieldWidth = minEditFieldWidth
+	}
+	return keyBudget, fieldWidth
 }
 
 // entryRowChromeWidth is the fixed chrome every entry row carries: the
@@ -660,9 +694,17 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	}
 	b.WriteString(cursor)
 
-	key := configKeyStyle.Render(e.Key)
+	keyText := e.Key
+	if selected && c.editing {
+		// Clip the KEY, not the field — see editRowSplit. Clipped as plain text
+		// before styling, so the truncation never lands inside an escape sequence.
+		if budget, _ := c.editRowSplit(e.Key); budget < lipgloss.Width(keyText) {
+			keyText = fitLine(keyText, budget)
+		}
+	}
+	key := configKeyStyle.Render(keyText)
 	if selected {
-		key = configSelectedStyle.Render(e.Key)
+		key = configSelectedStyle.Render(keyText)
 	}
 	b.WriteString(key)
 	b.WriteString("  ")

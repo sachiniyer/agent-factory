@@ -125,10 +125,56 @@ drive_edit_field() {
     echo "PASS: #3430 the value field fits its row at ${cols}x${rows}"
 }
 
+# --- D: a tight row yields its KEY, not the field the user is looking at -----
+#
+# The review's P1. At a narrow pane the cursor, a 30-cell key and the gap can
+# consume the whole width, and clipping the composed row from the right then
+# satisfies the width invariant by deleting the focused input — the user types
+# into a field they cannot see.
+drive_tight_edit_row() {
+    local cols="$1" rows="$2" key='network.require_loopback_token' row i
+    export AF_DRIVER_COLS="$cols" AF_DRIVER_ROWS="$rows"
+    af_reset_sandbox
+    _seed_config
+    af_boot
+    _open_config
+
+    # Select by the FULL key: it is only truncated once the field opens.
+    for i in $(seq 1 40); do
+        [ -n "$(_row_with "› $key")" ] && break
+        af_send j
+        sleep "$AF_DRIVER_POLL"
+    done
+    if [ -z "$(_row_with "› $key")" ]; then
+        _af_fail "#3430: never landed the cursor on '$key' at ${cols}x${rows}"
+        af_capture >&2
+        return 1
+    fi
+
+    af_send Enter
+    af_wait_for 'esc cancel' "$AF_DRIVER_TIMEOUT" 'the value field opened' || return 1
+
+    # Find the row by the selection cursor, since the key is now truncated.
+    row="$(_row_with '› ')"
+    _af_log "#3430 tight edit row (${cols}x${rows}): $row"
+    if ! printf '%s' "$row" | grep -qF -- 'false'; then
+        _af_fail "#3430: the focused field is invisible at ${cols}x${rows} — the row was clipped from the right, which deletes the input rather than the key:"
+        af_capture >&2
+        return 1
+    fi
+    if printf '%s' "$row" | grep -qF -- "$key"; then
+        _af_fail "#3430: the full key survived at ${cols}x${rows}, so the field cannot have had room: [$row]"
+        return 1
+    fi
+    af_close_config
+    echo "PASS: #3430 a tight editing row keeps its field and yields the key at ${cols}x${rows}"
+}
+
 # 48 columns puts the pane at ~42 cells (one under the un-sheddable 43) and 44
 # at ~38; both are above af's 40-column hard minimum.
 drive_narrow_hints 48 30
 drive_narrow_hints 44 30
 drive_edit_field 120 40
+drive_tight_edit_row 44 30
 
 echo "PASS: #3430 the config pane fits its box at 48x30, 44x30 and 120x40"
