@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
@@ -484,8 +485,16 @@ pointing at one).`,
 				"session %q was created but the daemon did not apply account %q — it is running on the ambient "+
 					"identity, not that account. The running daemon predates account support; upgrade it "+
 					"(af daemon restart after an upgrade) and recreate. Remove the unscoped session with "+
-					"`af sessions kill %s`",
-				data.Title, createAccountFlag, data.Title))
+					"`%s`",
+				data.Title, createAccountFlag,
+				// Through the shellsuggest seam, not %s: a title may contain a space or a
+				// shell metacharacter (validation rejects only whitespace-only titles and
+				// control characters), so `af sessions kill my session` fails with "too many
+				// arguments" and `af sessions kill test;echo pwned` parses into something
+				// else entirely. This suggestion is printed exactly when someone is already
+				// cleaning up after a failed create, which is when it most has to be
+				// pasteable (#3420). A safe title still prints unquoted.
+				shellsuggest.Command("af", "sessions", "kill", data.Title)))
 		}
 
 		return jsonOut(data)
