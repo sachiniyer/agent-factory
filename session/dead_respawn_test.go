@@ -110,7 +110,7 @@ func TestDeadInstance_LoadsAsLostWithoutRespawn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_dead_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	// Both sessions are GONE (the death that produced Dead): a Restore would hit
 	// the missing-session branch and re-spawn via new-session.
@@ -145,7 +145,7 @@ func TestLostInstance_NotRespawnedOnLoad(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_lost_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
@@ -178,7 +178,7 @@ func TestTombstonedInstance_NotRespawnedOnLoad(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_tombstone_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
@@ -215,7 +215,7 @@ func TestDeadInstance_HasUpdatedNilMonitor(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_dead_hasupdated"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	// Both sessions are GONE (the death that produced Dead): Start(false)
 	// returns at the Dead/Lost guard before Restore, so the agent TmuxSession's
@@ -286,7 +286,7 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_991_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	// The agent session is alive (reconnect path); the shell session is gone, so
 	// its restore hits the re-spawn branch — which the PTY fails on the first
@@ -323,7 +323,7 @@ func TestRunningInstance_OneLiveOneDeadShell_DeadShellReplaced(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_2527_agent"
-	firstShell := agentName + shellTmuxSuffix // "…__shell"
+	firstShell := agentName + tmuxTabSeparator + shellTabName // "…__shell"
 	secondShell := agentName + "__shell-2"
 
 	// Agent and the FIRST shell are alive; the SECOND shell is gone and its
@@ -367,7 +367,7 @@ func TestRunningInstance_AllShellsDead_EveryShellReplaced(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_2527_alldead"
-	firstShell := agentName + shellTmuxSuffix
+	firstShell := agentName + tmuxTabSeparator + shellTabName
 	secondShell := agentName + "__shell-2"
 
 	// Only the agent is alive; both shells are gone. failNFirstNewSessionsPty fails
@@ -434,7 +434,7 @@ func TestRunningInstance_DeadNonDefaultShellTabKeepsTmuxNameOnLoad(t *testing.T)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_1335_agent"
-	defaultShellName := agentName + shellTmuxSuffix
+	defaultShellName := agentName + tmuxTabSeparator + shellTabName
 	nonDefaultShellName := agentName + "__shell-2"
 
 	var newSessions, ptyNewSessions int
@@ -477,7 +477,7 @@ func TestLiveInstance_RespawnsMissingSessionOnLoad(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_live_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
@@ -514,7 +514,7 @@ func TestLiveInstance_ReattachesExistingSessionWithIdleEvidence(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_live_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	var newSessions int
 	exec := countingExec(map[string]bool{agentName: true, shellName: true}, &newSessions)
