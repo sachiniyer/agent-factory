@@ -206,6 +206,39 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 		}
 	}
 
+	// The artifacts must say who owns them BEFORE they exist, or the window between
+	// staging and describing is one where another home reads them as anonymous — and
+	// an anonymous artifact blocks forever by design (#2212 gate 4).
+	//
+	// Written AFTER the collision check above, never before: an id whose artifacts
+	// already belong to an earlier attempt or another home must be refused untouched.
+	// Writing first would overwrite that owner's record and then delete it on the way
+	// out, leaving THEIR binaries anonymous — manufacturing the permanent block this
+	// change exists to remove.
+	ownerRecord, err := captureArtifactOwner(home, stablePlan.ID)
+	if err != nil {
+		return nil, err
+	}
+	ownerPath := artifactOwnerPath(executable, stablePlan.ID)
+	if _, err := os.Lstat(ownerPath); err == nil {
+		return nil, fmt.Errorf("upgrade artifact owner already exists at %s", ownerPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect upgrade artifact owner %s: %w", ownerPath, err)
+	}
+	if err := writeArtifactOwner(ownerPath, ownerRecord); err != nil {
+		return nil, err
+	}
+	// Removed in its OWN defer, registered before the binaries are appended to
+	// createdArtifacts so it runs after that loop (defers are LIFO). A cleanup that
+	// dies partway must leave an owner record with no binaries — which blocks nothing
+	// — rather than binaries with no owner, which block this executable forever.
+	defer func() {
+		if published {
+			return
+		}
+		_ = os.Remove(ownerPath)
+	}()
+
 	mode := executableInfo.Mode().Perm()
 	createdArtifacts = append(createdArtifacts, previousPath)
 	if err := durableAtomicWriteFile(previousPath, previousBinary, mode); err != nil {
@@ -251,5 +284,27 @@ func Prepare(stablePlan Plan) (_ *Transaction, retErr error) {
 		return nil, fmt.Errorf("publish upgrade journal: %w", err)
 	}
 	published = true
+	// Hand authority to the journal. From here the journal's ABSENCE means the
+	// transaction is over, so a later scan must stop consulting this process's
+	// liveness: a daemon that survives a failed cleanup is still running, and gating
+	// on it would keep its own inert artifact blocking forever.
+	//
+	// Written after the journal is durable so the two can never disagree in the
+	// dangerous direction — a sidecar claiming the handoff before the journal exists
+	// would let a crash mid-publish read as finished.
+	//
+	// REQUIRED, not best-effort. A silent failure here leaves the sidecar saying
+	// pre-handoff while the journal exists, and the pre-handoff rule consults stager
+	// liveness — so a later abort that removes active.json but fails to delete
+	// .previous would block this executable permanently, which is precisely the defect
+	// under repair. Failing loudly here costs one retry; succeeding quietly costs the
+	// guarantee.
+	ownerRecord.Journalled = true
+	if err := writeArtifactOwner(ownerPath, ownerRecord); err != nil {
+		if abortErr := (&Transaction{journal: journal}).abort(); abortErr != nil {
+			return nil, fmt.Errorf("mark artifact owner journalled: %w (and rolling the transaction back failed: %v)", err, abortErr)
+		}
+		return nil, fmt.Errorf("mark artifact owner journalled: %w", err)
+	}
 	return &Transaction{journal: journal}, nil
 }
