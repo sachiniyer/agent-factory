@@ -382,15 +382,16 @@ type taskWatcher struct {
 	// queue at a time and replay order is preserved.
 	draining bool
 
-	// Delivery-failure alarm state (#1238), guarded by mu. deliverFailSince is
-	// the start of the current run of consecutive failed deliveries (zero when
-	// the last delivery succeeded); deliverFailCount is how many back-to-back
-	// attempts have failed; deliverFailErr is the most recent delivery error.
-	// A single success clears all three, so a task in the map with a non-zero
-	// deliverFailSince is exactly one whose pipeline is currently down.
+	// Alarm-run state, guarded by mu. deliverFailSince starts the run of
+	// consecutive failed deliveries (deliverFailCount of them, deliverFailErr
+	// last); one success clears all three (#1238). loadFailSince/loadFailErr
+	// are the queue-unreadable run (#3242), tracked apart so a live delivery
+	// success never resets the backlog alarm's clock (delivery_alarm.go).
 	deliverFailSince time.Time
 	deliverFailCount int
 	deliverFailErr   string
+	loadFailSince    time.Time
+	loadFailErr      string
 }
 
 // stop requests termination and blocks until the run goroutine returns. The
@@ -429,8 +430,11 @@ func (w *taskWatcher) run() {
 
 	// A backlog recovered from disk (daemon restart, reload, or a prior
 	// crash-looped run) starts replaying immediately, independent of the
-	// script's own lifecycle (#1129).
-	if w.queue != nil && w.queue.pendingCount() > 0 {
+	// script's own lifecycle (#1129). A queue whose load FAILED starts the
+	// drainer too (#3242), decided in ONE atomic read: split count/state
+	// calls race a concurrent snapshot heal into "0, known" — no drainer,
+	// and a healed backlog stranded until the next reload.
+	if w.queue != nil && w.queue.replayNeeded() {
 		w.ensureDrainer()
 	}
 
@@ -761,7 +765,12 @@ func (w *taskWatcher) handleEvent(line string, tail *tailBuffer) {
 	// queue until it drains. Backlogged enqueues bypass the rate limiter —
 	// the limiter gates deliveries to the target (the drainer reserves a slot
 	// per replayed event); the queue's own count/byte caps bound the backlog.
-	if w.queue != nil && w.queue.pendingCount() > 0 {
+	// A live event is a real recovery point (#3242): the FRESH count heals a
+	// failed load the moment storage recovers, restoring FIFO immediately; if
+	// it stays unreadable this reads 0 and falls through to direct delivery ON
+	// PURPOSE — enqueue refuses unknown state, so queue-routing would only
+	// drop the event, and delivering beats FIFO. Cost: ordering, not loss.
+	if w.queue != nil && w.queue.pendingCountFresh() > 0 {
 		w.enqueueEvent(line, tail)
 		return
 	}

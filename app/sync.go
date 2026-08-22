@@ -299,10 +299,11 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 	var infos []ui.AlarmInfo
 	for _, a := range alarms {
 		infos = append(infos, ui.AlarmInfo{
-			TaskName: a.TaskName,
-			Target:   a.TargetSession,
-			Pending:  a.Pending,
-			Since:    a.Since,
+			TaskName:       a.TaskName,
+			Target:         a.TargetSession,
+			Pending:        a.Pending,
+			PendingUnknown: a.PendingUnknown,
+			Since:          a.Since,
 		})
 	}
 	// Leave infos nil (not an empty slice) when there are no alarms so the
