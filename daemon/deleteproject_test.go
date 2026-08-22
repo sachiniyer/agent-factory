@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -260,6 +261,32 @@ func TestDeleteProject_RepoIDOnlyRegistryReadFailureLeavesProjectIntact(t *testi
 	assert.Equal(t, session.LiveReady, inst.GetLiveness())
 	_, statErr := os.Stat(source)
 	assert.NoError(t, statErr, "the live worktree must remain in place")
+}
+
+func TestRegisteredProjectRootForRepoID_ResolvesBareWorktreeIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	worktree := filepath.Join(base, "worktree")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", source).Run())
+	commit := exec.Command("git", "-C", source, "commit", "--allow-empty", "-m", "initial")
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	require.NoError(t, commit.Run())
+	require.NoError(t, exec.Command("git", "clone", "--bare", source, bare).Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", worktree).Run())
+	_, err := config.RegisterProject(worktree)
+	require.NoError(t, err)
+	repo, err := config.RepoFromPath(worktree)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(repo.ID)
+	require.NoError(t, err)
+	assert.Equal(t, worktree, got,
+		"repo-ID-only deletion must recover the registered linked workspace from bare identity")
 }
 
 // TestDeleteProject_RejectsMismatchedRepoIDAndPath prevents a split-target

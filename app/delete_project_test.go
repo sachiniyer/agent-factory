@@ -1,6 +1,9 @@
 package app
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,10 +13,32 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
+
+func TestDeleteProjectCarriesRetainedRecordedIdentity(t *testing.T) {
+	ancestor := t.TempDir()
+	cmd := exec.Command("git", "init", ancestor)
+	require.NoError(t, cmd.Run())
+	recorded := filepath.Join(ancestor, "deleted-nested-repo")
+	require.NoError(t, os.Mkdir(recorded, 0o755))
+	require.NotEqual(t, config.RepoIDForRecordedRoot(recorded), config.RepoIDForPath(recorded))
+	data := []session.InstanceData{{
+		Title: "legacy", Path: recorded,
+		Worktree: session.GitWorktreeData{RepoPath: recorded, WorktreePath: "/archive/legacy"},
+	}}
+	h, _ := armDeleteProjectDialog(t, data)
+	model, cmdFn := h.handleStateConfirm(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	h = model.(*home)
+	require.NotNil(t, cmdFn)
+	start, ok := cmdFn().(startDeleteProjectMsg)
+	require.True(t, ok)
+	assert.Equal(t, config.RepoIDForRecordedRoot(recorded), start.repoID,
+		"delete must carry the selected aggregate identity, not adopt the Git ancestor of its display root")
+}
 
 // deleteProjectTestRoot is the repo root the delete-project tests build their
 // snapshot around. RepoIDFromRoot is a pure hash of the path and the delete verb

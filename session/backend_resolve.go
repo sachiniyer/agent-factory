@@ -19,7 +19,7 @@ func loadRemoteHooksForPathIfConfigured(absPath string) (config.RemoteHooks, boo
 	if err != nil {
 		return config.RemoteHooks{}, false, fmt.Errorf("failed to resolve repo: %w", err)
 	}
-	cfg, err := config.ResolveConfig(repo.Root)
+	cfg, err := config.ResolveConfigForRepo(repo)
 	if err != nil {
 		return config.RemoteHooks{}, false, fmt.Errorf("failed to resolve repo config: %w", err)
 	}

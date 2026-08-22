@@ -115,7 +115,11 @@ func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {
 // not the unresolved enum label stored in the profile.
 func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, error) {
 	program := rootAgentProgramForProfile(repoRoot, ra)
-	resolved, err := config.ResolveConfig(repoRoot)
+	repo, err := config.RepoFromPath(repoRoot)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := config.ResolveConfigForRepo(repo)
 	if err != nil {
 		return "", err
 	}

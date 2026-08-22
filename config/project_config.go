@@ -1,13 +1,20 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
+)
+
+const (
+	registeredProjectProbeTimeout = 250 * time.Millisecond
+	registeredProjectScanTimeout  = time.Second
 )
 
 // ProjectConfig is the machine-local, per-project personal override layer
@@ -222,6 +229,55 @@ func projectForRoot(root string) (Project, bool, error) {
 		}
 	}
 	return Project{}, false, nil
+}
+
+// projectForRepo finds a registered project by usable workspace first, then by
+// repository identity. The identity pass matters for bare repositories: each
+// linked worktree is a different path, while personal configuration belongs to
+// the shared bare common directory. Unresolvable stale registry roots do not
+// match by inference; their recorded path remains the only evidence available.
+func projectForRepo(repo *RepoContext) (Project, bool, error) {
+	if repo == nil {
+		return Project{}, false, nil
+	}
+	projects, err := ListProjects()
+	if err != nil {
+		return Project{}, false, err
+	}
+	for _, project := range projects {
+		if sameProjectPath(project.Root, repo.WorkspacePath()) {
+			return project, true, nil
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
+	defer cancel()
+	for _, project := range projects {
+		candidateID, ok := registeredProjectRepoID(ctx, project.Root)
+		if ok && candidateID == repo.ID {
+			return project, true, nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return Project{}, false, nil
+}
+
+func registeredProjectRepoID(parent context.Context, root string) (string, bool) {
+	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
+	defer cancel()
+	repo, err := RepoFromPathContext(ctx, root)
+	if err != nil {
+		return "", false
+	}
+	// A registered root is identity evidence only when Git still recognizes that
+	// exact workspace. If a nested checkout disappears, resolving its old path
+	// may discover an enclosing repository; never lend the nested registration's
+	// personal config to that ancestor.
+	if !sameProjectPath(repo.WorkspacePath(), root) {
+		return "", false
+	}
+	return repo.ID, true
 }
 
 // ResolveProjectSelector resolves a `--project` selector — a prj_ id or a

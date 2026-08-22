@@ -62,7 +62,7 @@ func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 	}
-	resolved, err := config.ResolveConfigForInspection(repo.Root)
+	resolved, err := config.ResolveConfigForRepoInspection(repo)
 	if err != nil {
 		return nil, err
 	}

@@ -1347,6 +1347,48 @@ func TestMoveWorktree_ArchiveRestoreRoundTripPreservesModes(t *testing.T) {
 		"a restored session must come back with the modes it had, executable hooks included")
 }
 
+// TestBareOriginArchiveRestoreAndCleanup exercises the complete managed
+// worktree lifecycle when creation starts from a linked worktree whose common
+// directory is itself a bare repository. The bare directory remains the
+// durable repository identity while every filesystem operation targets the
+// managed workspace.
+func TestBareOriginArchiveRestoreAndCleanup(t *testing.T) {
+	sandboxHome(t)
+
+	source := createGitRepo(t)
+	runGitInPlaceTest(t, source, "commit", "--allow-empty", "-m", "init")
+
+	root := testguard.CanonicalTempDir(t)
+	bareRepo := filepath.Join(root, "origin.git")
+	requestWorktree := filepath.Join(root, "request")
+	runGitInPlaceTest(t, root, "clone", "--bare", source, bareRepo)
+	runGitInPlaceTest(t, bareRepo, "worktree", "add", requestWorktree)
+
+	gw, _, err := NewGitWorktree(requestWorktree, "bare-lifecycle", branchPrefixForTest(t))
+	require.NoError(t, err)
+	assert.Equal(t, bareRepo, gw.GetRepoPath(), "the bare common directory is the repository identity")
+	require.NoError(t, gw.Setup())
+	managedWorktree := gw.GetWorktreePath()
+	assert.NotEqual(t, requestWorktree, managedWorktree)
+	assert.DirExists(t, managedWorktree)
+
+	archive := filepath.Join(testguard.CanonicalTempDir(t), "archive")
+	require.NoError(t, gw.ArchiveWorktree(archive))
+	assert.NoDirExists(t, managedWorktree)
+	assert.DirExists(t, archive)
+
+	require.NoError(t, gw.RestoreWorktreeTo(managedWorktree))
+	assert.DirExists(t, managedWorktree)
+	assert.Equal(t, bareRepo, gw.GetRepoPath(), "restore must retain the bare repository identity")
+
+	state, err := gw.Cleanup()
+	require.NoError(t, err)
+	assert.Equal(t, CleanupSettled, state)
+	assert.NoDirExists(t, managedWorktree)
+	assert.DirExists(t, requestWorktree, "cleanup must not remove the caller's linked workspace")
+	assert.DirExists(t, bareRepo, "cleanup must not remove the bare repository")
+}
+
 // TestMoveDirCrossDevice_CopiesIntoAReadOnlySourceDirectory is the #2872
 // regression. A worktree may legitimately contain a directory the owner cannot
 // write — a vendored or generated tree checked in read-only. The same-device

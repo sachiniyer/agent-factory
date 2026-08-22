@@ -58,7 +58,11 @@ func (m *home) preflightSessionCreate() error {
 
 func (m *home) preflightConfig() (*config.Config, error) {
 	if m.repoRoot != "" {
-		resolved, err := config.ResolveConfig(m.repoRoot)
+		repo, err := config.RepoFromPath(m.repoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve project before starting session: %w", err)
+		}
+		resolved, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve config before starting session: %w", err)
 		}

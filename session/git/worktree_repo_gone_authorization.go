@@ -34,6 +34,39 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 		return fmt.Errorf("%w: repo path is empty", ErrRepoGone)
 	}
 	commandEnv := repoGoneGitCommandEnvironment()
+	bare, bareErr := worktree.runGitCommandContextWithEnvironment(
+		ctx, worktree.repoPath, commandEnv, "rev-parse", "--is-bare-repository",
+	)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if bareErr == nil && strings.TrimSpace(bare) == "true" {
+		gitDir, err := worktree.runGitCommandContextWithEnvironment(
+			ctx, worktree.repoPath, commandEnv, "rev-parse", "--absolute-git-dir",
+		)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return err
+		}
+		recorded, err := os.Stat(worktree.repoPath)
+		if err != nil {
+			return fmt.Errorf("inspect recorded bare repository root: %w", err)
+		}
+		resolvedPath := strings.TrimSpace(gitDir)
+		resolved, err := os.Stat(resolvedPath)
+		if err != nil {
+			return fmt.Errorf("inspect bare Git repository root %s: %w", resolvedPath, err)
+		}
+		if !os.SameFile(recorded, resolved) {
+			return fmt.Errorf(
+				"%w: recorded bare origin %s resolves to metadata at %s",
+				ErrRepoGone, worktree.repoPath, resolvedPath,
+			)
+		}
+		return nil
+	}
 	topLevel, err := worktree.runGitCommandContextWithEnvironment(
 		ctx, worktree.repoPath, commandEnv, "rev-parse", "--show-toplevel",
 	)
@@ -739,12 +772,37 @@ func resolveRepoMetadataRoot(repoPath string) (string, error) {
 	}
 	info, err := os.Stat(resolved)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) && bareMetadataDirectory(repoPath) {
+			return repoPath, nil
+		}
 		return "", fmt.Errorf("origin metadata %s could not be inspected: %w", resolved, err)
 	}
 	if info.IsDir() {
 		return resolved, nil
 	}
 	return readGitdirPointerFile("origin metadata redirect", resolved, repoPath)
+}
+
+// bareMetadataDirectory recognizes the direct metadata layout produced by a
+// bare clone. The caller has already established that repoPath is the live Git
+// origin; this structural check keeps resolveRepoMetadataRoot from accepting an
+// arbitrary directory merely because it lacks a .git child.
+func bareMetadataDirectory(repoPath string) bool {
+	for _, entry := range []struct {
+		name string
+		dir  bool
+	}{
+		{name: "HEAD"},
+		{name: "config"},
+		{name: "objects", dir: true},
+		{name: "refs", dir: true},
+	} {
+		info, err := os.Stat(filepath.Join(repoPath, entry.name))
+		if err != nil || info.IsDir() != entry.dir {
+			return false
+		}
+	}
+	return true
 }
 
 func verifyArchivedWorktreePointer(worktreePath string) error {

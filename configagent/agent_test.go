@@ -3,6 +3,7 @@ package configagent
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -237,6 +238,51 @@ func TestSpawnWithoutARepoFallsBackToGlobal(t *testing.T) {
 	}
 	if got.Program != "/bin/sh" {
 		t.Errorf("with no repo, the agent comes from the global config, got %q", got.Program)
+	}
+}
+
+func TestBuildSpawnRequestBareWorktreeUsesSharedRepoIdentity(t *testing.T) {
+	tempAFHome(t)
+	base := t.TempDir()
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	first := filepath.Join(base, "first")
+	second := filepath.Join(base, "second")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run(base, "init", source)
+	run(source, "commit", "--allow-empty", "-m", "initial")
+	run(base, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", first)
+	run(bare, "worktree", "add", "-b", "second", second)
+
+	project, err := config.RegisterProject(first)
+	if err != nil {
+		t.Fatalf("register first worktree: %v", err)
+	}
+	if _, err := config.SetProjectConfigValue(project.ID, "default_program", "codex"); err != nil {
+		t.Fatalf("set personal program: %v", err)
+	}
+	if _, err := config.SetProjectConfigValue(project.ID, "program_overrides.codex", "/bin/sh"); err != nil {
+		t.Fatalf("set personal override: %v", err)
+	}
+
+	req, err := BuildSpawnRequest(Options{Mode: ModeOnboard, RepoPath: second})
+	if err != nil {
+		t.Fatalf("build request from sibling worktree: %v", err)
+	}
+	if req.Program != "/bin/sh" {
+		t.Fatalf("config agent must resolve personal config through the shared bare identity, got %q", req.Program)
 	}
 }
 

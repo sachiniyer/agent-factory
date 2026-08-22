@@ -215,7 +215,7 @@ var tasksAddCmd = &cobra.Command{
 
 		program := taskAddProgramFlag
 		if program == "" {
-			cfg, err := config.ResolveConfig(repo.Root)
+			cfg, err := config.ResolveConfigForRepo(repo)
 			if err != nil {
 				return jsonError(err)
 			}

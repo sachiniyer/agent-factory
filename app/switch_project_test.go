@@ -63,6 +63,181 @@ func TestSelectProjectRowSwitchesProject(t *testing.T) {
 	assert.Equal(t, repoBRoot, h.repoRoot)
 }
 
+func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	worktree := filepath.Join(base, "worktree")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	run(base, "init", "-b", "main", source)
+	run(source, "commit", "--allow-empty", "-m", "initial")
+	run(base, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	h := newTestHome(t)
+	h.repoRoot = worktree
+	h.repoID = config.RepoIDFromRoot(bare)
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "bare-alpha", Path: worktree,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: filepath.Join(base, "managed")},
+	}})
+	require.False(t, degraded)
+	require.Len(t, projects, 1,
+		"one bare repository must not split into identity and workspace project rows")
+	assert.Equal(t, worktree, projects[0].Root, "project switching must retain a usable linked workspace")
+	assert.Equal(t, 1, projects[0].SessionCount)
+	rows := h.projectRows(projects)
+	require.Len(t, rows, 1)
+	assert.True(t, rows[0].Active)
+}
+
+func TestBuildProjectListCachesResolvedPathsAcrossPolls(t *testing.T) {
+	h := newTestHome(t)
+	repoRoot := initTestGitRepo(t)
+	h.repoRoot = repoRoot
+	h.repoID = config.RepoIDFromRoot(repoRoot)
+	cachedRoot := initTestGitRepo(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{cachedRoot: {}}
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-probes")
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\nprintf x >> \"$AF_GIT_PROBE_MARKER\"\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_GIT_PROBE_MARKER", marker)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	_, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	first, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+
+	_, degraded = h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	second, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	assert.Len(t, second, len(first), "a successful path resolution must survive the 750ms project poll")
+}
+
+func TestBuildProjectListUsesKnownActiveIdentityAfterProbeBudgetExpires(t *testing.T) {
+	base, bare, _, active := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = active
+	h.repoID = config.RepoIDFromRoot(bare)
+
+	stalled := filepath.Join(base, "stalled-worktree")
+	require.NoError(t, os.MkdirAll(stalled, 0o755))
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_PROJECT\"*) /bin/sleep 2; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_PROJECT", stalled)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "bare-alpha", Path: stalled,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: stalled},
+	}})
+	require.False(t, degraded)
+	for _, project := range projects {
+		if project.SessionCount == 1 {
+			assert.Equal(t, active, project.Root,
+				"the known active workspace must merge with its bare identity even after an earlier probe exhausts the budget")
+			return
+		}
+	}
+	t.Fatalf("session-bearing project missing after a stalled probe: %+v", projects)
+}
+
+func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
+	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	data := []session.InstanceData{{
+		Title: "bare-alpha", Path: liveRoot,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+	}}
+
+	first, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	require.Contains(t, h.projectPathResolutions, registeredRoot, "the first poll must cache the successful registry root")
+	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot),
+		"the live registered root is the preferred spelling before it disappears")
+
+	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
+	second, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
+		"a vanished cached registry root must not replace the surviving live workspace")
+}
+
+func projectWithCountHasRoot(projects []overlay.Project, count int, root string) bool {
+	for _, project := range projects {
+		if project.SessionCount == count && project.Root == root {
+			return true
+		}
+	}
+	return false
+}
+
+func setupBareProjectWorktrees(t *testing.T) (base, bare, first, second string) {
+	t.Helper()
+	base = testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare = filepath.Join(base, "origin.git")
+	first = filepath.Join(base, "first")
+	second = filepath.Join(base, "second")
+	runGit(t, base, "init", "-b", "main", source)
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "commit", "--allow-empty", "-m", "initial")
+	runGit(t, base, "clone", "--bare", source, bare)
+	runGit(t, bare, "worktree", "add", first)
+	runGit(t, bare, "worktree", "add", "-b", "second", second)
+	return base, bare, first, second
+}
+
+func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
+	h := newTestHome(t)
+	ancestor := initTestGitRepo(t)
+	legacyRoot := filepath.Join(ancestor, "recorded-parent")
+	require.NoError(t, os.Mkdir(legacyRoot, 0o755))
+	require.NotEqual(t, config.RepoIDForRecordedRoot(legacyRoot), config.RepoIDForPath(legacyRoot),
+		"fixture must place the retained root inside another repository")
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "legacy", Path: legacyRoot,
+		Worktree: session.GitWorktreeData{RepoPath: legacyRoot, WorktreePath: "/archive/legacy"},
+	}})
+	require.False(t, degraded)
+	for _, project := range projects {
+		if project.Root == legacyRoot {
+			assert.Equal(t, 1, project.SessionCount)
+			return
+		}
+	}
+	t.Fatalf("retained legacy project %s was silently reattributed: %+v", legacyRoot, projects)
+}
+
 // TestProjectsSectionEscReturnsToTree: Esc on the focused Projects section moves
 // the ring back to the tree (mirrors the Automations Esc flow), without touching
 // the active project.

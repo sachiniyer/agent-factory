@@ -345,6 +345,17 @@ func TestCheckRepoPresentForRelocation_FiltersAmbientGitDir(t *testing.T) {
 	}
 }
 
+func TestCheckRepoPresentForRelocation_AcceptsBareRepository(t *testing.T) {
+	repoPath := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput(); err != nil {
+		t.Fatalf("create bare origin repository: %v (%s)", err, out)
+	}
+
+	if err := CheckRepoPresentForRelocation(repoPath); err != nil {
+		t.Fatalf("bare repository identity must be a valid relocation origin: %v", err)
+	}
+}
+
 func TestProbeRepoGoneOrigin_IgnoresHookRepositoryOverrides(t *testing.T) {
 	repoPath := filepath.Join(t.TempDir(), "origin")
 	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
