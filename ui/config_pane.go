@@ -7,6 +7,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/mattn/go-runewidth"
+	muesliansi "github.com/muesli/ansi"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -620,16 +623,118 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	if e.Value == "" {
 		return "(unset)"
 	}
-	// Leave room for the cursor and the key.
-	budget := c.width - len(e.Key) - 8
+	// Leave room for the cursor and the key, and measure in terminal CELLS rather
+	// than runes (#3421). A CJK or emoji value renders 2+ cells per rune, so a
+	// rune-count budget under-truncates: at a 72-column pane a CJK path rendered an
+	// 85-cell row, which the overlay frame then wraps — and a wrapped row makes the
+	// height window's line count a lie, so the pane overflows its box (the exact
+	// failure TestConfigPaneNeverRendersALineWiderThanThePane exists to prevent).
+	budget := c.width - lipgloss.Width(e.Key) - 8
 	if budget < 12 {
 		budget = 12
 	}
-	runes := []rune(e.Value)
-	if len(runes) <= budget {
-		return e.Value
+	return truncateConfigPreview(e.Value, budget)
+}
+
+// maxConfigPreviewRunes caps how much of a value the LIST will even look at.
+//
+// A cell budget alone does not bound the work: a run of combining marks, zero-width
+// spaces or joiners measures ~0 cells, so a width-based cut keeps all of it and every
+// repaint emits and processes the whole thing. The budget is at most ~70 cells and a
+// legitimate value needs about one rune per cell, so this is orders of magnitude
+// above any real value while keeping a hostile one bounded.
+const maxConfigPreviewRunes = 512
+
+// truncateConfigPreview renders an untrusted config value as a bounded ONE-LINE
+// preview for the list. Config values are user text — a free-form string key like
+// on_archive_command accepts anything TOML can express, escapes included — so each
+// step below answers a specific way that text can break the pane rather than being
+// general hygiene (#3421 review).
+//
+// The edit field is untouched by all of this: c.input is filled from e.Value
+// directly, so what you can SAVE BACK is still exactly what is stored. That is the
+// same show-vs-save split CurrentValue documents.
+func truncateConfigPreview(value string, budget int) string {
+	// 1. ESCAPE SEQUENCES OUT. A value may hold an ANSI/OSC sequence (TOML writes
+	// one with \u001B), and a cell-measuring truncator deliberately preserves
+	// sequences across its cut — that is what keeps styled content from losing its
+	// reset. Preserved here, an ED or CUP sequence in a config value would clear the
+	// screen or move the cursor from inside a list row. ui/err.go strips for the
+	// same reason, and notes the same gap: Strip leaves a bare \r, which step 2 takes.
+	value = xansi.Strip(value)
+	// 2. ONE LINE. lipgloss.Width reports the WIDEST line of a multi-line string, so
+	// a value made of many short lines measures as narrow, survives any width check
+	// whole, and turns one list row into several — the same overflow arriving through
+	// height instead of width. A tab goes too: a terminal expands it to the next tab
+	// stop, which no width measurement predicts.
+	value = flattenConfigValue(value)
+	// 3. BOUND THE VOLUME before measuring width, because zero-width runes are free
+	// under every width measure. See maxConfigPreviewRunes.
+	if runes := []rune(value); len(runes) > maxConfigPreviewRunes {
+		value = string(runes[:maxConfigPreviewRunes])
 	}
-	return string(runes[:budget-1]) + "…"
+	// 4. CUT TO THE BUDGET IN THE MEASURE THE COMPOSITOR ACTUALLY USES.
+	//
+	// Three width functions are in play here and they do NOT agree, so the choice
+	// matters (all measured, on one joined-emoji family):
+	//
+	//   lipgloss.Width / x-ansi   2 cells — groups codepoints into graphemes
+	//   runewidth.StringWidth     2 cells — likewise
+	//   muesli/ansi.PrintableRuneWidth  8 cells — sums runewidth.RuneWidth per rune
+	//
+	// The last one is the one that decides whether the frame survives:
+	// ui/overlay.PlaceOverlay measures the foreground with it and RETURNS THE
+	// FOREGROUND ALONE when it reads wider than the background, so a modal holding a
+	// few joined-emoji values would erase the whole TUI behind it. A grapheme-aware
+	// cut cannot prevent that — it would admit 22 families in a 44-cell budget, which
+	// that function reads as 176 cells. tmux advances per codepoint too, so the
+	// pessimistic count is also what a real terminal does.
+	//
+	// So budget against the compositor's own function, walking runes by the exact
+	// per-rune width it sums. Bounding it bounds the grapheme measures as well
+	// (grouping can only narrow), so the pane's other width assertions still hold.
+	// The cost is density: a value of joined emoji shows about a quarter as many as a
+	// grapheme-aware cut would allow. That is the right trade against dropping the
+	// frame, and it matches what the emulator renders.
+	if compositorWidth(value) <= budget {
+		return value
+	}
+	tail := "…"
+	if budget < compositorWidth(tail) {
+		tail = ""
+	}
+	limit := budget - compositorWidth(tail)
+	var b strings.Builder
+	width := 0
+	for _, r := range value {
+		rw := runewidth.RuneWidth(r)
+		if width+rw > limit {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	return b.String() + tail
+}
+
+// compositorWidth measures a string the way ui/overlay.PlaceOverlay does, which
+// is the measurement that decides whether a modal still fits over the frame. It
+// is deliberately NOT lipgloss.Width: see truncateConfigPreview step 4.
+func compositorWidth(s string) int {
+	return muesliansi.PrintableRuneWidth(s)
+}
+
+// flattenConfigValue renders a config value as ONE line, turning embedded
+// control whitespace into spaces. Runs are NOT collapsed: the list row is a
+// preview of the real value, and collapsing would misreport what is stored.
+func flattenConfigValue(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t', '\v', '\f':
+			return ' '
+		}
+		return r
+	}, value)
 }
 
 // wrapIndented renders prose wrapped to the pane's width, indented under its key.
