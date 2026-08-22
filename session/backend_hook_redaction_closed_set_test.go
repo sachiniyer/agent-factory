@@ -84,6 +84,76 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"token\":\"nested-secret\"}"}`,
 			want:   `{"message":"{\"token\":\"[REDACTED]\"}"}`,
 		},
+		{
+			name:   "serialized document with trailing malformed bytes",
+			output: `{"message":"{\"token\":\"trailing-secret\"} trailing"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "truncated serialized document with an overwritten token member",
+			output: `{"message":"{\"payload\":{\"token\":\"duplicate-secret\"},\"payload\":\"safe\""}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "malformed multiply serialized document with a token",
+			output: `{"message":"\"{\\\"token\\\":\\\"deep-secret\\\"}\" trailing"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "serialized document with a token after a syntax error",
+			output: `{"message":"{\"level\":INVALID,\"token\":\"post-error-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "serialized child with a token after a syntax error",
+			output: `{"message":"{\"level\":INVALID,\"child\":\"{\\\"token\\\":\\\"nested-post-error-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "token after a raw newline in a malformed string",
+			output: `{"message":"{\"message\":\"unterminated\n,\"token\":\"newline-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "quoted token prose after a syntax error",
+			output: `{"message":"{\"message\":\"diagnostic says \\\"token\\\": unavailable\""}`,
+			want:   `{"message":"{\"message\":\"diagnostic says \\\"token\\\": unavailable\""}`,
+		},
+		{
+			name:   "serialized child followed by a colon after a syntax error",
+			output: `{"message":"{\"level\":INVALID,\"child\":\"{\\\"token\\\":\\\"colon-secret\\\"}\": junk}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "truncated serialized child string with a token",
+			output: `{"message":"{\"child\":\"{\\\"token\\\":\\\"truncated-string-secret\\\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "escaped serialized child after a raw newline",
+			output: `{"message":"{\"message\":\"unterminated\n{\\\"token\\\":\\\"invalid-string-child-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "escaped serialized child before a later invalid escape",
+			output: `{"message":"{\"message\":\"unterminated\n{\\\"token\\\":\\\"invalid-escape-secret\\\"}\\q\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "opener-prefixed token prose",
+			output: `{"message":"[INFO] diagnostic says \"token\": unavailable"}`,
+			want:   `{"message":"[INFO] diagnostic says \"token\": unavailable"}`,
+		},
+		{
+			name:   "serialized token key split by a raw newline",
+			output: `{"message":"{\"to\nken\":\"split-key-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "serialized token escape split by a raw newline",
+			output: `{"message":"{\"\\u00\n74oken\":\"split-escape-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
