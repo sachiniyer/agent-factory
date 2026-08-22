@@ -599,7 +599,9 @@ func TestUpdateDriverReadsTheSharedCacheFile(t *testing.T) {
 	require.Equal(t, filepath.Join(home, autoupdate.CheckCacheFileName), driver.cachePath)
 
 	// And it parses what the launch path writes.
-	require.NoError(t, autoupdate.RecordCheck(driver.cachePath, config.UpdateChannelStable, "v1.0.200", "1.0.200"))
+	require.NoError(t, config.WithFileLock(driver.cachePath, func() error {
+		return autoupdate.ReadCheckCache(driver.cachePath).Record(config.UpdateChannelStable, "v1.0.200", "1.0.200", time.Now().UTC())
+	}))
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal([]byte(driverCacheBytes(t, driver.cachePath)), &decoded))
 	require.Contains(t, decoded, "channels")
