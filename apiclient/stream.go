@@ -117,25 +117,6 @@ func (c *Client) DialStream(ctx context.Context, title, repoID, tabID string, ta
 // the request/response structs it already shares.
 const streamSeqHeader = "X-Af-Stream-Seq"
 
-// Preview captures a session tab's content through the daemon — the sole capturer
-// after PR6. It returns the captured content, or gone=true when the capture found
-// nothing to read (the caller maps that to its session-gone fallback). Used for
-// surfaces the TUI can't stream live: remote/hook sessions, scroll-mode
-// scrollback (full=true), and the transient preview target.
-//
-// tabGone NARROWS gone: the session is alive, only the addressed TAB is missing
-// (an id that no longer resolves, or an ordinal that is not a slot). It is always
-// accompanied by gone, so a caller that ignores it keeps the old behavior.
-// Callers that let a user ADDRESS a tab need it to avoid reporting a healthy
-// session as dead — a distinction the daemon can make and a client cannot (#1948).
-func (c *Client) Preview(req daemon.PreviewRequest) (content string, gone, tabGone bool, err error) {
-	resp, err := c.PreviewSnapshot(req)
-	if err != nil {
-		return "", false, false, err
-	}
-	return resp.Content, resp.Gone, resp.TabGone, nil
-}
-
 // PreviewSnapshot is the typed preview response used by terminal-aware clients.
 // Keeping modes beside content prevents a preview target from inheriting the
 // ownership state of whichever pane happened to render before it.
