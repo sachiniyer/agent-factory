@@ -157,7 +157,7 @@ func TestTreeNav_TabStopAcrossInstancePreservesParentForActions(t *testing.T) {
 		return spawnDaemonTab(beta)
 	}))
 
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	assert.Equal(t, beta.Title, createdFor,
 		"new-tab action must target the parent session of the selected tab")
 }
@@ -224,7 +224,7 @@ func TestTreeNav_TabCreateCloseFromTabRow(t *testing.T) {
 	require.Equal(t, 1, h.store.ActiveTab())
 
 	// t: the new tab (index 2) must be created AND selected, cursor following.
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	require.Equal(t, 3, inst.TabCount())
 	assert.Equal(t, 2, h.store.ActiveTab(), "t from a tab row must select the new tab")
 	sel = h.sidebar.GetSelection()

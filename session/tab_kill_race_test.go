@@ -267,7 +267,7 @@ func TestAttachShellTab_KillRaceDropsProjection(t *testing.T) {
 }
 
 // TestAttachShellTab_ArchiveFenceDropsProjection is the archive half of the same
-// window (#2100). handleNewTab gates on HasInFlightOp before the daemon
+// window (#2100). createNewTab gates on HasInFlightOp before the daemon
 // round-trip, but the archive that raises OpArchiving can land DURING it — and
 // archive deliberately keeps started=true (#1195), so the started-only recheck
 // this path shipped with never fired for it and the projection was appended into
