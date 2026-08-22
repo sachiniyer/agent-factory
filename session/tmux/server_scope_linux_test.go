@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
@@ -112,6 +113,161 @@ func TestOldTmuxUsesSessionScopeCompatibilityFallback(t *testing.T) {
 	want := "systemd-run --user --scope --quiet --collect -- tmux new-session -d -s af_old_tmux"
 	if got := strings.Join(cmd.Args, " "); got != want {
 		t.Fatalf("old-tmux compatibility command = %q, want %q", got, want)
+	}
+}
+
+func TestNoStartProbeFailureDoesNotDowngradeAndIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    exit 75
+fi
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	var warnings bytes.Buffer
+	oldWarningOut, oldWarningFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
+	log.WarningLog.SetOutput(&warnings)
+	log.WarningLog.SetFlags(0)
+	t.Cleanup(func() {
+		log.WarningLog.SetOutput(oldWarningOut)
+		log.WarningLog.SetFlags(oldWarningFlags)
+	})
+
+	cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_probe_failed")
+	if scoped {
+		t.Errorf("failed tmux -V probe downgraded client to compatibility scope: %q", strings.Join(cmd.Args, " "))
+	}
+	if got := strings.Join(cmd.Args, " "); got != "tmux -N new-session -d -s af_probe_failed" {
+		t.Errorf("failed-probe client command = %q, want isolation-preserving -N client", got)
+	}
+	for _, want := range []string{"tmux -V probe failed:", "exit status 75"} {
+		if !strings.Contains(warnings.String(), want) {
+			t.Errorf("failed-probe warning %q does not contain %q", warnings.String(), want)
+		}
+	}
+	if strings.Contains(warnings.String(), "lacks a verified -N") {
+		t.Errorf("failed probe was logged as a stable unsupported verdict: %q", warnings.String())
+	}
+
+	cmd, scoped = newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_probe_retry")
+	if scoped {
+		t.Errorf("successful retry still used compatibility scope: %q", strings.Join(cmd.Args, " "))
+	}
+	if got := strings.Join(cmd.Args, " "); got != "tmux -N new-session -d -s af_probe_retry" {
+		t.Errorf("retried-probe client command = %q, want cached supported client", got)
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "2" {
+		t.Fatalf("tmux -V probe attempts = %q, want failure plus one retry", got)
+	}
+}
+
+func TestNoStartProbeCachesSupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+printf '%s\n' "$((attempt + 1))" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	for i := 0; i < 2; i++ {
+		cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_supported")
+		if scoped || strings.Join(cmd.Args, " ") != "tmux -N new-session -d -s af_supported" {
+			t.Fatalf("supported tmux client = %q, scoped=%v", strings.Join(cmd.Args, " "), scoped)
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached supported verdict", got)
+	}
+}
+
+func TestNoStartProbeCachesUnsupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    printf '%s\n' 'tmux 3.2a'
+else
+    printf '%s\n' 'tmux 3.4'
+fi
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	for i := 0; i < 2; i++ {
+		cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_unsupported")
+		if !scoped {
+			t.Fatalf("old tmux client bypassed compatibility scope on call %d: %q", i+1, strings.Join(cmd.Args, " "))
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached unsupported verdict", got)
+	}
+}
+
+func TestTmuxVersionProbeAllowsMoreTimeThanSocketProbe(t *testing.T) {
+	if tmuxVersionProbeTimeout <= serverProbeTimeout {
+		t.Fatalf("tmux -V timeout = %s, want longer than socket probe timeout %s", tmuxVersionProbeTimeout, serverProbeTimeout)
 	}
 }
 
