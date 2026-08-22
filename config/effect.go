@@ -69,6 +69,7 @@ var keyEffectClasses = map[string]EffectClass{
 	"log_max_size_mb":                EffectAppliedLive,
 	"log_max_backups":                EffectAppliedLive,
 	"limit_auto_resume":              EffectAppliedLive,
+	"limit_account_candidates":       EffectAppliedLive,
 	"limit_retry_interval":           EffectAppliedLive,
 	"limit_patterns":                 EffectAppliedLive,
 	"global_agent_skills":            EffectAppliedLive,
@@ -116,6 +117,13 @@ func KeyEffectClass(key string) EffectClass {
 		base = key[:i]
 	}
 	return keyEffectClasses[base]
+}
+
+// ProjectConfigRequiresRestart reports whether a personal-project edit needs a
+// daemon restart. Applied-live project keys are resolved from disk at their next
+// relevant daemon operation; the remaining classes retain the startup boundary.
+func ProjectConfigRequiresRestart(key string) bool {
+	return KeyEffectClass(key) != EffectAppliedLive
 }
 
 // EffectNotice is the one sentence a save surface shows after writing key, stating

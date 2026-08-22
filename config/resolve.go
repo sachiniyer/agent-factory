@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pelletier/go-toml/v2"
+
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -99,6 +101,50 @@ func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
 }
 
+// ResolveConfigForInspectionFromGlobal resolves repoRoot's repo and personal
+// layers over one already-loaded global snapshot. Long-running operations use
+// this form so a global config save cannot split one decision across two
+// generations; like ResolveConfigForInspection, it records no load observation.
+func ResolveConfigForInspectionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	var err error
+	global, err = prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	return resolveConfigFromGlobal(repoRoot, global, suppressInRepoLoadObservation)
+}
+
+// ResolveConfigForIdentityDecisionFromGlobal resolves the same effective config
+// over an already-loaded global snapshot, but refuses to ignore an unreadable
+// personal-project layer. Automatic credential selection requires the complete
+// candidate policy; silently inheriting a global candidate when the personal
+// restrictions cannot be read could move work onto an identity the user did not
+// authorize for this project.
+func ResolveConfigForIdentityDecisionFromGlobal(repoRoot string, global *Config) (*ResolvedConfig, error) {
+	var err error
+	global, err = prepareGlobalConfigSnapshot(global)
+	if err != nil {
+		return nil, err
+	}
+	return resolveConfigFromGlobalWithPersonalPolicy(repoRoot, global, suppressInRepoLoadObservation, true)
+}
+
+func prepareGlobalConfigSnapshot(global *Config) (*Config, error) {
+	if global != nil && global.source.builtIn == nil {
+		data, err := toml.Marshal(global)
+		if err != nil {
+			return nil, fmt.Errorf("encode global config snapshot: %w", err)
+		}
+		snapshot := snapshotConfig(global)
+		snapshot.source.builtIn = snapshotConfig(global)
+		if err := attachConfigSource(snapshot, data, "", FormatTOML); err != nil {
+			return nil, fmt.Errorf("describe global config snapshot: %w", err)
+		}
+		global = snapshot
+	}
+	return global, nil
+}
+
 type inRepoLoadObservation uint8
 
 const (
@@ -116,6 +162,19 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	if err != nil {
 		return nil, err
 	}
+	return resolveConfigFromGlobal(repoRoot, global, observation)
+}
+
+func resolveConfigFromGlobal(repoRoot string, global *Config, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	return resolveConfigFromGlobalWithPersonalPolicy(repoRoot, global, observation, false)
+}
+
+func resolveConfigFromGlobalWithPersonalPolicy(
+	repoRoot string,
+	global *Config,
+	observation inRepoLoadObservation,
+	requireReadablePersonalPolicy bool,
+) (*ResolvedConfig, error) {
 	documents, err := globalResolutionDocuments(global)
 	if err != nil {
 		return nil, err
@@ -158,7 +217,12 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocument(repoRoot)
+	var personalDoc sourceDocument
+	if requireReadablePersonalPolicy {
+		personalDoc, err = projectPersonalDocumentStrict(repoRoot)
+	} else {
+		personalDoc, err = projectPersonalDocument(repoRoot)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -218,12 +282,20 @@ func emptyProjectPersonalDocument() sourceDocument {
 // explicit `af config --project` / `af projects` paths still surface the real
 // error, because they call the registry directly.
 func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
-	project, found, err := projectForRoot(repoRoot)
+	document, err := projectPersonalDocumentStrict(repoRoot)
 	if err != nil {
 		projectRegistryWarnOnce.Do(func() {
 			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)
 		})
 		return emptyProjectPersonalDocument(), nil
+	}
+	return document, nil
+}
+
+func projectPersonalDocumentStrict(repoRoot string) (sourceDocument, error) {
+	project, found, err := projectForRoot(repoRoot)
+	if err != nil {
+		return sourceDocument{}, err
 	}
 	if !found {
 		return emptyProjectPersonalDocument(), nil

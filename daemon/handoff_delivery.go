@@ -33,8 +33,8 @@ func prepareHandoffDelivery(delivery handoffDelivery) handoffDelivery {
 }
 
 func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
-	settle := func(event session.TransitionEvent, clearPending bool) error {
-		if err := delivery.instance.Transition(event); err != nil {
+	settle := func(transition func() error, clearPending bool) error {
+		if err := transition(); err != nil {
 			return err
 		}
 		if clearPending && !delivery.instance.ClearPendingHandoffMission(delivery.mission) {
@@ -62,7 +62,9 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 
 	serr := task.WaitForReadyAndSendPrompt(context.Background(), delivery.instance, delivery.mission)
 	if serr == nil {
-		if err := settle(session.CommitHandoff(), true); err != nil {
+		if err := settle(func() error {
+			return delivery.instance.Transition(session.CommitHandoff())
+		}, true); err != nil {
 			return fmt.Errorf(
 				"handed %q off to %s and delivered its mission, but could not settle the replacement fence: %w",
 				delivery.title, delivery.target, err)
@@ -76,7 +78,9 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// context — not the old create prompt or bare override — because the
 		// normal limit-resume path replays exactly Instance.Prompt.
 		delivery.instance.SetPrompt(delivery.mission)
-		if terr := settle(session.ParkHandoff(limitErr.ResetAt), true); terr != nil {
+		if terr := settle(func() error {
+			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt)
+		}, true); terr != nil {
 			return fmt.Errorf(
 				"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",
 				delivery.title, delivery.target, errors.Join(serr, terr))

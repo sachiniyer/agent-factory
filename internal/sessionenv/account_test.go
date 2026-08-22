@@ -1,6 +1,8 @@
 package sessionenv
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -277,6 +279,193 @@ func TestApplyAccount_FailsClosedOnAnUnprovableCommand(t *testing.T) {
 		_, err := ApplyAccount(nil, command, Account{Agent: "codex", Name: "p", Dir: "/afhome/accounts/codex/p"})
 		require.Error(t, err, "command %q is unparseable and must not be assumed safe", command)
 		require.Contains(t, err.Error(), "could not be proven")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesBareShells(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{"bash", "/bin/zsh", "env bash", "exec -- /bin/sh"} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "bare shell %q can reload ambient identity from startup files", command)
+		require.Contains(t, err.Error(), "cannot prove")
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand("git status", account),
+		"an ordinary literal process remains a valid account-scoped sibling")
+}
+
+func TestAccountShellCommandDisablesStartupFilesAndStripsTheirSelectors(t *testing.T) {
+	trustedShells := filepath.Join(t.TempDir(), "shells")
+	require.NoError(t, os.WriteFile(trustedShells, []byte("/bin/bash\n/bin/sh\n/bin/zsh\n"), 0o600))
+	previousShellsPath := accountShellsPath
+	accountShellsPath = trustedShells
+	t.Cleanup(func() { accountShellsPath = previousShellsPath })
+
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for shell, want := range map[string]string{
+		"/bin/bash": "/bin/bash --noprofile --norc -i",
+		"/bin/sh":   "/bin/sh -i",
+		"/bin/zsh":  "/bin/zsh --no-rcs --no-globalrcs -i",
+	} {
+		command, err := AccountShellCommand(shell)
+		require.NoError(t, err)
+		require.Equal(t, want, command)
+		require.NoError(t, ValidateAccountEnvironmentCommand(command, account))
+
+		scoped, err := ApplyAccountEnvironment([]string{
+			"PATH=/bin",
+			"ENV=/tmp/ambient-shrc",
+			"BASH_ENV=/tmp/ambient-bashrc",
+			"ZDOTDIR=/tmp/ambient-zdotdir",
+		}, command, account)
+		require.NoError(t, err)
+		require.ElementsMatch(t, []string{"PATH=/bin", "CODEX_HOME=" + account.Dir}, scoped)
+	}
+}
+
+func TestAccountShellCommandRefusesUnprovenShellExecutable(t *testing.T) {
+	_, err := AccountShellCommand("bash")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "absolute")
+
+	trustedDir := filepath.Join(t.TempDir(), "trusted")
+	untrustedDir := filepath.Join(t.TempDir(), "untrusted")
+	require.NoError(t, os.MkdirAll(trustedDir, 0o700))
+	require.NoError(t, os.MkdirAll(untrustedDir, 0o700))
+	trusted := filepath.Join(trustedDir, "bash")
+	untrusted := filepath.Join(untrustedDir, "bash")
+	require.NoError(t, os.WriteFile(trusted, []byte("#!/bin/sh\n"), 0o700))
+	require.NoError(t, os.WriteFile(untrusted, []byte("#!/bin/sh\n"), 0o700))
+	trustedShells := filepath.Join(t.TempDir(), "shells")
+	require.NoError(t, os.WriteFile(trustedShells, []byte(trusted+"\n"), 0o600))
+	previousShellsPath := accountShellsPath
+	accountShellsPath = trustedShells
+	t.Cleanup(func() { accountShellsPath = previousShellsPath })
+
+	_, err = AccountShellCommand(trusted)
+	require.NoError(t, err, "a host-listed executable with a supported shell identity is proven")
+	_, err = AccountShellCommand(untrusted)
+	require.Error(t, err, "an executable must not become a trusted shell merely because its basename is bash")
+	_, err = AccountShellCommand(untrusted + " --noprofile --norc -i")
+	require.Error(t, err, "pre-rendered safe-looking flags must not bypass executable provenance")
+	_, err = AccountShellCommand("/opt/custom-shell")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no startup-file-free")
+}
+
+func TestValidateAccountEnvironmentCommandRefusesSelectedAgentArguments(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`codex -c cli_auth_credentials_store="keyring"`,
+		`env codex --config cli_auth_credentials_store="keyring"`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "selected-agent arguments in sibling %q can redirect identity", command)
+		require.Contains(t, err.Error(), "arguments")
+		require.Contains(t, err.Error(), "cli_auth_credentials_store")
+	}
+	require.NoError(t, ValidateAccountEnvironmentCommand("git status --short", account),
+		"arguments to an ordinary non-agent process remain valid in a scoped sibling")
+}
+
+func TestValidateAccountEnvironmentCommandRefusesSelectedAgentBehindLaunchWrappers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`command codex -c cli_auth_credentials_store="keyring"`,
+		`nice codex -c cli_auth_credentials_store="keyring"`,
+		`nohup codex -c cli_auth_credentials_store="keyring"`,
+		`timeout 30 codex -c cli_auth_credentials_store="keyring"`,
+		`setsid codex -c cli_auth_credentials_store="keyring"`,
+		`sudo sh -c 'CODEX_HOME=/other exec codex'`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "launch wrapper %q must not hide a selected-agent identity override", command)
+		require.Contains(t, err.Error(), "cannot prove")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesMakefileLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`make`,
+		`make -j4`,
+		`make -f launcher.mk`,
+		`make --file=launcher.mk`,
+		`make -E 'launch:; CODEX_HOME=/other codex' launch`,
+		`gmake --eval='launch:; CODEX_HOME=/other codex' launch`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "make invocation %q evaluates a hidden launch program", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesPackageScriptLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`npm run launch`,
+		`npx hidden-launcher`,
+		`pnpm run launch`,
+		`pnpx hidden-launcher`,
+		`yarn run launch`,
+		`yarn launch`,
+		`bun run launch`,
+		`bunx hidden-launcher`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "package launcher %q can execute hidden program text", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesCargoLaunchers(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`cargo run`,
+		`cargo test`,
+		`cargo build`,
+		`rustup run stable cargo run`,
+		`cross run`,
+		`rustc main.rs --extern evil=./libevil.so`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "Rust launcher %q can execute package-owned program text", command)
+		require.Contains(t, err.Error(), "interpreter")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesCodeEvaluatingShellBuiltins(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`eval 'CODEX_HOME=/other exec codex'`,
+		`builtin eval 'CODEX_HOME=/other exec codex'`,
+		`. ./launcher.sh`,
+		`source ./launcher.sh`,
+		`trap 'CODEX_HOME=/other exec codex' EXIT`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "shell builtin %q evaluates hidden program text", command)
+		require.Contains(t, err.Error(), "shell wrapper")
+	}
+}
+
+func TestValidateAccountEnvironmentCommandRefusesCommandBuildingInterpreters(t *testing.T) {
+	account := Account{Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work"}
+	for _, command := range []string{
+		`python3 -c 'import os; os.environ["CODEX_HOME"]="/other"; os.execvp("codex", ["codex"])'`,
+		`env python3.13 -c 'import os; os.environ["CODEX_HOME"]="/other"'`,
+		`node -e 'process.env.CODEX_HOME="/other"'`,
+		`perl -e '$ENV{CODEX_HOME}="/other"'`,
+		`ruby -e 'ENV["CODEX_HOME"]="/other"'`,
+		`java Launcher.java`,
+		`javac -processor Evil Launcher.java`,
+		`fish -c 'set -x CODEX_HOME /other; exec codex'`,
+		`csh -c 'setenv CODEX_HOME /other; exec codex'`,
+		`tcsh -c 'setenv CODEX_HOME /other; exec codex'`,
+		`go run ./launcher.go`,
+	} {
+		err := ValidateAccountEnvironmentCommand(command, account)
+		require.Error(t, err, "interpreter %q can hide an identity-changing agent launch in program text", command)
+		require.Contains(t, err.Error(), "interpreter")
 	}
 }
 

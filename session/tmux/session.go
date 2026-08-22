@@ -163,6 +163,10 @@ type TmuxSession struct {
 	// separately from the resolved program so a program_overrides change cannot
 	// reinterpret the same account name as another agent's identity (#3083 review).
 	accountAgent string
+	// accountEnvironmentOnly marks a non-agent sibling pane. It receives the
+	// selected account's environment without pretending its shell/process command
+	// is the provider executable guarded by the direct-agent launch proof.
+	accountEnvironmentOnly bool
 	// generatedArgs are the argument words af authored for program, declared so
 	// the account boundary can verify af's output instead of refusing it (#3083,
 	// #3108). Guarded by programMu with program itself, because a launch reads
@@ -426,8 +430,26 @@ func newTmuxSession(sanitizedName string, program string, ptyFactory PtyFactory,
 func (t *TmuxSession) NewSiblingSession(sanitizedName, program string) *TmuxSession {
 	t.programMu.RLock()
 	extra := append([]string(nil), t.envPassthrough...)
+	account, accountAgent := t.account, t.accountAgent
 	t.programMu.RUnlock()
 	sibling := newTmuxSession(sanitizedName, program, t.ptyFactory, t.cmdExec)
 	_ = sibling.SetEnvPassthrough(extra)
+	sibling.SetAccountEnvironmentForAgent(accountAgent, account)
 	return sibling
+}
+
+// NewShellSiblingSession is NewSiblingSession for an af-created terminal. A
+// selected account requires a startup-file-free shell form so the user's rc
+// files cannot replace the identity after the boundary is applied.
+func (t *TmuxSession) NewShellSiblingSession(sanitizedName, shell string) (*TmuxSession, error) {
+	t.programMu.RLock()
+	extra := append([]string(nil), t.envPassthrough...)
+	account, accountAgent := t.account, t.accountAgent
+	t.programMu.RUnlock()
+	sibling := newTmuxSession(sanitizedName, shell, t.ptyFactory, t.cmdExec)
+	_ = sibling.SetEnvPassthrough(extra)
+	if err := sibling.SetAccountShellEnvironmentForAgent(accountAgent, account); err != nil {
+		return nil, err
+	}
+	return sibling, nil
 }

@@ -58,6 +58,34 @@ func TestResolveConfigPersonalBranchPrefixBeatsGlobal(t *testing.T) {
 		"branch_prefix has no in-repo layer, so the personal override sits directly above global")
 }
 
+func TestResolveConfigPersonalLimitAccountCandidatesReplaceGlobal(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"work\", \"personal\"]\n")
+	writePersonalConfig(t, project.ID, "limit_account_candidates = [\"project\"]\n")
+
+	resolved, err := ResolveConfig(repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"project"}, resolved.LimitAccountCandidates)
+
+	value, ok := resolved.ResolvedValue("limit_account_candidates")
+	require.True(t, ok)
+	require.NotNil(t, value.Winner)
+	assert.Equal(t, SourceProjectPersonal.String(), value.Winner.Layer)
+}
+
+func TestResolveConfigForInspectionFromGlobalKeepsOneGlobalGeneration(t *testing.T) {
+	home, repoRoot, _ := registeredTestProject(t)
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"first\"]\n")
+	frozen, err := LoadConfig()
+	require.NoError(t, err)
+
+	writeGlobalTOML(t, home, "limit_account_candidates = [\"second\"]\n")
+	resolved, err := ResolveConfigForInspectionFromGlobal(repoRoot, frozen)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"first"}, resolved.LimitAccountCandidates,
+		"a project overlay must resolve against the daemon operation's frozen global snapshot")
+}
+
 func TestResolveConfigPersonalEmptyValueStillOverrides(t *testing.T) {
 	home, repoRoot, project := registeredTestProject(t)
 	writeGlobalTOML(t, home, "branch_prefix = \"global/\"\n")

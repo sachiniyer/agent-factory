@@ -9,6 +9,26 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
+// IsRemoteHook reports whether this serialized record is a remote hook session,
+// reading the persisted BackendType discriminator. It centralizes the raw-data
+// remote check (#1592 Phase 1 PR3) so daemon logic that iterates []InstanceData
+// — where no backend is reconstructed and Capabilities() is unavailable — never
+// hard-codes the "remote" magic string. The load-time factory
+// (NewInstanceFromData) remains the one place that maps the discriminator to a
+// concrete backend.
+func (d InstanceData) IsRemoteHook() bool {
+	return d.BackendType == "remote"
+}
+
+// UsesLocalTmux reports whether this persisted row belongs to the in-process
+// local backend and therefore claims a repo-scoped tmux name. Empty is the
+// pre-backend-discriminator legacy encoding and also means local. Keeping this
+// decoding beside BackendType prevents daemon admission from growing its own
+// backend-name list.
+func (d InstanceData) UsesLocalTmux() bool {
+	return d.BackendType == "" || d.BackendType == "local"
+}
+
 // currentBackend snapshots the instance's backend under i.mu (#2096). The
 // backend is NOT immutable: a restore/recover of an off-box session rebinds it
 // via bindProvisionResult under i.mu.Lock, and the restore paths consult the
@@ -157,12 +177,21 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	if i.GetInFlightOp() != OpRespawning {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning {
 		return false
 	}
-	if err := i.Transition(ClearOp()); err != nil {
+	if err := i.transitionLocked(ClearOp()); err != nil {
 		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
 		return false
+	}
+	// A preflighted account replacement also fences lazy sibling starts. If the
+	// identity was never committed, releasing the resume owns and retires that
+	// provisional plan; a committed replacement keeps it until delivery clears
+	// pendingAccountSwap.
+	if i.pendingAccountSwap == nil {
+		i.accountSwapLaunch = nil
 	}
 	return true
 }
@@ -186,6 +215,34 @@ func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 		return fmt.Errorf("respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
 	}
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Respawn(i) })
+}
+
+// RespawnForAccountSwap starts the replacement identity in a fresh provider
+// conversation. Local recovery normally resumes the prior conversation, which
+// belongs to the previous account's separate home; Docker already provisions a
+// fresh sandbox and launch through its ordinary Respawn implementation.
+func (i *Instance) RespawnForAccountSwap() error {
+	return i.RespawnForAccountSwapWithLiveBoundary(nil)
+}
+
+// RespawnForAccountSwapWithLiveBoundary is the fresh-conversation account
+// replacement with the same pre-ConfirmLive callback used by ordinary respawn.
+// The idle-evidence mechanism owns that boundary; account swapping only routes
+// its distinct launch through it.
+func (i *Instance) RespawnForAccountSwapWithLiveBoundary(beforeLive func()) error {
+	if op := i.GetInFlightOp(); op != OpRespawning {
+		return fmt.Errorf("account respawn of %q requires the limit-resume fence (in-flight op is %s)", i.Title, opLabel(op))
+	}
+	if err := i.withLiveBoundary(beforeLive, func() error {
+		backend := i.currentBackend()
+		if local, ok := backend.(*LocalBackend); ok {
+			return local.respawnFresh(i)
+		}
+		return backend.Respawn(i)
+	}); err != nil {
+		return err
+	}
+	return i.markAccountSwapReplacementPanesStarted()
 }
 
 // PrepareAgentSwap resolves and validates the incoming launch while the outgoing

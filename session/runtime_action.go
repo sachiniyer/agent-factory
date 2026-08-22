@@ -38,6 +38,9 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 	if v.StartupStateUnknown {
 		return fmt.Errorf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
 	}
+	if v.PendingAccountSwap && action != RuntimeActionResumeLimit {
+		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before another lifecycle action", v.Title)
+	}
 
 	switch action {
 	case RuntimeActionRestoreArchived:

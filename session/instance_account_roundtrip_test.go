@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,6 +61,131 @@ func TestInstanceAccount_EmptyStaysEmpty(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), `"account"`,
 		"an unscoped session must not persist an account key at all")
+}
+
+func TestInstanceAccount_ExplicitPinAndAutomaticSelectionStayDistinctOnDisk(t *testing.T) {
+	explicit := (&Instance{Title: "explicit", Account: "work"}).ToInstanceData()
+	require.False(t, explicit.AccountAutoSelected,
+		"the zero value must preserve legacy non-empty accounts as explicit pins")
+
+	automatic := &Instance{Title: "automatic", Account: "personal", accountAutoSelected: true}
+	stored := automatic.ToInstanceData().ForStorage()
+	require.True(t, stored.AccountAutoSelected)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"account_auto_selected":true`)
+
+	restored, err := FromInstanceData(InstanceData{
+		Title:               "automatic",
+		Account:             "personal",
+		AccountAutoSelected: true,
+		BackendType:         "docker",
+		Liveness:            LiveArchived,
+	})
+	require.NoError(t, err)
+	account, restoredAutomatic := restored.AccountSelection()
+	require.Equal(t, "personal", account)
+	require.True(t, restoredAutomatic, "a daemon restart must not turn an automatic selection into an explicit pin")
+}
+
+func TestInstanceAccount_PendingAutomaticSwapSurvivesRestartInert(t *testing.T) {
+	original := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	original.Title = "pending-swap"
+	original.Prompt = "finish the migration"
+	require.NoError(t, original.ValidateAccountSwap("work"))
+	_, err := original.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	original.EndLimitResume()
+
+	stored := original.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: original.Path, WorktreePath: original.Path,
+		SessionName: original.Title, BranchName: "main", ExternalWorktree: true,
+	}
+	require.NotNil(t, stored.PendingAccountSwap)
+	require.NotEmpty(t, stored.PendingAccountSwap.ConversationID)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"conversation_id"`)
+
+	var decoded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	restored, err := FromInstanceData(decoded)
+	require.NoError(t, err)
+	from, to, pending := restored.PendingAccountSwap()
+	require.True(t, pending)
+	require.Empty(t, from)
+	require.Equal(t, "work", to)
+	require.Equal(t, stored.PendingAccountSwap.ConversationID,
+		restored.ToInstanceData().PendingAccountSwap.ConversationID)
+	require.True(t, restored.Started(), "the inert row must remain eligible for the limit scheduler")
+	require.Equal(t, LiveLimitReached, restored.GetLiveness(),
+		"ordinary status/lost recovery must not consume the pending swap")
+}
+
+type preAccountSwapInstanceData struct {
+	ID                  string          `json:"id,omitempty"`
+	Title               string          `json:"title"`
+	Path                string          `json:"path"`
+	Branch              string          `json:"branch"`
+	Status              Status          `json:"status"`
+	Liveness            Liveness        `json:"liveness,omitempty"`
+	Program             string          `json:"program"`
+	Account             string          `json:"account,omitempty"`
+	BackendType         string          `json:"backend_type,omitempty"`
+	StartupStateUnknown bool            `json:"startup_state_unknown,omitempty"`
+	Worktree            GitWorktreeData `json:"worktree"`
+	Tabs                []TabData       `json:"tabs,omitempty"`
+}
+
+func TestPendingAccountSwapStorageProjectionKeepsPreviousReleaseInert(t *testing.T) {
+	original := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	original.Title = "pending-swap-rollback"
+	original.Prompt = "finish the migration"
+	require.NoError(t, original.ValidateAccountSwap("work"))
+	_, err := original.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	original.EndLimitResume()
+
+	stored := original.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: original.Path, WorktreePath: original.Path,
+		SessionName: original.Title, BranchName: "main", ExternalWorktree: true,
+	}
+	require.True(t, stored.StartupStateUnknown,
+		"the immediately previous release must see a lifecycle fence it understands")
+	require.NotNil(t, stored.PendingAccountSwap.OriginalStartupStateUnknown)
+	require.False(t, *stored.PendingAccountSwap.OriginalStartupStateUnknown)
+	reprojected := stored.ForStorage()
+	require.False(t, *reprojected.PendingAccountSwap.OriginalStartupStateUnknown,
+		"rewriting a projected row must retain the real lifecycle value")
+	clientView := stored.ForClientRead()
+	require.False(t, clientView.StartupStateUnknown,
+		"disk fallback clients must see the pending-swap lifecycle, not its old-reader fence")
+	require.Nil(t, clientView.PendingAccountSwap.OriginalStartupStateUnknown)
+	payload, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var previousWire preAccountSwapInstanceData
+	require.NoError(t, json.Unmarshal(payload, &previousWire),
+		"the previous release ignored additive account-swap fields")
+	previousPayload, err := json.Marshal(previousWire)
+	require.NoError(t, err)
+	var previousView InstanceData
+	require.NoError(t, json.Unmarshal(previousPayload, &previousView))
+	previous, err := FromInstanceData(previousView)
+	require.NoError(t, err)
+	require.True(t, previous.StartupStateUnknown(),
+		"rollback must not resume an unrelated conversation under the replacement account")
+
+	current, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	require.False(t, current.StartupStateUnknown(),
+		"the current reader must remove its compatibility projection")
+	_, to, pending := current.PendingAccountSwap()
+	require.True(t, pending)
+	require.Equal(t, "work", to)
+	require.True(t, current.Started(),
+		"the current scheduler must retain the pending delivery obligation")
 }
 
 // Unsupported combinations must REFUSE at create time with an actionable error,

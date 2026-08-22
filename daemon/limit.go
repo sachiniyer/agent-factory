@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -90,7 +92,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
-		_ = instance.SetLimitReachedAtEpoch(resetAt, epoch)
+		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {
@@ -400,7 +402,7 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 		return resumeNotPerformed, nil
 	}
 
-	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title)
+	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance))
 }
 
 // resumeFromLimitLocked performs the shared limit-resume action. The caller must
@@ -411,8 +413,25 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 // points (resumeFromLimit and the auto-resume scheduler) take the two locks before
 // calling in, so this body never touches the lock helpers itself.
 func (m *Manager) resumeFromLimitLocked(repoID, key string, instance *session.Instance, requestedTitle string) error {
-	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle)
+	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, nil)
 	return err
+}
+
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) error {
+	_, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap)
+	return err
+}
+
+// fallBackFromUncommittedAccountSwap applies one deadline rule to every refusal
+// before identity selection: once the ordinary resume is already due, a failed
+// replacement must retain the current identity and yield to that ordinary path.
+func fallBackFromUncommittedAccountSwap(title string, swap *autoAccountSwap, cause error) bool {
+	if swap == nil || swap.alreadySet || !swap.fallbackDue {
+		return false
+	}
+	log.WarningLog.Printf("automatic account replacement for %q failed before identity commit; its ordinary resume deadline is due, so retaining the current identity: %v", title, cause)
+	swap.fellBack = true
+	return true
 }
 
 // publishSessionSnapshot pushes this session's current projection to clients while
@@ -439,7 +458,7 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 }
 
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string) (resumeFromLimitOutcome, error) {
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap) (resumeFromLimitOutcome, error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
@@ -514,11 +533,95 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 	}()
 
+	forceRespawn := false
+	configFenceHeld := false
+	accountLimitFenceHeld := false
+	releaseAccountSwapFences := func() {
+		if accountLimitFenceHeld {
+			m.accountLimitMu.Unlock()
+			accountLimitFenceHeld = false
+		}
+		if configFenceHeld {
+			m.configApplyMu.Unlock()
+			configFenceHeld = false
+		}
+	}
+	defer releaseAccountSwapFences()
+	if accountSwap != nil && !accountSwap.alreadySet {
+		testHookAccountSwapBeforeFinalFence()
+		// Serialize the final policy read and identity checkpoint with live config
+		// application. If an opt-out or candidate restriction has already applied,
+		// this admission observes it; once admission owns the fence, ApplyConfig
+		// cannot report a newer policy live until the identity commit has settled.
+		m.configApplyMu.Lock()
+		configFenceHeld = true
+		m.accountLimitMu.Lock()
+		accountLimitFenceHeld = true
+		liveConfig := m.Config()
+		if !liveConfig.LimitAutoResume {
+			// A live opt-out forbids every new automatic action, including an
+			// already-due ordinary same-account retry. Committed replacements use
+			// the independent recovery path and never enter this branch.
+			releaseAccountSwapFences()
+			return resumeNotPerformed, nil
+		}
+
+		root := instance.GetRepoPath()
+		if root == "" {
+			root = instance.Path
+		}
+		fallbackEligible := true
+		swapErr := config.WithProjectConfigLockForRoot(root, func() error {
+			var err error
+			fallbackEligible, err = m.commitNewAccountSwapIdentity(
+				repoID, key, requestedTitle, instance, accountSwap, liveConfig)
+			return err
+		})
+		if swapErr != nil {
+			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
+				return resumeNotPerformed, swapErr
+			}
+			accountSwap = nil
+			releaseAccountSwapFences()
+		} else {
+			releaseAccountSwapFences()
+			forceRespawn = true
+		}
+	}
+
 	as := instance.AgentServer()
-	switch probe := probeLiveness(instance, as); probe {
+	probe := probeAbsent
+	if !forceRespawn {
+		probe = probeLiveness(instance, as)
+	}
+	shouldRespawn := forceRespawn
+	switch probe {
 	case probeAlive:
-		// A live stall — the common claude/codex case. No re-spawn; the un-stall
-		// prompt below is all it needs.
+		// A live ordinary stall needs only the un-stall prompt. A committed account
+		// replacement is stronger: every persisted sibling must also be present.
+		// A daemon can crash after the agent starts but before setupTabs completes,
+		// so repair an incomplete pane set as one fresh credential boundary.
+		if accountSwap != nil && accountSwap.alreadySet {
+			var repairErr error
+			if paneErr := instance.ValidateAccountSwapReplacementPanes(); paneErr != nil {
+				repairErr = paneErr
+			}
+			if accountSwap.agent == tmux.ProgramCodex && !instance.AgentConversation().HasID() {
+				repairErr = errors.Join(repairErr, errors.New("its Codex conversation id is not durable"))
+			}
+			if repairErr != nil {
+				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				if err := instance.StopForAccountSwap(); err != nil {
+					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+				}
+				shouldRespawn = true
+			}
+		}
 	case probeUnknown:
 		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeAnsweredDead:
@@ -541,22 +644,62 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		fallthrough
 	case probeAbsent:
+		if accountSwap != nil && !forceRespawn {
+			if accountSwap.alreadySet {
+				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
+					return resumeNotPerformed, err
+				}
+			}
+			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
+				return resumeNotPerformed, err
+			}
+			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
+				return resumeNotPerformed, err
+			}
+		}
+		shouldRespawn = true
+	}
+	if shouldRespawn {
 		// Capture the limit window BEFORE the re-spawn: Respawn ends in ConfirmLive,
 		// which drops both the LiveLimitReached liveness and its reset time, and
 		// LimitResetAt reports (zero, false) once that has happened. Re-applying the
 		// block below has to restore THIS episode's window, not a zeroed one — the
 		// auto-resume scheduler schedules off it (reset + grace).
 		resetAt, _ := instance.LimitResetAt()
-		if rerr := instance.RespawnWithLiveBoundary(func() {
+		var rerr error
+		var accountConversationCapture session.ConversationCaptureSnapshot
+		beforeLive := func() {
 			if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 				log.WarningLog.Printf("limit resume for %q reached its live boundary before predecessor evidence was durable: %v", instance.Title, perr)
 			}
-		}); rerr != nil {
+		}
+		if accountSwap != nil {
+			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
+			if rerr == nil {
+				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
+			}
+		} else {
+			rerr = instance.RespawnWithLiveBoundary(beforeLive)
+		}
+		if rerr != nil {
+			if accountSwap != nil {
+				if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
+					rerr = errors.Join(rerr, perr)
+				}
+			}
 			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
 		m.noteRuntimeReplaced(repoID, instance)
+		// Account-swap preflight captured the selected account's provider store
+		// before launch. Discover Codex synchronously under this operation fence:
+		// the ordinary async writer cannot take the same op lock until this resume
+		// returns, which would let the pending crash-recovery marker retire first.
+		var accountCaptureErr error
+		if accountSwap != nil {
+			accountCaptureErr = captureAccountSwapConversation(instance, accountConversationCapture)
+		}
 		// SendPromptWithEvidence below resolves the agent-server only after Respawn;
 		// the `as` captured above belongs to the remote sandbox just torn down (#1786).
 		// Re-apply the limit block Respawn's ConfirmLive just cleared. A re-spawned
@@ -584,7 +727,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// through prompt delivery now (#2997), and the plain SetLimitReached refuses
 		// while any op is in flight — it would no-op here and lose this episode's
 		// reset time, which the auto-resume scheduler schedules off.
-		if perr := instance.ReparkLimitUnderResumeFence(resetAt); perr != nil {
+		if perr := m.reparkLimitUnderResumeFence(instance, resetAt); perr != nil {
 			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
 		}
 		// Write the respawn's durable state NOW, not at the end of the happy path
@@ -617,10 +760,31 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if settleErr != nil {
 			log.WarningLog.Printf("limit resume for %q: %v", instance.Title, settleErr)
 		}
+		if accountCaptureErr != nil {
+			captureErr := fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, accountCaptureErr)
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(captureErr, settleErr)
+			}
+			return resumeNotPerformed, captureErr
+		}
+	}
+	if accountSwap != nil {
+		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
+			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
+			if settleErr != nil {
+				return resumeNotPerformed, errors.Join(boundaryErr, settleErr)
+			}
+			return resumeNotPerformed, boundaryErr
+		}
+		if err := instance.SynchronizeAccountSwapRuntimeMetadata(); err != nil {
+			return resumeNotPerformed, err
+		}
 	}
 
 	prompt := strings.TrimSpace(instance.GetPrompt())
-	if prompt == "" {
+	if accountSwap != nil {
+		prompt = accountSwapPrompt(accountSwap, prompt)
+	} else if prompt == "" {
 		// Interactive session with no stored prompt: the best we can do is
 		// un-stall it. Loses the agent's prior context (documented caveat).
 		prompt = "continue"
@@ -647,6 +811,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			return resumeNotPerformed, errors.Join(resumeErr, settleErr)
 		}
 		return resumeNotPerformed, resumeErr
+	}
+	if accountSwap != nil && !instance.ClearPendingAccountSwap(accountSwap.from, accountSwap.to) {
+		return resumeNotPerformed, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.

@@ -74,6 +74,19 @@ func TestApplyAccountScope_RefusesRatherThanFallingBack(t *testing.T) {
 	require.Error(t, err, "an unprovable program must refuse rather than launch scoped-in-name-only")
 }
 
+func TestAccountEnvironmentScopeRejectsCommandLocalIdentity(t *testing.T) {
+	withLookup(t, func(agent, name string) (Account, error) {
+		return Account{Agent: agent, Name: name, Dir: "/accounts/" + agent + "/" + name}, nil
+	})
+
+	_, err := applyAccountEnvironmentScope(nil, "codex", "work", "CODEX_HOME=/other make")
+	require.ErrorContains(t, err, "overrides the account directory")
+
+	scoped, err := applyAccountEnvironmentScope(nil, "codex", "work", "git status")
+	require.NoError(t, err)
+	require.Contains(t, scoped, "CODEX_HOME=/accounts/codex/work")
+}
+
 var errNotRegistered = errNotRegisteredType{}
 
 type errNotRegisteredType struct{}

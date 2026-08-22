@@ -34,6 +34,7 @@ func (t *TmuxSession) SetAccount(name string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.account = name
+	t.accountEnvironmentOnly = false
 	if name == "" {
 		t.accountAgent = ""
 		return
@@ -49,11 +50,42 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.account = name
+	t.accountEnvironmentOnly = false
 	if name == "" {
 		t.accountAgent = ""
 		return
 	}
 	t.accountAgent = agent
+}
+
+// SetAccountEnvironmentForAgent scopes a shell/process sibling to the selected
+// account while keeping its own command shape. This is distinct from claiming
+// the sibling command is the agent executable.
+func (t *TmuxSession) SetAccountEnvironmentForAgent(agent, name string) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+}
+
+// SetAccountShellEnvironmentForAgent scopes an af-created interactive shell.
+// Named-account shells use the one startup-file-free form the account boundary
+// recognizes; an arbitrary shell command remains a refused process command.
+func (t *TmuxSession) SetAccountShellEnvironmentForAgent(agent, name string) error {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	if name != "" {
+		program, err := sessionenv.AccountShellCommand(t.program)
+		if err != nil {
+			return err
+		}
+		t.program = program
+	}
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+	return nil
 }
 
 // SetLaunchProgram sets the pane command AND af's executable/argument proof
@@ -77,7 +109,7 @@ func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountL
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program, sessionenv.AccountLaunchProof{
@@ -86,7 +118,8 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		},
 		append([]string(nil), t.envPassthrough...),
 		t.account,
-		t.accountAgent
+		t.accountAgent,
+		t.accountEnvironmentOnly
 }
 
 // It SNAPSHOTS rather than taking the program as a parameter: the caller used to
@@ -94,7 +127,7 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	program, proof, extra, account, accountAgent := t.launchSnapshot()
+	program, proof, extra, account, accountAgent, accountEnvironmentOnly := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
@@ -102,7 +135,7 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 	}
 	var wrapped string
 	if account != "" {
-		if agent != accountAgent {
+		if agent != accountAgent && !accountEnvironmentOnly {
 			resolved := agent
 			if resolved == "" {
 				resolved = "an unrecognized command"
@@ -120,17 +153,41 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
+		if accountEnvironmentOnly {
+			wrapped, err = sessionenv.WrapAccountEnvironmentCommand(executable, accountAgent, account, extra, program)
+		} else {
+			wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
+		}
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}
 	if err != nil {
 		return "", nil, nil, err
 	}
+	filterAgent := agent
+	if accountEnvironmentOnly {
+		filterAgent = accountAgent
+	}
 	source := os.Environ()
 	return wrapped,
-		sessionenv.FilterForCommand(source, agent, program, extra),
-		sessionenv.ImportNamesForCommand(source, agent, program, extra), nil
+		sessionenv.FilterForCommand(source, filterAgent, program, extra),
+		sessionenv.ImportNamesForCommand(source, filterAgent, program, extra), nil
+}
+
+// ValidateAccountLaunchSupport checks the host-only prerequisites that must be
+// known before an account swap stops the old panes. Command and environment
+// validation live in sessionenv; this keeps the tmux capability probe shared
+// with the actual launch instead of re-deriving its version rule in session.
+func ValidateAccountLaunchSupport(account string) error {
+	if !newSessionEnvSupportedForAccounts() {
+		return fmt.Errorf(
+			"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
+				"and af refuses rather than starting the session on the ambient account", account)
+	}
+	if _, err := sessionEnvExecutable(); err != nil {
+		return fmt.Errorf("locate af's account environment shim: %w", err)
+	}
+	return nil
 }
 
 // importClientEnvironmentArgs makes an existing tmux server copy the approved

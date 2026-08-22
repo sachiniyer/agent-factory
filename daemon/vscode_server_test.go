@@ -20,6 +20,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -45,6 +46,9 @@ const (
 	// fakeVSCodeArgsEnv names a file the fake writes its argv to, so a test can
 	// assert what the daemon actually asked the editor to do.
 	fakeVSCodeArgsEnv = "AF_TEST_FAKE_CODE_SERVER_ARGS"
+	// fakeVSCodeAccountEnv names a file the fake writes its identity-bearing
+	// environment to, proving integrated terminals inherit the session account.
+	fakeVSCodeAccountEnv = "AF_TEST_FAKE_CODE_SERVER_ACCOUNT_ENV"
 	// fakeVSCodeHangEnv makes the fake start but never listen, standing in for a
 	// cold editor that outruns the start grace.
 	fakeVSCodeHangEnv = "AF_TEST_FAKE_CODE_SERVER_HANG"
@@ -70,6 +74,11 @@ func fakeVSCodeServerMain() {
 	args := os.Args[1:]
 	if path := os.Getenv(fakeVSCodeArgsEnv); path != "" {
 		_ = os.WriteFile(path, []byte(strings.Join(args, "\n")), 0o600)
+	}
+	if path := os.Getenv(fakeVSCodeAccountEnv); path != "" {
+		identity := "CLAUDE_CONFIG_DIR=" + os.Getenv("CLAUDE_CONFIG_DIR") + "\n" +
+			"ANTHROPIC_API_KEY=" + os.Getenv("ANTHROPIC_API_KEY") + "\n"
+		_ = os.WriteFile(path, []byte(identity), 0o600)
 	}
 	if os.Getenv(fakeVSCodeHangEnv) != "" {
 		// Never listen: the supervisor must report "starting", leave us alive, and
@@ -376,6 +385,42 @@ func TestVSCodeTab_SpawnsEditorAndProxiesIt(t *testing.T) {
 	}
 	if fi.Mode()&os.ModeSocket == 0 {
 		t.Fatalf("editor endpoint %s is not a socket (mode %v)", socketPath, fi.Mode())
+	}
+}
+
+func TestVSCodeTab_AccountSessionScopesEditorEnvironment(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/ambient/claude")
+	t.Setenv("ANTHROPIC_API_KEY", "ambient-secret")
+	envFile := filepath.Join(t.TempDir(), "account-env")
+	binary := writeFakeVSCodeBinary(t, "code-server", map[string]string{fakeVSCodeAccountEnv: envFile})
+	manager, id, tabID, _ := newVSCodeFixture(t, binary)
+
+	home, err := config.GetConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountDir, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inst := range manager.InstancesSnapshot() {
+		if inst.ID == id {
+			inst.Account = "work"
+		}
+	}
+
+	mux := newHTTPMux(&controlServer{manager: manager})
+	_ = getVSCodeProxy(t, mux, id, tabID, "")
+	raw, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := string(raw)
+	if !strings.Contains(identity, "CLAUDE_CONFIG_DIR="+accountDir) {
+		t.Fatalf("editor identity environment = %q, want selected account root %q", identity, accountDir)
+	}
+	if strings.Contains(identity, "ambient-secret") {
+		t.Fatalf("editor identity environment retained the ambient API key: %q", identity)
 	}
 }
 

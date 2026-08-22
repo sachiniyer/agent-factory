@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -164,6 +165,28 @@ func TestTransition_ParkHandoffStoresIncomingResetTime(t *testing.T) {
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)
 	require.Equal(t, resetAt, got)
+}
+
+func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
+	resetAt := time.Date(2026, 8, 14, 19, 0, 0, 0, time.UTC)
+	i := &Instance{
+		Program: tmux.ProgramCodex, Account: "work",
+		liveness: LiveRunning, inFlightOp: OpReplacing,
+	}
+	require.NoError(t, i.Transition(ParkHandoff(resetAt)))
+
+	account, ok := i.LimitAccount()
+	require.True(t, ok)
+	require.Equal(t, "work", account)
+	want := []AccountLimitObservationData{{
+		Agent: tmux.ProgramCodex, Account: "work", ResetAt: resetAt,
+	}}
+	require.Equal(t, want, i.AccountLimitObservations(),
+		"the handoff fence must publish the incoming identity's quota wall atomically")
+	stored := i.ToInstanceData().ForStorage()
+	require.Equal(t, "work", stored.LimitAccount)
+	require.Equal(t, want, stored.AccountLimitObservations,
+		"killing or restarting the handoff must not lose its account quota evidence")
 }
 
 // I1 (tombstone-before-teardown) is intentionally NOT a chokepoint edge —

@@ -161,6 +161,10 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// limitAccount attributes the current limit after Account changes; empty means ambient.
+	limitAccount string
+	// accountLimitObservations keep named identity walls after liveness clears.
+	accountLimitObservations []AccountLimitObservationData
 	// agentModelChange is a live, projection-only diagnostic supplied by the
 	// running agent-server. It is mutex-protected and deliberately omitted from
 	// durable restore state; see AgentModelChange and InstanceData.ForStorage.
@@ -187,15 +191,18 @@ type Instance struct {
 	agentRuntimeGeneration uint64
 	// Program is the program to run in the instance.
 	Program string
-	// Account is the credential account this instance's agent runs as, or empty
-	// for the ambient identity — which is the behaviour every session had before
-	// #3051 and remains the default.
+	// Account is the provider-pane credential account, or empty for the ambient
+	// identity — the pre-#3051 behavior, which remains the default.
 	//
-	// Persisted, because the identity a session runs as must survive a restart:
-	// a restored session that silently reverted to the ambient account would
-	// spend the wrong quota while still displaying the account it was created
-	// with.
+	// Persisted because a restored session that silently reverted to ambient
+	// credentials would spend the wrong quota while displaying its saved account.
 	Account string `json:"account,omitempty"`
+	// accountAutoSelected distinguishes a scheduler choice; false keeps pre-#3127 accounts pinned.
+	accountAutoSelected bool
+	// pendingAccountSwap survives until the replacement notice and task land.
+	pendingAccountSwap *AccountSwapData
+	// accountSwapLaunch is the admitted command, rebuilt before a post-restart retry.
+	accountSwapLaunch *accountSwapLaunchPlan
 	// Height is the height of the instance.
 	Height int
 	// Width is the width of the instance.
@@ -206,11 +213,7 @@ type Instance struct {
 	UpdatedAt time.Time
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
-	// pendingHandoffMission is a rendered takeover brief whose delivery has not
-	// been durably confirmed. It is separate from Prompt: Prompt is the user's
-	// durable goal, while this value includes one handoff's generated context and
-	// must be cleared once that exact delivery lands. Persisting it closes the
-	// daemon-crash window between a runtime swap and readiness.
+	// pendingHandoffMission is the rendered brief awaiting confirmed delivery.
 	pendingHandoffMission string
 	// inPlace is true when the instance was created with `--here`: on first
 	// start it attaches to the repo's existing working tree at its current

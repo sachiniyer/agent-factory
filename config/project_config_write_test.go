@@ -18,7 +18,7 @@ func TestSetProjectConfigValueCreatesAndResolves(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "default_program", res.Key)
 	assert.Equal(t, "gemini", res.Value)
-	assert.True(t, res.RequiresRestart)
+	assert.False(t, res.RequiresRestart, "the next project create rereads this applied-live preference")
 	path, _ := ProjectConfigTomlPath(project.ID)
 	assert.Equal(t, path, res.Path)
 
@@ -32,6 +32,20 @@ func TestSetProjectConfigValueByPathSelector(t *testing.T) {
 	res, err := SetProjectConfigValue(repoRoot, "default_program", "codex")
 	require.NoError(t, err, "a repository path resolves to its registered project")
 	assert.Equal(t, "codex", res.Value)
+}
+
+func TestProjectLimitAccountCandidatesReportsLiveEffect(t *testing.T) {
+	_, _, project := registeredTestProject(t)
+	set, err := SetProjectConfigValue(project.ID, "limit_account_candidates", "work,personal")
+	require.NoError(t, err)
+	require.False(t, set.RequiresRestart,
+		"the limit scheduler rereads personal project candidates on its next poll")
+
+	unset, err := UnsetProjectConfigValue(project.ID, "limit_account_candidates")
+	require.NoError(t, err)
+	require.True(t, unset.Removed)
+	require.False(t, unset.RequiresRestart,
+		"clearing candidates is visible to the next poll without a daemon restart")
 }
 
 func TestSetProjectConfigValuePreservesComments(t *testing.T) {

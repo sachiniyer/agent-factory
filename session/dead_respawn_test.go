@@ -284,6 +284,7 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 	log.Initialize(false)
 	defer log.Close()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	t.Setenv("SHELL", "/bin/bash")
 
 	const agentName = "af_991_agent"
 	shellName := agentName + shellTmuxSuffix
@@ -300,7 +301,9 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 	}
 	defer func() { restoreTmuxSession = prev }()
 
-	restored, err := FromInstanceData(deadInstanceData(t, Running, agentName, shellName))
+	data := deadInstanceData(t, Running, agentName, shellName)
+	data.Account = "work"
+	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 
 	assert.True(t, restored.TabAlive(0), "the live agent tab must stay reconnected")
@@ -308,6 +311,8 @@ func TestRunningInstance_DeadShellTabReplacedWithFreshShellOnLoad(t *testing.T) 
 		"restore must replace the dead shell tab with a freshly-created live shell (#991)")
 	assert.Equal(t, 1, newSessions,
 		"exactly one fresh shell session must be spawned (the failed re-spawn never counted)")
+	require.Equal(t, "/bin/bash --noprofile --norc -i", restored.GetTabs()[1].tmux.Program(),
+		"the replacement must not reintroduce a startup-file shell inside the selected account")
 	assert.Equal(t, Running, restored.GetStatus())
 	assert.True(t, restored.Started())
 }

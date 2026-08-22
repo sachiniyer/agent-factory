@@ -236,13 +236,8 @@ func ResumeProgramWithConversationID(program, recordedAgent, id string) (rewritt
 
 	switch agent {
 	case ProgramClaude:
-		for _, tok := range tokens[agentIdx+1:] {
-			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
-				isShortResumeWithAttachedValue(tok) ||
-				tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
-				return program, false
-			}
+		if len(claudeConversationSelectorArgs(tokens[agentIdx+1:])) > 0 {
+			return program, false
 		}
 		return program + " --resume " + shellquote.Quote(id), true
 	case ProgramCodex:
@@ -279,15 +274,180 @@ func ClaudeProgramWithSessionID(program, sessionID string) (string, bool) {
 	if agent != ProgramClaude {
 		return program, false
 	}
-	for _, tok := range tokens[agentIdx+1:] {
-		if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-			strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
-			isShortResumeWithAttachedValue(tok) ||
-			tok == "--session-id" || strings.HasPrefix(tok, "--session-id=") {
-			return program, false
-		}
+	if len(claudeConversationSelectorArgs(tokens[agentIdx+1:])) > 0 {
+		return program, false
 	}
 	return program + " --session-id " + sessionID, true
+}
+
+// ConversationSelectorArgs returns the user-authored arguments that force a
+// Claude or Codex launch into an existing conversation. A credential-account
+// replacement must start fresh: provider conversation stores are account-local,
+// so carrying one of these selectors across the boundary can fail or address an
+// unrelated conversation. The returned words are suitable for a refusal that
+// names exactly what the operator must remove.
+func ConversationSelectorArgs(program string) []string {
+	tokens, _ := splitShellTokens(program)
+	agentIdx, agent := findAgentToken(tokens)
+	if agentIdx < 0 {
+		return nil
+	}
+	switch agent {
+	case ProgramClaude:
+		return claudeConversationSelectorArgs(tokens[agentIdx+1:])
+	case ProgramCodex:
+		idx := codexSubcommandIndex(tokens[agentIdx+1:])
+		if idx < 0 {
+			return nil
+		}
+		idx += agentIdx + 1
+		if idx < len(tokens) && (tokens[idx] == "exec" || tokens[idx] == "e") {
+			execIdx := codexExecSubcommandIndex(tokens[idx+1:])
+			if execIdx < 0 {
+				return nil
+			}
+			idx += execIdx + 1
+		}
+		if idx < len(tokens) && tokens[idx] == "resume" {
+			end := min(idx+2, len(tokens))
+			return append([]string(nil), tokens[idx:end]...)
+		}
+	}
+	return nil
+}
+
+// codexSubcommandIndex returns the first Codex subcommand or prompt token
+// after consuming the global options accepted before it. Value-taking options
+// are listed explicitly so a value named "resume" is never mistaken for the
+// resume subcommand. An unknown option is ambiguous and therefore stops the
+// scan instead of guessing whether its next word is a value.
+func codexSubcommandIndex(args []string) int {
+	return codexOptionSubcommandIndex(args, codexGlobalOptionTakesValue,
+		codexGlobalOptionHasAttachedValue, codexGlobalBooleanOption)
+}
+
+// codexExecSubcommandIndex is the exec-level counterpart to
+// codexSubcommandIndex. Codex accepts another option grammar between "exec" and
+// its optional nested "resume" subcommand, so the account boundary must consume
+// those values before deciding whether a conversation selector is present.
+func codexExecSubcommandIndex(args []string) int {
+	return codexOptionSubcommandIndex(args, codexExecOptionTakesValue,
+		codexExecOptionHasAttachedValue, codexExecBooleanOption)
+}
+
+func codexOptionSubcommandIndex(args []string, takesValue, hasAttachedValue, boolean func(string) bool) int {
+	for idx := 0; idx < len(args); {
+		arg := args[idx]
+		switch {
+		case arg == "--":
+			return -1
+		case hasAttachedValue(arg), boolean(arg):
+			idx++
+		case takesValue(arg):
+			idx += 2
+			if idx > len(args) {
+				return -1
+			}
+		case strings.HasPrefix(arg, "-"):
+			return -1
+		default:
+			return idx
+		}
+	}
+	return -1
+}
+
+func codexExecOptionTakesValue(arg string) bool {
+	switch arg {
+	case "-c", "--config", "--enable", "--disable", "-i", "--image", "-m", "--model",
+		"--local-provider", "-p", "--profile", "-s", "--sandbox", "-C", "--cd", "--add-dir",
+		"--output-schema", "--color", "-o", "--output-last-message":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexExecOptionHasAttachedValue(arg string) bool {
+	for _, prefix := range []string{
+		"--config=", "--enable=", "--disable=", "--image=", "--model=", "--local-provider=",
+		"--profile=", "--sandbox=", "--cd=", "--add-dir=", "--output-schema=", "--color=",
+		"--output-last-message=",
+	} {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return len(arg) > 2 && (strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-i") ||
+		strings.HasPrefix(arg, "-m") || strings.HasPrefix(arg, "-p") || strings.HasPrefix(arg, "-s") ||
+		strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-o"))
+}
+
+func codexExecBooleanOption(arg string) bool {
+	switch arg {
+	case "--strict-config", "--oss", "--approve-for-me",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+		"--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules", "--json",
+		"-h", "--help", "-V", "--version":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexGlobalOptionTakesValue(arg string) bool {
+	switch arg {
+	case "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
+		"-i", "--image", "-m", "--model", "--local-provider", "-p", "--profile",
+		"-s", "--sandbox", "-C", "--cd", "--add-dir", "-a", "--ask-for-approval":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexGlobalOptionHasAttachedValue(arg string) bool {
+	for _, prefix := range []string{
+		"--config=", "--enable=", "--disable=", "--remote=", "--remote-auth-token-env=",
+		"--image=", "--model=", "--local-provider=", "--profile=", "--sandbox=", "--cd=",
+		"--add-dir=", "--ask-for-approval=",
+	} {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return len(arg) > 2 && (strings.HasPrefix(arg, "-c") || strings.HasPrefix(arg, "-i") ||
+		strings.HasPrefix(arg, "-m") || strings.HasPrefix(arg, "-p") || strings.HasPrefix(arg, "-s") ||
+		strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "-a"))
+}
+
+func codexGlobalBooleanOption(arg string) bool {
+	switch arg {
+	case "--strict-config", "--oss", "--approve-for-me",
+		"--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust",
+		"--search", "--no-alt-screen", "-h", "--help", "-V", "--version":
+		return true
+	default:
+		return false
+	}
+}
+
+func claudeConversationSelectorArgs(args []string) []string {
+	for idx, arg := range args {
+		switch {
+		case arg == "-c" || arg == "--continue":
+			return []string{arg}
+		case arg == "-r" || arg == "--resume" || arg == "--session-id":
+			if idx+1 < len(args) {
+				return append([]string(nil), args[idx:idx+2]...)
+			}
+			return []string{arg}
+		case strings.HasPrefix(arg, "--resume=") || strings.HasPrefix(arg, "-r=") ||
+			isShortResumeWithAttachedValue(arg) || strings.HasPrefix(arg, "--session-id="):
+			return []string{arg}
+		}
+	}
+	return nil
 }
 
 // DetectAgentFromCommand returns the canonical agent name (one of

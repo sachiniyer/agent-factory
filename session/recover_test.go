@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/log"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -84,6 +86,45 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 	agentSpawn := spawns[0]
 	assert.Equal(t, 1, strings.Count(agentSpawn, "--plugin-dir"),
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
+}
+
+func TestRespawnForAccountSwap_StartsFreshConversation(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	cfg := config.DefaultConfig()
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: "claude"}
+	require.NoError(t, config.SaveConfig(cfg))
+	_, err := agentaccount.Register(home, tmux.ProgramClaude, "work")
+	require.NoError(t, err)
+
+	const agentName = "af_account_swap_agent"
+	var newSessions int
+	var spawns []string
+	restored := lostInstanceForRecover(t, agentName, agentName+shellTmuxSuffix,
+		recordingExec(map[string]bool{}, &newSessions, &spawns))
+	restored.mu.Lock()
+	restored.Tabs[1].Kind = TabKindProcess
+	restored.Tabs[1].Command = "git status --short"
+	restored.Tabs[1].tmux.SetProgram("git status --short")
+	restored.mu.Unlock()
+	restored.Path = initTempGitRepo(t)
+	restored.SetLimitReached(time.Time{})
+	require.NoError(t, restored.BeginLimitResume())
+	require.NoError(t, restored.ValidateAccountSwap("work"))
+	_, err = restored.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+
+	require.NoError(t, restored.RespawnForAccountSwap())
+	require.NotEmpty(t, spawns)
+	agentSpawn := spawns[0]
+	require.NotContains(t, agentSpawn, "--continue",
+		"the previous account's conversation store must never be resumed under the replacement account")
+	require.Contains(t, agentSpawn, "--session-id",
+		"the replacement claude identity must receive an explicit fresh conversation")
+	require.Contains(t, strings.Join(spawns, "\n"), "__af-session-env-exec-account-environment",
+		"restored process panes must launch inside the replacement account environment")
 }
 
 // A relocation probe that reaches its deadline latches the worktree as stalled

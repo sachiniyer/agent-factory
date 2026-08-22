@@ -67,6 +67,17 @@ type ConversationCaptureSnapshot struct {
 	codexBefore map[string]struct{}
 }
 
+func cloneConversationCaptureSnapshot(snap ConversationCaptureSnapshot) ConversationCaptureSnapshot {
+	copy := snap
+	if snap.codexBefore != nil {
+		copy.codexBefore = make(map[string]struct{}, len(snap.codexBefore))
+		for path := range snap.codexBefore {
+			copy.codexBefore[path] = struct{}{}
+		}
+	}
+	return copy
+}
+
 // BeginConversationCapture snapshots local provider transcript stores before
 // spawning a tab. Today only Codex exposes a local file id we can safely observe;
 // other providers degrade to their existing latest-session resume path unless a

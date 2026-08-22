@@ -37,14 +37,29 @@ func WrapAccountCommand(executable, agent, account string, proof AccountLaunchPr
 	return wrapCommand(executable, agent, account, proof, extras, command)
 }
 
-func wrapCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
-	normalized, err := NormalizeExtraNames(extras)
-	if err != nil {
-		return "", err
+// WrapAccountEnvironmentCommand applies a selected account to a sibling pane's
+// environment. Unlike WrapAccountCommand, the pane command may be a shell or an
+// arbitrary process; the account still resolves in the child and never falls
+// back to ambient credentials.
+func WrapAccountEnvironmentCommand(executable, agent, account string, extras []string, command string) (string, error) {
+	if strings.TrimSpace(account) == "" {
+		return "", fmt.Errorf("account-scoped environment requires an account name")
 	}
+	return wrapCommandWithMarker(executable, AccountEnvironmentExecMarker, agent, account, AccountLaunchProof{}, extras, command)
+}
+
+func wrapCommand(executable, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
 	marker := ExecMarker
 	if account != "" {
 		marker = AccountExecMarker
+	}
+	return wrapCommandWithMarker(executable, marker, agent, account, proof, extras, command)
+}
+
+func wrapCommandWithMarker(executable, marker, agent, account string, proof AccountLaunchProof, extras []string, command string) (string, error) {
+	normalized, err := NormalizeExtraNames(extras)
+	if err != nil {
+		return "", err
 	}
 	args := []string{executable, marker, agent, strconv.Itoa(len(normalized))}
 	if account != "" {
@@ -74,16 +89,21 @@ func HandleInternalExec() {
 		return
 	}
 	scoped := os.Args[1] == AccountExecMarker
-	if os.Args[1] != ExecMarker && !scoped {
+	environmentOnly := os.Args[1] == AccountEnvironmentExecMarker
+	if os.Args[1] != ExecMarker && !scoped && !environmentOnly {
 		return
 	}
-	if err := execInvocation(os.Args[2:], scoped); err != nil {
+	if err := execInvocationMode(os.Args[2:], scoped || environmentOnly, environmentOnly); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "af: could not start the filtered session process")
 		os.Exit(127)
 	}
 }
 
 func execInvocation(args []string, scoped bool) error {
+	return execInvocationMode(args, scoped, false)
+}
+
+func execInvocationMode(args []string, scoped, environmentOnly bool) error {
 	trailing := 3
 	if scoped {
 		trailing = 6
@@ -132,7 +152,11 @@ func execInvocation(args []string, scoped bool) error {
 	// through to the ambient identity, which would be the silent wrong-account
 	// outcome the whole feature exists to prevent (#3051).
 	if scoped {
-		environ, err = applyAccountScope(environ, agent, account, command, proof)
+		if environmentOnly {
+			environ, err = applyAccountEnvironmentScope(environ, agent, account, command)
+		} else {
+			environ, err = applyAccountScope(environ, agent, account, command, proof)
+		}
 		if err != nil {
 			return err
 		}

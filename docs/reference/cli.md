@@ -161,8 +161,14 @@ account while reporting the one you asked for.
 ssh, sandbox and hook refuse by design, not because the work is pending. docker
 bind-MOUNTS the directory, so account writes land in your real account. An account is a writable agent home, so the agent writes refreshed authentication back into it. For ssh, sandbox and hook, af cannot establish that those writes come back, so a rotated token can be lost. If your provider rotates refresh tokens, losing it also invalidates the copy on this machine — so a feature meant to NARROW where an identity is used could break it.
 
-af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.
+By default af never switches accounts on its own. With limit_auto_resume enabled,
+an explicit limit_account_candidates list may opt an unpinned local
+session into switching after a usage limit. af skips registered candidates with
+a current limit observation, says which identity changed in the session, and
+waits normally when none is usable. Docker account-scoped creates remain
+supported, but automatic Docker replacement is disabled until af can durably
+identify and reap a crash-surviving container and freeze its complete provision
+plan. An explicit --account is a permanent pin and is never overridden.
 
 ```
 af accounts
@@ -701,6 +707,7 @@ Settable keys:
   update_channel             stable | preview
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
+  limit_account_candidates   comma-separated registered account names, or "" to disable account switching
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
