@@ -170,8 +170,83 @@ func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, path string) {
 func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
 	c.height = height
-	c.input.Width = max(20, width-24)
+	c.sizeEditField()
 }
+
+// sizeEditField sizes the value field from the row it actually renders into.
+//
+// It used to be a flat width-24, which is only correct for a 20-cell key — so
+// editing `network.require_loopback_token` (30 cells) rendered a row wider than
+// the pane at EVERY geometry, not just narrow ones (#3430). The field scrolls
+// horizontally, so a smaller width costs visible context, never content.
+//
+// Called from SetSize (which runs on every render, so a resize mid-edit is
+// covered) and from beginEdit, where the selected key is what changed.
+func (c *ConfigPane) sizeEditField() {
+	key := ""
+	if e := c.selectedEntry(); e != nil {
+		key = e.Key
+	}
+	_, width := c.editRowSplit(key)
+	c.input.Width = width
+}
+
+// editRowSplit divides an editing row's width between the KEY and the value
+// FIELD, and is the single place that arithmetic lives so the renderer and the
+// field's own Width can never disagree about it.
+//
+// The field is served first, and the key yields (#3430 review). At af's
+// supported minimum — a 40-column terminal, which app/render.go turns into 34
+// content cells — the cursor, `network.require_loopback_token` and the gap
+// consume all 34 by themselves. Clipping the composed row from the right then
+// removes the entire focused input: the width invariant holds, the row ends in
+// an ellipsis, and the user is typing into a field they cannot see. Truncating
+// the KEY instead costs identification the purpose line right below already
+// gives back, and is the only degradation that keeps the row's actual job doable.
+//
+// The key is only ever shortened when it would push the field below its minimum,
+// so at ordinary widths this returns the key untouched and the same field width
+// as before.
+//
+// Note the asymmetry with a non-editing row, which clips the VALUE and keeps the
+// whole key: there the key is the row's identity and the value is a preview, so
+// the preview is what can go. While editing, the field IS the task.
+func (c *ConfigPane) editRowSplit(key string) (keyBudget, fieldWidth int) {
+	keyWidth := lipgloss.Width(key)
+	// Everything the field costs beyond its text: the prompt, plus the cell a
+	// focused textinput renders past its Width for the cursor.
+	fieldChrome := lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
+	available := c.width - entryRowChromeWidth
+	keyBudget = available - minEditFieldWidth - fieldChrome
+	if keyBudget > keyWidth {
+		keyBudget = keyWidth
+	}
+	if keyBudget < 0 {
+		keyBudget = 0
+	}
+	fieldWidth = available - keyBudget - fieldChrome
+	// The floor keeps the field usable at a pane too narrow for any split to fit;
+	// fitPaneLine then clips the row, so the floor cannot reintroduce an overflow.
+	if fieldWidth < minEditFieldWidth {
+		fieldWidth = minEditFieldWidth
+	}
+	return keyBudget, fieldWidth
+}
+
+// entryRowChromeWidth is the fixed chrome every entry row carries: the
+// two-cell selection cursor plus the two-cell gap between key and value.
+const entryRowChromeWidth = 4
+
+// minEditFieldWidth keeps a value field usable at a degenerate pane width.
+const minEditFieldWidth = 8
+
+// editFieldCursorWidth is the cell a focused textinput renders PAST its Width,
+// for the cursor. Measured, not assumed: Width 42 with a 2-cell prompt renders a
+// 45-cell View. Without it the composed row is one cell over the pane and the
+// fitPaneLine backstop clips the field's last character — which is invisible to a
+// width assertion (the row does fit, after clipping) and showed up only in the
+// real terminal, as `…TAILMAR…` where the value's tail should have been.
+const editFieldCursorWidth = 1
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
 
@@ -343,6 +418,7 @@ func (c *ConfigPane) beginEdit() {
 	c.editing = true
 	c.status = ""
 	c.restartNotice = ""
+	c.sizeEditField()
 	c.input.SetValue(entry.Value)
 	c.input.CursorEnd()
 	c.input.Focus()
@@ -488,8 +564,48 @@ func (c *ConfigPane) renderHeader() string {
 	if c.path != "" {
 		b.WriteString(configPurposeStyle.Render("  " + c.path))
 	}
-	b.WriteString("\n\n")
-	return b.String()
+	// The path is the one part of this line the pane does not control the length
+	// of, so it is clipped rather than allowed to wrap (#3430). "Config" plus a
+	// clipped path still says which file is open; a wrapped header costs a list
+	// row at exactly the width where rows are scarcest, and makes countLines lie.
+	return c.fitPaneLine(b.String()) + "\n\n"
+}
+
+// fitPaneLine clips one composed line to the pane's width. It is the backstop
+// behind every per-fragment budget in this file, not a substitute for them: the
+// budgets keep the common case readable, and this keeps the INVARIANT true — the
+// pane never renders a line wider than itself, because a wider line is wrapped
+// by the overlay frame, and a wrapped line makes the height window's count (which
+// is taken from renderRowLines) a lie (#3430).
+//
+// A pane with no width yet (before the first SetSize) is left alone: clipping to
+// zero would blank the frame.
+func (c *ConfigPane) fitPaneLine(line string) string {
+	line = flattenPaneLine(line)
+	if c.width <= 0 {
+		return line
+	}
+	return fitLine(line, c.width)
+}
+
+// flattenPaneLine turns embedded control whitespace into spaces so the result is
+// genuinely ONE line.
+//
+// Load-bearing, not hygiene. An unrestricted string key (on_archive_command) may
+// hold a newline, and lipgloss.Width reports the WIDEST line of a multi-line
+// string — so fitLine would measure such a value as narrow, pass it through
+// whole, and turn one list row into several. That is the same overflow this file
+// guards against arriving through height instead of width, and it defeats
+// countLines the same way. A tab is here for the matching reason: the terminal
+// expands it to the next tab stop, which no width measurement predicts.
+func flattenPaneLine(line string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t', '\v', '\f':
+			return ' '
+		}
+		return r
+	}, line)
 }
 
 // renderRowLines renders every row to lines, reporting the line span of the
@@ -578,9 +694,17 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	}
 	b.WriteString(cursor)
 
-	key := configKeyStyle.Render(e.Key)
+	keyText := e.Key
+	if selected && c.editing {
+		// Clip the KEY, not the field — see editRowSplit. Clipped as plain text
+		// before styling, so the truncation never lands inside an escape sequence.
+		if budget, _ := c.editRowSplit(e.Key); budget < lipgloss.Width(keyText) {
+			keyText = fitLine(keyText, budget)
+		}
+	}
+	key := configKeyStyle.Render(keyText)
 	if selected {
-		key = configSelectedStyle.Render(e.Key)
+		key = configSelectedStyle.Render(keyText)
 	}
 	b.WriteString(key)
 	b.WriteString("  ")
@@ -590,6 +714,14 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	} else {
 		b.WriteString(configValueStyle.Render(c.displayValue(e)))
 	}
+	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
+	// this row, but neither can shrink the KEY: at a narrow pane the key alone
+	// (network.require_loopback_token is 30 cells) plus the cursor and the gap
+	// outgrows the box, and a wrapped row is the failure the height window cannot
+	// survive. The purpose lines below wrap on purpose and are already bounded.
+	line := c.fitPaneLine(b.String())
+	b.Reset()
+	b.WriteString(line)
 	b.WriteString("\n")
 
 	if selected {
@@ -701,28 +833,88 @@ func (c *ConfigPane) wrap(text string, style lipgloss.Style) string {
 // from it, and an off-by-one there is an overflowing pane.
 func (c *ConfigPane) renderHints() string {
 	if c.editing {
-		return "\n" + configHintStyle.Render("↵ save · esc cancel") + "\n"
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↵ save", drop: 1},
+			{text: "esc cancel"},
+		})) + "\n"
 	}
 	advanced := "a show advanced"
 	if c.showAdvanced {
 		advanced = "a hide advanced"
 	}
+	// Display order left to right; `drop` is the shed order (see fitHints).
+	//
 	// "C assistant" is the button #2453 adds: the discoverable way to open the
 	// config assistant from the config surface. It sits before "esc close" so the
 	// exit stays last, where a reader looks for it.
-	//
-	// Adding a hint is a WIDTH change (#1936). With the assistant hint the full row
-	// is ~1 column past the 64-wide box's inner width, so at the real geometries it
-	// would wrap "esc close" onto a second line. Rather than wrap, shed the most
-	// droppable hint when the row will not fit: the advanced toggle, because `a`
-	// still works and pressing it reveals the tier — whereas the assistant button
-	// and the exit must always show. This is the hintDropOrder pattern, scoped to
-	// the one optional hint this row has.
-	full := "↑/↓ move · ↵ edit · " + advanced + " · C assistant · esc close"
-	if c.width > 0 && lipgloss.Width(full) > c.width {
-		full = "↑/↓ move · ↵ edit · C assistant · esc close"
+	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+		{text: "↑/↓ move", drop: 2},
+		{text: "↵ edit", drop: 3},
+		{text: advanced, drop: 1},
+		{text: "C assistant", drop: 4},
+		{text: "esc close"},
+	})) + "\n"
+}
+
+// configHint is one fragment of a hint row, with the order it is shed in when
+// the row does not fit the pane. drop 0 means NEVER shed; 1 goes first.
+type configHint struct {
+	text string
+	drop int
+}
+
+// fitHints renders the richest hint row that fits the pane (#1936/#3430).
+//
+// Adding a hint is a WIDTH change (#1936), and the row had exactly one
+// sheddable fragment — so once the assistant button landed, the shed remainder
+// was still 43 cells and any pane narrower than that overflowed with nothing
+// left to drop. The ladder below replaces that single special case: each step
+// sheds one more fragment, in `drop` order, and the first step that fits wins.
+//
+// The ORDER is a product decision, so it is stated here rather than left to fall
+// out of the composition:
+//
+//  1. the advanced toggle — `a` still works, and pressing it reveals the tier,
+//  2. `↑/↓ move` — arrow keys are the most conventional binding on the row,
+//  3. `↵ edit` — Enter to activate is nearly as conventional,
+//  4. `C assistant` — deliberately always-on (#2453), so it goes last of all,
+//
+// and `esc close` is shed by NOTHING. A modal must always advertise the way out:
+// the key stays live either way, but a user who cannot see it is stuck in a pane
+// they do not know how to leave, which is the #2830 failure (an advertised key
+// that is not live where focus is) run backwards.
+//
+// If even the un-sheddable remainder is too wide — a pane narrower than
+// "esc close" — the row is CLIPPED rather than left for the overlay frame to
+// wrap. Never exceed the box.
+func (c *ConfigPane) fitHints(hints []configHint) string {
+	maxDrop := 0
+	for _, h := range hints {
+		if h.drop > maxDrop {
+			maxDrop = h.drop
+		}
 	}
-	return "\n" + configHintStyle.Render(full) + "\n"
+	row := joinHints(hints, 0)
+	for shed := 0; shed <= maxDrop; shed++ {
+		row = joinHints(hints, shed)
+		if c.width <= 0 || lipgloss.Width(row) <= c.width {
+			return row
+		}
+	}
+	return c.fitPaneLine(row)
+}
+
+// joinHints composes the hint row with every fragment whose drop order is at or
+// below shedThrough removed. shedThrough 0 keeps them all.
+func joinHints(hints []configHint, shedThrough int) string {
+	kept := make([]string, 0, len(hints))
+	for _, h := range hints {
+		if h.drop != 0 && h.drop <= shedThrough {
+			continue
+		}
+		kept = append(kept, h.text)
+	}
+	return strings.Join(kept, " · ")
 }
 
 // SetEditValueForTest and EditValueForTest expose the value field's buffer to
