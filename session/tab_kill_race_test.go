@@ -276,7 +276,7 @@ func TestAttachShellTab_KillRaceDropsProjection(t *testing.T) {
 // failed move aborts the archive back to Lost).
 func TestAttachShellTab_ArchiveFenceDropsProjection(t *testing.T) {
 	const agentName = "af_attach_archive"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	var inst *Instance
 	mockExec, sessionKilled := reconcileRaceExec(agentName, shellName, func() {
