@@ -88,6 +88,20 @@ func watchTask(id, cmd, dir string) task.Task {
 	return task.Task{ID: id, Name: "watch-" + id, WatchCmd: cmd, ProjectPath: dir, Enabled: true}
 }
 
+// watchingTaskIDs returns the IDs with a live (not yet finished) watcher, for
+// tests observing arming/disarming behavior.
+func (s *watcherSupervisor) watchingTaskIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.watchers))
+	for id, w := range s.watchers {
+		if !w.finished() {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // waitUntil polls cond until it returns true or the timeout elapses.
 func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
