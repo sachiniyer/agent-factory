@@ -69,7 +69,7 @@ func TestHookCancellation_ChildProcessOrphaned(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsync(ctx, repoPath, t.TempDir())
+	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
 
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -102,7 +102,7 @@ func TestHookCancellation_BackgroundedGrandchildKilledByGroupSignal(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsync(ctx, repoPath, t.TempDir())
+	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
 
 	pids := make([]int, len(pidFiles))
 	for i, f := range pidFiles {
@@ -141,7 +141,7 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsync(ctx, repoPath, t.TempDir())
+	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
 
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -155,7 +155,7 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 
 // freshRepoConfig isolates the per-test config dir via AGENT_FACTORY_HOME,
 // writes a repo config with the given post-worktree commands, and returns a
-// repo path the test should hand to RunPostWorktreeHooksAsync. The repo path
+// repo path the test should hand to RunPostWorktreeHooksAsyncWithEnvironment. The repo path
 // itself never needs to exist on disk — hooks.go only passes it through
 // RepoIDFromRoot to locate the per-repo config file.
 func freshRepoConfig(t *testing.T, postCmds []string) string {
