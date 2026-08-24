@@ -212,8 +212,7 @@ func (sshRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 		return ProvisionResult{}, p.reapProvisionFailure(err)
 	}
 	res.Backend = &sshBackend{
-		remoteAgentBackend: remoteAgentBackend{reap: res.Teardown},
-		provisioner:        p,
+		provisioner: p,
 		cleanup: &SSHRuntimeCleanupData{
 			Config:     sshCfg,
 			SessionDir: p.sessionDir,

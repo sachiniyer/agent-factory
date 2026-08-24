@@ -320,7 +320,7 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 		return errors.Join(sandboxErr, hookErr)
 	}
 	res.Teardown = teardown
-	res.Backend = p.provisionedBackend(teardown)
+	res.Backend = p.provisionedBackend()
 	removeKnownHostsOnFailure = false
 	return res, nil
 }
@@ -397,7 +397,7 @@ func restoredHookProvisionTeardown(reap func() error, slug, title string) func()
 // Split out so a test drives the real constructor rather than a restatement of
 // it: asserting on a hand-built HookBackend would pass even if provisionHost
 // returned the sandbox one.
-func (p *hookProvisioner) provisionedBackend(teardown func() error) Backend {
+func (p *hookProvisioner) provisionedBackend() Backend {
 	cleanup := p.cleanupData()
 	// The one place this claim is made, and the only path entitled to make it:
 	// provisionHost reaches here solely after hookProvisionKnownHosts wrote the
@@ -411,9 +411,8 @@ func (p *hookProvisioner) provisionedBackend(teardown func() error) Backend {
 	// breaking the very teardown this field exists to complete.
 	cleanup.HasKnownHostsDir = true
 	return &HookBackend{
-		remoteAgentBackend: remoteAgentBackend{reap: teardown},
-		provisioner:        p,
-		cleanup:            cleanup,
+		provisioner: p,
+		cleanup:     cleanup,
 	}
 }
 
