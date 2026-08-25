@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -196,4 +197,15 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			assert.Equal(t, test.want, redactHookOutputTokens(test.output))
 		})
 	}
+}
+
+func TestMalformedHookJSONStringRecoveryScansOnce(t *testing.T) {
+	contents := strings.Repeat("{", 256)
+	var containsToken bool
+	allocations := testing.AllocsPerRun(1, func() {
+		containsToken = malformedHookJSONStringContentsContainToken(contents)
+	})
+
+	require.False(t, containsToken)
+	assert.Less(t, allocations, 100.0)
 }

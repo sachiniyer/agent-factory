@@ -283,18 +283,14 @@ func malformedHookJSONStringContentsContainToken(contents string) bool {
 	}
 
 	document := recovered.String()
-	for offset := 0; offset < len(document); {
-		opener := strings.IndexAny(document[offset:], "{[")
-		if opener < 0 {
-			return false
-		}
-		opener += offset
-		if malformedHookJSONDocumentContainsToken(document[opener:]) {
-			return true
-		}
-		offset = opener + 1
+	opener := strings.IndexAny(document, "{[")
+	if opener < 0 {
+		return false
 	}
-	return false
+	// The malformed-document fallback scans the complete recovered suffix, so
+	// starting it once at the first possible container covers every later opener
+	// without repeatedly rescanning overlapping suffixes.
+	return malformedHookJSONDocumentContainsToken(document[opener:])
 }
 
 func hookJSONKeyMayStartAt(document string, index int) bool {
