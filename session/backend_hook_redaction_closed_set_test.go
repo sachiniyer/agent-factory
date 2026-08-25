@@ -102,6 +102,16 @@ func TestRedactHookOutputTokensPreservesDiagnosticsWithoutObjectOpeners(t *testi
 			name:   "plain sentence naming a token",
 			output: `{"message":"the token was rejected by the endpoint"}`,
 		},
+		{
+			// Byte-exact means byte-exact: a string that cannot carry an object is not
+			// parsed at all, so it cannot come back whitespace-normalized either.
+			name:   "numeric-looking string keeps its spacing",
+			output: `{"code":" 42 "}`,
+		},
+		{
+			name:   "serialized array of scalars keeps its spacing",
+			output: `{"list":"[1, 2, 3]"}`,
+		},
 	}
 
 	for _, test := range tests {

@@ -97,16 +97,18 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string can itself be a serialized payload, so it gets the same closed-set
-		// rule the top level applies to the whole output: parse it, or replace it.
-		redacted, parsed := redactHookJSONDocument(value)
-		if parsed {
-			return redacted, redacted != value
+		// A string can itself be a serialized payload, so one that could carry an
+		// object gets the same closed-set rule the top level applies to the whole
+		// output: parse it, or replace it. One that could not is left alone entirely
+		// — not even re-encoded, so an unrelated diagnostic stays byte-exact.
+		if !hookStringMayCarrySerializedObject(value) {
+			return value, false
 		}
-		if hookStringMayCarrySerializedObject(value) {
+		redacted, parsed := redactHookJSONDocument(value)
+		if !parsed {
 			return hookOutputRedaction, true
 		}
-		return value, false
+		return redacted, redacted != value
 	default:
 		return value, false
 	}
