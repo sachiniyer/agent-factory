@@ -387,10 +387,16 @@ func TestCleanupSessionsRecoversVanishedSessionsConcurrently(t *testing.T) {
 	// bound only caught because overhead pushed it over.
 	//
 	// A barrier makes the observation exact rather than probable: each recovery
-	// holds at the top of its bounded waits until every one has arrived.
+	// holds at the top of its bounded grace wait until every one has arrived.
 	// Concurrent recoveries release each other at once; a serial sweep can never
 	// raise the count, falls through the bound, and the peak below reports one
 	// window instead of three. No machine speed enters the verdict.
+	//
+	// The observer brackets the WAIT, not the worker goroutine, and the
+	// difference is the whole test: a recovery that launched all three workers
+	// and then serialized their waits behind a shared lock would satisfy a
+	// worker-level observer while reset latency grew per session again.
+	// Mutation-tested both ways.
 	var mu sync.Mutex
 	inFlight, peak := 0, 0
 	allOverlapped := make(chan struct{})
