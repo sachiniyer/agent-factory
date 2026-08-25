@@ -1,11 +1,13 @@
 package upgradetxn
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -182,4 +184,103 @@ func TestRollbackFailureCircuitBreakerRequiresADurablePhase(t *testing.T) {
 	require.Equal(t, PhaseRollbackFailed, reloaded.Journal().Phase)
 	require.True(t, reloaded.Journal().CandidateInstalled,
 		"the checkpoint the whole fix exists for must still be there")
+}
+
+// #3453 review (Codex P2). rollback()'s "already past the restore" arm returned a
+// bare nil, so a retried Rollback on a transaction that ADOPTED an unconfirmed
+// PhaseRollbackRestored reported the boundary as durable without another barrier
+// attempt — the same skip as the lifecycle operations, in the one place that had
+// been missed.
+func TestRollbackRetryReaffirmsAnAdoptedRestoredPhase(t *testing.T) {
+	txn, _, executable := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	_ = executable
+
+	// Fail only the LAST journal write of the rollback — the PhaseRollbackRestored
+	// boundary — so the transaction lands in the adopted state under test.
+	injected := errors.New("injected restored-boundary sync failure")
+	root := upgradeRoot(txn.Journal().HomeDir)
+	previous := syncTransactionDirectory
+	failFrom := false
+	syncTransactionDirectory = func(path string) error {
+		if path == root && failFrom {
+			return injected
+		}
+		return previous(path)
+	}
+	t.Cleanup(func() { syncTransactionDirectory = previous })
+	// Read the count OUTSIDE the callback: afterRollbackCheckpoint runs with the
+	// transaction mutex held, so txn.Journal() in there self-deadlocks.
+	metadataCount := len(txn.Journal().Metadata)
+	require.NotZero(t, metadataCount, "the fixture must restore some metadata for this to hook the last checkpoint")
+	txn.afterRollbackCheckpoint = func(progress RollbackProgress) error {
+		if progress.BinaryRestored && progress.MetadataRestored >= metadataCount {
+			failFrom = true
+		}
+		return nil
+	}
+
+	require.ErrorIs(t, lease.Rollback(), injected)
+	require.Equal(t, PhaseRollbackRestored, txn.Journal().Phase,
+		"precondition: the restored boundary was adopted from a visible write")
+
+	// The retry must re-attempt the barrier, not report the adopted phase as done.
+	require.ErrorIs(t, lease.Rollback(), injected,
+		"a retried rollback must retry the barrier rather than confirm an adopted boundary")
+
+	failFrom = false
+	require.NoError(t, lease.Rollback(), "and once the barrier can close, the retry settles it")
+}
+
+// #3453 review (Codex P1). Supervisor.Run reads Journal().Phase and acts on it
+// directly — its PhaseCommitted arm approves the candidate, disables the recovery
+// job, and starts cleanup without ever calling Commit. An ADOPTED PhaseCommitted
+// would run those irreversible effects over a journal a crash can still lose,
+// recovering the older candidate_validating entry with no actor left to finish it.
+//
+// So Run closes the barrier before reading the phase. Here it cannot close, and the
+// assertion is that none of those effects ran.
+func TestSupervisorRunRefusesToActOnAnAdoptedCommittedPhase(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = lease.Release() })
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+
+	injected := errors.New("injected commit sync failure")
+	_ = failJournalDirectorySync(t, upgradeRoot(txn.Journal().HomeDir), -1, injected)
+
+	require.Error(t, lease.Commit())
+	require.Equal(t, PhaseCommitted, txn.Journal().Phase,
+		"precondition: the committed phase was adopted from a visible write")
+
+	var approved, disabled int
+	supervisor := Supervisor{Operations: SupervisorOperations{
+		AwaitActivation:    func(context.Context, Journal) error { return nil },
+		StopPrevious:       func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartCandidate:     func(context.Context, Journal) error { return nil },
+		ValidateCandidate:  func(context.Context, Journal) error { return nil },
+		ApproveCandidate:   func(context.Context, Journal) error { approved++; return nil },
+		StopCandidate:      func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartPrevious:      func(context.Context, Journal) error { return nil },
+		ValidatePrevious:   func(context.Context, Journal) error { return nil },
+		DisableRecoveryJob: func(context.Context, Journal) error { disabled++; return nil },
+	}}
+
+	err = supervisor.Run(context.Background(), txn, lease)
+	require.ErrorIs(t, err, injected,
+		"Run must refuse to act on a phase whose barrier it cannot close")
+	assert.Zero(t, approved, "an adopted commit must not approve the candidate")
+	assert.Zero(t, disabled, "and must not disarm the recovery job over a journal a crash can lose")
 }

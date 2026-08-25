@@ -574,7 +574,10 @@ func (t *Transaction) rollback() error {
 	defer t.mu.Unlock()
 	switch t.journal.Phase {
 	case PhaseRollbackRestored, PhasePreviousStarting, PhasePreviousValidating, PhaseRolledBack:
-		return nil
+		// Already past the restore. Same rule as the lifecycle skips: an ADOPTED
+		// boundary is not a durable one, and reporting it as finished would let a
+		// retried Rollback confirm a barrier that never closed (#3453 review).
+		return t.reaffirmPhaseLocked(t.journal.Phase)
 	case PhaseCommitted:
 		return errors.New("cannot roll back a committed upgrade")
 	case PhaseRollingBack:
@@ -837,6 +840,29 @@ func (l *RecoveryLease) Cleanup() error {
 // restoring binary or metadata over that still-live owner.
 func (l *RecoveryLease) Abort() error {
 	return l.withTransaction(func(txn *Transaction) error { return txn.abort() })
+}
+
+// reaffirmDurableJournal closes the barrier on a journal this process ADOPTED
+// from a write whose bytes were visible but whose directory sync never completed
+// (#3453). It is a no-op — no write at all — whenever the journal is already
+// durable, which is every ordinary call.
+//
+// The internal lifecycle skips reaffirm themselves, but they only protect callers
+// that go THROUGH them. Supervisor.Run does not: it reads Journal().Phase and acts
+// on it directly, and its PhaseCommitted arm approves the candidate, disables the
+// recovery job, and starts cleanup without ever calling Commit. An adopted
+// PhaseCommitted there would run those irreversible effects over a journal a crash
+// can still lose, recovering the older candidate_validating entry with no actor
+// left to finish it (#3453 review). So the phase is made durable before it is
+// acted on, at the one place that reads it.
+func (l *RecoveryLease) reaffirmDurableJournal() error {
+	return l.withTransaction(func(txn *Transaction) error { return txn.reaffirmDurableJournal() })
+}
+
+func (t *Transaction) reaffirmDurableJournal() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reaffirmPhaseLocked(t.journal.Phase)
 }
 
 func (l *RecoveryLease) withTransaction(action func(*Transaction) error) error {
