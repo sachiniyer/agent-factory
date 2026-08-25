@@ -205,6 +205,7 @@ func malformedHookJSONDocumentContainsToken(document string) bool {
 }
 
 func malformedHookJSONDocumentContainsTokenKey(document string) bool {
+	recoveredSuffix := false
 	for index := 0; index < len(document); index++ {
 		// Examine every unescaped quote as a possible recovery boundary. Advancing
 		// only to a previously assumed closing quote can consume the opening quote
@@ -214,14 +215,8 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			continue
 		}
 
-		end := index + 1
-		for end < len(document) && document[end] != '"' {
-			if document[end] == '\\' {
-				end++
-			}
-			end++
-		}
-		if end >= len(document) {
+		nextQuote := strings.IndexByte(document[index+1:], '"')
+		if nextQuote < 0 {
 			// A serialized child can be the final, truncated string in the malformed
 			// document. Close only that string literal for decoding; its decoded value
 			// must still pass the JSON-opener gate before recursive inspection.
@@ -233,8 +228,9 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			if malformedHookJSONStringContentsContainToken(document[index+1:]) {
 				return true
 			}
-			continue
+			return false
 		}
+		end := index + 1 + nextQuote
 
 		var value string
 		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
@@ -242,6 +238,15 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 			if strings.HasPrefix(after, ":") && hookJSONKeyMayStartAt(document, index) &&
 				malformedHookJSONKeyEqualsToken(document[index+1:end]) {
 				return true
+			}
+			// Adjacent quote pairing keeps this loop linear, but an escaped quote can
+			// truncate the first malformed string candidate. Recover the complete
+			// remaining suffix once so nested serialized boundaries remain visible.
+			if !recoveredSuffix {
+				recoveredSuffix = true
+				if malformedHookJSONStringContentsContainToken(document[index+1:]) {
+					return true
+				}
 			}
 			if malformedHookJSONStringContentsContainToken(document[index+1 : end]) {
 				return true
@@ -256,7 +261,7 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 		}
 		after := strings.TrimLeft(document[end+1:], " \t\r\n")
 		if strings.HasPrefix(after, ":") && hookJSONKeyMayStartAt(document, index) {
-			if strings.EqualFold(value, "token") {
+			if strings.EqualFold(value, "token") || malformedHookJSONKeyEqualsToken(document[index+1:end]) {
 				return true
 			}
 			continue
@@ -359,12 +364,38 @@ func hookJSONKeyMayStartAt(document string, index int) bool {
 			index = line + comment
 			continue
 		}
-		return document[index-1] == '{' || document[index-1] == ','
+		boundary := document[index-1]
+		if boundary == '{' {
+			return true
+		}
+		if boundary != ',' {
+			return false
+		}
+		return hookJSONCommaInsideObject(document, index-1)
+	}
+	return false
+}
+
+func hookJSONCommaInsideObject(document string, comma int) bool {
+	depth := 0
+	for index := comma - 1; index >= 0; index-- {
+		switch document[index] {
+		case '}', ']':
+			depth++
+		case '{', '[':
+			if depth == 0 {
+				return document[index] == '{'
+			}
+			depth--
+		}
 	}
 	return false
 }
 
 func malformedHookJSONKeyEqualsToken(contents string) bool {
+	// Adjacent quote recovery includes the escape that protected a serialized
+	// closing quote. Remove one such serialization layer before decoding the key.
+	contents = strings.TrimRight(contents, "\\")
 	var normalized strings.Builder
 	normalized.Grow(len(contents))
 	for _, character := range contents {
@@ -401,6 +432,9 @@ func hookJSONStringRecoveryBoundary(contents string) (int, int) {
 
 		if index+1 >= len(contents) {
 			return index, 1
+		}
+		if contents[index+1] < ' ' {
+			return index + 1, 1
 		}
 		switch contents[index+1] {
 		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':

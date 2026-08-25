@@ -210,6 +210,16 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"message\":\"unterminated\n\\u00\n7b\\\"token\\\":\\\"split-opener-secret\\\"}\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "array-prefixed comma-delimited quoted token prose",
+			output: `{"message":"[INFO, \"token\": unavailable]"}`,
+			want:   `{"message":"[INFO, \"token\": unavailable]"}`,
+		},
+		{
+			name:   "escaped token key quote split by a raw newline",
+			output: `{"message":"{\"child\":\"{\\\n\"token\\\":\\\"split-quote-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
@@ -228,4 +238,25 @@ func TestMalformedHookJSONStringRecoveryScansOnce(t *testing.T) {
 
 	require.False(t, containsToken)
 	assert.Less(t, allocations, 100.0)
+}
+
+func TestMalformedHookJSONQuoteRecoveryScansOnce(t *testing.T) {
+	var containsToken bool
+	small := "{" + strings.Repeat(`\"{`, 128)
+	smallAllocations := testing.AllocsPerRun(1, func() {
+		containsToken = malformedHookJSONDocumentContainsTokenKey(small)
+	})
+	require.False(t, containsToken)
+
+	large := "{" + strings.Repeat(`\"{`, 256)
+	largeAllocations := testing.AllocsPerRun(1, func() {
+		containsToken = malformedHookJSONDocumentContainsTokenKey(large)
+	})
+	require.False(t, containsToken)
+	assert.Less(t, largeAllocations, smallAllocations*3)
+}
+
+func TestMalformedHookJSONQuoteRecoveryHandlesEvenEscapeLayer(t *testing.T) {
+	assert.True(t, malformedHookJSONDocumentContainsToken(`{\\"token\\":\\"secret\\"}`))
+	assert.True(t, malformedHookRecoveredDocumentContainsToken(`prefix\{\\"token\\":\\"secret\\"}`))
 }
