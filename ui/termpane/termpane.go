@@ -155,9 +155,9 @@ type TermPane struct {
 	// mouseModes is the set of mouse-tracking DECModes (X10/normal/highlight/
 	// button-event/any-event) the inner app currently has enabled, maintained by
 	// the emulator's EnableMode/DisableMode callbacks (fired inside emu.Write, under
-	// gridMu's write lock). MouseTrackingEnabled reads it under the read lock. It
-	// mirrors exactly the set emu.SendMouse consults, so "tracking enabled" means
-	// "a forwarded wheel/click would actually reach the inner app". Starts empty.
+	// gridMu's write lock). It mirrors exactly the set emu.SendMouse consults, so
+	// "tracking enabled" means "a forwarded wheel/click would actually reach the
+	// inner app". Starts empty.
 	//
 	// It cannot go stale across a terminal reset: a full reset (RIS) runs the
 	// emulator's resetModes, which re-drives setMode(ModeReset) for every mouse
@@ -221,7 +221,7 @@ func New(dial Dialer, width, height int) *TermPane {
 		// Track the inner app's mouse-reporting requests so the host can tell
 		// whether the wheel belongs to the program or to pane scrollback (#1024
 		// wheel fix). Both callbacks fire from emu.Write under gridMu's write lock,
-		// ordering these map writes against MouseTrackingEnabled's locked read.
+		// ordering these writes against TerminalModes's locked read.
 		EnableMode: func(mode ansi.Mode) {
 			if isMouseTrackingMode(mode) {
 				t.mouseModes[mode] = true

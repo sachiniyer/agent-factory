@@ -523,13 +523,24 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 				// lock, so a stalled mount must time out — and a timeout must
 				// STOP here (#3278 review): falling through would reach
 				// Cleanup's own unbounded stat of the same stalled path.
-				if _, statErr := git.BoundedLstat(gw.GetWorktreePath()); statErr != nil {
+				info, statErr := git.BoundedLstat(gw.GetWorktreePath())
+				if statErr != nil {
 					if errors.Is(statErr, os.ErrNotExist) {
 						return nil
 					}
 					return fmt.Errorf(
 						"%w: the archived worktree's state at %s could not be established (%v) — kill the session again once the path answers",
 						ErrWorkspaceStateUnknown, gw.GetWorktreePath(), statErr,
+					)
+				}
+				// A genuine archive is a real directory, never a symlink —
+				// and cleanup's own first probe FOLLOWS links, so a symlink
+				// occupant pointing into a stalled mount would wedge the kill
+				// under its operation lock (#3278 review). Refuse it here.
+				if info.Mode()&os.ModeSymlink != 0 {
+					return fmt.Errorf(
+						"%w: the occupant at %s is a symlink, not the archived directory — refusing to enter cleanup through it",
+						ErrWorkspaceStateUnknown, gw.GetWorktreePath(),
 					)
 				}
 				if err := git.CheckRepoPresentForRelocation(gw.GetRepoPath()); err != nil {

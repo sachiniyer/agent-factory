@@ -659,11 +659,18 @@ function requireSessionID(id: string, action: string): void {
  *  daemon's resolved, collision-suffixed tab name. Refuses a session with no id. */
 export async function createTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a tab");
-  const resp = await af<{ name: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: true, command: "", name: "" },
     token,
   );
+  if (resp.warning) {
+    // A committed-but-failed tab create (#3237): the spawned tmux session may
+    // have survived a failed rollback. Route it through the shared
+    // mutation-committed path so the caller resyncs and shows the daemon's
+    // explanation instead of rendering the unpersisted tab as created.
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 
@@ -675,11 +682,15 @@ export async function createTab(id: string, title: string, token: string): Promi
  *  collision-suffixed tab name. Refuses a session with no id. */
 export async function createVSCodeTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a VS Code tab");
-  const resp = await af<{ name: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
     token,
   );
+  if (resp.warning) {
+    // Same committed contract as createTab (#3237).
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 

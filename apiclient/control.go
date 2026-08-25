@@ -109,10 +109,14 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 // caller cannot accidentally discard the destructive-addressing handle.
 func (c *Client) CreateTab(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var resp daemon.CreateTabResponse
-	if err := c.call("CreateTab", req, &resp); err != nil {
+	err := c.call("CreateTab", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the caller may need to target.
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab and returns the resolved

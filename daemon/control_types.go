@@ -455,6 +455,13 @@ type CreateTabResponse struct {
 	// It also makes the reservation inspectable rather than invisible, which is
 	// the complaint #1957 opened with.
 	TmuxName string `json:"tmux_name,omitempty"`
+	// The response stays successful on a committed failure — a spawned tab whose
+	// roster write failed and whose rollback could not prove the tmux session
+	// absent (#3237) — so every transport keeps the minted identity above and
+	// clients can explain or target the surviving tab instead of treating the
+	// create as an untouched, freely retryable failure. VALUE embed: gob elides
+	// zero pointers.
+	MutationOutcome
 }
 
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and
@@ -939,6 +946,21 @@ type SetConfigValueResponse struct {
 	// rebind failure at save time (#2480 PR2). The web form shows them after the
 	// echo so a user learns when a socket key did not apply or a posture is exposed.
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// UnsetConfigValueRequest clears one globally unsettable migrated setting.
+// It is a separate RPC from SetConfigValue so an older daemon cannot mistake
+// an additive "unset" bit for a request to set an empty value.
+type UnsetConfigValueRequest struct {
+	Key string `json:"key"`
+}
+
+type UnsetConfigValueResponse struct {
+	Result        *config.UnsetResult `json:"result"`
+	RestartNotice string              `json:"restart_notice"`
+	Applied       []string            `json:"applied"`
+	Pending       []string            `json:"pending"`
+	Warnings      []string            `json:"warnings,omitempty"`
 }
 
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config

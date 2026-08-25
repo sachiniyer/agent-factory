@@ -176,11 +176,11 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 	// than the silence.
 	if cfg != nil && config.ListenerServesUnauthenticatedNetwork(cfg.ListenAddr, cfg.RequireToken) {
 		report.Warn(sectionDaemon, "listener",
-			fmt.Sprintf("listen_addr %q is reachable from the network and require_token is false, so the control API "+
+			fmt.Sprintf("network.listen_addr %q is reachable from the network and network.require_token is false, so the control API "+
 				"(including DeliverPrompt, which runs instructions through your agents) is served to anyone who can "+
 				"reach that address, with no authentication", cfg.ListenAddr),
-			"if that is not what you want, run `af config set require_token true` to require a bearer token (`af token "+
-				"show` prints it), or `af config set listen_addr 127.0.0.1:8443` to serve this machine only",
+			"if that is not what you want, run `af config set network.require_token true` to require a bearer token (`af token "+
+				"show` prints it), or `af config set network.listen_addr 127.0.0.1:8443` to serve this machine only",
 			false)
 	}
 	// "A unit file exists" is not "this home has autostart". There is one unit

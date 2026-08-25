@@ -30,6 +30,20 @@ import (
 // projection instead of re-reading instances.json off disk.
 type SnapshotRequest struct {
 	RepoID string `json:"repo_id"`
+	// Live excludes deliberately archived rows. It is distinct from Statuses so
+	// callers can ask for every non-archived lifecycle state without copying the
+	// daemon's status vocabulary into their scripts.
+	Live bool `json:"live,omitempty"`
+	// Statuses is an OR filter over canonical liveness names. All other filters
+	// compose with it as AND constraints.
+	Statuses []string `json:"statuses,omitempty"`
+	// CreatedAfter excludes sessions created before this absolute bound. The CLI's
+	// --max-age flag resolves to this timestamp once, so daemon and disk-fallback
+	// reads cannot disagree at a moving duration boundary.
+	CreatedAfter time.Time `json:"created_after,omitzero"`
+	// Limit bounds the filtered result. A pointer distinguishes an omitted,
+	// backward-compatible unbounded request from an explicit invalid zero.
+	Limit *int `json:"limit,omitempty"`
 }
 
 type SnapshotResponse struct {
@@ -132,6 +146,10 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if owner, isSandbox := sandboxOwner(ctx); isSandbox {
 		instances = onlyOwnedBySandbox(instances, owner)
 		alarms = nil
+	}
+	instances, err := FilterSnapshotInstances(req, instances)
+	if err != nil {
+		return err
 	}
 	resp.Instances = instances
 	resp.DeliveryAlarms = alarms

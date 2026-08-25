@@ -128,6 +128,16 @@ func describeWatchState(d *session.InstanceData) string {
 		// state the resume is in the middle of leaving.
 		return "being respawned"
 	}
+	// An operation this build has no name for, from a newer daemon. ClassifyActivity
+	// holds such a record pending (#3450), so a skewed pair can now reach this
+	// timeout — and the liveness fallback below would describe it as "working" or
+	// "not idle", hiding the one fact that explains the wait and names its fix. The
+	// wording matches classifyWatchStop's unknown-state reason so an operator meets
+	// the same sentence whichever watch surface they are on. Diagnostic only: the
+	// classification is already correct, and this text changes nothing watch DOES.
+	if d.InFlightOp != session.OpNone {
+		return "in an operation a newer daemon understands and this af build does not — upgrade af to read it"
+	}
 	switch d.Liveness {
 	case session.LiveRunning:
 		return "working"

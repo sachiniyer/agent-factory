@@ -97,7 +97,7 @@ func TestHookAccountRefusalDoesNotPromiseAnIdentityForTheWorkaround(t *testing.T
 	require.Error(t, sandbox)
 	assert.NotContains(t, sandbox.Error(), "to use that machine's own credentials",
 		"an operator's ssh_config can SendEnv the daemon's credentials into the sandbox")
-	assert.Contains(t, sandbox.Error(), "sandbox_ssh",
+	assert.Contains(t, sandbox.Error(), "sandbox.ssh",
 		"the identity depends on their command, so name that rather than assert an outcome")
 
 	// ssh IS immune, because af pins -F none there so no ssh_config is read at all —

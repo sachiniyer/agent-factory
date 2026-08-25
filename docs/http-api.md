@@ -64,7 +64,7 @@ anything. Do not proxy this socket to a network interface.
     To drive the daemon from a **different host** — a remote TUI, or the
     browser web client — don't proxy this socket. SSH to the host and run `af`
     there, or expose the HTTP+token TCP listener to the network (it's on by
-    default on loopback; point `listen_addr` at a routable host:port). The
+    default on loopback; point `network.listen_addr` at a routable host:port). The
     listener is plain HTTP — front it with a TLS-terminating proxy or a private
     network. Both are covered in [Remote daemon access](remote-http-auth.md).
 
@@ -202,6 +202,14 @@ patch onto the freshly-loaded record under its file lock and leaves every
 unspecified field — and the scheduler-owned fields — as-stored, so a single-field
 edit cannot clobber a concurrent edit another client made (#1700). See
 [tasks.md](tasks.md) for the task shape.
+
+`Snapshot` accepts additive list filters in the request body: `live: true`
+excludes archived sessions; `statuses` is an array of lifecycle names
+(`running`, `ready`, `lost`, `dead`, `archived`, or `limit-reached`) matched as
+OR alternatives; `created_after` is an RFC 3339 creation-time lower bound; and
+`limit` is a positive maximum row count. These filters compose, run after
+`repo_id` scoping, and are applied by the daemon before the response is encoded.
+Omitting all four preserves the complete response and its existing stable order.
 
 `UpdateTask`, `RemoveTask`, and `TriggerTask` also accept an optional `expect`
 object — `{ "enforce": true, "project_path": "/repos/alpha" }` — asserting the

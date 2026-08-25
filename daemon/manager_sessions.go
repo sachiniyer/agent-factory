@@ -157,7 +157,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
-	// daemon dies or the teardown errors between here and DeleteInstance, the
+	// daemon dies or the teardown errors between here and DeleteInstanceByStableID, the
 	// surviving record is provably a user kill — the status poll finishes the
 	// teardown instead of classifying the vanished session Lost and restoring
 	// it. Best-effort: a failed tombstone write degrades to today's crash

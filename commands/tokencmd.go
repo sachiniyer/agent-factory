@@ -13,7 +13,7 @@ import (
 // `af token` manages the daemon's bearer token — the optional credential for the
 // direct-TCP HTTP API surface (#1592 Phase 3). Under the locked auth model one
 // token = full access, single-owner. The token authenticates the HTTP TCP
-// listener (enabled with the listen_addr config key); the material can be
+// listener (enabled with the network.listen_addr config key); the material can be
 // generated, inspected, and rotated independently of enabling the listener. The
 // local unix socket is never affected — its filesystem 0600 perms are the local
 // auth (#1029). The listener is plain HTTP (no TLS): the token travels over the
@@ -60,7 +60,7 @@ var tokenCmd = &cobra.Command{
 	Long: `Manage the bearer token that authenticates the daemon's direct-TCP HTTP API.
 
 The token grants full access under the single-owner auth model. It is only used
-by the TCP listener (enabled with the listen_addr config key); the local unix
+by the TCP listener (enabled with the network.listen_addr config key); the local unix
 socket stays unauthenticated (its 0600 filesystem perms are the local auth).
 The token is stored in the af home (~/.agent-factory) with 0600 permissions.
 

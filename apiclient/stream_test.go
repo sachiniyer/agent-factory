@@ -80,15 +80,15 @@ func TestPreview_CarriesTabAndReturnsContent(t *testing.T) {
 		return apiproto.Success(daemon.PreviewResponse{Content: "PANE-" + strconv.Itoa(req.Tab)})
 	})
 
-	content, gone, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha", RepoID: "r", Tab: 2, Full: true})
+	resp, err := c.PreviewSnapshot(daemon.PreviewRequest{Title: "alpha", RepoID: "r", Tab: 2, Full: true})
 	if err != nil {
-		t.Fatalf("Preview: %v", err)
+		t.Fatalf("PreviewSnapshot: %v", err)
 	}
-	if gone {
+	if resp.Gone {
 		t.Fatalf("gone must be false on a normal capture")
 	}
-	if content != "PANE-2" {
-		t.Fatalf("content = %q, want PANE-2", content)
+	if resp.Content != "PANE-2" {
+		t.Fatalf("content = %q, want PANE-2", resp.Content)
 	}
 	if got.Title != "alpha" || got.RepoID != "r" || got.Tab != 2 || !got.Full {
 		t.Fatalf("request lost fields: %+v", *got)
@@ -124,12 +124,12 @@ func TestPreview_GoneSurfacesFlag(t *testing.T) {
 	c, _ := previewServer(t, func(daemon.PreviewRequest) apiproto.Envelope {
 		return apiproto.Success(daemon.PreviewResponse{Gone: true})
 	})
-	content, gone, _, err := c.Preview(daemon.PreviewRequest{Title: "alpha"})
+	resp, err := c.PreviewSnapshot(daemon.PreviewRequest{Title: "alpha"})
 	if err != nil {
-		t.Fatalf("Preview: %v", err)
+		t.Fatalf("PreviewSnapshot: %v", err)
 	}
-	if !gone || content != "" {
-		t.Fatalf("want gone=true, empty content; got gone=%v content=%q", gone, content)
+	if !resp.Gone || resp.Content != "" {
+		t.Fatalf("want gone=true, empty content; got gone=%v content=%q", resp.Gone, resp.Content)
 	}
 }
 

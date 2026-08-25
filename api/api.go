@@ -700,6 +700,10 @@ func init() {
 	// Listing is project-scoped by default; --all is the explicit read-only
 	// opt-in to global breadth, matching `tasks list` (#2089).
 	sessionsListCmd.Flags().BoolVar(&sessionsListAllFlag, "all", false, "List sessions across every project instead of only the current one")
+	sessionsListCmd.Flags().BoolVar(&sessionsListLiveFlag, "live", false, "Exclude archived sessions")
+	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil, "Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached)")
+	sessionsListCmd.Flags().DurationVar(&sessionsListMaxAgeFlag, "max-age", 0, "Only list sessions created within this duration (for example 24h)")
+	sessionsListCmd.Flags().IntVar(&sessionsListLimitFlag, "limit", 0, "Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded)")
 
 	SessionsCmd.AddCommand(sessionsListCmd)
 	SessionsCmd.AddCommand(sessionsGetCmd)

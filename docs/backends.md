@@ -16,8 +16,14 @@ can be closed, renamed, and reordered like local web tabs.
 | `local` (default) | a git worktree + tmux on the daemon's own machine | nothing (the default), or `backend = "local"` |
 | `docker` | a container on the daemon's Docker host | `backend = "docker"` + `docker.image` |
 | `ssh` | a remote host over SSH | `backend = "ssh"` + `ssh.host` |
-| `sandbox` | whatever the operator's own `sandbox_ssh` command reaches (free-form ssh: jump hosts, `ProxyCommand`, bastions) | `backend = "sandbox"` + global `sandbox_ssh` |
+| `sandbox` | whatever the operator's own `sandbox.ssh` command reaches (free-form ssh: jump hosts, `ProxyCommand`, bastions) | `backend = "sandbox"` + global `sandbox.ssh` |
 | `hook` | wherever your provisioner scripts put it | `backend = "hook"` (see [Hook backend](#hook-backend-bring-your-own-provisioner)) |
+
+The operator-owned backend settings use `[docker]`, `[ssh]`, and `[sandbox]` in
+global TOML. Their former flat spellings (`docker_mount_agent_credentials`,
+`ssh_host_key_verification`, and `sandbox_ssh`) remain permanent aliases for
+existing TOML and JSON. When both spellings are present, the grouped value wins,
+including explicit `false` and empty-string values.
 
 Select a backend per-repo in `.agent-factory/config.json`, or per-session on any
 surface — each overrides the repo config for that one session:
@@ -78,7 +84,7 @@ clones the branch back (see [Archive & restore](#archive-restore)).
 | `docker.run_args` | no | Extra arguments appended verbatim to `docker run` (mounts, env, resource limits). |
 
 Letting a containerised agent authenticate is **not** a `docker` key — it is the
-global-only, operator-owned `docker_mount_agent_credentials` grant. See
+global-only, operator-owned `docker.mount_agent_credentials` grant. See
 [Agent credentials in a container](#agent-credentials-in-a-container).
 
 The Docker runtime does not copy the daemon's whole environment into the
@@ -98,7 +104,7 @@ session using environment-backed credentials may explicitly list
 authentication working after the operator has made that trust decision. If you
 use stored credentials instead, mount only the relevant config or
 credential-helper resources deliberately with `docker.run_args`, or set the
-global `docker_mount_agent_credentials` grant (below); host paths and native
+global `docker.mount_agent_credentials` grant (below); host paths and native
 keyrings are not implicitly mounted into a container.
 
 ### Agent credentials in a container
@@ -109,10 +115,10 @@ default-deny env boundary above, on its own, leaves a containerised agent
 unauthenticated.
 
 The **operator** (not a repo) opts in by setting the global
-`docker_mount_agent_credentials`:
+`docker.mount_agent_credentials`:
 
 ```bash
-af config set docker_mount_agent_credentials true
+af config set docker.mount_agent_credentials true
 ```
 
 When it is on, a docker session bind-mounts **read-only** the credential file
@@ -143,9 +149,18 @@ user's real home and mounts it only if it exists, so:
 - **Read-only.** The agent authenticates but cannot refresh or rewrite the host
   credential (a session-lifetime token still works; the disposable container
   discards its own writes on kill regardless).
+- **SELinux-relabeled.** The mount is `:ro,z`, so the credential is readable
+  inside the container on an SELinux-enforcing host — the Fedora, RHEL and CentOS
+  default. Without the relabel the container still starts and only the *read* is
+  denied, which surfaces as a session that is silently unauthenticated. `z` is the
+  **shared** label rather than `Z`: every concurrent session running that agent
+  mounts the same host file, and the private label would relabel it out from under
+  the others. Docker ignores the flag where SELinux is disabled, so it costs
+  nothing on other hosts; where SELinux is on, note that it does relabel the host
+  file itself to `container_file_t`.
 
 !!! warning "A global, operator-owned grant — and a deliberate partial hole"
-    `docker_mount_agent_credentials` is **global-only**: a repository selects the
+    `docker.mount_agent_credentials` is **global-only**: a repository selects the
     docker image, but only the **operator** decides whether that image may see
     their credentials. This is enforced by *source scoping*, not a trust gate —
     the key simply is not a repo key, so a cloned `.agent-factory/config.json`
@@ -267,7 +282,7 @@ degrade gracefully on an unprepared box:
 1. **Build the image:** `make session-image` (or point `docker.image` at your own
    — see [Image requirements](#image-requirements-bring-your-own-image)).
 2. **Grant credentials (operator, global):**
-   `af config set docker_mount_agent_credentials true`, so the containerised agent
+   `af config set docker.mount_agent_credentials true`, so the containerised agent
    can authenticate (see [Agent credentials in a container](#agent-credentials-in-a-container)).
    This is global-only on purpose and cannot be set from the repo config.
 3. **Set the repo default:** put `"backend": "docker"` and `"docker": {"image": …}`
@@ -296,7 +311,7 @@ With `backend = "ssh"`, a session runs on a remote host you reach over SSH — t
 built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 
 1. The daemon runs `ssh` (OpenSSH 7.6 or newer must be on the daemon host's PATH;
-   7.6 is what `ssh_host_key_verification = "accept-new"` needs, and the other
+   7.6 is what `ssh.host_key_verification = "accept-new"` needs, and the other
    postures need less),
    with every setting af owns passed explicitly and **no configuration file read
    at all** — reusing your keys and verifying the host key against `known_hosts`.
@@ -345,7 +360,7 @@ back (see [Archive & restore](#archive-restore)).
 
 > **Your `~/.ssh/config` does not apply, and never has.** af runs `ssh` with
 > `-F none`, so neither `~/.ssh/config` nor `/etc/ssh/ssh_config` is read. Only
-> the `ssh.*` settings above, `ssh_host_key_verification`, and your keys decide
+> the `ssh.*` settings above, `ssh.host_key_verification`, and your keys decide
 > how af connects. This is unchanged behaviour — the backend has always ignored
 > `ssh_config` — and it is deliberate: this backend's contract is that af enforces
 > the host-key posture in code, and a `Host` block could otherwise supply
@@ -353,7 +368,7 @@ back (see [Archive & restore](#archive-restore)).
 > setting can override.
 >
 > **If you need a bastion, a `ProxyJump`, a `ProxyCommand`, or any transport af
-> does not model, use `backend = "sandbox"`** with a free-form `sandbox_ssh`
+> does not model, use `backend = "sandbox"`** with a free-form `sandbox.ssh`
 > command — that backend exists precisely so you can express the connection
 > yourself, and there your `ssh_config` and `known_hosts` are the whole authority.
 > See the sandbox section below.
@@ -457,9 +472,9 @@ back (see [Archive & restore](#archive-restore)).
 
 **Host-key verification is strict by default** (secure by default — an unverified
 host could MITM the connection and capture the bearer token). The operator can
-relax it with the global-only **`ssh_host_key_verification`** key:
+relax it with the global-only **`ssh.host_key_verification`** key:
 
-| `ssh_host_key_verification` | Behavior |
+| `ssh.host_key_verification` | Behavior |
 |-----------------------------|----------|
 | `strict` (default) | Verify against a `known_hosts` file; refuse an unknown or changed key. Existing behavior — no change. |
 | `accept-new` | Trust-on-first-use: record an **unknown** host's key on first connect and proceed, but still refuse a **changed** key. This removes the pre-seed step for ephemeral hosts. |
@@ -469,7 +484,7 @@ It is **global-only** (operator-owned), not part of the repo-settable `ssh` tabl
 a repo selects `ssh.host`, but only the operator decides whether to relax
 verification — a repo-settable waiver combined with a repo-settable `ssh.host`
 would be a one-commit man-in-the-middle. Set it with
-`af config set ssh_host_key_verification accept-new`.
+`af config set ssh.host_key_verification accept-new`.
 
 `accept-new` records learned keys in an **af-owned store** under the AF home
 (`$AGENT_FACTORY_HOME/ssh_known_hosts`) by default — never your shared
@@ -480,7 +495,7 @@ either switch that host to `accept-new` for the first connect, or add its key to
 your `known_hosts` out of band (`ssh-keyscan -H host >> ~/.ssh/known_hosts`, or
 point `ssh.known_hosts` at a dedicated file), then create the session.
 
-**Legacy cleanup records.** `ssh_host_key_verification` is stored alongside a
+**Legacy cleanup records.** The `ssh.host_key_verification` posture is stored alongside a
 killed session's cleanup record, but records written before that field existed
 carry no posture, so they are cleaned up strictly. If such a record's host is not
 in the strict `known_hosts` file, no retry can ever complete it — af says so once
@@ -534,7 +549,7 @@ flow, over ssh. It skips cleanly where Docker is unavailable.
 ## Sandbox backend
 
 `backend = "sandbox"` reaches the target through **your own** ssh invocation. The
-global `sandbox_ssh` key holds a free-form command line — whatever already works
+global `sandbox.ssh` key holds a free-form command line — whatever already works
 in your terminal, including a jump host, a `ProxyCommand`, a bastion, or any flag
 `backend = "ssh"` does not model — and af runs the same provision, tunnel, and
 cleanup steps over it. Your `ssh_config`, `known_hosts`, and host-key posture are
@@ -542,7 +557,7 @@ the whole authority here; af adds none of its own. It is global-only and
 operator-owned, because af **executes** it on the daemon host (see
 [Configuration](configuration.md)).
 
-> **Known limitation: af cannot pin a `sandbox_ssh` target to one machine.**
+> **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup
 > commands, the port-forward, and the cleanup. If it reaches a name with several
 > addresses (a round-robin record, a load balancer, a dual-stack host), each
@@ -552,7 +567,7 @@ operator-owned, because af **executes** it on the daemon host (see
 > machine's directory and reports success while the real one leaks.
 >
 > `backend = "ssh"` no longer has this problem because af composes that command
-> and knows which token is the host. `sandbox_ssh` is **your** command, and af
+> and knows which token is the host. `sandbox.ssh` is **your** command, and af
 > cannot know which of its words is a hostname — an argument to `-o`, a jump-host
 > spec, a wrapper's own flag, or the target — so there is nothing it can safely
 > substitute. Guessing would silently rewrite the command you asked for.

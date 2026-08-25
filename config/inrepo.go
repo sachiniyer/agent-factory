@@ -315,6 +315,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	for key := range metadata.shape {
 		presentKeys[key] = true
 	}
+	if key, present := globalOnlyGroupedAliasInShape(metadata.shape); present {
+		return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, tomlGlobalConfigLocation)
+	}
 	for key := range presentKeys {
 		if inRepoGlobalOnlyKeys[key] {
 			// TOML-only global keys (the [keys] keymap, #1026) must point at

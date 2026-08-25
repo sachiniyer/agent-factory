@@ -36,6 +36,7 @@ func captureLog(t *testing.T, logger **stdlog.Logger) *bytes.Buffer {
 	t.Helper()
 	resetRemovedAutoYesWarnings()
 	resetLegacyRootAgentsWarnings()
+	resetConfigAliasWarnings()
 	var buf bytes.Buffer
 	old := *logger
 	*logger = stdlog.New(&buf, "", 0)

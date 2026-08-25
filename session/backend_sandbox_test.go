@@ -200,7 +200,7 @@ func TestSandboxTunnelProbeFailsWhenNothingListens(t *testing.T) {
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	assert.Contains(t, err.Error(), "never started listening")
-	assert.Contains(t, err.Error(), "sandbox_ssh", "the error must name the thing the operator can test by hand")
+	assert.Contains(t, err.Error(), "sandbox.ssh", "the error must name the thing the operator can test by hand")
 }
 
 func TestSandboxTunnelProbeSucceedsWhenSomethingListens(t *testing.T) {
@@ -399,4 +399,63 @@ func TestSandboxReapCompletesWhenTheProcessIsAlreadyGone(t *testing.T) {
 	_, statErr := os.Stat(marker)
 	assert.True(t, os.IsNotExist(statErr),
 		"the session directory must actually be removed — the whole point of the reap")
+}
+
+// stubSandboxReapNonce swaps the reap's nonce source for the duration of a test.
+func stubSandboxReapNonce(t *testing.T, fn func() (string, error)) {
+	t.Helper()
+	previous := sandboxReapNonce
+	sandboxReapNonce = fn
+	t.Cleanup(func() { sandboxReapNonce = previous })
+}
+
+// #3449. A nonce that cannot be generated is a PRE-FLIGHT failure: no script is
+// built, ssh is never invoked, and the sandbox is untouched — still running, and
+// still billing. Reporting that as a plain error tells TeardownStateUnknown the
+// teardown was determinate, and deleteSessionRecord then deletes the record that
+// is the user's only handle on it.
+//
+// Same shape as ssh's ambiguous 255 above, so it must be classified the same way:
+// unknown-state, and it must NOT latch, or the next poll reads a cached verdict
+// instead of retrying once the entropy source recovers.
+func TestSandboxReapNonceFailureIsUndetermined(t *testing.T) {
+	ranSSH := filepath.Join(t.TempDir(), "ssh-ran")
+	ssh := stubSSH(t, "touch "+ranSSH+"\nexit 0")
+	stubSandboxReapNonce(t, func() (string, error) { return "", errors.New("entropy exhausted") })
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "42"}
+
+	err := p.reap()
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrWorkspaceStateUnknown),
+		"a nonce failure cannot prove the sandbox was cleaned up, so the record must be retained")
+	assert.False(t, p.reaped, "and it must not latch, or the next poll will never retry")
+	assert.NoFileExists(t, ranSSH, "the reap failed before the script existed, so ssh cannot have run")
+
+	// And it really re-attempts rather than returning a cached verdict.
+	second := p.reap()
+	assert.True(t, errors.Is(second, ErrWorkspaceStateUnknown),
+		"a second reap while entropy is still exhausted must stay unknown-state")
+}
+
+// The other direction, so the fix above cannot degenerate into "a sandbox reap is
+// always unknown": once the nonce source recovers, the SAME provisioner reaps for
+// real and latches, and the record becomes deletable.
+func TestSandboxReapRecoversAfterANonceFailure(t *testing.T) {
+	ssh := stubSSH(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'; exit 0`)
+	failNonce := true
+	stubSandboxReapNonce(t, func() (string, error) {
+		if failNonce {
+			return "", errors.New("entropy exhausted")
+		}
+		return "0123456789abcdef", nil
+	})
+
+	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "42"}
+	require.Error(t, p.reap())
+	require.False(t, p.reaped)
+
+	failNonce = false
+	require.NoError(t, p.reap(), "the retry the non-latch preserves must be able to succeed")
+	assert.True(t, p.reaped, "a confirmed reap latches, so the record may finally be retired")
 }

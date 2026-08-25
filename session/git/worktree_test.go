@@ -1,9 +1,7 @@
 package git
 
 import (
-	"bytes"
 	"fmt"
-	stdlog "log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -515,8 +513,7 @@ func TestCleanup_LegacyExternalWorktreeIsPreserved(t *testing.T) {
 // has been removed externally), git retains internal worktree metadata.
 // Without an intervening `git worktree prune`, `git branch -D` reports the
 // branch is "in use" and the orphaned branch is left behind.
-// CleanupWorktreesForRepo already prunes before branch deletion (#330);
-// this verifies GitWorktree.Cleanup() follows the same order.
+// This verifies GitWorktree.Cleanup() prunes before branch deletion (#330).
 func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 	sandboxHome(t)
 
@@ -572,8 +569,8 @@ func TestCleanup_PrunesBeforeBranchDelete(t *testing.T) {
 // worktree's `.git` pointer is corrupted, `git worktree remove -f` fails with
 // "validation failed" and leaves the directory on disk. Cleanup() must fall
 // back to os.RemoveAll so the orphaned directory does not leak disk space and
-// force the user into `af reset`. CleanupWorktreesForRepo already does this;
-// this verifies GitWorktree.Cleanup() follows the same fallback.
+// force the user into `af reset`. This verifies GitWorktree.Cleanup()
+// follows the same os.RemoveAll fallback.
 func TestCleanup_RemovesOrphanedDirectory(t *testing.T) {
 	sandboxHome(t)
 
@@ -840,165 +837,4 @@ func createGitRepo(t *testing.T) string {
 	require.NoError(t, err, string(out))
 
 	return repoRoot
-}
-
-// TestCleanupWorktreesForRepo_PrunesBeforeBranchDelete is a regression test
-// for issue #330. When `git worktree remove -f` fails (e.g. the worktree's
-// `.git` pointer file has been removed externally) and CleanupWorktreesForRepo
-// falls back to os.RemoveAll, git still tracks the worktree in its metadata.
-// Without an intervening `git worktree prune`, `git branch -D` reports the
-// branch is "in use" and the orphaned branch is left behind.
-func TestCleanupWorktreesForRepo_PrunesBeforeBranchDelete(t *testing.T) {
-	sandboxHome(t)
-
-	repoRoot := createGitRepo(t)
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-	)
-	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "init")
-	commitCmd.Env = env
-	out, err := commitCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-
-	linkedPath := filepath.Join(filepath.Dir(repoRoot), "linked-wt")
-	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "linked-branch", linkedPath)
-	addCmd.Env = env
-	out, err = addCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-
-	// Corrupt the worktree by removing its `.git` pointer file. This makes
-	// `git worktree remove -f` fail validation, forcing the os.RemoveAll
-	// fallback path. Git's internal metadata still references the worktree
-	// until `git worktree prune` runs.
-	require.NoError(t, os.Remove(filepath.Join(linkedPath, ".git")))
-
-	// Cleanup should still complete successfully and delete the branch.
-	require.NoError(t, CleanupWorktreesForRepo(repoRoot))
-
-	// The branch should be gone — this is what regresses without the prune
-	// before `git branch -D`.
-	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "--list", "linked-branch")
-	out, err = branchCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Empty(t, strings.TrimSpace(string(out)),
-		"linked branch should be deleted even when `git worktree remove` falls back to os.RemoveAll")
-
-	// Only the main worktree should remain.
-	listCmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
-	out, err = listCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Equal(t, 1, strings.Count(string(out), "worktree "),
-		"only the main worktree should remain, got:\n%s", string(out))
-}
-
-// TestCleanupWorktreesForRepo_RejectsEmpty verifies the exported helper does
-// not silently operate on the cwd when given an empty repo root.
-func TestCleanupWorktreesForRepo_RejectsEmpty(t *testing.T) {
-	err := CleanupWorktreesForRepo("")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "repo root is empty")
-}
-
-// TestCleanupWorktreesForRepo_CleansGivenRepo verifies that
-// CleanupWorktreesForRepo targets the repo it is given — regardless of the
-// process's current working directory. This is the core of the #265 fix:
-// `af reset` must be able to clean worktrees in repos OTHER than the cwd.
-func TestCleanupWorktreesForRepo_CleansGivenRepo(t *testing.T) {
-	sandboxHome(t)
-
-	// Build a repo, make an initial commit, and add a linked worktree.
-	repoRoot := createGitRepo(t)
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-	)
-	commitCmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "init")
-	commitCmd.Env = env
-	out, err := commitCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-
-	linkedPath := filepath.Join(filepath.Dir(repoRoot), "linked-wt")
-	addCmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", "linked-branch", linkedPath)
-	addCmd.Env = env
-	out, err = addCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-
-	// Sanity: the linked worktree is on disk and known to git.
-	_, err = os.Stat(linkedPath)
-	require.NoError(t, err)
-
-	// Run cleanup targeting this repo EXPLICITLY. We do not chdir, so if
-	// the helper were derived from cwd (the old behavior) it would not
-	// touch this repo at all.
-	require.NoError(t, CleanupWorktreesForRepo(repoRoot))
-
-	// The linked worktree directory should have been removed.
-	if _, statErr := os.Stat(linkedPath); !os.IsNotExist(statErr) {
-		t.Fatalf("expected linked worktree to be removed; got stat err: %v", statErr)
-	}
-
-	// The linked branch should have been deleted.
-	branchCmd := exec.Command("git", "-C", repoRoot, "branch", "--list", "linked-branch")
-	out, err = branchCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Empty(t, strings.TrimSpace(string(out)), "linked branch should be deleted")
-
-	// Only the main worktree should remain.
-	listCmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
-	out, err = listCmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	assert.Equal(t, 1, strings.Count(string(out), "worktree "),
-		"only the main worktree should remain, got:\n%s", string(out))
-}
-
-// TestCleanupWorktreesForRepo_SkipsMissingPath verifies that when a stored
-// repo root no longer exists on disk (e.g. because the user moved or deleted
-// the repo), CleanupWorktreesForRepo logs a warning and returns nil instead
-// of aborting `af reset`. See issue #341.
-func TestCleanupWorktreesForRepo_SkipsMissingPath(t *testing.T) {
-	// Redirect WarningLog to a buffer so we can assert on the message.
-	var buf bytes.Buffer
-	origWarning := log.WarningLog
-	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
-	t.Cleanup(func() { log.WarningLog = origWarning })
-
-	missing := filepath.Join(t.TempDir(), "definitely-does-not-exist")
-	// Sanity: the path really is absent.
-	_, statErr := os.Stat(missing)
-	require.True(t, os.IsNotExist(statErr), "test setup: path should not exist")
-
-	err := CleanupWorktreesForRepo(missing)
-	require.NoError(t, err,
-		"CleanupWorktreesForRepo should return nil when the repo path is missing")
-
-	assert.Contains(t, buf.String(), "skipping cleanup for deleted repo",
-		"expected warning log about skipped cleanup, got: %q", buf.String())
-}
-
-// TestCleanupWorktreesForRepo_SkipsNonGitPath verifies that when a stored repo
-// path exists but is no longer a git repo (e.g. `.git` has been removed),
-// CleanupWorktreesForRepo logs a warning and returns nil instead of aborting
-// `af reset`. See issue #370.
-func TestCleanupWorktreesForRepo_SkipsNonGitPath(t *testing.T) {
-	// Redirect WarningLog to a buffer so we can assert on the message.
-	var buf bytes.Buffer
-	origWarning := log.WarningLog
-	log.WarningLog = stdlog.New(&buf, "WARNING: ", 0)
-	t.Cleanup(func() { log.WarningLog = origWarning })
-
-	// Create a directory that exists but is not a git repo.
-	nonGit := t.TempDir()
-	// Sanity: the directory exists but has no .git entry.
-	_, statErr := os.Stat(nonGit)
-	require.NoError(t, statErr, "test setup: path should exist")
-	_, gitStatErr := os.Stat(filepath.Join(nonGit, ".git"))
-	require.True(t, os.IsNotExist(gitStatErr), "test setup: .git should not exist")
-
-	err := CleanupWorktreesForRepo(nonGit)
-	require.NoError(t, err,
-		"CleanupWorktreesForRepo should return nil when the path is not a git repo")
-
-	assert.Contains(t, buf.String(), "skipping cleanup for non-git path",
-		"expected warning log about non-git path, got: %q", buf.String())
 }

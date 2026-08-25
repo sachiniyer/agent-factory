@@ -8,7 +8,7 @@ Agent Factory (af) is a terminal multiplexer that runs each AI coding agent in i
 
 Sessions (one agent per isolated worktree):
   af sessions whoami                                   Identify your own session
-  af sessions list                                     List sessions
+  af sessions list [--live] [--status <state>] [--max-age <duration>] [--limit N]
   af sessions get <title>                              Fetch one session
   af sessions create --name <title> [--prompt <p>] [--program claude|codex|aider|gemini|amp|opencode|devin]
   af sessions send-prompt <title> <prompt> [--create]  Send a prompt (--create makes the session first if missing)

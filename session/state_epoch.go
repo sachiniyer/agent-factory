@@ -36,17 +36,6 @@ import "time"
 // for N seconds after a resume" guard could not promise. Under-applying by one
 // tick is recoverable; clobbering a newer transition is not.
 
-// StateEpoch returns the instance's observation generation counter (#2135).
-// Capture it BEFORE the observation a decision will be made from, and hand it back
-// to the epoch-scoped applier (TransitionEvent.AtEpoch / SetLimitReachedAtEpoch)
-// so a decision that a newer transition has superseded is dropped instead of
-// applied. See the file comment for why this is a counter and not a lock.
-func (i *Instance) StateEpoch() uint64 {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.stateEpoch
-}
-
 // InFlightOpAndEpoch reads the op axis and the state epoch TOGETHER under one lock.
 //
 // An observer that reads them separately has a window that neither read closes on

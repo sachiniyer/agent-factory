@@ -390,8 +390,16 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
 			client := rpc.NewClient(conn)
 			defer client.Close()
+			// The flat alias is the version-skew wire spelling: an older daemon's
+			// SetConfigValue allowlist predates the grouped TOML name, while a new
+			// daemon canonicalizes the same alias before writing. Normalize its
+			// echo so new callers always see the canonical public key.
+			wireKey := config.LegacyConfigKey(key)
 			callErr := client.Call(controlServiceName+".SetConfigValue",
-				SetConfigValueRequest{Key: key, Value: value}, &resp)
+				SetConfigValueRequest{Key: wireKey, Value: value}, &resp)
+			if callErr == nil && resp.Result != nil {
+				resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
+			}
 			if callErr == nil || !isRPCMethodMissing(callErr) {
 				return resp, callErr
 			}
@@ -439,6 +447,48 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	} else {
 		resp.RestartNotice = config.EffectNotice(result.Key, applied)
 	}
+	return resp, nil
+}
+
+// UnsetGlobalConfigValue routes a global alias removal through a running
+// daemon's mutation-admission gate. With no daemon it performs the same locked
+// local edit and best-effort live apply used by SetGlobalConfigValue.
+func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
+	var resp UnsetConfigValueResponse
+	if socketPath, err := DaemonSocketPath(); err == nil {
+		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
+			client := rpc.NewClient(conn)
+			defer client.Close()
+			callErr := client.Call(controlServiceName+".UnsetConfigValue",
+				UnsetConfigValueRequest{Key: key}, &resp)
+			if callErr == nil || !isRPCMethodMissing(callErr) {
+				return resp, callErr
+			}
+		}
+	}
+	if homeDir, ok := configHomeDir(); ok {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress:
+			return UnsetConfigValueResponse{}, fmt.Errorf(
+				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
+		case upgradeGateRestoringPrevious:
+			return UnsetConfigValueResponse{}, fmt.Errorf(
+				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
+		}
+	}
+	result, err := config.UnsetGlobalConfigValue(key)
+	if err != nil {
+		return UnsetConfigValueResponse{}, err
+	}
+	resp.Result = result
+	applyResp, applyErr := RequestApplyConfig()
+	applied := applyErr == nil
+	if applied {
+		resp.Applied = applyResp.Applied
+		resp.Pending = applyResp.Pending
+		resp.Warnings = applyResp.Warnings
+	}
+	resp.RestartNotice = config.EffectNotice(result.Key, applied)
 	return resp, nil
 }
 
@@ -509,10 +559,15 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 // together with its resolved and tmux names across the gob transport.
 func CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	var resp CreateTabResponse
-	if err := callDaemon("CreateTab", req, &resp); err != nil {
+	err := callDaemon("CreateTab", req, &resp)
+	// callDaemon classifies the committed outcome generically; keep the payload
+	// on that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the CLI must report so the survivor
+	// can be targeted. Only a clean failure has nothing to return.
+	if err != nil && !isMutationCommitted(err) {
 		return CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab on an existing session and

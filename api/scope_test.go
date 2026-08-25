@@ -489,6 +489,10 @@ func resetScopeFlags(t *testing.T) {
 	reset := func() {
 		repoFlag = ""
 		sessionsListAllFlag = false
+		sessionsListLiveFlag = false
+		sessionsListStatusesFlag = nil
+		sessionsListMaxAgeFlag = 0
+		sessionsListLimitFlag = 0
 		tasksListAllFlag = false
 	}
 	t.Cleanup(reset)

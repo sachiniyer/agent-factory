@@ -72,7 +72,7 @@ The TUI opens with an empty sidebar. From here:
    permanently kills a session and removes its worktree/branch, including any
    uncommitted or unmerged work.
    If a session is marked Lost or Dead after a crash, reboot, or missing
-   worktree, select it and press **`a`** or run `af sessions restore <title>` to
+   worktree, select it and press **`r`** or run `af sessions restore <title>` to
    recover it and resume its recorded agent conversation when possible.
 
 Because each session is a real git branch, reviewing and merging an agent's work

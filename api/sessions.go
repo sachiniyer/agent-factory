@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
@@ -72,14 +74,26 @@ var (
 // is reachable (#1029 PR 2). Both paths return the same shape sorted by
 // (repoID, title), so scripts see a consistent order regardless of source.
 func listSessions(repoID string) ([]session.InstanceData, error) {
-	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{RepoID: repoID})
+	return listSessionsRequest(daemon.SnapshotRequest{RepoID: repoID})
+}
+
+// listSessionsRequest is listSessions with additive daemon-side filters. The
+// daemon applies them before transfer; applying the same pure filter here keeps
+// daemonless disk fallback useful and prevents a rolled-back daemon that ignores
+// unknown JSON fields from silently widening a filtered command.
+func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+	data, fallBack, err := snapshotRead(req)
 	if err == nil {
-		return data, nil
+		return daemon.FilterSnapshotInstances(req, data)
 	}
 	if !fallBack {
 		return nil, err
 	}
-	return diskListSessions(repoID)
+	data, err = diskListSessions(req.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	return daemon.FilterSnapshotInstances(req, data)
 }
 
 // getSessionByTitle returns the single session matching title across ALL repos,
@@ -191,7 +205,13 @@ func resolveSelfSession() (*session.InstanceData, error) {
 	return whoamiSession(tmuxName)
 }
 
-var sessionsListAllFlag bool
+var (
+	sessionsListAllFlag      bool
+	sessionsListLiveFlag     bool
+	sessionsListStatusesFlag []string
+	sessionsListMaxAgeFlag   time.Duration
+	sessionsListLimitFlag    int
+)
 
 var sessionsListCmd = &cobra.Command{
 	Use:   "list",
@@ -200,7 +220,9 @@ var sessionsListCmd = &cobra.Command{
 		"Scope follows the shared project-context contract: --repo names a project, " +
 		"otherwise the current directory's project is used, and --all spans every " +
 		"project. Run from outside a git repository with no --repo, there is no " +
-		"project context and every project's sessions are listed.",
+		"project context and every project's sessions are listed. Lifecycle, age, " +
+		"and limit filters compose and are applied by the daemon before transfer. " +
+		"With no filter flags, the complete list and its existing order are unchanged.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
@@ -220,11 +242,30 @@ var sessionsListCmd = &cobra.Command{
 			}
 		}
 
+		req := daemon.SnapshotRequest{
+			RepoID:   repoID,
+			Live:     sessionsListLiveFlag,
+			Statuses: append([]string(nil), sessionsListStatusesFlag...),
+		}
+		if cmd.Flags().Changed("max-age") {
+			if sessionsListMaxAgeFlag <= 0 {
+				return jsonError(fmt.Errorf("--max-age must be greater than 0"))
+			}
+			req.CreatedAfter = time.Now().Add(-sessionsListMaxAgeFlag)
+		}
+		if cmd.Flags().Changed("limit") {
+			limit := sessionsListLimitFlag
+			req.Limit = &limit
+		}
+		if err := req.Validate(); err != nil {
+			return jsonError(err)
+		}
+
 		// Read from the daemon's authoritative in-memory state when a daemon is
 		// running, falling back to disk otherwise (#1029 PR 2). listSessions
 		// never spawns a daemon, so `sessions list` in a script or CI keeps
 		// working with none running.
-		allData, err := listSessions(repoID)
+		allData, err := listSessionsRequest(req)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -445,8 +486,22 @@ pointing at one).`,
 				"session %q was created but the daemon did not apply account %q — it is running on the ambient "+
 					"identity, not that account. The running daemon predates account support; upgrade it "+
 					"(af daemon restart after an upgrade) and recreate. Remove the unscoped session with "+
-					"`af sessions kill %s`",
-				data.Title, createAccountFlag, data.Title))
+					"`%s`",
+				data.Title, createAccountFlag,
+				// Through the shellsuggest seam, not %s: a title may contain a space or a
+				// shell metacharacter (validation rejects only whitespace-only titles and
+				// control characters), so `af sessions kill my session` fails with "too many
+				// arguments" and `af sessions kill test;echo pwned` parses into something
+				// else entirely. This suggestion is printed exactly when someone is already
+				// cleaning up after a failed create, which is when it most has to be
+				// pasteable (#3420). A safe title still prints unquoted.
+				//
+				// `--` because quoting cannot answer option parsing: `--name=-worker` is a
+				// valid title, and `af sessions kill '-worker'` still exits "unknown
+				// shorthand flag". shellsuggest quotes an argument and deliberately leaves
+				// option termination to the call site, which is the convention
+				// daemon/sandbox_preserve.go's kill suggestion already states.
+				shellsuggest.Command("af", "sessions", "kill", "--", data.Title)))
 		}
 
 		return jsonOut(data)

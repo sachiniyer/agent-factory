@@ -135,7 +135,7 @@ func TestListenerExposureNotice(t *testing.T) {
 			// auth, so pin both rather than just its existence.
 			assert.Contains(t, notice, tc.listenAddr, "name the exposed address")
 			assert.Contains(t, notice, "DeliverPrompt", "say what an unauthenticated peer can actually do")
-			assert.Contains(t, notice, "require_token = true", "offer the token fix")
+			assert.Contains(t, notice, "network.require_token = true", "offer the canonical token fix")
 			// It reports; it does not forecast a failure that no longer happens.
 			assert.NotContains(t, notice, "refus", "the posture is allowed since #2168 Phase 0 — nothing refuses it")
 			assert.NotContains(t, notice, "\n", "one line: this goes in a log and a status row")

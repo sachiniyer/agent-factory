@@ -593,10 +593,13 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 		return err
 	}
 	created, err := s.manager.CreateTab(req)
-	if err != nil {
+	// Assign before recording so the envelope survives the copy: a committed
+	// outcome (#3237) carries the minted identity in the response; a genuine
+	// failure returns unchanged (net/rpc sends no reply body on error).
+	*resp = created
+	if !resp.record(err) {
 		return err
 	}
-	*resp = created
 	return nil
 }
 

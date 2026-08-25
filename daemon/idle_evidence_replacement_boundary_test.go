@@ -62,7 +62,8 @@ func TestRecoverRetiresIdleEvidenceBeforeReplacementIsExposed(t *testing.T) {
 	inst := registerStarted(t, manager, repoID, repoPath, "recover-boundary", backend, true, session.Lost)
 	attemptedAt := time.Now().Add(-time.Minute)
 	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), inst.StateEpoch()))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 
 	var releaseOnce sync.Once
@@ -109,7 +110,8 @@ func TestLimitRespawnRetiresIdleEvidenceBeforeReplacementIsExposed(t *testing.T)
 	inst.SetLimitReached(time.Time{})
 	attemptedAt := time.Now().Add(-time.Minute)
 	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), inst.StateEpoch()))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 
 	var releaseOnce sync.Once
@@ -146,7 +148,8 @@ func TestRemoteArchiveIdleEvidenceClearPersistFailureIsRetried(t *testing.T) {
 	inst, _ := registerStartedRemote(t, manager, repoID, repoPath, "remote-archive-settlement", "http://127.0.0.1:1", session.Archived)
 	attemptedAt := time.Now().Add(-time.Minute)
 	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), inst.StateEpoch()))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
 	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
 	failedWrites, seen, heal := fullDiskFor(t, inst.Title, errors.New("disk full"))
 

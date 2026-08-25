@@ -34,13 +34,16 @@ func prepareFixture(t *testing.T) (*Transaction, string, string) {
 	t.Helper()
 	home := t.TempDir()
 	binDir := t.TempDir()
+	// Stated, not inherited (#3470). ExecutableMode and every metadata mode here
+	// are RECORDED at Prepare and restored by rollback, so a fixture whose modes
+	// the umask reduced makes those round-trip assertions test the wrong values.
 	executable := filepath.Join(binDir, "af")
-	require.NoError(t, os.WriteFile(executable, []byte("known-running-binary"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(home, "state.json"), []byte("old-state"), 0o640))
-	require.NoError(t, os.MkdirAll(filepath.Join(home, "instances", "repo-a"), 0o755))
-	require.NoError(t, os.WriteFile(
+	writeFileWithMode(t, executable, []byte("known-running-binary"), 0o755)
+	writeFileWithMode(t, filepath.Join(home, "state.json"), []byte("old-state"), 0o640)
+	mkdirAllWithMode(t, filepath.Join(home, "instances", "repo-a"), 0o755)
+	writeFileWithMode(t,
 		filepath.Join(home, "instances", "repo-a", "instances.json"),
-		[]byte("old-instances"), 0o600))
+		[]byte("old-instances"), 0o600)
 
 	txn, err := Prepare(Plan{
 		ID:             "txn-2212",
@@ -851,10 +854,15 @@ func TestRollbackRestoresPrivateMetadataParentModes(t *testing.T) {
 	home := t.TempDir()
 	privateDir := filepath.Join(home, "private")
 	nestedDir := filepath.Join(privateDir, "nested")
-	require.NoError(t, os.Mkdir(privateDir, 0o710))
-	require.NoError(t, os.Mkdir(nestedDir, 0o700))
+	// The asserted modes below are a PRODUCT guarantee — rollback restores the
+	// parent modes it recorded — so the fixture must actually produce them rather
+	// than whatever the umask allows (#3470). Under 077 the 0710 mkdir landed
+	// 0700, the recorded original was 0700, rollback restored 0700 faithfully, and
+	// the assertion failed against a mode the fixture never had.
+	mkdirWithMode(t, privateDir, 0o710)
+	mkdirWithMode(t, nestedDir, 0o700)
 	metadataPath := filepath.Join(nestedDir, "state.json")
-	require.NoError(t, os.WriteFile(metadataPath, []byte("private-state"), 0o600))
+	writeFileWithMode(t, metadataPath, []byte("private-state"), 0o600)
 	plan := basicPreparePlan(t, home, "parent-modes")
 	plan.MetadataPaths = []string{filepath.Join("private", "nested", "state.json")}
 	txn, err := Prepare(plan)
@@ -871,10 +879,13 @@ func TestRollbackRestoresPrivateMetadataParentModes(t *testing.T) {
 	require.NoError(t, lease.Rollback())
 	privateInfo, err := os.Stat(privateDir)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o710), privateInfo.Mode().Perm())
+	require.Equal(t, os.FileMode(0o710), privateInfo.Mode().Perm(),
+		"rollback must restore the recorded parent mode, not a default: 0710 grants the group "+
+			"traversal without read, and recreating it any wider exposes private metadata")
 	nestedInfo, err := os.Stat(nestedDir)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o700), nestedInfo.Mode().Perm())
+	require.Equal(t, os.FileMode(0o700), nestedInfo.Mode().Perm(),
+		"and the same for the nested parent")
 }
 
 func TestPersistJournalReturnsDirectorySyncFailure(t *testing.T) {
@@ -1000,7 +1011,9 @@ func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
 
 	_, err = Prepare(plan)
 	require.ErrorIs(t, err, injected)
-	require.Equal(t, 1, publishSyncs)
+	require.Equal(t, 2, publishSyncs,
+		"the durable write's own sync, plus persistJournal's one completing attempt at the barrier "+
+			"over the already-visible file (#3453) — a barrier completion, not a retry of the write")
 	journal, readErr := readJournal(activePath)
 	require.NoError(t, readErr, "a visible journal must retain everything needed for later recovery")
 	require.FileExists(t, journal.PreviousBinaryPath)
@@ -1012,9 +1025,10 @@ func TestMetadataParentModesAreRestoredEvenWhenRollbackFails(t *testing.T) {
 	home := t.TempDir()
 	privateDir := filepath.Join(home, "private")
 	nestedDir := filepath.Join(privateDir, "nested")
-	require.NoError(t, os.Mkdir(privateDir, 0o710))
-	require.NoError(t, os.Mkdir(nestedDir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(nestedDir, "state.json"), []byte("state"), 0o600))
+	// Same PRODUCT guarantee as the sibling above, on the failure path (#3470).
+	mkdirWithMode(t, privateDir, 0o710)
+	mkdirWithMode(t, nestedDir, 0o700)
+	writeFileWithMode(t, filepath.Join(nestedDir, "state.json"), []byte("state"), 0o600)
 	plan := basicPreparePlan(t, home, "parent-mode-failure")
 	plan.MetadataPaths = []string{filepath.Join("private", "nested", "state.json")}
 	txn, err := Prepare(plan)
@@ -1077,7 +1091,7 @@ func TestPrepareAcceptsRecoveryJobMatchingDaemonOwner(t *testing.T) {
 func basicPreparePlan(t *testing.T, home, id string) Plan {
 	t.Helper()
 	executable := filepath.Join(t.TempDir(), "af")
-	require.NoError(t, os.WriteFile(executable, []byte("known-running"), 0o755))
+	writeFileWithMode(t, executable, []byte("known-running"), 0o755)
 	return Plan{
 		ID: id, HomeDir: home, ExecutablePath: executable,
 		FromVersion: "1", ToVersion: "2", Candidate: []byte("candidate"),

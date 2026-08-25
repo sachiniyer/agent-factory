@@ -366,9 +366,23 @@ func decodeHTTPRequest(w http.ResponseWriter, r *http.Request, dst any) error {
 	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("malformed JSON request body: %w", err)
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
+	// The trailing-data probe decodes into a json.RawMessage, NOT into an empty
+	// struct (#3406). Strict mode is a property of the DECODER, not of one call, so
+	// a second value decoded into `struct{}{}` under DisallowUnknownFields failed
+	// with `unknown field "repo_id"` — naming a field that exists and is spelled
+	// correctly, on the very population this whole branch exists to help. A
+	// hand-authoring user then hunts a typo that is not there, while the actual
+	// fault — a second JSON value in the body — goes unmentioned. RawMessage accepts
+	// any well-formed value with no field policy at all, so the probe answers the
+	// only question it is asking: is there more after the first value?
+	//
+	// It also makes the two populations agree. The same body previously produced
+	// "multiple JSON values" for an af client and "unknown field" for curl, purely
+	// because of a header that is documented as opting out of TYPO checking.
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("malformed JSON request body: multiple JSON values")
+			return fmt.Errorf("malformed JSON request body: multiple JSON values — the body must hold exactly one JSON value, and this one continues after the first ends. Two concatenated objects (`{…}{…}`) are the usual cause; send one object, or an array if the endpoint takes a list")
 		}
 		return fmt.Errorf("malformed JSON request body: %w", err)
 	}

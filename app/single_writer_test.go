@@ -33,7 +33,7 @@ func TestTUIHasNoInstancesWritePath(t *testing.T) {
 		return spawnDaemonTab(inst)
 	})
 	defer createRestore()
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	require.Equal(t, 3, inst.TabCount(), "the daemon-created tab must appear locally")
 
 	// PR-info refresh: the TUI sends identity only; the daemon owns the write.

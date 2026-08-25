@@ -55,6 +55,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) 
 		if warnRootAgents {
 			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 		}
+		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatJSON)
 	}
 
 	// Warn about keys the frozen reader ignores so they are not silently lost
@@ -119,12 +120,18 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	if err := toml.Unmarshal(decodedData, config); err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
+	tables, err := decodeGlobalSettingsTables(decodedData)
+	if err != nil {
+		return nil, tomlParseError("config file "+prettyConfigPath, err)
+	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
 		return nil, err
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
+		applyGroupedConfigAliases(config, tables, metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
 		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
+		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatTOML)
 	}
 	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
@@ -182,7 +189,33 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 			// generic warning that loses the migration recipe.
 			continue
 		}
+		if len(key) == 1 && configAliasSection(key[0]) {
+			// Config intentionally keeps the grouped tables out of its runtime and
+			// JSON shape. Their approved leaves are checked below; do not reduce an
+			// unknown leaf to a misleading warning about the whole table.
+			continue
+		}
 		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(key, "."))
+	}
+
+	var shape map[string]any
+	if err := toml.Unmarshal(data, &shape); err != nil {
+		return
+	}
+	for section, raw := range shape {
+		if !configAliasSection(section) {
+			continue
+		}
+		table, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for leaf := range table {
+			if configAliasLeaf(section, leaf) {
+				continue
+			}
+			log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, section+"."+leaf)
+		}
 	}
 }
 
@@ -250,7 +283,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	if config.SSHHostKeyVerification == "" {
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	} else if !IsValidSSHHostKeyVerification(config.SSHHostKeyVerification) {
-		log.WarningLog.Printf("ssh_host_key_verification=%q is not one of [%s, %s, %s]; using default %q",
+		log.WarningLog.Printf("ssh.host_key_verification=%q is not one of [%s, %s, %s]; using default %q",
 			config.SSHHostKeyVerification, SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, SSHHostKeyStrict)
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	}

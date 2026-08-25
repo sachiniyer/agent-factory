@@ -422,25 +422,15 @@ export interface ConfigEntry {
   purpose: string;
   tier: number;
   tier_name: string;
-  /** The MANIFEST's claim: `af config set` accepts this key — or, for a dynamic
-   *  family, its LEAVES (`af config set program_overrides.claude …`). Do NOT
-   *  drive a control off this: "the CLI takes this key's leaves" is not "this
-   *  row is one editable value". Use `editable`. */
+  /** The MANIFEST's claim that `af config set` accepts this whole key. Dynamic
+   *  families also retain their leaf form (`program_overrides.claude`). */
   settable: boolean;
-  /** The EDITOR's question: can this row be edited directly, as a single scalar
-   *  the write path will accept? Settable minus the dynamic families, derived
-   *  Go-side from the real allowlist. False renders read-only with `edit_hint`. */
-  editable: boolean;
-  /** How to change a key that is not directly editable. Not always "hand-edit
-   *  the file" — a dynamic family's leaves ARE settable from the CLI, so the
-   *  hint names that command. */
-  edit_hint?: string;
   /** Present when the value is enumerated; drives a picker instead of a text
    *  field. For a table it constrains the entry NAMES, not the value. */
   enum?: string[];
   value: string;
-  /** True for every key today: config.toml is read at startup, so an edit
-   *  applies when af and the daemon next start. */
+  /** True for every key today: a successful save carries the writer's exact
+   *  per-key effect notice (live now, next daemon start, or next af launch). */
   requires_restart: boolean;
 }
 

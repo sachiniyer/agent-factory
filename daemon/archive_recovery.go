@@ -395,7 +395,8 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 		!ghostRestoredWorktreeRemovable(&restored) {
 		return nil
 	}
-	if _, statErr := sessiongit.BoundedLstat(restored.Worktree.WorktreePath); statErr != nil {
+	statInfo, statErr := sessiongit.BoundedLstat(restored.Worktree.WorktreePath)
+	if statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
 			// An absent archived directory has nothing to orphan: ghost
 			// cleanup settles the missing path and clears the stale row
@@ -409,6 +410,15 @@ func ghostDirectRepoGoneKillGuard(data *session.InstanceData) error {
 		return fmt.Errorf(
 			"the archived worktree's state at %s could not be established; nothing was changed — retry once the path answers: %w",
 			restored.Worktree.WorktreePath, statErr,
+		)
+	}
+	if statInfo.Mode()&os.ModeSymlink != 0 {
+		// A genuine archive is a real directory; a symlink occupant would
+		// send later, link-following probes into whatever it targets (#3278
+		// review). Refuse before any of them run.
+		return fmt.Errorf(
+			"the occupant at %s is a symlink, not the archived directory; nothing was changed — inspect it manually",
+			restored.Worktree.WorktreePath,
 		)
 	}
 	probeErr := sessiongit.CheckRepoPresentForRelocation(restored.Worktree.RepoPath)
