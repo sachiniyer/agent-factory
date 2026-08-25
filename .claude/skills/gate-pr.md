@@ -550,8 +550,10 @@ is a pass**:
   A message saying the reviewer declined to look is the opposite of a clean
   verdict, and it is the one most likely to be misread as "Codex responded".
 
-Auto Gate blocks an unreviewed head — `Codex has not reviewed head <sha> yet` —
-so it will not merge for you. What to do:
+Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
+fresh usage-limit reply degrades it to a manual-only pass that still does not
+merge — `Codex has not reviewed head <sha> yet` either way, so it will not
+merge for you. What to do:
 
 1. **Re-trigger** with a `@codex review` comment and wait. Limits reset.
 2. **If it still does not post, get a real review from something that is not

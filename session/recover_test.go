@@ -64,7 +64,7 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_recover_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	var newSessions int
 	var spawns []string
 	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
@@ -96,7 +96,7 @@ func TestRecover_RefusesWorktreeAfterRelocationProbeTimeout(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_recover_relocation_stall"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
 	restored := lostInstanceForRecover(t, agentName, shellName, exec)
@@ -135,7 +135,7 @@ func TestRecover_RetryAfterFailureInjectsFlagsOnce(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_recover_retry"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	var newSessions, ptyNewSessions int
 	var spawns []string
 	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
@@ -160,7 +160,7 @@ func TestRecover_RetryAfterFailureInjectsFlagsOnce(t *testing.T) {
 	require.NoError(t, restored.Recover(), "retry must succeed once the server behaves")
 	assert.Equal(t, Running, restored.GetStatus())
 	for _, spawn := range spawns {
-		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellTmuxSuffix) {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, tmuxTabSeparator+shellTabName) {
 			assert.Equal(t, 1, strings.Count(spawn, "--plugin-dir"),
 				"every attempt recomputes injection from the clean Program: %s", spawn)
 		}
@@ -176,7 +176,7 @@ func TestRecover_FailsWithoutWorktree(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_recover_nowt"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	var newSessions int
 	exec := countingExec(map[string]bool{}, &newSessions)
 	pty := persistPtyFactory{t: t, cmdExec: exec}
@@ -210,7 +210,7 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 	gitOut(t, repoRoot, "branch", branch)
 
 	const agentName = "af_recover_branch"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
 	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover")
 	branchCreatedByUs := true
@@ -268,7 +268,7 @@ func TestRecover_RebuildsMissingWorktreeFromExistingBranchAndResumesRecordedConv
 
 	var agentSpawn string
 	for _, spawn := range spawns {
-		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellTmuxSuffix) {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, tmuxTabSeparator+shellTabName) {
 			agentSpawn = spawn
 			break
 		}
@@ -301,7 +301,7 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 
 	const branch = "af/branch-gone"
 	const agentName = "af_recover_branch_gone"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
 	worktreePath := filepath.Join(t.TempDir(), "repo-branch-gone")
 	branchCreatedByUs := false
@@ -359,7 +359,7 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 
 	var agentSpawn string
 	for _, spawn := range spawns {
-		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellTmuxSuffix) {
+		if strings.Contains(spawn, agentName) && !strings.Contains(spawn, tmuxTabSeparator+shellTabName) {
 			agentSpawn = spawn
 			break
 		}
@@ -388,7 +388,7 @@ func TestRecover_BranchGoneWithoutRecordedConversationDoesNotFreshDispatch(t *te
 
 	const branch = "af/no-conversation"
 	const agentName = "af_recover_no_conversation"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	worktreePath := filepath.Join(t.TempDir(), "repo-no-conversation")
 	branchCreatedByUs := true
 	data := InstanceData{
@@ -444,7 +444,7 @@ func TestRecover_RefusesNonLostAndTombstoned(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_recover_guard"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	var newSessions int
 	exec := countingExec(map[string]bool{agentName: true, shellName: true}, &newSessions)
 	pty := persistPtyFactory{t: t, cmdExec: exec}
@@ -458,7 +458,7 @@ func TestRecover_RefusesNonLostAndTombstoned(t *testing.T) {
 	require.NoError(t, err)
 	require.Error(t, live.Recover(), "a non-Lost session must be refused")
 
-	tombstoned := lostInstanceForRecover(t, "af_recover_guard2", "af_recover_guard2"+shellTmuxSuffix,
+	tombstoned := lostInstanceForRecover(t, "af_recover_guard2", "af_recover_guard2"+tmuxTabSeparator+shellTabName,
 		countingExec(map[string]bool{}, &newSessions))
 	tombstoned.MarkUserKilled()
 	require.Error(t, tombstoned.Recover(), "a tombstoned session must be refused")

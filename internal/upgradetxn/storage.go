@@ -684,13 +684,48 @@ func binaryArtifactPaths(executable, id string) (string, string) {
 	return filepath.Join(dir, prefix+".previous"), filepath.Join(dir, prefix+".candidate")
 }
 
+// errJournalVisibleNotDurable reports a journal write whose bytes ARE at the
+// path — the rename landed — but whose directory barrier could not be completed.
+//
+// It is not "the write failed": the content a reader sees is the new content.
+// Callers that hold the journal in memory must therefore ADVANCE to it, or their
+// next write starts from state the disk has already moved past and silently
+// overwrites what landed (#3453).
+var errJournalVisibleNotDurable = errors.New("the upgrade journal is visible but its durability could not be confirmed")
+
+// persistJournal writes the journal durably, completing the barrier by hand when
+// durableAtomicWriteFile reports a failure that happened AFTER its rename.
+//
+// durableAtomicWriteFile renames first and fsyncs the directory second, so a
+// directory-sync failure returns an error over a file whose new content is
+// ALREADY visible at the path. publishActivationApproval has handled that shape
+// since activation was added; the journal did not, and the gap was reachable —
+// see errJournalVisibleNotDurable and persistJournalLocked.
+//
+// The visibility test is byte equality against exactly what this call encoded,
+// the same identity check publishActivationApproval makes. A rename that did not
+// happen leaves the PREVIOUS journal at the path, and every journal carries its
+// own UpdatedAt, so the two cannot be confused; if they somehow were identical,
+// the disk already holds what this call wanted to write.
 func persistJournal(path string, journal Journal) error {
 	data, err := json.MarshalIndent(journal, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode upgrade journal: %w", err)
 	}
 	data = append(data, '\n')
-	return durableAtomicWriteFile(path, data, journalFileMode)
+	writeErr := durableAtomicWriteFile(path, data, journalFileMode)
+	if writeErr == nil {
+		return nil
+	}
+	visible, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(visible, data) {
+		return writeErr
+	}
+	if syncErr := syncTransactionDirectory(filepath.Dir(path)); syncErr != nil {
+		return errors.Join(errJournalVisibleNotDurable, writeErr,
+			fmt.Errorf("confirm visible upgrade journal: %w", syncErr))
+	}
+	return nil
 }
 
 func removeDurableFile(path string) error {

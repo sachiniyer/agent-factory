@@ -526,6 +526,15 @@ var sensitiveJSONKeys = map[string]bool{
 	// fields (agent, captured_at) are not worth reconstructing a shape
 	// contract for here (#1839).
 	"conversation": true, "agent_conversation": true,
+	// handoffs and from close the same gap on this path that #3405 closed on the
+	// typed one: a handoff ledger entry holds the outgoing agent's conversation
+	// under the key "from", which neither "conversation" above nor any other key
+	// here matched, so an unparseable record leaked exactly the id the typed path
+	// had been taught to clear. handoffs drops the ledger wholesale, matching how
+	// runtime_cleanup and conversation are handled — on a shape af could not
+	// parse, the entry's own layout is not something to rely on. from is the
+	// belt: the same object under a legacy or renamed container still goes.
+	"handoffs": true, "from": true,
 	// pending_handoff_mission mirrors the typed-path redaction (redactInstanceData
 	// blanks PendingHandoffMission): the rendered takeover brief embeds the user's
 	// free-text prompt/goal verbatim, the same sensitivity class as prompt. A
@@ -646,6 +655,19 @@ func redactTabData(tab *session.TabData) {
 	}
 	if tab.Conversation != nil {
 		tab.Conversation.ID = ""
+	}
+	// Handoffs[].From is the same AgentConversationData under a different name,
+	// carrying an id with the same resume semantics — so it is the same policy,
+	// not an adjacent one (#3405). The ledger arrived with agent handoff (#2013)
+	// five days after the conversation-id policy was written and inherited none
+	// of it, so every bundle from a session that had ever swapped agents shipped
+	// the OUTGOING agent's resumable id while the incoming one was redacted
+	// beside it.
+	//
+	// A loop over the whole ledger rather than a first/last entry: it is
+	// append-only and unbounded, and "the ones we thought of" is not a policy.
+	for i := range tab.Handoffs {
+		tab.Handoffs[i].From.ID = ""
 	}
 }
 

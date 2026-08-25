@@ -80,13 +80,6 @@ func (m *home) handleStateSelectTabKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.createNewTab(selected, newTabChoices[idx].kind)
 }
 
-// handleNewTab is the direct shell-create helper used by the Terminal picker
-// choice and focused lifecycle tests. The user-facing `t` binding opens
-// showNewTabPicker first (#2077).
-func (m *home) handleNewTab() (tea.Model, tea.Cmd) {
-	return m.createNewTab(m.sidebar.GetSelectedInstance(), session.TabKindShell)
-}
-
 // createNewTab creates one no-input tab kind through the daemon's CreateTab RPC
 // and selects it. Remote instances have no local worktree and the hook protocol
 // has no run-arbitrary-command verb, so their tab roster is runtime-fixed.

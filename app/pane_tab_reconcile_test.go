@@ -33,7 +33,7 @@ func TestPane_CloseTabRebindsPanes(t *testing.T) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // agent + shell + shell-2
 	require.Equal(t, 3, inst.TabCount())
 	require.Equal(t, 1, h.store.NumOpenPanes(), "t opens the fresh tab as a pane")
 	require.Equal(t, 2, h.store.OpenPanes()[0].Tab(), "bound to the new last slot")
@@ -73,7 +73,7 @@ func TestPane_SnapshotTabRemovalRebindsPanes(t *testing.T) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // agent + shell + shell-2; opens the slot-2 pane
 	require.Equal(t, 3, inst.TabCount())
 	_, _ = h.openOrFocusPane(inst, 1) // and the slot-1 ("shell") pane, focused
 	require.Equal(t, 2, h.store.NumOpenPanes())
@@ -110,7 +110,7 @@ func TestPane_SnapshotTabRemovalKeepsUnaffectedPaneBinding(t *testing.T) {
 		return spawnDaemonTab(inst)
 	})
 	defer restore()
-	_, _ = h.handleNewTab() // agent + shell + shell-2; opens the slot-2 pane
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // agent + shell + shell-2; opens the slot-2 pane
 	require.Equal(t, 3, inst.TabCount())
 	_, _ = h.openOrFocusPane(inst, 1)
 	require.Equal(t, 2, h.store.NumOpenPanes())

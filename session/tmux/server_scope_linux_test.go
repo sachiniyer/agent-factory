@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 func TestNewTmuxServerCommandScopesDaemonUnitSpawn(t *testing.T) {
@@ -111,6 +113,161 @@ func TestOldTmuxUsesSessionScopeCompatibilityFallback(t *testing.T) {
 	want := "systemd-run --user --scope --quiet --collect -- tmux new-session -d -s af_old_tmux"
 	if got := strings.Join(cmd.Args, " "); got != want {
 		t.Fatalf("old-tmux compatibility command = %q, want %q", got, want)
+	}
+}
+
+func TestNoStartProbeFailureDoesNotDowngradeAndIsRetried(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    exit 75
+fi
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	var warnings bytes.Buffer
+	oldWarningOut, oldWarningFlags := log.WarningLog.Writer(), log.WarningLog.Flags()
+	log.WarningLog.SetOutput(&warnings)
+	log.WarningLog.SetFlags(0)
+	t.Cleanup(func() {
+		log.WarningLog.SetOutput(oldWarningOut)
+		log.WarningLog.SetFlags(oldWarningFlags)
+	})
+
+	cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_probe_failed")
+	if scoped {
+		t.Errorf("failed tmux -V probe downgraded client to compatibility scope: %q", strings.Join(cmd.Args, " "))
+	}
+	if got := strings.Join(cmd.Args, " "); got != "tmux -N new-session -d -s af_probe_failed" {
+		t.Errorf("failed-probe client command = %q, want isolation-preserving -N client", got)
+	}
+	for _, want := range []string{"tmux -V probe failed:", "exit status 75"} {
+		if !strings.Contains(warnings.String(), want) {
+			t.Errorf("failed-probe warning %q does not contain %q", warnings.String(), want)
+		}
+	}
+	if strings.Contains(warnings.String(), "lacks a verified -N") {
+		t.Errorf("failed probe was logged as a stable unsupported verdict: %q", warnings.String())
+	}
+
+	cmd, scoped = newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_probe_retry")
+	if scoped {
+		t.Errorf("successful retry still used compatibility scope: %q", strings.Join(cmd.Args, " "))
+	}
+	if got := strings.Join(cmd.Args, " "); got != "tmux -N new-session -d -s af_probe_retry" {
+		t.Errorf("retried-probe client command = %q, want cached supported client", got)
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "2" {
+		t.Fatalf("tmux -V probe attempts = %q, want failure plus one retry", got)
+	}
+}
+
+func TestNoStartProbeCachesSupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+printf '%s\n' "$((attempt + 1))" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+printf '%s\n' 'tmux 3.4'
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	for i := 0; i < 2; i++ {
+		cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_supported")
+		if scoped || strings.Join(cmd.Args, " ") != "tmux -N new-session -d -s af_supported" {
+			t.Fatalf("supported tmux client = %q, scoped=%v", strings.Join(cmd.Args, " "), scoped)
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached supported verdict", got)
+	}
+}
+
+func TestNoStartProbeCachesUnsupportedVerdict(t *testing.T) {
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	tmuxShim := filepath.Join(dir, "tmux")
+	script := `#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AF_TEST_TMUX_PROBE_ATTEMPTS" ]; then
+    attempt=$(cat "$AF_TEST_TMUX_PROBE_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$AF_TEST_TMUX_PROBE_ATTEMPTS"
+if [ "$attempt" -eq 1 ]; then
+    printf '%s\n' 'tmux 3.2a'
+else
+    printf '%s\n' 'tmux 3.4'
+fi
+`
+	if err := os.WriteFile(tmuxShim, []byte(script), 0o700); err != nil {
+		t.Fatalf("write tmux probe shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AF_TEST_TMUX_PROBE_ATTEMPTS", attemptsPath)
+	t.Setenv(systemdunit.DaemonMarkerEnv, systemdunit.DaemonUnitName)
+	t.Setenv("SYSTEMD_EXEC_PID", strconv.Itoa(os.Getpid()))
+	restore := ConfigureDaemonServer(t.TempDir())
+	t.Cleanup(restore)
+
+	for i := 0; i < 2; i++ {
+		cmd, scoped := newTmuxServerCommandAfterEnsure(nil, "new-session", "-d", "-s", "af_unsupported")
+		if !scoped {
+			t.Fatalf("old tmux client bypassed compatibility scope on call %d: %q", i+1, strings.Join(cmd.Args, " "))
+		}
+	}
+	attempts, err := os.ReadFile(attemptsPath)
+	if err != nil {
+		t.Fatalf("read tmux probe attempts: %v", err)
+	}
+	if got := strings.TrimSpace(string(attempts)); got != "1" {
+		t.Fatalf("tmux -V probe attempts = %q, want one cached unsupported verdict", got)
+	}
+}
+
+func TestTmuxVersionProbeAllowsMoreTimeThanSocketProbe(t *testing.T) {
+	if tmuxVersionProbeTimeout <= serverProbeTimeout {
+		t.Fatalf("tmux -V timeout = %s, want longer than socket probe timeout %s", tmuxVersionProbeTimeout, serverProbeTimeout)
 	}
 }
 
@@ -246,7 +403,14 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		t.Fatalf("write blocking systemd-run shim: %v", err)
 	}
 	systemctl := filepath.Join(dir, "systemctl")
-	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\nfor suffix in child parent; do\n  pid=$(cat \"$base.$suffix\")\n  kill -KILL \"$pid\" 2>/dev/null || true\ndone\n"
+	// The kills land after this shim has answered, which is what systemd does:
+	// `systemctl kill` queues the signals and returns, and the kernel finishes
+	// the teardown on its own schedule. Delaying them deterministically is the
+	// regression for #3382 — the assertion below used to probe the pids once,
+	// instantly, so it read a launcher child that was merely on its way out as
+	// one that survived. Its fds are redirected so CombinedOutput does not wait
+	// on the backgrounded subshell.
+	stopScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >\"$0.args\"\nbase=$(dirname \"$0\")/systemd-run\n(\n  sleep 0.2\n  for suffix in child parent; do\n    pid=$(cat \"$base.$suffix\")\n    kill -KILL \"$pid\" 2>/dev/null || true\n  done\n) >/dev/null 2>&1 &\n"
 	if err := os.WriteFile(systemctl, []byte(stopScript), 0o700); err != nil {
 		t.Fatalf("write systemctl shim: %v", err)
 	}
@@ -276,12 +440,76 @@ func TestDedicatedServerTimeoutStopsAndReapsLauncher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s pid: %v", label, err)
 		}
-		if err := syscall.Kill(pid, 0); err == nil {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-			t.Errorf("timed-out dedicated server %s %d is still alive", label, pid)
-		} else if err != syscall.ESRCH {
+		// An identity, not a bare pid: (pid, StartID) names a process INSTANCE, so
+		// nothing below can mistake a recycled number for a survivor or aim a kill
+		// at whatever inherited it. Lookup answers three ways and only one of them
+		// has anything left to wait for.
+		process, err := proctree.Lookup(pid)
+		switch {
+		case errors.Is(err, proctree.ErrProcessExited), errors.Is(err, os.ErrNotExist):
+			// Gone already: reaped, or a corpse nobody has collected yet. A zombie
+			// counts, and that is not a concession — it has exited, and who collects
+			// its status is somebody else's schedule (#2103).
+			continue
+		case err != nil:
 			t.Errorf("probe timed-out %s %d: %v", label, pid, err)
+			continue
 		}
+		gone, probeErr := waitForProcessTeardown(process, dedicatedServerTeardownWait)
+		switch {
+		case probeErr != nil:
+			t.Errorf("probe timed-out %s %d: %v", label, pid, probeErr)
+		case !gone:
+			// Only now that the wait has genuinely expired: a survivor is a real
+			// failure, and killing it keeps that failure from leaking a process into
+			// the next run. Signal re-verifies the identity first, so a PID recycled
+			// since the capture above is left alone rather than killed.
+			if killErr := proctree.Signal(process, syscall.SIGKILL); killErr != nil &&
+				!errors.Is(killErr, proctree.ErrIdentityChanged) {
+				t.Errorf("kill surviving %s %d: %v", label, pid, killErr)
+			}
+			t.Errorf("timed-out dedicated server %s %d is still alive after %s",
+				label, pid, dedicatedServerTeardownWait)
+		}
+	}
+}
+
+// dedicatedServerTeardownWait is how long the assertion above watches for the
+// killed launcher and its child to go away. Large on purpose: the wait returns
+// the instant they are gone, so the budget costs nothing on a passing run, and
+// only a genuine survivor — one that is still there after the whole of it —
+// spends it. A tight bound would be a statement about the CI scheduler rather
+// than about the teardown (#2879).
+const dedicatedServerTeardownWait = 30 * time.Second
+
+// waitForProcessTeardown reports whether the captured process instance stopped
+// running within timeout. Signal delivery and process teardown are
+// asynchronous, so there is always a window after the kill in which the pid is
+// still probe-able; the caller's old single instantaneous probe granted that
+// window zero time and failed whenever CI contention widened it past nothing
+// (#3382).
+//
+// SameIdentity rather than kill(pid, 0), because an existence probe answers the
+// wrong question twice over: it accepts a zombie as running (#2103), and it
+// accepts a recycled PID as the process that was supposed to die. It is also
+// the reason a read failure is RETURNED rather than retried or folded into
+// either verdict — "I cannot look" is neither "it is gone" nor "it survived",
+// and this package's standing rule is that those never collapse into each
+// other.
+func waitForProcessTeardown(process proctree.Process, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		alive, err := proctree.SameIdentity(process)
+		if err != nil {
+			return false, err
+		}
+		if !alive {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

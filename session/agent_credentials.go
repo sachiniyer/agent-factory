@@ -57,7 +57,28 @@ var agentCredentialFiles = map[string][]string{
 	tmux.ProgramDevin: {".config/devin/config.json"},
 }
 
-// agentCredentialMounts returns the `-v host:container:ro` docker run arguments
+// dockerCredentialMountMode is the volume mode every agent-credential bind mount
+// carries: read-only, plus the SHARED SELinux relabel.
+//
+// The relabel is not cosmetic. Without it the mount is not a broken mount but a
+// DENIED read: on an SELinux-enforcing host — the Fedora/RHEL/CentOS default —
+// the host file keeps its user_home_t label, container policy refuses the open,
+// and because this whole path is deliberately fail-open (an unauthenticated
+// session beats aborting provisioning) the session starts UNAUTHENTICATED with
+// nothing logged as wrong (#3451).
+//
+// z (shared), never Z (private), for a reason specific to what is being mounted:
+// this is ONE host file that every concurrent session running that agent mounts.
+// Z assigns an SVirt category pair unique to a single container, so the second
+// session to start would relabel the credential out from under the first. z is
+// the same label dockerAccountMount picks, for the same sharing reason.
+//
+// Unconditional rather than gated on hostSELinuxEnforcing(): Docker ignores z
+// where SELinux is disabled, so there is no probe to run and no way for a failed
+// probe to silently drop the relabel on a host that needed it.
+const dockerCredentialMountMode = "ro,z"
+
+// agentCredentialMounts returns the `-v host:container:ro,z` docker run arguments
 // that bind-mount the credential file(s) for the single agent `agent` that exist
 // under homeDir. exists is injected for testability (os.Stat in production). The
 // container target is dockerContainerHome + "/" + rel — matching where the
@@ -75,7 +96,7 @@ func agentCredentialMounts(agent, homeDir string, exists func(string) bool) []st
 		}
 		// rel uses '/' and the container is linux, so the target is well-formed.
 		target := dockerContainerHome + "/" + rel
-		args = append(args, "-v", host+":"+target+":ro")
+		args = append(args, "-v", host+":"+target+":"+dockerCredentialMountMode)
 	}
 	return args
 }

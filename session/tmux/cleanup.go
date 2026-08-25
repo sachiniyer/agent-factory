@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -111,6 +112,37 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
 	// other error, which this probe has always conflated with absence.
 	return false, true
+}
+
+// recoveryWindowObserver is notified when a vanished-session recovery's bounded
+// GRACE WAIT opens and closes. Production leaves it nil, so this costs one nil
+// check per wait.
+//
+// It exists because concurrency here can only be inferred from the OUTSIDE by
+// timing the whole sweep, and that inference makes the machine the judge. The
+// concurrent floor is two grace waits; three sessions' real tmux and /proc work
+// sits on top of it, so on a loaded runner a perfectly concurrent
+// implementation blows any bound tight enough to also catch a serial one — the
+// #3439 flake class, measured failing 8 runs out of 8 at load 75. Overlapping
+// waits ARE the property, so the regression observes them directly instead
+// (see TestCleanupSessionsRecoversVanishedSessionsConcurrently).
+//
+// It brackets the WAIT rather than the worker goroutine on purpose. Launching
+// the workers together is not the property: a recovery that serialized its
+// grace waits behind a shared mutex or semaphore would still let every worker
+// start, so an observer at the top of the goroutine would record full overlap
+// while reset latency grew by a grace period per session again — the very
+// regression this test exists to catch.
+var recoveryWindowObserver func(match string, entered bool)
+
+// observeOrphanAncestryObserved is observeOrphanAncestry with the bounded grace
+// wait bracketed for recoveryWindowObserver.
+func observeOrphanAncestryObserved(captured []proctree.Process, match string, wait time.Duration) ([]proctree.Process, error) {
+	if observer := recoveryWindowObserver; observer != nil {
+		observer(match, true)
+		defer observer(match, false)
+	}
+	return observeOrphanAncestry(captured, match, wait)
 }
 
 // probeSessionStrict is the non-lossy existence probe for CleanupSessions'
@@ -795,7 +827,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		if pass > 0 {
 			refreshed, beforeErr = refreshOrphanCandidates(candidates, match, &generations)
 		}
-		observed, observeErr := observeOrphanAncestry(refreshed, match, reapGraceWait)
+		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
 		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
 		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations)

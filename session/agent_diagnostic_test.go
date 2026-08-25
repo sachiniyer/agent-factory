@@ -11,7 +11,8 @@ func TestAgentModelChangeProjectionIsTypedAndStorageSafe(t *testing.T) {
 	inst := &Instance{ID: "session-id", liveness: LiveReady}
 	change := NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	require.NotNil(t, change)
-	require.True(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.SetAgentModelChangeAtEpoch(change, epoch))
 
 	// The live API/CLI projection carries the exact explanation.
 	projected := inst.ToInstanceData()
@@ -29,8 +30,9 @@ func TestAgentModelChangeProjectionIsTypedAndStorageSafe(t *testing.T) {
 
 	// Constructors/setters reject values that do not describe a transition.
 	require.Nil(t, NewAgentModelChange("same", "same"))
+	_, epoch = inst.InFlightOpAndEpoch()
 	require.True(t, inst.SetAgentModelChangeAtEpoch(
-		&AgentModelChange{Before: "", After: "unknown"}, inst.StateEpoch(),
+		&AgentModelChange{Before: "", After: "unknown"}, epoch,
 	))
 	require.Nil(t, inst.AgentModelChange())
 }
@@ -38,7 +40,8 @@ func TestAgentModelChangeProjectionIsTypedAndStorageSafe(t *testing.T) {
 func TestAgentModelChangeDoesNotCrossArchiveRestoreRuntimeBoundary(t *testing.T) {
 	change := NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low")
 	inst := &Instance{liveness: LiveRunning, started: true}
-	require.True(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()))
+	_, epoch := inst.InFlightOpAndEpoch()
+	require.True(t, inst.SetAgentModelChangeAtEpoch(change, epoch))
 
 	require.NoError(t, inst.Transition(BeginArchive()))
 	require.NoError(t, inst.Transition(CommitArchive()))
@@ -48,7 +51,8 @@ func TestAgentModelChangeDoesNotCrossArchiveRestoreRuntimeBoundary(t *testing.T)
 	// Also reject a stale projection injected while the row is archived. Restore
 	// creates a new runtime under the same Instance identity, so its first snapshot
 	// must not inherit a warning observed from the retired process.
-	require.False(t, inst.SetAgentModelChangeAtEpoch(change, inst.StateEpoch()),
+	_, epoch = inst.InFlightOpAndEpoch()
+	require.False(t, inst.SetAgentModelChangeAtEpoch(change, epoch),
 		"an archived row must reject runtime diagnostics")
 	require.Nil(t, inst.AgentModelChange())
 

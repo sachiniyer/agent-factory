@@ -369,7 +369,7 @@ func TestFromInstanceData_RelocationRecoveryLoadsRunningSessionInert(t *testing.
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_relocation_recovery_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	data := deadInstanceData(t, Running, agentName, shellName)
 	originalExternalWorktree := data.Worktree.ExternalWorktree
 	originalBranchCreatedByUs := false

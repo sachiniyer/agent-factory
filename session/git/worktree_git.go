@@ -32,8 +32,9 @@ var networkGitTimeout = 60 * time.Second
 // timeout above (the #856 lesson from the claude shell probe).
 const gitWaitDelay = 2 * time.Second
 
-// localGitTimeout bounds the local git commands on the session-TEARDOWN path
-// (#1917). It is deliberately far larger than networkGitTimeout's sibling
+// localGitTimeout bounds the destructive local git commands on the session
+// teardown path (#1917) and, since #3424, the identical ones on the session
+// SETUP path. It is deliberately far larger than networkGitTimeout's sibling
 // reasoning would suggest: the command it really exists for is
 // `git worktree remove -f`, which recursively deletes a whole checkout —
 // legitimately slow on a large tree over a cold cache, and NOT something we want
@@ -62,15 +63,23 @@ func SetLocalGitTimeoutForTest(d time.Duration) func() {
 // It runs with a background context, so it is UNBOUNDED. This used to be
 // justified as "local-only operations cannot stall the way a fetch can", which
 // is false — see runGitLocalCommand, which bounds the teardown-path callers that
-// disproved it. The remaining callers here are pure metadata reads (rev-parse,
-// show-ref, merge-base) plus `worktree add`, which stay unbounded on purpose:
-// `worktree add` runs the repo's post-checkout hook, i.e. arbitrary user code
-// whose legitimate runtime (a big install step) has no defensible upper bound,
-// and it is on the session-CREATE path, where a stall is visible and cancellable
-// rather than wedging a kill forever.
+// disproved it. Most callers left here are metadata reads (rev-parse, show-ref,
+// merge-base, for-each-ref, status); the writes that remain are `worktree add`,
+// the archive snapshot's `add -A` + `commit` (worktree_push.go) and the rename's
+// `branch -m` (branch_rename.go). None of them recursively unlinks a checkout,
+// and `worktree add` in particular stays unbounded on purpose: it runs the
+// repo's post-checkout hook, i.e. arbitrary user code whose legitimate runtime
+// (a big install step) has no defensible upper bound.
 //
-// Network operations must use runGitNetworkCommand instead (#896); local
-// operations on a teardown path must use runGitLocalCommand (#1917).
+// The setup path used to be here too, and that was #3424: `worktree remove -f`,
+// `worktree prune` and `branch -D` ran through this unbounded runner on session
+// CREATE while the identical teardown calls had been bounded since #1917. Those
+// callers now use runGitLocalCommand — see worktree_setup_bounded.go.
+//
+// Network operations must use runGitNetworkCommand instead (#896); a local
+// operation that DESTROYS something — a checkout, a registration, a branch —
+// must use runGitLocalCommand, on the teardown path (#1917) and on the setup
+// path alike (#3424).
 func (g *GitWorktree) runGitCommand(path string, args ...string) (string, error) {
 	return g.runGitCommandContext(context.Background(), path, args...)
 }

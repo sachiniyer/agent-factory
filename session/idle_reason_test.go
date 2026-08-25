@@ -172,7 +172,7 @@ func TestPaneChurnRequestsOneCheckpointPerPrompt(t *testing.T) {
 	inst := &Instance{liveness: LiveRunning}
 	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	inst.RecordPromptAttempt(PromptDelivered, attemptedAt)
-	epoch := inst.StateEpoch()
+	_, epoch := inst.InFlightOpAndEpoch()
 
 	recorded, checkpoint := inst.RecordPaneChurnCheckpointAtEpoch(attemptedAt.Add(time.Second), epoch)
 	if !recorded || !checkpoint {
@@ -190,7 +190,7 @@ func TestClearIdleEvidenceRetiresPredecessorRuntimeFacts(t *testing.T) {
 	inst := &Instance{liveness: LiveReady}
 	attemptedAt := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	inst.RecordPromptAttempt(PromptDelivered, attemptedAt)
-	epoch := inst.StateEpoch()
+	_, epoch := inst.InFlightOpAndEpoch()
 	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch)
 
 	if !inst.ClearIdleEvidence() {
@@ -218,7 +218,7 @@ func TestIdleReasonEvidenceRecordsWithoutSemanticInference(t *testing.T) {
 	if got, _ := inst.IdleReasonSnapshot(); got != IdleReasonDeliveryUnconfirmed {
 		t.Fatalf("reason before churn = %q, want %q", got, IdleReasonDeliveryUnconfirmed)
 	}
-	epoch := inst.StateEpoch()
+	_, epoch := inst.InFlightOpAndEpoch()
 	if !inst.RecordPaneChurnAtEpoch(churnAt, epoch) {
 		t.Fatal("same-epoch pane churn was not recorded")
 	}

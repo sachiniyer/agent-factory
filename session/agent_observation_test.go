@@ -57,7 +57,7 @@ func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.SetBackend(backend)
-	oldEpoch := inst.StateEpoch()
+	_, oldEpoch := inst.InFlightOpAndEpoch()
 
 	deliveryDone := make(chan error, 1)
 	go func() {
@@ -87,8 +87,9 @@ func TestSnapshotAgentSamplesEpochInsideObservationFence(t *testing.T) {
 	if got.op != OpNone {
 		t.Fatalf("snapshot op = %v, want none", got.op)
 	}
-	if got.epoch == oldEpoch || got.epoch != inst.StateEpoch() {
-		t.Fatalf("snapshot epoch = %d, want post-delivery epoch %d (old %d)", got.epoch, inst.StateEpoch(), oldEpoch)
+	_, postDeliveryEpoch := inst.InFlightOpAndEpoch()
+	if got.epoch == oldEpoch || got.epoch != postDeliveryEpoch {
+		t.Fatalf("snapshot epoch = %d, want post-delivery epoch %d (old %d)", got.epoch, postDeliveryEpoch, oldEpoch)
 	}
 	if !inst.RecordPaneChurnAtEpoch(time.Now(), got.epoch) {
 		t.Fatal("post-delivery snapshot was rejected after consuming its pane hash")
@@ -116,7 +117,7 @@ func TestPromptDeliveryWaitsForSnapshotAndFencesItsApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	inst.SetBackend(backend)
-	epoch := inst.StateEpoch()
+	_, epoch := inst.InFlightOpAndEpoch()
 
 	snapshotDone := make(chan error, 1)
 	go func() {
@@ -182,7 +183,7 @@ func TestRuntimeReplacementDoesNotWaitForPredecessorSnapshot(t *testing.T) {
 	// Runtime replacement retires the predecessor's evidence. Delivery to the
 	// replacement must not wait for pane I/O that is still blocked in the old
 	// runtime; its eventual observation is rejected by the state-epoch fence.
-	oldEpoch := inst.StateEpoch()
+	_, oldEpoch := inst.InFlightOpAndEpoch()
 	inst.ClearIdleEvidence()
 	deliveryDone := make(chan error, 1)
 	go func() {
@@ -248,8 +249,9 @@ func TestSnapshotAgentDiscardsRetiredRuntimeResult(t *testing.T) {
 	if got.obs.Content != "successor observation" || backend.calls != 2 {
 		t.Fatalf("snapshot = %q after %d calls, want successor observation after retry", got.obs.Content, backend.calls)
 	}
-	if got.epoch != inst.StateEpoch() {
-		t.Fatalf("snapshot epoch = %d, want successor epoch %d", got.epoch, inst.StateEpoch())
+	_, successorEpoch := inst.InFlightOpAndEpoch()
+	if got.epoch != successorEpoch {
+		t.Fatalf("snapshot epoch = %d, want successor epoch %d", got.epoch, successorEpoch)
 	}
 	if !inst.AgentObservationCurrent(got.generation) {
 		t.Fatal("successor observation generation is not current")

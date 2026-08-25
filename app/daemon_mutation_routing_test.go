@@ -25,7 +25,7 @@ func TestHandleNewTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	})
 	defer restore()
 
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 
 	require.Equal(t, daemon.CreateTabRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID, Shell: true}, gotRequest,
 		"CreateTab must carry the selected session's stable identity")
@@ -56,7 +56,7 @@ func TestHandleCloseTab_RoutesThroughDaemon_NoLocalSave(t *testing.T) {
 	})
 	defer closeRestore()
 
-	_, _ = h.handleNewTab() // agent + shell + shell-2, active = 2
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // agent + shell + shell-2, active = 2
 	require.Equal(t, 3, inst.TabCount())
 	createdTab := inst.GetTabs()[2]
 	require.NotEmpty(t, createdTab.ID)
