@@ -104,6 +104,24 @@ type HookRuntimeCleanupData struct {
 	AuthSelectors         []string `json:"auth_selectors,omitempty"`
 	AuthSelectorsResolved bool     `json:"auth_selectors_resolved,omitempty"`
 	SessionEnvPassthrough []string `json:"session_env_passthrough,omitempty"`
+	// HasKnownHostsDir marks a session provisioned through provision_cmd, which
+	// pins one host key per session under hook-hosts/<slug> and OWNS that
+	// directory. It is what lets a teardown rebuilt after a daemon restart drop
+	// the pin on the same success-only condition the live one uses (#3454).
+	//
+	// It is a claim of OWNERSHIP, so only the provision_cmd constructor sets it —
+	// never the shared cleanupData(), which the launch_cmd path uses too. That
+	// contract owns a URL and a token and pins nothing, and a launch_cmd tombstone
+	// claiming this directory would delete a live session's pin under a slug it
+	// never owned.
+	//
+	// omitempty keeps it compatible in both directions, and both directions
+	// degrade to the SAME pre-existing leak rather than to anything unsafe. A
+	// record written before this field restores with it false and orphans its
+	// directory exactly as every record does today; a daemon rolled BACK to a
+	// release without the field silently DROPS it on its next checkpoint (#3122)
+	// and lands in the same place. Nothing removes a pin it cannot prove it owns.
+	HasKnownHostsDir bool `json:"has_known_hosts_dir,omitempty"`
 }
 
 type runtimeCleanupProvider interface {
@@ -345,6 +363,14 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			launchStarted:         true,
 		}
 		teardown := p.reap
+		if data.Hook.HasKnownHostsDir {
+			// A provision_cmd session, which pinned one host key under
+			// hook-hosts/<slug>. Finish that half of the teardown too, or a kill that
+			// outlives its daemon reaps the machine and orphans the pin forever
+			// (#3454). See restoredHookProvisionTeardown for why the directory is
+			// resolved per attempt rather than here.
+			teardown = restoredHookProvisionTeardown(p.reap, p.slug, title)
+		}
 		return &HookBackend{
 			remoteAgentBackend: remoteAgentBackend{reap: teardown},
 			provisioner:        p,
