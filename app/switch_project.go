@@ -1,11 +1,9 @@
 package app
 
 import (
-	"context"
 	"fmt"
 	"path/filepath"
 	"sort"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,13 +17,6 @@ import (
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
-
-const projectPathScanTimeout = 150 * time.Millisecond
-
-type projectPathResolution struct {
-	id   string
-	root string
-}
 
 // showProjectPickerOverlay opens the project switcher (#1461): every repo af has
 // seen — the current project, repos with tracked sessions, and the root_agents
@@ -75,37 +66,40 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		inPlace      int
 	}
 	projectsByID := map[string]*projectAggregate{}
-	resolvedPaths := map[string]projectPathResolution{}
-	// The active repo identity was already resolved while opening this home.
-	// Seed it before any bounded registry/session probes so a slow stale path
-	// cannot make the active bare worktree fall back to its raw path identity.
-	if m.repoRoot != "" && m.repoID != "" {
-		resolvedPaths[m.repoRoot] = projectPathResolution{id: m.repoID, root: m.repoRoot}
+
+	// Read the durable registry before resolving any paths so every uncached
+	// candidate can start its bounded Git probe together. A single stalled path
+	// must not consume the entire opportunity of an inactive worktree that comes
+	// later in the snapshot or registry.
+	registryDegraded := false
+	registeredProjects, err := config.ListProjects()
+	if err != nil {
+		registryDegraded = true
+		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+		registeredProjects = nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), projectPathScanTimeout)
-	defer cancel()
-	resolvePath := func(path string) projectPathResolution {
-		if path == "" {
-			return projectPathResolution{}
+	paths := make([]string, 0, len(data)+len(registeredProjects)+1)
+	for _, d := range data {
+		if !session.IsArchivedData(d) && d.Worktree.RepoPath != "" {
+			paths = append(paths, d.Path)
 		}
-		if resolved, ok := resolvedPaths[path]; ok {
-			return resolved
-		}
-		if resolved, ok := m.projectPathResolutions[path]; ok {
-			resolvedPaths[path] = resolved
-			return resolved
-		}
-		resolved := projectPathResolution{id: config.RepoIDForRecordedRoot(path), root: filepath.Clean(path)}
-		if repo, err := config.RepoFromPathContext(ctx, path); err == nil {
-			resolved = projectPathResolution{id: repo.ID, root: repo.WorkspacePath()}
-			if m.projectPathResolutions == nil {
-				m.projectPathResolutions = make(map[string]projectPathResolution)
-			}
-			m.projectPathResolutions[path] = resolved
-		}
-		resolvedPaths[path] = resolved
-		return resolved
 	}
+	for _, project := range registeredProjects {
+		if !project.PathExists {
+			// Absence is stronger than the short cache TTL: discard the cached
+			// spelling immediately so it cannot override a surviving worktree.
+			delete(m.projectPathResolutions, project.Root)
+		}
+		paths = append(paths, project.Root)
+	}
+	if m.appConfig != nil {
+		for path := range m.appConfig.RootAgents {
+			paths = append(paths, config.ExpandTilde(path))
+		}
+	}
+	paths = append(paths, m.repoRoot)
+	resolvedPaths := m.resolveProjectPaths(paths)
+	resolvePath := func(path string) projectPathResolution { return resolvedPaths[path] }
 	ensure := func(resolved projectPathResolution, priority int) *projectAggregate {
 		if resolved.id == "" || resolved.root == "" {
 			return nil
@@ -173,21 +167,8 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// the union for repos registered before the add-verb rewire, so an existing opt-in
 	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
 	// as the counts above come from the daemon's session snapshot passed in.
-	registryDegraded := false
-	if projects, err := config.ListProjects(); err == nil {
-		for _, p := range projects {
-			if !p.PathExists {
-				// Successful resolutions persist across the 750ms sidebar poll, but
-				// a registry root that has disappeared must not keep overriding a
-				// live sibling worktree for the same bare repository.
-				delete(m.projectPathResolutions, p.Root)
-				delete(resolvedPaths, p.Root)
-			}
-			ensure(resolvePath(p.Root), 2)
-		}
-	} else {
-		registryDegraded = true
-		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+	for _, project := range registeredProjects {
+		ensure(resolvePath(project.Root), 2)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {

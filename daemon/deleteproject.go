@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -131,7 +132,11 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		// repository's linked workspace matches the bare-derived repo ID. A
 		// missing path retains its recorded-root fallback instead of being
 		// guessed into a different project.
-		if config.RepoIDForPath(project.Root) != repoID {
+		candidateID := config.RepoIDForRecordedRoot(project.Root)
+		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project.Root); ok {
+			candidateID = resolvedID
+		}
+		if candidateID != repoID {
 			continue
 		}
 		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {

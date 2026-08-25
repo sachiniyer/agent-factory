@@ -164,6 +164,41 @@ func TestBuildProjectListUsesKnownActiveIdentityAfterProbeBudgetExpires(t *testi
 	t.Fatalf("session-bearing project missing after a stalled probe: %+v", projects)
 }
 
+func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testing.T) {
+	base, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+
+	stalled := filepath.Join(base, "stalled-worktree")
+	require.NoError(t, os.MkdirAll(stalled, 0o755))
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_PROJECT\"*) /bin/sleep 2; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_PROJECT", stalled)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{
+		{
+			Title: "stalled", Path: stalled,
+			Worktree: session.GitWorktreeData{RepoPath: stalled, WorktreePath: stalled},
+		},
+		{
+			Title: "bare-alpha", Path: liveRoot,
+			Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+		},
+	})
+	require.False(t, degraded)
+	assert.True(t, projectWithCountHasRoot(projects, 1, registeredRoot),
+		"one stalled inactive path must not consume the healthy bare worktree's resolution opportunity")
+}
+
 func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
 	h := newTestHome(t)
@@ -188,6 +223,32 @@ func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
 	require.False(t, degraded)
 	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
 		"a vanished cached registry root must not replace the surviving live workspace")
+}
+
+func TestBuildProjectListRevalidatesPresentReplacementCheckout(t *testing.T) {
+	base, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	data := []session.InstanceData{{
+		Title: "bare-alpha", Path: liveRoot,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+	}}
+
+	first, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	require.True(t, projectWithCountHasRoot(first, 1, registeredRoot))
+
+	runGit(t, bare, "worktree", "remove", "--force", registeredRoot)
+	runGit(t, base, "init", "-b", "main", registeredRoot)
+	time.Sleep(projectPathResolutionTTL + 100*time.Millisecond)
+	second, degraded := h.buildProjectListFrom(data)
+	require.False(t, degraded)
+	assert.True(t, projectWithCountHasRoot(second, 1, liveRoot),
+		"an expired registry resolution must not lend the bare identity to a replacement checkout")
 }
 
 func projectWithCountHasRoot(projects []overlay.Project, count int, root string) bool {

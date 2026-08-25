@@ -145,6 +145,57 @@ func TestCreateSessionAtBareCloneWorktreeUsesBareIdentityAndWorkspace(t *testing
 	}
 }
 
+func TestCreateSessionCheckpointKeepsFirstWriteBareIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	_, bare, worktree := setupBareCloneWorktree3358(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	data, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: "bare-worktreeless", RepoPath: worktree, Program: "claude",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if data.Worktree.RepoPath != "" {
+		t.Fatalf("fixture must create a worktree-less row, got repo path %q", data.Worktree.RepoPath)
+	}
+
+	identityID := config.RepoIDFromRoot(bare)
+	cmd := exec.Command("git", "-C", bare, "worktree", "remove", "--force", worktree)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("remove linked worktree: %v: %s", err, out)
+	}
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("recreate former workspace path: %v", err)
+	}
+	wrongID := config.RepoIDForPath(worktree)
+	if wrongID == identityID {
+		t.Fatalf("fixture did not change identity after removing linked worktree: %s", identityID)
+	}
+
+	if err := manager.SaveInstances(); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+	identityRows, err := loadRepoInstanceData(identityID)
+	if err != nil {
+		t.Fatalf("load identity-keyed rows: %v", err)
+	}
+	if len(identityRows) != 1 || identityRows[0].Title != "bare-worktreeless" {
+		t.Fatalf("first-write identity %s rows = %+v", identityID, identityRows)
+	}
+	wrongRows, err := loadRepoInstanceData(wrongID)
+	if err != nil {
+		t.Fatalf("load path-derived rows: %v", err)
+	}
+	if len(wrongRows) != 0 {
+		t.Fatalf("checkpoint duplicated fresh row under re-resolved identity %s: %+v", wrongID, wrongRows)
+	}
+}
+
 // TestEnsureRootAgentsCreatesRootAtBareCloneWorktree flips PR #3334's parity
 // anchor: the registered checkout remains the root agent's in-place workspace,
 // while its row and daemon key use the bare repository's identity.

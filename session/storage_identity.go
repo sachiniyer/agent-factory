@@ -34,8 +34,16 @@ func (i *Instance) repoIDForStorage() string {
 	return i.storageRepoID
 }
 
-func (i *Instance) rememberStorageRepoID(repoID string) {
+// PinStorageRepoID records the authoritative key used by an instance's first
+// successful durable write. A later checkpoint must not re-resolve a
+// worktree-less row's Path after that checkout disappears or is repurposed.
+func (i *Instance) PinStorageRepoID(repoID string) {
+	if repoID == "" {
+		return
+	}
 	i.mu.Lock()
-	i.storageRepoID = repoID
+	if i.storageRepoID == "" {
+		i.storageRepoID = repoID
+	}
 	i.mu.Unlock()
 }

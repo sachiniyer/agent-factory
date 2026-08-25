@@ -252,7 +252,7 @@ func projectForRepo(repo *RepoContext) (Project, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
 	defer cancel()
 	for _, project := range projects {
-		candidateID, ok := registeredProjectRepoID(ctx, project.Root)
+		candidateID, ok := ResolveRegisteredProjectRepoID(ctx, project.Root)
 		if ok && candidateID == repo.ID {
 			return project, true, nil
 		}
@@ -263,7 +263,11 @@ func projectForRepo(repo *RepoContext) (Project, bool, error) {
 	return Project{}, false, nil
 }
 
-func registeredProjectRepoID(parent context.Context, root string) (string, bool) {
+// ResolveRegisteredProjectRepoID returns the repository identity for a durable
+// project root only when Git still recognizes that exact workspace. It rejects
+// upward resolution into an enclosing repository after a nested checkout is
+// removed or replaced.
+func ResolveRegisteredProjectRepoID(parent context.Context, root string) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	repo, err := RepoFromPathContext(ctx, root)

@@ -880,7 +880,7 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 				log.WarningLog.Printf("skipping instance %q: %v", data.Title, err)
 				continue
 			}
-			instance.rememberStorageRepoID(repoID)
+			instance.PinStorageRepoID(repoID)
 			instances = append(instances, instance)
 		}
 	}

@@ -274,6 +274,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 			delete(m.instances, key)
 			return err
 		}
+		instance.PinStorageRepoID(repo.ID)
 		// Register the provider discovery in the same manager-lock critical
 		// section that makes the instance visible. A concurrent status poll can
 		// therefore never observe a newly created root without also seeing that
@@ -802,5 +803,6 @@ func (m *Manager) persistFailedCreate(repoID, title string, instance *session.In
 		delete(m.instances, key)
 		return err
 	}
+	instance.PinStorageRepoID(repoID)
 	return nil
 }

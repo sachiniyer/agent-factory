@@ -289,6 +289,24 @@ func TestRegisteredProjectRootForRepoID_ResolvesBareWorktreeIdentity(t *testing.
 		"repo-ID-only deletion must recover the registered linked workspace from bare identity")
 }
 
+func TestRegisteredProjectRootForRepoID_RejectsStaleNestedCheckoutAncestor(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	outer := filepath.Join(testguard.CanonicalTempDir(t), "outer")
+	nested := filepath.Join(outer, "nested")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", outer).Run())
+	require.NoError(t, exec.Command("git", "init", "-b", "main", nested).Run())
+	_, err := config.RegisterProject(nested)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(nested, ".git")))
+	outerRepo, err := config.RepoFromPath(outer)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(outerRepo.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got,
+		"a stale nested registration must not resolve upward and select its enclosing repository")
+}
+
 // TestDeleteProject_RejectsMismatchedRepoIDAndPath prevents a split-target
 // delete: RepoID selects the sessions/root-agent state, while RepoPath selects
 // the durable registry row. If they describe different projects, fail before
