@@ -240,9 +240,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		teardown := p.reap
 		return &dockerBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			containerID:        p.containerID,
-			provisioner:        p,
+			containerID: p.containerID,
+			provisioner: p,
 			cleanup: &DockerRuntimeCleanupData{
 				ContainerID: p.containerID,
 				EngineID:    p.engineID,
@@ -296,9 +295,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			teardown = legacySSHTombstoneReap(teardown, legacyCfg)
 		}
 		return &sshBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
-			cleanup:            &cleanup,
+			provisioner: p,
+			cleanup:     &cleanup,
 		}, teardown, nil
 	case "sandbox":
 		if data.Sandbox == nil || strings.TrimSpace(data.Sandbox.SSHCommand) == "" || strings.TrimSpace(data.Sandbox.SessionDir) == "" {
@@ -316,9 +314,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 		}
 		teardown := p.reap
 		return &sandboxBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
-			cleanup:            &cleanup,
+			provisioner: p,
+			cleanup:     &cleanup,
 		}, teardown, nil
 	case "remote":
 		if data.Hook == nil || strings.TrimSpace(data.Hook.DeleteCmd) == "" || strings.TrimSpace(data.Hook.Slug) == "" {
@@ -372,9 +369,8 @@ func restoreRuntimeCleanup(title, backendType string, data *RuntimeCleanupData) 
 			teardown = restoredHookProvisionTeardown(p.reap, p.slug, title)
 		}
 		return &HookBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
-			cleanup:            &cleanup,
+			provisioner: p,
+			cleanup:     &cleanup,
 		}, teardown, nil
 	default:
 		return nil, nil, fmt.Errorf("backend %q has no restorable remote cleanup handle", backendType)

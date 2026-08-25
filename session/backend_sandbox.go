@@ -178,8 +178,7 @@ func (p *sandboxProvisioner) provision() (ProvisionResult, error) {
 		p.spec.Title, p.sshCmd, p.sessionDir, endpoint.URL)
 	return ProvisionResult{
 		Backend: &sandboxBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
+			provisioner: p,
 			cleanup: &SandboxRuntimeCleanupData{
 				SSHCommand: p.sshCmd,
 				SessionDir: p.sessionDir,

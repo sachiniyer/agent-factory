@@ -191,8 +191,7 @@ func TestSSHCleanupHandleSurvivesTombstoneRoundTrip(t *testing.T) {
 		Title: "restart-reap",
 		Path:  "/repo",
 		backend: &sshBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
+			provisioner: p,
 			cleanup: &SSHRuntimeCleanupData{
 				Config:              config.SSHConfig{Host: "cleanup.example.test", User: "remote"},
 				SessionDir:          p.sessionDir,

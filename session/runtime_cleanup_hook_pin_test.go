@@ -61,7 +61,7 @@ func hookPinnedProvisionSession(t *testing.T, deleteBody string) (inst *Instance
 		ID:              t.Name() + "-id",
 		Title:           t.Name(),
 		Path:            "/repo",
-		backend:         p.provisionedBackend(live),
+		backend:         p.provisionedBackend(),
 		runtimeTeardown: live,
 		userKilled:      true,
 	}, dir, filepath.Join(h.dir, "delete-ran.log")
