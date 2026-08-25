@@ -882,42 +882,91 @@ func deleteTOMLScalar(content, section, leaf string) (string, bool) {
 	return rebuild(), true
 }
 
+// TOML's two multiline string delimiters. They are scanned as three-byte UNITS
+// rather than as three individual quotes, which is the whole of #3455: a
+// per-quote toggle reads a triple quote as open-close-open and leaves the
+// scanner believing it is inside a string, so a '#' after the delimiter never
+// registers as a comment.
+const (
+	tomlMultilineBasic   = `"""`
+	tomlMultilineLiteral = `'''`
+)
+
 // splitTrailingComment separates a TOML value from a trailing inline comment,
-// tracking quote state so a '#' inside a string is not mistaken for a comment.
+// tracking string state so a '#' inside a string is not mistaken for a comment.
 // It returns the value part and the comment part (including the whitespace that
 // preceded the '#'), so the comment can be reattached byte-for-byte.
+//
+// The scan begins OUTSIDE every string, which is right for a line that opens
+// whatever strings it contains: a single-line assignment's value, or an inline
+// table. The closing line of a MULTILINE assignment is the other case — the
+// string it ends was opened on an earlier line — and that one needs
+// scanTrailingComment with the delimiter still open.
 func splitTrailingComment(rest string) (value, comment string) {
-	inSingle, inDouble := false, false
-	escape := false
-	for i := 0; i < len(rest); i++ {
-		c := rest[i]
+	value, comment, _ = scanTrailingComment(rest, "")
+	return value, comment
+}
+
+// scanTrailingComment splits one line of a TOML value, resuming inside the
+// string that `open` closes ("" when the line begins outside every string), and
+// reports the delimiter still open when the line ends so the caller can carry
+// the state to the next line.
+//
+// Carrying that state is what makes the closing delimiter of a multiline string
+// read as the CLOSE it is rather than the open of a new string. It also covers
+// the same defect one level down, where a multiline string is an ELEMENT of a
+// multiline array and holds its state open across the element boundary.
+func scanTrailingComment(rest, open string) (value, comment, stillOpen string) {
+	for i := 0; i < len(rest); {
+		if open != "" {
+			// Basic strings process backslash escapes, so an escaped quote is
+			// content and cannot close anything. Literal strings process none
+			// at all, which is exactly what lets a lone backslash sit inside
+			// one.
+			if open[0] == '"' && rest[i] == '\\' {
+				i += 2
+				continue
+			}
+			if !strings.HasPrefix(rest[i:], open) {
+				i++
+				continue
+			}
+			i += len(open)
+			if len(open) == 3 {
+				// TOML lets a multiline string's content end with one or two of
+				// its own quote characters, so the delimiter is the LAST three
+				// of the run: `"""a""""` is the string `a"`. Consuming the whole
+				// run keeps a stray quote from opening a phantom string that
+				// would swallow the comment after it.
+				for i < len(rest) && rest[i] == open[0] {
+					i++
+				}
+			}
+			open = ""
+			continue
+		}
 		switch {
-		case inSingle:
-			if c == '\'' {
-				inSingle = false
-			}
-		case inDouble:
-			if escape {
-				escape = false
-			} else if c == '\\' {
-				escape = true
-			} else if c == '"' {
-				inDouble = false
-				escape = false
-			}
-		case c == '\'':
-			inSingle = true
-			escape = false
-		case c == '"':
-			inDouble = true
-			escape = false
-		case c == '#':
+		case strings.HasPrefix(rest[i:], tomlMultilineBasic):
+			open = tomlMultilineBasic
+			i += len(tomlMultilineBasic)
+		case strings.HasPrefix(rest[i:], tomlMultilineLiteral):
+			open = tomlMultilineLiteral
+			i += len(tomlMultilineLiteral)
+		case rest[i] == '"':
+			open = `"`
+			i++
+		case rest[i] == '\'':
+			open = `'`
+			i++
+		case rest[i] == '#':
 			j := i
 			for j > 0 && (rest[j-1] == ' ' || rest[j-1] == '\t') {
 				j--
 			}
-			return rest[:j], rest[j:]
+			return rest[:j], rest[j:], ""
+		default:
+			i++
 		}
 	}
-	return rest, ""
+	return rest, "", open
 }

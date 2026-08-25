@@ -150,15 +150,22 @@ func preservedTOMLAssignmentComments(lines []string, start, end int) []string {
 	}
 	array := strings.HasPrefix(strings.TrimSpace(lines[start][valueStart:]), "[")
 	comments := make([]string, 0)
+	// The string state carries from line to line. A multiline """ or ''' opened
+	// on one line is still open on the next, so its closing delimiter has to read
+	// as a CLOSE; reading it as a fresh open is what silently dropped the comment
+	// after it (#3455). That is why EVERY line is scanned, including the ones
+	// whose comments are not collected — skipping one would lose the state.
+	open := ""
 	for i := start; i <= end; i++ {
-		if !array && i != end {
-			continue
-		}
 		segment := lines[i]
 		if i == start {
 			segment = segment[valueStart:]
 		}
-		_, comment := splitTrailingComment(segment)
+		var comment string
+		_, comment, open = scanTrailingComment(segment, open)
+		if !array && i != end {
+			continue
+		}
 		if comment == "" {
 			continue
 		}
