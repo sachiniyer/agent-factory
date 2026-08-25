@@ -98,8 +98,23 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 	dir := t.TempDir()
 	trigger := filepath.Join(dir, "fork")
 	pidFile := filepath.Join(dir, "child.pid")
+	// The parent outlives the sweep instead of exiting 150ms after it forks, and
+	// that is what makes this test deterministic (#3439). The changed-generation
+	// child is reachable only as a ppid-descendant of a LIVE parent: it calls
+	// setsid, so it shares no session id, and the moment the parent exits it
+	// reparents to init and no refresh can attribute it again. The old fixture
+	// gave that window 150ms against a 200ms grace, so the sweep's refresh landed
+	// ~10ms before the parent died — on a loaded box the two reorder and the
+	// descendant is simply never seen, which reads as "no refusal" and fails the
+	// assertion below. Measured 3 failures in 15 runs at load 75.
+	//
+	// Nothing here depends on the parent exiting: it carries the cohort's own
+	// generation marker, so the sweep classifies it as a marked escapee and
+	// signals it, and t.Cleanup collects whatever is left. `exec` so the shell
+	// BECOMES that process — a trailing `sleep 300` as a child would outlive the
+	// Kill below.
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; sleep 0.15",
+		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300",
 		trigger, EnvMarkerGeneration, pidFile)
 	parentCmd := exec.Command("sh", "-c", script)
 	parentCmd.Env = []string{

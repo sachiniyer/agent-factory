@@ -113,6 +113,20 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	return false, true
 }
 
+// recoveryWindowObserver is notified when a vanished-session recovery's bounded
+// waits open and close. Production leaves it nil, so this costs one nil check
+// per recovery.
+//
+// It exists because concurrency here can only be inferred from the OUTSIDE by
+// timing the whole sweep, and that inference makes the machine the judge. The
+// concurrent floor is two grace waits; three sessions' real tmux and /proc work
+// sits on top of it, so on a loaded runner a perfectly concurrent
+// implementation blows any bound tight enough to also catch a serial one — the
+// #3439 flake class, measured failing 8 runs out of 8 at load 75. Overlapping
+// windows ARE the property, so the regression observes them directly instead
+// (see TestCleanupSessionsRecoversVanishedSessionsConcurrently).
+var recoveryWindowObserver func(match string, entered bool)
+
 // probeSessionStrict is the non-lossy existence probe for CleanupSessions'
 // ownership gate. Unlike probeSession, it does not treat every non-timeout
 // execution failure as absence: only tmux's ordinary exit 1 paired with its
@@ -717,6 +731,10 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		wg.Add(1)
 		go func(recovery vanishedSessionRecovery) {
 			defer wg.Done()
+			if observer := recoveryWindowObserver; observer != nil {
+				observer(recovery.match, true)
+				defer observer(recovery.match, false)
+			}
 			if reapErr := recoverVanishedSessionProcesses(recovery, ownHome); reapErr != nil {
 				processSweepErrs <- fmt.Errorf("tmux session %s vanished during process capture, but its process cleanup is incomplete: %w",
 					recovery.match, errors.Join(recovery.captureError, reapErr))
