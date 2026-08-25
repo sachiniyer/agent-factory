@@ -124,6 +124,7 @@ func redactHookJSONValue(value any) (any, bool) {
 
 func hookJSONStringMayContainJSONDocument(value string) bool {
 	trimmed := strings.TrimSpace(value)
+	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "\uFEFF"))
 	return trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"')
 }
 
@@ -266,9 +267,12 @@ func malformedHookJSONDocumentContainsTokenKey(document string) bool {
 
 func malformedHookJSONStringContentsContainToken(contents string) bool {
 	var recovered strings.Builder
+	var reassembled strings.Builder
 	for len(contents) > 0 {
 		boundary, skip := hookJSONStringRecoveryBoundary(contents)
-		recovered.WriteString(decodeHookJSONStringContentSegment(contents[:boundary]))
+		segment := contents[:boundary]
+		recovered.WriteString(decodeHookJSONStringContentSegment(segment))
+		reassembled.WriteString(segment)
 		if skip == 0 {
 			break
 		}
@@ -278,11 +282,54 @@ func malformedHookJSONStringContentsContainToken(contents string) bool {
 			// Preserve a boundary where an invalid escape was removed so unrelated
 			// words cannot be joined into a protected key spelling.
 			recovered.WriteByte(' ')
+			reassembled.WriteByte(' ')
 		}
 		contents = contents[boundary+skip:]
 	}
 
 	document := recovered.String()
+	if malformedHookRecoveredDocumentContainsToken(document) {
+		return true
+	}
+
+	// A raw control may split a Unicode escape that encodes the container opener.
+	// Reassemble the original encoded segments without those already-invalid
+	// controls, then decode them together so the split escape becomes whole.
+	normalized := decodeHookJSONStringContentSegment(reassembled.String())
+	if normalized == document {
+		return false
+	}
+	return malformedHookRecoveredDocumentContainsToken(decodeHookJSONEscapedContainerOpeners(normalized))
+}
+
+func decodeHookJSONEscapedContainerOpeners(document string) string {
+	var decoded strings.Builder
+	decoded.Grow(len(document))
+	for index := 0; index < len(document); index++ {
+		if index+1 < len(document) && document[index] == '\\' && document[index+1] == '"' {
+			decoded.WriteByte('"')
+			index++
+			continue
+		}
+		if index+5 < len(document) && document[index] == '\\' && document[index+1] == 'u' {
+			codepoint := document[index+2 : index+6]
+			switch {
+			case strings.EqualFold(codepoint, "007b"):
+				decoded.WriteByte('{')
+				index += 5
+				continue
+			case strings.EqualFold(codepoint, "005b"):
+				decoded.WriteByte('[')
+				index += 5
+				continue
+			}
+		}
+		decoded.WriteByte(document[index])
+	}
+	return decoded.String()
+}
+
+func malformedHookRecoveredDocumentContainsToken(document string) bool {
 	opener := strings.IndexAny(document, "{[")
 	if opener < 0 {
 		return false
@@ -294,12 +341,25 @@ func malformedHookJSONStringContentsContainToken(contents string) bool {
 }
 
 func hookJSONKeyMayStartAt(document string, index int) bool {
-	for index--; index >= 0; index-- {
-		character := document[index]
-		if character <= ' ' || character == '\\' {
+	for index > 0 {
+		for index > 0 && (document[index-1] <= ' ' || document[index-1] == '\\') {
+			index--
+		}
+		if index >= 2 && document[index-2:index] == "*/" {
+			comment := strings.LastIndex(document[:index-2], "/*")
+			if comment < 0 {
+				return false
+			}
+			index = comment
 			continue
 		}
-		return character == '{' || character == ','
+
+		line := strings.LastIndexByte(document[:index], '\n') + 1
+		if comment := strings.LastIndex(document[line:index], "//"); comment >= 0 {
+			index = line + comment
+			continue
+		}
+		return document[index-1] == '{' || document[index-1] == ','
 	}
 	return false
 }
@@ -350,6 +410,9 @@ func hookJSONStringRecoveryBoundary(contents string) (int, int) {
 				return index, 1
 			}
 			for offset := 2; offset <= 5; offset++ {
+				if contents[index+offset] < ' ' {
+					return index + offset, 1
+				}
 				if !isHookJSONHex(contents[index+offset]) {
 					return index, 1
 				}

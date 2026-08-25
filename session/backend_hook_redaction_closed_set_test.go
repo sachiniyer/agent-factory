@@ -190,6 +190,26 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"child\":\"{\n\\\"token\\\":\\\"brace-before-newline-secret\\\"}\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "token key after a malformed block comment",
+			output: `{"message":"{/*comment*/\"token\":\"comment-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "token key after a malformed line comment",
+			output: `{"message":"{// comment\n\"token\":\"line-comment-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "serialized token document after a byte order mark",
+			output: `{"message":"\ufeff{\"token\":\"bom-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "unicode-escaped object opener split by a raw newline",
+			output: `{"message":"{\"message\":\"unterminated\n\\u00\n7b\\\"token\\\":\\\"split-opener-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
