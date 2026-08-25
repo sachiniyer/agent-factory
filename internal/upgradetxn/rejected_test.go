@@ -118,12 +118,43 @@ func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
 // TestRejectedLedger_IsOwnerOnly — the ledger decides whether a binary may be
 // activated, so a user who can write it can re-enable a release this box refused.
 func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "af")
+	// State the directory posture rather than inheriting it (#3465). The ledger's
+	// mode is DERIVED from the directory's, so leaving the fixture at whatever
+	// umask produced it tests the developer's environment, not the contract: under
+	// 002 this asserted 0600 against the shared branch's 0660.
+	executable := sharedInstallDir(t, 0o700)
+	_, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.False(t, shared, "precondition: a privately-owned install directory")
+
 	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
 
 	info, err := os.Stat(rejectedLedgerPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+// The other branch, pinned rather than merely tolerated. The owner-only mode
+// exists so a user who can write the ledger cannot re-enable a release this box
+// refused — but on a directory the group can already install into, that group can
+// replace the binary outright, so an owner-only ledger withholds nothing from
+// them and instead blocks the authorized writers the widening exists to admit
+// (install_lock.go:245-262). The ledger carries the DIRECTORY's group, not the
+// creator's primary group.
+func TestRejectedLedger_WidensOnAGroupInstallableDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	gid, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.True(t, shared, "precondition: a group-installable install directory")
+
+	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+
+	info, err := os.Stat(rejectedLedgerPath(executable))
+	require.NoError(t, err)
+	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
+		"a ledger the authorized group cannot read leaves them unable to see what this box refused")
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.Equal(t, gid, int(stat.Gid),
+		"the ledger must carry the DIRECTORY's group; the creator's primary group is the wrong audience")
 }
 
 // TestCandidateRejected_StructurallyInvalidLedgerErrors — decoding successfully is

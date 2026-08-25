@@ -224,10 +224,43 @@ func TestWithExecutableLock_RefusesToFollowASymlink(t *testing.T) {
 // The lock file is deliberately left behind — removing one another process may
 // hold is a race — and it must be private.
 func TestWithExecutableLock_LeavesAPrivateLockFile(t *testing.T) {
-	executable := lockTestExecutable(t)
+	// State the directory posture rather than inheriting it (#3465). The lock's
+	// audience is DERIVED from the directory's, so a test that does not set the
+	// directory is not testing a branch — it is testing whoever's umask ran the
+	// suite. Under 002, lockTestExecutable's t.TempDir() is group-writable, and
+	// this asserted 0600 against the shared branch's 0660. sharedInstallDir is the
+	// fixture that sets a posture and then proves it; its own comment names this
+	// same umask trap.
+	executable := sharedInstallDir(t, 0o700)
+	_, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.False(t, shared, "precondition: a privately-owned install directory")
+
 	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
 
 	info, err := os.Stat(executableLockPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(journalFileMode), info.Mode().Perm())
+}
+
+// The other branch, pinned rather than merely tolerated. On a directory the group
+// can already install into, an owner-only lock protects nothing against that
+// group — they can replace the binary regardless — while locking them out gives
+// them EACCES and leaves them swapping UNLOCKED, which is strictly worse (#2948,
+// rationale at install_lock.go:245-262). So the lock widens to match, and carries
+// the DIRECTORY's group rather than the creator's primary group.
+func TestWithExecutableLock_WidensTheLockOnAGroupInstallableDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	gid, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.True(t, shared, "precondition: a group-installable install directory")
+
+	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
+
+	info, err := os.Stat(executableLockPath(executable))
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(journalFileMode|0o060), info.Mode().Perm(),
+		"a lock the authorized group cannot open sends them installing unlocked")
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	require.Equal(t, gid, int(stat.Gid),
+		"widening to the CREATOR's primary group would admit an unrelated group and still lock out the authorized one")
 }
