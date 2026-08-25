@@ -257,3 +257,53 @@ func TestSessionsArchiveSelf_OutsideSessionErrors(t *testing.T) {
 		t.Fatalf("error = %v, want the actionable outside-a-session message", err)
 	}
 }
+
+// TestSessionsArchiveSelf_SendsStableIDForWorktreelessRow: a worktree-less row
+// (remote backend) carries no Worktree.RepoPath, so sessionRepoID falls back to
+// resolving the recorded workspace Path — and that path is MUTABLE. Under #3358
+// the row is pinned under the bare repository's id, which no InstanceData field
+// spells, so the fallback is not even a lossy version of the right answer: let
+// another repository take over the path and the derived scope names THAT repo,
+// where a same-titled session would be archived instead of the caller's own.
+//
+// The row's stable id is the identity that cannot drift, and the daemon already
+// resolves by id first (resolveActionSession), reporting the repo id from the
+// row's own storage key. `--self` has that id in hand and must send it.
+func TestSessionsArchiveSelf_SendsStableIDForWorktreelessRow(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+
+	// The recorded workspace path is now occupied by an UNRELATED repository —
+	// exactly the reuse that makes path-derived identity send the wrong scope.
+	foreign := mkRepo(t, "foreign-occupant")
+
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			ID:       "sess_stable_id",
+			Title:    "me",
+			TmuxName: "af_me_agent",
+			Path:     foreign,
+			// Worktree is deliberately zero: a remote row projects no worktree.
+		}}, nil
+	})
+
+	var gotReq daemon.ArchiveSessionRequest
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+		gotReq = req
+		return "/archived/me", nil
+	}
+	t.Cleanup(func() { archiveSessionViaDaemon = prev })
+	sessionsArchiveSelf = true
+	t.Cleanup(func() { sessionsArchiveSelf = false })
+
+	_, err := runCmdCaptureStdout(t, sessionsArchiveCmd, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "sess_stable_id", gotReq.ID,
+		"--self must send the resolved row's stable id so the daemon resolves by identity, not by a mutable recorded path")
+	// The derived repo scope is the FOREIGN occupant's — proof the path fallback
+	// alone would have aimed the archive at the wrong project.
+	assert.Equal(t, config.RepoIDForPath(foreign), gotReq.RepoID,
+		"test premise: the recorded path resolves to the unrelated occupying repository")
+}

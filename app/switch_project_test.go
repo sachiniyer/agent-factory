@@ -946,3 +946,63 @@ func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 	assert.True(t, degraded, "a failed registry read must be reported to the switcher surfaces")
 	require.NotEmpty(t, got, "the union still renders from the other sources")
 }
+
+// TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity pins the #3358
+// review finding: a durable registration is a claim about a PATH, and a path is
+// not identity. A registered nested checkout that loses its .git metadata while
+// its directory survives inside an outer repository resolves UPWARD through the
+// generic path resolver, so the switcher would add or merge a Projects row for a
+// repository the user never registered — switching opens that foreign checkout,
+// and deleting the row aims delete-project at its sessions and root-agent state.
+//
+// The union must union the entry only under an identity Git actually vouches for
+// (config.ResolveRegisteredProjectRepoID: exact workspace plus checkout marker,
+// the same proof delete-project applies). Failing that, the entry keeps the
+// identity hashed from its OWN recorded root — it stays visible without
+// borrowing an ancestor's.
+func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	outer := initTestGitRepo(t)
+	nested := filepath.Join(outer, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	runGit(t, nested, "init")
+	runGit(t, nested, "config", "user.email", "test@example.com")
+	runGit(t, nested, "config", "user.name", "test")
+
+	project, err := config.RegisterProject(nested)
+	require.NoError(t, err, "fixture: the nested checkout must register while it is still a checkout")
+
+	// The active project is deliberately NOT the outer repo: any outer row in the
+	// union can then only have come from the registry entry resolving upward.
+	unrelated := initTestGitRepo(t)
+	h.repoRoot = unrelated
+	h.repoID = config.RepoIDFromRoot(unrelated)
+
+	// The nested checkout loses its Git metadata; its DIRECTORY survives inside
+	// the outer repository, which is what makes the upward resolution possible.
+	require.NoError(t, os.RemoveAll(filepath.Join(nested, ".git")))
+
+	outerRepo, err := config.RepoFromPath(outer)
+	require.NoError(t, err)
+	generic, err := config.RepoFromPathContext(t.Context(), project.Root)
+	require.NoError(t, err, "fixture: the surviving directory must still resolve through Git")
+	require.Equal(t, outerRepo.ID, generic.ID,
+		"test premise: the generic resolver adopts the ENCLOSING repository for the de-gitted registration")
+
+	got, degraded := h.buildProjectList()
+	require.False(t, degraded)
+
+	ids := map[string]overlay.Project{}
+	for _, p := range got {
+		ids[p.RepoID] = p
+	}
+	assert.NotContains(t, ids, outerRepo.ID,
+		"an unproven registration must not lend the enclosing repository a Projects row")
+	assert.Contains(t, ids, config.RepoIDForRecordedRoot(project.Root),
+		"the registration keeps its own recorded-root identity rather than vanishing")
+}

@@ -167,8 +167,34 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// the union for repos registered before the add-verb rewire, so an existing opt-in
 	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
 	// as the counts above come from the daemon's session snapshot passed in.
+	// A registration is a durable claim about a PATH, so it may only lend a
+	// repository's identity to the union once Git vouches for that exact
+	// workspace and its checkout marker (#3358 review). Without the proof a
+	// registered nested checkout that lost its .git metadata, or a path taken
+	// over by another checkout, resolves upward into an unrelated enclosing
+	// repository and merges its row here — where switching opens that foreign
+	// checkout and delete-project aims at its sessions and root-agent state.
+	//
+	// An unproven entry is not dropped: it falls back to the identity hashed
+	// from its own recorded root, exactly as a retained session row does above,
+	// so a registered project on a stalled or missing checkout keeps its own
+	// row instead of vanishing or borrowing an ancestor's.
+	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
 	for _, project := range registeredProjects {
-		ensure(resolvePath(project.Root), 2)
+		if project.Root == "" {
+			continue
+		}
+		resolved := resolvePath(project.Root)
+		provenID, proven := provenRegistryIDs[project.Root]
+		switch {
+		case proven:
+			resolved.id = provenID
+		case resolved.id != config.RepoIDForRecordedRoot(project.Root):
+			resolved = projectPathResolution{
+				id: config.RepoIDForRecordedRoot(project.Root), root: filepath.Clean(project.Root),
+			}
+		}
+		ensure(resolved, 2)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {

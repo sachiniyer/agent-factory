@@ -13,6 +13,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // setupBareCloneWorktree3358 builds the issue's exact repository shape: the
@@ -226,5 +227,106 @@ func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	manager.mu.Unlock()
 	if root == nil {
 		t.Fatalf("root not keyed under bare repository identity %s", config.RepoIDFromRoot(bare))
+	}
+}
+
+// TestWarnLegacyBareCloneTasksNamesStrandedAutomation pins the #3358 review
+// finding on the AUTOMATION half of the identity transition. A task created
+// from a bare clone's linked worktree before the fix retained the unrelated
+// parent in both ProjectPath and RepoID. After the fix the corrected bare
+// project no longer lists it, yet an enabled cron/watch task keeps firing under
+// the old identity — and when that parent is itself a repository, every
+// delivery keeps creating sessions there, invisible from the project the user
+// now works in. Preserved sessions are inert; running automation is not, so the
+// transition has to NAME these rather than leave them silently active.
+func TestWarnLegacyBareCloneTasksNamesStrandedAutomation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent, _, worktree := setupBareCloneWorktree3358(t)
+	legacyID := config.RepoIDFromRoot(parent)
+
+	// Seeded exactly as the pre-#3358 writer produced them: the task binds to the
+	// PARENT, which is what the old resolver returned for this worktree.
+	if err := task.AddTask(task.Task{
+		ID: "legacy-cron", Name: "nightly", Prompt: "go",
+		CronExpr: "0 3 * * *", Program: "claude",
+		ProjectPath: parent, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed enabled legacy task: %v", err)
+	}
+	if err := task.AddTask(task.Task{
+		ID: "legacy-watch", Name: "watcher", Prompt: "go",
+		WatchCmd: "true", Program: "claude",
+		ProjectPath: parent, Enabled: false,
+	}); err != nil {
+		t.Fatalf("seed disabled legacy task: %v", err)
+	}
+	seeded, err := task.LoadTasks()
+	if err != nil {
+		t.Fatalf("reload seeded tasks: %v", err)
+	}
+	for _, seededTask := range seeded {
+		if seededTask.RepoID != legacyID {
+			t.Fatalf("fixture: task %s bound to %q, want the legacy parent identity %s", seededTask.ID, seededTask.RepoID, legacyID)
+		}
+	}
+
+	repo, err := config.RepoFromPath(worktree)
+	if err != nil {
+		t.Fatalf("RepoFromPath(%s): %v", worktree, err)
+	}
+	if repo.ID == legacyID {
+		t.Fatalf("fixture: the corrected identity must differ from the legacy parent identity %s", legacyID)
+	}
+
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+
+	warnLegacyBareCloneTasks(repo)
+
+	warning := warnings.String()
+	for _, want := range []string{
+		"legacy-cron", "legacy-watch", // every stranded task is named
+		"nightly",                         // and named recognizably, not only by id
+		legacyID,                          // the identity they are still bound to
+		parent,                            // and its spelling, so the user can find them
+		"2 pre-#3358 task(s) (1 enabled)", // enabled ones are the live hazard
+		"af tasks list --all",             // an actionable next step
+	} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("legacy task warning missing %q: %q", want, warning)
+		}
+	}
+}
+
+// TestWarnLegacyBareCloneTasksSilentWithoutStrandedTasks keeps the warning from
+// becoming noise every create: a bare clone whose tasks all bind to the
+// corrected identity has nothing stranded to report.
+func TestWarnLegacyBareCloneTasksSilentWithoutStrandedTasks(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	_, _, worktree := setupBareCloneWorktree3358(t)
+
+	repo, err := config.RepoFromPath(worktree)
+	if err != nil {
+		t.Fatalf("RepoFromPath(%s): %v", worktree, err)
+	}
+	if err := task.AddTask(task.Task{
+		ID: "current", Name: "current", Prompt: "go",
+		CronExpr: "0 3 * * *", Program: "claude",
+		ProjectPath: worktree, Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed current task: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	previous := log.WarningLog.Writer()
+	log.WarningLog.SetOutput(&warnings)
+	t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
+
+	warnLegacyBareCloneTasks(repo)
+
+	if warning := warnings.String(); strings.Contains(warning, "pre-#3358 task(s)") {
+		t.Fatalf("no task is stranded, but the transition still warned: %q", warning)
 	}
 }

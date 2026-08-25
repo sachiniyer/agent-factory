@@ -9,8 +9,17 @@ import (
 )
 
 const (
-	projectPathScanTimeout   = 150 * time.Millisecond
-	projectPathResolutionTTL = time.Second
+	projectPathScanTimeout = 150 * time.Millisecond
+	// registeredProjectProveTimeout is deliberately LONGER than the generic path
+	// scan: proving a registration runs two Git probes plus a marker read where
+	// the generic resolver runs one, and it matches config's own
+	// registeredProjectProbeTimeout. An under-budgeted proof is not a neutral
+	// failure here — absence of proof downgrades the entry to its recorded-root
+	// identity, so a healthy project starved of milliseconds would split into two
+	// rows until the cache refreshed. The deadline is only ever spent on
+	// UNCACHED entries, behind the same one-second TTL.
+	registeredProjectProveTimeout = 250 * time.Millisecond
+	projectPathResolutionTTL      = time.Second
 )
 
 type projectPathResolution struct {
@@ -96,4 +105,92 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 		}
 	}
 	return resolvedPaths
+}
+
+// registeredProjectIdentity is a registry entry's PROVEN repository identity —
+// proven in the ResolveRegisteredProjectRepoID sense: Git still recognizes that
+// exact workspace and its checkout marker still matches the registration.
+type registeredProjectIdentity struct {
+	id         string
+	resolvedAt time.Time
+}
+
+type registeredProjectProbeResult struct {
+	root     string
+	id       string
+	resolved bool
+}
+
+// resolveRegisteredProjectIdentities proves each registered root's identity
+// before the switcher is willing to treat the registration as evidence about a
+// repository.
+//
+// A durable registration names a path, and a path is not identity. If a nested
+// checkout loses its .git metadata while its directory survives inside an outer
+// repository, or another checkout takes over the path, the generic resolver
+// happily answers with the ENCLOSING or REPLACEMENT repository — and the
+// switcher would then add or merge a Projects row for it. Switching there opens
+// a repository the user never registered, and deleting the row aims
+// delete-project at that repository's sessions and root-agent state.
+//
+// config.ResolveRegisteredProjectRepoID is the same exact-workspace plus
+// checkout-marker check delete-project already applies, so the picker and the
+// destructive verb cannot disagree about which registrations are real.
+//
+// Failure is not exclusion: an unproven entry falls back to its RECORDED root
+// identity at the call site, so a registered project on a stalled mount stays
+// visible under its own hash instead of vanishing or borrowing an ancestor's.
+// Probes start together and share one deadline, matching resolveProjectPaths:
+// one unreachable registration must not spend the whole poll's opportunity.
+func (m *home) resolveRegisteredProjectIdentities(projects []config.Project) map[string]string {
+	now := time.Now()
+	proven := make(map[string]string, len(projects))
+	uncached := make([]config.Project, 0, len(projects))
+	for _, project := range projects {
+		if project.Root == "" {
+			continue
+		}
+		if !project.PathExists {
+			// Absence outranks the short TTL: drop the cached proof at once so a
+			// vanished checkout cannot keep vouching for itself for another second.
+			delete(m.registeredProjectIdentities, project.Root)
+			continue
+		}
+		if cached, ok := m.registeredProjectIdentities[project.Root]; ok && now.Sub(cached.resolvedAt) < projectPathResolutionTTL {
+			proven[project.Root] = cached.id
+			continue
+		}
+		delete(m.registeredProjectIdentities, project.Root)
+		uncached = append(uncached, project)
+	}
+	if len(uncached) == 0 {
+		return proven
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProveTimeout)
+	defer cancel()
+	results := make(chan registeredProjectProbeResult, len(uncached))
+	for _, project := range uncached {
+		go func(project config.Project) {
+			id, ok := config.ResolveRegisteredProjectRepoID(ctx, project)
+			results <- registeredProjectProbeResult{root: project.Root, id: id, resolved: ok}
+		}(project)
+	}
+	if m.registeredProjectIdentities == nil {
+		m.registeredProjectIdentities = make(map[string]registeredProjectIdentity)
+	}
+	for range uncached {
+		select {
+		case result := <-results:
+			if result.resolved {
+				proven[result.root] = result.id
+				m.registeredProjectIdentities[result.root] = registeredProjectIdentity{
+					id: result.id, resolvedAt: time.Now(),
+				}
+			}
+		case <-ctx.Done():
+			return proven
+		}
+	}
+	return proven
 }
