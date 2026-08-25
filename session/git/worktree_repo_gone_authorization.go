@@ -54,7 +54,9 @@ func probeRepoGoneOrigin(ctx context.Context, worktree *GitWorktree) error {
 		if err != nil {
 			return fmt.Errorf("inspect recorded bare repository root: %w", err)
 		}
-		resolvedPath := strings.TrimSpace(gitDir)
+		// Git terminates the path record with a newline. Preserve spaces and tabs,
+		// which are valid final bytes in a repository directory name.
+		resolvedPath := strings.TrimSuffix(gitDir, "\n")
 		resolved, err := os.Stat(resolvedPath)
 		if err != nil {
 			return fmt.Errorf("inspect bare Git repository root %s: %w", resolvedPath, err)

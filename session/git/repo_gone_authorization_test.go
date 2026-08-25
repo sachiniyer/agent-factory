@@ -356,6 +356,21 @@ func TestCheckRepoPresentForRelocation_AcceptsBareRepository(t *testing.T) {
 	}
 }
 
+func TestCheckRepoPresentForRelocation_PreservesBarePathTrailingWhitespace(t *testing.T) {
+	for name, suffix := range map[string]string{"space": " ", "tab": "\t"} {
+		t.Run(name, func(t *testing.T) {
+			repoPath := filepath.Join(t.TempDir(), "origin.git"+suffix)
+			if out, err := exec.Command("git", "init", "--bare", repoPath).CombinedOutput(); err != nil {
+				t.Fatalf("create bare origin repository: %v (%s)", err, out)
+			}
+
+			if err := CheckRepoPresentForRelocation(repoPath); err != nil {
+				t.Fatalf("valid trailing whitespace changed the bare origin identity: %v", err)
+			}
+		})
+	}
+}
+
 func TestProbeRepoGoneOrigin_IgnoresHookRepositoryOverrides(t *testing.T) {
 	repoPath := filepath.Join(t.TempDir(), "origin")
 	if err := exec.Command("git", "init", repoPath).Run(); err != nil {

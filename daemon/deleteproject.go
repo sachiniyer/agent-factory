@@ -229,6 +229,17 @@ func resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, 
 		if pathRepoID != repoID {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
+		// A bare session persists its identity directory as repo_path, while the
+		// durable project record names the linked workspace that was registered.
+		// Once both selectors prove the same repo, use that registered root for
+		// deregistration just as the repo-ID-only form does.
+		registeredRoot, err := registeredProjectRootForRepoID(repoID)
+		if err != nil {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root after validating repo_path; nothing was changed: %w", repoID, err)
+		}
+		if registeredRoot != "" {
+			repoPath = registeredRoot
+		}
 	}
 	return deleteProjectTarget{repoID: repoID, repoPath: repoPath}, nil
 }
