@@ -321,32 +321,6 @@ func (s *TaskPane) ConsumePendingTrigger() *task.Task {
 	return nil
 }
 
-// ScrollUp moves the selection up one row. Used by scroll keys and mouse wheel
-// regardless of focus, so the user can browse the task list without first
-// focusing the pane. No-op while a task is being edited or created so the
-// background selection doesn't drift out from under the form.
-func (s *TaskPane) ScrollUp() {
-	if s.editing || s.creating {
-		return
-	}
-	// Moving the selection retires a notice about the row being left behind.
-	s.listNotice = ""
-	if s.selectedIdx > 0 {
-		s.selectedIdx--
-	}
-}
-
-// ScrollDown moves the selection down one row. See ScrollUp.
-func (s *TaskPane) ScrollDown() {
-	if s.editing || s.creating {
-		return
-	}
-	s.listNotice = ""
-	if s.selectedIdx < len(s.tasks)-1 {
-		s.selectedIdx++
-	}
-}
-
 // HandleKeyPress processes a key press. Returns true if consumed.
 func (s *TaskPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if !s.hasFocus {
