@@ -227,10 +227,16 @@ func TestWithExecutableLock_LeavesAPrivateLockFile(t *testing.T) {
 	// State the directory posture rather than inheriting it (#3465). The lock's
 	// audience is DERIVED from the directory's, so a test that does not set the
 	// directory is not testing a branch — it is testing whoever's umask ran the
-	// suite. Under 002, lockTestExecutable's t.TempDir() is group-writable, and
-	// this asserted 0600 against the shared branch's 0660. sharedInstallDir is the
-	// fixture that sets a posture and then proves it; its own comment names this
-	// same umask trap.
+	// suite. sharedInstallDir is the fixture that sets a posture and then proves
+	// it; its own comment names this same umask trap.
+	//
+	// The mechanism, precisely, because "MkdirTemp is 0700" makes it look
+	// impossible: t.TempDir() is TWO steps. It calls os.MkdirTemp (0700, umask
+	// irrelevant) and then creates the numbered subdirectory it hands back with
+	// os.Mkdir(dir, 0777) — and THAT one the umask reduces. Measured: 002 yields
+	// 0775, which is group rwx without other-write, exactly what
+	// directoryWriterGroup classifies as shared. 022 yields 0755 and 077 yields
+	// 0700, both private, which is why this assertion passed everywhere else.
 	//
 	// The widened counterpart is TestExecutableLock_SharedWithTheDirectorysWriters
 	// in executable_lock_sharing_test.go, which already pins the 0660 branch from

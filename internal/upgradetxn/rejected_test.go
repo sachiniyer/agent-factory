@@ -120,8 +120,13 @@ func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
 func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
 	// State the directory posture rather than inheriting it (#3465). The ledger's
 	// mode is DERIVED from the directory's, so leaving the fixture at whatever
-	// umask produced it tests the developer's environment, not the contract: under
-	// 002 this asserted 0600 against the shared branch's 0660.
+	// umask produced it tests the developer's environment, not the contract.
+	//
+	// t.TempDir() is not the 0700 that os.MkdirTemp suggests: it calls MkdirTemp
+	// and THEN creates the numbered subdirectory it returns with
+	// os.Mkdir(dir, 0777), which the umask reduces. Measured at 0775 under umask
+	// 002 — group rwx, no other-write, i.e. shared — so this asserted 0600 against
+	// the shared branch'"'"'s 0660. See TestWithExecutableLock_LeavesAPrivateLockFile.
 	executable := sharedInstallDir(t, 0o700)
 	_, shared := directoryWriterGroup(filepath.Dir(executable))
 	require.False(t, shared, "precondition: a privately-owned install directory")
