@@ -589,7 +589,7 @@ func (t *Transaction) markRollbackFailed() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseRollbackFailed {
-		return nil
+		return t.reaffirmPhaseLocked(PhaseRollbackFailed)
 	}
 	switch t.journal.Phase {
 	case PhaseRollbackRestored,

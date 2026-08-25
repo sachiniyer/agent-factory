@@ -56,7 +56,7 @@ func stageInstalledCandidateAwaitingRollback(t *testing.T) (*RecoveryLease, *Tra
 // This is the failure durableAtomicWriteFile cannot make atomic: it renames FIRST
 // and fsyncs the directory SECOND, so the caller gets an error over a file whose
 // new content is already visible at the path.
-func failJournalDirectorySync(t *testing.T, root string, times int, injected error) {
+func failJournalDirectorySync(t *testing.T, root string, times int, injected error) (heal func()) {
 	t.Helper()
 	previous := syncTransactionDirectory
 	calls := 0
@@ -70,6 +70,7 @@ func failJournalDirectorySync(t *testing.T, root string, times int, injected err
 		return previous(path)
 	}
 	t.Cleanup(func() { syncTransactionDirectory = previous })
+	return func() { syncTransactionDirectory = previous }
 }
 
 // #3453, the reported symptom. restoreLocked checkpoints CandidateInstalled=true;
@@ -84,7 +85,7 @@ func failJournalDirectorySync(t *testing.T, root string, times int, injected err
 func TestRollbackKeepsCandidateInstalledWhenCheckpointSyncNeverHeals(t *testing.T) {
 	takeover, loaded, home, root := stageInstalledCandidateAwaitingRollback(t)
 	injected := errors.New("injected checkpoint sync failure")
-	failJournalDirectorySync(t, root, -1, injected)
+	_ = failJournalDirectorySync(t, root, -1, injected)
 
 	err := takeover.Rollback()
 	require.ErrorIs(t, err, injected)
@@ -106,7 +107,7 @@ func TestRollbackKeepsCandidateInstalledWhenCheckpointSyncNeverHeals(t *testing.
 // a barrier that did close, and the marker survives into the restored journal.
 func TestRollbackCompletesCheckpointBarrierAfterATransientSyncFailure(t *testing.T) {
 	takeover, _, home, root := stageInstalledCandidateAwaitingRollback(t)
-	failJournalDirectorySync(t, root, 1, errors.New("injected transient sync failure"))
+	_ = failJournalDirectorySync(t, root, 1, errors.New("injected transient sync failure"))
 
 	require.NoError(t, takeover.Rollback(),
 		"a directory sync that succeeds on the completing retry must not fail the rollback")
@@ -145,4 +146,40 @@ func TestPersistJournalRejectsAWriteThatNeverLanded(t *testing.T) {
 	require.Equal(t, before.Phase, txn.Journal().Phase)
 	require.False(t, txn.Journal().CandidateInstalled,
 		"in-memory state must not advance past a record that is not on disk")
+}
+
+// #3453 review (Codex P1). Adopting a visible-but-unconfirmed journal keeps the
+// landed FIELDS safe, but it must not make an unconfirmed PHASE look established.
+// markRollbackFailed short-circuits on "already PhaseRollbackFailed" and returns
+// success without another write, and finishFailedRollback reads that success as
+// permission to run DisableRecoveryJob — over a terminal entry whose barrier never
+// closed. A crash then loses the entry with the persistent actor already disarmed,
+// stranding an earlier rollback phase with nothing left to finish it.
+//
+// finishTerminalRollbackFailure states the invariant directly: only the DURABLE
+// rollback_failed phase is a circuit-breaker that may disable the persistent actor.
+func TestRollbackFailureCircuitBreakerRequiresADurablePhase(t *testing.T) {
+	takeover, loaded, _, root := stageInstalledCandidateAwaitingRollback(t)
+	injected := errors.New("injected checkpoint sync failure")
+	heal := failJournalDirectorySync(t, root, -1, injected)
+
+	require.ErrorIs(t, takeover.Rollback(), injected)
+	require.Equal(t, PhaseRollbackFailed, loaded.Journal().Phase,
+		"precondition: the terminal phase was adopted from a write whose bytes are visible")
+
+	require.ErrorIs(t, takeover.MarkRollbackFailed(), injected,
+		"an unconfirmed terminal phase must not report the circuit breaker as established — "+
+			"finishFailedRollback would let DisableRecoveryJob disarm the persistent actor")
+
+	// And the retry is a real retry: once the barrier can close, the circuit
+	// breaker establishes rather than failing forever.
+	heal()
+	require.NoError(t, takeover.MarkRollbackFailed())
+	require.NoError(t, takeover.MarkRollbackFailed(), "and it is idempotent once durable")
+
+	reloaded, err := Load(loaded.Journal().HomeDir)
+	require.NoError(t, err)
+	require.Equal(t, PhaseRollbackFailed, reloaded.Journal().Phase)
+	require.True(t, reloaded.Journal().CandidateInstalled,
+		"the checkpoint the whole fix exists for must still be there")
 }
