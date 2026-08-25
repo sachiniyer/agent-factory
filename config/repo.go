@@ -106,7 +106,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		}
 		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", err)
 	}
-	toplevel := strings.TrimSpace(string(topOut))
+	toplevel := trimGitOutputLine(topOut)
 
 	// Get git-dir and git-common-dir to detect if we're in a linked worktree.
 	// In the main repo: git-dir == ".git", git-common-dir == ".git"
@@ -121,7 +121,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(infoOut)), "\n", 2)
+	parts := strings.SplitN(trimGitOutputLine(infoOut), "\n", 2)
 	if len(parts) != 2 {
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
@@ -161,7 +161,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	wtCmd.WaitDelay = repoGitWaitDelay
 	wtOut, err := wtCmd.Output()
 	if err == nil {
-		worktree := strings.TrimSpace(string(wtOut))
+		worktree := trimGitOutputLine(wtOut)
 		if !filepath.IsAbs(worktree) {
 			worktree = filepath.Join(commonDir, worktree)
 		}
@@ -187,7 +187,14 @@ func resolveDirectBareRepoRootContext(ctx context.Context, pathArgs ...string) (
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve bare git directory: %w", err)
 	}
-	return filepath.Clean(strings.TrimSpace(string(dirOut))), nil
+	return filepath.Clean(trimGitOutputLine(dirOut)), nil
+}
+
+// trimGitOutputLine removes Git's record terminator without stripping bytes
+// that are valid in a path. In particular, TrimSpace would corrupt repository
+// directories whose names end in a space or tab.
+func trimGitOutputLine(out []byte) string {
+	return strings.TrimSuffix(string(out), "\n")
 }
 
 func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {

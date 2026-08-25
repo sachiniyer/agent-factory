@@ -230,9 +230,11 @@ func TestProjectForRepoBoundsUnrelatedRegistryIdentityProbe(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	require.NoError(t, err)
 	binDir := t.TempDir()
+	probeMarker := filepath.Join(t.TempDir(), "stale-root-probed")
 	wrapper := filepath.Join(binDir, "git")
-	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_ROOT\"*) /bin/sleep 3; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_ROOT\"*) : > \"$AF_STALLED_PROBE_MARKER\"; /bin/sleep 3; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
 	t.Setenv("AF_STALLED_ROOT", staleRoot)
+	t.Setenv("AF_STALLED_PROBE_MARKER", probeMarker)
 	t.Setenv("AF_REAL_GIT", realGit)
 	t.Setenv("PATH", binDir)
 
@@ -244,6 +246,9 @@ func TestProjectForRepoBoundsUnrelatedRegistryIdentityProbe(t *testing.T) {
 	assert.Equal(t, registered.ID, got.ID)
 	assert.Less(t, elapsed, 2*time.Second,
 		"one unrelated stalled registry root must not block config resolution for a healthy sibling")
+	_, statErr := os.Stat(probeMarker)
+	assert.ErrorIs(t, statErr, os.ErrNotExist,
+		"config resolution must identify the target marker without probing unrelated registered roots")
 }
 
 func TestProjectForRepoRejectsRegisteredRootAdoptedByAncestor(t *testing.T) {
@@ -261,5 +266,23 @@ func TestProjectForRepoRejectsRegisteredRootAdoptedByAncestor(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, found,
 		"a stale nested registration must not lend its personal config to the ancestor repository")
+	assert.NotEqual(t, registered.ID, got.ID)
+}
+
+func TestProjectForRepoRejectsReplacementAtRegisteredPath(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", filepath.Join(base, "af-home"))
+	root := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	registered, err := RegisterProject(root)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, ".git")))
+	initProjectRegistryRepo(t, root)
+	replacement, err := RepoFromPath(root)
+	require.NoError(t, err)
+
+	got, found, err := projectForRepo(replacement)
+	require.NoError(t, err)
+	assert.False(t, found,
+		"path equality is not identity proof when the registered checkout marker is gone")
 	assert.NotEqual(t, registered.ID, got.ID)
 }

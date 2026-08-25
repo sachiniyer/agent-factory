@@ -307,6 +307,23 @@ func TestRegisteredProjectRootForRepoID_RejectsStaleNestedCheckoutAncestor(t *te
 		"a stale nested registration must not resolve upward and select its enclosing repository")
 }
 
+func TestRegisteredProjectRootForRepoID_RejectsReplacementCheckout(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	root := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", root).Run())
+	_, err := config.RegisterProject(root)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, ".git")))
+	require.NoError(t, exec.Command("git", "init", "-b", "main", root).Run())
+	replacement, err := config.RepoFromPath(root)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(replacement.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got,
+		"a reused path without the registered checkout marker must not be deregistered as the replacement repo")
+}
+
 // TestDeleteProject_RejectsMismatchedRepoIDAndPath prevents a split-target
 // delete: RepoID selects the sessions/root-agent state, while RepoPath selects
 // the durable registry row. If they describe different projects, fail before

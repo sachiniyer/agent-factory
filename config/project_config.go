@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -204,72 +205,115 @@ func isProjectPersonalKey(key string) bool {
 	return false
 }
 
-// projectForRoot finds the registered project whose last-known root is root. It
-// is read-only and cheap — a path comparison against the on-disk registry, with
-// no git invocation, no checkout-marker read, and no directory creation — so it
-// is safe on the resolver's hot path.
-//
-// A moved checkout whose stored root has gone stale simply does not match here,
-// and the repo then resolves with no personal layer. That silent fall-through is
-// the correct additive behavior for a caller (session create, hook exec,
-// inspection) that did NOT explicitly name a project: there is no override to
-// lose. The explicit `--project` write path uses the stricter, git-normalized
-// ResolveProjectSelector instead.
+// projectForRoot finds the project whose checkout marker belongs to root. The
+// marker is the registry's identity evidence; a last-known path is not proof
+// when another checkout can replace it in place.
 func projectForRoot(root string) (Project, bool, error) {
-	if root == "" {
-		return Project{}, false, nil
-	}
-	projects, err := ListProjects()
-	if err != nil {
-		return Project{}, false, err
-	}
-	for _, p := range projects {
-		if sameProjectPath(p.Root, root) {
-			return p, true, nil
-		}
-	}
-	return Project{}, false, nil
+	return projectForWorkspace(root)
 }
 
-// projectForRepo finds a registered project by usable workspace first, then by
-// repository identity. The identity pass matters for bare repositories: each
-// linked worktree is a different path, while personal configuration belongs to
-// the shared bare common directory. Unresolvable stale registry roots do not
-// match by inference; their recorded path remains the only evidence available.
+// projectForRepo finds a registered project by the requesting workspace's
+// checkout marker. Bare linked worktrees share the common directory that owns
+// that marker, while two clones at the same path have different markers.
 func projectForRepo(repo *RepoContext) (Project, bool, error) {
 	if repo == nil {
 		return Project{}, false, nil
 	}
-	projects, err := ListProjects()
+	return projectForWorkspace(repo.WorkspacePath())
+}
+
+func projectForWorkspace(root string) (Project, bool, error) {
+	if root == "" {
+		return Project{}, false, nil
+	}
+	projects, err := listProjectsWithoutRootProbes()
 	if err != nil {
 		return Project{}, false, err
 	}
-	for _, project := range projects {
-		if sameProjectPath(project.Root, repo.WorkspacePath()) {
-			return project, true, nil
-		}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), registeredProjectScanTimeout)
 	defer cancel()
-	for _, project := range projects {
-		candidateID, ok := ResolveRegisteredProjectRepoID(ctx, project.Root)
-		if ok && candidateID == repo.ID {
-			return project, true, nil
-		}
-		if ctx.Err() != nil {
-			break
-		}
+	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	if !ok {
+		return Project{}, false, nil
 	}
-	return Project{}, false, nil
+	var matched Project
+	for _, project := range projects {
+		if project.CheckoutID != checkoutID {
+			continue
+		}
+		if matched.ID != "" {
+			return Project{}, false, fmt.Errorf("checkout marker %s matches multiple registered projects %s and %s", checkoutID, matched.ID, project.ID)
+		}
+		matched = project
+	}
+	return matched, matched.ID != "", nil
+}
+
+func listProjectsWithoutRootProbes() ([]Project, error) {
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return nil, err
+	}
+	records, err := loadProjectRecords(dir)
+	if err != nil {
+		return nil, err
+	}
+	projects := make([]Project, 0, len(records))
+	for _, record := range records {
+		projects = append(projects, Project{
+			ID: record.ID, CheckoutID: record.CheckoutID, Root: record.Root,
+			RelativeRoot: record.RelativeRoot,
+		})
+	}
+	return projects, nil
+}
+
+func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool) {
+	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
+	cmd.WaitDelay = repoGitWaitDelay
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	commonDir := trimGitOutputLine(out)
+	if commonDir == "" || strings.Contains(commonDir, "\n") {
+		return "", false
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(root, commonDir)
+	}
+	markerName, err := checkoutMarkerName()
+	if err != nil {
+		return "", false
+	}
+	type markerResult struct {
+		id     string
+		exists bool
+		err    error
+	}
+	result := make(chan markerResult, 1)
+	go func() {
+		id, exists, err := readCheckoutID(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
+		result <- markerResult{id: id, exists: exists, err: err}
+	}()
+	select {
+	case marker := <-result:
+		return marker.id, marker.exists && marker.err == nil
+	case <-ctx.Done():
+		return "", false
+	}
 }
 
 // ResolveRegisteredProjectRepoID returns the repository identity for a durable
-// project root only when Git still recognizes that exact workspace. It rejects
-// upward resolution into an enclosing repository after a nested checkout is
-// removed or replaced.
-func ResolveRegisteredProjectRepoID(parent context.Context, root string) (string, bool) {
+// project only when Git recognizes its exact recorded workspace and its
+// checkout marker still matches. It rejects upward resolution after a nested
+// checkout disappears and replacement checkouts at a reused path.
+func ResolveRegisteredProjectRepoID(parent context.Context, project Project) (string, bool) {
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
+	root := project.Root
 	repo, err := RepoFromPathContext(ctx, root)
 	if err != nil {
 		return "", false
@@ -278,7 +322,11 @@ func ResolveRegisteredProjectRepoID(parent context.Context, root string) (string
 	// exact workspace. If a nested checkout disappears, resolving its old path
 	// may discover an enclosing repository; never lend the nested registration's
 	// personal config to that ancestor.
-	if !sameProjectPath(repo.WorkspacePath(), root) {
+	if filepath.Clean(repo.WorkspacePath()) != filepath.Clean(root) {
+		return "", false
+	}
+	checkoutID, ok := checkoutIDForWorkspaceContext(ctx, root)
+	if !ok || checkoutID != project.CheckoutID {
 		return "", false
 	}
 	return repo.ID, true

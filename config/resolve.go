@@ -253,8 +253,9 @@ func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string) (source
 }
 
 // projectPersonalDocument builds the SourceProjectPersonal document for
-// repoRoot. It resolves the repo to a registered project read-only (no git, no
-// writes) and loads that project's machine-local config; a repo that is not a
+// repoRoot. It resolves the repo to a registered project read-only (a bounded
+// Git/checkout-marker probe, but no writes) and loads that project's
+// machine-local config; a repo that is not a
 // registered project, or one with no personal file yet, yields an empty
 // presence-only document so the layer is always present for the resolver.
 //

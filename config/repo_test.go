@@ -155,6 +155,24 @@ func TestResolveMainRepoRoot_BareCloneWorktree(t *testing.T) {
 		"personal project config follows bare identity across linked worktrees")
 }
 
+func TestRepoFromDirectBarePathPreservesTrailingWhitespace(t *testing.T) {
+	for name, suffix := range map[string]string{"space": " ", "tab": "\t"} {
+		t.Run(name, func(t *testing.T) {
+			parent := testguard.CanonicalTempDir(t)
+			bare := filepath.Join(parent, "bare.git"+suffix)
+			cmd := exec.Command("git", "init", "--bare", bare)
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "git init --bare: %s", out)
+
+			repo, err := RepoFromPath(bare)
+			require.NoError(t, err)
+			assert.Equal(t, bare, repo.IdentityPath())
+			assert.Equal(t, RepoIDFromRoot(bare), repo.ID)
+		})
+	}
+}
+
 func TestResolveConfigForRepoWarnsAboutRetainedLegacyBareParentConfig(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	parent := testguard.CanonicalTempDir(t)

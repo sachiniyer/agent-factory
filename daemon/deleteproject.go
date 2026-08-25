@@ -132,9 +132,14 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		// repository's linked workspace matches the bare-derived repo ID. A
 		// missing path retains its recorded-root fallback instead of being
 		// guessed into a different project.
-		candidateID := config.RepoIDForRecordedRoot(project.Root)
-		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project.Root); ok {
+		candidateID := ""
+		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
 			candidateID = resolvedID
+		} else if !project.PathExists {
+			// Only a determinately absent path keeps the recorded-root fallback.
+			// A present replacement without this record's checkout marker is
+			// positive evidence that it is not the registered checkout.
+			candidateID = config.RepoIDForRecordedRoot(project.Root)
 		}
 		if candidateID != repoID {
 			continue
