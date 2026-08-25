@@ -1449,12 +1449,12 @@
         "pointer": "web/src/api.ts:281 et al send id"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:733 et al send {Title, RepoID}"
+        "status": "partial",
+        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1980,13 +1980,6 @@
         }
       },
       "KillSessionRequest": {
-        "cli": {
-          "id": {
-            "gap": "wire.id-addressing"
-          }
-        }
-      },
-      "ArchiveSessionRequest": {
         "cli": {
           "id": {
             "gap": "wire.id-addressing"

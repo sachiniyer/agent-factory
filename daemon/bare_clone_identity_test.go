@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,14 +261,31 @@ func TestWarnLegacyBareCloneTasksNamesStrandedAutomation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed disabled legacy task: %v", err)
 	}
+	// AddTask re-derives RepoID from ProjectPath, and TODAY that parent resolves
+	// to no repository at all — so it cannot mint the pre-#3358 binding. The old
+	// resolver returned the parent PATH for this worktree regardless, which is
+	// what made RepoIDFromRoot(parent) the stored identity. Restore that binding
+	// on the stored row, which is the state a pre-#3358 daemon actually left on
+	// disk. legacy-watch keeps the empty RepoID a still-older row has, so the two
+	// seeds cover BOTH match paths: the retained id and the ProjectPath fallback.
+	bindStoredTaskToLegacyIdentity(t, "legacy-cron", legacyID)
+
 	seeded, err := task.LoadTasks()
 	if err != nil {
 		t.Fatalf("reload seeded tasks: %v", err)
 	}
+	byID := map[string]task.Task{}
 	for _, seededTask := range seeded {
-		if seededTask.RepoID != legacyID {
-			t.Fatalf("fixture: task %s bound to %q, want the legacy parent identity %s", seededTask.ID, seededTask.RepoID, legacyID)
-		}
+		byID[seededTask.ID] = seededTask
+	}
+	if got := byID["legacy-cron"].RepoID; got != legacyID {
+		t.Fatalf("fixture: legacy-cron bound to %q, want the legacy parent identity %s", got, legacyID)
+	}
+	if got := byID["legacy-watch"].RepoID; got != "" {
+		t.Fatalf("fixture: legacy-watch must keep an empty RepoID to cover the ProjectPath fallback, got %q", got)
+	}
+	if got := byID["legacy-watch"].ProjectPath; got != parent {
+		t.Fatalf("fixture: legacy-watch ProjectPath = %q, want the legacy parent %s", got, parent)
 	}
 
 	repo, err := config.RepoFromPath(worktree)
@@ -328,5 +346,47 @@ func TestWarnLegacyBareCloneTasksSilentWithoutStrandedTasks(t *testing.T) {
 
 	if warning := warnings.String(); strings.Contains(warning, "pre-#3358 task(s)") {
 		t.Fatalf("no task is stranded, but the transition still warned: %q", warning)
+	}
+}
+
+// bindStoredTaskToLegacyIdentity rewrites one stored task's repo_id in place.
+// AddTask derives that field from ProjectPath, so it is the only way to produce
+// the pre-#3358 binding on today's resolver — see its call site.
+func bindStoredTaskToLegacyIdentity(t *testing.T, taskID, repoID string) {
+	t.Helper()
+	path, err := task.MigrateOnLoadPath()
+	if err != nil {
+		t.Fatalf("tasks path: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tasks file: %v", err)
+	}
+	var file map[string]any
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatalf("parse tasks file: %v", err)
+	}
+	tasks, ok := file["tasks"].([]any)
+	if !ok {
+		t.Fatalf("tasks file has no tasks array: %s", raw)
+	}
+	found := false
+	for _, entry := range tasks {
+		row, ok := entry.(map[string]any)
+		if !ok || row["id"] != taskID {
+			continue
+		}
+		row["repo_id"] = repoID
+		found = true
+	}
+	if !found {
+		t.Fatalf("task %s not present in the stored file: %s", taskID, raw)
+	}
+	updated, err := json.Marshal(file)
+	if err != nil {
+		t.Fatalf("re-encode tasks file: %v", err)
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		t.Fatalf("write tasks file: %v", err)
 	}
 }
