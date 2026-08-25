@@ -30,6 +30,33 @@ func archiveCommittedWarning(instance *session.Instance, hookErr error, extra ..
 	return &mutationCommittedError{err: errors.Join(warnings...)}
 }
 
+// failedArchiveWithHook composes what a FAILED archive returns: its primary
+// cause, plus a clause naming a failed on-archive hook when there was one —
+// logged on the way past.
+//
+// The hook runs at the teardown chokepoint, BEFORE the worktree moves, so every
+// archive failure below it is reachable with a broken cleanup command behind it.
+// The primary cause stays primary — it is what the caller acts on — but it does
+// not subsume the hook's (#2763): a cleanup command that may already have mutated
+// external resources is otherwise invisible, and every retry fails the same way
+// and reports the same single cause.
+//
+// The log is the other half, not decoration. An archive driven by an `af tasks`
+// run has no one reading a return value, so the daemon log is the only diagnosis
+// that survives. Composing both here is what stops an exit on these paths from
+// getting one and forgetting the other — which is exactly how the two
+// rollback-success returns came to drop the hook entirely (#3452).
+//
+// Committed outcomes do not come through here: archiveCommittedWarning folds the
+// hook failure into the warning those paths already carry.
+func failedArchiveWithHook(title string, cause, hookErr error) error {
+	if hookErr == nil {
+		return cause
+	}
+	log.WarningLog.Printf("archive of session %q failed and its on-archive hook also failed: %v", title, hookErr)
+	return fmt.Errorf("%w (its on-archive hook also failed: %v)", cause, hookErr)
+}
+
 // restoredArchiveResult surfaces a report persisted weeks earlier without
 // turning the completed restore into a retryable failure. MutationOutcome is
 // the existing three-valued wire channel for "committed, with a warning".
@@ -130,7 +157,9 @@ func (m *Manager) keepUnrollableArchiveCommitted(
 	if _, _, unresolved := instance.GetWorktreeRelocationCandidates(); unresolved ||
 		instance.GetWorktreePath() != archivedPath {
 		m.persistInstance(repoID, instance)
-		return "", session.InstanceData{}, cause
+		// Plain shape, so no committed warning carries the hook failure here: this
+		// return owes the operator the same truth the committed one below does.
+		return "", session.InstanceData{}, failedArchiveWithHook(instance.Title, cause, hookErr)
 	}
 	if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
 		// The committed claim itself could not be made durable: a restart reloads
@@ -139,8 +168,8 @@ func (m *Manager) keepUnrollableArchiveCommitted(
 		// warning and deregister the project on top of that stale row (#3335
 		// review) — before this helper existed, the plain error is what stopped
 		// that. Keep the plain double-failure shape until the claim can land.
-		return "", session.InstanceData{}, errors.Join(cause,
-			fmt.Errorf("the committed archive also could not be written durably: %w", persistErr))
+		return "", session.InstanceData{}, failedArchiveWithHook(instance.Title, errors.Join(cause,
+			fmt.Errorf("the committed archive also could not be written durably: %w", persistErr)), hookErr)
 	}
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)

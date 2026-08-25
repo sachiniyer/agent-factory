@@ -276,23 +276,17 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		// rebuild a worktree whose bytes are sitting in the archive directory.
 		//
 		// The hook ran BEFORE the move, so this branch is reachable with both
-		// failing. The move error stays the primary cause — it is what the caller
-		// must act on — but the hook error is not redundant with it and must not be
-		// dropped (#2763): a broken cleanup command is invisible otherwise, since
-		// this path never reaches the committed-archive warning below, and every
-		// later attempt fails the same way and reports the same single cause. Log
-		// it as well as returning it, matching the committed path, so an archive
-		// driven by a task still leaves the diagnosis in the daemon log.
-		hookNote := ""
-		if hookErr != nil {
-			log.WarningLog.Printf("archive of session %q failed and its on-archive hook also failed: %v", req.Title, hookErr)
-			hookNote = fmt.Sprintf(" (its on-archive hook also failed: %v)", hookErr)
-		}
+		// failing, and the move error alone is not the whole outcome (#2763).
+		// failedArchiveWithHook is what keeps the hook failure attached and logged;
+		// this path never reaches the committed-archive warning below.
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote))
+			return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
+				"failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w",
+				req.Title, perr, worktreeRecoveryLocation(instance), err), hookErr))
 		}
-		return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote))
+		return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"failed to archive session %q (its agent will be restored in place): %w", req.Title, err), hookErr))
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
@@ -354,7 +348,13 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		archiveCommitted = false
-		return "", session.InstanceData{}, fmt.Errorf("could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w", req.Title, stopErr)
+		// A clean rollback is still reachable with a failed on-archive hook behind
+		// it — the hook ran before the move — and the hook may already have mutated
+		// external resources. Surface both (#3452): the teardown failure is what the
+		// caller acts on, the hook failure is what the operator must fix.
+		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w",
+			req.Title, stopErr), hookErr)
 	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		if !instance.GetArchiveReport().Empty() {
@@ -373,8 +373,11 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 				req.Title, archivedPath, perr, rbErr))
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
+		// The hook failure rides along for the same reason as the sibling above.
 		archiveCommitted = false
-		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
+		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w",
+			req.Title, perr), hookErr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	archived := instance.ToInstanceData()
