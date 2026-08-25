@@ -500,7 +500,21 @@ func TestArchiveSession_PersistFailureKeepsIncompleteArchiveCommitted(t *testing
 	}}})
 
 	prev := archivePersist
-	archivePersist = func(*Manager, string, *session.Instance) error {
+	calls := 0
+	archivePersist = func(m *Manager, rid string, inst *session.Instance) error {
+		calls++
+		if calls > 1 {
+			// The disk heals for the helper's durable retry: only a LANDED Archived
+			// row may claim committed (#3448), so the committed case is a transient
+			// write failure. Same shape the keepUnrollableArchiveCommitted sibling
+			// uses since #3335. A disk that never heals is the other half, and is
+			// covered by TestArchiveSession_IncompleteAndUndurable_StaysPlainFailure.
+			//
+			// This retry used to run through m.persistInstance, which the seam above
+			// does not intercept — so the write silently LANDED here while the test
+			// read as "persist always fails". Both callers now share the one seam.
+			return prev(m, rid, inst)
+		}
 		return errors.New("forced persist failure")
 	}
 	t.Cleanup(func() { archivePersist = prev })
@@ -509,6 +523,7 @@ func TestArchiveSession_PersistFailureKeepsIncompleteArchiveCommitted(t *testing
 	require.NoError(t, derr)
 	archivedPath, archived, err := manager.ArchiveSession(ArchiveSessionRequest{Title: "worker", RepoID: repoID})
 	require.Error(t, err)
+	require.Equal(t, 2, calls, "precondition: the commit write failed and the keep-incomplete helper retried it")
 	require.True(t, isMutationCommitted(err), "the physical archive landed and must not be retried: %v", err)
 	assert.Contains(t, err.Error(), "rolling its incomplete copy back would omit retained files")
 	assert.Equal(t, dest, archivedPath)
