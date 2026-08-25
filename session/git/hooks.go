@@ -50,7 +50,19 @@ func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath strin
 // session does not grant that agent's provider credentials to repository code.
 func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath string, passthrough []string) <-chan struct{} {
 	done := make(chan struct{})
-	repoCfg, err := config.ResolveConfig(repoPath)
+	// A bare repository's identity path contains no checked-out config. Once a
+	// worktree has been provisioned, resolve through it to keep identity-keyed
+	// legacy config on the bare directory and checked-in config on the checkout.
+	// Retain the raw-path fallback for recovery and callers whose recorded repo is
+	// temporarily unavailable.
+	repo, repoErr := config.RepoFromPath(worktreePath)
+	var repoCfg *config.ResolvedConfig
+	var err error
+	if repoErr == nil {
+		repoCfg, err = config.ResolveConfigForRepo(repo)
+	} else {
+		repoCfg, err = config.ResolveConfig(repoPath)
+	}
 	if err != nil {
 		log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
 		close(done)

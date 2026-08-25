@@ -53,7 +53,7 @@ func resolveLaunchProgramForInstance(i *Instance) launchProgramResolution {
 
 func resolveResolvedConfigForInstance(i *Instance) *config.ResolvedConfig {
 	if repo, err := config.RepoFromPath(i.Path); err == nil {
-		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
+		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
 			return resolved
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)
@@ -106,7 +106,7 @@ func resolveProgramForAgent(i *Instance, agent string) string {
 func resolveConfigForInstance(i *Instance) *config.Config {
 	var cfg *config.Config
 	if repo, err := config.RepoFromPath(i.Path); err == nil {
-		if resolved, rerr := config.ResolveConfig(repo.Root); rerr == nil {
+		if resolved, rerr := config.ResolveConfigForRepo(repo); rerr == nil {
 			cfg = &resolved.Config
 		} else {
 			log.WarningLog.Printf("failed to resolve repo config when resolving program for %q: %v", i.Title, rerr)

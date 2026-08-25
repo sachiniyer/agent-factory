@@ -435,7 +435,7 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	if err != nil {
 		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", err)
 	}
-	commonParts := strings.SplitN(strings.TrimSpace(string(commonOut)), "\n", 2)
+	commonParts := strings.SplitN(trimGitOutputLine(commonOut), "\n", 2)
 	if len(commonParts) != 2 {
 		return projectBinding{}, fmt.Errorf("resolve git common directory: unexpected git output %q", strings.TrimSpace(string(commonOut)))
 	}

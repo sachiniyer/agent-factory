@@ -107,6 +107,10 @@ type Instance struct {
 	Title string
 	// Path is the path to the workspace.
 	Path string
+	// storageRepoID retains the instances/<repoID> key this row was loaded from,
+	// preventing checkpoints from silently migrating legacy rows (#3358). It is
+	// empty until a fresh instance's first save and is protected by mu.
+	storageRepoID string
 	// Branch is the branch of the instance.
 	Branch string
 	// liveness and inFlightOp are the two orthogonal axes of session state

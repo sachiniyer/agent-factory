@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -83,6 +85,46 @@ func TestReserveCreate_RefusesADeleteThatCompletedWhileResolvingTheRepo(t *testi
 	require.Error(t, got.err, "a create must not be admitted into a project whose delete completed while it was still resolving which project that was")
 	require.ErrorContains(t, got.err, "being deleted")
 	require.Nil(t, got.release, "a refused create must not hand back a reservation to release")
+}
+
+func TestDeleteProjectResolvesRepoIDOnlyRegistryTargetBeforeTaskLock(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	_, err := config.RegisterProject(repoPath)
+	require.NoError(t, err)
+
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-probed")
+	git := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(git, []byte("#!/bin/sh\n: > \"$AF_DELETE_GIT_MARKER\"\nexit 1\n"), 0o755))
+	t.Setenv("AF_DELETE_GIT_MARKER", marker)
+	t.Setenv("PATH", binDir)
+
+	manager.taskTargetMu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID})
+		done <- err
+	}()
+
+	deadline := time.After(time.Second)
+	probed := false
+	for !probed {
+		if _, statErr := os.Stat(marker); statErr == nil {
+			probed = true
+			break
+		}
+		select {
+		case <-deadline:
+			probed = false
+			goto release
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+release:
+	manager.taskTargetMu.Unlock()
+	require.NoError(t, <-done)
+	require.True(t, probed, "registry Git probes must run before waiting for taskTargetMu")
 }
 
 // The same window, but the delete is still RUNNING when repo resolution

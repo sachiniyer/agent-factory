@@ -34,6 +34,14 @@ type home struct {
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
+	// projectPathResolutions retains successful Git identity lookups across the
+	// 750ms Projects poll. It is event-loop-owned like the rest of home state.
+	projectPathResolutions map[string]projectPathResolution
+	// registeredProjectIdentities retains PROVEN registry identities across the
+	// same poll — a registered root whose exact workspace and checkout marker
+	// Git still vouches for. Kept apart from projectPathResolutions because a
+	// generic path resolution is not evidence about a durable registration.
+	registeredProjectIdentities map[string]registeredProjectIdentity
 
 	// adoptedSnapshotOps separates daemon-adopted in-flight ops from local
 	// optimistic ones, which the reconcile guards must treat oppositely (#3005).
@@ -457,35 +465,37 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	errBox := ui.NewErrBox()
 
 	h := &home{
-		adoptedSnapshotOps: adoptedOps{},
-		alarmBanner:        ui.NewAlarmBanner(),
-		ctx:                ctx,
-		store:              proj,
-		menu:               menu,
-		errBox:             errBox,
-		paneWindows:        make(map[int]*ui.TabbedWindow),
-		lastPaneCapture:    make(map[int]time.Time),
-		paneJumpIntent:     make(map[int]uint64),
-		liveTerms:          make(map[int]liveTermAttachment),
-		liveKeys:           make(map[int]string),
-		automations:        ui.NewAutomationsPane(proj),
-		projects:           ui.NewProjectsPane(),
-		statusBar:          ui.NewStatusBar(menu, errBox),
-		hooksPane:          ui.NewHooksPane(),
-		configPane:         ui.NewConfigPane(),
-		ring:               layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
-		zones:              zones.NewRegistry(),
-		mouseClock:         time.Now,
-		snapshotFetcher:    snapshotThroughDaemon,
-		previewFetcher:     previewThroughDaemon,
-		pauseStatusPoll:    pauseStatusPollThroughDaemon,
-		resumeStatusPoll:   resumeStatusPollThroughDaemon,
-		appConfig:          appConfig,
-		program:            program,
-		repoID:             repoID,
-		repoRoot:           repoRoot,
-		state:              stateDefault,
-		appState:           appState,
+		adoptedSnapshotOps:          adoptedOps{},
+		alarmBanner:                 ui.NewAlarmBanner(),
+		ctx:                         ctx,
+		store:                       proj,
+		menu:                        menu,
+		errBox:                      errBox,
+		paneWindows:                 make(map[int]*ui.TabbedWindow),
+		lastPaneCapture:             make(map[int]time.Time),
+		paneJumpIntent:              make(map[int]uint64),
+		liveTerms:                   make(map[int]liveTermAttachment),
+		liveKeys:                    make(map[int]string),
+		automations:                 ui.NewAutomationsPane(proj),
+		projects:                    ui.NewProjectsPane(),
+		statusBar:                   ui.NewStatusBar(menu, errBox),
+		hooksPane:                   ui.NewHooksPane(),
+		configPane:                  ui.NewConfigPane(),
+		ring:                        layout.NewRing(layout.RegionTree, layout.RegionAutomations, layout.RegionProjects),
+		zones:                       zones.NewRegistry(),
+		mouseClock:                  time.Now,
+		snapshotFetcher:             snapshotThroughDaemon,
+		previewFetcher:              previewThroughDaemon,
+		pauseStatusPoll:             pauseStatusPollThroughDaemon,
+		resumeStatusPoll:            resumeStatusPollThroughDaemon,
+		appConfig:                   appConfig,
+		program:                     program,
+		repoID:                      repoID,
+		repoRoot:                    repoRoot,
+		projectPathResolutions:      make(map[string]projectPathResolution),
+		registeredProjectIdentities: make(map[string]registeredProjectIdentity),
+		state:                       stateDefault,
+		appState:                    appState,
 	}
 	h.sidebar = ui.NewSidebar(proj)
 	h.wireZoneRegistry()
@@ -560,8 +570,8 @@ func newHome(ctx context.Context, program string, repo *config.RepoContext) *hom
 	// .agent-factory/config.json over the legacy per-repo file. Skipped in
 	// registry mode (no active repo, #2477): there are no repo-scoped hooks to
 	// show until a project is selected, and switchProject re-resolves them then.
-	if repoRoot != "" {
-		repoCfg, err := config.ResolveConfig(repoRoot)
+	if repo != nil {
+		repoCfg, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			log.WarningLog.Printf("failed to resolve repo config: %v", err)
 		} else {

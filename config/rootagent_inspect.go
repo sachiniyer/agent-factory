@@ -147,7 +147,7 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 			out.inputs.Legacy = legacy
 			out.locs.legacyKey = key
 		}
-		project, found, err := projectForRoot(repo.Root)
+		project, found, err := projectForRepo(repo)
 		if err != nil {
 			if strictProjectLookup {
 				return rootAgentInspectionAssembly{}, err

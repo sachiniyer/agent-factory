@@ -59,7 +59,63 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // a failed read shown as an empty result — every registered sessionless
 // project silently vanishes from the picker. Callers surface the degradation.
 func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Project, bool) {
-	counts := map[string]int{}
+	type projectAggregate struct {
+		root         string
+		rootPriority int
+		count        int
+		inPlace      int
+	}
+	projectsByID := map[string]*projectAggregate{}
+
+	// Read the durable registry before resolving any paths so every uncached
+	// candidate can start its bounded Git probe together. A single stalled path
+	// must not consume the entire opportunity of an inactive worktree that comes
+	// later in the snapshot or registry.
+	registryDegraded := false
+	registeredProjects, err := config.ListProjects()
+	if err != nil {
+		registryDegraded = true
+		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+		registeredProjects = nil
+	}
+	paths := make([]string, 0, len(data)+len(registeredProjects)+1)
+	for _, d := range data {
+		if !session.IsArchivedData(d) && d.Worktree.RepoPath != "" {
+			paths = append(paths, d.Path)
+		}
+	}
+	for _, project := range registeredProjects {
+		if !project.PathExists {
+			// Absence is stronger than the short cache TTL: discard the cached
+			// spelling immediately so it cannot override a surviving worktree.
+			delete(m.projectPathResolutions, project.Root)
+		}
+		paths = append(paths, project.Root)
+	}
+	if m.appConfig != nil {
+		for path := range m.appConfig.RootAgents {
+			paths = append(paths, config.ExpandTilde(path))
+		}
+	}
+	paths = append(paths, m.repoRoot)
+	resolvedPaths := m.resolveProjectPaths(paths)
+	resolvePath := func(path string) projectPathResolution { return resolvedPaths[path] }
+	ensure := func(resolved projectPathResolution, priority int) *projectAggregate {
+		if resolved.id == "" || resolved.root == "" {
+			return nil
+		}
+		aggregate := projectsByID[resolved.id]
+		if aggregate == nil {
+			aggregate = &projectAggregate{}
+			projectsByID[resolved.id] = aggregate
+		}
+		if aggregate.root == "" || priority > aggregate.rootPriority {
+			aggregate.root = resolved.root
+			aggregate.rootPriority = priority
+		}
+		return aggregate
+	}
+
 	// inPlace counts the subset of each repo's live sessions that delete-project
 	// tears down instead of archiving (#1973). Keyed off the SAME predicate the
 	// daemon applies in deleteProject — Instance.IsExternalWorktree(), which is
@@ -67,18 +123,6 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// gitWorktree.IsExternalWorktree(), and both read false when no worktree is
 	// attached). Deriving it here, from the snapshot that already yields the
 	// total, keeps the dialog's split as faithful as the count beside it.
-	inPlace := map[string]int{}
-	var order []string
-	seen := func(root string) {
-		if root == "" {
-			return
-		}
-		if _, ok := counts[root]; !ok {
-			counts[root] = 0
-			order = append(order, root)
-		}
-	}
-
 	for _, d := range data {
 		// Only LIVE sessions define an "active project" (#1735): a repo whose
 		// sessions are all archived is not an active project — its archived rows
@@ -88,14 +132,32 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		if session.IsArchivedData(d) {
 			continue
 		}
-		root := d.Worktree.RepoPath
-		if root == "" {
+		identityPath := d.Worktree.RepoPath
+		if identityPath == "" {
 			continue
 		}
-		seen(root)
-		counts[root]++
+		// RepoPath is the durable recorded identity. Hash it without walking
+		// through Git so a deliberately retained pre-#3358 row cannot be adopted
+		// by an enclosing, unrelated repository merely because its old parent
+		// path now resolves there.
+		identity := projectPathResolution{
+			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
+		}
+		// Path is the requested operational workspace. Prefer it only when Git
+		// proves it belongs to the session's recorded identity; this collapses a
+		// bare.git identity and bare-wt workspace into one selectable project
+		// without letting an unrelated stale path relabel the row (#3358).
+		workspace := resolvePath(d.Path)
+		if workspace.id != identity.id {
+			workspace = identity
+		}
+		aggregate := ensure(workspace, 1)
+		if aggregate == nil {
+			continue
+		}
+		aggregate.count++
 		if d.Worktree.ExternalWorktree {
-			inPlace[root]++
+			aggregate.inPlace++
 		}
 	}
 
@@ -105,31 +167,52 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// the union for repos registered before the add-verb rewire, so an existing opt-in
 	// keeps its switcher entry. Both are on-disk config read in-process here, exactly
 	// as the counts above come from the daemon's session snapshot passed in.
-	registryDegraded := false
-	if projects, err := config.ListProjects(); err == nil {
-		for _, p := range projects {
-			seen(p.Root)
+	// A registration is a durable claim about a PATH, so it may only lend a
+	// repository's identity to the union once Git vouches for that exact
+	// workspace and its checkout marker (#3358 review). Without the proof a
+	// registered nested checkout that lost its .git metadata, or a path taken
+	// over by another checkout, resolves upward into an unrelated enclosing
+	// repository and merges its row here — where switching opens that foreign
+	// checkout and delete-project aims at its sessions and root-agent state.
+	//
+	// An unproven entry is not dropped: it falls back to the identity hashed
+	// from its own recorded root, exactly as a retained session row does above,
+	// so a registered project on a stalled or missing checkout keeps its own
+	// row instead of vanishing or borrowing an ancestor's.
+	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	for _, project := range registeredProjects {
+		if project.Root == "" {
+			continue
 		}
-	} else {
-		registryDegraded = true
-		log.WarningLog.Printf("failed to read the project registry for the switcher: %v", err)
+		resolved := resolvePath(project.Root)
+		provenID, proven := provenRegistryIDs[project.Root]
+		switch {
+		case proven:
+			resolved.id = provenID
+		case resolved.id != config.RepoIDForRecordedRoot(project.Root):
+			resolved = projectPathResolution{
+				id: config.RepoIDForRecordedRoot(project.Root), root: filepath.Clean(project.Root),
+			}
+		}
+		ensure(resolved, 2)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
-			if repo, err := config.RepoFromPath(config.ExpandTilde(path)); err == nil {
-				seen(repo.Root)
-			}
+			ensure(resolvePath(config.ExpandTilde(path)), 2)
 		}
 	}
-	seen(m.repoRoot)
+	// The active workspace is the best selectable spelling and wins over a
+	// registry or session snapshot that names another linked worktree.
+	ensure(resolvePath(m.repoRoot), 3)
 
-	projects := make([]overlay.Project, 0, len(order))
-	for _, root := range order {
+	projects := make([]overlay.Project, 0, len(projectsByID))
+	for repoID, aggregate := range projectsByID {
 		projects = append(projects, overlay.Project{
-			Name:         filepath.Base(root),
-			Root:         root,
-			SessionCount: counts[root],
-			InPlaceCount: inPlace[root],
+			RepoID:       repoID,
+			Name:         filepath.Base(aggregate.root),
+			Root:         aggregate.root,
+			SessionCount: aggregate.count,
+			InPlaceCount: aggregate.inPlace,
 		})
 	}
 	sort.Slice(projects, func(i, j int) bool {
@@ -147,6 +230,7 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
+			RepoID:       p.RepoID,
 			Name:         p.Name,
 			Root:         p.Root,
 			SessionCount: p.SessionCount,
@@ -365,11 +449,13 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 // this message is the entire basis on which the user consents to a destructive
 // action. On confirm it dispatches the async daemon archive-then-remove.
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
-	repoID := config.RepoIDFromRoot(proj.Root)
+	if proj.RepoID == "" {
+		return m, m.handleError(fmt.Errorf("cannot delete project %q: repository identity is unavailable", proj.Name))
+	}
 	restoreKey := keys.GlobalKeyBindings[keys.KeyRestore].Help().Key
 	message, detail := deleteProjectConfirmMessage(proj.Name, proj.SessionCount, proj.InPlaceCount, restoreKey)
 	return m, m.confirmActionWithDetail(message, detail, func() tea.Msg {
-		return startDeleteProjectMsg{root: proj.Root, repoID: repoID, name: proj.Name}
+		return startDeleteProjectMsg{root: proj.Root, repoID: proj.RepoID, name: proj.Name}
 	})
 }
 
@@ -476,7 +562,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// carried-over value silently runs this project's tasks under the previous
 	// project's agent (#2138). Session creation is separately covered:
 	// preflightSessionCreate re-resolves and blocks.
-	if resolved, err := config.ResolveConfig(repo.Root); err == nil {
+	if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
 		// config and only overwrites it with a non-empty in-repo value, and a
@@ -517,7 +603,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
 
-	if tasks, err := task.LoadTasksForRepo(repo.Root); err != nil {
+	if tasks, err := task.LoadTasksForKnownRepo(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)
 		m.store.SetTasks(nil)
 		m.automations.TaskPane().SetTasks(nil)

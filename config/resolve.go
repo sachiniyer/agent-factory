@@ -20,6 +20,10 @@ const inRepoHashFileName = "inrepo-config-hash"
 // once per repo per process.
 var legacyDeprecationLogged sync.Map
 
+// retainedLegacyBareRepoConfigLogged dedupes the ambiguity warning for a
+// pre-#3358 parent-keyed config to once per corrected repository identity.
+var retainedLegacyBareRepoConfigLogged sync.Map
+
 // ResolvedConfig is effective configuration plus the provenance produced by
 // the same manifest-driven pass. Every consumer of per-repo configuration
 // (programs, remote hooks, post-worktree commands) must go through this file's
@@ -90,6 +94,14 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, recordInRepoLoadObservation)
 }
 
+// ResolveConfigForRepo resolves repo-keyed legacy state against the identity
+// root while reading checked-in and personal config from the requesting
+// workspace. The distinction matters for a bare repository's linked worktree:
+// the bare directory owns identity but has no checked-out files.
+func ResolveConfigForRepo(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, recordInRepoLoadObservation)
+}
+
 // ResolveConfigForInspection returns the same effective values and provenance
 // as ResolveConfig without logging or persisting the per-repo load observation.
 // It is the resolver for read surfaces such as `af config --project`. This is
@@ -97,6 +109,24 @@ func ResolveConfig(repoRoot string) (*ResolvedConfig, error) {
 // documented first-run and legacy-format migration behavior.
 func ResolveConfigForInspection(repoRoot string) (*ResolvedConfig, error) {
 	return resolveConfig(repoRoot, suppressInRepoLoadObservation)
+}
+
+// ResolveConfigForRepoInspection is ResolveConfigForRepo without the durable
+// in-repo load observation.
+func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) {
+	return resolveConfigForRepo(repo, suppressInRepoLoadObservation)
+}
+
+func resolveConfigForRepo(repo *RepoContext, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repo context is required")
+	}
+	resolved, err := resolveConfigRoots(repo.IdentityPath(), repo.WorkspacePath(), observation)
+	if err != nil {
+		return nil, err
+	}
+	warnRetainedLegacyBareRepoConfig(repo)
+	return resolved, nil
 }
 
 type inRepoLoadObservation uint8
@@ -109,6 +139,10 @@ const (
 // resolveConfig is the one value/provenance path for runtime and inspection
 // callers. The typed observation mode is the only behavior difference.
 func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
+	return resolveConfigRoots(repoRoot, repoRoot, observation)
+}
+
+func resolveConfigRoots(identityRoot, workspaceRoot string, observation inRepoLoadObservation) (*ResolvedConfig, error) {
 	if observation != suppressInRepoLoadObservation && observation != recordInRepoLoadObservation {
 		return nil, fmt.Errorf("invalid in-repo load observation mode %d", observation)
 	}
@@ -121,18 +155,18 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 		return nil, err
 	}
 
-	repoID := RepoIDFromRoot(repoRoot)
+	repoID := RepoIDFromRoot(identityRoot)
 	legacy, err := LoadRepoConfig(repoID)
 	if err != nil {
 		return nil, err
 	}
 
-	inRepo, raw, err := LoadInRepoConfig(repoRoot)
+	inRepo, raw, err := LoadInRepoConfig(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	if inRepo != nil && observation == recordInRepoLoadObservation {
-		logInRepoConfigLoaded(repoID, repoRoot, inRepo, raw)
+		logInRepoConfigLoaded(repoID, workspaceRoot, inRepo, raw)
 	}
 
 	documents = append(documents, sourceDocument{
@@ -142,7 +176,7 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	})
 	if inRepo == nil {
 		inRepo = &InRepoConfig{source: sourceMetadata{
-			path:   InRepoTomlConfigPath(repoRoot),
+			path:   InRepoTomlConfigPath(workspaceRoot),
 			format: FormatTOML,
 		}}
 	}
@@ -158,36 +192,36 @@ func resolveConfig(repoRoot string, observation inRepoLoadObservation) (*Resolve
 	// resolveManifest's requireAllSources check always finds the candidate a
 	// personal-admitting key names in its precedence, exactly like the empty
 	// in-repo document above.
-	personalDoc, err := projectPersonalDocument(repoRoot)
+	personalDoc, err := projectPersonalDocumentForRoots(identityRoot, workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	documents = append(documents, personalDoc)
 
-	res, err := materializeResolution(global, repoRoot, AllManifest(), documents, true)
+	res, err := materializeResolution(global, workspaceRoot, AllManifest(), documents, true)
 	if err != nil {
 		return nil, err
 	}
 
-	// Rewrite relative hook command paths to absolute against repoRoot
+	// Rewrite relative hook command paths to absolute against workspaceRoot
 	// (#834). This is the single chokepoint for the rewrite: every exec of a
 	// hook command — launch/list/attach/delete/terminal, startup import,
 	// restore liveness, preview — receives its RemoteHooks from ResolveConfig, so
-	// resolving here covers them all. repoRoot is the main worktree root, so
-	// sessions in linked worktrees resolve hooks against the repository whose
-	// config file was loaded, never against a worktree path. The rewrite
-	// applies to the legacy-location value too, so both sources behave
-	// identically.
+	// resolving here covers them all. workspaceRoot is the checkout whose config
+	// was loaded. It normally equals identityRoot; for a bare repository's
+	// linked worktree it is the only root that contains checked-out commands.
+	// The rewrite applies to the legacy-location value too, so both sources
+	// behave identically.
 	if res.RemoteHooks != nil {
 		before := res.RemoteHooks
-		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(repoRoot)
+		res.RemoteHooks = res.RemoteHooks.resolveCommandPaths(workspaceRoot)
 		if !jsonEquivalent(before, res.RemoteHooks) {
 			annotateResolutionWinner(res, "remote_hooks", "relative command paths resolved against the project root")
 		}
 	}
 	refreshResolutionValues(res)
 
-	warnLegacyRepoConfig(repoID, repoRoot, legacy, inRepo)
+	warnLegacyRepoConfig(repoID, workspaceRoot, legacy, inRepo)
 	return res, nil
 }
 
@@ -204,9 +238,24 @@ func emptyProjectPersonalDocument() sourceDocument {
 	return sourceDocument{layer: SourceProjectPersonal, metadata: sourceMetadata{format: FormatTOML}}
 }
 
+// projectPersonalDocumentForRoots preserves the registered project's personal
+// layer when a bare repository is addressed through a different linked
+// worktree. Registry records name a checkout, while repo-keyed configuration
+// belongs to the bare identity shared by all of its checkouts.
+func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string) (sourceDocument, error) {
+	if identityRoot == workspaceRoot {
+		return projectPersonalDocument(workspaceRoot)
+	}
+	project, found, err := projectForRepo(&RepoContext{
+		Root: workspaceRoot, IdentityRoot: identityRoot, ID: RepoIDFromRoot(identityRoot),
+	})
+	return projectPersonalDocumentFromLookup(project, found, err)
+}
+
 // projectPersonalDocument builds the SourceProjectPersonal document for
-// repoRoot. It resolves the repo to a registered project read-only (no git, no
-// writes) and loads that project's machine-local config; a repo that is not a
+// repoRoot. It resolves the repo to a registered project read-only (a bounded
+// Git/checkout-marker probe, but no writes) and loads that project's
+// machine-local config; a repo that is not a
 // registered project, or one with no personal file yet, yields an empty
 // presence-only document so the layer is always present for the resolver.
 //
@@ -219,6 +268,10 @@ func emptyProjectPersonalDocument() sourceDocument {
 // error, because they call the registry directly.
 func projectPersonalDocument(repoRoot string) (sourceDocument, error) {
 	project, found, err := projectForRoot(repoRoot)
+	return projectPersonalDocumentFromLookup(project, found, err)
+}
+
+func projectPersonalDocumentFromLookup(project Project, found bool, err error) (sourceDocument, error) {
 	if err != nil {
 		projectRegistryWarnOnce.Do(func() {
 			log.WarningLog.Printf("personal project config disabled: the project registry could not be read (%v); run `af projects list` to inspect it", err)
@@ -454,4 +507,37 @@ func warnLegacyRepoConfig(repoID, repoRoot string, legacy *RepoConfig, inRepo *I
 	}
 	log.WarningLog.Printf("deprecated: %s is still read from %s; move it to %s — the legacy location stops working in a future release",
 		strings.Join(fields, ", "), prettyHomePath(legacyPath), InRepoConfigPath(repoRoot))
+}
+
+// warnRetainedLegacyBareRepoConfig keeps the pre-#3358 parent-keyed legacy
+// config visible without adopting it. The parent ID can describe multiple
+// sibling bare clones or a real enclosing repository, so applying that file to
+// any one corrected identity would be an unsafe migration.
+func warnRetainedLegacyBareRepoConfig(repo *RepoContext) {
+	_, legacyID := repo.LegacyBareRepoIdentity()
+	if legacyID == "" {
+		return
+	}
+	_, legacyPath, err := repoConfigPath(legacyID)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(legacyPath); err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		key := repo.ID + "|" + legacyID
+		if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
+			return
+		}
+		log.WarningLog.Printf("bare repository %s now uses repo identity %s, but retained pre-#3358 per-repo config %s under former parent identity %s could not be inspected: %v; inspect it before assuming the corrected repository has no legacy hooks",
+			repo.IdentityPath(), repo.ID, legacyPath, legacyID, err)
+		return
+	}
+	key := repo.ID + "|" + legacyID
+	if _, loaded := retainedLegacyBareRepoConfigLogged.LoadOrStore(key, true); loaded {
+		return
+	}
+	log.WarningLog.Printf("bare repository %s now uses repo identity %s; retained pre-#3358 per-repo config %s under former parent identity %s was not applied because that parent key cannot be safely attributed — move its post_worktree_commands or remote_hooks to %s",
+		repo.IdentityPath(), repo.ID, legacyPath, legacyID, InRepoTomlConfigPath(repo.WorkspacePath()))
 }

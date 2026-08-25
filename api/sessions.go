@@ -377,9 +377,10 @@ pointing at one).`,
 			}
 			return jsonError(err)
 		}
+		workspace := repo.WorkspacePath()
 
-		if !git.IsGitRepo(repo.Root) {
-			return jsonError(fmt.Errorf("path %s is not a git repository", repo.Root))
+		if !git.IsGitRepo(workspace) {
+			return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
 		}
 
 		// Fail fast on the reserved root-agent title (#1106) before any
@@ -401,7 +402,7 @@ pointing at one).`,
 			return jsonError(fmt.Errorf("session with title %q already exists", createTitle))
 		}
 
-		cfg, err := config.ResolveConfig(repo.Root)
+		cfg, err := config.ResolveConfigForRepo(repo)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -432,7 +433,7 @@ pointing at one).`,
 		// user never typed.
 		local, err := session.LocalPrereqsRequired(session.InstanceOptions{
 			Backend: session.BackendKind(createBackendFlag),
-		}, repo.Root)
+		}, workspace)
 		if err != nil {
 			return jsonError(err)
 		}
@@ -459,7 +460,7 @@ pointing at one).`,
 
 		data, err := createSessionViaDaemon(daemon.CreateSessionRequest{
 			Title:    createTitle,
-			RepoPath: repo.Root,
+			RepoPath: workspace,
 			Program:  program,
 			Account:  createAccountFlag,
 			Prompt:   createPromptFlag,
@@ -727,6 +728,7 @@ success.`,
 		// daemon RPC as the title path, so the daemon still rejects a
 		// non-relocatable worktree.
 		var repoID string
+		var sessionID string
 		if sessionsArchiveSelf {
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
@@ -736,20 +738,31 @@ success.`,
 				return jsonError(fmt.Errorf("--self must be run from inside an af session: %w", err))
 			}
 			title = data.Title
+			// The resolved row's STABLE ID is the identity to act on, so send it:
+			// the daemon resolves by id first and reports the repo id from the
+			// row's own storage key, which is the authoritative one. Deriving
+			// identity from a path instead is unsound for a worktree-less row —
+			// its Worktree is empty, so sessionRepoID falls back to the recorded
+			// workspace Path, and that path is mutable. Remove the checkout and
+			// --self can no longer find its own session; let another repository
+			// reuse the path and a same-titled session THERE is archived instead.
+			// Under #3358 the row is pinned under the bare repository's id while
+			// no field of InstanceData carries it, so the path is not even a
+			// lossy spelling of the right answer.
+			sessionID = data.ID
 			// Scope by the RESOLVED session's OWN repo, never cwd/--repo. An
 			// agent that cd'd into another repo must still archive ITS OWN
 			// session — scoping by cwd would archive a same-titled namesake in
 			// the wrong repo, or fail "instance not found" while leaving the
 			// caller's real session alive. Mirror Storage's root→repoID
-			// derivation (#667), shared with whoami via sessionRepoRoot so the
+			// derivation (#667), shared with whoami via sessionRepoID so the
 			// two cannot drift.
 			// A worktree-less session (remote backend) leaves repoID empty so
 			// the resolved title is matched all-repo and the daemon's remote
 			// guard still fires with its own clear message.
-			root := sessionRepoRoot(data)
-			if root != "" {
-				repoID = config.RepoIDFromRoot(root)
-			}
+			// This stays the fallback for a pre-#1195 row that has no id at all;
+			// when the id is present the daemon ignores it.
+			repoID = sessionRepoID(data)
 		} else {
 			if title == "" {
 				return jsonError(fmt.Errorf("a session <title> is required (or pass --self to archive the current session)"))
@@ -765,7 +778,7 @@ success.`,
 			}
 		}
 
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{Title: title, RepoID: repoID})
+		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
@@ -963,12 +976,11 @@ var sessionsWhoamiCmd = &cobra.Command{
 			// who IS in the named project, so an unknown project is never an
 			// error — only a known-mismatched one.
 			//
-			// Resolve the session's root through git rather than hashing it
-			// raw: a stored root that was never git-resolved would otherwise
-			// hash differently from the canonical --repo naming the same
-			// project, rejecting a caller who is exactly where they claim.
-			if root := sessionRepoRoot(data); root != "" && newProjectIDCache().idFor(root) != repo.ID {
-				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", root, repo.Root))
+			// A recorded worktree origin is already authoritative; resolving it
+			// again could adopt an enclosing repository after the original Git
+			// metadata disappears.
+			if recordedID := sessionRepoID(data); recordedID != "" && recordedID != repo.ID {
+				return jsonError(fmt.Errorf("this session belongs to project %s, not --repo %s", sessionRepoRoot(data), repo.Root))
 			}
 		}
 		return jsonOut(*data)

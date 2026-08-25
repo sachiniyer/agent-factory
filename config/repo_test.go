@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
 func TestResolveMainRepoRoot_MainRepo(t *testing.T) {
@@ -81,6 +82,136 @@ func TestResolveMainRepoRoot_Worktree(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, repoFromMain.ID, repoFromWT.ID)
 	assert.Equal(t, repoFromMain.Root, repoFromWT.Root)
+}
+
+// TestResolveMainRepoRoot_BareCloneWorktree pins #3358: a linked worktree's
+// common directory is itself the repository when core.bare=true. Its identity
+// root is therefore the bare directory, never that directory's non-repository
+// parent.
+func TestResolveMainRepoRoot_BareCloneWorktree(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+
+	run(parent, "init", source)
+	run(source, "config", "user.email", "test@test.com")
+	run(source, "config", "user.name", "Test")
+	run(source, "commit", "--allow-empty", "-m", "init")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	root, err := resolveMainRepoRoot("-C", worktree)
+	require.NoError(t, err)
+	assert.Equal(t, bare, root)
+
+	repo, err := RepoFromPath(worktree)
+	require.NoError(t, err)
+	assert.Equal(t, worktree, repo.Root)
+	assert.Equal(t, worktree, repo.WorkspacePath())
+	assert.Equal(t, bare, repo.IdentityPath())
+	assert.Equal(t, RepoIDFromRoot(bare), repo.ID)
+	assert.Equal(t, repo.ID, RepoIDForPath(worktree))
+	assert.NotEqual(t, RepoIDFromRoot(parent), repo.ID)
+	directBare, err := RepoFromPath(bare)
+	require.NoError(t, err)
+	assert.Equal(t, bare, directBare.Root)
+	assert.Equal(t, bare, directBare.IdentityPath())
+	assert.Equal(t, repo.ID, directBare.ID)
+
+	require.NoError(t, SaveRepoConfig(repo.ID, &RepoConfig{
+		PostWorktreeCommands: []string{"legacy-from-bare-identity"},
+	}))
+	require.NoError(t, os.MkdirAll(filepath.Join(worktree, InRepoConfigDirName), 0o755))
+	require.NoError(t, os.WriteFile(InRepoTomlConfigPath(worktree),
+		[]byte("default_program = \"codex\"\n"), 0o644))
+	resolved, err := ResolveConfigForRepo(repo)
+	require.NoError(t, err)
+	assert.Equal(t, worktree, resolved.ProjectRoot)
+	assert.Equal(t, "codex", resolved.DefaultProgram)
+	assert.Equal(t, []string{"legacy-from-bare-identity"}, resolved.PostWorktreeCommands)
+
+	project, err := RegisterProject(worktree)
+	require.NoError(t, err)
+	writePersonalConfig(t, project.ID, "on_archive_command = \"bare-personal\"\n")
+	secondWorktree := filepath.Join(parent, "worktree-2")
+	run(bare, "worktree", "add", "-b", "second", secondWorktree)
+	secondRepo, err := RepoFromPath(secondWorktree)
+	require.NoError(t, err)
+	secondResolved, err := ResolveConfigForRepo(secondRepo)
+	require.NoError(t, err)
+	assert.Equal(t, secondWorktree, secondResolved.ProjectRoot)
+	assert.Equal(t, "bare-personal", secondResolved.OnArchiveCommand,
+		"personal project config follows bare identity across linked worktrees")
+}
+
+func TestRepoFromDirectBarePathPreservesTrailingWhitespace(t *testing.T) {
+	for name, suffix := range map[string]string{"space": " ", "tab": "\t"} {
+		t.Run(name, func(t *testing.T) {
+			parent := testguard.CanonicalTempDir(t)
+			bare := filepath.Join(parent, "bare.git"+suffix)
+			cmd := exec.Command("git", "init", "--bare", bare)
+			cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+			out, err := cmd.CombinedOutput()
+			require.NoError(t, err, "git init --bare: %s", out)
+
+			repo, err := RepoFromPath(bare)
+			require.NoError(t, err)
+			assert.Equal(t, bare, repo.IdentityPath())
+			assert.Equal(t, RepoIDFromRoot(bare), repo.ID)
+		})
+	}
+}
+
+func TestResolveConfigForRepoWarnsAboutRetainedLegacyBareParentConfig(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v failed: %s", args, out)
+	}
+	run(parent, "init", source)
+	run(source, "config", "user.email", "test@test.com")
+	run(source, "config", "user.name", "Test")
+	run(source, "commit", "--allow-empty", "-m", "init")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	repo, err := RepoFromPath(worktree)
+	require.NoError(t, err)
+	legacyRoot, legacyID := repo.LegacyBareRepoIdentity()
+	require.Equal(t, parent, legacyRoot)
+	require.NoError(t, SaveRepoConfig(legacyID, &RepoConfig{
+		PostWorktreeCommands: []string{"ambiguous-parent-command"},
+	}))
+	_, legacyPath, err := repoConfigPath(legacyID)
+	require.NoError(t, err)
+	warnings := captureLog(t, &aflog.WarningLog)
+
+	resolved, err := ResolveConfigForRepo(repo)
+	require.NoError(t, err)
+	assert.Empty(t, resolved.PostWorktreeCommands,
+		"an ambiguous parent-keyed config must not be silently adopted")
+	assert.Contains(t, warnings.String(), legacyID)
+	assert.Contains(t, warnings.String(), legacyPath)
+	assert.Contains(t, warnings.String(), "was not applied")
 }
 
 func TestResolveMainRepoRoot_Public(t *testing.T) {
