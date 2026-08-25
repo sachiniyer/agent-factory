@@ -97,379 +97,43 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string beginning with a JSON container or string opener may itself be a
-		// serialized document. Objects and arrays can structurally contain a token
-		// field, while a string can wrap either one through further serialization.
-		// Those three openers are the closed set that can eventually reach a token
-		// field; ordinary diagnostic strings are not reinterpreted as payloads.
-		if !hookJSONStringMayContainJSONDocument(value) {
-			return value, false
-		}
+		// A string can itself be a serialized payload, so it gets the same closed-set
+		// rule the top level applies to the whole output: parse it, or replace it.
 		redacted, parsed := redactHookJSONDocument(value)
-		if !parsed {
-			// The opener alone does not distinguish a serialized document from an
-			// ordinary diagnostic such as "[INFO] connection failed".
-			if malformedHookJSONDocumentContainsToken(value) {
-				// Decoder.Token retains duplicate members and the valid prefix before a
-				// syntax error, so malformed documents cannot hide an observed token key.
-				return hookOutputRedaction, true
-			}
-			return value, false
+		if parsed {
+			return redacted, redacted != value
 		}
-		return redacted, redacted != value
+		if hookStringMayCarrySerializedObject(value) {
+			return hookOutputRedaction, true
+		}
+		return value, false
 	default:
 		return value, false
 	}
 }
 
-func hookJSONStringMayContainJSONDocument(value string) bool {
-	trimmed := strings.TrimSpace(value)
-	trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "\uFEFF"))
-	return trimmed != "" && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"')
-}
-
-type hookJSONContainer struct {
-	object       bool
-	expectingKey bool
-}
-
-// malformedHookJSONDocumentContainsToken walks the trustworthy token prefix of
-// a JSON-looking string. Unlike decoding into a map, the token stream preserves
-// duplicate object members; unlike json.Valid, it exposes keys parsed before a
-// missing closer or trailing syntax error. Strings encountered as values are
-// checked recursively because hooks can serialize JSON through multiple layers.
-func malformedHookJSONDocumentContainsToken(document string) bool {
-	decoder := json.NewDecoder(strings.NewReader(document))
-	decoder.UseNumber()
-	var containers []hookJSONContainer
-
-	for {
-		token, err := decoder.Token()
-		if err != nil {
-			// A malformed value can stop Decoder.Token before a later object member.
-			// Fall back to the narrower lexical shape of a valid JSON string named
-			// "token" followed by a colon; arbitrary token-looking text is ignored.
-			return malformedHookJSONDocumentContainsTokenKey(document)
-		}
-
-		if delimiter, ok := token.(json.Delim); ok {
-			switch delimiter {
-			case '{':
-				containers = append(containers, hookJSONContainer{object: true, expectingKey: true})
-			case '[':
-				containers = append(containers, hookJSONContainer{})
-			case '}', ']':
-				if len(containers) == 0 {
-					return false
-				}
-				containers = containers[:len(containers)-1]
-				if len(containers) > 0 {
-					parent := &containers[len(containers)-1]
-					if parent.object && !parent.expectingKey {
-						parent.expectingKey = true
-					}
-				}
-			}
-			continue
-		}
-
-		if len(containers) == 0 {
-			if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
-				return true
-			}
-			continue
-		}
-		container := &containers[len(containers)-1]
-		if !container.object {
-			if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
-				return true
-			}
-			continue
-		}
-		if container.expectingKey {
-			key, ok := token.(string)
-			if !ok {
-				return false
-			}
-			if strings.EqualFold(key, "token") {
-				return true
-			}
-			container.expectingKey = false
-			continue
-		}
-		if nested, ok := token.(string); ok && hookJSONStringMayContainJSONDocument(nested) && malformedHookJSONDocumentContainsToken(nested) {
-			return true
-		}
-		container.expectingKey = true
-	}
-}
-
-func malformedHookJSONDocumentContainsTokenKey(document string) bool {
-	recoveredSuffix := false
-	for index := 0; index < len(document); index++ {
-		// Examine every unescaped quote as a possible recovery boundary. Advancing
-		// only to a previously assumed closing quote can consume the opening quote
-		// of a later key when an earlier string contains an illegal raw newline.
-		if document[index] != '"' ||
-			(hookJSONQuoteEscaped(document, index) && !hookJSONKeyMayStartAt(document, index)) {
-			continue
-		}
-
-		nextQuote := strings.IndexByte(document[index+1:], '"')
-		if nextQuote < 0 {
-			// A serialized child can be the final, truncated string in the malformed
-			// document. Close only that string literal for decoding; its decoded value
-			// must still pass the JSON-opener gate before recursive inspection.
-			var value string
-			if err := json.Unmarshal([]byte(document[index:]+"\""), &value); err == nil &&
-				hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
-				return true
-			}
-			if malformedHookJSONStringContentsContainToken(document[index+1:]) {
-				return true
-			}
-			return false
-		}
-		end := index + 1 + nextQuote
-
-		var value string
-		if err := json.Unmarshal([]byte(document[index:end+1]), &value); err != nil {
-			after := strings.TrimLeft(document[end+1:], " \t\r\n")
-			if strings.HasPrefix(after, ":") && hookJSONKeyMayStartAt(document, index) &&
-				malformedHookJSONKeyEqualsToken(document[index+1:end]) {
-				return true
-			}
-			// Adjacent quote pairing keeps this loop linear, but an escaped quote can
-			// truncate the first malformed string candidate. Recover the complete
-			// remaining suffix once so nested serialized boundaries remain visible.
-			if !recoveredSuffix {
-				recoveredSuffix = true
-				if malformedHookJSONStringContentsContainToken(document[index+1:]) {
-					return true
-				}
-			}
-			if malformedHookJSONStringContentsContainToken(document[index+1 : end]) {
-				return true
-			}
-			continue
-		}
-		// Inspect serialized values before using the following colon to classify a
-		// string as a key. Malformed input can put a colon after an otherwise valid
-		// serialized child, and secrecy wins over trusting that broken boundary.
-		if hookJSONStringMayContainJSONDocument(value) && malformedHookJSONDocumentContainsToken(value) {
-			return true
-		}
-		after := strings.TrimLeft(document[end+1:], " \t\r\n")
-		if strings.HasPrefix(after, ":") && hookJSONKeyMayStartAt(document, index) {
-			if strings.EqualFold(value, "token") || malformedHookJSONKeyEqualsToken(document[index+1:end]) {
-				return true
-			}
-			continue
-		}
-	}
-	return false
-}
-
-func malformedHookJSONStringContentsContainToken(contents string) bool {
-	var recovered strings.Builder
-	var reassembled strings.Builder
-	for len(contents) > 0 {
-		boundary, skip := hookJSONStringRecoveryBoundary(contents)
-		segment := contents[:boundary]
-		recovered.WriteString(decodeHookJSONStringContentSegment(segment))
-		reassembled.WriteString(segment)
-		if skip == 0 {
-			break
-		}
-		if contents[boundary] < ' ' {
-			recovered.WriteByte(contents[boundary])
-		} else {
-			// Preserve a boundary where an invalid escape was removed so unrelated
-			// words cannot be joined into a protected key spelling.
-			recovered.WriteByte(' ')
-			reassembled.WriteByte(' ')
-		}
-		contents = contents[boundary+skip:]
-	}
-
-	document := recovered.String()
-	if malformedHookRecoveredDocumentContainsToken(document) {
-		return true
-	}
-
-	// A raw control may split a Unicode escape that encodes the container opener.
-	// Reassemble the original encoded segments without those already-invalid
-	// controls, then decode them together so the split escape becomes whole.
-	normalized := decodeHookJSONStringContentSegment(reassembled.String())
-	if normalized == document {
-		return false
-	}
-	return malformedHookRecoveredDocumentContainsToken(decodeHookJSONEscapedContainerOpeners(normalized))
-}
-
-func decodeHookJSONEscapedContainerOpeners(document string) string {
-	var decoded strings.Builder
-	decoded.Grow(len(document))
-	for index := 0; index < len(document); index++ {
-		if index+1 < len(document) && document[index] == '\\' && document[index+1] == '"' {
-			decoded.WriteByte('"')
-			index++
-			continue
-		}
-		if index+5 < len(document) && document[index] == '\\' && document[index+1] == 'u' {
-			codepoint := document[index+2 : index+6]
-			switch {
-			case strings.EqualFold(codepoint, "007b"):
-				decoded.WriteByte('{')
-				index += 5
-				continue
-			case strings.EqualFold(codepoint, "005b"):
-				decoded.WriteByte('[')
-				index += 5
-				continue
-			}
-		}
-		decoded.WriteByte(document[index])
-	}
-	return decoded.String()
-}
-
-func malformedHookRecoveredDocumentContainsToken(document string) bool {
-	opener := strings.IndexAny(document, "{[")
-	if opener < 0 {
-		return false
-	}
-	// The malformed-document fallback scans the complete recovered suffix, so
-	// starting it once at the first possible container covers every later opener
-	// without repeatedly rescanning overlapping suffixes.
-	return malformedHookJSONDocumentContainsToken(document[opener:])
-}
-
-func hookJSONKeyMayStartAt(document string, index int) bool {
-	for index > 0 {
-		for index > 0 && (document[index-1] <= ' ' || document[index-1] == '\\') {
-			index--
-		}
-		if index >= 2 && document[index-2:index] == "*/" {
-			comment := strings.LastIndex(document[:index-2], "/*")
-			if comment < 0 {
-				return false
-			}
-			index = comment
-			continue
-		}
-
-		line := strings.LastIndexByte(document[:index], '\n') + 1
-		if comment := strings.LastIndex(document[line:index], "//"); comment >= 0 {
-			index = line + comment
-			continue
-		}
-		boundary := document[index-1]
-		if boundary == '{' {
-			return true
-		}
-		if boundary != ',' {
-			return false
-		}
-		return hookJSONCommaInsideObject(document, index-1)
-	}
-	return false
-}
-
-func hookJSONCommaInsideObject(document string, comma int) bool {
-	depth := 0
-	for index := comma - 1; index >= 0; index-- {
-		switch document[index] {
-		case '}', ']':
-			depth++
-		case '{', '[':
-			if depth == 0 {
-				return document[index] == '{'
-			}
-			depth--
-		}
-	}
-	return false
-}
-
-func malformedHookJSONKeyEqualsToken(contents string) bool {
-	// Adjacent quote recovery includes the escape that protected a serialized
-	// closing quote. Remove one such serialization layer before decoding the key.
-	contents = strings.TrimRight(contents, "\\")
-	var normalized strings.Builder
-	normalized.Grow(len(contents))
-	for _, character := range contents {
-		if character >= ' ' {
-			normalized.WriteRune(character)
-		}
-	}
-
-	var key string
-	if err := json.Unmarshal([]byte("\""+normalized.String()+"\""), &key); err != nil {
-		return false
-	}
-	return strings.EqualFold(key, "token")
-}
-
-func decodeHookJSONStringContentSegment(contents string) string {
-	for {
-		var decoded string
-		if err := json.Unmarshal([]byte("\""+contents+"\""), &decoded); err != nil || decoded == contents {
-			return contents
-		}
-		contents = decoded
-	}
-}
-
-func hookJSONStringRecoveryBoundary(contents string) (int, int) {
-	for index := 0; index < len(contents); index++ {
-		if contents[index] < ' ' {
-			return index, 1
-		}
-		if contents[index] != '\\' {
-			continue
-		}
-
-		if index+1 >= len(contents) {
-			return index, 1
-		}
-		if contents[index+1] < ' ' {
-			return index + 1, 1
-		}
-		switch contents[index+1] {
-		case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
-			index++
-		case 'u':
-			if index+5 >= len(contents) {
-				return index, 1
-			}
-			for offset := 2; offset <= 5; offset++ {
-				if contents[index+offset] < ' ' {
-					return index + offset, 1
-				}
-				if !isHookJSONHex(contents[index+offset]) {
-					return index, 1
-				}
-			}
-			index += 5
-		default:
-			return index, 2
-		}
-	}
-	return len(contents), 0
-}
-
-func isHookJSONHex(character byte) bool {
-	return character >= '0' && character <= '9' ||
-		character >= 'a' && character <= 'f' ||
-		character >= 'A' && character <= 'F'
-}
-
-func hookJSONQuoteEscaped(document string, index int) bool {
-	backslashes := 0
-	for index > 0 && document[index-1] == '\\' {
-		backslashes++
-		index--
-	}
-	return backslashes%2 != 0
+// hookStringMayCarrySerializedObject reports whether a string the JSON parser
+// rejected could still be carrying a serialized object, and with it a token
+// field.
+//
+// A token field exists only inside an object, and an object needs a `{`. That
+// byte reaches an unparseable string in exactly two spellings: literally, or
+// escaped for a serialization layer this decode did not unwrap — `{`, or a
+// `{` behind further backslashes. A backslash is the only way to write the
+// second, so `{` and `\` together close the set: a string holding neither cannot
+// name a token field however many times it is re-parsed, and survives
+// byte-exact. That keeps ordinary diagnostics — "[INFO] connection failed",
+// "quota exceeded", `he said "token": no` — readable in the error.
+//
+// The inverse is deliberately blunt. Once a rejected string does hold an object
+// opener, this replaces the whole string instead of hunting for the token field
+// inside it. That hunt is the open-ended half of the JSON grammar — escapes,
+// truncation, raw controls, duplicate members, comments, recovery after a syntax
+// error — and each round of hardening it received answered one spelling while
+// leaving the next one reachable. Absence of evidence is not the property a
+// redaction boundary can be built on, so the boundary is drawn where the parser
+// stops instead: over-redacting a brace-bearing diagnostic costs a line of
+// context, and under-redacting one persists a credential.
+func hookStringMayCarrySerializedObject(value string) bool {
+	return strings.ContainsAny(value, `{\`)
 }
