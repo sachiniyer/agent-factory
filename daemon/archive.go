@@ -332,7 +332,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
 		if !instance.GetArchiveReport().Empty() {
 			return m.keepIncompleteArchiveCommitted(
-				repoID, archivedPath, instance, hookErr, true,
+				repoID, archivedPath, instance, hookErr,
 				fmt.Errorf("final VS Code editor teardown was not confirmed: %w", stopErr),
 			)
 		}
@@ -359,7 +359,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		if !instance.GetArchiveReport().Empty() {
 			return m.keepIncompleteArchiveCommitted(
-				repoID, archivedPath, instance, hookErr, false,
+				repoID, archivedPath, instance, hookErr,
 				fmt.Errorf("its durable state write failed: %w", perr),
 			)
 		}
