@@ -1139,3 +1139,62 @@ func TestConfigPaneEditFieldUnboundedWhileUnsized(t *testing.T) {
 		t.Errorf("a pane resized to nothing kept a %d-cell field width", c.input.Width)
 	}
 }
+
+// TestConfigPaneNeverOverflowsOnWideCharacterValues is #3421: the same "fits in
+// its box" invariant as TestConfigPaneNeverRendersALineWiderThanThePane, for
+// values whose runes are not one cell wide.
+//
+// A CJK ideograph or an emoji renders 2+ terminal cells, so a budget counted in
+// RUNES under-truncates the value and the composed row runs past the pane — at a
+// 72-column pane, a CJK path rendered an 85-cell line. That is not a cosmetic
+// overflow: the overlay frame wraps the long row into several physical rows, the
+// height window's line count becomes a lie, and the selection scrolls off the
+// pane exactly as it did before the window existed.
+//
+// Non-ASCII paths are ordinary for the two keys seeded here, and the walk covers
+// every row (with a wide-character status line up, since the status wraps through
+// a different path than the value truncates through).
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the vscode_server_binary row is 13 cells wider
+// than the pane.
+func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
+	const w = 72
+	wide := map[string]string{
+		// A real-shaped path: user directory, project directory, versioned binary.
+		"vscode_server_binary": "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin",
+		"worktree_root":        "/home/пользователь/工作区/代理工厂/セッション/树根/非常长的路径/结束",
+		// Emoji, including a ZWJ cluster and a flag — the cases where rune count,
+		// grapheme count and cell width all disagree.
+		"default_program": "claude 🚀🎉🔥 --team 🧑‍🚀🧑‍🚀 --region 🇯🇵🇯🇵 --tail 🌏🌏🌏🌏🌏🌏🌏🌏",
+	}
+
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	seeded := 0
+	for i := range entries {
+		if v, ok := wide[entries[i].Key]; ok {
+			entries[i].Value = v
+			seeded++
+		}
+	}
+	if seeded != len(wide) {
+		t.Fatalf("seeded %d of %d wide values — a manifest rename made this test vacuous", seeded, len(wide))
+	}
+
+	c := NewConfigPane()
+	c.SetSize(w, paneHeight)
+	c.SetEntries(entries, "~/.agent-factory/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	c.status = `vscode_server_binary は "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin" に設定されました — 変更は次回の起動時に反映されます 🎉`
+
+	for step := 0; step < 40; step++ {
+		for _, line := range strings.Split(c.String(), "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Fatalf("step %d (%s): rendered a %d-cell line into a %d-cell pane — a wide-character value was truncated by rune count, not display width (#3421).\n  line: %s",
+					step, c.selectedEntry().Key, got, w, line)
+			}
+		}
+		c.move(1)
+	}
+}
