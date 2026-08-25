@@ -169,3 +169,37 @@ func TestScanTrailingComment_ReconstitutesEveryLine(t *testing.T) {
 	}
 	check(nil)
 }
+
+// TestDeleteTOMLScalar_PreservesCommentAfterMultilineDelimiter covers the OTHER
+// caller of the same scanner. `af config unset` runs deleteTOMLScalar, which
+// reuses preservedTOMLAssignmentComments to keep an operator's notes when the
+// assignment around them goes away — so the dropped comment was reachable from
+// unset as well as set, and both forms are pinned here.
+func TestDeleteTOMLScalar_PreservesCommentAfterMultilineDelimiter(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "basic multiline",
+			content: "on_archive_command = \"\"\"\necho hi\n\"\"\" # keep me\nbranch_prefix = \"x/\"\n",
+			want:    "# keep me\nbranch_prefix = \"x/\"\n",
+		},
+		{
+			name:    "literal multiline",
+			content: "on_archive_command = '''\necho hi\n''' # keep me\nbranch_prefix = \"x/\"\n",
+			want:    "# keep me\nbranch_prefix = \"x/\"\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := deleteTOMLScalar(tt.content, "", "on_archive_command")
+			if !ok {
+				t.Fatalf("deleteTOMLScalar did not find the key")
+			}
+			if got != tt.want {
+				t.Errorf("deleteTOMLScalar:\n got %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
