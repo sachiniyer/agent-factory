@@ -154,6 +154,41 @@ func TestRedactHookOutputTokensPreservesUnparseableNestedDiagnostics(t *testing.
 			output: `{"message":"{\"\\u00\n74oken\":\"split-escape-secret\"}"}`,
 			want:   `{"message":"[REDACTED]"}`,
 		},
+		{
+			name:   "malformed object whose first item is invalid",
+			output: `{"message":"{INVALID,\"token\":\"first-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "malformed array whose first item is invalid",
+			output: `{"message":"[INVALID,{\"token\":\"first-array-secret\"}]"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "escaped serialized child after an invalid escape",
+			output: `{"message":"{\"message\":\"unterminated\n{error}\\q{\\\"token\\\":\\\"later-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "token key after a stray backslash",
+			output: `{"message":"{\"a\":INVALID,\\\"token\":\"slash-secret\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "unicode-escaped object opener after a raw newline",
+			output: `{"message":"{\"message\":\"unterminated\n\\u007b\\\"token\\\":\\\"unicode-open-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
+		{
+			name:   "timestamp-prefixed quoted token prose",
+			output: `{"message":"[2026-08-25] diagnostic says \"token\": unavailable"}`,
+			want:   `{"message":"[2026-08-25] diagnostic says \"token\": unavailable"}`,
+		},
+		{
+			name:   "serialized child opener immediately before a raw newline",
+			output: `{"message":"{\"child\":\"{\n\\\"token\\\":\\\"brace-before-newline-secret\\\"}\"}"}`,
+			want:   `{"message":"[REDACTED]"}`,
+		},
 	}
 
 	for _, test := range tests {
