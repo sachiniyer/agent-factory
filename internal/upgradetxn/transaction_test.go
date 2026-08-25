@@ -1000,7 +1000,9 @@ func TestPrepareRetainsRecoveryInputsWhenJournalPublishSyncFails(t *testing.T) {
 
 	_, err = Prepare(plan)
 	require.ErrorIs(t, err, injected)
-	require.Equal(t, 1, publishSyncs)
+	require.Equal(t, 2, publishSyncs,
+		"the durable write's own sync, plus persistJournal's one completing attempt at the barrier "+
+			"over the already-visible file (#3453) — a barrier completion, not a retry of the write")
 	journal, readErr := readJournal(activePath)
 	require.NoError(t, readErr, "a visible journal must retain everything needed for later recovery")
 	require.FileExists(t, journal.PreviousBinaryPath)

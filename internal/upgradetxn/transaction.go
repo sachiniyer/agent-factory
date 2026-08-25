@@ -892,11 +892,31 @@ func (t *Transaction) persistPhaseLocked(phase Phase) error {
 	return t.persistJournalLocked(journal)
 }
 
+// persistJournalLocked writes the journal and advances the in-memory copy to
+// match what is now ON DISK — which is not always the same thing as "the write
+// succeeded".
+//
+// t.journal is the base every later write starts from (persistPhaseLocked copies
+// it and changes one field), so leaving it behind the disk is how a landed record
+// gets overwritten. That was reachable on the rollback path: restoreLocked
+// checkpoints CandidateInstalled=true, the directory sync fails AFTER the rename,
+// the checkpoint is on disk but t.journal still says false — and Rollback's error
+// handler then writes PhaseRollbackFailed from that stale copy, erasing the
+// marker. The candidate had been installed, had run, and came back eligible to be
+// offered again (#3453).
+//
+// So the memory follows the bytes: when persistJournal reports the content is
+// visible, t.journal advances even though the error propagates. The caller still
+// learns durability is unconfirmed; it just cannot un-write what landed.
 func (t *Transaction) persistJournalLocked(journal Journal) error {
 	journal.UpdatedAt = time.Now().UTC()
-	if err := persistJournal(activeJournalPath(journal.HomeDir), journal); err != nil {
-		return fmt.Errorf("persist upgrade phase %s: %w", journal.Phase, err)
+	err := persistJournal(activeJournalPath(journal.HomeDir), journal)
+	if err == nil {
+		t.journal = journal
+		return nil
 	}
-	t.journal = journal
-	return nil
+	if errors.Is(err, errJournalVisibleNotDurable) {
+		t.journal = journal
+	}
+	return fmt.Errorf("persist upgrade phase %s: %w", journal.Phase, err)
 }
