@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The provisioning-hook contract (#2847): a hook that returns an ssh HOST, not
@@ -309,23 +310,79 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 		if sandboxTeardown != nil {
 			sandboxErr = sandboxTeardown()
 		}
-		hookErr := p.reap()
+		hookErr := hookProvisionReapUnpinning(p.reap, dir, p.spec.Title)
 		if hookErr == nil {
-			// The machine is gone: nothing about the workspace can still be unknown,
-			// and the pin has nothing left to verify. Both are safe to drop.
-			_ = os.RemoveAll(dir)
+			// The machine is gone, so nothing about the workspace can still be
+			// unknown: sandboxErr is dropped here on purpose. (The pin is dropped by
+			// the call above, on the same evidence.)
 			return nil
 		}
-		// Cleanup is still retryable, so the pin MUST survive: it is embedded in the
-		// sandbox ssh command, and deleting it would make every later reap fail
-		// host-key verification before it could reach the machine — a retained row
-		// that can never recover.
 		return errors.Join(sandboxErr, hookErr)
 	}
 	res.Teardown = teardown
 	res.Backend = p.provisionedBackend(teardown)
 	removeKnownHostsOnFailure = false
 	return res, nil
+}
+
+// hookProvisionReapUnpinning runs a provision_cmd session's delete_cmd reap and
+// drops its pinned host-key directory ONLY when that reap returned nil.
+//
+// It exists so the live teardown and the one rebuilt from a kill tombstone
+// cannot drift apart, because the success-only condition is the whole of what
+// matters here and it is now spelled once. #3454 was exactly that drift: the
+// restored path ran the reap and never removed the directory, so every
+// tombstone that outlived its daemon orphaned one.
+//
+// SUCCESS-ONLY IS LOAD-BEARING, not an optimization. The pin is embedded in this
+// session's sandbox ssh command, so removing it while cleanup is still retryable
+// would make every later reap fail host-key verification before it could reach
+// the machine — a retained row that could never complete. A reap that SUCCEEDED
+// settles it the other way: the machine is gone, and the pin has nothing left to
+// verify.
+//
+// A removal that FAILS is logged rather than returned. The machine is genuinely
+// gone by then, and promoting a stray directory into a teardown failure would
+// retain a row whose delete_cmd can only ever succeed again — trading a leaked
+// directory for a session stuck in cleanup. The log line is what keeps a
+// persistent leak visible instead of silent. An empty dir means the af home
+// could not be resolved at all; the reap still has to run.
+func hookProvisionReapUnpinning(reap func() error, dir, title string) error {
+	if err := reap(); err != nil {
+		return err
+	}
+	if dir == "" {
+		return nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		log.WarningLog.Printf("hook runtime: session %q was reaped, but its pinned host-key directory %q could not be removed: %v",
+			title, dir, err)
+	}
+	return nil
+}
+
+// restoredHookProvisionTeardown rebuilds the pin half of the teardown for a
+// tombstone whose session created hook-hosts/<slug>, so a kill that outlives its
+// daemon reaches the same end state a live one does (#3454).
+//
+// The directory is resolved per ATTEMPT rather than when the closure is
+// composed, for the reason the ssh case documents at its own store: this runs
+// while persisted instances are loading, and a transiently unresolvable af home
+// must not be captured as a permanently broken cleanup. It resolves through
+// hookProvisionSessionDir — the same helper the create path uses — so the two
+// cannot come to name different directories.
+func restoredHookProvisionTeardown(reap func() error, slug, title string) func() error {
+	return func() error {
+		dir, err := hookProvisionSessionDir(slug)
+		if err != nil {
+			// Nothing can be named, so nothing can be removed — but the MACHINE still
+			// has to go. Reap anyway and report only the directory left behind;
+			// refusing here would leak a billable host to avoid leaking a directory.
+			log.WarningLog.Printf("hook runtime: cannot locate the pinned host-key directory for session %q, so a successful reap will leave it behind: %v",
+				title, err)
+		}
+		return hookProvisionReapUnpinning(reap, dir, title)
+	}
 }
 
 // provisionedBackend builds the Backend a provision_cmd session is recorded as.
@@ -341,10 +398,22 @@ func (p *hookProvisioner) provisionHost() (ProvisionResult, error) {
 // it: asserting on a hand-built HookBackend would pass even if provisionHost
 // returned the sandbox one.
 func (p *hookProvisioner) provisionedBackend(teardown func() error) Backend {
+	cleanup := p.cleanupData()
+	// The one place this claim is made, and the only path entitled to make it:
+	// provisionHost reaches here solely after hookProvisionKnownHosts wrote the
+	// pin, so a record built by this constructor genuinely owns hook-hosts/<slug>
+	// and its restored teardown may drop it (#3454).
+	//
+	// Deliberately NOT set inside cleanupData(): that helper is shared with the
+	// launch_cmd path, which pins nothing. Setting it there would make a
+	// launch_cmd tombstone claim a directory it never created — and under a
+	// recycled slug that claim deletes a live provision_cmd session's pin,
+	// breaking the very teardown this field exists to complete.
+	cleanup.HasKnownHostsDir = true
 	return &HookBackend{
 		remoteAgentBackend: remoteAgentBackend{reap: teardown},
 		provisioner:        p,
-		cleanup:            p.cleanupData(),
+		cleanup:            cleanup,
 	}
 }
 
