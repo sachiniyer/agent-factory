@@ -459,15 +459,36 @@ func TestRejectedLedgerRefusesAHardLinkedInode(t *testing.T) {
 func TestRejectedLedgerRealignNeverRestylesALinkedExecutable(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "af")
-	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	// 0755 is the FIXTURE's choice here, not a mode the product promises — what
+	// realign guarantees for a linked inode is that it does not touch the mode at
+	// ALL. So the assertion below is invariance, and the literal is gone (#3470).
+	//
+	// The value still has to be STATED rather than inherited: os.WriteFile's mode
+	// is umask-masked, so under 077 this landed 0700 and the old assertion checked
+	// an executable bit that was never set. sharedInstallDir's comment named this
+	// very test as the casualty of that trap — "the hard-link test then asserts a
+	// 0755 that was never there" — before anyone fixed it.
+	writeFileWithMode(t, executable, []byte("bin"), 0o755)
 	path := rejectedLedgerPath(executable)
 	require.NoError(t, os.Link(executable, path), "the ledger path is a second name for the executable")
 	require.NoError(t, os.Chmod(dir, 0o750))
 
+	before, err := os.Stat(executable)
+	require.NoError(t, err)
+	// Invariance is only a real assertion while the fixture differs from what a
+	// restyle would produce. Both directions, because either one bricks it.
+	require.NotEqual(t, rejectedLedgerMode, before.Mode().Perm(),
+		"the fixture must differ from the narrowing target, or 'unchanged' could not fail")
+	require.NotEqual(t, rejectedLedgerSharedMode, before.Mode().Perm(),
+		"and from the widening target, for the same reason")
+
 	alignRejectedLedgerWithDirectoryWriters(path)
 
-	info, err := os.Stat(executable)
+	after, err := os.Stat(executable)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
-		"the executable must still be executable; a chmod through the link would have bricked it")
+	require.Equal(t, before.Mode().Perm(), after.Mode().Perm(),
+		"realign must leave a hard-linked inode alone: a chmod through the second name "+
+			"rewrites the executable itself")
+	require.NotZero(t, after.Mode().Perm()&0o111,
+		"and the bricking this guards against is specifically the executable bit going away")
 }
