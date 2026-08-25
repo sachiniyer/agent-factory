@@ -1015,3 +1015,101 @@ func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
 		t.Errorf("the key was not truncated, so nothing yielded: %q", row)
 	}
 }
+
+// TestConfigPaneEditFieldReflowsOnResize is the #3430 review's reflow finding.
+//
+// textinput recomputes its horizontal viewport in handleOverflow, which runs from
+// SetValue and SetCursor and NOT from a bare Width assignment. So narrowing the
+// terminal mid-edit updated Width while offset/offsetRight still described the old
+// width: View() kept rendering the old, wider slice, fitPaneLine clipped it from
+// the right, and the value's tail and the cursor vanished until the next keystroke
+// happened to recompute the viewport.
+//
+// The assertion is on the FIELD, not the row: the row fits either way because the
+// backstop clips it, which is exactly why this needs its own test.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: after narrowing 72 -> 38, the field still
+// renders its 72-cell slice.
+func TestConfigPaneEditFieldReflowsOnResize(t *testing.T) {
+	const key = "vscode_server_binary"
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	seeded := false
+	for i := range entries {
+		if entries[i].Key == key {
+			entries[i].Value = "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
+			seeded = true
+		}
+	}
+	if !seeded {
+		t.Fatalf("%s left the manifest — this test is vacuous", key)
+	}
+
+	c := NewConfigPane()
+	c.SetSize(72, paneHeight)
+	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	for step := 0; step < 60; step++ {
+		if e := c.selectedEntry(); e != nil && e.Key == key {
+			break
+		}
+		c.move(1)
+	}
+	if e := c.selectedEntry(); e == nil || e.Key != key {
+		t.Fatalf("never landed on %s", key)
+	}
+	c.beginEdit()
+
+	// The terminal narrows while the edit is open. SetSize is what a resize calls.
+	c.SetSize(38, paneHeight)
+
+	budget := c.input.Width + lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
+	if got := lipgloss.Width(c.input.View()); got > budget {
+		t.Fatalf("after narrowing to 38, the field renders %d cells for a %d-cell budget (Width=%d) — the viewport still describes the old width, so the row gets clipped and the value's tail and cursor disappear",
+			got, budget, c.input.Width)
+	}
+	// And the cursor must not have been dragged somewhere by the reflow.
+	if c.input.Position() != len(c.input.Value()) {
+		t.Errorf("the reflow moved the cursor: position %d, value length %d", c.input.Position(), len(c.input.Value()))
+	}
+}
+
+// TestConfigPaneEditFieldUnboundedWhileUnsized is the review's other half: an
+// unsized pane constrains nothing.
+//
+// fitPaneLine, fitHints and window all pass content through at width 0, and
+// textinput reads Width 0 as unbounded. Deriving a field width from a pane with no
+// width put this one member out of step with all three and rendered a narrow
+// scrolling tail where there is no box to fit.
+func TestConfigPaneEditFieldUnboundedWhileUnsized(t *testing.T) {
+	long := "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	for i := range entries {
+		if entries[i].Key == "vscode_server_binary" {
+			entries[i].Value = long
+		}
+	}
+
+	// No SetSize at all.
+	c := NewConfigPane()
+	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	c.beginEdit()
+	if c.input.Width != 0 {
+		t.Errorf("an unsized pane bounded its value field to %d cells", c.input.Width)
+	}
+
+	// And a pane that loses its size goes back to unbounded rather than keeping a
+	// stale width.
+	c.SetSize(72, paneHeight)
+	if c.input.Width == 0 {
+		t.Fatal("a sized pane left the field unbounded")
+	}
+	c.SetSize(0, 0)
+	if c.input.Width != 0 {
+		t.Errorf("a pane resized to nothing kept a %d-cell field width", c.input.Width)
+	}
+}

@@ -180,15 +180,38 @@ func (c *ConfigPane) SetSize(width, height int) {
 // the pane at EVERY geometry, not just narrow ones (#3430). The field scrolls
 // horizontally, so a smaller width costs visible context, never content.
 //
-// Called from SetSize (which runs on every render, so a resize mid-edit is
-// covered) and from beginEdit, where the selected key is what changed.
+// Called from SetSize (which runs on every render, so a resize mid-edit reaches
+// here) and from beginEdit, where the selected key is what changed.
+//
+// Two things this has to get right beyond the arithmetic, both from the #3430
+// review:
+//
+// AN UNSIZED PANE CONSTRAINS NOTHING. At width 0 fitPaneLine, fitHints and window
+// all pass content through untouched, and textinput reads Width 0 as unbounded
+// (handleOverflow hands back the whole value). Deriving a width from a pane that
+// has no width would put this one member out of step with all three and show a
+// narrow scrolling tail where there is no box to fit.
+//
+// AND ASSIGNING Width DOES NOT REFLOW. textinput recomputes its horizontal
+// viewport in handleOverflow, which only runs from SetValue and SetCursor — never
+// from a bare Width assignment. So a resize mid-edit left offset/offsetRight
+// describing the OLD width and View() kept rendering the old, wider slice, which
+// fitPaneLine then clipped from the right: the value's tail and the cursor
+// disappeared until the next keystroke happened to recompute it. Measured before
+// the fix: Width 42 -> Width 10 with the value untouched still rendered a 45-cell
+// View. SetCursor to the position it already holds is the public seam that reflows
+// without moving anything.
 func (c *ConfigPane) sizeEditField() {
-	key := ""
-	if e := c.selectedEntry(); e != nil {
-		key = e.Key
+	width := 0
+	if c.width > 0 {
+		key := ""
+		if e := c.selectedEntry(); e != nil {
+			key = e.Key
+		}
+		_, width = c.editRowSplit(key)
 	}
-	_, width := c.editRowSplit(key)
 	c.input.Width = width
+	c.input.SetCursor(c.input.Position())
 }
 
 // editRowSplit divides an editing row's width between the KEY and the value
