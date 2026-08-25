@@ -105,25 +105,6 @@ func (t instanceTrustTarget) CheckAndHandleTrustPrompt() bool {
 	return t.inst.CheckAndHandleTrustPrompt()
 }
 
-// StartAndSendPrompt is the canonical way to start an instance, wait for
-// readiness, handle trust prompts, and optionally send a prompt.
-//
-// It always waits for the program to become ready. If prompt is non-empty,
-// it sends the prompt via tmux send-keys after readiness.
-//
-// It does NOT set the instance status to Running — callers must do so when
-// appropriate. For TUI async paths, the instanceStartedMsg handler sets
-// Running after saving to disk; for synchronous API/runner paths, the caller
-// sets Running immediately after this function returns.
-//
-// ctx bounds the readiness wait: an abandoned or cancelled create tears down the
-// pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
-// treated as context.Background().
-func StartAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
-	_, err := StartAndSendPromptWithConversationCapture(ctx, instance, prompt)
-	return err
-}
-
 // StartAndSendPromptWithConversationCapture is the daemon create path. It
 // separates provisioning from launch so a local backend can snapshot the exact
 // command-specific provider store after the final cwd exists in the model but
@@ -147,10 +128,11 @@ func StartAndSendPromptWithConversationCapture(
 	return capture, WaitForReadyAndSendPrompt(ctx, instance, prompt)
 }
 
-// WaitForReadyAndSendPrompt is the post-launch half of StartAndSendPrompt. A
-// handoff has already launched its incoming pane, but it owes the same readiness
-// and trust-dialog contract as a fresh create before any mission text is typed.
-// Keeping that contract here prevents the two launch paths from drifting.
+// WaitForReadyAndSendPrompt is the post-launch half of
+// StartAndSendPromptWithConversationCapture. A handoff has already launched its
+// incoming pane, but it owes the same readiness and trust-dialog contract as a
+// fresh create before any mission text is typed. Keeping that contract here
+// prevents the two launch paths from drifting.
 func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
 	if ctx == nil {
 		ctx = context.Background()

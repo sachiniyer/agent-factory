@@ -20,7 +20,7 @@ import (
 func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (session.InstanceData, error) {
 	// Own the create's lifetime: cancel derives a child context that is cancelled
 	// the instant this returns (success, failure, or panic), so the readiness poll
-	// StartAndSendPrompt runs can never outlive the create and keep capturing the
+	// StartAndSendPromptWithConversationCapture runs can never outlive the create and keep capturing the
 	// pane — the amp hang, where a create that never reached ready left a poll
 	// spinning under the per-repo start lock and pinned the daemon. A caller
 	// context cancelled early (an abandoned create) tears it down even sooner.
