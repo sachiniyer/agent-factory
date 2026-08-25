@@ -104,19 +104,33 @@ func failedArchiveResult(instance *session.Instance, failure error) (string, ses
 // in a retained tree, so restoring it home would start a Lost session without
 // those bytes. Keep and publish Archived, preserve the report, and return the
 // committed marker that prevents every caller from retrying the landed move.
+//
+// The committed claim must BE durable before it is made, the same rule
+// keepUnrollableArchiveCommitted enforces below (#3448). A committed marker is
+// read by DeleteProject as success-with-warning: it records the message as a
+// warning and goes on to DEREGISTER the project. If the Archived row never
+// reached disk, that deregisters on top of a stale PRE-ARCHIVE live row — a
+// restart reloads it, cannot reconstruct the worktree at the old path, and skips
+// the instance, leaving the bytes orphaned under the archive with no project and
+// no session pointing at them. So the durable write is attempted here and only
+// its SUCCESS claims committed; a failure returns the plain, retryable error
+// callers refuse on, naming the archive location for manual recovery.
+//
+// One write, not two branches. The caller that arrives here BECAUSE its durable
+// write already failed used to take a best-effort persistInstance whose error was
+// discarded, and claimed committed regardless — the identical undurable claim,
+// reached by the more likely road. Both callers now retry the same write through
+// the same gate.
 func (m *Manager) keepIncompleteArchiveCommitted(
 	repoID, archivedPath string,
 	instance *session.Instance,
 	hookErr error,
-	needsDurableWrite bool,
 	cause error,
 ) (string, session.InstanceData, error) {
-	if needsDurableWrite {
-		if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
-			cause = fmt.Errorf("%w; the committed archive also could not be written durably: %v", cause, persistErr)
-		}
-	} else {
-		m.persistInstance(repoID, instance)
+	if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
+		return "", session.InstanceData{}, errors.Join(cause, fmt.Errorf(
+			"its incomplete archive was kept at %s because rolling it back would omit retained files, but the committed archive could not be written durably, so it is not claimed committed and needs manual recovery: %w",
+			archivedPath, persistErr))
 	}
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)
