@@ -121,6 +121,12 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 	var previousValidatedThisRun bool
 	var takeoverFromStopIntent bool
 	firstIteration := true
+	// A retried Run inherits whatever this process adopted last time, so the phase
+	// is made durable before anything reads it (#3453 review). No-op when it
+	// already is.
+	if err := lease.reaffirmDurableJournal(); err != nil {
+		return err
+	}
 	if txn.Journal().Phase == PhaseSupervisorReady {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -139,6 +145,12 @@ func (s Supervisor) Run(ctx context.Context, txn *Transaction, lease *RecoveryLe
 
 	for {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Every arm below acts on journal.Phase, several of them irreversibly, and
+		// an iteration can have adopted an unconfirmed write. Close the barrier
+		// before the phase is read rather than in each arm (#3453 review).
+		if err := lease.reaffirmDurableJournal(); err != nil {
 			return err
 		}
 		journal := txn.Journal()
@@ -589,7 +601,7 @@ func (t *Transaction) markRollbackFailed() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseRollbackFailed {
-		return nil
+		return t.reaffirmPhaseLocked(PhaseRollbackFailed)
 	}
 	switch t.journal.Phase {
 	case PhaseRollbackRestored,
