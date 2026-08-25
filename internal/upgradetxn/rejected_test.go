@@ -118,12 +118,58 @@ func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
 // TestRejectedLedger_IsOwnerOnly — the ledger decides whether a binary may be
 // activated, so a user who can write it can re-enable a release this box refused.
 func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "af")
+	// State the directory posture rather than inheriting it (#3465). The ledger's
+	// mode is DERIVED from the directory's, so leaving the fixture at whatever
+	// umask produced it tests the developer's environment, not the contract.
+	//
+	// t.TempDir() is not the 0700 that os.MkdirTemp suggests: it calls MkdirTemp
+	// and THEN creates the numbered subdirectory it returns with
+	// os.Mkdir(dir, 0777), which the umask reduces. Measured at 0775 under umask
+	// 002 — group rwx, no other-write, i.e. shared — so this asserted 0600 against
+	// the shared branch'"'"'s 0660. See TestWithExecutableLock_LeavesAPrivateLockFile.
+	executable := sharedInstallDir(t, 0o700)
+	_, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.False(t, shared, "precondition: a privately-owned install directory")
+
 	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
 
 	info, err := os.Stat(rejectedLedgerPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+// The other branch, pinned rather than merely tolerated. The owner-only mode
+// exists so a user who can write the ledger cannot re-enable a release this box
+// refused — but on a directory the group can already install into, that group can
+// replace the binary outright, so an owner-only ledger withholds nothing from
+// them and instead blocks the authorized writers the widening exists to admit
+// (install_lock.go:245-262).
+//
+// Scoped to the MODE. The group the ledger carries is a separate claim, and a
+// single-user fixture cannot test it — the temp dir's group already equals the
+// creator's primary group, so "file gid == dir gid" passes against unfixed code.
+// TestExecutableLock_TakesTheDirectorysGroup owns that one, and retargets the
+// directory to a SECONDARY group to give the assertion teeth.
+//
+// The sibling ledger tests cover the READ path (realign on
+// readRejectedLedger); this is the initial WRITE, which goes through
+// durableAtomicWriteFileInGroup instead.
+func TestRejectedLedger_WidensOnAGroupInstallableDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	if _, shared := directoryWriterGroup(filepath.Dir(executable)); !shared {
+		// Not a failure. Where ACL state cannot be read — macOS, and any filesystem
+		// that presents one — the classifier declines and the ledger stays private,
+		// which is the correct behaviour. Asserting the widening there would make a
+		// red job out of a right answer, and teach the next reader to ignore it.
+		t.Skip("this filesystem/uid does not present the directory as group-installable")
+	}
+
+	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+
+	info, err := os.Stat(rejectedLedgerPath(executable))
+	require.NoError(t, err)
+	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
+		"a ledger the authorized group cannot read leaves them unable to see what this box refused")
 }
 
 // TestCandidateRejected_StructurallyInvalidLedgerErrors — decoding successfully is
