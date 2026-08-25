@@ -103,9 +103,13 @@ func TestDockerMountAgentCredentials_OperatorGrantIsAgentSelective(t *testing.T)
 
 	runArgs := provisionDockerCapturingRun(t, tmux.ProgramCodex)
 
-	wantCodex := filepath.Join(home, ".codex/auth.json") + ":" + dockerContainerHome + "/.codex/auth.json:ro"
+	// The MODE is asserted here, not just the paths: this is the only test that
+	// reads the argv docker run actually receives, so it is what proves the
+	// SELinux relabel survives argv assembly rather than merely existing in the
+	// helper (#3451).
+	wantCodex := filepath.Join(home, ".codex/auth.json") + ":" + dockerContainerHome + "/.codex/auth.json:" + dockerCredentialMountMode
 	if !argsHave(runArgs, wantCodex) {
-		t.Fatalf("operator grant on, codex session: codex credential must be mounted read-only; args=%v", runArgs)
+		t.Fatalf("operator grant on, codex session: codex credential must be mounted read-only and SELinux-relabeled (%q); args=%v", wantCodex, runArgs)
 	}
 	if argsHave(runArgs, ".claude/.credentials.json") {
 		t.Fatalf("codex session must NOT receive the Claude credential; args=%v", runArgs)

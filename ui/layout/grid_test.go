@@ -28,6 +28,35 @@ func ladderLevel(l layout.Layout) int {
 	}
 }
 
+// visibleRegions is a test helper that collects a solved layout's visible
+// region rects keyed by region id, mirroring the layout's region model.
+func visibleRegions(l layout.Layout) map[string]layout.Rect {
+	regions := make(map[string]layout.Rect)
+	if l.Fallback {
+		return regions
+	}
+	regions[layout.RegionTree] = l.Tree
+	regions["status"] = l.StatusBar
+	if len(l.Panes) == 0 {
+		regions["workspace"] = l.Workspace
+	}
+	for i, r := range l.Panes {
+		regions[layout.PaneRegion(i)] = r
+	}
+	for i, r := range l.Dividers {
+		regions[fmt.Sprintf("divider:%d", i)] = r
+	}
+	if l.AutomationsVisible {
+		regions["railRule"] = l.RailRule
+		regions[layout.RegionAutomations] = l.Automations
+	}
+	if l.ProjectsVisible {
+		regions["projectsRule"] = l.ProjectsRule
+		regions[layout.RegionProjects] = l.Projects
+	}
+	return regions
+}
+
 // TestGridSolveTilesExactly sweeps the full supported size range for several
 // requested pane counts and asserts the visible regions exactly tile the
 // terminal: no overlap, no gaps, no negative dimensions, nothing outside the
@@ -41,7 +70,7 @@ func TestGridSolveTilesExactly(t *testing.T) {
 				require.False(t, l.Fallback, "unexpected fallback at %dx%d", w, h)
 
 				screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
-				visible := l.VisibleRegions()
+				visible := visibleRegions(l)
 				parts := make([]layout.Rect, 0, len(visible))
 				for id, r := range visible {
 					require.False(t, r.Empty(), "visible region %s is empty at %dx%d panes=%d", id, w, h, panes)
@@ -70,7 +99,7 @@ func TestGridSolveFallbackBelowHardMinimum(t *testing.T) {
 			l := layout.Grid{Panes: 2}.Solve(tt.w, tt.h)
 			assert.Equal(t, tt.fallback, l.Fallback)
 			if tt.fallback {
-				assert.Empty(t, l.VisibleRegions(), "fallback layout must expose no regions")
+				assert.Empty(t, visibleRegions(l), "fallback layout must expose no regions")
 				assert.Zero(t, l.PaneCount())
 				assert.False(t, l.AutomationsVisible)
 			}
@@ -193,7 +222,7 @@ func TestGridSolveAutomationsGrowsToContent(t *testing.T) {
 				l := grid.Solve(w, h)
 				require.False(t, l.Fallback)
 				screen := layout.Rect{X: 0, Y: 0, W: w, H: h}
-				visible := l.VisibleRegions()
+				visible := visibleRegions(l)
 				parts := make([]layout.Rect, 0, len(visible))
 				for id, r := range visible {
 					require.False(t, r.Empty(),
@@ -297,14 +326,14 @@ func TestGridSolveBannerReservesTopRow(t *testing.T) {
 			"banner is a full-width top band at %v", size)
 
 		// Every other region sits strictly below the banner.
-		visible := on.VisibleRegions()
+		visible := visibleRegions(on)
 		parts := make([]layout.Rect, 0, len(visible)+1)
 		for id, r := range visible {
 			assert.GreaterOrEqual(t, r.Y, layout.AlarmBarRows,
 				"region %s must sit below the banner at %v", id, size)
 			parts = append(parts, r)
 		}
-		// The banner is passive (not in VisibleRegions); include it to prove the
+		// The banner is passive (not in the visible region set); include it to prove the
 		// banner + regions still tile the whole screen with no gap or overlap.
 		parts = append(parts, on.Banner)
 		requireTiles(t, layout.Rect{X: 0, Y: 0, W: w, H: h}, parts)
@@ -397,8 +426,8 @@ func TestGridSolveRegionsMonotonicWithinLevel(t *testing.T) {
 		if !sameState(cur, prev) || cur.Fallback {
 			return
 		}
-		prevRegions := prev.VisibleRegions()
-		for id, r := range cur.VisibleRegions() {
+		prevRegions := visibleRegions(prev)
+		for id, r := range visibleRegions(cur) {
 			pr, ok := prevRegions[id]
 			require.True(t, ok, "region %s appeared on shrink at %dx%d", id, cur.Width, cur.Height)
 			require.LessOrEqual(t, r.W, pr.W, "region %s width grew shrinking to %dx%d", id, cur.Width, cur.Height)
@@ -422,45 +451,6 @@ func TestGridSolveRegionsMonotonicWithinLevel(t *testing.T) {
 			prev = cur
 		}
 	}
-}
-
-func TestGridVisibleRegionsMatchLayout(t *testing.T) {
-	l := layout.Grid{Panes: 2}.Solve(160, 48)
-	require.Equal(t, 2, l.PaneCount())
-	require.True(t, l.AutomationsVisible)
-	require.True(t, l.ProjectsVisible)
-	regions := l.VisibleRegions()
-	assert.Len(t, regions, 9)
-	assert.Equal(t, l.Tree, regions[layout.RegionTree])
-	assert.Equal(t, l.Panes[0], regions[layout.PaneRegion(0)])
-	assert.Equal(t, l.Panes[1], regions[layout.PaneRegion(1)])
-	assert.Equal(t, l.Dividers[0], regions[layout.DividerRegion(0)])
-	assert.Equal(t, l.RailRule, regions[layout.RegionRailRule])
-	assert.Equal(t, l.Automations, regions[layout.RegionAutomations])
-	assert.Equal(t, l.ProjectsRule, regions[layout.RegionProjectsRule])
-	assert.Equal(t, l.Projects, regions[layout.RegionProjects])
-	assert.Equal(t, l.StatusBar, regions[layout.RegionStatusBar])
-	assert.NotContains(t, regions, layout.RegionWorkspace,
-		"the bare workspace region only exists with no panes open")
-
-	single := layout.Grid{Panes: 1}.Solve(160, 48)
-	regions = single.VisibleRegions()
-	assert.Len(t, regions, 7)
-	assert.NotContains(t, regions, layout.PaneRegion(1))
-	assert.NotContains(t, regions, layout.DividerRegion(0))
-
-	empty := layout.Grid{}.Solve(160, 48)
-	regions = empty.VisibleRegions()
-	assert.Equal(t, empty.Workspace, regions[layout.RegionWorkspace],
-		"no panes open → the workspace itself is the region")
-
-	minimal := layout.Grid{}.Solve(50, 12)
-	regions = minimal.VisibleRegions()
-	assert.Len(t, regions, 3)
-	assert.NotContains(t, regions, layout.RegionAutomations)
-	assert.NotContains(t, regions, layout.RegionRailRule)
-	assert.NotContains(t, regions, layout.RegionProjects)
-	assert.NotContains(t, regions, layout.RegionProjectsRule)
 }
 
 // TestGridSolveAutomationsInRail pins the #1087/#1090 geometry as revised by the

@@ -738,7 +738,7 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 //
 // Only repos with at least one persistable in-memory instance are rewritten;
 // repos the daemon holds nothing for are left untouched — their records were
-// already removed by the targeted DeleteInstance on kill, or were never loaded.
+// already removed by the targeted DeleteInstanceByStableID on kill, or were never loaded.
 // Generic Loading/Deleting/non-started instances are skipped: their worktree is
 // not yet populated (Loading) or is mid-teardown (Deleting), so FromInstanceData
 // cannot restore them. Explicit durable retention markers override that legacy
@@ -746,7 +746,7 @@ func dedupeInstanceData(data []InstanceData) []InstanceData {
 // staged archive report is the only durable handle to retained source trees.
 //
 // The targeted writers (appendInstanceData / persistInstanceData /
-// DeleteInstance) keep the disk current on every mutation; this full save is the
+// DeleteInstanceByStableID) keep the disk current on every mutation; this full save is the
 // shutdown checkpoint. Records are deduped by title (#808) before marshaling.
 // Because the manager's memory is the source of truth, the save deliberately
 // does NOT read disk first: the file is overwritten with authoritative state, so
@@ -768,6 +768,13 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		pendingTabs := len(data.PendingTabs) > 0
 		durableRetention := pendingHandoff || unknownRuntimeCleanup ||
 			unresolvedRelocation || archiveReportPending
+		// A lost sandbox row loads inert (started=false) by design, and its record is
+		// the only pointer to the branch it pushed to origin — a durable retention claim
+		// of its own (#3422; see lostSandboxRecord). Deliberately NOT folded into
+		// durableRetention, which also overrides the Loading/Deleting skip below: an
+		// explicit kill or archive in flight must still win there, so a crash cannot
+		// resurrect a session the user deleted.
+		lostSandbox := lostSandboxRecord(data)
 		// A pending mission is a durable recovery obligation and therefore a
 		// retention claim, not generic transient UI state. OpReplacing composes to
 		// Loading, but dropping that row would erase the only handle to a live
@@ -784,7 +791,9 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// the ONLY pointer to the relocated worktree. Dropping it on a wholesale
 		// per-repo checkpoint save — triggered whenever ANY started instance in
 		// the same repo is saved — would silently orphan the archived worktree.
-		// (Lost is unaffected: it loads started=true, so it already survives.)
+		// (A LOCAL Lost session is unaffected: it loads started=true, so it already
+		// survives. A LOST SANDBOX row does not — it loads inert with started=false —
+		// which is why lostSandbox above is a retention claim of its own, #3422.)
 		//
 		// TOMBSTONED, startup-unknown, runtime-cleanup-unknown, and unresolved
 		// worktree-relocation instances are also kept (#1917/#2207/#3135). They are
@@ -798,7 +807,7 @@ func (s *Storage) SaveInstances(instances []*Instance) error {
 		// in a layer that never heard of it, and orphaning the very workspace the
 		// retention exists to protect. Retention is a claim on this writer too.
 		if !inst.Started() && status != Archived && !data.UserKilled &&
-			!data.StartupStateUnknown && !durableRetention && !pendingTabs {
+			!data.StartupStateUnknown && !durableRetention && !pendingTabs && !lostSandbox {
 			continue
 		}
 		root := inst.GetRepoPath()
@@ -880,20 +889,6 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 	}
 
 	return instances, nil
-}
-
-// DeleteInstance removes an instance from storage by filtering raw JSON
-// directly, avoiding the need to reconstruct live Instance objects (which
-// may fail if tmux/worktree has already been destroyed).
-func (s *Storage) DeleteInstance(title string) error {
-	deleted, err := s.DeleteInstanceByStableID(title, "")
-	if err != nil {
-		return err
-	}
-	if !deleted {
-		return fmt.Errorf("instance not found: %s", title)
-	}
-	return nil
 }
 
 // InstanceDeleteLockTimeout bounds how long DeleteInstanceByStableID waits for

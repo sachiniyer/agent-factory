@@ -173,7 +173,7 @@ func spawnDaemonTab(inst *session.Instance) (daemon.CreateTabResponse, error) {
 }
 
 // startedLocalInstance is freshLocalInstance plus one on-demand shell tab
-// (added via AddShellTab — the 't' path), so handleNewTab / handleCloseTab
+// (added via AddShellTab — the 't' path), so createNewTab / handleCloseTab
 // exercise the real tab-lifecycle path hermetically.
 func startedLocalInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
@@ -243,7 +243,7 @@ func TestHandleNewTabAppendsAndSelects(t *testing.T) {
 	created, _ := stubTabDaemonSeams(t, inst)
 	require.Equal(t, 2, inst.TabCount(), "helper gives an agent tab + one on-demand shell tab")
 
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 
 	require.Equal(t, 1, *created, "new-tab must route through the daemon CreateTab RPC")
 	require.Equal(t, 3, inst.TabCount(), "new-tab must append a shell tab")
@@ -396,7 +396,7 @@ func TestHandleCloseTabSelectsNeighbor(t *testing.T) {
 	inst := startedLocalInstance(t, "close")
 	selectInstance(h, inst)
 	_, closed := stubTabDaemonSeams(t, inst)
-	_, _ = h.handleNewTab() // now agent + shell + shell-2, active = 2
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // now agent + shell + shell-2, active = 2
 	require.Equal(t, 3, inst.TabCount())
 	require.Equal(t, 2, h.store.ActiveTab())
 
@@ -435,7 +435,7 @@ func TestHandleTabJump(t *testing.T) {
 	inst := startedLocalInstance(t, "jump")
 	selectInstance(h, inst)
 	stubTabDaemonSeams(t, inst)
-	_, _ = h.handleNewTab() // agent + shell + shell-2 (3 tabs)
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // agent + shell + shell-2 (3 tabs)
 	require.Equal(t, 3, inst.TabCount())
 
 	_, _ = h.handleTabJump(1)
@@ -456,7 +456,7 @@ func TestNumberKeyRoutesToTabJump(t *testing.T) {
 	inst := startedLocalInstance(t, "route")
 	selectInstance(h, inst)
 	stubTabDaemonSeams(t, inst)
-	_, _ = h.handleNewTab() // 3 tabs
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell) // 3 tabs
 
 	h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	require.Equal(t, 1, h.store.ActiveTab(),
@@ -489,7 +489,7 @@ func TestFreshInstanceSingleTabSlotUI(t *testing.T) {
 
 	// t materializes the on-demand terminal as a real second slot.
 	stubTabDaemonSeams(t, inst)
-	_, _ = h.handleNewTab()
+	_, _ = h.createNewTab(h.sidebar.GetSelectedInstance(), session.TabKindShell)
 	require.Equal(t, 2, inst.TabCount())
 	require.Equal(t, []string{"◆ Agent", "› Terminal"}, tree.TabLabels(inst),
 		"after t the terminal is a real second slot")

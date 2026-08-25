@@ -408,3 +408,113 @@ func TestSaveInstances_KeepsPendingTabsAlongsideStartedSibling(t *testing.T) {
 	}
 	t.Fatal("whole-repo save dropped the inert off-box row while PendingTabs was its recovery claim")
 }
+
+// TestSaveInstances_KeepsLostSandboxRowAlongsideStartedSibling is #3422: the
+// retention predicate must know that a lost SANDBOX row is durable.
+//
+// A non-archived sandbox session (docker/ssh/sandbox/hook) loads INERT on purpose
+// — FromInstanceData sets LiveLost and deliberately does NOT call Start(), so the
+// status poll and the Lost-restore loop pass it by. That leaves started=false,
+// which is exactly the shape the wholesale checkpoint treats as disposable junk.
+// It is the opposite of disposable: the container/remote is gone and this record
+// is the user's only pointer to the branch the session pushed to origin, so
+// dropping it destroys the only handle to real work with no recovery path.
+//
+// The started sibling is load-bearing: without it the repo has no rows to save
+// and the checkpoint is a no-op, so the bug never fires.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the lost sandbox row is absent after the save.
+func TestSaveInstances_KeepsLostSandboxRowAlongsideStartedSibling(t *testing.T) {
+	for _, backendType := range []string{"docker", "ssh", "sandbox", "remote"} {
+		t.Run(backendType, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoPath := t.TempDir()
+			state := newMockStorage()
+
+			alive := makeAliveInstance("alive", repoPath)
+			lost, err := FromInstanceData(InstanceData{
+				Title:       "lost-sandbox",
+				Path:        repoPath,
+				Branch:      "af/lost-sandbox",
+				BackendType: backendType,
+				Status:      Running,
+			})
+			if err != nil {
+				t.Fatalf("FromInstanceData: %v", err)
+			}
+			// The inert load contract this fix must NOT disturb: a lost sandbox row
+			// stays out of the poll/restore loops via the started=false fence.
+			if lost.Started() {
+				t.Fatal("a restored sandbox row must load inert — never started")
+			}
+			if lost.GetStatus() != Lost {
+				t.Fatalf("restored sandbox liveness = %v, want Lost", lost.GetStatus())
+			}
+
+			storage, err := NewStorage(state, "")
+			if err != nil {
+				t.Fatalf("NewStorage: %v", err)
+			}
+			if err := storage.SaveInstances([]*Instance{alive, lost}); err != nil {
+				t.Fatalf("SaveInstances: %v", err)
+			}
+
+			for _, row := range readDisk(t, state, repoPath) {
+				if row.Title != lost.Title {
+					continue
+				}
+				if row.Branch != "af/lost-sandbox" {
+					t.Fatalf("retained lost sandbox row lost its branch pointer: %q", row.Branch)
+				}
+				if row.BackendType != backendType {
+					t.Fatalf("retained row backend type = %q, want %q", row.BackendType, backendType)
+				}
+				return
+			}
+			t.Fatalf("the daemon's shutdown checkpoint dropped a lost %s session: its branch is "+
+				"pushed to origin and this record was the user's only handle to it (#3422)", backendType)
+		})
+	}
+}
+
+// TestSaveInstances_StillPrunesDisposableSandboxRows is the other half of #3422:
+// making a lost sandbox durable must not degrade into "never prune anything".
+// Both rows below are sandbox-backed and !Started, and both must still be
+// dropped — a never-started in-memory row has no persisted workspace behind it,
+// and a create still in flight is the transient junk the Loading skip exists for.
+func TestSaveInstances_StillPrunesDisposableSandboxRows(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoPath := t.TempDir()
+	state := newMockStorage()
+
+	alive := makeAliveInstance("alive", repoPath)
+	neverStarted := &Instance{
+		ID: "never-started-id", Title: "never-started", Path: repoPath, Program: "claude",
+		started: false, liveness: LiveReady, backend: &dockerBackend{},
+	}
+	creating := &Instance{
+		ID: "creating-id", Title: "creating", Path: repoPath, Program: "claude",
+		started: false, liveness: LiveReady, inFlightOp: OpCreating, backend: &dockerBackend{},
+	}
+	// Same treatment for a local row that never started: unchanged by this fix.
+	localJunk := makeInstance("local-junk", repoPath, false)
+
+	storage, err := NewStorage(state, "")
+	if err != nil {
+		t.Fatalf("NewStorage: %v", err)
+	}
+	if err := storage.SaveInstances([]*Instance{alive, neverStarted, creating, localJunk}); err != nil {
+		t.Fatalf("SaveInstances: %v", err)
+	}
+
+	rows := readDisk(t, state, repoPath)
+	for _, row := range rows {
+		if row.Title != alive.Title {
+			t.Fatalf("checkpoint retained disposable row %q — the #3422 retention widened "+
+				"into a blanket keep-everything", row.Title)
+		}
+	}
+	if len(rows) != 1 {
+		t.Fatalf("checkpoint persisted %d rows, want only the live sibling", len(rows))
+	}
+}

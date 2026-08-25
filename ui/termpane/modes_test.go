@@ -50,7 +50,7 @@ func TestRepaintRestoresTerminalOwnershipModes(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		got, known := tp.TerminalModes()
-		return known && got == child && tp.MouseTrackingEnabled()
+		return known && got == child
 	}, 2*time.Second, 5*time.Millisecond,
 		"fresh repaint must restore alternate-screen, tracking, and mouse encoding")
 
@@ -66,7 +66,7 @@ func TestRepaintRestoresTerminalOwnershipModes(t *testing.T) {
 	}
 	require.Eventually(t, func() bool {
 		got, known := tp.TerminalModes()
-		return known && got == host && !tp.MouseTrackingEnabled()
+		return known && got == host
 	}, 2*time.Second, 5*time.Millisecond,
 		"recovery repaint must clear stale alternate-screen and mouse ownership")
 

@@ -72,7 +72,7 @@ func reconcileRaceExec(agentName, shellTmuxName string, onRestore func()) (cmd_t
 // kill-session here would destroy a live tab over an operation that gets undone.
 func TestReconcileTabsFromData_TeardownRaceDropsRestoredTab(t *testing.T) {
 	const agentName = "af_snap_race"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	for _, tc := range []struct {
 		name  string
@@ -124,7 +124,7 @@ func TestReconcileTabsFromData_TeardownRaceDropsRestoredTab(t *testing.T) {
 // rather than appending a second copy.
 func TestReconcileTabsFromData_NoTeardownRaceStillAdopts(t *testing.T) {
 	const agentName = "af_snap_norace"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	mockExec, sessionKilled := reconcileRaceExec(agentName, shellName, nil)
 	inst, _ := newReconcileTestInstanceWithExec(t, agentName, mockExec)

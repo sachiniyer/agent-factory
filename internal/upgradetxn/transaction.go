@@ -249,8 +249,14 @@ type Journal struct {
 // Transaction is a loaded, validated journal. The mutex only protects callers
 // in one process; TryAcquireRecovery is the cross-process single-actor rule.
 type Transaction struct {
-	mu                      sync.Mutex
-	journal                 Journal
+	mu      sync.Mutex
+	journal Journal
+	// journalUnconfirmed marks a journal adopted from a write whose bytes are
+	// VISIBLE at the path but whose durability barrier never closed (#3453).
+	// t.journal has to follow those bytes or the next write erases them — but a
+	// phase that arrived this way must not satisfy an idempotence skip or a
+	// durability gate. See reaffirmPhaseLocked.
+	journalUnconfirmed      bool
 	afterRollbackCheckpoint func(RollbackProgress) error
 }
 
@@ -439,7 +445,7 @@ func (t *Transaction) advance(next Phase) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == next {
-		return nil
+		return t.reaffirmPhaseLocked(next)
 	}
 	allowed := map[Phase]Phase{
 		PhasePrepared:           PhaseSupervisorReady,
@@ -464,7 +470,10 @@ func (t *Transaction) installCandidate() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseCandidateInstalled {
-		return t.verifyInstalledCandidateLocked()
+		if err := t.verifyInstalledCandidateLocked(); err != nil {
+			return err
+		}
+		return t.reaffirmPhaseLocked(PhaseCandidateInstalled)
 	}
 	if t.journal.Phase != PhaseDaemonStopped {
 		return fmt.Errorf("cannot install candidate from upgrade phase %s", t.journal.Phase)
@@ -529,7 +538,7 @@ func (t *Transaction) commit() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseCommitted {
-		return nil
+		return t.reaffirmPhaseLocked(PhaseCommitted)
 	}
 	if t.journal.Phase != PhaseCandidateValidating {
 		return fmt.Errorf("cannot commit upgrade from phase %s", t.journal.Phase)
@@ -548,7 +557,7 @@ func (t *Transaction) abort() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.journal.Phase == PhaseAborted {
-		return nil
+		return t.reaffirmPhaseLocked(PhaseAborted)
 	}
 	if t.journal.Phase != PhasePrepared && t.journal.Phase != PhaseSupervisorReady &&
 		t.journal.Phase != PhaseDaemonStopping {
@@ -565,7 +574,10 @@ func (t *Transaction) rollback() error {
 	defer t.mu.Unlock()
 	switch t.journal.Phase {
 	case PhaseRollbackRestored, PhasePreviousStarting, PhasePreviousValidating, PhaseRolledBack:
-		return nil
+		// Already past the restore. Same rule as the lifecycle skips: an ADOPTED
+		// boundary is not a durable one, and reporting it as finished would let a
+		// retried Rollback confirm a barrier that never closed (#3453 review).
+		return t.reaffirmPhaseLocked(t.journal.Phase)
 	case PhaseCommitted:
 		return errors.New("cannot roll back a committed upgrade")
 	case PhaseRollingBack:
@@ -830,6 +842,29 @@ func (l *RecoveryLease) Abort() error {
 	return l.withTransaction(func(txn *Transaction) error { return txn.abort() })
 }
 
+// reaffirmDurableJournal closes the barrier on a journal this process ADOPTED
+// from a write whose bytes were visible but whose directory sync never completed
+// (#3453). It is a no-op — no write at all — whenever the journal is already
+// durable, which is every ordinary call.
+//
+// The internal lifecycle skips reaffirm themselves, but they only protect callers
+// that go THROUGH them. Supervisor.Run does not: it reads Journal().Phase and acts
+// on it directly, and its PhaseCommitted arm approves the candidate, disables the
+// recovery job, and starts cleanup without ever calling Commit. An adopted
+// PhaseCommitted there would run those irreversible effects over a journal a crash
+// can still lose, recovering the older candidate_validating entry with no actor
+// left to finish it (#3453 review). So the phase is made durable before it is
+// acted on, at the one place that reads it.
+func (l *RecoveryLease) reaffirmDurableJournal() error {
+	return l.withTransaction(func(txn *Transaction) error { return txn.reaffirmDurableJournal() })
+}
+
+func (t *Transaction) reaffirmDurableJournal() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.reaffirmPhaseLocked(t.journal.Phase)
+}
+
 func (l *RecoveryLease) withTransaction(action func(*Transaction) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -892,11 +927,53 @@ func (t *Transaction) persistPhaseLocked(phase Phase) error {
 	return t.persistJournalLocked(journal)
 }
 
+// persistJournalLocked writes the journal and advances the in-memory copy to
+// match what is now ON DISK — which is not always the same thing as "the write
+// succeeded".
+//
+// t.journal is the base every later write starts from (persistPhaseLocked copies
+// it and changes one field), so leaving it behind the disk is how a landed record
+// gets overwritten. That was reachable on the rollback path: restoreLocked
+// checkpoints CandidateInstalled=true, the directory sync fails AFTER the rename,
+// the checkpoint is on disk but t.journal still says false — and Rollback's error
+// handler then writes PhaseRollbackFailed from that stale copy, erasing the
+// marker. The candidate had been installed, had run, and came back eligible to be
+// offered again (#3453).
+//
+// So the memory follows the bytes: when persistJournal reports the content is
+// visible, t.journal advances even though the error propagates. The caller still
+// learns durability is unconfirmed; it just cannot un-write what landed.
 func (t *Transaction) persistJournalLocked(journal Journal) error {
 	journal.UpdatedAt = time.Now().UTC()
-	if err := persistJournal(activeJournalPath(journal.HomeDir), journal); err != nil {
-		return fmt.Errorf("persist upgrade phase %s: %w", journal.Phase, err)
+	err := persistJournal(activeJournalPath(journal.HomeDir), journal)
+	if err == nil {
+		t.journal = journal
+		t.journalUnconfirmed = false
+		return nil
 	}
-	t.journal = journal
-	return nil
+	if errors.Is(err, errJournalVisibleNotDurable) {
+		t.journal = journal
+		t.journalUnconfirmed = true
+	}
+	return fmt.Errorf("persist upgrade phase %s: %w", journal.Phase, err)
+}
+
+// reaffirmPhaseLocked completes an "already at this phase, nothing to do" fast
+// path. It returns nil when that phase is durably settled, and otherwise
+// RE-PERSISTS it.
+//
+// Every such fast path must go through here rather than returning nil on a bare
+// phase comparison. persistJournalLocked adopts a write whose bytes are visible
+// but whose barrier never closed, because the memory has to follow the bytes —
+// and a phase that arrived that way is exactly the kind that must not be reported
+// as an established boundary. finishTerminalRollbackFailure says so in as many
+// words: only the DURABLE rollback_failed phase is a circuit-breaker that may
+// disable the persistent recovery actor. Reporting success from an unconfirmed
+// one lets DisableRecoveryJob run over a terminal entry a crash can still lose,
+// stranding an earlier rollback phase with no actor left to finish it.
+func (t *Transaction) reaffirmPhaseLocked(phase Phase) error {
+	if !t.journalUnconfirmed {
+		return nil
+	}
+	return t.persistPhaseLocked(phase)
 }

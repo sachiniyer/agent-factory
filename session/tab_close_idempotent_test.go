@@ -79,7 +79,7 @@ func TestCloseTab_StaleSessionAlreadyDead(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_stale_close"
-	deadShell := agentName + shellTmuxSuffix
+	deadShell := agentName + tmuxTabSeparator + shellTabName
 	// Agent session is alive; the shell tab's session is already dead.
 	exec := deadAwareExec(map[string]bool{agentName: true})
 	pty := persistPtyFactory{t: t, cmdExec: exec}

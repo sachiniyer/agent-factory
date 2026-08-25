@@ -31,7 +31,7 @@ WORK="/tmp/af-playtest-$(date +%Y%m%d-%H%M%S)" && mkdir -p "$WORK"
 export AF_PLAYTEST_NAME="af-playtest-$$"
 git clone --depth 1 https://github.com/sachiniyer/agent-factory "$WORK/src"   # play-test master, not a dirty checkout
 make -C "$WORK/src" playtest-container-detached                               # container name: $AF_PLAYTEST_NAME
-docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -x /home/dev/bin/af ]; do sleep 1; done'   # af builds on boot
+docker exec "$AF_PLAYTEST_NAME" sh -c 'until [ -f /home/dev/sandbox/playtest-ready ]; do sleep 1; done'   # setup runs on boot
 
 # Drive the TUI exactly as in section 2, but through docker exec — no -L
 # socket needed; the container's default tmux server IS the private server:

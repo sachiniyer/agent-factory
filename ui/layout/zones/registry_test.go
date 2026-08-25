@@ -107,26 +107,3 @@ func TestRegistryReset(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "b", id)
 }
-
-// TestRegistryFromGridRegions exercises the intended per-frame usage:
-// register every visible region of a solved layout and verify any screen
-// cell resolves to exactly the region that contains it.
-func TestRegistryFromGridRegions(t *testing.T) {
-	l := layout.Grid{Panes: 2}.Solve(140, 40)
-	require.False(t, l.Fallback)
-
-	reg := zones.NewRegistry()
-	for id, r := range l.VisibleRegions() {
-		reg.Register(id, r)
-	}
-
-	for y := 0; y < l.Height; y++ {
-		for x := 0; x < l.Width; x++ {
-			id, local, ok := reg.Resolve(x, y)
-			require.True(t, ok, "cell (%d,%d) resolves — regions tile the screen", x, y)
-			r := l.VisibleRegions()[id]
-			require.True(t, r.Contains(layout.Point{X: x, Y: y}))
-			require.Equal(t, layout.Point{X: x - r.X, Y: y - r.Y}, local)
-		}
-	}
-}

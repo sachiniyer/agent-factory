@@ -324,8 +324,9 @@ seen).
 
 The rail shows the work you can still act on: **archived sessions are hidden by
 default**, and every other state is shown. The **funnel** control in the rail header
-opens a checkbox per state — Working, Ready, Lost, Dead, Limit reached, Archived —
-so you can reveal the archive or narrow to just one group (only what's working, say).
+opens a checkbox per state — Needs you, Working, Waiting on a limit, Broken,
+Archived — so you can reveal the archive or narrow to just one group (only
+what's working, say).
 Archived rows render dimmed when shown, so they read as inactive.
 
 The filter is a **display filter, applied within the selected project**: the daemon

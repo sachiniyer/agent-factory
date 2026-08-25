@@ -10,22 +10,15 @@ import (
 // panes get dynamic ids from PaneRegion — the N-pane model (#1088) has no
 // fixed pane regions.
 const (
-	RegionTree         = "tree"
-	RegionWorkspace    = "workspace"
-	RegionRailRule     = "railRule"
-	RegionAutomations  = "automations"
-	RegionProjectsRule = "projectsRule"
-	RegionProjects     = "projects"
-	RegionStatusBar    = "status"
+	RegionTree        = "tree"
+	RegionAutomations = "automations"
+	RegionProjects    = "projects"
 )
 
 // PaneRegion returns the region/focus-ring id for a workspace pane. The app
-// keys ring entries on the store's stable pane ids (so the ring survives
-// panes opening and closing); layout keys VisibleRegions on position.
+// keys ring entries on the store's stable pane ids so the ring survives
+// panes opening and closing.
 func PaneRegion(id int) string { return fmt.Sprintf("pane:%d", id) }
-
-// DividerRegion returns the region id for the 1-col divider right of pane i.
-func DividerRegion(i int) string { return fmt.Sprintf("divider:%d", i) }
 
 // IsPaneRegion reports whether a region/focus-ring id names a workspace pane.
 func IsPaneRegion(id string) bool { return strings.HasPrefix(id, "pane:") }
@@ -371,34 +364,4 @@ func (g Grid) Solve(width, height int) Layout {
 		}
 	}
 	return l
-}
-
-// VisibleRegions returns the regions visible at this size, keyed by region
-// id — panes and dividers positionally (PaneRegion(i)/DividerRegion(i)), the
-// bare workspace when no panes are open. Fallback layouts have none.
-func (l Layout) VisibleRegions() map[string]Rect {
-	regions := make(map[string]Rect)
-	if l.Fallback {
-		return regions
-	}
-	regions[RegionTree] = l.Tree
-	regions[RegionStatusBar] = l.StatusBar
-	if len(l.Panes) == 0 {
-		regions[RegionWorkspace] = l.Workspace
-	}
-	for i, r := range l.Panes {
-		regions[PaneRegion(i)] = r
-	}
-	for i, r := range l.Dividers {
-		regions[DividerRegion(i)] = r
-	}
-	if l.AutomationsVisible {
-		regions[RegionRailRule] = l.RailRule
-		regions[RegionAutomations] = l.Automations
-	}
-	if l.ProjectsVisible {
-		regions[RegionProjectsRule] = l.ProjectsRule
-		regions[RegionProjects] = l.Projects
-	}
-	return regions
 }
