@@ -231,6 +231,10 @@ func TestWithExecutableLock_LeavesAPrivateLockFile(t *testing.T) {
 	// this asserted 0600 against the shared branch's 0660. sharedInstallDir is the
 	// fixture that sets a posture and then proves it; its own comment names this
 	// same umask trap.
+	//
+	// The widened counterpart is TestExecutableLock_SharedWithTheDirectorysWriters
+	// in executable_lock_sharing_test.go, which already pins the 0660 branch from
+	// the same fixture — this is the private half it was missing.
 	executable := sharedInstallDir(t, 0o700)
 	_, shared := directoryWriterGroup(filepath.Dir(executable))
 	require.False(t, shared, "precondition: a privately-owned install directory")
@@ -240,27 +244,4 @@ func TestWithExecutableLock_LeavesAPrivateLockFile(t *testing.T) {
 	info, err := os.Stat(executableLockPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(journalFileMode), info.Mode().Perm())
-}
-
-// The other branch, pinned rather than merely tolerated. On a directory the group
-// can already install into, an owner-only lock protects nothing against that
-// group — they can replace the binary regardless — while locking them out gives
-// them EACCES and leaves them swapping UNLOCKED, which is strictly worse (#2948,
-// rationale at install_lock.go:245-262). So the lock widens to match, and carries
-// the DIRECTORY's group rather than the creator's primary group.
-func TestWithExecutableLock_WidensTheLockOnAGroupInstallableDirectory(t *testing.T) {
-	executable := sharedInstallDir(t, 0o770)
-	gid, shared := directoryWriterGroup(filepath.Dir(executable))
-	require.True(t, shared, "precondition: a group-installable install directory")
-
-	require.NoError(t, withExecutableLock(executable, false, func() error { return nil }))
-
-	info, err := os.Stat(executableLockPath(executable))
-	require.NoError(t, err)
-	require.Equal(t, os.FileMode(journalFileMode|0o060), info.Mode().Perm(),
-		"a lock the authorized group cannot open sends them installing unlocked")
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
-	require.Equal(t, gid, int(stat.Gid),
-		"widening to the CREATOR's primary group would admit an unrelated group and still lock out the authorized one")
 }

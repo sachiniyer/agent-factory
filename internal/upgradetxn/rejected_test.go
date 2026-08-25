@@ -138,12 +138,26 @@ func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
 // refused — but on a directory the group can already install into, that group can
 // replace the binary outright, so an owner-only ledger withholds nothing from
 // them and instead blocks the authorized writers the widening exists to admit
-// (install_lock.go:245-262). The ledger carries the DIRECTORY's group, not the
-// creator's primary group.
+// (install_lock.go:245-262).
+//
+// Scoped to the MODE. The group the ledger carries is a separate claim, and a
+// single-user fixture cannot test it — the temp dir's group already equals the
+// creator's primary group, so "file gid == dir gid" passes against unfixed code.
+// TestExecutableLock_TakesTheDirectorysGroup owns that one, and retargets the
+// directory to a SECONDARY group to give the assertion teeth.
+//
+// The sibling ledger tests cover the READ path (realign on
+// readRejectedLedger); this is the initial WRITE, which goes through
+// durableAtomicWriteFileInGroup instead.
 func TestRejectedLedger_WidensOnAGroupInstallableDirectory(t *testing.T) {
 	executable := sharedInstallDir(t, 0o770)
-	gid, shared := directoryWriterGroup(filepath.Dir(executable))
-	require.True(t, shared, "precondition: a group-installable install directory")
+	if _, shared := directoryWriterGroup(filepath.Dir(executable)); !shared {
+		// Not a failure. Where ACL state cannot be read — macOS, and any filesystem
+		// that presents one — the classifier declines and the ledger stays private,
+		// which is the correct behaviour. Asserting the widening there would make a
+		// red job out of a right answer, and teach the next reader to ignore it.
+		t.Skip("this filesystem/uid does not present the directory as group-installable")
+	}
 
 	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
 
@@ -151,10 +165,6 @@ func TestRejectedLedger_WidensOnAGroupInstallableDirectory(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
 		"a ledger the authorized group cannot read leaves them unable to see what this box refused")
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	require.True(t, ok)
-	require.Equal(t, gid, int(stat.Gid),
-		"the ledger must carry the DIRECTORY's group; the creator's primary group is the wrong audience")
 }
 
 // TestCandidateRejected_StructurallyInvalidLedgerErrors — decoding successfully is
