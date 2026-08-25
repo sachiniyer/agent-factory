@@ -1032,46 +1032,72 @@ func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
 // renders its 72-cell slice.
 func TestConfigPaneEditFieldReflowsOnResize(t *testing.T) {
 	const key = "vscode_server_binary"
-	entries := config.ManifestWithValues(config.DefaultConfig())
-	seeded := false
-	for i := range entries {
-		if entries[i].Key == key {
-			entries[i].Value = "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
-			seeded = true
-		}
-	}
-	if !seeded {
-		t.Fatalf("%s left the manifest — this test is vacuous", key)
-	}
+	long := "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
 
-	c := NewConfigPane()
-	c.SetSize(72, paneHeight)
-	c.SetEntries(entries, "/tmp/config.toml")
-	c.SetFocus(true)
-	c.showAdvanced = true
-	c.rebuildRows()
-	for step := 0; step < 60; step++ {
-		if e := c.selectedEntry(); e != nil && e.Key == key {
-			break
-		}
-		c.move(1)
-	}
-	if e := c.selectedEntry(); e == nil || e.Key != key {
-		t.Fatalf("never landed on %s", key)
-	}
-	c.beginEdit()
+	// EVERY cursor position, not just the end. handleOverflow moves the offsets only
+	// when the cursor is OUTSIDE the window it already has (pos < offset, or
+	// pos >= offsetRight), so a test that leaves the cursor at CursorEnd always
+	// satisfies the second condition and passes while an interior cursor is still
+	// stranded — which is what the first version of this test did.
+	//
+	// A FRESH pane per case, deliberately: sharing one leaks viewport state from the
+	// previous case, and a case that inherits an already-narrow window passes without
+	// exercising anything. Measured — with the pane shared, the interior case passed
+	// against an implementation the start case had just failed.
+	for _, tc := range []struct {
+		name string
+		// posOf picks the cursor position from the value's length.
+		posOf func(n int) int
+	}{
+		{name: "cursor at the start", posOf: func(int) int { return 0 }},
+		{name: "cursor in the interior", posOf: func(n int) int { return n / 2 }},
+		{name: "cursor at the end", posOf: func(n int) int { return n }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := config.ManifestWithValues(config.DefaultConfig())
+			seeded := false
+			for i := range entries {
+				if entries[i].Key == key {
+					entries[i].Value = long
+					seeded = true
+				}
+			}
+			if !seeded {
+				t.Fatalf("%s left the manifest — this test is vacuous", key)
+			}
 
-	// The terminal narrows while the edit is open. SetSize is what a resize calls.
-	c.SetSize(38, paneHeight)
+			c := NewConfigPane()
+			c.SetSize(72, paneHeight)
+			c.SetEntries(entries, "/tmp/config.toml")
+			c.SetFocus(true)
+			c.showAdvanced = true
+			c.rebuildRows()
+			for step := 0; step < 60; step++ {
+				if e := c.selectedEntry(); e != nil && e.Key == key {
+					break
+				}
+				c.move(1)
+			}
+			if e := c.selectedEntry(); e == nil || e.Key != key {
+				t.Fatalf("never landed on %s", key)
+			}
+			c.beginEdit()
+			pos := tc.posOf(len(c.input.Value()))
+			c.input.SetCursor(pos)
 
-	budget := c.input.Width + lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
-	if got := lipgloss.Width(c.input.View()); got > budget {
-		t.Fatalf("after narrowing to 38, the field renders %d cells for a %d-cell budget (Width=%d) — the viewport still describes the old width, so the row gets clipped and the value's tail and cursor disappear",
-			got, budget, c.input.Width)
-	}
-	// And the cursor must not have been dragged somewhere by the reflow.
-	if c.input.Position() != len(c.input.Value()) {
-		t.Errorf("the reflow moved the cursor: position %d, value length %d", c.input.Position(), len(c.input.Value()))
+			// The terminal narrows while the edit is open. SetSize is what a resize calls.
+			c.SetSize(38, paneHeight)
+
+			budget := c.input.Width + lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
+			if got := lipgloss.Width(c.input.View()); got > budget {
+				t.Fatalf("after narrowing to 38 with the %s, the field renders %d cells for a %d-cell budget (Width=%d) — the viewport still describes the old width, so the row gets clipped and the value's tail and cursor disappear",
+					tc.name, got, budget, c.input.Width)
+			}
+			// And the reflow must not have dragged the cursor.
+			if c.input.Position() != pos {
+				t.Errorf("the reflow moved the cursor: position %d, want %d", c.input.Position(), pos)
+			}
+		})
 	}
 }
 

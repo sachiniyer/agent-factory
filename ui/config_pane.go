@@ -199,8 +199,22 @@ func (c *ConfigPane) SetSize(width, height int) {
 // fitPaneLine then clipped from the right: the value's tail and the cursor
 // disappeared until the next keystroke happened to recompute it. Measured before
 // the fix: Width 42 -> Width 10 with the value untouched still rendered a 45-cell
-// View. SetCursor to the position it already holds is the public seam that reflows
-// without moving anything.
+// View.
+//
+// Reflowing takes BOTH calls below, and which anchor they use is load-bearing.
+// handleOverflow only moves the offsets when the cursor falls OUTSIDE the window it
+// already has (pos < offset, or pos >= offsetRight); otherwise it returns with the
+// old window intact. So re-setting the cursor to the position it already holds
+// reflows nothing for a cursor in the interior — narrowing 42 -> 10 with the cursor
+// at position 25 kept the 45-cell View — and anchoring at the START does not help
+// either, because offset is already 0 there and the stale offsetRight is never
+// revisited (measured: the start case still rendered the wide slice).
+//
+// CursorEnd is the one anchor that always satisfies a branch: pos == len(value) is
+// >= offsetRight for any window, so offsetRight is rebuilt and offset walked back
+// against the NEW Width. Restoring the real position then falls outside that
+// window, or inside one that already fits. SetValue is not an alternative: it
+// re-enters the same pos-relative branches (#3430 review, round 2).
 func (c *ConfigPane) sizeEditField() {
 	width := 0
 	if c.width > 0 {
@@ -211,7 +225,9 @@ func (c *ConfigPane) sizeEditField() {
 		_, width = c.editRowSplit(key)
 	}
 	c.input.Width = width
-	c.input.SetCursor(c.input.Position())
+	pos := c.input.Position()
+	c.input.CursorEnd()
+	c.input.SetCursor(pos)
 }
 
 // editRowSplit divides an editing row's width between the KEY and the value
