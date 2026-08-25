@@ -24,6 +24,7 @@ const (
 	dedicatedServerLogEnv     = "AF_TMUX_SERVER_LOG"
 	dedicatedServerLogName    = "tmux-server.log"
 	serverProbeTimeout        = 250 * time.Millisecond
+	tmuxVersionProbeTimeout   = 2 * time.Second
 	serverStartupTimeout      = 2 * time.Second
 	serverScopeKillTimeout    = 2 * time.Second
 )
@@ -33,6 +34,9 @@ var (
 	daemonServerHome     string
 	serverBootstrapMu    sync.Mutex
 	noStartWarningOnce   sync.Once
+	noStartProbeMu       sync.Mutex
+	noStartProbeCached   bool
+	noStartProbeSupports bool
 )
 
 // ConfigureDaemonServer gives the tmux launch path the AF home where the
@@ -45,13 +49,22 @@ func ConfigureDaemonServer(home string) func() {
 	}
 	daemonServerConfigMu.Lock()
 	previous := daemonServerHome
+	resetNoStartProbeCache()
 	daemonServerHome = home
 	daemonServerConfigMu.Unlock()
 	return func() {
 		daemonServerConfigMu.Lock()
+		resetNoStartProbeCache()
 		daemonServerHome = previous
 		daemonServerConfigMu.Unlock()
 	}
+}
+
+func resetNoStartProbeCache() {
+	noStartProbeMu.Lock()
+	noStartProbeCached = false
+	noStartProbeSupports = false
+	noStartProbeMu.Unlock()
 }
 
 func configuredDaemonServerHome() (string, bool) {
@@ -201,11 +214,26 @@ func tmuxServerRunning() bool {
 	return exec.CommandContext(ctx, "tmux", "show-options", "-gv", "exit-empty").Run() == nil
 }
 
-func tmuxSupportsNoStart() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), serverProbeTimeout)
+func tmuxSupportsNoStart() (bool, error) {
+	noStartProbeMu.Lock()
+	defer noStartProbeMu.Unlock()
+	if noStartProbeCached {
+		return noStartProbeSupports, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), tmuxVersionProbeTimeout)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, "tmux", "-V").Output()
-	return err == nil && tmuxVersionAtLeast(strings.TrimSpace(string(out)), 3, 3)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("tmux -V timed out after %s: %w", tmuxVersionProbeTimeout, ctxErr)
+		}
+		return false, fmt.Errorf("tmux -V: %w", err)
+	}
+
+	noStartProbeSupports = tmuxVersionAtLeast(strings.TrimSpace(string(out)), 3, 3)
+	noStartProbeCached = true
+	return noStartProbeSupports, nil
 }
 
 func dedicatedServerScopeCommand(logPath string) *exec.Cmd {
@@ -324,7 +352,12 @@ func newTmuxServerCommandAfterEnsure(serverErr error, args ...string) (*exec.Cmd
 	if _, configured := configuredDaemonServerHome(); configured {
 		serverReady := serverErr == nil || tmuxServerRunning()
 		if serverReady {
-			if tmuxSupportsNoStart() {
+			supportsNoStart, probeErr := tmuxSupportsNoStart()
+			if probeErr != nil {
+				log.WarningLog.Printf("tmux -V probe failed: %v; using -N no-autostart client", probeErr)
+				return exec.Command("tmux", append([]string{"-N"}, args...)...), false
+			}
+			if supportsNoStart {
 				return exec.Command("tmux", append([]string{"-N"}, args...)...), false
 			}
 			noStartWarningOnce.Do(func() {
