@@ -128,9 +128,13 @@ func (m *Manager) keepIncompleteArchiveCommitted(
 	cause error,
 ) (string, session.InstanceData, error) {
 	if persistErr := archivePersist(m, repoID, instance); persistErr != nil {
-		return "", session.InstanceData{}, errors.Join(cause, fmt.Errorf(
+		// A FAILED archive exit, so the on-archive hook's outcome composes in here
+		// too (#3460) — this path carries a hookErr that the committed return below
+		// would have surfaced, and dropping it on the way out is the same
+		// swallowed-outcome bug pointed at a different exit.
+		return "", session.InstanceData{}, failedArchiveWithHook(instance.Title, errors.Join(cause, fmt.Errorf(
 			"its incomplete archive was kept at %s because rolling it back would omit retained files, but the committed archive could not be written durably, so it is not claimed committed and needs manual recovery: %w",
-			archivedPath, persistErr))
+			archivedPath, persistErr)), hookErr)
 	}
 	archived := instance.ToInstanceData()
 	m.publishEvent(agentproto.EventSessionArchived, archived)

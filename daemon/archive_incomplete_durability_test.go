@@ -170,3 +170,34 @@ func TestArchiveSession_IncompleteAndUndurable_StaysPlainFailure(t *testing.T) {
 		break
 	}
 }
+
+// #3460 composes into the new failure exit. The on-archive hook runs at the
+// teardown chokepoint, before this helper is reached, so a hookErr can be in
+// flight on the undurable path too — and the committed return would have
+// surfaced it. Dropping it here is the same swallowed-outcome bug #3460 fixed,
+// pointed at a different exit: the operator's on_archive_command may already
+// have deleted a remote branch, and they would be sent looking at the disk.
+func TestKeepIncompleteArchiveCommitted_UndurableWriteStillSurfacesTheHookFailure(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, _ := registerArchivable(t, manager, repoID, repoPath, "worker")
+	markArchiveIncomplete(t, inst)
+
+	prev := archivePersist
+	archivePersist = func(*Manager, string, *session.Instance) error {
+		return errors.New("no space left on device")
+	}
+	t.Cleanup(func() { archivePersist = prev })
+
+	_, _, err := manager.keepIncompleteArchiveCommitted(
+		repoID, "/archived/worker", inst,
+		errors.New("on_archive_command exited 1"),
+		errors.New("final VS Code editor teardown was not confirmed"),
+	)
+
+	require.Error(t, err)
+	assert.False(t, isMutationCommitted(err))
+	assert.Contains(t, err.Error(), "on_archive_command exited 1",
+		"a failed archive must still report that its on-archive hook failed (#3460)")
+	assert.Contains(t, err.Error(), "could not be written durably",
+		"and the primary cause stays the durability failure the caller acts on")
+}
