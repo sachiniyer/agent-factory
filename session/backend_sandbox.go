@@ -406,6 +406,11 @@ func (p *sandboxProvisioner) reapProvisionFailure(provisionErr error) error {
 // UNDETERMINED (ErrWorkspaceStateUnknown) rather than as a completed reap — the
 // daemon then RETAINS the record and retries, instead of deleting a row whose
 // sandbox may still be running. Only a clean exit latches.
+//
+// Every PRE-FLIGHT failure reports the same way, for the same reason: it says
+// something about this host, not about the sandbox. A nonce that cannot be
+// generated (#3449) is one of them — the script is never built, so ssh never
+// runs and the sandbox is untouched.
 func (p *sandboxProvisioner) reap() error {
 	p.reapMu.Lock()
 	defer p.reapMu.Unlock()
@@ -420,7 +425,19 @@ func (p *sandboxProvisioner) reap() error {
 
 	nonce, nonceErr := sandboxReapNonce()
 	if nonceErr != nil {
-		return fmt.Errorf("backend=%s: cannot generate a reap challenge: %w", p.label(), nonceErr)
+		// PRE-FLIGHT, so nothing remote ran. Without a nonce there is no script to
+		// send, ssh is never invoked, and the sandbox is exactly as it was: the
+		// agent-server still running, the session dir still there, and this record
+		// their only handle. That is the same UNDETERMINED state as ssh's 255 and a
+		// missing sentinel below, and it must be reported the same way — a plain
+		// error here reads as a teardown that TOLD us something, and
+		// deleteSessionRecord retires the row over a sandbox that is still billing
+		// (#3449). It also must not latch, so the next poll re-runs the reap once
+		// the entropy source recovers.
+		reapErr := fmt.Errorf("%w: backend=%s: cannot generate a reap challenge for %q, so its sandbox was never contacted; retry the teardown, and remove the sandbox by hand if it keeps failing: %w",
+			ErrWorkspaceStateUnknown, p.label(), p.sessionDir, nonceErr)
+		log.ErrorLog.Printf("sandbox runtime: %v", reapErr)
+		return reapErr
 	}
 	script, expect := p.reapScript(nonce)
 	out, err := p.Run(sshReapTimeout, script, nil, true)
@@ -547,7 +564,11 @@ func (p *sandboxProvisioner) reapScript(nonce string) (script, expect string) {
 
 // sandboxReapNonce makes each reap's challenge unique, so a marker captured from
 // an earlier run's log cannot satisfy a later one.
-func sandboxReapNonce() (string, error) {
+//
+// It is a var so the pre-flight failure path has a test: crypto/rand cannot be
+// made to fail from a test on any platform af runs on, and that path decides
+// whether a still-running sandbox keeps its record (#3449).
+var sandboxReapNonce = func() (string, error) {
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
