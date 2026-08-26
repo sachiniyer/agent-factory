@@ -337,12 +337,25 @@ func (m *Manager) validateTitleNamespacesLocked(repoID, repoPath, title, program
 // reservation), so two repos could take the same name sequentially and hand both
 // sandboxes the identical --name.
 //
-// Corrupted per-repo files are surfaced rather than skipped: a hidden hook
-// session would otherwise let a colliding name through, and the cost of a false
-// refusal here is a clear error, while the cost of a miss is two provisioned
-// sandboxes fighting over one name.
+// Per-repo files this cannot READ and per-repo files it cannot PARSE are both
+// surfaced rather than skipped: a hidden hook session would otherwise let a
+// colliding name through, and the cost of a false refusal here is a clear error,
+// while the cost of a miss is two provisioned sandboxes fighting over one name.
+//
+// The two are the same epistemic state (#3476). This function exists to prove a
+// name is FREE, and neither a file it could not parse nor one it could not open
+// is evidence of that — so it takes the loader form that REPORTS unread repos.
+// config.LoadAllRepoInstances drops them silently, which made one unreadable
+// file in an unrelated project answer "no collision" and admit the duplicate.
+//
+// Two things keep the fail-closed cost bounded. A collision found in a repo that
+// DID load short-circuits above, so an unrelated unread file never downgrades a
+// specific "taken by X in Y" into a generic refusal. And only the remote-hook
+// namespace consults this scan at all — local titles are per-repo — so a stale
+// unreadable project file cannot block ordinary session creation. What is left
+// is a refusal that names the file and the I/O error, which is repairable.
 func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, skipped, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return "", "", fmt.Errorf("%w: %v", errTitleCheckFatal, err)
 	}
@@ -365,10 +378,32 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 			}
 		}
 	}
+	// Past the scan, so nothing that loaded holds the name. Everything below is a
+	// hole in the evidence, not an answer.
+	var unreadable []config.RepoInstancesSkip
+	for _, skip := range skipped {
+		// This repo's own rows are the caller's job — the create path loads them
+		// via loadRepoInstanceData, which propagates its read error — and this
+		// scan excludes them by contract, so refusing on them here would be a
+		// second, differently-worded refusal for a case already covered.
+		if skip.RepoID == repoID {
+			continue
+		}
+		unreadable = append(unreadable, skip)
+	}
+	var problems []string
+	if len(unreadable) > 0 {
+		problems = append(problems, fmt.Sprintf("%d project record file(s) could not be read: %s",
+			len(unreadable), config.FormatRepoInstancesSkips(unreadable)))
+	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)
-		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free: %d repo(s) have a corrupted instances.json that may be hiding a session using it: %s",
-			errTitleCheckFatal, candidate, len(corrupted), strings.Join(corrupted, ", "))
+		problems = append(problems, fmt.Sprintf("%d repo(s) have a corrupted instances.json: %s",
+			len(corrupted), strings.Join(corrupted, ", ")))
+	}
+	if len(problems) > 0 {
+		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free — %s; any of them may be hiding a session already using it, so repair or remove the file(s) and retry",
+			errTitleCheckFatal, candidate, strings.Join(problems, "; "))
 	}
 	return "", "", nil
 }

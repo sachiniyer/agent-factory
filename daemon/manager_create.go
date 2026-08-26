@@ -771,7 +771,8 @@ func (m *Manager) reserveCreate(req CreateSessionRequest) (*config.RepoContext, 
 
 // errTitleCheckFatal marks a title-availability failure that is NOT "this
 // candidate is taken" but "the check itself could not be completed" — today, a
-// corrupted instances.json that might be hiding a hook session using the name.
+// per-repo instances.json that is corrupted, or that could not be read at all
+// (#3476), and might be hiding a hook session using the name.
 //
 // The distinction is load-bearing for nextAvailableTitleLocked, which walks
 // candidates (base, base-2, base-3 …) and reads ANY error as "taken, try the
