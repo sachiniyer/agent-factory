@@ -210,13 +210,50 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// failure exit on a provisioned runtime already follows; a new exit does not
 	// get to skip it.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return ProvisionResult{}, discardUnusableSandbox(res, opts.SandboxCredentials, rerr)
+		return ProvisionResult{}, discardUnusableSandbox(opts.Title, res, opts.SandboxCredentials, rerr)
 	}
 	return res, nil
 }
 
-// discardUnusableSandbox reaps a sandbox that was provisioned but must not be
-// used, and revokes the credential minted for it.
+// reapUnusableSandbox tears down a sandbox that was provisioned but must not be
+// used, and settles the ONE question every such failure exit has to answer: is
+// the sandbox confirmed gone, or might it still be running?
+//
+// THE rule, in one place instead of once per branch: an UNKNOWN teardown outcome
+// must never drop the only handle on a sandbox that may still be running. That
+// is the same fail-closed posture TeardownStateUnknown already buys everywhere
+// else — a record that cannot be proved dead is the last pointer to it.
+//
+// Where the handle GOES is the caller's business, and the only thing that
+// differs between the create and the replacement paths: retain installs it, and
+// nil means the caller has nowhere to put one (see discardUnusableSandbox). The
+// classification is NOT the caller's business, because a branch that re-derives
+// it drifts — #3475 is exactly that drift, two adjacent exits in
+// reprovisionRemote answering this condition differently.
+//
+// A KNOWN teardown error still means the runtime is gone, per the runtimes'
+// best-effort contract, so it is logged and the cause is returned alone.
+func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain func(ProvisionResult)) error {
+	if res.Teardown == nil {
+		return cause
+	}
+	terr := res.Teardown()
+	if terr == nil {
+		return cause
+	}
+	if TeardownStateUnknown(terr) {
+		if retain != nil {
+			retain(res)
+		}
+		return fmt.Errorf("%w; and the sandbox provisioned for it could not be confirmed torn down, so it may still be running: %w", cause, terr)
+	}
+	log.WarningLog.Printf("session %q: discarded sandbox teardown reported a completed error: %v", title, terr)
+	return cause
+}
+
+// discardUnusableSandbox is the CREATE path's exit for a sandbox that was
+// provisioned but must not be used: reap it, and revoke the credential minted
+// for it.
 //
 // Both halves matter and both were missing. The runtime leaks without the reap,
 // because the caller drops the ProvisionResult on error and with it the only
@@ -224,23 +261,16 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 // registered against a session whose sandbox no longer exists — a token minted
 // for a runtime that is gone, which is the state this feature exists to prevent.
 //
-// A teardown that reports an UNKNOWN outcome is joined into the returned error
-// rather than swallowed: the sandbox may still be running, and the operator is
-// the only one who can settle it.
-func discardUnusableSandbox(res ProvisionResult, creds SandboxCredentials, cause error) error {
+// It passes NO retainer, and that is a property of this path rather than an
+// oversight: create fails before an Instance exists, so an unconfirmed teardown
+// has nowhere to install a handle and can only be NAMED in the returned error
+// for an operator to settle. The replacement path does have an instance, and
+// retains — see Instance.discardUnusableReplacement.
+func discardUnusableSandbox(title string, res ProvisionResult, creds SandboxCredentials, cause error) error {
 	if creds != nil {
 		creds.Revoke()
 	}
-	if res.Teardown == nil {
-		return cause
-	}
-	if terr := res.Teardown(); terr != nil {
-		if TeardownStateUnknown(terr) {
-			return fmt.Errorf("%w; and the sandbox provisioned for it could not be confirmed torn down, so it may still be running: %w", cause, terr)
-		}
-		log.WarningLog.Printf("discarded sandbox teardown reported a completed error: %v", terr)
-	}
-	return cause
+	return reapUnusableSandbox(title, res, cause, nil)
 }
 
 // resolveBackendKind decides which runtime a new session uses, in precedence
