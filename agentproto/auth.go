@@ -2,7 +2,6 @@ package agentproto
 
 import (
 	"errors"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -246,19 +245,4 @@ func BearerToken(headerValue string) string {
 // query values, returning "" when absent.
 func AccessTokenFromQuery(q url.Values) string {
 	return q.Get(AccessTokenQueryParam)
-}
-
-// TokenFromRequest extracts the bearer token an incoming REST or WS request
-// presents, preferring the Authorization header and falling back to the
-// ?access_token= query param (the browser WS path). It returns "" when neither is
-// present. Pure extraction; the caller's auth middleware decides what to do with
-// it (a no-op in Phase 2).
-func TokenFromRequest(r *http.Request) string {
-	if tok := BearerToken(r.Header.Get(AuthHeader)); tok != "" {
-		return tok
-	}
-	if r.URL != nil {
-		return AccessTokenFromQuery(r.URL.Query())
-	}
-	return ""
 }
