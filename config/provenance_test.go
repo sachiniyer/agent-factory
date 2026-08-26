@@ -272,9 +272,9 @@ program = "claude"
 
 func TestResolveConfigExplainsLegacyAndExplicitEmptyRepoValue(t *testing.T) {
 	repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
-	require.NoError(t, SaveRepoConfig(RepoIDFromRoot(repoRoot), &RepoConfig{
+	writeLegacyRepoConfig(t, RepoIDFromRoot(repoRoot), &RepoConfig{
 		PostWorktreeCommands: []string{"legacy-command"},
-	}))
+	})
 	writeInRepoTomlConfig(t, repoRoot, "post_worktree_commands = []\n")
 
 	resolved, err := ResolveConfig(repoRoot)

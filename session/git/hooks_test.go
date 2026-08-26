@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/sachiniyer/agent-factory/config"
 )
 
@@ -163,9 +161,9 @@ func freshRepoConfig(t *testing.T, postCmds []string) string {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repoPath := filepath.Join(t.TempDir(), "repo")
 	repoID := config.RepoIDFromRoot(repoPath)
-	require.NoError(t, config.SaveRepoConfig(repoID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: postCmds,
-	}))
+	})
 	return repoPath
 }
 

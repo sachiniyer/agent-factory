@@ -129,9 +129,9 @@ func TestResolveMainRepoRoot_BareCloneWorktree(t *testing.T) {
 	assert.Equal(t, bare, directBare.IdentityPath())
 	assert.Equal(t, repo.ID, directBare.ID)
 
-	require.NoError(t, SaveRepoConfig(repo.ID, &RepoConfig{
+	writeLegacyRepoConfig(t, repo.ID, &RepoConfig{
 		PostWorktreeCommands: []string{"legacy-from-bare-identity"},
-	}))
+	})
 	require.NoError(t, os.MkdirAll(filepath.Join(worktree, InRepoConfigDirName), 0o755))
 	require.NoError(t, os.WriteFile(InRepoTomlConfigPath(worktree),
 		[]byte("default_program = \"codex\"\n"), 0o644))
@@ -198,9 +198,9 @@ func TestResolveConfigForRepoWarnsAboutRetainedLegacyBareParentConfig(t *testing
 	require.NoError(t, err)
 	legacyRoot, legacyID := repo.LegacyBareRepoIdentity()
 	require.Equal(t, parent, legacyRoot)
-	require.NoError(t, SaveRepoConfig(legacyID, &RepoConfig{
+	writeLegacyRepoConfig(t, legacyID, &RepoConfig{
 		PostWorktreeCommands: []string{"ambiguous-parent-command"},
-	}))
+	})
 	_, legacyPath, err := repoConfigPath(legacyID)
 	require.NoError(t, err)
 	warnings := captureLog(t, &aflog.WarningLog)
