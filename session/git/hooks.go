@@ -23,8 +23,8 @@ import (
 // shell — normal hooks complete their I/O at shell exit and return instantly.
 const hookWaitDelay = 2 * time.Second
 
-// RunPostWorktreeHooksAsync runs the per-repo post_worktree_commands in the
-// background. Each command is executed sequentially via "sh -c" with the
+// RunPostWorktreeHooksAsyncWithEnvironment runs the per-repo post_worktree_commands
+// in the background. Each command is executed sequentially via "sh -c" with the
 // working directory set to worktreePath. The provided context can be used to
 // cancel in-flight hooks (e.g. when the worktree is being cleaned up). Each
 // command runs as the leader of its own process group so that the whole tree
@@ -34,20 +34,16 @@ const hookWaitDelay = 2 * time.Second
 // outlive their parent hook.
 // Errors are logged but do not propagate.
 //
+// Repository-provided commands receive common Git/runtime names plus only the
+// operator's explicit extensions. Selecting an agent for the session does not
+// grant that agent's provider credentials to repository code.
+//
 // The returned channel is closed once every hook has finished — whether by
 // normal completion, failure, or ctx cancellation. It is closed immediately
 // when there are no hooks to run (or the repo config can't be resolved). It
 // lets callers tell whether provisioning is still in flight; in particular the
 // readiness wait uses it so a slow build hook running concurrently with the
 // agent is not charged against the agent's startup budget (see task.WaitForReady).
-func RunPostWorktreeHooksAsync(ctx context.Context, repoPath, worktreePath string) <-chan struct{} {
-	return RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, worktreePath, nil)
-}
-
-// RunPostWorktreeHooksAsyncWithEnvironment is the session-aware form used by
-// GitWorktree. Repository-provided commands receive common Git/runtime names
-// plus only the operator's explicit extensions. Selecting an agent for the
-// session does not grant that agent's provider credentials to repository code.
 func RunPostWorktreeHooksAsyncWithEnvironment(ctx context.Context, repoPath, worktreePath string, passthrough []string) <-chan struct{} {
 	done := make(chan struct{})
 	// A bare repository's identity path contains no checked-out config. Once a
