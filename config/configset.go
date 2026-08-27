@@ -564,6 +564,7 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
+	current = stripUTF8BOM(current)
 	updated := string(current)
 	if w.structured {
 		base := DefaultConfig()
@@ -647,6 +648,7 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
+	current = stripUTF8BOM(current)
 	updated := string(current)
 	if w.structured {
 		updated, err = setTOMLStructured(updated, w.key, w.encoded)

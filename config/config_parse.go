@@ -98,6 +98,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) 
 // era), but a silently ignored key is how typos eat settings, so each one is
 // named in the log.
 func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
+	data = stripUTF8BOM(data)
 	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
 	}
@@ -138,13 +139,22 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	return validateConfig(config, prettyConfigPath)
 }
 
+// stripUTF8BOM removes a leading UTF-8 BOM. TOML 1.0 says a BOM should be
+// ignored when present, but go-toml/v2 does not strip it, so every entry
+// point that feeds raw file bytes to toml.Unmarshal must call this first.
+// bytes.TrimPrefix is a no-op when the prefix is absent, so applying it at
+// more than one layer is safe.
+func stripUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+}
+
 // isEffectivelyEmptyToml reports whether data decodes to an empty TOML
 // document. That includes zero bytes, whitespace, a UTF-8 BOM, and comments
 // without any keys or tables. Every such file is valid TOML, so without this
 // check it would silently become an all-defaults canonical config while
 // shadowing a real config.json.
 func isEffectivelyEmptyToml(data []byte) bool {
-	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	trimmed := stripUTF8BOM(data)
 	if len(bytes.TrimSpace(trimmed)) == 0 {
 		return true
 	}

@@ -138,6 +138,7 @@ func LoadProjectConfig(id string) (*ProjectConfig, error) {
 // file is validated on exactly the rules a read applies.
 func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	prettyPath := prettyHomePath(path)
+	data = stripUTF8BOM(data)
 	if isEffectivelyEmptyToml(data) {
 		// A contentless file is valid TOML but never something to declare on
 		// purpose; keep the loud contract the global and in-repo loaders use.
