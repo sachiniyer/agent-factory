@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -255,7 +256,7 @@ func rotationPolicy() (maxBytes int64, backups int) {
 		}
 		parsed := false
 		if data, err := os.ReadFile(filepath.Join(configDir, "config.toml")); err == nil {
-			parsed = toml.Unmarshal(data, &cfg) == nil
+			parsed = toml.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &cfg) == nil
 		} else if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
 			parsed = json.Unmarshal(data, &cfg) == nil
 		}
