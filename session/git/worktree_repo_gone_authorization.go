@@ -138,7 +138,8 @@ func definitiveMissingRepository(probeErr error) bool {
 func definitiveNonGitRepository(probeErr error, commandEnv []string) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(probeErr, &exitErr) ||
-		!strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
+		!(strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
+			strings.Contains(string(exitErr.Stderr), "not a git repository (or any parent up to mount point")) ||
 		environmentContainsName(commandEnv, "GIT_DIR") {
 		return false
 	}
