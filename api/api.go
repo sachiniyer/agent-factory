@@ -564,8 +564,8 @@ func jsonOut(v any) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(string(data))
-	return nil
+	_, err = fmt.Fprintln(os.Stdout, string(data))
+	return err
 }
 
 // jsonError writes a JSON error to stderr and returns the error. By default it

@@ -26,6 +26,25 @@ func captureStderr(t *testing.T, fn func()) string {
 	return string(data)
 }
 
+// withFailingStdout replaces os.Stdout with a closed pipe write-end so every
+// write to it fails with os.ErrClosed. This stands in for ENOSPC/EIO on a
+// redirected file (disk full, stale NFS) — the real-world failure mode where
+// the discarded write error caused silent exit 0. The original os.Stdout is
+// always restored, even when an assertion aborts the test.
+func withFailingStdout(t *testing.T, fn func()) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	require.NoError(t, w.Close())
+	require.NoError(t, r.Close())
+
+	fn()
+}
+
 // withEnvelope flips the opt-in --json flag on for the duration of fn and
 // restores it, so a test can exercise the enveloped output path in isolation.
 func withEnvelope(t *testing.T, fn func()) {
@@ -58,6 +77,33 @@ func TestJSONOut_EnvelopeWrapsPayload(t *testing.T) {
 		})
 	})
 	require.JSONEq(t, `{"data":{"ok":true},"error":null}`, out)
+}
+
+// TestJSONOut_StdoutWriteError_BarePath verifies the bare (no --json) path
+// propagates stdout write failures to the caller instead of silently discarding
+// them (the api.go:567 bug: fmt.Println's error was dropped and nil returned).
+// Scripts redirecting output to a full/stale-NFS file rely on a non-zero exit
+// when the write fails, which requires jsonOut to surface the error.
+func TestJSONOut_StdoutWriteError_BarePath(t *testing.T) {
+	require.False(t, envelopeOutput, "bare path must be the default")
+	var err error
+	withFailingStdout(t, func() {
+		err = jsonOut(map[string]bool{"ok": true})
+	})
+	require.Error(t, err, "bare jsonOut must propagate stdout write failures, not return nil")
+}
+
+// TestJSONOut_StdoutWriteError_EnvelopePath is the consistency guard: the
+// envelope path already propagates WriteEnvelope's write error, and must keep
+// doing so. Both --json and non---json output modes must fail closed.
+func TestJSONOut_StdoutWriteError_EnvelopePath(t *testing.T) {
+	var err error
+	withEnvelope(t, func() {
+		withFailingStdout(t, func() {
+			err = jsonOut(map[string]bool{"ok": true})
+		})
+	})
+	require.Error(t, err, "envelope jsonOut must continue to propagate stdout write failures")
 }
 
 // TestJSONError_DefaultIsBareError locks in the historical stderr shape
