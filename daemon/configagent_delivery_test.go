@@ -65,6 +65,11 @@ func captureConfigAgentReceiptLogs(t *testing.T) (info, warnings *synchronizedLo
 // contract at the byte boundary af drives:
 //
 //   - the new directory-trust modal contains a selected `› 1. Yes` row;
+//   - the modal is a ListSelectionView, so it HIDES the terminal cursor; the
+//     ordinary composer it reveals after Enter exposes one (same contract
+//     renderFixturePane in session/tmux/codex_safety_real_test.go models, and
+//     the contract inspectCodexSafetyPrompt / the directory-trust handler key
+//     off to distinguish an active modal from quoted text);
 //   - bracketed paste is enabled, but pasted data is ignored while that modal is
 //     active;
 //   - Enter accepts trust and reveals the composer;
@@ -425,7 +430,12 @@ func readConfigAgentCodexPaste(reader *bufio.Reader) (string, error) {
 }
 
 func drawConfigAgentCodexTrust() {
-	fmt.Print("\x1b[2J\x1b[H> You are in /tmp/throwaway-af-home\r\n\r\n" +
+	// \x1b[?25l hides the terminal cursor: Codex's directory-trust modal is a
+	// ListSelectionView, which never exposes a cursor position. af's trust
+	// dismissal reads cursor visibility to tell an active modal apart from the
+	// dialog text quoted in ordinary output, so the fixture must match the real
+	// modal's hidden-cursor state for the dismissal to proceed.
+	fmt.Print("\x1b[2J\x1b[H\x1b[?25l> You are in /tmp/throwaway-af-home\r\n\r\n" +
 		"  Do you trust the contents of this directory? Working with untrusted contents\r\n" +
 		"  comes with higher risk of prompt injection.\r\n\r\n" +
 		"› 1. Yes, continue\r\n" +
@@ -434,7 +444,10 @@ func drawConfigAgentCodexTrust() {
 }
 
 func drawConfigAgentCodexComposer() {
-	fmt.Print("\x1b[2J\x1b[H╭ OpenAI Codex (fixture) ╮\r\n\r\n› Use /skills to list available skills\r\n")
+	// \x1b[?25h restores the visible cursor the ordinary Codex composer owns
+	// once the trust modal has been accepted (mirrors renderFixturePane's
+	// cursorVisible=true transition).
+	fmt.Print("\x1b[2J\x1b[H\x1b[?25h╭ OpenAI Codex (fixture) ╮\r\n\r\n› Use /skills to list available skills\r\n")
 }
 
 func appendConfigAgentCodexUserTurn(rollout, prompt string) error {

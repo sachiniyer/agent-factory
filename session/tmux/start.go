@@ -277,6 +277,21 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			return true
 		}
 		if CodexTrustPromptPresent(content) {
+			// Codex's directory-trust modal is a ListSelectionView that hides
+			// the terminal cursor, while the ordinary composer exposes one. The
+			// dialog text can appear verbatim in quoted agent output (logs,
+			// diffs of this very file), so the text pattern alone is not proof a
+			// modal owns the pane. Require a hidden cursor before accepting
+			// "Yes, continue", and fail closed on a cursor-read error: blocking
+			// costs one poll, but injecting Enter into an active composer is
+			// irreversible. Mirrors inspectCodexSafetyPrompt (#2220, #3302).
+			cursor, err := t.readPaneCursorState()
+			if err != nil {
+				return true
+			}
+			if cursor.Visible {
+				return false
+			}
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
 			}
