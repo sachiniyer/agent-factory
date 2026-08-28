@@ -209,8 +209,14 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// left to reap it (#3065 review). This is the same discipline every other
 	// failure exit on a provisioned runtime already follows; a new exit does not
 	// get to skip it.
+	//
+	// And when that reap cannot CONFIRM the sandbox is gone, the identity travels
+	// out with the error so the daemon can tombstone it and keep retrying (#3480).
+	// Reaping was never the gap here; the gap was that an unconfirmed reap left
+	// nothing behind but a sentence.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return ProvisionResult{}, discardUnusableSandbox(opts.Title, res, opts.SandboxCredentials, rerr)
+		discarded := discardUnusableSandbox(opts.Title, res, opts.SandboxCredentials, rerr)
+		return ProvisionResult{}, orphanIfUnconfirmed(opts.Title, absPath, res, discarded)
 	}
 	return res, nil
 }
@@ -532,14 +538,23 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		if err != nil {
 			// The sandbox is already up (backendFactory provisioned it); a bad
 			// endpoint here would strand it, so reap it before failing rather than
-			// leaking a container/remote workspace. No Instance exists to retain a
-			// retry handle, so preserve every cleanup failure in the returned chain
-			// and call out an unknown outcome as a possible orphan.
+			// leaking a container/remote workspace.
+			//
+			// A KNOWN cleanup failure is SURFACED here rather than logged, unlike on
+			// the replacement path. That is deliberate and stays: the sandbox is
+			// provably gone either way, and a create that failed for a reason it can
+			// name should say so to the person who asked for the session.
+			//
+			// An UNKNOWN one is the case that used to end here as prose (#3480). No
+			// Instance exists to retain a handle on, so the identity leaves through the
+			// error instead, and the daemon tombstones it into the cleanup retry it
+			// already runs for a failed Start.
 			if res.Teardown != nil {
 				if cleanupErr := res.Teardown(); cleanupErr != nil {
 					if TeardownStateUnknown(cleanupErr) {
-						return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
-							errors.Join(err, cleanupErr))
+						return nil, orphanIfUnconfirmed(opts.Title, absPath, res,
+							fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
+								errors.Join(err, cleanupErr)))
 					}
 					return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup failed: %w",
 						errors.Join(err, cleanupErr))
