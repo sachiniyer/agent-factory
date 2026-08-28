@@ -745,11 +745,26 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 				}
 				return nil, "", nil, session.AmbiguousTitleError(title, all)
 			}
-			// Nothing readable holds it twice, but the check did not see
-			// everything, so uniqueness is unproven rather than established.
-			if len(gaps) > 0 {
+			// Nothing readable holds it twice, but the check may not have seen
+			// everything — in which case uniqueness is unproven rather than
+			// established.
+			//
+			// A gap in the MATCHED project is not such a case. Ambiguity is
+			// defined across distinct repo IDs, and the live match already
+			// establishes this project's identity, so its own unreadable file
+			// cannot conceal a second project and must not refuse an operation
+			// it cannot affect. Same exclusion hookSlugOwnerInOtherRepos makes
+			// for its own repo (#3476).
+			blocking := make([]config.RepoInstancesSkip, 0, len(gaps))
+			for _, gap := range gaps {
+				if gap.RepoID == matchedRepoID {
+					continue
+				}
+				blocking = append(blocking, gap)
+			}
+			if len(blocking) > 0 {
 				return nil, "", nil, fmt.Errorf("cannot resolve session %q without a project scope: %s, and any of them may hold this title too; scope the command with --repo <path>, or repair or remove the file(s)",
-					title, config.DescribeRepoInstancesSkips(gaps))
+					title, config.DescribeRepoInstancesSkips(blocking))
 			}
 			return matched, matchedRepoID, nil, nil
 		}

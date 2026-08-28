@@ -177,7 +177,7 @@ func withCollectTitleRepoPaths(t *testing.T, fn func(string) (map[string]string,
 // managerWithLiveSession returns a manager holding exactly one live session, so
 // findSession's unscoped branch reaches the one-live-match path where the
 // cross-project ambiguity guard runs.
-func managerWithLiveSession(t *testing.T, title string) (*Manager, string) {
+func managerWithLiveSession(t *testing.T, title string) (*Manager, string, string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installInstantBackend(t)
@@ -191,7 +191,11 @@ func managerWithLiveSession(t *testing.T, title string) (*Manager, string) {
 	}); err != nil {
 		t.Fatalf("create %q: %v", title, err)
 	}
-	return manager, repoPath
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	return manager, repoPath, repo.ID
 }
 
 // TestFindSessionPrefersDetectedAmbiguityOverTheGap keeps the gap refusal from
@@ -200,7 +204,7 @@ func managerWithLiveSession(t *testing.T, title string) (*Manager, string) {
 // unique again — so it must be reported as ambiguity, naming both projects,
 // rather than downgraded to "could not verify".
 func TestFindSessionPrefersDetectedAmbiguityOverTheGap(t *testing.T) {
-	manager, _ := managerWithLiveSession(t, "foo")
+	manager, _, _ := managerWithLiveSession(t, "foo")
 	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
 		return map[string]string{"other-repo": "/repos/other"},
 			[]config.RepoInstancesSkip{{RepoID: "blocked", Path: "/af/instances/blocked/instances.json", Err: os.ErrPermission}},
@@ -224,7 +228,7 @@ func TestFindSessionPrefersDetectedAmbiguityOverTheGap(t *testing.T) {
 // so uniqueness is unproven rather than established. Resolving here is what an
 // unscoped kill or archive would act on.
 func TestFindSessionRefusesWhenUniquenessIsUnprovenByAGap(t *testing.T) {
-	manager, _ := managerWithLiveSession(t, "foo")
+	manager, _, _ := managerWithLiveSession(t, "foo")
 	const blockedPath = "/af/instances/blocked/instances.json"
 	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
 		return map[string]string{},
@@ -248,7 +252,7 @@ func TestFindSessionRefusesWhenUniquenessIsUnprovenByAGap(t *testing.T) {
 // hole: failing to enumerate repos AT ALL is strictly less evidence than one
 // unreadable file, so it cannot keep failing open while that case refuses.
 func TestFindSessionRefusesWhenAmbiguityCheckCannotEnumerate(t *testing.T) {
-	manager, _ := managerWithLiveSession(t, "foo")
+	manager, _, _ := managerWithLiveSession(t, "foo")
 	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
 		return nil, nil, errors.New("instances directory unreadable")
 	})
@@ -265,7 +269,7 @@ func TestFindSessionRefusesWhenAmbiguityCheckCannotEnumerate(t *testing.T) {
 // TestFindSessionResolvesWhenTheCheckIsCompleteAndClean is the non-regression
 // floor: a complete check that finds no second project still resolves.
 func TestFindSessionResolvesWhenTheCheckIsCompleteAndClean(t *testing.T) {
-	manager, repoPath := managerWithLiveSession(t, "foo")
+	manager, repoPath, _ := managerWithLiveSession(t, "foo")
 	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
 		return map[string]string{}, nil, nil
 	})
@@ -276,5 +280,49 @@ func TestFindSessionResolvesWhenTheCheckIsCompleteAndClean(t *testing.T) {
 	}
 	if inst == nil || inst.Path != repoPath {
 		t.Fatalf("resolved the wrong session: %v", inst)
+	}
+}
+
+// TestFindSessionIgnoresAGapInTheMatchedProject is the false-refusal boundary.
+// Ambiguity is defined across DISTINCT repo IDs, and the live match already
+// establishes the matched project's identity — so an unreadable file belonging
+// to that same project cannot conceal a second project and must not refuse an
+// operation it cannot affect. The same exclusion hookSlugOwnerInOtherRepos makes
+// for its own repo (#3476).
+func TestFindSessionIgnoresAGapInTheMatchedProject(t *testing.T) {
+	manager, repoPath, repoID := managerWithLiveSession(t, "foo")
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return map[string]string{},
+			[]config.RepoInstancesSkip{{RepoID: repoID, Path: "/af/instances/self/instances.json", Err: os.ErrPermission}},
+			nil
+	})
+
+	inst, gotID, _, err := manager.findSession("foo", "")
+	if err != nil {
+		t.Fatalf("a gap in the matched project cannot hide a SECOND project, so it must not refuse: %v", err)
+	}
+	if inst == nil || inst.Path != repoPath || gotID != repoID {
+		t.Fatalf("resolved the wrong session: inst=%v rid=%q", inst, gotID)
+	}
+}
+
+// TestFindSessionStillRefusesAGapInAnotherProject guards the other side of that
+// filter: excluding the matched project must not swallow a gap anywhere else.
+func TestFindSessionStillRefusesAGapInAnotherProject(t *testing.T) {
+	manager, _, repoID := managerWithLiveSession(t, "foo")
+	const otherPath = "/af/instances/other/instances.json"
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return map[string]string{},
+			[]config.RepoInstancesSkip{
+				{RepoID: repoID, Path: "/af/instances/self/instances.json", Err: os.ErrPermission},
+				{RepoID: "elsewhere", Path: otherPath, Err: os.ErrPermission},
+			},
+			nil
+	})
+
+	if _, _, _, err := manager.findSession("foo", ""); err == nil {
+		t.Fatalf("a gap in ANOTHER project still leaves uniqueness unproven and must refuse")
+	} else if !strings.Contains(err.Error(), otherPath) {
+		t.Errorf("refusal must name the other project's unreadable file, got: %v", err)
 	}
 }
