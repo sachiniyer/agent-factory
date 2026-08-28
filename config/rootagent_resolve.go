@@ -21,10 +21,10 @@ type RootAgent struct {
 	// The built-in default is false, which keeps root agents strictly opt-in.
 	//
 	// Deliberately NO omitempty: an explicit `enabled = false` written to override
-	// an enabling global layer must survive a full serialization — RegisterRootAgent
-	// and saveConfigLocked toml.Marshal the whole Config — or the override is
-	// silently erased on the next write, the zero-value-elision class this repo
-	// already paid for in #1700.
+	// an enabling global layer must survive a full serialization — every global
+	// config writer lands through saveConfigLocked, which toml.Marshals the whole
+	// Config — or the override is silently erased on the next write, the
+	// zero-value-elision class this repo already paid for in #1700.
 	Enabled bool `json:"enabled" toml:"enabled"`
 	// Program is the command the root session runs. Empty means UNSET, not "run
 	// an empty command": it falls through to a lower-precedence layer's program
@@ -166,13 +166,17 @@ type rootAgentNormLayer struct {
 //
 //	built-in  <  global  <  legacy root_agents[path]  <  personal-project
 //
-// Legacy MUST sit BELOW personal. RegisterRootAgent and the TUI project-switch
-// write an EMPTY root_agents entry for EVERY registered project, and a present
-// legacy entry means Enabled=true. If legacy outranked personal, that ubiquitous
-// Enabled=true would override a personal `enabled=false`, so a user could NEVER
-// disable a root for a registered project through the singleton — exactly the
-// silent no-op #2216 exists to kill. Keeping legacy below personal lets a personal
-// `enabled=false` disable it. (root_agent admits no in-repo layer.)
+// Legacy MUST sit BELOW personal. The pre-#2456 add-project flow wrote an EMPTY
+// root_agents entry for EVERY project it registered, and a present legacy entry
+// means Enabled=true. Nothing writes those entries any more — adds land in the
+// #2355 project registry via RegisterProject — but every entry written before
+// that rewire survives in existing configs, so they stay ubiquitous in the field
+// and this precedence still decides real users' configs. If legacy outranked
+// personal, that ubiquitous Enabled=true would override a personal
+// `enabled=false`, so a user could NEVER disable a root for a registered project
+// through the singleton — exactly the silent no-op #2216 exists to kill. Keeping
+// legacy below personal lets a personal `enabled=false` disable it. (root_agent
+// admits no in-repo layer.)
 //
 // Merge is by FIELD on presence: a higher layer overrides `enabled` only if it
 // set it (an explicit false counts) and `program` only if non-empty (empty =
