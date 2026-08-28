@@ -173,6 +173,39 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		}
 	}()
 	if err != nil {
+		// A create that provisioned a sandbox and then could NOT confirm it torn
+		// down carries a cleanup-only record out through its error (#3480). Keep it,
+		// so the reap becomes the retry the daemon already runs rather than a
+		// sentence in a CLI response that nothing can act on.
+		//
+		// Deliberately the SAME helper as the failed-Start branch below, because the
+		// obligation is the same one: keepFailedCreate is what makes SaveInstances
+		// retain the row through a wholesale checkpoint and what routes it to
+		// finishUserKill on every poll, which retries the teardown and drops the
+		// record once it completes. Nothing new is scheduled here.
+		//
+		// createCommitted stays FALSE, matching that branch and not the
+		// uncertain-start one above: cleanup has been attempted and the daemon keeps
+		// retrying it, so this row is on its way out and its credential goes with it.
+		var orphan *session.SandboxOrphanError
+		if errors.As(err, &orphan) {
+			if keepErr := m.keepFailedCreate(repo.ID, title, orphan.OrphanRecord()); keepErr != nil {
+				return session.InstanceData{}, fmt.Errorf("failed to create instance %q, and the sandbox provisioned for it could not be confirmed torn down or recorded — it may still be running and must be found and cleaned up by hand: %w",
+					title, errors.Join(err, keepErr))
+			}
+			// SETTLE the provisional projection, exactly as the retained-Start branches
+			// do. Without this, creatingProjectionSettled stays false and the deferred
+			// cleanup publishes EventSessionKilled for the pending row — so live
+			// clients delete the only visible handle to a tombstone that IS durable on
+			// disk, which is the opposite of what retaining it was for.
+			settleRetainedCreate(orphan.OrphanRecord())
+			// COMMITTED on the wire (#3233): the row is durable and holds the title,
+			// so a plain error with an empty InstanceData would read as
+			// failed-nothing-committed and invite an immediate retry against a name
+			// this record still owns.
+			return orphan.OrphanRecord().ToInstanceData(), &mutationCommittedError{err: fmt.Errorf("failed to create instance %q, and the sandbox provisioned for it could not be confirmed torn down; it is recorded and the daemon will keep retrying that cleanup — the record clears once it succeeds: %w",
+				title, err)}
+		}
 		return session.InstanceData{}, err
 	}
 
