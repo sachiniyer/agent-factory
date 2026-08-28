@@ -421,6 +421,9 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
+		// A recovery retry lands here after an earlier attempt already vacated the
+		// candidate this claim did not select — the only path residue can be at.
+		reportRelocationResidue(sourceClaim.AlternatePath)
 		return nil
 	}
 	if pathExists(dest) {
@@ -429,9 +432,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return unknownIfCutOff(fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err))
 	}
-	// Every refusal is behind us and no bytes have moved yet: reap the writers
-	// that would otherwise be left pointed at a vacated pathname (#3391).
-	vacated := reapRelocationSourceWriters(src, dest)
+	// Every refusal is behind us and no bytes have moved yet: reap the writers a
+	// move would otherwise strand at a vacated pathname (#3391).
+	vacated, reapErr := g.reapRelocationSourceWriters(src, dest, sourceClaim)
+	if reapErr != nil {
+		return reapErr
+	}
 
 	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
 	if inspectErr != nil {

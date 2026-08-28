@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	stdlog "log"
 	"os"
 	"os/exec"
@@ -130,6 +131,8 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 
 	assert.Contains(t, warnings.String(), "that pathname exists again",
 		"residue at the vacated pathname must be reported, not left silent")
+	assert.NotContains(t, warnings.String(), "complete",
+		"a cross-device archive may deliberately omit unreadable entries, so this warning must not assert completeness")
 	assert.Contains(t, warnings.String(), srcPath)
 	assert.Contains(t, warnings.String(), shellsuggest.Command("rm", "-rf", srcPath),
 		"the report must name the by-hand cleanup for the leftover it found")
@@ -164,11 +167,13 @@ func TestArchiveWorktree_SilentWhenTheVacatedPathStaysGone(t *testing.T) {
 // channel merely not being closed: "still running" is the claim, and a stalled
 // process would satisfy the weaker form.
 func TestReapRelocationSourceWriters_SkipsAnInPlaceRelocation(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
 	dir := t.TempDir()
 	exited, heartbeat := relocationWriterFixture(t, dir)
 
-	assert.Empty(t, reapRelocationSourceWriters(dir, dir),
-		"an in-place relocation vacates no pathname")
+	vacated, err := gw.reapRelocationSourceWriters(dir, dir, RelocationClaim{})
+	require.NoError(t, err)
+	assert.Empty(t, vacated, "an in-place relocation vacates no pathname")
 
 	before, err := os.Stat(heartbeat)
 	require.NoError(t, err)
@@ -234,4 +239,141 @@ func TestArchiveWorktree_DoesNotKillTmuxServer(t *testing.T) {
 	require.True(t, proctree.AliveSame(process),
 		"a tmux server whose cwd is inside an archived worktree must not enter the kill set (#3186)")
 	assertLiveWorktreeAt(t, gw, dest)
+}
+
+// TestArchiveWorktree_RefusesToReapAReplacedSource is the #3278 rule applied to
+// the relocation reap.
+//
+// Selecting processes by PATHNAME is destructive, so it needs its ownership
+// proof at the FRONT. Source resolution is a point-in-time claim, and the
+// engine's next revalidation happens at the fast-move boundary — after this reap
+// would already have signalled. Without the proof here, a same-uid actor who
+// swaps the claimed directory in that window has the processes working inside
+// *its* directory killed, and the mismatch is only noticed afterwards.
+func TestArchiveWorktree_RefusesToReapAReplacedSource(t *testing.T) {
+	gw, _, _ := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	var replacementWriter <-chan struct{}
+	swapped := false
+	prev := relocateBeforeWriterReap
+	relocateBeforeWriterReap = func(path string) {
+		if swapped {
+			return
+		}
+		swapped = true
+		// A same-uid racer strands the claimed tree and drops its own directory,
+		// with its own live process, at the pathname the reap is about to use.
+		require.NoError(t, os.Rename(path, path+".stranded"))
+		require.NoError(t, os.Mkdir(path, 0o755))
+		replacementWriter, _ = relocationWriterFixture(t, path)
+	}
+	t.Cleanup(func() { relocateBeforeWriterReap = prev })
+
+	err := gw.ArchiveWorktree(dest)
+
+	require.True(t, swapped, "the test must have replaced the source before the reap")
+	require.Error(t, err, "a source that no longer matches the claim must not be relocated")
+	require.NotNil(t, replacementWriter)
+	select {
+	case <-replacementWriter:
+		t.Fatal("the reap signalled processes inside a replacement directory the claim no longer identifies (#3278)")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestArchiveWorktree_ReportsResidueAtTheRecoveryAlternatePath covers the one
+// success path that reaches no move at all.
+//
+// When a bounded `git worktree move` is cut off AFTER moving the directory, the
+// retry resolves the destination as the claimed source and returns through the
+// repair-only branch — before anything computes a vacated pathname. The original
+// pathname was still vacated by the first attempt, so the residue obligation has
+// to come from the candidate the claim did NOT select.
+func TestArchiveWorktree_ReportsResidueAtTheRecoveryAlternatePath(t *testing.T) {
+	gw, _, srcPath := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+	require.NoError(t, gw.ArchiveWorktree(dest))
+
+	// A writer that outlived the first attempt re-created the vacated pathname.
+	require.NoError(t, os.MkdirAll(filepath.Join(srcPath, "apps"), 0o755))
+
+	identity, err := relocationPathIdentity(dest)
+	require.NoError(t, err)
+	gw.beginRelocationRecovery(dest, srcPath, identity)
+
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
+
+	require.NoError(t, gw.ArchiveWorktree(dest))
+
+	assert.Contains(t, warnings.String(), "that pathname exists again")
+	assert.Contains(t, warnings.String(), srcPath,
+		"the recovery retry must report residue at the candidate it did not select")
+}
+
+// TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear: a check that
+// could not run must not read as a check that passed. Only a genuine "does not
+// exist" is silence.
+func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) {
+	vacated := filepath.Join(t.TempDir(), "vacated")
+	restore := SetRelocationIdentityErrorForTest(vacated, context.DeadlineExceeded)
+	t.Cleanup(restore)
+
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
+
+	reportRelocationResidue(vacated)
+
+	assert.Contains(t, warnings.String(), "could not be established",
+		"a failed read is not an empty result")
+	assert.Contains(t, warnings.String(), vacated)
+}
+
+// TestReportRelocationResidue_BoundsTheProbe: this check runs after the bytes and
+// the git registration are committed but before the relocation returns, so an
+// unbounded stat against a filesystem that stalled during the move would wedge
+// teardown with its result established and nothing able to finalize it — the
+// exact class #1917 bounded the rest of this path for.
+func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
+	prevTimeout := relocationIdentityTimeout
+	relocationIdentityTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { relocationIdentityTimeout = prevTimeout })
+
+	vacated := filepath.Join(t.TempDir(), "stalled")
+	release := make(chan struct{})
+	prevIdentity := relocationPathIdentity
+	relocationPathIdentity = func(observed string) (pathIdentity, error) {
+		if observed == vacated {
+			<-release // an unresponsive mount: the syscall never returns
+			return pathIdentity{}, nil
+		}
+		return prevIdentity(observed)
+	}
+	t.Cleanup(func() {
+		relocationPathIdentity = prevIdentity
+		close(release)
+	})
+
+	var warnings bytes.Buffer
+	origWarning := aflog.WarningLog
+	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
+	t.Cleanup(func() { aflog.WarningLog = origWarning })
+
+	done := make(chan struct{})
+	go func() {
+		reportRelocationResidue(vacated)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the residue probe was not bounded: a stalled filesystem wedges it after the relocation committed")
+	}
+
+	assert.Contains(t, warnings.String(), "could not be established")
 }
