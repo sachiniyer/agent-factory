@@ -346,17 +346,19 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 
 	vacated := filepath.Join(t.TempDir(), "stalled")
 	release := make(chan struct{})
+	entered := make(chan struct{})
 	prevIdentity := relocationPathIdentity
 	relocationPathIdentity = func(observed string) (pathIdentity, error) {
 		if observed == vacated {
+			close(entered)
 			<-release // an unresponsive mount: the syscall never returns
 			return pathIdentity{}, nil
 		}
 		return prevIdentity(observed)
 	}
 	t.Cleanup(func() {
-		relocationPathIdentity = prevIdentity
 		close(release)
+		relocationPathIdentity = prevIdentity
 	})
 
 	var warnings bytes.Buffer
@@ -376,4 +378,19 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 	}
 
 	assert.Contains(t, warnings.String(), "could not be established")
+
+	// The bounded probe deliberately LEAKS its goroutine — "a truly
+	// uninterruptible mount may retain one read-only goroutine for this failed
+	// lifecycle attempt" — and that goroutine reads the seam this test installed.
+	// Returning before it has done so lets t.Cleanup restore the seam underneath
+	// it, which is a real data race and not a theoretical one: `go test -race`
+	// caught exactly that on both Linux and macOS. Waiting for the stub to be
+	// ENTERED orders the read before the restore. It is also the fixture's own
+	// precondition — a probe that was never entered stalled nothing, so the bound
+	// this test claims to prove was never exercised.
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled probe was never entered, so nothing was actually stalled")
+	}
 }
