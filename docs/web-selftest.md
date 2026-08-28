@@ -64,9 +64,14 @@ bundle works. This harness deliberately serves the **committed** `web/dist` rath
 than rebuilding, so it exercises the artifact a released binary embeds — which is
 also why you run `make web-build` before it locally.
 
-Failures give you Playwright's assertion output in the job log but no trace: the
-harness works inside the container's own copy of the tree, so its
-`web/test-results/` never reaches the host. Reproduce locally for a trace.
+Failures give you Playwright's assertion output in the job log **and** the trace.
+The harness works inside the container's own copy of the tree, so its
+`web/test-results/` used to die with the container on every failure (#3505) —
+`scripts/testbox.sh` now bind-mounts that directory, so the trace, the
+screenshots and the daemon logs land in `web/test-results/<run-token>/` on the
+host, and CI uploads them as the `web-selftest-artifacts` artifact on the run's
+page. Open one with
+`npx playwright show-trace web/test-results/<run-token>/<test>/trace.zip`.
 
 ## What it asserts
 
@@ -99,3 +104,27 @@ The harness is assertion-gated, so it needs no committed artifacts. Per-run
 Playwright outputs (`web/test-results/`, `web/playwright-report/`,
 `web/blob-report/`, `web/selftest/.last-run.json`) are git-ignored; a failing run
 retains a trace under `web/test-results/` for local debugging.
+
+Each run gets its **own** subdirectory under `web/test-results/`, keyed by the
+same per-run token the container and image tags use (#3505). That is what keeps
+two concurrent `web-selftest` invocations from one checkout out of each other's
+output — the collision class #1171 already paid for — and it means the artifacts
+are that run's by construction rather than because something cleared a shared
+directory. Subdirectories older than a week are pruned on the next run; only
+failures create them.
+
+The container runs as root, so it hands ownership back on the way out AND writes
+under `umask 000`. Both, because the trap only runs on a graceful exit: a
+SIGKILLed container (the docker daemon dying, the CI job timeout) is precisely
+what the mount rescues, and its files would otherwise be root-owned directories
+you cannot delete without sudo.
+
+In CI the same directory is uploaded as `web-selftest-artifacts` (14-day
+retention); the upload is best-effort and cannot change the job's verdict either
+way, and the harness step is capped below the job timeout so a hung run still has
+budget left to upload.
+
+The trace records full request and response headers. There is no `Authorization`
+header in it only because the loopback browser is tokenless (#1696) — not because
+Playwright redacts anything. If this harness ever drives a token-bearing request,
+re-check what the upload would publish before trusting it.

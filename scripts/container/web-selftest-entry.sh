@@ -24,6 +24,14 @@ set -euo pipefail
 copy_src_tree /src /work --exclude=web/node_modules --exclude=web/test-results
 cd /work
 
+# Playwright's outputDir. When testbox.sh bind-mounts it, this is the ONLY way a
+# trace/screenshot survives the container (#3505). It does NOT need clearing: the
+# host side is scoped to the run token and created fresh, so these artifacts are
+# this run's by construction — and a blind `find -delete` here would have been
+# actively harmful, deleting a CONCURRENT run's in-progress output back when the
+# mount was a single shared path.
+WEB_RESULTS=/work/web/test-results
+
 HOME_DIR=/work/afhome
 MOCK=/work/mock-repo
 # A SECOND mock repo (redesign PR2): the single-project IA scopes the rail to one
@@ -290,9 +298,39 @@ cleanup() {
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
+    # Give the daemon its SIGTERM shutdown before reading its logs. RunDaemon exits
+    # through a graceful teardown, so snapshotting immediately after `kill` races its
+    # final flush and drops precisely the shutdown-adjacent lines a failure needs.
+    # BOUNDED rather than a bare `wait`: a daemon that will not die must not hang
+    # teardown, and the artifacts we have are better than none.
+    for _ in $(seq 1 50); do
+        kill -0 "$DAEMON_PID" 2>/dev/null || break
+        sleep 0.1
+    done
     if [ "$rc" -ne 0 ]; then
         echo "===== daemon.log (tail) =====" >&2
         tail -n 40 /work/daemon.log >&2 || true
+        # The daemon redirects its OWN logging into the AF home, so /work/daemon.log
+        # holds little more than af's "wrote logs to ..." line — the tail above has
+        # been a one-line file all along. The real thing is $HOME_DIR/agent-factory.log.
+        echo "===== agent-factory.log (tail) =====" >&2
+        tail -n 60 "$HOME_DIR/agent-factory.log" >&2 || true
+        # Both logs alongside the Playwright trace (#3505), whole rather than tailed:
+        # the interesting event is routinely above the window. Best-effort — a missing
+        # log must never change the harness's verdict.
+        if [ -d "$WEB_RESULTS" ]; then
+            cp /work/daemon.log "$WEB_RESULTS/daemon-stdout.log" 2>/dev/null || true
+            cp "$HOME_DIR/agent-factory.log" "$WEB_RESULTS/agent-factory.log" 2>/dev/null || true
+        fi
+    fi
+    # Hand the rescued artifacts back to whoever owns the source mount. This
+    # container runs as root, so without it a dev box is left with root-owned files
+    # in its worktree that the developer cannot delete (the cache-volume problem
+    # fix_cache_perms solves in testbox.sh). Wholly best-effort: `rc` is already
+    # decided, and rescuing diagnostics must never turn a green run red or mask a
+    # red one.
+    if [ -d "$WEB_RESULTS" ]; then
+        chown -R "$(stat -c '%u:%g' /src)" "$WEB_RESULTS" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -701,6 +739,15 @@ cd /work/web
 # download and use the bundled one.
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 npm ci --no-audit --no-fund
+
+# Everything Playwright writes below lands in the bind-mounted results dir as
+# ROOT, and the ownership hand-back in cleanup() only runs on a graceful exit. A
+# container killed with SIGKILL — the docker daemon dying, `docker rm -f`, the CI
+# job timeout — runs no trap at all, and that is exactly the case the mount is
+# meant to rescue, so the rescued files would be root-owned 0755 directories the
+# developer cannot delete without sudo. A permissive umask makes them removable on
+# every path, trap or no trap; cleanup() still fixes ownership when it can.
+umask 000
 
 export AF_WEB_BASE_URL="$BASE_URL"
 export AF_WEB_SESSION_A="$SESSION_A"
