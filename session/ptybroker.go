@@ -287,6 +287,24 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		return nil, err
 	}
 
+	// Re-evaluate the repaint decision after ensureCaptureStarted() unblocks.
+	// ensureCaptureStarted() takes captureMu, which recovery (recoverCapture) also
+	// holds across its WHOLE transition: stop, ring discard, base advance, restart.
+	// A subscriber that registered while recovery was blocked in stop() computed
+	// needRepaint against the PRE-recovery base; by the time captureMu is released
+	// and we get here, recovery has advanced base past this subscriber's cursor,
+	// making the decision stale. Re-check against the post-recovery base, and when a
+	// repaint is now owed, move the cursor to the live tail: the repaint reconstructs
+	// the whole screen, so the retained ring must not be replayed on top of it (see
+	// the needRepaint comment above). base is monotonic, so the decision can only
+	// flip false→true here, never back.
+	b.mu.Lock()
+	needRepaint = since == 0 || since < b.base
+	if needRepaint {
+		sub.cursor = b.headLocked()
+	}
+	b.mu.Unlock()
+
 	// Paint the current screen for a subscriber the replay stream can't reconstruct
 	// (see needRepaint): a fresh one (pipe-pane only streams FUTURE output, so without
 	// this a just-opened pane renders blank until the next byte) or a reconnect whose
