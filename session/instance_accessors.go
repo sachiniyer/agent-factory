@@ -137,21 +137,6 @@ func (i *Instance) SetSandboxBranch(branch string) {
 	i.Branch = branch
 }
 
-// GetWorktreeBranch returns the canonical branch recorded by the GitWorktree,
-// or empty when the instance has no worktree. Unlike GetGitWorktree, this is not
-// gated on started: kill/archive cleanup still acts on a restore-failed row's
-// recorded worktree and branch, so safety checks must be able to inspect the
-// exact ref cleanup would delete (#2209 review).
-func (i *Instance) GetWorktreeBranch() string {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-	if gw == nil {
-		return ""
-	}
-	return gw.GetBranchName()
-}
-
 // MarkUserKilled records kill intent on the instance (#1108). Callers persist
 // the instance afterwards so the tombstone survives a daemon crash mid-kill.
 // Daemon callers reach this commit at serialized points: an explicit kill owns
@@ -278,24 +263,6 @@ func (i *Instance) GetWorktreeRelocationCandidates() (primary, alternate string,
 		return "", "", false
 	}
 	return primary, recovery.AlternatePath, true
-}
-
-// GetBaseCommitSHA returns the recorded base commit SHA of the instance's
-// worktree, or "" when there is no worktree. Deliberately NOT gated on started
-// (unlike GetGitWorktree): the kill-confirmation's unmerged-work check must run
-// for a session that has a worktree even if it was never started — a restore-
-// failed session's branch still gets force-deleted by the kill (#2029). Mirrors
-// GetWorktreePath, which is likewise ungated so both loss checks cover the same
-// session states.
-func (i *Instance) GetBaseCommitSHA() string {
-	i.mu.RLock()
-	gw := i.gitWorktree
-	i.mu.RUnlock()
-
-	if gw == nil {
-		return ""
-	}
-	return gw.GetBaseCommitSHA()
 }
 
 // GetRepoPath returns the resolved git repo path stored in the instance's

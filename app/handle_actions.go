@@ -211,9 +211,8 @@ func (m *home) handleKill() (tea.Model, tea.Cmd) {
 	severeLine := ""
 	if selected.Capabilities().Workspace == session.WorkspaceLocalWorktree {
 		// Both loss checks run under the SAME worktree-path gate so they cover the
-		// same session states. GetWorktreePath, GetWorktreeBranch, and
-		// GetBaseCommitSHA are intentionally not gated on started (unlike
-		// GetGitWorktree), so a session that HAS a
+		// same session states. GetWorktreeCleanupImpact is intentionally not
+		// gated on started (unlike GetGitWorktree), so a session that HAS a
 		// worktree but was never started — e.g. a restore-failed session — still gets
 		// the unmerged-work warning the old GetGitWorktree gate skipped for it
 		// (#2029). The cleanup-impact snapshot is the authority for ownership:
