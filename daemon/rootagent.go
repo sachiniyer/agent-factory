@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -85,7 +86,11 @@ var rootKillHealDelay = 2 * time.Minute
 // but tests drive EnsureRootAgents directly).
 type rootEnsureState struct {
 	consecutiveFailures int
-	nextAttempt         time.Time
+	// unansweredFailures counts how many of those consecutive failures never
+	// got an answer out of git (#3500), so the escalation ERROR can only claim
+	// a persistent cause when something actually established one.
+	unansweredFailures int
+	nextAttempt        time.Time
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
@@ -224,7 +229,7 @@ func (m *Manager) ensureLegacyRootAgent(path string, rc config.RootAgentConfig) 
 
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
-		m.rootEnsureFailed(path, st, fmt.Errorf("root_agents entry %q does not resolve to a git repository: %w", path, err))
+		m.rootEnsureFailed(path, st, fmt.Errorf("%s: %w", repoResolveClaim("root_agents entry", path, err), err))
 		return
 	}
 	resolution := m.resolvedRootAgentFor(repo.ID, &rc)
@@ -747,6 +752,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	m.mu.Lock()
 	st.consecutiveFailures = 0
+	st.unansweredFailures = 0
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
 	m.mu.Unlock()
@@ -766,13 +772,34 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
+	if errors.Is(err, config.ErrRepoProbeUnanswered) {
+		st.unansweredFailures++
+	}
 	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
 	st.nextAttempt = time.Now().Add(backoff)
 	if st.consecutiveFailures == rootEnsureEscalationThreshold {
-		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; the cause looks persistent — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureBackoffMax, err)
+		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
 	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
+}
+
+// rootEnsureEscalationCause words what the escalation ERROR is entitled to
+// claim about the cause. Attempts whose repo probe went unanswered (#3500)
+// still count toward the backoff — they must, since the retry cadence is what
+// keeps a loaded box from forking git every tick, and #1122's retry-forever
+// contract is unchanged — but they are not evidence of anything: an attempt
+// that never got an answer out of git has established nothing about the
+// repository or the configuration. Caller holds m.mu.
+func rootEnsureEscalationCause(st *rootEnsureState) string {
+	switch {
+	case st.unansweredFailures >= st.consecutiveFailures:
+		return "no attempt got an answer out of git, so the cause is unknown; a repo probe that keeps dying says nothing about the repository or its configuration"
+	case st.unansweredFailures > 0:
+		return fmt.Sprintf("the cause looks persistent, though %d of those attempts ended before git could answer", st.unansweredFailures)
+	default:
+		return "the cause looks persistent"
+	}
 }
 
 // rootAgentProgram resolves the command the root agent runs from a legacy

@@ -183,7 +183,9 @@ func TestRootEnsureEscalationStillAssertsPersistenceForAnsweredFailures(t *testi
 // same way, and had the same defect.
 func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	project := config.Project{ID: "probe-project", Root: t.TempDir()}
+	// A well-formed project id keeps the personal-config read (and its own
+	// fail-closed warning) out of the buffer this test reads.
+	project := config.Project{ID: "prj_0123456789abcdef0123456789abcdef", Root: t.TempDir()}
 
 	installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
