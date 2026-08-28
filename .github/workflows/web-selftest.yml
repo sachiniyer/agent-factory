@@ -123,15 +123,44 @@ jobs:
       - name: Run the web-driver selftest
         run: make web-selftest-container
 
-      # No artifact-upload step, deliberately. The harness copies /src into /work
-      # inside the container (the bind mount is read-only) and Playwright writes
-      # its traces there, so they die with the container — there is nothing on the
-      # host to upload. A step pointing at web/test-results/ would upload an empty
-      # artifact on every failure and read as though traces were captured.
+      # The trace zip, the screenshots and the daemon logs (#3505). This comment
+      # used to explain why there was NO upload here: Playwright wrote its traces
+      # to /work/web/test-results inside the container, so `--rm` destroyed them
+      # and there was nothing on the host to upload. That was true, and it made
+      # every web-selftest red undebuggable by design — while the reporter cheerily
+      # printed `npx playwright show-trace test-results/.../trace.zip` for a file
+      # that had never existed outside the container. Both halves are fixed:
+      # testbox.sh now bind-mounts that directory, and this step ships it.
       #
-      # What you get instead is Playwright's reporter output in the job log, which
-      # names the failing assertion. For a trace, reproduce locally:
-      #   make web-selftest-container
+      # `always()`, not `failure()`: the case where a trace is worth most is a run
+      # that was CANCELLED — the 40-minute timeout above, a hung browser — and
+      # `failure()` does not run on cancellation. Playwright only retains a trace
+      # `on-failure`, so a green run leaves nothing uploadable here: measured, it
+      # is three EMPTY per-test output dirs (which upload-artifact skips) plus a
+      # hidden `.last-run.json` (which it excludes unless include-hidden-files is
+      # set). if-no-files-found: ignore turns that into a silent no-op rather than
+      # a warning that reads like a lost artifact.
+      #
+      # continue-on-error, because rescuing diagnostics must never CHANGE a verdict:
+      # a failed upload cannot turn a green run red, and it cannot mask a red one
+      # either (the harness step above has already decided the job).
+      #
+      # On contents: the fixture is a throwaway container — mock repos, a fake
+      # agent, probe-* sessions — and the trace was inspected before this step was
+      # wired (53 screenshots, API JSON, no host paths, no credentials). Note the
+      # trace DOES record full request and response headers; there is no
+      # Authorization header to capture only because the loopback browser is
+      # tokenless under #1696, not because Playwright redacts anything. If this
+      # harness ever drives a token-bearing request, re-check this before shipping.
+      - name: Upload the Playwright trace and daemon logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-selftest-artifacts
+          path: web/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
 
 # ── How this gates ────────────────────────────────────────────────────────────
 #

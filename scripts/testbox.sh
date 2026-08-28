@@ -636,12 +636,32 @@ web-selftest)
     # as root, so mixing caches would leave root-owned files the dev-user testbox
     # can't write. Chromium wants more memory + pids than the default suite.
     ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
+    # Playwright's trace zip is THE diagnostic for a selftest failure, and the
+    # reporter PRINTS an invitation to open it — but it is written inside the
+    # container (/work/web/test-results, the config's outputDir) and --rm deleted
+    # it on the way out, on every failure since the harness existed (#3505). So the
+    # log told a maintainer to run `npx playwright show-trace <path>` against a file
+    # that had never existed on the host.
+    #
+    # Bind-mounting the output dir rescues it WITHOUT giving up --rm's guaranteed
+    # teardown, which is the property this harness cares about most (#1171/#2133).
+    # It also beats a copy-out on the path that matters: a container that is KILLED
+    # rather than exiting — the CI 40-minute timeout, a hung browser — never reaches
+    # a `docker cp`, but whatever it had already written is on the host regardless.
+    #
+    # The directory is gitignored, and the entry script clears it on entry (so an
+    # upload can never carry a previous run's trace) and chowns it back to the /src
+    # owner on the way out (the container runs as root; see fix_cache_perms for the
+    # same problem in the cache volumes).
+    WEB_RESULTS="$REPO_ROOT/web/test-results"
+    mkdir -p "$WEB_RESULTS"
     rc=0
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"
     watch_image_start "$WEB_SELFTEST_NAME"
     "$ENGINE" run --rm --label "$LABEL" --init \
         --name "$WEB_SELFTEST_NAME" \
         -v "$REPO_ROOT":/src:ro \
+        -v "$WEB_RESULTS":/work/web/test-results \
         -v af-web-selftest-gomod:/cache/gomod \
         -v af-web-selftest-gobuild:/cache/gobuild \
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \

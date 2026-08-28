@@ -24,6 +24,18 @@ set -euo pipefail
 copy_src_tree /src /work --exclude=web/node_modules --exclude=web/test-results
 cd /work
 
+# Playwright's outputDir. When testbox.sh bind-mounts it, this is the ONLY way a
+# trace/screenshot survives the container (#3505) — so clear it on entry, or a
+# CI upload would ship the PREVIOUS run's trace under this run's name, which is
+# worse than shipping none. Root here, so leftovers from an earlier root-owned
+# run are removable; the cleanup trap hands ownership back at the end.
+# Unmounted (someone running this entry script directly) it simply does not exist
+# yet and this is a no-op.
+WEB_RESULTS=/work/web/test-results
+if [ -d "$WEB_RESULTS" ]; then
+    find "$WEB_RESULTS" -mindepth 1 -delete
+fi
+
 HOME_DIR=/work/afhome
 MOCK=/work/mock-repo
 # A SECOND mock repo (redesign PR2): the single-project IA scopes the rail to one
@@ -293,6 +305,27 @@ cleanup() {
     if [ "$rc" -ne 0 ]; then
         echo "===== daemon.log (tail) =====" >&2
         tail -n 40 /work/daemon.log >&2 || true
+        # The daemon redirects its OWN logging into the AF home, so /work/daemon.log
+        # holds little more than af's "wrote logs to ..." line — the tail above has
+        # been a one-line file all along. The real thing is $HOME_DIR/agent-factory.log.
+        echo "===== agent-factory.log (tail) =====" >&2
+        tail -n 60 "$HOME_DIR/agent-factory.log" >&2 || true
+        # Both logs alongside the Playwright trace (#3505), whole rather than tailed:
+        # the interesting event is routinely above the window. Best-effort — a missing
+        # log must never change the harness's verdict.
+        if [ -d "$WEB_RESULTS" ]; then
+            cp /work/daemon.log "$WEB_RESULTS/daemon-stdout.log" 2>/dev/null || true
+            cp "$HOME_DIR/agent-factory.log" "$WEB_RESULTS/agent-factory.log" 2>/dev/null || true
+        fi
+    fi
+    # Hand the rescued artifacts back to whoever owns the source mount. This
+    # container runs as root, so without it a dev box is left with root-owned files
+    # in its worktree that the developer cannot delete (the cache-volume problem
+    # fix_cache_perms solves in testbox.sh). Wholly best-effort: `rc` is already
+    # decided, and rescuing diagnostics must never turn a green run red or mask a
+    # red one.
+    if [ -d "$WEB_RESULTS" ]; then
+        chown -R "$(stat -c '%u:%g' /src)" "$WEB_RESULTS" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
