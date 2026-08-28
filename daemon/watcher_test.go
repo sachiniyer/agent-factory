@@ -102,6 +102,20 @@ func (s *watcherSupervisor) watchingTaskIDs() []string {
 	return ids
 }
 
+// droppedEvents returns the rate-limit drop counter for a task's watcher, or
+// 0 if no watcher is registered, for tests asserting rate-limit/drop behavior.
+func (s *watcherSupervisor) droppedEvents(taskID string) int {
+	s.mu.Lock()
+	w := s.watchers[taskID]
+	s.mu.Unlock()
+	if w == nil {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.dropped
+}
+
 // waitUntil polls cond until it returns true or the timeout elapses.
 func waitUntil(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()

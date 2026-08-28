@@ -271,20 +271,6 @@ func (s *watcherSupervisor) Stop() {
 	stopWatchers(stale)
 }
 
-// droppedEvents returns the rate-limit drop counter for a task's watcher, or
-// 0 if no watcher is registered.
-func (s *watcherSupervisor) droppedEvents(taskID string) int {
-	s.mu.Lock()
-	w := s.watchers[taskID]
-	s.mu.Unlock()
-	if w == nil {
-		return 0
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.dropped
-}
-
 func (s *watcherSupervisor) newTaskWatcher(t task.Task) *taskWatcher {
 	w := &taskWatcher{
 		taskID:        t.ID,
