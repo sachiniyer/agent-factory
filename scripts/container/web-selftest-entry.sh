@@ -25,16 +25,12 @@ copy_src_tree /src /work --exclude=web/node_modules --exclude=web/test-results
 cd /work
 
 # Playwright's outputDir. When testbox.sh bind-mounts it, this is the ONLY way a
-# trace/screenshot survives the container (#3505) — so clear it on entry, or a
-# CI upload would ship the PREVIOUS run's trace under this run's name, which is
-# worse than shipping none. Root here, so leftovers from an earlier root-owned
-# run are removable; the cleanup trap hands ownership back at the end.
-# Unmounted (someone running this entry script directly) it simply does not exist
-# yet and this is a no-op.
+# trace/screenshot survives the container (#3505). It does NOT need clearing: the
+# host side is scoped to the run token and created fresh, so these artifacts are
+# this run's by construction — and a blind `find -delete` here would have been
+# actively harmful, deleting a CONCURRENT run's in-progress output back when the
+# mount was a single shared path.
 WEB_RESULTS=/work/web/test-results
-if [ -d "$WEB_RESULTS" ]; then
-    find "$WEB_RESULTS" -mindepth 1 -delete
-fi
 
 HOME_DIR=/work/afhome
 MOCK=/work/mock-repo
@@ -302,6 +298,15 @@ cleanup() {
     kill "$WEBTAB_SERVER_PID" >/dev/null 2>&1 || true
     kill "$VITE_SERVER_PID" >/dev/null 2>&1 || true
     kill "$DAEMON_PID" >/dev/null 2>&1 || true
+    # Give the daemon its SIGTERM shutdown before reading its logs. RunDaemon exits
+    # through a graceful teardown, so snapshotting immediately after `kill` races its
+    # final flush and drops precisely the shutdown-adjacent lines a failure needs.
+    # BOUNDED rather than a bare `wait`: a daemon that will not die must not hang
+    # teardown, and the artifacts we have are better than none.
+    for _ in $(seq 1 50); do
+        kill -0 "$DAEMON_PID" 2>/dev/null || break
+        sleep 0.1
+    done
     if [ "$rc" -ne 0 ]; then
         echo "===== daemon.log (tail) =====" >&2
         tail -n 40 /work/daemon.log >&2 || true
@@ -734,6 +739,15 @@ cd /work/web
 # download and use the bundled one.
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 npm ci --no-audit --no-fund
+
+# Everything Playwright writes below lands in the bind-mounted results dir as
+# ROOT, and the ownership hand-back in cleanup() only runs on a graceful exit. A
+# container killed with SIGKILL — the docker daemon dying, `docker rm -f`, the CI
+# job timeout — runs no trap at all, and that is exactly the case the mount is
+# meant to rescue, so the rescued files would be root-owned 0755 directories the
+# developer cannot delete without sudo. A permissive umask makes them removable on
+# every path, trap or no trap; cleanup() still fixes ownership when it can.
+umask 000
 
 export AF_WEB_BASE_URL="$BASE_URL"
 export AF_WEB_SESSION_A="$SESSION_A"

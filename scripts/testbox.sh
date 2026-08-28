@@ -649,11 +649,27 @@ web-selftest)
     # rather than exiting — the CI 40-minute timeout, a hung browser — never reaches
     # a `docker cp`, but whatever it had already written is on the host regardless.
     #
-    # The directory is gitignored, and the entry script clears it on entry (so an
-    # upload can never carry a previous run's trace) and chowns it back to the /src
-    # owner on the way out (the container runs as root; see fix_cache_perms for the
-    # same problem in the cache volumes).
-    WEB_RESULTS="$REPO_ROOT/web/test-results"
+    # PER-RUN, not a shared path. This harness deliberately supports concurrent
+    # invocations — unique container names AND a unique image tag, both bought after
+    # #1171 — so a single `web/test-results` would have re-introduced exactly the
+    # fixed-name collision those fixes exist to prevent: two runs from one checkout
+    # would interleave their output, and whichever started second would delete the
+    # first's in-progress trace. Scoping to RUN_TOKEN also means the directory is
+    # fresh by construction, so nothing has to clear a shared one to guarantee "these
+    # artifacts are THIS run's".
+    #
+    # The entry script chowns it back to the /src owner on the way out (the container
+    # runs as root; see fix_cache_perms for the same problem in the cache volumes),
+    # and runs Playwright under umask 000 so the files stay removable even when that
+    # graceful path never happens — a SIGKILLed container skips every trap, and that
+    # is precisely the case this mount exists to rescue.
+    WEB_RESULTS="$REPO_ROOT/web/test-results/$RUN_TOKEN"
+    # Old runs are gitignored and only ever created by FAILURES, but they are traces
+    # of ~1MB each, so age them out. Best-effort, and it can never touch a concurrent
+    # run: that directory is minutes old, not days.
+    find "$REPO_ROOT/web/test-results" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+        -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "$WEB_RESULTS"
     mkdir -p "$WEB_RESULTS"
     rc=0
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"

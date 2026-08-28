@@ -120,7 +120,14 @@ jobs:
       # Everything (daemon, tmux, browser) lives on 127.0.0.1 inside an ephemeral
       # container with no published ports, so this is as isolated on a runner as
       # it is on a dev box.
+      #
+      # STEP timeout, deliberately below the JOB's 40 above. A job that burns its
+      # whole budget is terminated by the runner, and the upload step below — the
+      # one that exists for exactly this hung-browser case — may never get to run.
+      # Capping the harness at 35 leaves 5 minutes of job budget for the rescue,
+      # so the timeout path produces the artifact instead of consuming it.
       - name: Run the web-driver selftest
+        timeout-minutes: 35
         run: make web-selftest-container
 
       # The trace zip, the screenshots and the daemon logs (#3505). This comment
@@ -133,8 +140,8 @@ jobs:
       # testbox.sh now bind-mounts that directory, and this step ships it.
       #
       # `always()`, not `failure()`: the case where a trace is worth most is a run
-      # that was CANCELLED — the 40-minute timeout above, a hung browser — and
-      # `failure()` does not run on cancellation. Playwright only retains a trace
+      # that timed out or was CANCELLED — a hung browser — and `failure()` does not
+      # run on cancellation. The step timeout above is what leaves room for this one. Playwright only retains a trace
       # `on-failure`, so a green run leaves nothing uploadable here: measured, it
       # is three EMPTY per-test output dirs (which upload-artifact skips) plus a
       # hidden `.last-run.json` (which it excludes unless include-hidden-files is
