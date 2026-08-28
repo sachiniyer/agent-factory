@@ -105,10 +105,28 @@ func (t instanceTrustTarget) CheckAndHandleTrustPrompt() bool {
 	return t.inst.CheckAndHandleTrustPrompt()
 }
 
-// StartAndSendPromptWithConversationCapture is the daemon create path. It
-// separates provisioning from launch so a local backend can snapshot the exact
-// command-specific provider store after the final cwd exists in the model but
-// before the agent process can create a transcript there.
+// StartAndSendPromptWithConversationCapture is the canonical way to start an
+// instance, wait for readiness, handle trust prompts, and optionally send a
+// prompt. It is the daemon create path, and separates provisioning from launch
+// so a local backend can snapshot the exact command-specific provider store
+// after the final cwd exists in the model but before the agent process can
+// create a transcript there. Everything after launch — the readiness wait, the
+// trust-dialog loop, and prompt delivery — is WaitForReadyAndSendPrompt's
+// contract, documented there.
+//
+// It does NOT mark the instance live; callers must settle liveness themselves
+// when appropriate, and the two live callers settle at different moments. The
+// daemon create path settles synchronously on return, in finishCreateStart
+// (daemon/limit.go), which also translates a usage-limit wall at startup into a
+// parked row rather than a live one. The TUI never calls this directly — the
+// daemon has been the sole session writer since #960 — so its create settles
+// asynchronously instead, in the instanceStartedMsg handler (app/home_update.go),
+// once the started row is in the store. Both go through session.ConfirmLive(),
+// the #1195 Phase 2d chokepoint. A caller that assumes this function already
+// settled liveness leaves the session stuck in its creating state.
+//
+// ctx bounds the readiness wait it delegates; a nil ctx is treated as
+// context.Background().
 func StartAndSendPromptWithConversationCapture(
 	ctx context.Context,
 	instance *session.Instance,
@@ -133,6 +151,15 @@ func StartAndSendPromptWithConversationCapture(
 // incoming pane, but it owes the same readiness and trust-dialog contract as a
 // fresh create before any mission text is typed. Keeping that contract here
 // prevents the two launch paths from drifting.
+//
+// It always waits for the program to become ready. If prompt is non-empty, it
+// sends the prompt after readiness (and after the trust dialog is cleared),
+// never before — a prompt typed into a pane that is not yet at its composer is
+// lost or mangled.
+//
+// ctx bounds the readiness wait: an abandoned or cancelled create tears down the
+// pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
+// treated as context.Background().
 func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
 	if ctx == nil {
 		ctx = context.Background()

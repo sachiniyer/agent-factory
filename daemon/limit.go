@@ -12,9 +12,9 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// finishCreateStart settles a freshly created instance after StartAndSendPromptWithConversationCapture
-// returns (#1146 PR4). It is the single place CreateSession translates that
-// outcome into liveness:
+// finishCreateStart settles a freshly created instance after
+// StartAndSendPromptWithConversationCapture returns (#1146 PR4). It is the
+// single place CreateSession translates that outcome into liveness:
 //   - startErr nil: the agent came up — mark it live.
 //   - startErr is a usage-limit park (task.LimitReachedError): the agent hit a
 //     usage-limit wall during startup before the prompt could be delivered. KEEP
