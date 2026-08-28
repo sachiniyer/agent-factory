@@ -787,7 +787,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	}
 	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
 	st.nextAttempt = time.Now().Add(backoff)
-	if st.consecutiveFailures >= rootEnsureEscalationThreshold && rootEnsureShouldEscalate(st) {
+	if rootEnsureShouldEscalate(st) {
 		st.escalated = true
 		st.escalatedAllUnanswered = rootEnsureAllUnanswered(st)
 		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
@@ -803,21 +803,33 @@ func rootEnsureAllUnanswered(st *rootEnsureState) bool {
 	return st.unansweredFailures >= st.consecutiveFailures
 }
 
-// rootEnsureShouldEscalate decides whether a streak that has crossed the
-// threshold gets an ERROR now. Once per streak, plus once more for the one
+// rootEnsureShouldEscalate decides whether a streak gets an escalation ERROR
+// now. Once when it crosses the threshold, plus at most once more for the one
 // transition that changes what the ERROR may claim: a streak escalated as
-// "cause unknown" whose probes LATER start answering has established a real
+// "cause unknown" whose failures LATER start answering has established a real
 // persistent cause, and the old strict equality on the threshold could never
 // report it — the count is already past the threshold, so the genuine cause
 // would be logged as warnings forever while the root stayed down (#3500
-// review). The reverse transition cannot happen: an answered failure is never
-// un-answered later in the same streak, which bounds this at two ERRORs.
-// Caller holds m.mu.
+// review).
+//
+// The upgrade carries the SAME evidence bar the first escalation had: a full
+// threshold of failures that actually answered. One is not enough, and the
+// reason is that this function does not see only repo probes —
+// rootEnsureFailed also records a failed session create and a failed dead-root
+// reap, neither of which carries the unanswered sentinel. Without the bar, one
+// transient tmux failure after an unanswerable streak would upgrade "cause
+// unknown" to "looks persistent" on the spot, which is the same fabricated
+// verdict this PR exists to remove (#3500 review round 2).
+//
+// Bounded at two ERRORs per streak: the reverse transition cannot happen, since
+// an answered failure is never un-answered later in the same streak. Caller
+// holds m.mu.
 func rootEnsureShouldEscalate(st *rootEnsureState) bool {
 	if !st.escalated {
-		return true
+		return st.consecutiveFailures >= rootEnsureEscalationThreshold
 	}
-	return st.escalatedAllUnanswered && !rootEnsureAllUnanswered(st)
+	answered := st.consecutiveFailures - st.unansweredFailures
+	return st.escalatedAllUnanswered && answered >= rootEnsureEscalationThreshold
 }
 
 // rootEnsureEscalationCause words what the escalation ERROR is entitled to

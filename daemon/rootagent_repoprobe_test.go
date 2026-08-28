@@ -255,11 +255,24 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 		t.Fatalf("expected the unknown-cause escalation first, got: %q", got)
 	}
 
-	// git recovers, and now answers: the directory is not a repository. That is
-	// a real, persistent cause, and it must be reported as one.
+	// git recovers and starts answering: the directory is not a repository.
+	// ONE answered failure is not evidence of a persistent cause, and this is
+	// not a hypothetical distinction — rootEnsureFailed also records a failed
+	// session create and a failed dead-root reap, so a single transient tmux
+	// failure here must not upgrade "cause unknown" to "looks persistent"
+	// (#3500 review round 2).
 	errorLog.Reset()
 	letGitAnswer()
 	manager.EnsureRootAgents()
+	if got := errorLog.String(); got != "" {
+		t.Fatalf("one answered failure is not a persistent cause; it must not re-escalate: %q", got)
+	}
+
+	// A full threshold of answered failures is the same bar the first
+	// escalation cleared. Now the established cause gets its ERROR.
+	for i := 1; i < rootEnsureEscalationThreshold; i++ {
+		manager.EnsureRootAgents()
+	}
 
 	got := errorLog.String()
 	if !strings.Contains(got, "the cause looks persistent") {
