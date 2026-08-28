@@ -47,45 +47,44 @@ func (e *unansweredProbeError) Error() string   { return e.err.Error() }
 func (e *unansweredProbeError) Unwrap() []error { return []error{ErrRepoProbeUnanswered, e.err} }
 
 // markUnansweredProbe classifies a failed git invocation: err marked with
-// ErrRepoProbeUnanswered when the failure happened to the CHILD rather than to
-// the repository, and err untouched when git ran and answered.
-//
-// Unanswered, in every form this resolver can see it:
-//   - the context was cancelled or its deadline passed, so the child was
-//     signalled rather than read;
-//   - exec could not start git at all (missing binary, not executable);
-//   - Cmd.WaitDelay expired before the output pipe closed, so the read was
-//     abandoned mid-flight — repoGitWaitDelay is 100ms, and a loaded box
-//     reaches it (#3500 was observed on a host whose load baseline is 60-95);
-//   - git died on a signal, which ProcessState reports as a negative exit
-//     code, so its stderr says nothing about the repository.
-//
-// Everything else is git exiting non-zero with a diagnostic of its own: an
-// ANSWER, even when it is one this resolver cannot classify further. Callers
-// may narrate those as facts about the path; they must not narrate the ones
-// above that way.
-func markUnansweredProbe(ctx context.Context, err error) error {
-	if err == nil {
-		return nil
-	}
-	if !probeWentUnanswered(ctx, err) {
+// ErrRepoProbeUnanswered when nothing proves git answered, and err untouched
+// when it did.
+func markUnansweredProbe(err error) error {
+	if err == nil || !probeWentUnanswered(err) {
 		return err
 	}
 	return &unansweredProbeError{err: err}
 }
 
-func probeWentUnanswered(ctx context.Context, err error) bool {
-	if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
-		return true
-	}
-	var startErr *exec.Error
-	if errors.As(err, &startErr) {
-		return true
-	}
-	// ExitCode is -1 for a process terminated by a signal; an ExitError always
-	// means the process exited, so a negative code here can only be that.
+// probeWentUnanswered reports whether a failed git invocation left the question
+// unanswered.
+//
+// The test is deliberately INVERTED: an answer is proven only by an
+// *exec.ExitError carrying a real exit status — git ran, diagnosed, and exited
+// — and every other outcome is unanswered. Enumerating the failure modes the
+// other way round is how #3500 happened in the first place; that list is never
+// complete, and each gap becomes a fabricated verdict about a user's path. Some
+// of what the inverted rule catches for free:
+//
+//   - a fork/exec failure, which is an *fs.PathError and matches NEITHER
+//     exec error type (measured: "exec format error", and a box out of process
+//     slots produces the same shape with EAGAIN);
+//   - Cmd.WaitDelay expiring before the output pipe closed, so the read was
+//     abandoned mid-flight — repoGitWaitDelay is 100ms, and a loaded box
+//     reaches it (#3500 was observed on a host whose load baseline is 60-95);
+//   - a signalled death, which ProcessState reports as a negative exit code;
+//   - a cancelled context, whose child CommandContext kills — hence signalled;
+//   - anything that loses the output after a clean exit.
+//
+// It deliberately does NOT consult ctx.Err(): a deadline that expires between
+// Output returning a completed ExitError and this call would otherwise retag an
+// answer as unknown (#3500 review). The command's own outcome is the evidence.
+func probeWentUnanswered(err error) bool {
 	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr) && exitErr.ProcessState != nil && exitErr.ProcessState.ExitCode() < 0
+	if errors.As(err, &exitErr) && exitErr.ProcessState != nil && exitErr.ProcessState.ExitCode() >= 0 {
+		return false
+	}
+	return true
 }
 
 // maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
@@ -157,7 +156,8 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		// A bare repository has no toplevel, but it is still a valid identity
 		// root. Accept that direct shape so callers holding the resolved identity
 		// can continue to address repo-scoped state.
-		if bareRoot, bareErr := resolveDirectBareRepoRootContext(ctx, pathArgs...); bareErr == nil && bareRoot != "" {
+		bareRoot, bareErr := resolveDirectBareRepoRootContext(ctx, pathArgs...)
+		if bareErr == nil && bareRoot != "" {
 			return repoRootResolution{identityRoot: bareRoot, workspaceRoot: bareRoot}, nil
 		}
 		var exitErr *exec.ExitError
@@ -167,7 +167,19 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 			!gitMetadataMayExist(pathArgs...) {
 			return repoRootResolution{}, fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", markUnansweredProbe(ctx, err))
+		// The bare shape is checked by a SECOND probe, and its outcome has to be
+		// classified too (#3500 review). A bare repository's toplevel refusal is
+		// an answer about a work tree, not about whether this is a repository at
+		// all; if the probe that would have settled that was killed, the
+		// question is open however cleanly the first one failed. The definite
+		// outside-repository answer above still wins — that one needs no bare
+		// probe to be true — and an ordinary non-repo path is unaffected,
+		// because there the bare probe answers (exit 128) like the first.
+		resolveErr := err
+		if !probeWentUnanswered(err) && bareErr != nil && probeWentUnanswered(bareErr) {
+			resolveErr = bareErr
+		}
+		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", markUnansweredProbe(resolveErr))
 	}
 	toplevel := trimGitOutputLine(topOut)
 
@@ -180,7 +192,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	infoOut, err := infoCmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return repoRootResolution{}, markUnansweredProbe(ctx, ctx.Err())
+			return repoRootResolution{}, markUnansweredProbe(ctx.Err())
 		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
@@ -231,7 +243,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		return repoRootResolution{identityRoot: filepath.Clean(worktree), workspaceRoot: toplevel}, nil
 	}
 	if ctx.Err() != nil {
-		return repoRootResolution{}, markUnansweredProbe(ctx, ctx.Err())
+		return repoRootResolution{}, markUnansweredProbe(ctx.Err())
 	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return repoRootResolution{identityRoot: filepath.Dir(commonDir), workspaceRoot: toplevel}, nil
@@ -265,7 +277,7 @@ func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {
 	cmd.WaitDelay = repoGitWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(ctx, err))
+		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(err))
 	}
 	switch value := strings.TrimSpace(string(out)); value {
 	case "true":

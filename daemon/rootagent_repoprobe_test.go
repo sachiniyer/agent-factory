@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,15 +29,31 @@ import (
 // before writing anything. exec reports a signalled exit as a negative exit
 // code, which is the "no answer came back" shape #3500 is about — the same
 // class as a WaitDelay-abandoned read, and deterministic enough for a test.
-// The real PATH stays behind the shim so the script's own utilities resolve.
-func installUnanswerableGit(t *testing.T) {
+//
+// The returned function makes the shim start answering again by handing every
+// invocation to the real git, so one test can drive the transition #3500's
+// review is about: a streak that begins unanswerable and later gets a verdict.
+func installUnanswerableGit(t *testing.T) (letGitAnswer func()) {
 	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
 	binDir := t.TempDir()
-	script := "#!/bin/sh\nkill -9 $$\n"
+	marker := filepath.Join(binDir, "unanswerable")
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\nif [ -f %q ]; then kill -9 $$; fi\nexec %q \"$@\"\n", marker, realGit)
 	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write git shim: %v", err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() {
+		if err := os.Remove(marker); err != nil {
+			t.Fatalf("let git answer: %v", err)
+		}
+	}
 }
 
 // captureRootEnsureLogs redirects the warning and error loggers for one test.
@@ -66,7 +83,7 @@ func TestRootEnsureDoesNotNarrateAnUnansweredProbeAsNotARepository(t *testing.T)
 
 	// Shim git only once the manager exists, so nothing but the ensure pass
 	// under test sees an unanswerable probe.
-	installUnanswerableGit(t)
+	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
 	manager.EnsureRootAgents()
 
@@ -125,7 +142,7 @@ func TestRootEnsureEscalationDoesNotAssertPersistenceFromUnansweredProbes(t *tes
 		t.Fatalf("NewManager: %v", err)
 	}
 
-	installUnanswerableGit(t)
+	_ = installUnanswerableGit(t)
 	_, errorLog := captureRootEnsureLogs(t)
 	for i := 0; i < rootEnsureEscalationThreshold; i++ {
 		manager.EnsureRootAgents()
@@ -187,7 +204,7 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	// fail-closed warning) out of the buffer this test reads.
 	project := config.Project{ID: "prj_0123456789abcdef0123456789abcdef", Root: t.TempDir()}
 
-	installUnanswerableGit(t)
+	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
 	_, _, projectRoots, unresolvedRoots := projectRootAgentLayers([]config.Project{project})
 
@@ -206,5 +223,59 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	}
 	if _, ok := unresolvedRoots[config.RepoIDForRecordedRoot(project.Root)]; !ok {
 		t.Fatalf("an unresolved root must still be recorded as unresolved")
+	}
+}
+
+// TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished: a streak that
+// begins with unanswerable probes escalates as "cause unknown", and when git
+// LATER starts answering with a real refusal the now-established cause gets its
+// own ERROR. Without that second escalation the strict threshold equality could
+// never fire again — the count is already past it — so a genuine persistent
+// failure would be logged as warnings forever while the root stayed down
+// (#3500 review).
+func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+
+	path := t.TempDir() // a real directory, and really not a git repository
+	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	letGitAnswer := installUnanswerableGit(t)
+	_, errorLog := captureRootEnsureLogs(t)
+	for i := 0; i < rootEnsureEscalationThreshold; i++ {
+		manager.EnsureRootAgents()
+	}
+	if got := errorLog.String(); !strings.Contains(got, "no attempt got an answer out of git") {
+		t.Fatalf("expected the unknown-cause escalation first, got: %q", got)
+	}
+
+	// git recovers, and now answers: the directory is not a repository. That is
+	// a real, persistent cause, and it must be reported as one.
+	errorLog.Reset()
+	letGitAnswer()
+	manager.EnsureRootAgents()
+
+	got := errorLog.String()
+	if !strings.Contains(got, "the cause looks persistent") {
+		t.Fatalf("an established cause after an unknown-only escalation must escalate again, got: %q", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("though %d of those attempts ended before git could answer", rootEnsureEscalationThreshold)) {
+		t.Fatalf("the second ERROR must still account for the attempts that established nothing, got: %q", got)
+	}
+
+	// And it stays at two: further answered failures are the same cause, and
+	// must not re-log the ERROR on every pass.
+	errorLog.Reset()
+	for i := 0; i < 3; i++ {
+		manager.EnsureRootAgents()
+	}
+	if got := errorLog.String(); got != "" {
+		t.Fatalf("the escalation must not repeat once the cause is established: %q", got)
 	}
 }

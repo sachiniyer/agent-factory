@@ -93,3 +93,63 @@ exit 128
 	assert.NotErrorIs(t, err, ErrRepoProbeUnanswered,
 		"an answered probe must never be reported as unanswered, or the honest message becomes noise")
 }
+
+// TestRepoFromPathClassifiesForkExecFailureAsUnanswered: git is found on PATH
+// but cannot be executed at all. This produces an *fs.PathError — matching
+// NEITHER *exec.Error nor *exec.ExitError — which is why the classifier proves
+// an answer instead of enumerating failures (#3500 review). The same shape
+// reaches a box that is out of process slots, which is exactly the load this
+// bug was reported under.
+func TestRepoFromPathClassifiesForkExecFailureAsUnanswered(t *testing.T) {
+	binDir := t.TempDir()
+	// Executable, but not a program: no shebang and no valid binary format, so
+	// execve fails with ENOEXEC after LookPath succeeds.
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte("not a program\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := RepoFromPath(t.TempDir())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRepoProbeUnanswered,
+		"a git that could not be executed answered nothing")
+	assert.NotErrorIs(t, err, ErrNotGitRepository, "a failed exec is not an answer")
+}
+
+// TestRepoFromPathClassifiesAKilledBareProbeAsUnanswered: a bare repository has
+// no work tree, so its toplevel probe fails cleanly and the bare shape is
+// settled by a SECOND probe. When that one is killed, nothing established
+// whether the path is a repository — even though the first failure was a
+// perfectly good answer to a different question (#3500 review).
+func TestRepoFromPathClassifiesAKilledBareProbeAsUnanswered(t *testing.T) {
+	installFakeGit(t, `#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	--is-bare-repository|--absolute-git-dir) kill -9 $$ ;;
+	esac
+done
+printf '%s\n' 'fatal: this operation must be run in a work tree' >&2
+exit 128
+`)
+
+	_, err := RepoFromPath(t.TempDir())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRepoProbeUnanswered,
+		"the probe that would have recognised a bare repository was killed; the question is open")
+}
+
+// TestRepoFromPathKeepsAnsweredBareRefusalOutOfTheUnansweredClass is the guard
+// on the case above: when the bare probe ANSWERS (an ordinary directory, where
+// it reports a non-repository just as the first probe did), the classification
+// must be unchanged. Otherwise the bare handling would quietly turn every
+// answered refusal into an unknown.
+func TestRepoFromPathKeepsAnsweredBareRefusalOutOfTheUnansweredClass(t *testing.T) {
+	installFakeGit(t, `#!/bin/sh
+printf '%s\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2
+exit 128
+`)
+
+	_, err := RepoFromPath(t.TempDir())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRepoProbeUnanswered,
+		"both probes answered; nothing here is unknown")
+	assert.ErrorIs(t, err, ErrNotGitRepository)
+}

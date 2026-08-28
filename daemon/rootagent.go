@@ -35,9 +35,10 @@ import (
 const rootDangerouslySkipPermissionsFlag = "--dangerously-skip-permissions"
 
 // rootEnsureEscalationThreshold is the consecutive-failure count at which the
-// ensure loop escalates to a one-time ERROR log: the cause now looks
-// persistent (a deleted repo path, an unparseable persisted root record), not
-// transient. The loop never stops retrying — it settles at the
+// ensure loop escalates to an ERROR log: the cause now looks persistent (a
+// deleted repo path, an unparseable persisted root record), not transient.
+// Once per streak, and a second time only for the one transition that changes
+// what the ERROR may claim — see rootEnsureShouldEscalate (#3500). The loop never stops retrying — it settles at the
 // rootEnsureBackoffMax cadence instead. A permanent give-up here is what kept
 // root agents down for hours after the 2026-07-03 tmux-server outage: the
 // outage outlasted the six fast attempts, and recovery then depended on a
@@ -90,7 +91,13 @@ type rootEnsureState struct {
 	// got an answer out of git (#3500), so the escalation ERROR can only claim
 	// a persistent cause when something actually established one.
 	unansweredFailures int
-	nextAttempt        time.Time
+	// escalated and escalatedAllUnanswered record whether this streak has
+	// already logged its escalation ERROR and what it was able to claim, so a
+	// streak that starts unanswerable and LATER gets a real answer escalates
+	// once more with the cause it can now name (#3500 review).
+	escalated              bool
+	escalatedAllUnanswered bool
+	nextAttempt            time.Time
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
@@ -753,6 +760,8 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	m.mu.Lock()
 	st.consecutiveFailures = 0
 	st.unansweredFailures = 0
+	st.escalated = false
+	st.escalatedAllUnanswered = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
 	m.mu.Unlock()
@@ -765,9 +774,10 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 // outage is indistinguishable from a broken config while it lasts, and only
 // a later retry can tell the difference (#1122). The cost for a genuinely
 // broken config is one cheap failed attempt per cadence interval, each
-// logged. Crossing rootEnsureEscalationThreshold logs one ERROR so a
+// logged. Crossing rootEnsureEscalationThreshold logs an ERROR so a
 // persistent cause is visible without waiting for a user to notice the
-// missing root.
+// missing root — worded for what the attempts actually established, and
+// re-logged if that changes (#3500).
 func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -777,11 +787,37 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	}
 	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
 	st.nextAttempt = time.Now().Add(backoff)
-	if st.consecutiveFailures == rootEnsureEscalationThreshold {
+	if st.consecutiveFailures >= rootEnsureEscalationThreshold && rootEnsureShouldEscalate(st) {
+		st.escalated = true
+		st.escalatedAllUnanswered = rootEnsureAllUnanswered(st)
 		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
 	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
+}
+
+// rootEnsureAllUnanswered reports whether every failure in the current streak
+// went unanswered — the one predicate both the escalation decision and its
+// wording read, so they cannot drift apart. Caller holds m.mu.
+func rootEnsureAllUnanswered(st *rootEnsureState) bool {
+	return st.unansweredFailures >= st.consecutiveFailures
+}
+
+// rootEnsureShouldEscalate decides whether a streak that has crossed the
+// threshold gets an ERROR now. Once per streak, plus once more for the one
+// transition that changes what the ERROR may claim: a streak escalated as
+// "cause unknown" whose probes LATER start answering has established a real
+// persistent cause, and the old strict equality on the threshold could never
+// report it — the count is already past the threshold, so the genuine cause
+// would be logged as warnings forever while the root stayed down (#3500
+// review). The reverse transition cannot happen: an answered failure is never
+// un-answered later in the same streak, which bounds this at two ERRORs.
+// Caller holds m.mu.
+func rootEnsureShouldEscalate(st *rootEnsureState) bool {
+	if !st.escalated {
+		return true
+	}
+	return st.escalatedAllUnanswered && !rootEnsureAllUnanswered(st)
 }
 
 // rootEnsureEscalationCause words what the escalation ERROR is entitled to
@@ -793,7 +829,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 // repository or the configuration. Caller holds m.mu.
 func rootEnsureEscalationCause(st *rootEnsureState) string {
 	switch {
-	case st.unansweredFailures >= st.consecutiveFailures:
+	case rootEnsureAllUnanswered(st):
 		return "no attempt got an answer out of git, so the cause is unknown; a repo probe that keeps dying says nothing about the repository or its configuration"
 	case st.unansweredFailures > 0:
 		return fmt.Sprintf("the cause looks persistent, though %d of those attempts ended before git could answer", st.unansweredFailures)
