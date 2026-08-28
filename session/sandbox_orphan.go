@@ -56,34 +56,52 @@ func (e *SandboxOrphanError) Unwrap() error { return e.cause }
 // reading this comment still gets "finish this teardown, never restore it".
 func (e *SandboxOrphanError) OrphanRecord() *Instance { return e.record }
 
-// orphanIfUnconfirmed wraps err in a *SandboxOrphanError when it reports a
-// sandbox this create could not confirm torn down.
+// sandboxIdentity is who a provisioned sandbox belongs to: enough to build a
+// cleanup-only record for it, and deliberately nothing more.
 //
-// THE one thing the two create-path failure exits share, and therefore the one
-// place it lives. What they do NOT share is how a KNOWN teardown error is
-// reported: NewInstance surfaces it, because a create failing for a reason it can
-// name should say so, while discardUnusableSandbox logs it and returns the cause
-// alone. That difference is a decision rather than drift, so this keys off the
-// classification each exit already performed instead of redoing it — a confirmed
-// teardown returns err untouched, and only "it may still be running" produces a
-// record.
-func orphanIfUnconfirmed(title, path string, res ProvisionResult, err error) error {
-	if err == nil || !TeardownStateUnknown(err) {
-		return err
-	}
+// The id matters as much as the title. A daemon create publishes a provisional
+// row under pending.ID and passes that same id into NewInstance so every later
+// projection UPSERTS onto it; a retained row that minted its own id would reach
+// clients as a second identity beside the pending one instead of replacing it.
+// createdAt is carried for the same reason as id: the daemon publishes the
+// provisional row with one, and a retained row that stamped time.Now() instead
+// would jump in the clients' rail order at the moment it settles.
+type sandboxIdentity struct {
+	id, title, path string
+	createdAt       time.Time
+}
+
+// newSandboxOrphanError builds the orphan error for a sandbox whose teardown
+// could not be confirmed.
+//
+// It does NOT re-derive that classification from the error chain, and that is the
+// whole point of the signature: it is reached only from a branch that already
+// established the teardown came back unknown. An earlier version of this tested
+// TeardownStateUnknown on the COMBINED error instead, which is a different
+// question — the revalidation cause can carry a teardown sentinel of its own, and
+// that manufactured an orphan record, a tombstone and a held title for a sandbox
+// the reap had already confirmed gone.
+func newSandboxOrphanError(who sandboxIdentity, res ProvisionResult, cause error) error {
 	if res.Backend == nil {
 		// Nothing to name, so nothing a row could ever reap. The error already says
 		// a sandbox may still be running; manufacturing a handle-less record would
 		// only hold a title hostage to something no retry can reach.
-		return err
+		return cause
 	}
-	now := time.Now()
+	id := who.id
+	if id == "" {
+		id = NewInstanceID()
+	}
+	created := who.createdAt
+	if created.IsZero() {
+		created = time.Now()
+	}
 	record := &Instance{
-		ID:        NewInstanceID(),
-		Title:     title,
-		Path:      path,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:        id,
+		Title:     who.title,
+		Path:      who.path,
+		CreatedAt: created,
+		UpdatedAt: time.Now(),
 		// Lost, not Ready: no agent ever ran on this sandbox. Retention comes from
 		// the unknown-cleanup marker and the tombstone below, never from a row that
 		// looks alive.
@@ -100,5 +118,5 @@ func orphanIfUnconfirmed(title, path string, res ProvisionResult, err error) err
 	// that escaped without one could be "recovered" into a fresh sandbox beside the
 	// orphan — the #3475 harm, re-entered from the create side.
 	record.MarkUserKilled()
-	return &SandboxOrphanError{record: record, cause: err}
+	return &SandboxOrphanError{record: record, cause: cause}
 }
