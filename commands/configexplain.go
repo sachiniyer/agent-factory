@@ -62,7 +62,7 @@ func loadResolvedConfig(projectSelector string) (*config.ResolvedConfig, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve project path %q: %w", projectSelector, err)
 	}
-	resolved, err := config.ResolveConfigForInspection(repo.Root)
+	resolved, err := config.ResolveConfigForRepoInspection(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +112,16 @@ func rootAgentReadValue(projectSelector, keyPath string, strictProjectLookup boo
 	}
 	if keyPath == "root_agent" {
 		return parent, nil
+	}
+	// A fail-closed table (#3264) has no Origins for the generic projection to
+	// key on — no config source decided it — so its leaves project through the
+	// dedicated path that keeps every candidate's cause verbatim.
+	if config.RootAgentValueFailsClosed(parent) {
+		projected, ok := config.ProjectFailClosedRootAgentLeaf(parent, keyPath)
+		if !ok {
+			return config.ResolvedValue{}, unknownConfigKeyError(keyPath)
+		}
+		return projected, nil
 	}
 	synthetic := &config.ResolvedConfig{Resolution: []config.ResolvedValue{parent}}
 	projected, ok := synthetic.ResolvedValuePath(keyPath)

@@ -1210,10 +1210,13 @@ func TestDeliverPrompt_DeletedProjectRootStillRejected(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("expected the reserved-name error for a deleted project's root target")
+		t.Fatal("expected a refusal for a deleted project's root target")
 	}
-	if !strings.Contains(err.Error(), "reserved") {
-		t.Fatalf("expected the reserved-name error, got: %v", err)
+	// Since #3264 the refusal names its cause instead of falling through to
+	// the reserved-name guard, whose "add it to root_agents" advice pointed at
+	// an opt-in the delete had just removed.
+	if !strings.Contains(err.Error(), "will not materialize") || !strings.Contains(err.Error(), "was deleted this daemon run") {
+		t.Fatalf("expected the cause-bearing refusal for a deleted project's root target, got: %v", err)
 	}
 	// The root is permanently suppressed, not coming back — saying otherwise
 	// sends the user looking for a recreation that will never happen.

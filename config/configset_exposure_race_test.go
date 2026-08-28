@@ -118,7 +118,7 @@ func TestExposureWarningJudgesTheFileInsideTheLock(t *testing.T) {
 					c.key, c.value, after.ListenAddr, after.RequireToken,
 					preLock.ListenAddr, preLock.RequireToken)
 			}
-			if w := res.Warnings[0]; !strings.Contains(w, "af config set require_token true") {
+			if w := res.Warnings[0]; !strings.Contains(w, "af config set network.require_token true") {
 				t.Errorf("the warning must say how to fix it, got: %s", w)
 			}
 		})

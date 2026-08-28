@@ -129,7 +129,11 @@ func httpSnapshotServer(t *testing.T, wantToken string) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/Snapshot", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if agentproto.TokenFromRequest(r) != wantToken {
+		tok := agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader))
+		if tok == "" && r.URL != nil {
+			tok = agentproto.AccessTokenFromQuery(r.URL.Query())
+		}
+		if tok != wantToken {
 			w.WriteHeader(http.StatusUnauthorized)
 			_ = apiproto.WriteEnvelope(w, apiproto.Failure("unauthorized"))
 			return

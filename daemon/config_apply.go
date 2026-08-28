@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
@@ -18,7 +19,7 @@ import (
 // startup config m.cfg is deliberately separate — it backs only the keys that do
 // NOT hot-reload: root_agents/root_agent and branch_prefix (title-reservation
 // helpers). The network listener keys used to read m.cfg too; #2480 PR2 made them
-// applied-live (livePosture per request; listen_addr/preview_listen_addr rebind in
+// applied-live (livePosture per request; network.listen_addr/network.preview_listen_addr rebind in
 // place), so they no longer do.
 func (m *Manager) Config() *config.Config {
 	if c := m.live.Load(); c != nil {
@@ -45,10 +46,10 @@ type ApplyConfigResult struct {
 	// Warnings are operator/user-facing notices produced while applying (#2480 PR2):
 	// the tokenless-network exposure notice (#2168 — warn, never refuse) and a
 	// listener rebind failure (bind-new-before-close kept the OLD listener serving,
-	// so the requested listen_addr / preview_listen_addr did NOT take effect). A save
+	// so the requested network.listen_addr / network.preview_listen_addr did NOT take effect). A save
 	// surface shows these so the user learns when a socket key did not apply.
 	Warnings []string
-	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
+	// FailedListenerKeys names the socket keys (network.listen_addr / network.preview_listen_addr)
 	// whose live rebind failed, so a save surface can word THAT key's notice as
 	// deferred rather than falsely "applied". The auth/CORS keys never appear here —
 	// they are live-read and cannot fail to apply.
@@ -60,7 +61,7 @@ type ApplyConfigResult struct {
 // (live now) versus Pending (next daemon start) — is NOT decided here: it is
 // config.KeyEffectClass, the single source of truth the save-surface notice reads
 // too (config/effect.go). So a key cannot be bucketed one way for the daemon and
-// described another way to the user. Client-side keys (update_channel, theme, …)
+// described another way to the user. Client-only keys (update_channel, keys, …)
 // are absent because the daemon never reads them; their notice is class-driven.
 var keyDiff = map[string]func(a, b *config.Config) bool{
 	// EffectAppliedLive keys.
@@ -79,16 +80,18 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"limit_retry_interval":           func(a, b *config.Config) bool { return a.LimitRetryInterval != b.LimitRetryInterval },
 	"limit_patterns":                 func(a, b *config.Config) bool { return !reflect.DeepEqual(a.LimitPatterns, b.LimitPatterns) },
 	"global_agent_skills":            func(a, b *config.Config) bool { return a.GlobalAgentSkills != b.GlobalAgentSkills },
-	"docker_mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
-	"ssh_host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
+	"docker.mount_agent_credentials": func(a, b *config.Config) bool { return a.DockerMountAgentCredentials != b.DockerMountAgentCredentials },
+	"ssh.host_key_verification":      func(a, b *config.Config) bool { return a.SSHHostKeyVerification != b.SSHHostKeyVerification },
+	"sandbox.ssh":                    func(a, b *config.Config) bool { return a.SandboxSSH != b.SandboxSSH },
+	"theme":                          func(a, b *config.Config) bool { return !reflect.DeepEqual(a.Theme, b.Theme) },
 	// Network listener keys — applied-live since #2480 PR2: the auth/CORS keys are
-	// read per request (livePosture); listen_addr / preview_listen_addr rebind the
+	// read per request (livePosture); network.listen_addr / network.preview_listen_addr rebind the
 	// socket in place (webListeners.reconcile, below in ApplyConfig).
-	"listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
-	"preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
-	"require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
-	"require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
-	"cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
+	"network.listen_addr":            func(a, b *config.Config) bool { return a.ListenAddr != b.ListenAddr },
+	"network.preview_listen_addr":    func(a, b *config.Config) bool { return a.PreviewListenAddr != b.PreviewListenAddr },
+	"network.require_token":          func(a, b *config.Config) bool { return a.RequireToken != b.RequireToken },
+	"network.require_loopback_token": func(a, b *config.Config) bool { return a.RequireLoopbackToken != b.RequireLoopbackToken },
+	"network.cors_allowed_origins":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.CORSAllowedOrigins, b.CORSAllowedOrigins) },
 	// EffectNextDaemonStart keys — read once at startup.
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
@@ -125,12 +128,44 @@ func withoutKeys(keys, drop []string) []string {
 	return kept
 }
 
+// ApplyTheme advances only the daemon-owned palette from the global config. A
+// plain `af` launch calls this after resolving a hand edit: applying the complete
+// file there would also mutate listeners/auth and could hide a failed rebind from
+// the user who merely opened the TUI. The event is an invalidation signal; open
+// web clients fetch GetTheme after receiving it.
+func (m *Manager) ApplyTheme() (bool, error) {
+	m.configApplyMu.Lock()
+	defer m.configApplyMu.Unlock()
+
+	newCfg, err := config.LoadConfig()
+	if err != nil {
+		return false, fmt.Errorf("reload config theme: %w", err)
+	}
+	old := m.Config()
+	if old == nil {
+		return false, fmt.Errorf("reload config theme: daemon config is unavailable")
+	}
+	if old.Theme == newCfg.Theme {
+		return false, nil
+	}
+
+	next := *old
+	next.Theme = newCfg.Theme
+	m.live.Store(&next)
+	m.publishEvent(agentproto.EventThemeChanged, nil)
+	return true, nil
+}
+
 func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
+	m.configApplyMu.Lock()
+	defer m.configApplyMu.Unlock()
+
 	newCfg, err := config.LoadConfig()
 	if err != nil {
 		return ApplyConfigResult{}, fmt.Errorf("reload config: %w", err)
 	}
 	old := m.Config()
+	themeChanged := old != nil && old.Theme != newCfg.Theme
 
 	// Bucket every changed key by its effect class (config.KeyEffectClass, the same
 	// source the save-surface notice reads). Sorted so the reported order is stable
@@ -152,9 +187,13 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 
 	// Swap the live config: per-op keys (default_program, session_env_passthrough,
 	// limit_auto_resume, limit_retry_interval, …) read it at their next op entry.
-	// branch_prefix rides along in the swapped config but is read from the frozen
-	// m.cfg in the title-reservation helpers, so it stays Pending, not Applied.
+	// branch_prefix rides along in the swapped config, but its runtime consumers
+	// read frozen m.cfg so an unrelated apply cannot advance that generation behind
+	// the next-start notice. GetTheme deliberately reads this live snapshot.
 	m.live.Store(newCfg)
+	if themeChanged {
+		m.publishEvent(agentproto.EventThemeChanged, nil)
+	}
 
 	// limit_patterns snapshots at construction, so the swap alone would be a silent
 	// no-op — rebuild the detector in place.
@@ -178,10 +217,10 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	}
 
 	// Network listener keys (#2480 PR2). The auth/CORS keys already apply — their
-	// handlers read the swapped live config per request, so require_token /
-	// require_loopback_token / cors_allowed_origins take effect on the next request
+	// handlers read the swapped live config per request, so network.require_token /
+	// network.require_loopback_token / network.cors_allowed_origins take effect on the next request
 	// with no action here, and DECOUPLED from any rebind (a security tightening lands
-	// whether or not a socket rebind succeeds). Only a listen_addr / preview_listen_addr
+	// whether or not a socket rebind succeeds). Only a network.listen_addr / network.preview_listen_addr
 	// change is a socket operation: reconcile rebinds it bind-new-before-close. A
 	// rebind that fails keeps the OLD listener serving and is reported deferred with
 	// the reason — never silently dropped.
@@ -203,10 +242,10 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 			result.Applied = withoutKeys(result.Applied, failed)
 		}
 	}
-	// Turning require_token OFF voids the premise every outstanding sandbox callback
+	// Turning network.require_token OFF voids the premise every outstanding sandbox callback
 	// credential was issued under (#3012 review).
 	//
-	// mintSandboxCallback REFUSES to issue one while require_token is false, on the
+	// mintSandboxCallback REFUSES to issue one while network.require_token is false, on the
 	// grounds that a scoped credential against a listener that authenticates nobody
 	// "manufactures the appearance of a boundary that nothing enforces". That check
 	// runs once, at provision time — and per the block above, an auth key applies
@@ -221,12 +260,12 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// also stop claiming a scope it is no longer enforcing, so the credentials go
 	// and the operator is told what they just widened.
 	//
-	// This does NOT restore the boundary, and the warning says so: with require_token
+	// This does NOT restore the boundary, and the warning says so: with network.require_token
 	// false the control plane answers every caller anonymously, so a sandbox does not
 	// need a credential to reach it. Only re-enabling the key restores it.
 	if old.RequireToken && !newCfg.RequireToken {
 		if n := m.sandboxTokens.revokeAll(); n > 0 {
-			warning := fmt.Sprintf("require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable require_token to restore the boundary", n)
+			warning := fmt.Sprintf("network.require_token is now false: revoked %d sandbox callback credential(s), because a scoped credential enforces nothing against a listener that authenticates nobody. Those sessions lose callback. NOTE: this does not re-isolate them — the control plane now answers unauthenticated callers, provisioned sandboxes included; re-enable network.require_token to restore the boundary", n)
 			log.WarningLog.Printf("%s", warning)
 			result.Warnings = append(result.Warnings, warning)
 		}

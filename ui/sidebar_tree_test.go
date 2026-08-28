@@ -205,7 +205,7 @@ func TestSidebarTreeSyncCursorSurvivesStructureRebuild(t *testing.T) {
 	s.Down() // tab row 1
 	require.Equal(t, 1, s.proj.ActiveTab())
 
-	// Simulate handleNewTab: the instance grows a third slot in place (no
+	// Simulate a new tab: the instance grows a third slot in place (no
 	// store version bump) and the handler selects the fresh tab.
 	inst := s.proj.GetInstances()[0]
 	inst.AddTabForTest("proc", session.TabKindProcess)

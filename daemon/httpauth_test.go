@@ -318,8 +318,10 @@ func TestWithAuthGateFailsClosed(t *testing.T) {
 }
 
 // TestWithAuthNilGateBypasses is the regression guard for local trust: the unix
-// socket passes a nil gate, so every request is authorized regardless of the
-// (missing or bogus) credential. This is why enforcement stays DARK until PR3.
+// socket passes a nil gate (httpserver.go), so every request is authorized
+// regardless of the (missing or bogus) credential. Token enforcement lives on
+// the TCP listener (tcpserver.go), gated by the configured posture
+// (require_token / require_loopback_token).
 func TestWithAuthNilGateBypasses(t *testing.T) {
 	h := withAuth(newHTTPMux(&controlServer{}), nil, nil)
 

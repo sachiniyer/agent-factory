@@ -53,16 +53,17 @@ func TestSessionEnvFlagsIncludeMarkers(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	flags := sessionEnvFlags("af_abc_mysession")
+	flags := sessionEnvFlags("af_abc_mysession", "generation-1")
 	require.Equal(t, []string{
 		"-e", "AF_SESSION=af_abc_mysession",
+		"-e", "AF_SESSION_GEN=generation-1",
 		"-e", "AF_HOME=" + home,
 	}, flags)
 }
 
 func TestSessionEnvFlagsEmptyWhenUnsupported(t *testing.T) {
 	forceNewSessionEnvMarkers(t, false)
-	require.Nil(t, sessionEnvFlags("af_abc_mysession"))
+	require.Nil(t, sessionEnvFlags("af_abc_mysession", "generation-1"))
 }
 
 // TestStartInjectsEnvMarkers verifies the markers reach the actual
@@ -73,6 +74,9 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	forceSessionEnvExecutable(t, "/test/af")
 	home := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", home)
+	oldNewSessionGeneration := newSessionGeneration
+	newSessionGeneration = func() string { return "generation-1" }
+	t.Cleanup(func() { newSessionGeneration = oldNewSessionGeneration })
 
 	ptyFactory := NewMockPtyFactory(t)
 	created := false
@@ -97,7 +101,7 @@ func TestStartInjectsEnvMarkers(t *testing.T) {
 	require.NoError(t, session.Start(workdir))
 	require.NotEmpty(t, ptyFactory.cmds)
 	require.Equal(t,
-		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_HOME=%s %s",
+		fmt.Sprintf("tmux new-session -d -s af_marked -c %s -e AF_SESSION=af_marked -e AF_SESSION_GEN=generation-1 -e AF_HOME=%s %s",
 			workdir, home, wrappedProgramForTest(t, "/test/af", "claude")),
 		strings.Join(ptyFactory.cmds[0].Args, " "))
 }

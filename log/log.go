@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -255,7 +256,7 @@ func rotationPolicy() (maxBytes int64, backups int) {
 		}
 		parsed := false
 		if data, err := os.ReadFile(filepath.Join(configDir, "config.toml")); err == nil {
-			parsed = toml.Unmarshal(data, &cfg) == nil
+			parsed = toml.Unmarshal(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), &cfg) == nil
 		} else if data, err := os.ReadFile(filepath.Join(configDir, "config.json")); err == nil {
 			parsed = json.Unmarshal(data, &cfg) == nil
 		}
@@ -384,6 +385,10 @@ func (w *rotatingWriter) Close() error {
 // applies both to the initial open and to the fresh file each rotation
 // creates. The writer is safe for concurrent use; Close is idempotent.
 func NewRotatingFile(path string, perm os.FileMode) (io.WriteCloser, error) {
+	return newRotatingFile(path, perm)
+}
+
+func newRotatingFile(path string, perm os.FileMode) (*rotatingWriter, error) {
 	maxBytes, backups := rotationPolicy()
 	if fi, err := os.Stat(path); err == nil && fi.Size() > maxBytes {
 		rotateFiles(path, backups)

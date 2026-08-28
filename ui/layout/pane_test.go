@@ -84,7 +84,7 @@ func TestPaneViewIsExactlyRectSized(t *testing.T) {
 
 	l := layout.Grid{Panes: 2}.Solve(132, 43)
 	require.False(t, l.Fallback)
-	for _, r := range l.VisibleRegions() {
+	for _, r := range visibleRegions(l) {
 		for _, content := range contents {
 			var pane layout.Pane = &stubPane{content: content}
 			pane.SetRect(r)
@@ -102,7 +102,7 @@ func TestPaneMouseDispatchViaZones(t *testing.T) {
 
 	panes := map[string]*stubPane{}
 	reg := zones.NewRegistry()
-	for id, r := range l.VisibleRegions() {
+	for id, r := range visibleRegions(l) {
 		pane := &stubPane{}
 		pane.SetRect(r)
 		panes[id] = pane

@@ -24,6 +24,17 @@ you can select a known project or add one.
   works — so you can follow progress across several agents without attaching to
   any of them. Toggle it with `s` (open) and `x` (hide).
 
+An idle row also says **why** it's idle, as far as the daemon can mechanically
+tell — `usage limit`, `process exited`, `restore gave up after 6 attempts: ...`,
+`no change after delivery`, `pane changed · 12m ago` — next to its branch name.
+The detail reports mechanically established facts only: process and restore
+state, prompt-delivery evidence, and when the pane's rendered bytes last changed.
+No reason ever claims the agent *finished*, *asked a question*, or is
+*wedged* — those can render identically in a terminal, so af reports the
+observation and leaves reading the pane to you (#3168). The full `idle_reason`
+vocabulary is in the
+[HTTP API guide](../http-api.md#session-idle-diagnosis).
+
 ## Interacting with a session
 
 There are two ways in, split deliberately:
@@ -64,9 +75,10 @@ For a named long-running command or a web preview with a URL/port, use
 ## Sessions, tasks, and other surfaces
 
 - **`n`** creates a new local session; **`N`** creates a remote one.
-- **`a`** archives the selected session as the default done action (or restores
-  an archived, Lost, or Dead one). **`D`** permanently kills it, including any
-  uncommitted or unmerged work.
+- **`a`** archives the selected live session as the default done action, behind
+  a confirmation — on an archived, Lost, or Dead row it does nothing. **`r`**
+  restores an archived, Lost, or Dead session. **`D`** permanently kills a
+  session, including any uncommitted or unmerged work.
 - **`m`** opens the tasks view to manage [scheduled and event-driven
   automations](../tasks.md).
 - **`c`** retries a session that's parked on a [usage limit](../usage-limits.md).
@@ -83,7 +95,7 @@ For a named long-running command or a web preview with a URL/port, use
 
 Every binding above is the default. You can rebind almost all of them in the
 `[keys]` table of your config — a handful of structural keys (Enter, Tab,
-`Ctrl-]`, the `1`–`9` tab jumps) are reserved. Run:
+Shift-Tab, Esc, `Ctrl-]`, the `1`–`9` tab jumps) are reserved. Run:
 
 ```bash
 af keys

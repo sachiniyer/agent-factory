@@ -36,7 +36,26 @@ var (
 	ErrPromptReceiptAmbiguous = errors.New("prompt receipt ambiguous")
 )
 
+// errCodexCaptureUndecided marks a retryable observation in which at least one
+// new rollout file exists but its session_meta cannot be classified yet. It is
+// what separates "no evidence appeared" (absence, bounded by the caller's
+// timeout) from "evidence exists and is still being written" (bounded by
+// codexSessionMetaSettleTimeout on top). Both refuse if their bound expires.
+var errCodexCaptureUndecided = errors.New("codex conversation capture undecided")
+
 const promptReceiptPollInterval = 50 * time.Millisecond
+
+// codexSessionMetaSettleTimeout bounds how much longer capture keeps polling
+// past its base timeout when a new rollout file exists but its session_meta
+// header is not yet classifiable. The base timeout answers "did a rollout
+// appear at all"; once one has, the only open question is evidence that Codex
+// has not finished writing. Codex 0.147.0 was measured writing the header
+// 2.6–2.8s after process start (#3266), so a base window sized for file
+// creation expired moments before the header became readable and a successful
+// handoff permanently lost its conversation id. 15s is ~5x that observed
+// latency; a header still unclassifiable at this bound gets the same undecided
+// refusal as before. Var, not const, so tests can shorten the bound.
+var codexSessionMetaSettleTimeout = 15 * time.Second
 
 // ConversationCaptureSnapshot records provider-local state before a pane is
 // spawned. It lets post-spawn capture identify a newly-created conversation
@@ -156,12 +175,23 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	if snap.codexHome == "" {
 		return AgentConversationData{}, nil
 	}
-	deadline := time.Now().Add(timeout)
+	start := time.Now()
+	absentDeadline := start.Add(timeout)
+	settleDeadline := start.Add(timeout + codexSessionMetaSettleTimeout)
 	for {
 		conv, retry, err := captureCodexConversationOnce(snap)
-		// An unclassifiable session_meta is retryable even though err records why
-		// capture must refuse if the deadline expires before the header settles.
-		if conv.HasID() || !retry || timeout <= 0 || time.Now().After(deadline) {
+		if conv.HasID() || !retry || timeout <= 0 {
+			return conv, err
+		}
+		// Expiry while a concrete candidate is still unclassifiable is not
+		// absence (#3266): the file already appeared inside the base window, so
+		// the extended bound only waits for Codex to finish writing a header
+		// that classification — unchanged and fail-closed — will then rule on.
+		deadline := absentDeadline
+		if errors.Is(err, errCodexCaptureUndecided) {
+			deadline = settleDeadline
+		}
+		if time.Now().After(deadline) {
 			return conv, err
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -177,8 +207,8 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 		// a match or proof that the rollout belongs to another process. The error
 		// is returned only if the caller's bounded retry window expires.
 		return AgentConversationData{}, true, fmt.Errorf(
-			"codex conversation capture undecided: %d new rollout files appeared and %d had uncorrelatable session metadata",
-			len(observed), uncorrelated)
+			"%w: %d new rollout files appeared and %d had uncorrelatable session metadata",
+			errCodexCaptureUndecided, len(observed), uncorrelated)
 	}
 	switch len(candidates) {
 	case 0:

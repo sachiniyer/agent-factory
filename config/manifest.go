@@ -2,6 +2,7 @@ package config
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -63,6 +64,11 @@ type ManifestEntry struct {
 	// "table", or "list". It describes what a user writes, which can be more
 	// specific than the Go field used for the normalized in-memory value.
 	Type string
+	// AcceptedTypes lists every config shape the decoder accepts when Type alone
+	// is incomplete. It includes Type itself and is nil for ordinary one-shape
+	// keys. Theme uses this to describe its named string presets and custom table
+	// without weakening Type's lock to the normalized Go struct.
+	AcceptedTypes []string
 	// Default is the default value rendered for a human. For a key whose default
 	// is deterministic, TestManifestDefaultsMatchDefaultConfig pins this against
 	// DefaultConfig(); the rest (a username-derived prefix, a detected binary
@@ -75,12 +81,11 @@ type ManifestEntry struct {
 	// Tier ranks the key for ordering and for what an agent surfaces first.
 	Tier ConfigTier
 	// Settable reports whether the current global `af config set` accepts this
-	// key — for a dynamic family (program_overrides, limit_patterns) that means
-	// its leaves, e.g.
-	// `af config set program_overrides.claude …`. It is pinned against the real
-	// allowlist by TestManifestAgreesWithSettableKeys, so it can never become a
-	// claim the CLI does not honor. A false here means the key must be changed
-	// through another writer or by hand in an allowed config location.
+	// whole key. Dynamic families (program_overrides, limit_patterns) additionally
+	// retain their leaf form, e.g. `af config set program_overrides.claude …`.
+	// It is pinned against the real allowlist by TestManifestAgreesWithSettableKeys,
+	// so it can never become a claim the CLI does not honor. Global entries are
+	// uniformly true; false is reserved for repo-only keys outside these panes.
 	Settable bool
 	// Enum is the allowed values, when they are enumerated. Nil when the value
 	// is free-form (a path, a duration, an address) or a plain bool.
@@ -139,7 +144,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "listen_addr",
+		Key:        "network.listen_addr",
 		Type:       "string",
 		Default:    "127.0.0.1:8443",
 		Purpose:    "Address the browser interface and HTTP API are served on · set it to \"\" to turn the web server off entirely.",
@@ -151,7 +156,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "require_token",
+		Key:        "network.require_token",
 		Type:       "bool",
 		Default:    "false",
 		Purpose:    "Require an access token from other machines on the network · off by default, so the browser interface opens with no login.",
@@ -163,10 +168,10 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "require_loopback_token",
+		Key:        "network.require_loopback_token",
 		Type:       "bool",
 		Default:    "false",
-		Purpose:    "Also require the token from browsers on this same machine · has no effect on its own, since it only tightens a token that require_token must first turn on.",
+		Purpose:    "Also require the token from browsers on this same machine · has no effect on its own, since it only tightens a token that network.require_token must first turn on.",
 		Tier:       TierCore,
 		Settable:   true,
 		Sources:    sourceGlobalOnly,
@@ -202,12 +207,16 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 2 ----
 	{
-		Key:        "theme",
-		Type:       "table",
-		Default:    "the Zenburn palette",
-		Purpose:    "Colors the terminal interface uses · one #RRGGBB value per slot, and any slot you leave out keeps its default.",
+		Key:  "theme",
+		Type: "table",
+		AcceptedTypes: []string{
+			"string",
+			"table",
+		},
+		Default:    "nord",
+		Purpose:    "Colors the terminal and browser interfaces use · choose the nord or zenburn preset, or provide one #RRGGBB value per custom slot.",
 		Tier:       TierCommon,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeTableByField,
@@ -228,7 +237,7 @@ var configManifest = []ManifestEntry{
 
 	// ---- Tier 3: everything else user-facing ----
 	{
-		Key:        "preview_listen_addr",
+		Key:        "network.preview_listen_addr",
 		Type:       "string",
 		Default:    `""`,
 		Purpose:    "Address for a separate per-tab web-tab preview origin, kept apart from the main interface · off by default; it hosts previews only and never the control API, and it works for same-machine viewing only.",
@@ -343,7 +352,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none",
 		Purpose:    "Extra environment variable names an agent session may inherit · exact names only, values stay out of config, and each name explicitly trusts a repo-selected Docker image.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeReplace,
@@ -387,7 +396,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "docker_mount_agent_credentials",
+		Key:        "docker.mount_agent_credentials",
 		Type:       "bool",
 		Default:    "false",
 		Purpose:    "Let a docker-backend session mount the operator's on-disk credential file for that session's own agent, read-only, so it can authenticate · global-only: a repo selects the image but only the operator grants it credential access.",
@@ -399,7 +408,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "ssh_host_key_verification",
+		Key:        "ssh.host_key_verification",
 		Type:       "string",
 		Default:    "strict",
 		Purpose:    "How the ssh backend verifies a remote host key · strict (default) refuses an unknown or changed key; accept-new trusts an unknown key on first connect (still refuses a changed one); insecure skips verification · global-only: a repo selects ssh.host but only the operator relaxes verification.",
@@ -412,7 +421,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "sandbox_ssh",
+		Key:        "sandbox.ssh",
 		Type:       "string",
 		Default:    `""`,
 		Purpose:    "The free-form ssh command the `sandbox` backend runs to reach the sandbox host (jump hosts, ProxyCommand, custom flags) · global-only: af executes it on the daemon host, so a repo selecting backend=sandbox cannot dictate what command runs — only the operator can.",
@@ -436,7 +445,7 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
-		Key:        "cors_allowed_origins",
+		Key:        "network.cors_allowed_origins",
 		Type:       "list",
 		Default:    "none",
 		Purpose:    "Other websites allowed to call this machine's API from a browser · empty blocks every one of them.",
@@ -451,9 +460,9 @@ var configManifest = []ManifestEntry{
 		Key:        "root_agents",
 		Type:       "table",
 		Default:    "none",
-		Purpose:    "Repositories that always keep a session named root running · one entry per repository path.",
+		Purpose:    "Legacy path map: repositories that always keep a session named root running · accepted forever for compatibility; use the current root_agent project profile for new configuration.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeMapByKey,
@@ -463,9 +472,9 @@ var configManifest = []ManifestEntry{
 		Key:        "root_agent",
 		Type:       "table",
 		Default:    "not enabled",
-		Purpose:    "Whether a project keeps a session named root running, and the command it runs · the singleton successor to the root_agents list, settable per project.",
+		Purpose:    "Current project profile: whether a registered project keeps a session named root running, and the command it runs · the singleton successor to the legacy root_agents path map, settable per project.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalPersonal,
 		Precedence: precedenceGlobalPersonal,
 		Merge:      MergeTableByField,
@@ -477,7 +486,7 @@ var configManifest = []ManifestEntry{
 		Default:    "none · the built-in bindings are used",
 		Purpose:    "Which key triggers each action in the terminal interface · one entry per action, replacing that action's default.",
 		Tier:       TierAdvanced,
-		Settable:   false,
+		Settable:   true,
 		Sources:    sourceGlobalOnly,
 		Precedence: precedenceGlobal,
 		Merge:      MergeMapByKey,
@@ -577,6 +586,11 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 	out := make([]ManifestEntry, len(entries))
 	copy(out, entries)
 	for i := range out {
+		if out[i].AcceptedTypes != nil {
+			acceptedTypes := make([]string, len(out[i].AcceptedTypes))
+			copy(acceptedTypes, out[i].AcceptedTypes)
+			out[i].AcceptedTypes = acceptedTypes
+		}
 		if out[i].Enum != nil {
 			enum := make([]string, len(out[i].Enum))
 			copy(enum, out[i].Enum)
@@ -589,6 +603,17 @@ func cloneManifest(entries []ManifestEntry) []ManifestEntry {
 		}
 	}
 	return out
+}
+
+func (e ManifestEntry) acceptedTypes() []string {
+	if len(e.AcceptedTypes) == 0 {
+		return []string{e.Type}
+	}
+	return e.AcceptedTypes
+}
+
+func (e ManifestEntry) typeLabel() string {
+	return strings.Join(e.acceptedTypes(), " or ")
 }
 
 // manifestKeysForSource is the sorted key projection used by source-specific
@@ -610,6 +635,9 @@ func manifestGlobalOnlyKeySet() map[string]bool {
 	for _, entry := range configManifest {
 		if entry.Sources.Has(SourceGlobal) && !entry.Sources.Has(SourceRepoShared) {
 			keys[entry.Key] = true
+			if alias, ok := configAliasForCanonical(entry.Key); ok {
+				keys[alias.legacy] = true
+			}
 		}
 	}
 	return keys
@@ -620,6 +648,13 @@ func manifestTOMLOnlyGlobalKeySet() map[string]bool {
 	for _, entry := range configManifest {
 		if entry.Sources.Has(SourceGlobal) && !entry.Formats.Has(FormatJSON) {
 			keys[entry.Key] = true
+		}
+		if entry.Sources.Has(SourceGlobal) {
+			if _, ok := configAliasForCanonical(entry.Key); ok {
+				// The setting remains available to JSON under its flat alias, but
+				// its canonical dotted spelling is a TOML table leaf.
+				keys[entry.Key] = true
+			}
 		}
 	}
 	return keys

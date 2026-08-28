@@ -3,7 +3,6 @@ package agentproto
 import (
 	"errors"
 	"math/rand"
-	"net/http"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -343,33 +342,5 @@ func TestAccessTokenFromQuery(t *testing.T) {
 	}
 	if got := AccessTokenFromQuery(url.Values{}); got != "" {
 		t.Errorf("AccessTokenFromQuery(empty) = %q, want empty", got)
-	}
-}
-
-func TestTokenFromRequest(t *testing.T) {
-	// Header path.
-	r := &http.Request{Header: http.Header{}, URL: &url.URL{}}
-	r.Header.Set(AuthHeader, "Bearer header-tok")
-	if got := TokenFromRequest(r); got != "header-tok" {
-		t.Errorf("header path = %q, want header-tok", got)
-	}
-
-	// Query fallback (the browser WS path — no header).
-	r2 := &http.Request{Header: http.Header{}, URL: &url.URL{RawQuery: AccessTokenQueryParam + "=query-tok"}}
-	if got := TokenFromRequest(r2); got != "query-tok" {
-		t.Errorf("query fallback = %q, want query-tok", got)
-	}
-
-	// Header wins over query when both are present.
-	r3 := &http.Request{Header: http.Header{}, URL: &url.URL{RawQuery: AccessTokenQueryParam + "=query-tok"}}
-	r3.Header.Set(AuthHeader, "Bearer header-tok")
-	if got := TokenFromRequest(r3); got != "header-tok" {
-		t.Errorf("header precedence = %q, want header-tok", got)
-	}
-
-	// Neither present.
-	r4 := &http.Request{Header: http.Header{}, URL: &url.URL{}}
-	if got := TokenFromRequest(r4); got != "" {
-		t.Errorf("no auth = %q, want empty", got)
 	}
 }

@@ -47,15 +47,21 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("%w: prepare filtered session environment: %v", ErrSessionNotStarted, envErr)
 	}
 	args := []string{"new-session", "-d", "-s", t.sanitizedName, "-c", workDir}
-	args = append(args, sessionEnvFlags(t.sanitizedName)...)
+	args = append(args, sessionEnvFlags(t.sanitizedName, newSessionGeneration())...)
 	args = append(args, wrappedProgram)
+	// Bootstrap before deciding whether new-session needs a temporary
+	// update-environment override. Otherwise the no-server probe below omits
+	// the override, the bootstrap creates a filtered server, and the first pane
+	// loses its agent-specific environment. Thread the result into command
+	// selection so a failed bootstrap falls back without repeating its timeout.
+	serverErr := EnsureDaemonServer()
 	args, envErr = t.importClientEnvironmentArgs(args, importNames)
 	if envErr != nil {
 		// Same proof as above: still read-only, still before new-session.
 		t.proveNoPaneIfDeterminatelyAbsent()
 		return fmt.Errorf("%w: prepare existing tmux session environment: %v", ErrSessionNotStarted, envErr)
 	}
-	cmd, systemdScoped := newTmuxServerCommand(args...)
+	cmd, systemdScoped := newTmuxServerCommandAfterEnsure(serverErr, args...)
 	// A fresh tmux server snapshots its first client's environment. Filter the
 	// client as well as the pane so a server created here never stores unrelated
 	// credentials in its global environment. The pane exec shim filters again
@@ -233,15 +239,26 @@ func (t *TmuxSession) Start(workDir string) error {
 	return nil
 }
 
-// CheckAndHandleTrustPrompt checks the pane content once for a trust prompt and dismisses it if found.
-// Returns true if the prompt was found and handled.
+// CheckAndHandleTrustPrompt checks the pane content once for a trust prompt
+// and dismisses it if found. It reports whether a dialog was in the way of the
+// pane's composer — NOT whether the dismissal keystroke landed.
+//
+// That distinction is the #3302 contract: task.DismissTrustPrompt treats false
+// as "the pane shows no dialog", which is the create path's permission to type
+// the user's prompt into the pane. A dialog that was positively identified but
+// whose keystroke failed is still on screen, so every such branch returns true
+// and lets the caller retry within its budget — the same fail-closed answer
+// handleCodexSafetyBuffering already gives on its send-keys failures. An
+// unreadable pane likewise reports true: a failed capture is not an observed
+// dialog-free pane, and the caller's readiness re-wait fails fast on a session
+// that is genuinely gone.
 func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	t.inputMu.Lock()
 	defer t.inputMu.Unlock()
 
 	content, err := t.CapturePaneContent()
 	if err != nil {
-		return false
+		return true
 	}
 
 	// Key off the agent actually running in the pane, token-matched — a loose
@@ -252,7 +269,6 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeTrustPromptPresent(content) {
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
-				return false
 			}
 			return true
 		}
@@ -261,9 +277,23 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			return true
 		}
 		if CodexTrustPromptPresent(content) {
+			// Codex's directory-trust modal is a ListSelectionView that hides
+			// the terminal cursor, while the ordinary composer exposes one. The
+			// dialog text can appear verbatim in quoted agent output (logs,
+			// diffs of this very file), so the text pattern alone is not proof a
+			// modal owns the pane. Require a hidden cursor before accepting
+			// "Yes, continue", and fail closed on a cursor-read error: blocking
+			// costs one poll, but injecting Enter into an active composer is
+			// irreversible. Mirrors inspectCodexSafetyPrompt (#2220, #3302).
+			cursor, err := t.readPaneCursorState()
+			if err != nil {
+				return true
+			}
+			if cursor.Visible {
+				return false
+			}
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
-				return false
 			}
 			return true
 		}
@@ -271,7 +301,6 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if DocTrustPromptPresent(content) {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
-				return false
 			}
 			return true
 		}

@@ -145,7 +145,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 	candidates := make([]sourceCandidate, 0, len(documents))
 	for _, document := range documents {
 		allowed := sourceInPrecedence(document.layer, entry.Precedence)
-		configured, present := document.metadata.topLevel(entry.Key)
+		configured, present, keyPath := document.metadata.topLevelWithKeyPath(entry.Key)
 		if document.isBuiltIn() {
 			present = allowed
 		}
@@ -153,7 +153,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 			Layer:   document.layer.String(),
 			Path:    document.metadata.path,
 			Format:  sourceFormatName(document.metadata.format),
-			KeyPath: entry.Key,
+			KeyPath: keyPath,
 			Allowed: allowed,
 			Present: present,
 			Value:   nil,
@@ -211,7 +211,7 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 		!jsonEquivalent(winnerTrace.Value, clonedInterface(candidates[winner].typed)) {
 		winnerTrace.Reason += "; load-time normalization changed the configured value before resolution"
 	}
-	ref := sourceReference(candidates[winner].document, entry.Key)
+	ref := sourceReference(candidates[winner].document, winnerTrace.KeyPath)
 	result.Winner = &ref
 
 	for i := range candidates {
@@ -237,6 +237,7 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	leafValues := make(map[string]reflect.Value)
 	origins := make(map[string]SourceRef)
 	materialized := false
+	var themeIdentity *ThemeConfig
 	for i := range candidates {
 		candidate := &candidates[i]
 		trace := &result.Candidates[candidate.traceIndex]
@@ -246,6 +247,11 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 		}
 
 		configured, _ := candidate.document.metadata.topLevel(entry.Key)
+		if entry.Key == "theme" {
+			if theme, ok := reflectedThemeConfig(candidate.typed); ok {
+				themeIdentity = &theme
+			}
+		}
 		leaves, configuredCount, normalizedCount, candidateMaterialized, err := compositeLeaves(
 			candidate.typed, configured, candidate.document.isBuiltIn())
 		if err != nil {
@@ -352,7 +358,26 @@ func resolveComposite(entry ManifestEntry, result ResolvedValue, candidates []so
 	if len(origins) > 0 {
 		result.Origins = origins
 	}
+	if entry.Key == "theme" && themeIdentity != nil {
+		theme := value.Interface().(ThemeConfig)
+		theme.preset = themeIdentity.preset
+		theme.explicitPreset = themeIdentity.explicitPreset
+		value = reflect.ValueOf(theme)
+	}
 	return computedValue{resolved: result, value: value}, nil
+}
+
+func reflectedThemeConfig(value reflect.Value) (ThemeConfig, bool) {
+	for value.IsValid() && value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return ThemeConfig{}, false
+		}
+		value = value.Elem()
+	}
+	if !value.IsValid() || value.Type() != reflect.TypeOf(ThemeConfig{}) {
+		return ThemeConfig{}, false
+	}
+	return value.Interface().(ThemeConfig), true
 }
 
 func setNonParticipantResult(trace *CandidateTrace) {
@@ -401,6 +426,9 @@ func valueFromSchemas(schemas []any, key string) (reflect.Value, bool) {
 }
 
 func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
+	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
+		key = alias.legacy
+	}
 	for value.IsValid() && value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			value = reflect.Zero(value.Type().Elem())
@@ -455,6 +483,13 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 		}
 		sort.Strings(names)
 		materialized = true
+	} else if _, namedPreset := configured.(string); namedPreset && value.Kind() == reflect.Struct {
+		// A dual-shape composite such as theme = "zenburn" configures the
+		// complete typed struct produced by its text decoder. Treating the scalar
+		// only as top-level presence would make every expanded field look like an
+		// unconfigured mutation of the inherited snapshot.
+		names = compositeNames(value)
+		materialized = true
 	} else {
 		// JSON null is a present, typed nil table. It contributes no fields but
 		// remains visible as a present candidate in the trace.
@@ -467,8 +502,7 @@ func compositeLeaves(value reflect.Value, configured any, builtIn bool) (map[str
 		leaf, ok := compositeLeaf(value, name)
 		if ok {
 			leaves[name] = leaf
-			if !builtIn {
-				configuredMap := configured.(map[string]any)
+			if configuredMap, mapped := configured.(map[string]any); !builtIn && mapped {
 				if !jsonEquivalent(configuredMap[name], clonedInterface(leaf)) {
 					normalized++
 				}
@@ -647,6 +681,7 @@ func pluralize(word string, count int) string {
 // leaf is projected from the already-resolved value and origins; it never runs
 // a second precedence algorithm.
 func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool) {
+	keyPath = canonicalConfigKey(keyPath)
 	if value, ok := r.ResolvedValue(keyPath); ok {
 		return value, true
 	}

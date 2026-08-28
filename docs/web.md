@@ -24,7 +24,7 @@ another machine; the rest of this page is a tour.
 The web client is served on the daemon's **plain-HTTP TCP listener**, and that
 listener is bound by default at `127.0.0.1:8443`. A fresh install needs **zero**
 config: start the daemon (any `af` command does), open `http://127.0.0.1:8443`, and
-you're in. The address is controlled by one **global-only** key, `listen_addr` — a
+you're in. The address is controlled by one **global-only** key, `network.listen_addr` — a
 cloned repo must never be able to open a network port, so it lives only in your
 global config and defaults to loopback.
 
@@ -34,14 +34,14 @@ token:
 ```
 daemon HTTP TCP listener enabled on 127.0.0.1:8443 (plain HTTP — terminate TLS at a proxy if needed)
   bearer token: kZ9…-…q0
-  all peers connect with NO token (require_token defaults to false; set require_token = true to require auth)
+  all peers connect with NO token (network.require_token defaults to false; set network.require_token = true to require auth)
 ```
 
 ### Loopback (default), the network, or off
 
-`listen_addr` takes three shapes. Because config parsing layers your file on top
-of the defaults, an **absent** `listen_addr` inherits the loopback default, while
-an **explicit** `listen_addr = ""` is the deliberate opt-out — the two are not the
+`network.listen_addr` takes three shapes. Because config parsing layers your file on top
+of the defaults, an **absent** `network.listen_addr` inherits the loopback default, while
+an **explicit** `network.listen_addr = ""` is the deliberate opt-out — the two are not the
 same.
 
 - **`127.0.0.1:8443` — the default.** The listener is reachable only from the same
@@ -56,7 +56,7 @@ same.
     ```
 
 - **`0.0.0.0:8443` (or a LAN/Tailscale IP) — expose to the network.** The listener
-  is reachable from the network. Pair it with **`require_token = true`** — af
+  is reachable from the network. Pair it with **`network.require_token = true`** — af
   serves a tokenless network bind and only warns (see [Remote daemon
   access](remote-http-auth.md#the-tokenless-network-warning)). Only bind a routable
   interface when you must, and put it behind a firewall. Hand-edit your global
@@ -64,6 +64,7 @@ same.
 
     ```toml
     # ~/.agent-factory/config.toml
+    [network]
     listen_addr = "0.0.0.0:8443"
     require_token = true   # strongly recommended: the default is false — no token at all
     ```
@@ -73,13 +74,14 @@ same.
     ```
 
     See [Remote daemon access](remote-http-auth.md#option-2-direct-tcp-token) for the
-    full network setup, including CORS and `require_token`.
+    full network setup, including CORS and `network.require_token`.
 
 - **`""` — disable the web server.** An explicit empty value turns the HTTP TCP
   listener off entirely; the daemon runs pure-unix-socket and serves no browser UI:
 
     ```toml
     # ~/.agent-factory/config.toml
+    [network]
     listen_addr = ""
     ```
 
@@ -148,7 +150,7 @@ about the app changes — it is fully functional over plain HTTP, install is sim
 not on the menu.
 
 **To install from a remote machine, put the daemon behind HTTPS** — a
-TLS-terminating reverse proxy in front of `listen_addr` — and open the proxy's
+TLS-terminating reverse proxy in front of `network.listen_addr` — and open the proxy's
 `https://` origin. Tailscale's own HTTPS (`tailscale serve`) works too, since it
 gives you an `https://…ts.net` origin. See
 [Transport encryption](remote-http-auth.md#transport-encryption-terminate-tls-yourself).
@@ -183,15 +185,15 @@ Whether the web client asks you for a token depends on **where your browser is**
 judged from the real TCP connection address (never a header — those are
 attacker-controlled and ignored, see [When is a token required?](remote-http-auth.md#when-is-a-token-required-loopback-vs-network)).
 
-**By default, never.** `require_token` defaults to `false`, so the app connects
+**By default, never.** `network.require_token` defaults to `false`, so the app connects
 with no login screen wherever your browser is. Turning the token on is opt-in:
 
 | Your browser is on… | Token needed? | What you see |
 | --- | --- | --- |
-| **Anywhere**, default (`require_token = false`) | **No** | The app loads straight through — no login screen |
-| **The same machine** (loopback), `require_token = true` | No | The app loads straight through — loopback stays exempt |
-| **The same machine**, `require_token` **and** `require_loopback_token` both `true` | **Yes** | A login screen asking you to paste the daemon token |
-| **Another machine** (network peer), `require_token = true` | **Yes** | A login screen asking you to paste the daemon token |
+| **Anywhere**, default (`network.require_token = false`) | **No** | The app loads straight through — no login screen |
+| **The same machine** (loopback), `network.require_token = true` | No | The app loads straight through — loopback stays exempt |
+| **The same machine**, `network.require_token` **and** `network.require_loopback_token` both `true` | **Yes** | A login screen asking you to paste the daemon token |
+| **Another machine** (network peer), `network.require_token = true` | **Yes** | A login screen asking you to paste the daemon token |
 
 The web client never guesses: it asks the daemon via `/v1/auth-info` whether
 *this* connection needs a token, and skips the login screen whenever the answer is
@@ -203,25 +205,25 @@ Making a same-machine browser hunt for a token and paste it bought no real
 security — anyone on the box already runs as your user, the same trust the Unix
 socket grants — and it cost every new user a login screen before they saw the
 product. So the token is **off by default** and auth is opt-in. What bounds the
-exposure is the *other* default: `listen_addr` is loopback-only, so nothing off
+exposure is the *other* default: `network.listen_addr` is loopback-only, so nothing off
 the machine can reach the daemon until you change it.
 
 Two cases break that assumption, and both are on you to close:
 
 - **A shared / multi-user machine**: the loopback listener has no per-user gating,
-  so every local account can reach it. Set **both** `require_token = true` and
-  `require_loopback_token = true` (the latter is inert on its own), or
-  `listen_addr = ""` to turn the web server off.
-- **A network bind**: pointing `listen_addr` at a routable interface while leaving
+  so every local account can reach it. Set **both** `network.require_token = true` and
+  `network.require_loopback_token = true` (the latter is inert on its own), or
+  `network.listen_addr = ""` to turn the web server off.
+- **A network bind**: pointing `network.listen_addr` at a routable interface while leaving
   the tokenless default would serve an **unauthenticated control plane** to anyone
   who can route to it. af allows that and warns once at daemon start rather than
   refusing, so this one is on you. Set
-  `require_token = true` to bind the network, or keep `listen_addr` on loopback
+  `network.require_token = true` to bind the network, or keep `network.listen_addr` on loopback
   and reach it over SSH/Tailscale port-forwarding.
 
 See the [Security notes](#security-notes).
 
-### With `require_token = true`: paste the token
+### With `network.require_token = true`: paste the token
 
 When you turn the token on, the web client shows a login screen with a single
 field. Get the token from the **host**:
@@ -240,9 +242,9 @@ a dead credential. A connection that fails for any other reason — the daemon i
 down, the wrong host — reports the daemon's own message and **keeps** the token: a
 daemon restart doesn't cost you a re-paste.
 
-See [Turning auth on](remote-http-auth.md#turning-auth-on-require_token-true) for
-the full setup, and the note there on why `require_loopback_token` does nothing
-unless `require_token` is also `true`.
+See [Turning auth on](remote-http-auth.md#turning-auth-on-networkrequire_token-true) for
+the full setup, and the note there on why `network.require_loopback_token` does nothing
+unless `network.require_token` is also `true`.
 
 **Disconnect** (top-right) forgets the stored token and returns you to the login
 screen — useful on a shared machine.
@@ -303,7 +305,12 @@ the TUI:
   archived),
 - the **title**, with the TUI's `[lost]` / `[deleting]` / `[limit]` / `[remote]`
   prefixes, and
-- the **branch** as a secondary `⎇` line.
+- the **branch** as a secondary `⎇` line — prefixed, when the session is idle
+  for a mechanically known reason, by the same idle detail the TUI shows
+  (`no change after delivery · pane changed 12m ago`). No reason claims the
+  agent finished, asked a question, or is wedged — the daemon observes pane
+  bytes changing, not what the agent meant. See the
+  [`idle_reason` vocabulary](http-api.md#session-idle-diagnosis).
 
 Rows are ordered exactly like the TUI: the reserved root agent is pinned to the
 top, then live sessions (oldest created first), the archived group last
@@ -317,8 +324,9 @@ seen).
 
 The rail shows the work you can still act on: **archived sessions are hidden by
 default**, and every other state is shown. The **funnel** control in the rail header
-opens a checkbox per state — Working, Ready, Lost, Dead, Limit reached, Archived —
-so you can reveal the archive or narrow to just one group (only what's working, say).
+opens a checkbox per state — Needs you, Working, Waiting on a limit, Broken,
+Archived — so you can reveal the archive or narrow to just one group (only
+what's working, say).
 Archived rows render dimmed when shown, so they read as inactive.
 
 The filter is a **display filter, applied within the selected project**: the daemon
@@ -581,7 +589,7 @@ brings the tab back to life.
 
 ### Per-tab preview origins
 
-Set [`preview_listen_addr`](configuration.md#global-config) (for example
+Set [`network.preview_listen_addr`](configuration.md#global-config) (for example
 `127.0.0.1:8444`) and the daemon opens a **second** plain-HTTP port that serves
 **previews and editor origins only — never the control API**. Each web tab is
 then served from its own origin:
@@ -615,7 +623,7 @@ What to know before turning it on:
   simply never reports and previews keep using the mirror — no configuration needed,
   and nothing to detect by hand.
 - **Viewing remotely is unchanged.** A Tailscale or SSH viewer keeps the
-  same-origin, sandboxed preview it has always had. Binding `preview_listen_addr` to
+  same-origin, sandboxed preview it has always had. Binding `network.preview_listen_addr` to
   a network interface gains a remote *browser* nothing — it still resolves
   `*.localhost` to its own machine — but it is not therefore harmless. `*.localhost`
   is a browser convention, not a restriction on the port: anything that can reach
@@ -646,7 +654,7 @@ its own origin is what partitions that store.
 Two consequences worth knowing:
 
 - **Editor origins require a LOOPBACK, fixed preview port.** With
-  `preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
+  `network.preview_listen_addr` bound to a network interface (or to an ephemeral `:0`), web
   tabs still get per-tab origins but **editors do not** — they stay on the same-origin
   mirror. On that listener the hostname is the only credential, and a remote client can
   simply send `Host: <label>.localhost` to the exposed port; behind an editor origin is
@@ -658,7 +666,7 @@ Two consequences worth knowing:
   so a rotating name would wipe them on every restart. It is derived from a secret kept
   at `~/.agent-factory/editor-origin-secret` (0600, the same posture as the daemon
   token). Delete that file and every session's editor starts fresh.
-- **Existing editor state does not migrate.** Turning `preview_listen_addr` on moves
+- **Existing editor state does not migrate.** Turning `network.preview_listen_addr` on moves
   editors to new origins, so layout and history start empty once. That old state is the
   shared store this fixes, so leaving it behind is the point.
 
@@ -775,18 +783,18 @@ drawer, to detach.)
     anyone who can run a process as you already has that access. On a
     **shared / multi-user machine**, close the gap one of two ways:
 
-    - `require_token = true` **and** `require_loopback_token = true` — loopback
+    - `network.require_token = true` **and** `network.require_loopback_token = true` — loopback
       peers must present the bearer token too (`af token show`). Both are needed:
-      `require_token` defaults to `false`, which disables the token for everyone,
-      so `require_loopback_token` alone changes nothing; or
-    - `listen_addr = ""` — disable the web server entirely.
+      `network.require_token` defaults to `false`, which disables the token for everyone,
+      so `network.require_loopback_token` alone changes nothing; or
+    - `network.listen_addr = ""` — disable the web server entirely.
 
 !!! warning "A network bind requires the token"
-    `require_token` defaults to `false`, so pointing `listen_addr` at a routable
+    `network.require_token` defaults to `false`, so pointing `network.listen_addr` at a routable
     interface (`0.0.0.0:8443`, a LAN/Tailscale IP) would serve **full control of
     your daemon to anyone who can reach the port, with no credential**. The daemon
     **warns once at daemon start** on that combination and serves it anyway: a
-    non-loopback `listen_addr` should set `require_token = true`. This is the boundary on the
+    non-loopback `network.listen_addr` should set `network.require_token = true`. This is the boundary on the
     zero-friction default — a stock install is protected by the loopback bind, and
     af will not let that protection be removed silently.
 
@@ -802,7 +810,7 @@ drawer, to detach.)
   browser would attach automatically, so there is no CSRF surface. On a **shared
   machine**, use **Disconnect** when you step away (it erases the stored token), or
   use a private/incognito window, whose storage the browser discards on close.
-- **Prefer loopback + SSH over `0.0.0.0`.** Binding `listen_addr` to `127.0.0.1`
+- **Prefer loopback + SSH over `0.0.0.0`.** Binding `network.listen_addr` to `127.0.0.1`
   and forwarding over SSH keeps the port off the network entirely, encrypts the
   channel, and still gives you the browser UI.
 - **af serves plain HTTP — front it for encryption.** The listener terminates no
@@ -810,17 +818,17 @@ drawer, to detach.)
   (nginx/Caddy), a private network (Tailscale/VPN), or an SSH tunnel — the token
   travels over the connection as-is.
 - **The loopback exemption is scoped to a loopback bind.** It applies only when
-  `listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`). On a **network** bind
+  `network.listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`). On a **network** bind
   (`0.0.0.0`/routable) the token is enforced for every peer, loopback-origin
   included, so a same-host reverse proxy cannot bypass it. Behind a proxy on a
-  loopback-bound daemon, auth is the proxy's job (or set `require_loopback_token
+  loopback-bound daemon, auth is the proxy's job (or set `network.require_loopback_token
   = true`). See
   [Reverse proxies and the loopback exemption](remote-http-auth.md#reverse-proxies-and-the-loopback-exemption).
 
 ## See also
 
 - [Remote daemon access](remote-http-auth.md) — the full listener, token, CORS,
-  and `require_token` reference the web client rides on (including how to terminate
+  and `network.require_token` reference the web client rides on (including how to terminate
   TLS at a proxy).
 - [The TUI](concepts/tui.md) — the terminal client the web client mirrors.
 - [Tasks & automation](tasks.md) — the scheduled tasks the Tasks view drives.

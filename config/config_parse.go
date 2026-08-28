@@ -20,9 +20,21 @@ import (
 // but every key added after the swap (starting with [keys]) lives only in the
 // TOML decoder. Any key this reader does not recognize is warned about rather
 // than silently dropped, so "I added the new option to my old config.json"
-// fails loud. Reachable only from convertJSONToTOML now that first-run and
-// lost-race materialization write TOML.
+// fails loud. Reachable from convertJSONToTOML and read-only diagnostics now
+// that first-run and lost-race materialization write TOML.
 func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
+	return parseConfigJSON(data, prettyConfigPath, true)
+}
+
+// parseConfigForConversion is the frozen JSON reader on the one path that is
+// about to replace config.json with config.toml. The conversion emits one
+// write-aware root_agents notice after its atomic TOML write; suppressing the
+// generic read-only notice here avoids two contradictory warnings.
+func parseConfigForConversion(data []byte, prettyConfigPath string) (*Config, error) {
+	return parseConfigJSON(data, prettyConfigPath, false)
+}
+
+func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
@@ -40,6 +52,10 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		if warnRootAgents {
+			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
+		}
+		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatJSON)
 	}
 
 	// Warn about keys the frozen reader ignores so they are not silently lost
@@ -82,6 +98,7 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 // era), but a silently ignored key is how typos eat settings, so each one is
 // named in the log.
 func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
+	data = stripUTF8BOM(data)
 	if isEffectivelyEmptyToml(data) {
 		return nil, fmt.Errorf("config file %s is empty; add valid TOML, or delete it to fall back to config.json or defaults", prettyConfigPath)
 	}
@@ -91,18 +108,44 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	config := DefaultConfig()
 	config.source.builtIn = snapshotConfig(config)
+	// A table is a custom palette, not the named default it overlays. Clear the
+	// preset metadata before decoding so a later save preserves the user's table
+	// rather than collapsing it to theme = "nord".
+	var shape map[string]any
+	if err := toml.Unmarshal(decodedData, &shape); err == nil {
+		if _, isTable := shape["theme"].(map[string]any); isTable {
+			config.Theme.preset = ""
+			config.Theme.explicitPreset = false
+		}
+	}
 	if err := toml.Unmarshal(decodedData, config); err != nil {
+		return nil, tomlParseError("config file "+prettyConfigPath, err)
+	}
+	tables, err := decodeGlobalSettingsTables(decodedData)
+	if err != nil {
 		return nil, tomlParseError("config file "+prettyConfigPath, err)
 	}
 	if err := validateLoadedConfigSchemaVersion(config.SchemaVersion, prettyConfigPath); err != nil {
 		return nil, err
 	}
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatTOML); err == nil {
+		applyGroupedConfigAliases(config, tables, metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
+		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatTOML)
 	}
 	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
 	return validateConfig(config, prettyConfigPath)
+}
+
+// stripUTF8BOM removes a leading UTF-8 BOM. TOML 1.0 says a BOM should be
+// ignored when present, but go-toml/v2 does not strip it, so every entry
+// point that feeds raw file bytes to toml.Unmarshal must call this first.
+// bytes.TrimPrefix is a no-op when the prefix is absent, so applying it at
+// more than one layer is safe.
+func stripUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 }
 
 // isEffectivelyEmptyToml reports whether data decodes to an empty TOML
@@ -111,7 +154,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 // check it would silently become an all-defaults canonical config while
 // shadowing a real config.json.
 func isEffectivelyEmptyToml(data []byte) bool {
-	trimmed := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	trimmed := stripUTF8BOM(data)
 	if len(bytes.TrimSpace(trimmed)) == 0 {
 		return true
 	}
@@ -156,7 +199,33 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 			// generic warning that loses the migration recipe.
 			continue
 		}
+		if len(key) == 1 && configAliasSection(key[0]) {
+			// Config intentionally keeps the grouped tables out of its runtime and
+			// JSON shape. Their approved leaves are checked below; do not reduce an
+			// unknown leaf to a misleading warning about the whole table.
+			continue
+		}
 		log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, strings.Join(key, "."))
+	}
+
+	var shape map[string]any
+	if err := toml.Unmarshal(data, &shape); err != nil {
+		return
+	}
+	for section, raw := range shape {
+		if !configAliasSection(section) {
+			continue
+		}
+		table, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		for leaf := range table {
+			if configAliasLeaf(section, leaf) {
+				continue
+			}
+			log.WarningLog.Printf("config %s: unknown key %q is ignored by this version of af", prettyConfigPath, section+"."+leaf)
+		}
 	}
 }
 
@@ -224,7 +293,7 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	if config.SSHHostKeyVerification == "" {
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	} else if !IsValidSSHHostKeyVerification(config.SSHHostKeyVerification) {
-		log.WarningLog.Printf("ssh_host_key_verification=%q is not one of [%s, %s, %s]; using default %q",
+		log.WarningLog.Printf("ssh.host_key_verification=%q is not one of [%s, %s, %s]; using default %q",
 			config.SSHHostKeyVerification, SSHHostKeyStrict, SSHHostKeyAcceptNew, SSHHostKeyInsecure, SSHHostKeyStrict)
 		config.SSHHostKeyVerification = SSHHostKeyStrict
 	}

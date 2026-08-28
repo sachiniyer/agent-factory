@@ -88,9 +88,13 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 	rendered := s.Render()
 	width := lipglossWidth(rendered)
 	lines := strings.Split(rendered, "\n")
-	next := 0
+	style := selectionOverlayStyle()
+	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
+	textRect := overlayTextRect(fit, style)
+	startIdx, endIdx, _, _, _ := s.windowForTextHeight(textRect.H)
+	next := startIdx
 	for i, line := range lines {
-		if next >= len(s.items) {
+		if next >= endIdx {
 			break
 		}
 		t := strings.Trim(xansi.Strip(line), "│ ")

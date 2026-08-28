@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -112,7 +113,7 @@ func normalizeDeleteProjectPath(path string) (string, string) {
 		return repo.Root, repo.ID
 	}
 	root = filepath.Clean(root)
-	return root, config.RepoIDFromRoot(root)
+	return root, config.RepoIDForRecordedRoot(root)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -127,7 +128,20 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 	}
 	var root string
 	for _, project := range projects {
-		if config.RepoIDFromRoot(project.Root) != repoID {
+		// A reachable registered worktree resolves through Git so a bare
+		// repository's linked workspace matches the bare-derived repo ID. A
+		// missing path retains its recorded-root fallback instead of being
+		// guessed into a different project.
+		candidateID := ""
+		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
+			candidateID = resolvedID
+		} else if !project.PathExists {
+			// Only a determinately absent path keeps the recorded-root fallback.
+			// A present replacement without this record's checkout marker is
+			// positive evidence that it is not the registered checkout.
+			candidateID = config.RepoIDForRecordedRoot(project.Root)
+		}
+		if candidateID != repoID {
 			continue
 		}
 		if root != "" && filepath.Clean(root) != filepath.Clean(project.Root) {
@@ -163,19 +177,29 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 // unknown project archives nothing, drops no opt-in or registration, and returns
 // a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
+	target, err := resolveDeleteProjectTarget(req)
+	if err != nil {
+		return DeleteProjectResult{RepoID: target.repoID}, err
+	}
 	m.taskTargetMu.Lock()
 	defer m.taskTargetMu.Unlock()
-	return m.deleteProject(req)
+	return m.deleteProject(target)
 }
 
-// deleteProject performs DeleteProject while taskTargetMu is already held from
-// blocker preflight through the final session mutation.
-func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
+type deleteProjectTarget struct {
+	repoID   string
+	repoPath string
+}
+
+// resolveDeleteProjectTarget performs every filesystem/Git selector probe
+// before DeleteProject takes taskTargetMu. A stale registry root must not hold
+// the cross-task lifecycle lock while Git waits on an unrelated mount.
+func resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
 	if repoID == "" {
 		if repoPath == "" {
-			return DeleteProjectResult{}, fmt.Errorf("delete project: repo_id or repo_path is required")
+			return deleteProjectTarget{}, fmt.Errorf("delete project: repo_id or repo_path is required")
 		}
 		// Expand a leading ~ BEFORE canonicalizing: git (RepoFromPath) does not do
 		// tilde expansion — the shell normally would — so a literal "~/repo" request
@@ -194,7 +218,7 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		var err error
 		repoPath, err = registeredProjectRootForRepoID(repoID)
 		if err != nil {
-			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
@@ -203,9 +227,28 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 		var pathRepoID string
 		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
 		if pathRepoID != repoID {
-			return DeleteProjectResult{RepoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
+		}
+		// A bare session persists its identity directory as repo_path, while the
+		// durable project record names the linked workspace that was registered.
+		// Once both selectors prove the same repo, use that registered root for
+		// deregistration just as the repo-ID-only form does.
+		registeredRoot, err := registeredProjectRootForRepoID(repoID)
+		if err != nil {
+			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root after validating repo_path; nothing was changed: %w", repoID, err)
+		}
+		if registeredRoot != "" {
+			repoPath = registeredRoot
 		}
 	}
+	return deleteProjectTarget{repoID: repoID, repoPath: repoPath}, nil
+}
+
+// deleteProject performs DeleteProject while taskTargetMu is already held from
+// blocker preflight through the final session mutation.
+func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResult, error) {
+	repoID := resolved.repoID
+	repoPath := resolved.repoPath
 	result := DeleteProjectResult{RepoID: repoID}
 
 	// FAIL CLOSED, before mutating ANY state, if a session for this repo is still being
@@ -322,6 +365,16 @@ func (m *Manager) deleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 				// lifecycle events do not understate what the delete achieved.
 				killed = session.InstanceData{ID: t.id, Title: t.title}
 				err = nil
+			}
+			if isMutationCommitted(err) {
+				// A committed kill is durable but NOT finished: the tombstoned row
+				// was retained, so at the project level this session genuinely was
+				// not removed and the delete must stay a retryable failure. Flatten
+				// the marker before joining — errors.As walks the join, so a
+				// committed member would make the whole project-delete failure read
+				// as mutation_committed on the HTTP envelope, and a delete that
+				// never deregistered would print as ok-with-warning (#3234).
+				err = errors.New(err.Error())
 			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("session %q: %w", t.title, err))
@@ -445,8 +498,16 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// and task delivery waits for that same promise. Include the reserved target
 	// before the empty-roster return, or DeleteProject can suppress re-creation
 	// and strand a root-targeted task behind a title ordinary auto-create refuses.
-	if !hasRoot && m.repoRootAgentWillMaterialize(repoID) {
-		titles = append(titles, session.RootSessionTitle)
+	// For this consumer UNKNOWN behaves like yes (#3264): a fail-closed repo
+	// (unloadable personal config, unlistable registry) reports
+	// willMaterialize=false, but deleting through that answer would drop the
+	// root_agents opt-in and leave the enabled task stranded the moment the
+	// config becomes readable again — the exact hazard this preflight refuses.
+	if !hasRoot {
+		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable:
+			titles = append(titles, session.RootSessionTitle)
+		}
 	}
 	sort.Strings(titles)
 	if len(titles) == 0 {

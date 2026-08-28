@@ -179,17 +179,7 @@ func runeEqualFold(a, b rune) bool {
 // Shared with the mouse zone registration (zones.go) so the rows registered
 // are exactly the rows rendered.
 func (s *SearchOverlay) visibleWindowForRows(maxVisible int) (startIdx, endIdx int) {
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-	if s.selectedIdx >= maxVisible {
-		startIdx = s.selectedIdx - maxVisible + 1
-	}
-	endIdx = startIdx + maxVisible
-	if endIdx > len(s.results) {
-		endIdx = len(s.results)
-	}
-	return startIdx, endIdx
+	return selectionWindow(s.selectedIdx, len(s.results), maxVisible)
 }
 
 type searchRenderPlan struct {
@@ -233,7 +223,7 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 		} else if availableRows < 1 {
 			availableRows = 1
 		}
-		startIdx, endIdx, showAbove, showBelow := s.windowForAvailableRows(availableRows)
+		startIdx, endIdx, showAbove, showBelow := budgetedSelectionWindow(s.selectedIdx, len(s.results), availableRows, 10)
 		return searchRenderPlan{
 			styleWidth:    fit.W,
 			styleHeight:   fit.H,
@@ -259,37 +249,6 @@ func (s *SearchOverlay) renderPlan(style lipgloss.Style) searchRenderPlan {
 		showAbove:     startIdx > 0,
 		showBelow:     endIdx < len(s.results),
 	}
-}
-
-func (s *SearchOverlay) windowForAvailableRows(available int) (startIdx, endIdx int, showAbove, showBelow bool) {
-	if len(s.results) == 0 {
-		return 0, 0, false, false
-	}
-	if available <= 0 {
-		available = 10
-	}
-	rows := available
-	if rows > 10 {
-		rows = 10
-	}
-	for rows > 0 {
-		startIdx, endIdx = s.visibleWindowForRows(rows)
-		showAbove = startIdx > 0
-		showBelow = endIdx < len(s.results)
-		need := endIdx - startIdx
-		if showAbove {
-			need++
-		}
-		if showBelow {
-			need++
-		}
-		if need <= available {
-			return startIdx, endIdx, showAbove, showBelow
-		}
-		rows--
-	}
-	startIdx, endIdx = s.visibleWindowForRows(1)
-	return startIdx, endIdx, false, false
 }
 
 // Render renders the search overlay.

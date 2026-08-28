@@ -116,7 +116,7 @@ func enforceTaskScope(id string) (task.ProjectExpectation, error) {
 	if err := requireTaskInScope(t, scope); err != nil {
 		return task.ProjectExpectation{}, err
 	}
-	return task.ProjectExpectation{Enforce: true, ProjectPath: t.ProjectPath}, nil
+	return task.ExpectProject(*t), nil
 }
 
 var tasksListAllFlag bool
@@ -215,7 +215,7 @@ var tasksAddCmd = &cobra.Command{
 
 		program := taskAddProgramFlag
 		if program == "" {
-			cfg, err := config.ResolveConfig(repo.Root)
+			cfg, err := config.ResolveConfigForRepo(repo)
 			if err != nil {
 				return jsonError(err)
 			}

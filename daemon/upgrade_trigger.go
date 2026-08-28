@@ -27,9 +27,10 @@ var upgradeActivationSupervisorReadyGrace = 60 * time.Second
 // touching the host service manager, or re-execing the real binary. The
 // lease-handshake pair (AwaitSupervisorReady / AuthorizeActivation) is seamed
 // because a genuine supervisor_ready proof requires the actor to run as the exact
-// preserved previous binary (TryAcquireRecovery's path identity) — a real spawned
-// process, which is R4's territory. AwaitSupervisorReady's own real-journal behavior
-// is proven in the upgradetxn package where that identity seam is reachable.
+// preserved previous binary (TryAcquireRecovery's path identity) — a real
+// spawned process, owned by the recovery actor (upgrade_recovery.go).
+// AwaitSupervisorReady's own real-journal behavior is proven in the upgradetxn
+// package where that identity seam is reachable.
 var (
 	upgradeTriggerExecutableFn     = os.Executable
 	upgradeTriggerVersionFn        = Version
@@ -42,8 +43,8 @@ var (
 )
 
 // triggerUpgradeActivation is the OLD-daemon side of an upgrade activation, run
-// inside the serving daemon (#2212 R2b). R3's update loop will call it once it has
-// decided to install a candidate; R2b wires it to nothing. It stages the candidate,
+// inside the serving daemon (#2212 R2b). The update driver (update_driver.go)
+// calls it once it has decided to install a candidate. It stages the candidate,
 // hands supervision to the immutable previous binary, and quiesces + exits so the
 // candidate can bind the socket.
 //

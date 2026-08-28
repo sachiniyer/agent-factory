@@ -238,6 +238,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ReapConfigAgent":  blockedDuringProbation,
 	"RegisterProject":  blockedDuringProbation,
 	"ReloadTasks":      blockedDuringProbation,
+	"RefreshPRInfo":    blockedDuringProbation,
 	"RemoveTask":       blockedDuringProbation,
 	"RestartTask":      blockedDuringProbation,
 	"RenameTab":        blockedDuringProbation,
@@ -248,19 +249,24 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"ResumeStatusPoll": blockedDuringProbation,
 	"SendPrompt":       blockedDuringProbation,
 	"SetConfigValue":   blockedDuringProbation,
+	"UnsetConfigValue": blockedDuringProbation,
 	"SetPRInfo":        blockedDuringProbation,
 	"SpawnConfigAgent": blockedDuringProbation,
 	"TriggerTask":      blockedDuringProbation,
 	"UpdateTask":       blockedDuringProbation,
-	// ApplyConfig is allowed during probation, and that is ONLY safe because
-	// SetConfigValue is blocked (above): with the write closed, the config file
-	// cannot change during the upgrade window, so ApplyConfig can only re-read a
-	// file that did not change and swap an in-memory pointer — a read, alongside
-	// GetConfig/ListPrograms, not a durable mutation. If SetConfigValue is ever
-	// unblocked during probation, this reasoning collapses and ApplyConfig must be
-	// revisited: the two policies are only safe together (#2480).
-	"ApplyConfig":  allowedDuringProbation,
+	// ApplyConfig was allowed during probation on the reasoning that a blocked
+	// SetConfigValue kept the file from changing, so an apply could only re-read
+	// unchanged bytes. #3231 disproved the premise: pre-#3231 CLIs and hand-edits
+	// write config.toml around the gate, and an apply is not inert — it swaps the
+	// live config, rebinds listeners, and changes auth posture, mutating the very
+	// daemon the supervisor is mid-validation on. Blocked, like the write itself.
+	"ApplyConfig": blockedDuringProbation,
+	// ApplyTheme also swaps the live config and publishes a repaint event. It is
+	// narrower than ApplyConfig, but it is still a mutation of the candidate the
+	// upgrade supervisor is validating, so it follows the same admission rule.
+	"ApplyTheme":   blockedDuringProbation,
 	"GetConfig":    allowedDuringProbation,
+	"GetTheme":     allowedDuringProbation,
 	"ListBackends": allowedDuringProbation,
 	// A read of the daemon host's directory names (#2788): no manager, no daemon
 	// state, nothing an upgrade window is protecting. It sits with ListProjects

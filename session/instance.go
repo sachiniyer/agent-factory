@@ -57,8 +57,8 @@ const (
 	// + shell/process tabs; web tabs have no tmux and survive with their URLs,
 	// #1809) and MOVED the worktree out to the global archive
 	// dir (<AGENT_FACTORY_HOME>/archived/<repoID>/<title>/). Where Lost is a
-	// wanted, actively-self-healing state (tmux vanished under a live record;
-	// the restore loop re-spawns it every poll), Archived is a wanted,
+	// wanted, self-healing state until its bounded restore attempts give up (tmux
+	// vanished under a live record), Archived is a wanted,
 	// QUIESCENT state: it is never probed, never marked Lost, and never
 	// auto-restored — only an explicit `af sessions restore` moves the worktree
 	// back and re-spawns the agent. It therefore loads INERT (FromInstanceData
@@ -107,6 +107,10 @@ type Instance struct {
 	Title string
 	// Path is the path to the workspace.
 	Path string
+	// storageRepoID retains the instances/<repoID> key this row was loaded from,
+	// preventing checkpoints from silently migrating legacy rows (#3358). It is
+	// empty until a fresh instance's first save and is protected by mu.
+	storageRepoID string
 	// Branch is the branch of the instance.
 	Branch string
 	// liveness and inFlightOp are the two orthogonal axes of session state
@@ -118,6 +122,10 @@ type Instance struct {
 	// liveness.go. Both are mutex-protected.
 	liveness   Liveness
 	inFlightOp InFlightOp
+	// lostRestoreFailure is the durable terminal outcome of automatic recovery.
+	// It gates only the automatic retry loop; an explicit restore may replace the
+	// runtime and clear it at the live boundary.
+	lostRestoreFailure LostRestoreFailure
 	// taskRunActive is THE fact the watch-task concurrency cap is about (#1892):
 	// has this session's task run finished yet? It is true from creation for a
 	// task-spawned session and flips false — once, permanently — when the AGENT
@@ -286,6 +294,10 @@ type Instance struct {
 	// the first lazy fetch on selection always runs. Used to debounce
 	// repeated fetches when the user cycles the sidebar.
 	prInfoLastFetched time.Time
+	// prInfoGeneration counts PR-info writes and freshness bumps, so a slow
+	// producer can detect that a newer one landed while it was fetching and
+	// discard its stale result (#3287 review). In-memory only, like the clock.
+	prInfoGeneration uint64
 
 	// backend abstracts session lifecycle (local tmux+git vs off-box runtimes).
 	backend Backend

@@ -73,6 +73,7 @@ var pluginReleaseDigests = []string{
 	"db64cd98b4631f1781a1635595ac68a83e2db52a721e5ea0c6287519696ff675", // 3.8 — drop the nine-tab limit from the tab guidance; agents were being told not to create a tenth (#3023)
 	"eb82ea0bd7020c61fc0affb73decaf448c95464f979494445758bf5bd4a62caa", // 3.9 — name the per-kind remote tab boundary after external web tabs became admissible (#3062)
 	"3b2dcc3fde22b1d9c63f9c00110f810531b04b70e7d4ff302d7ac82b586e16ea", // 3.10 — require HTTPS for directly framed off-box web tabs (#3062)
+	"828a01a7b3f3e3e14bdbe4dc864067040c4f260251d029dad422e65f5ce24e7e", // 3.11 — advertise bounded daemon-side session listing (#3362)
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

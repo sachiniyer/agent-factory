@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -123,6 +124,12 @@ type CreateSessionRequest struct {
 
 type CreateSessionResponse struct {
 	Instance session.InstanceData `json:"instance"`
+	// The response stays successful on a committed failure — a create that
+	// retained and durably recorded its session/workspace (#3233) — so every
+	// transport keeps Instance and clients can address the retained row
+	// instead of treating the create as an untouched, freely retryable
+	// failure. VALUE embed, never a pointer: gob elides zero values.
+	MutationOutcome
 }
 
 type KillSessionRequest struct {
@@ -448,6 +455,13 @@ type CreateTabResponse struct {
 	// It also makes the reservation inspectable rather than invisible, which is
 	// the complaint #1957 opened with.
 	TmuxName string `json:"tmux_name,omitempty"`
+	// The response stays successful on a committed failure — a spawned tab whose
+	// roster write failed and whose rollback could not prove the tmux session
+	// absent (#3237) — so every transport keeps the minted identity above and
+	// clients can explain or target the surviving tab instead of treating the
+	// create as an untouched, freely retryable failure. VALUE embed: gob elides
+	// zero pointers.
+	MutationOutcome
 }
 
 // CloseTabRequest asks the daemon to close a non-agent tab of a session and
@@ -601,6 +615,20 @@ type SetPRInfoRequest struct {
 }
 
 type SetPRInfoResponse struct {
+	OK bool `json:"ok"`
+}
+
+// RefreshPRInfoRequest asks the daemon to refresh its GitHub PR projection for
+// one session. The client supplies identity only: discovery, eligibility, and
+// the projected fields are daemon-owned (#3296). ID is authoritative when
+// present; legacy callers may address the row by {Title, RepoID}.
+type RefreshPRInfoRequest struct {
+	Title  string `json:"title"`
+	RepoID string `json:"repo_id"`
+	ID     string `json:"id"`
+}
+
+type RefreshPRInfoResponse struct {
 	OK bool `json:"ok"`
 }
 
@@ -857,10 +885,13 @@ type ReapConfigAgentResponse struct{}
 // config.toml is NOT daemon-owned state. Unlike instances.json (the #960
 // single-writer model), it is a file the README tells users to hand-edit, read
 // by af and the daemon at startup and guarded by a file lock rather than by
-// daemon ownership. These RPCs therefore exist for REACH, not for arbitration:
+// daemon ownership. These RPCs originally existed for REACH, not arbitration:
 // the web UI is a browser and cannot touch the user's disk, so it asks the
-// daemon to run the same config.SetGlobalConfigValue call the TUI and
-// `af config set` run in their own process. There is no daemon-side copy of
+// daemon to run the config.SetGlobalConfigValue call other clients ran in their
+// own process. Since #3231 the TUI and `af config set` route through the same
+// RPC while a daemon is running — not for ownership, but so the lifecycle
+// admission gate answers identically for every surface — and write locally only
+// when no daemon answers the socket. There is still no daemon-side copy of
 // config, no cache to invalidate, and no writer to serialize against beyond the
 // lock every writer already takes.
 
@@ -875,6 +906,14 @@ type GetConfigResponse struct {
 	// user which file it is editing (a user with AF_HOME set is otherwise left
 	// guessing).
 	Path string `json:"path"`
+}
+
+// GetTheme is the palette read used by renderer clients. Config remains the
+// source of truth; the response carries only its resolved semantic slots, never
+// browser mode or renderer-specific derivatives.
+type GetThemeRequest struct{}
+type GetThemeResponse struct {
+	Theme apiproto.Theme `json:"theme"`
 }
 
 // SetConfigValueRequest sets one key, exactly as `af config set key value` does.
@@ -909,6 +948,21 @@ type SetConfigValueResponse struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
+// UnsetConfigValueRequest clears one globally unsettable migrated setting.
+// It is a separate RPC from SetConfigValue so an older daemon cannot mistake
+// an additive "unset" bit for a request to set an empty value.
+type UnsetConfigValueRequest struct {
+	Key string `json:"key"`
+}
+
+type UnsetConfigValueResponse struct {
+	Result        *config.UnsetResult `json:"result"`
+	RestartNotice string              `json:"restart_notice"`
+	Applied       []string            `json:"applied"`
+	Pending       []string            `json:"pending"`
+	Warnings      []string            `json:"warnings,omitempty"`
+}
+
 // ApplyConfigRequest asks the running daemon to apply the on-disk global config
 // to itself in place (#2480). The config was already written (by `af config set`,
 // the web form's SetConfigValue, or a hand-edit); this only makes the running
@@ -921,10 +975,20 @@ type ApplyConfigResponse struct {
 	Applied []string `json:"applied"`
 	Pending []string `json:"pending"`
 	// Warnings carries the tokenless-network exposure notice and any listener rebind
-	// failure so `af config set` (which applies via RequestApplyConfig) can print them.
+	// failure so a pre-#3231 `af config set` (which applies via RequestApplyConfig)
+	// can print them.
 	Warnings []string `json:"warnings,omitempty"`
 	// FailedListenerKeys names the socket keys (listen_addr / preview_listen_addr)
 	// whose live rebind failed, so the CLI can report THAT key's change as deferred
 	// rather than falsely applied.
 	FailedListenerKeys []string `json:"failed_listener_keys,omitempty"`
+}
+
+// ApplyThemeRequest asks a running daemon to reload only the global palette.
+// Unlike ApplyConfig, it cannot change auth, listeners, or any other live key.
+type ApplyThemeRequest struct{}
+
+// ApplyThemeResponse reports whether the live palette generation advanced.
+type ApplyThemeResponse struct {
+	Changed bool `json:"changed"`
 }

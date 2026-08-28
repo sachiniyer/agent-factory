@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -307,12 +305,13 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			return nil
 		}
 
-		cfg, err := parseConfig(data, prettyConfigPath)
+		cfg, err := parseConfigForConversion(data, prettyConfigPath)
 		if err != nil {
 			return err // invalid config.json: do not convert or rename it.
 		}
 
-		tomlBytes, err := toml.Marshal(cfg)
+		legacyMetadata, _ := metadataForSource(data, prettyConfigPath, FormatJSON)
+		tomlBytes, err := marshalGlobalConfigTOML(cfg, legacyMetadata.shape)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
@@ -346,6 +345,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 			log.InfoLog.Printf("migrated config to TOML: wrote %s and moved the original to %s — edit %s from now on",
 				prettyTomlPath, prettyHomePath(bakPath), prettyTomlPath)
 		}
+		warnConvertedLegacyRootAgents(cfg.RootAgents, prettyConfigPath, prettyTomlPath)
 		result, err = parseLoadedConfigTOML(tomlBytes, prettyTomlPath, tomlPath)
 		if err != nil {
 			return fmt.Errorf("failed to reload converted config %s: %w", prettyTomlPath, err)
@@ -397,7 +397,7 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 		// defaults without another write attempt.
 	}
 	if created {
-		data, err := toml.Marshal(defaultCfg)
+		data, err := marshalGlobalConfigTOML(defaultCfg, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal materialized config metadata: %w", err)
 		}
@@ -436,7 +436,7 @@ func writeConfigIfMissing(configPath string, config *Config) (bool, error) {
 	if err := ensureStorageParent(configPath); err != nil {
 		return false, fmt.Errorf("failed to create config directory: %w", err)
 	}
-	data, err := toml.Marshal(config)
+	data, err := marshalGlobalConfigTOML(config, config.source.shape)
 	if err != nil {
 		return false, fmt.Errorf("failed to marshal config: %w", err)
 	}

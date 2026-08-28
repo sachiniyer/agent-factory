@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -25,62 +24,6 @@ import (
 // misleading partial failure. Only in-process callers can match it; over the
 // control RPC it degrades to its (unchanged) message.
 var ErrAlreadyArchived = errors.New("already archived")
-
-// archiveTargetTasksChecked is a test seam for pinning the interval between the
-// task snapshot and the archive fence. Production leaves it as a no-op.
-var archiveTargetTasksChecked = func() {}
-
-// loadTasksForRepoID is a test seam for proving lifecycle operations do not
-// repeatedly reload and freshly resolve the same project task set.
-var loadTasksForRepoID = task.LoadTasksForRepoIDWithBindingUpdates
-
-// enabledTasksTargetingSession returns enabled tasks in repoID whose canonical
-// target is exactly title. Names are sorted for a deterministic, complete
-// archive refusal. A load error stays unknown and must fail the archive before
-// any session mutation.
-func (m *Manager) enabledTasksTargetingSession(repoID, title string) ([]task.Task, error) {
-	targets, err := m.loadEnabledTaskTargets(repoID)
-	if err != nil {
-		return nil, err
-	}
-	return targets[title], nil
-}
-
-// loadEnabledTaskTargets loads and freshly scopes a project's task store once,
-// then indexes every enabled target. DeleteProject reuses this snapshot for its
-// preflight and each subsequent archive while holding taskTargetMu, so projects
-// with many sessions do not repeat tasks x path-resolution work.
-func (m *Manager) loadEnabledTaskTargets(repoID string) (map[string][]task.Task, error) {
-	tasks, bindingUpdates, err := loadTasksForRepoID(repoID)
-	// Publish BEFORE propagating: the load returns backfilled bindings alongside
-	// a scope error (task.LoadTasksForRepoIDWithBindingUpdates), and those rows
-	// were already committed durably. Dropping them on the error branch is not a
-	// no-op — nothing re-publishes them, so a push-only client keeps a stale
-	// repository scope for a projection the server has made authoritative.
-	for _, updated := range bindingUpdates {
-		m.publishEvent(agentproto.EventTaskUpdated, updated)
-	}
-	if err != nil {
-		return nil, err
-	}
-	targets := make(map[string][]task.Task)
-	for _, t := range tasks {
-		target := task.CanonicalTargetSession(t.TargetSession)
-		if t.Enabled && target != "" {
-			targets[target] = append(targets[target], t)
-		}
-	}
-	for target := range targets {
-		targeted := targets[target]
-		sort.Slice(targeted, func(i, j int) bool {
-			if targeted[i].Name == targeted[j].Name {
-				return targeted[i].ID < targeted[j].ID
-			}
-			return targeted[i].Name < targeted[j].Name
-		})
-	}
-	return targets, nil
-}
 
 func describeTargetTasks(tasks []task.Task) string {
 	parts := make([]string, 0, len(tasks))
@@ -221,12 +164,15 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// locks, and archive fence.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
 		archivedPath, rerr := m.archiveRemoteSession(repoID, instance, req.Title)
-		if rerr != nil {
+		if rerr != nil && !isMutationCommitted(rerr) {
 			return "", session.InstanceData{}, rerr
 		}
+		// A committed rerr still reaches here: the branch is on origin and the
+		// sandbox is reaped, so callers get the location and projection, and
+		// clients reconcile the completed transition off this event (#3235).
 		archived := instance.ToInstanceData()
 		m.publishEvent(agentproto.EventSessionArchived, archived)
-		return archivedPath, archived, nil
+		return archivedPath, archived, rerr
 	}
 
 	dest, err := archivedWorktreePath(repoID, req.Title)
@@ -330,23 +276,17 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		// rebuild a worktree whose bytes are sitting in the archive directory.
 		//
 		// The hook ran BEFORE the move, so this branch is reachable with both
-		// failing. The move error stays the primary cause — it is what the caller
-		// must act on — but the hook error is not redundant with it and must not be
-		// dropped (#2763): a broken cleanup command is invisible otherwise, since
-		// this path never reaches the committed-archive warning below, and every
-		// later attempt fails the same way and reports the same single cause. Log
-		// it as well as returning it, matching the committed path, so an archive
-		// driven by a task still leaves the diagnosis in the daemon log.
-		hookNote := ""
-		if hookErr != nil {
-			log.WarningLog.Printf("archive of session %q failed and its on-archive hook also failed: %v", req.Title, hookErr)
-			hookNote = fmt.Sprintf(" (its on-archive hook also failed: %v)", hookErr)
-		}
+		// failing, and the move error alone is not the whole outcome (#2763).
+		// failedArchiveWithHook is what keeps the hook failure attached and logged;
+		// this path never reaches the committed-archive warning below.
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w%s", req.Title, perr, worktreeRecoveryLocation(instance), err, hookNote))
+			return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
+				"failed to archive session %q AND could not record its recovered state on disk (%v); worktree recovery location: %s — inspect those path(s) before restarting the daemon: %w",
+				req.Title, perr, worktreeRecoveryLocation(instance), err), hookErr))
 		}
-		return failedArchiveResult(instance, fmt.Errorf("failed to archive session %q (its agent will be restored in place): %w%s", req.Title, err, hookNote))
+		return failedArchiveResult(instance, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"failed to archive session %q (its agent will be restored in place): %w", req.Title, err), hookErr))
 	}
 
 	// Success: worktree relocated, tmux down. Commit the inert Archived state
@@ -392,40 +332,52 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	if stopErr := m.stopVSCodeForInstance(vscodeKey, instance.ID); stopErr != nil {
 		if !instance.GetArchiveReport().Empty() {
 			return m.keepIncompleteArchiveCommitted(
-				repoID, archivedPath, instance, hookErr, true,
+				repoID, archivedPath, instance, hookErr,
 				fmt.Errorf("final VS Code editor teardown was not confirmed: %w", stopErr),
 			)
 		}
 		log.ErrorLog.Printf("archive of session %q: final VS Code editor teardown was not confirmed (%v); rolling back the moved worktree", req.Title, stopErr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
-			// The worktree cannot be returned home. Keep and best-effort persist the
-			// committed archive rather than claiming a live Lost session at a path
-			// that no longer exists, while surfacing both unknown outcomes.
-			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery", req.Title, archivedPath, stopErr, rbErr)
+			// The worktree cannot be returned home. Keep the committed archive
+			// rather than claiming a live Lost session at a path that no longer
+			// exists, and report it as committed — with the location and
+			// projection — like the keepIncompleteArchiveCommitted sibling (#3235).
+			return m.keepUnrollableArchiveCommitted(repoID, archivedPath, instance, hookErr, fmt.Errorf(
+				"archived session %q to %s but could not confirm its final VS Code editor teardown (%v) and could not roll the worktree back (%v); it may need manual recovery",
+				req.Title, archivedPath, stopErr, rbErr))
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
 		archiveCommitted = false
-		return "", session.InstanceData{}, fmt.Errorf("could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w", req.Title, stopErr)
+		// A clean rollback is still reachable with a failed on-archive hook behind
+		// it — the hook ran before the move — and the hook may already have mutated
+		// external resources. Surface both (#3452): the teardown failure is what the
+		// caller acts on, the hook failure is what the operator must fix.
+		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"could not confirm final VS Code editor teardown for session %q; rolled the archive back and left it Lost for retry: %w",
+			req.Title, stopErr), hookErr)
 	}
 	if perr := archivePersist(m, repoID, instance); perr != nil {
 		if !instance.GetArchiveReport().Empty() {
 			return m.keepIncompleteArchiveCommitted(
-				repoID, archivedPath, instance, hookErr, false,
+				repoID, archivedPath, instance, hookErr,
 				fmt.Errorf("its durable state write failed: %w", perr),
 			)
 		}
 		log.ErrorLog.Printf("archive of session %q: failed to durably record the Archived state (%v); rolling back to keep the on-disk record consistent", req.Title, perr)
 		if rbErr := m.undoCommittedArchive(repoID, instance, origPath); rbErr != nil {
 			// Could not move the worktree home: the committed archive is the
-			// safest remaining state. Persist it best-effort and surface both
-			// failures so the operator can recover it manually.
-			m.persistInstance(repoID, instance)
-			return "", session.InstanceData{}, fmt.Errorf("archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery", req.Title, archivedPath, perr, rbErr)
+			// safest remaining state. Keep it and report it as committed — with
+			// the location and projection — like the sibling above (#3235).
+			return m.keepUnrollableArchiveCommitted(repoID, archivedPath, instance, hookErr, fmt.Errorf(
+				"archived session %q to %s but failed to record it durably (%v) and could not roll it back (%v); it may need manual recovery",
+				req.Title, archivedPath, perr, rbErr))
 		}
 		// Rolled back: the session is Lost, still drivable, so it keeps its credential.
+		// The hook failure rides along for the same reason as the sibling above.
 		archiveCommitted = false
-		return "", session.InstanceData{}, fmt.Errorf("failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w", req.Title, perr)
+		return "", session.InstanceData{}, failedArchiveWithHook(req.Title, fmt.Errorf(
+			"failed to durably archive session %q; rolled it back and left it Lost to be restored in place: %w",
+			req.Title, perr), hookErr)
 	}
 	log.InfoLog.Printf("archived session %q (repo %s): tmux torn down, worktree moved to %s", req.Title, repoID, archivedPath)
 	archived := instance.ToInstanceData()
@@ -438,90 +390,6 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return archivedPath, archived, committedErr
 	}
 	return archivedPath, archived, nil
-}
-
-// taskTargetValidationContext carries the root-agent reachability fact that can
-// require git resolution. Control callers prepare it while holding taskTargetMu
-// but before entering the tasks-file lock; validators must not shell out there.
-type taskTargetValidationContext struct {
-	rootRepoID          string
-	rootWillMaterialize bool
-}
-
-func (m *Manager) prepareTaskTargetValidation(repoID, target string, enabled bool) taskTargetValidationContext {
-	ctx := taskTargetValidationContext{}
-	if enabled && repoID != "" && session.IsReservedTitle(target) {
-		ctx.rootRepoID = repoID
-		ctx.rootWillMaterialize = m.repoRootAgentWillMaterialize(repoID)
-	}
-	return ctx
-}
-
-// validateEnabledTaskTarget is the task-writer side of taskTargetMu's fence.
-// Missing ordinary targets remain legal (delivery auto-creates them), but a
-// reserved target needs a proven daemon materialization path. A known target
-// that is archiving or already archived would retry forever and is refused
-// before the task-store commit. RepoID has already been derived by the checked
-// add path or supplied from a freshly resolved legacy update. Unknown identity
-// stays unknown for enabled targeted writes; accepting it would bypass every
-// repository-scoped lifecycle check.
-func (m *Manager) validateEnabledTaskTarget(t task.Task, ctx taskTargetValidationContext) error {
-	target := task.CanonicalTargetSession(t.TargetSession)
-	if !t.Enabled || target == "" {
-		return nil
-	}
-	// During restore, absence from m.instances is unknown rather than proof that
-	// the target does not exist. Keep the historical warm-up allowance for
-	// disabled/untargeted task writes, but fail target-dependent writes closed.
-	if !m.Ready() {
-		return errDaemonStarting()
-	}
-	if t.RepoID == "" {
-		return fmt.Errorf("cannot determine project identity for enabled task %q target %q; nothing was changed", t.ID, target)
-	}
-	// Reserved root delivery is safe only while the daemon owns its future, not
-	// merely because a process happens to exist now. A disabled root-agent policy
-	// deliberately leaves a surviving live root alone, but will not recreate it
-	// after the next kill/outage; accepting a task there would defer the permanent
-	// failure until that disappearance.
-	if session.IsReservedTitle(target) {
-		if target != session.RootSessionTitle {
-			return fmt.Errorf("cannot enable task %q: reserved target session %q cannot materialize under that spelling; use %q exactly; nothing was changed", t.ID, target, session.RootSessionTitle)
-		}
-		if ctx.rootRepoID != t.RepoID {
-			return fmt.Errorf("cannot enable task %q: could not determine whether reserved target session %q will materialize because its project identity changed during validation; retry; nothing was changed", t.ID, target)
-		}
-		if !ctx.rootWillMaterialize {
-			return fmt.Errorf("cannot enable task %q: target session %q is reserved, but af could not establish that its root agent will materialize (it may be unconfigured, unresolved, or its project may be deleted); configure or re-register the root agent and restart the daemon, or choose a different target; nothing was changed", t.ID, target)
-		}
-	}
-	m.mu.Lock()
-	instance := m.instances[daemonInstanceKey(t.RepoID, target)]
-	m.mu.Unlock()
-	loaded := instance != nil
-	var state session.InstanceData
-	if loaded {
-		state = instance.ToInstanceData()
-	} else {
-		persisted, _, err := findInstanceDataByTitle(target, t.RepoID)
-		if errors.Is(err, errSessionNotFound) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("cannot enable task %q: could not determine target session %q state from storage; nothing was changed: %w", t.ID, target, err)
-		}
-		state = *persisted
-	}
-	switch {
-	case state.InFlightOp == session.OpArchiving:
-		return fmt.Errorf("cannot enable task %q: target session %q is being archived; wait for the archive, then restore it or choose a different target", t.ID, target)
-	case state.Liveness == session.LiveArchived:
-		return fmt.Errorf("cannot enable task %q: target session %q is archived; restore it or choose a different target", t.ID, target)
-	case !loaded:
-		return fmt.Errorf("cannot enable task %q: could not determine whether target session %q can receive prompts; it is recorded on disk but unavailable in the daemon — repair or remove that session, or choose a different target; nothing was changed", t.ID, target)
-	default:
-		return nil
-	}
 }
 
 // undoCommittedArchive rolls a committed-but-unpersisted archive back to a
@@ -592,8 +460,20 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// best-effort write leaves the on-disk record naming the pushed branch, so a
 		// restart loads the session Lost and an explicit restore re-provisions it.
 		log.ErrorLog.Printf("archive of remote session %q: failed to durably record the Archived state (%v); branch %q is on origin, so the session stays restorable", title, perr, branch)
-		m.persistInstance(repoID, instance)
-		return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, perr)
+		// The committed claim must itself be durable before it is made (#3335
+		// review), exactly as keepUnrollableArchiveCommitted enforces for the
+		// local body: ArchiveSandbox records the pushed branch only in memory, so
+		// if no write ever lands, a restart loads a row with an empty or stale
+		// branch — the Lost re-provision then clones the repo's default branch and
+		// strands the pushed work — and DeleteProject would convert the committed
+		// marker to a warning and deregister the project over that row. Retry the
+		// durable write; only its success claims committed, with the pushed
+		// branch preserved (#3235). A second failure keeps the plain shape whose
+		// message still names the branch for manual recovery.
+		if retryErr := archivePersist(m, repoID, instance); retryErr != nil {
+			return "", fmt.Errorf("archived remote session %q (branch %q pushed to origin) but failed to record it durably: %w", title, branch, errors.Join(perr, retryErr))
+		}
+		return branch, &mutationCommittedError{err: fmt.Errorf("archived remote session %q (branch %q pushed to origin) but its durable record initially failed to write: %w", title, branch, perr)}
 	}
 	log.InfoLog.Printf("archived remote session %q (repo %s): branch %q pushed to origin, sandbox reaped", title, repoID, branch)
 	return branch, nil

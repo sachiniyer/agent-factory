@@ -245,25 +245,6 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 	return &cfg, nil
 }
 
-// SaveRepoConfig saves the per-repo config for the given repo ID.
-//
-// Legacy location: see LoadRepoConfig — new code writes the in-repo file
-// (e.g. SaveInRepoPostWorktreeCommands) instead of this legacy location.
-func SaveRepoConfig(repoID string, cfg *RepoConfig) error {
-	dir, path, err := repoConfigPath(repoID)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create repo config dir: %w", err)
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal repo config: %w", err)
-	}
-	return AtomicWriteFile(path, data, 0644)
-}
-
 // ResolveCommandPathsForTest exposes resolveCommandPaths to tests in other
 // packages, which need to assert that every hook command — including
 // provision_cmd — is made absolute against the repo root before exec sees it.

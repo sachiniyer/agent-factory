@@ -87,8 +87,26 @@ func TestRunDaemon_ExitsWhenHomeDeleted(t *testing.T) {
 	case <-time.After(10 * homeCheckInterval):
 	}
 
-	if err := os.RemoveAll(home); err != nil {
-		t.Fatalf("delete home: %v", err)
+	// Delete the home out from under the LIVE daemon. RemoveAll walks
+	// readdir-then-unlink, which is not atomic against a concurrent writer — and
+	// right now the daemon is alive and entitled to write inside its home (that
+	// is the invariant the pre-deletion window above just verified). One entry
+	// created mid-walk means ENOTEMPTY, and a partial walk may already have
+	// unlinked daemon.sock, so failing here also strands the cleanup's Shutdown
+	// RPC. Retry within a bound instead: each pass removes whatever the daemon
+	// re-created, and the daemon's writes are occasional, so a pass wins long
+	// before the deadline (#3272). The bound keeps a genuinely undeletable home
+	// a loud fixture failure rather than a hang.
+	deleteDeadline := time.Now().Add(2 * time.Second)
+	for {
+		err := os.RemoveAll(home)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deleteDeadline) {
+			t.Fatalf("delete home (retried while the live daemon wrote into it): %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	select {

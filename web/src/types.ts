@@ -62,6 +62,7 @@ export type LifecycleAction = "archive" | "restore";
 export type IdleReason =
   | "usage-limit"
   | "process-exited"
+  | "restore-gave-up"
   | "recreate-pending"
   | "prompt-not-delivered"
   | "delivery-unconfirmed"
@@ -72,6 +73,12 @@ export type IdleReason =
 export interface AgentModelChange {
   before: string;
   after: string;
+}
+
+/** Durable terminal result of the daemon's automatic Lost-session restore loop. */
+export interface LostRestoreFailure {
+  attempts: number;
+  error: string;
 }
 
 /** session.Status (session/instance.go) — the legacy single-axis int, read ONLY
@@ -137,6 +144,8 @@ export interface SessionData {
   /** Daemon-derived explanation for a non-working row. Every value is established
    *  from lifecycle/delivery/churn facts; absence means af cannot say why. */
   idle_reason?: IdleReason;
+  /** Present while a Lost row has exhausted automatic restore attempts. */
+  lost_restore_failure?: LostRestoreFailure;
   /** RFC3339 time of the most recent actual prompt send attempt. */
   last_prompt_attempt_at?: string;
   /** Closed delivery observation. Both unverified values are uncertainty, not failure. */
@@ -175,11 +184,32 @@ export interface SessionData {
    *  derive the new-session modal's project picker, exactly as the TUI does from
    *  InstanceData.Worktree.RepoPath (app/switch_project.go buildProjectListFrom). */
   worktree?: WorktreeData;
+  /** The daemon-discovered PR projection (session/storage.go PRInfoData; #3232
+   *  made discovery daemon-side, so every surface receives it). Go's `omitempty`
+   *  cannot drop a struct field, so a session with no discovered PR arrives as
+   *  `pr_info: {}` — consumers treat a record without a number and url as "no
+   *  PR" (fail closed) rather than keying on the field's presence. */
+  pr_info?: PRInfoData;
   /** The session's tabs (session/storage.go InstanceData.Tabs): index 0 is the
    *  agent tab, followed by up to 9 user-created shell/process tabs (#930). The
    *  web tab bar renders these and streams a selected tab via /stream?tab=<idx>.
    *  Absent (→ one implicit agent tab) only on pre-#930 records. */
   tabs?: TabData[];
+}
+
+/** The wire shape of session/storage.go PRInfoData: the daemon's cached answer to
+ *  "which PR belongs to this session's branch". Field names match the Go JSON tags
+ *  (all `omitempty`), and `state` carries gh's uppercase vocabulary (OPEN / MERGED /
+ *  CLOSED) verbatim — display code lowercases it rather than mapping through a
+ *  table, so an unrecognized future state still renders honestly. */
+export interface PRInfoData {
+  number?: number;
+  title?: string;
+  url?: string;
+  state?: string;
+  /** The exact ref the lookup ran against; consumers making destructive decisions
+   *  must match it, but display code does not read it. */
+  branch?: string;
 }
 
 /** The subset of session.TabData (session/storage.go) the web tab bar reads: the
@@ -219,8 +249,38 @@ export interface WorktreeData {
 
 /** The Snapshot RPC response (daemon/snapshot.go: SnapshotResponse). */
 export interface SnapshotResponse {
-  instances: SessionData[] | null;
-  delivery_alarms?: unknown[];
+	instances: SessionData[] | null;
+	delivery_alarms?: unknown[];
+}
+
+/** apiproto.Theme: the daemon-resolved semantic palette. Browser light/dark is
+ * deliberately absent; theme.ts derives both modes from these source slots. */
+export interface DaemonTheme {
+  name?: string;
+  foreground: string;
+  foreground_strong: string;
+  foreground_muted: string;
+  foreground_dim: string;
+  background: string;
+  background_subtle: string;
+  background_panel: string;
+  accent: string;
+  success: string;
+  warning: string;
+  error: string;
+  info: string;
+  purple: string;
+  selection_background: string;
+  selection_foreground: string;
+  pane_border_default: string;
+  pane_border_selected: string;
+  pane_border_interactive: string;
+  pane_border_preview: string;
+}
+
+/** GetThemeResponse (daemon/control_types.go). */
+export interface ThemeResponse {
+  theme: DaemonTheme;
 }
 
 /**
@@ -279,6 +339,36 @@ export interface TaskUpdate {
   enabled?: boolean;
 }
 
+/**
+ * The project compare-and-swap every task mutation carries (#3230): the Go
+ * task.ProjectExpectation, field names/JSON tags matched EXACTLY. The daemon
+ * re-checks — under the same locked operation that mutates the task — that the
+ * task is still bound to the project the pane displayed it under, and refuses
+ * the action if another client rebound it meanwhile. `enforce` distinguishes
+ * "expected to be unbound" (project_path "") from "no expectation" — an absent
+ * or zero-value expect disables the check, which is why the api layer builds
+ * this from the displayed record itself rather than letting callers pass one.
+ */
+export interface ProjectExpectation {
+  enforce: boolean;
+  project_path: string;
+}
+
+/**
+ * The slice of a displayed task record a mutation needs: the stable id to
+ * target and the project binding to pin (#3230). The api.ts mutation helpers
+ * take this instead of the full TaskData both because it is all they read and
+ * because the surface-parity audit (parity/derive_test.go webNestedValueReach)
+ * derives AddTask's reachable payload from every TaskData-typed parameter in
+ * api.ts — typing the mutations TaskData would make their pass-through call
+ * sites unanalyzable. Callers still hand over the full displayed TaskData;
+ * structural typing narrows it here.
+ */
+export interface TaskMutationRef {
+  id: string;
+  project_path: string;
+}
+
 /** The ListTasks RPC response (daemon/control_types.go: ListTasksResponse). */
 export interface TasksResponse {
   tasks: TaskData[] | null;
@@ -291,6 +381,7 @@ export type EventType =
   | "session.killed"
   | "session.archived"
   | "session.restored"
+  | "theme.changed"
   | "projects.changed"
   | "task.created"
   | "task.updated"
@@ -324,29 +415,22 @@ export interface WireEvent {
 export interface ConfigEntry {
   key: string;
   type: string;
+  /** Every accepted config shape when the normalized `type` alone is
+   *  incomplete, such as theme's named string preset or custom table. */
+  accepted_types?: string[];
   default: string;
   purpose: string;
   tier: number;
   tier_name: string;
-  /** The MANIFEST's claim: `af config set` accepts this key — or, for a dynamic
-   *  family, its LEAVES (`af config set program_overrides.claude …`). Do NOT
-   *  drive a control off this: "the CLI takes this key's leaves" is not "this
-   *  row is one editable value". Use `editable`. */
+  /** The MANIFEST's claim that `af config set` accepts this whole key. Dynamic
+   *  families also retain their leaf form (`program_overrides.claude`). */
   settable: boolean;
-  /** The EDITOR's question: can this row be edited directly, as a single scalar
-   *  the write path will accept? Settable minus the dynamic families, derived
-   *  Go-side from the real allowlist. False renders read-only with `edit_hint`. */
-  editable: boolean;
-  /** How to change a key that is not directly editable. Not always "hand-edit
-   *  the file" — a dynamic family's leaves ARE settable from the CLI, so the
-   *  hint names that command. */
-  edit_hint?: string;
   /** Present when the value is enumerated; drives a picker instead of a text
    *  field. For a table it constrains the entry NAMES, not the value. */
   enum?: string[];
   value: string;
-  /** True for every key today: config.toml is read at startup, so an edit
-   *  applies when af and the daemon next start. */
+  /** True for every key today: a successful save carries the writer's exact
+   *  per-key effect notice (live now, next daemon start, or next af launch). */
   requires_restart: boolean;
 }
 

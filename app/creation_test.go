@@ -59,31 +59,31 @@ func newTestHome(t *testing.T) *home {
 	// unchanged. Tests asserting the daemon-dispatch itself swap in a recorder.
 	t.Cleanup(SetTaskAdderForTest(task.AddTask))
 	// task.UpdateTask returns the merged record; the seam only needs the error,
-	// so adapt it to the field-level updater signature (#1700).
-	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate) error {
-		_, err := task.UpdateTask(id, update, task.ProjectExpectation{})
+	// so adapt it to the field-level updater signature (#1700). The expectation
+	// is passed through, exactly as the daemon's handler does (#3230), so these
+	// disk-assertion tests exercise the same CAS a real save runs under.
+	t.Cleanup(SetTaskUpdaterForTest(func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
+		_, err := task.UpdateTask(id, update, expect)
 		return err
 	}))
-	// The TUI's remove seam takes no project expectation: the CLI's client-side
-	// scope check is what an expectation re-verifies, and the TUI has none.
-	t.Cleanup(SetTaskRemoverForTest(func(id string) error {
-		return task.RemoveTask(id, task.ProjectExpectation{})
+	t.Cleanup(SetTaskRemoverForTest(func(id string, expect task.ProjectExpectation) error {
+		return task.RemoveTask(id, expect)
 	}))
 	t.Cleanup(SetLocalSessionPreflightForTest(func(*config.Config, string) error { return nil }))
 
-	// The tab + PR-info mutations now route through daemon RPCs (#960 PR 2).
+	// Tab mutations and PR-info refresh pokes route through daemon RPCs.
 	// Stub the seams with safe defaults so tests that incidentally trigger them
 	// never dial — or spawn — a real daemon. Tests exercising these paths
 	// override the relevant seam. createTab/closeTab default to an error so an
-	// unstubbed mutation fails loudly rather than reaching the daemon; setPRInfo
-	// defaults to a no-op so the in-memory PR-badge path stays exercisable.
+	// unstubbed mutation fails loudly rather than reaching the daemon; PR refresh
+	// defaults to a no-op because snapshots own the projected badge.
 	t.Cleanup(SetTabCreatorForTest(func(daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 		return daemon.CreateTabResponse{}, fmt.Errorf("createTabThroughDaemon not stubbed in test")
 	}))
 	t.Cleanup(SetTabCloserForTest(func(daemon.CloseTabRequest) error {
 		return fmt.Errorf("closeTabThroughDaemon not stubbed in test")
 	}))
-	t.Cleanup(SetPRInfoSetterForTest(func(daemon.SetPRInfoRequest) error {
+	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error {
 		return nil
 	}))
 

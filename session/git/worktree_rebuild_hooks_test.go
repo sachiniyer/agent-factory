@@ -1,6 +1,7 @@
 package git
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,22 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/stretchr/testify/require"
 )
+
+// writeLegacyRepoConfig materializes the legacy per-repo config at
+// ~/.agent-factory/repos/<repoID>/config.json with the given RepoConfig.
+// Production code stopped writing here after #800 pulled writes into the
+// in-repo file; only test fixtures need this writer, so it lives in test scope.
+func writeLegacyRepoConfig(t *testing.T, repoID string, cfg *config.RepoConfig) {
+	t.Helper()
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	dir := filepath.Join(configDir, "repos", repoID)
+	path := filepath.Join(dir, config.RepoConfigFileName)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0644))
+}
 
 // gatedHookRepo builds a real repo whose single post-worktree hook is a gate: it
 // records that it started, blocks until the test releases it, and only then
@@ -41,9 +58,9 @@ func gatedHookRepo(t *testing.T) (repoRoot, startedDir, releaseFile, doneDir str
 		"touch " + doneDir + "/$$"
 
 	repoID := config.RepoIDFromRoot(repoRoot)
-	require.NoError(t, config.SaveRepoConfig(repoID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: []string{hook},
-	}))
+	})
 
 	cfg := config.DefaultConfig()
 	cfg.BranchPrefix = "test/"
@@ -204,9 +221,9 @@ func TestRebuildAfterCleanup_StillRunsHooks(t *testing.T) {
 	doneDir := filepath.Join(t.TempDir(), "done")
 	require.NoError(t, os.MkdirAll(doneDir, 0o755))
 	repoID := config.RepoIDFromRoot(repoRoot)
-	require.NoError(t, config.SaveRepoConfig(repoID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: []string{"touch " + doneDir + "/$$"},
-	}))
+	})
 	cfg := config.DefaultConfig()
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))
@@ -264,11 +281,11 @@ func TestRebuildFromExistingBranch_RecreatedTreeIsUntouchedByThePriorRun(t *test
 	// $$ is the hook shell's pid; the worktree path is resolved by the hook at
 	// run time via $PWD's absolute value captured before any deletion.
 	repoID := config.RepoIDFromRoot(repoRoot)
-	require.NoError(t, config.SaveRepoConfig(repoID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repoID, &config.RepoConfig{
 		PostWorktreeCommands: []string{
 			`d="$PWD"; while true; do echo "$$" >> "$d/hook-touched"; sleep 0.01; done`,
 		},
-	}))
+	})
 	cfg := config.DefaultConfig()
 	cfg.BranchPrefix = "test/"
 	require.NoError(t, config.SaveConfig(cfg))

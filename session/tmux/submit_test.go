@@ -474,17 +474,52 @@ func TestCodexSubmitConcurrentDeliveriesUseDistinctBuffers(t *testing.T) {
 	require.Equal(t, unique, pasteBufs, "each paste must read back a per-call load buffer")
 }
 
+// TestBashWrappedSubmitDoesNotDuplicateCommandPrefix is the #1256 regression: a
+// narrow pane must render ONE submit's command prefix once, never twice.
+//
+// It drives sendKeysPasteBuffer — a single delivery attempt — rather than
+// SendKeysCommand, and that is a correctness fix rather than a narrowing (#3439).
+// SendKeysCommand is SendKeysCommandObserved, which since #3293 redelivers an
+// observed-absent prompt once. Against a REAL bash pane a redelivery runs the
+// command a second time, so a second prefix appears on screen: production's
+// designed behaviour, not the duplication #1256 is about. Whether that retry
+// fires is decided by whether the pane rendered the completion tail inside
+// pasteDeliveryMaxWait, so on a contended runner the wall clock — not the code
+// under test — chose the verdict, and the failure arrived wearing this test's
+// #1256 message. Measured on this box at load 75: with the delivery budget
+// squeezed the way contention squeezes it, the retry fired every run and the
+// duplicate prefix surfaced in 1 run of 10.
+//
+// One attempt is also the exact unit of the property: "one submit renders the
+// prefix once" is not true of a path that may deliberately submit twice. The
+// retry's own boundaries are covered by submit_redeliver_test.go, including
+// TestSentUnverifiedRealPaneDeliversExactlyOnce against a real pane.
 func TestBashWrappedSubmitDoesNotDuplicateCommandPrefix(t *testing.T) {
 	testguard.IsolateTmux(t)
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skipf("bash not available: %v", err)
 	}
 
+	// Count pastes through a real executor so a future change that reintroduces
+	// a second delivery on this path fails loudly here instead of resurfacing as
+	// an intermittent duplicate-prefix report.
+	realExec := cmdpkg.MakeExecutor()
+	pastes := 0
+	countingExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if strings.Contains(strings.Join(c.Args, " "), "paste-buffer") {
+				pastes++
+			}
+			return realExec.Run(c)
+		},
+		OutputFunc: realExec.Output,
+	}
+
 	session := newTmuxSession(
 		toTmuxName("wrap-submit", ""),
 		"bash --noprofile --norc -i",
 		MakePtyFactory(),
-		cmdpkg.MakeExecutor(),
+		countingExec,
 	)
 	require.NoError(t, session.Start(t.TempDir()))
 	t.Cleanup(func() {
@@ -495,20 +530,87 @@ func TestBashWrappedSubmitDoesNotDuplicateCommandPrefix(t *testing.T) {
 	resizeCmd := exec.Command("tmux", "resize-window", "-t", exactTarget(session.sanitizedName), "-x", "24", "-y", "10")
 	require.NoError(t, session.cmdExec.Run(resizeCmd))
 
-	time.Sleep(100 * time.Millisecond)
+	requireBashAdoptedWidth(t, session, 24)
 
 	const command = "printf '%s\\n' AF1292_DONE"
-	require.NoError(t, session.SendKeysCommand(command))
+	status, _, err := session.sendKeysPasteBuffer(command)
+	require.NoError(t, err, "the single submit attempt must reach tmux")
+	require.True(t, status.Valid(), "a completed attempt must report a wire-supported status, got %q", status)
 
-	require.Eventually(t, func() bool {
-		content, err := captureRawPane(session)
-		return err == nil && strings.Contains(content, "\nAF1292_DONE\n")
-	}, 2*time.Second, 50*time.Millisecond, "wrapped bash command did not run")
+	// Assert on a SETTLED pane rather than on a fresh capture taken after a wait
+	// that a DIFFERENT capture satisfied. This is not what was causing the
+	// duplicates — those survived two identical consecutive captures, which is
+	// how the resize was identified as the real cause above — it just closes the
+	// frame-sampling gap the old shape left open. It cannot mask the artifact it
+	// sits next to: #1293's stale prefix row is one the pane is left HOLDING, so
+	// it is still there once the pane stops changing.
+	content := settledPane(t, session, "\nAF1292_DONE\n")
 
-	content, err := captureRawPane(session)
-	require.NoError(t, err)
+	require.Equal(t, 1, pastes,
+		"the property under test is what ONE submit renders; %d pastes reached tmux", pastes)
 	require.Equal(t, 1, strings.Count(content, "printf '%s"),
 		"wrapped command prefix must be captured once, not duplicated:\n%s", content)
+}
+
+// settledPane returns the pane once it contains want AND has stopped changing.
+// Two identical consecutive captures is the stability signal; the bound is
+// liveness only, since a pane that never settles has already failed the test.
+func settledPane(t *testing.T, session *TmuxSession, want string) string {
+	t.Helper()
+	var settled string
+	require.Eventually(t, func() bool {
+		first, err := captureRawPane(session)
+		if err != nil || !strings.Contains(first, want) {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+		second, err := captureRawPane(session)
+		if err != nil || second != first {
+			return false
+		}
+		settled = second
+		return true
+	}, paneLivenessBound, 25*time.Millisecond,
+		"pane never settled with %q rendered", want)
+	return settled
+}
+
+// requireBashAdoptedWidth blocks until the pane's shell has PROCESSED the
+// resize, and clears the pane afterwards.
+//
+// The fixed 100ms sleep this replaces was a hope, and "the pane is non-empty"
+// would be worse than a hope: bash draws its first prompt before the resize is
+// even issued, so that check is satisfied by a pre-resize frame and proves
+// nothing. If readline is still modelling the old width when the paste lands,
+// it renders a 25-character command as unwrapped, discovers the real width, and
+// redraws — leaving behind exactly the stale prompt+prefix row #1293 describes,
+// with one paste and one Enter. The test then reports that as a duplicated
+// submit. Asking the shell what width IT believes it has is the actual
+// precondition, and $COLUMNS only updates once bash has handled SIGWINCH.
+func requireBashAdoptedWidth(t *testing.T, session *TmuxSession, width int) {
+	t.Helper()
+	target := exactTarget(session.sanitizedName)
+	sendKeys := func(text string) {
+		t.Helper()
+		require.NoError(t, session.cmdExec.Run(
+			exec.Command("tmux", "send-keys", "-t", target, text, "Enter")))
+	}
+	// The marker is spelled so only the OUTPUT can match it: the echoed command
+	// line carries the unexpanded "$COLUMNS".
+	want := fmt.Sprintf("AFCOLS=%d", width)
+	sendKeys("echo AFCOLS=$COLUMNS")
+	require.Eventually(t, func() bool {
+		content, err := captureRawPane(session)
+		return err == nil && strings.Contains(content, want)
+	}, paneLivenessBound, 25*time.Millisecond,
+		"the pane shell never adopted the %d-column resize", width)
+
+	// Clear so the assertion counts only what the submit under test renders.
+	sendKeys("clear")
+	require.Eventually(t, func() bool {
+		content, err := captureRawPane(session)
+		return err == nil && !strings.Contains(content, "AFCOLS")
+	}, paneLivenessBound, 25*time.Millisecond, "pane never cleared before the submit")
 }
 
 // TestSubmitDeletesBufferWhenPasteFails guards the #1536 leak: `paste-buffer -d`
@@ -900,7 +1002,10 @@ func TestSubmitRequiresPromptSpecificRenderingBeforeObservedAbsent(t *testing.T)
 // TestMissingPromptAfterPromptSpecificRenderingStaysLoud protects the genuine
 // #1982 signal. The pane renders a new prefix from this exact prompt but never
 // its disjoint completion tail. That is terminal observed-absent regardless of
-// agent identity and must remain actionable at ERROR.
+// agent identity and must remain actionable at ERROR — once per attempt, since
+// #3293 redelivers an observed-absent prompt once before reporting it. The mock
+// resets its per-attempt state on each load-buffer so both attempts strand the
+// same way.
 func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	defer withPasteDeliveryTiming(50*time.Millisecond, time.Millisecond)()
 	errors := captureErrorLog(t)
@@ -911,6 +1016,9 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
+			if strings.Contains(joined, "load-buffer") {
+				pasted, enterSent = false, false
+			}
 			if strings.Contains(joined, "paste-buffer") {
 				pasted = true
 			}
@@ -946,8 +1054,8 @@ func TestMissingPromptAfterPromptSpecificRenderingStaysLoud(t *testing.T) {
 		"an observed-absent prompt must be reported to the caller, not collapsed into success")
 	require.True(t, enterSent, "observed-absent must retain the best-effort Enter")
 	got := errors.String()
-	require.Equal(t, 1, strings.Count(got, "prompt delivery observed absent"),
-		"a genuine missing prompt should emit one actionable ERROR, got %q", got)
+	require.Equal(t, 2, strings.Count(got, "prompt delivery observed absent"),
+		"a genuine missing prompt should emit one actionable ERROR per stranded attempt (#3293 redelivers once), got %q", got)
 	require.Contains(t, got, "pane rendered this prompt's prefix but not its completion tail")
 	require.Contains(t, got, "Enter sent best-effort")
 	require.Contains(t, got, "run bash -lc 'printf started",
@@ -1090,7 +1198,15 @@ func TestUncapturedBaselineCannotConfirmOldCompletionTail(t *testing.T) {
 }
 
 func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
-	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	defer withPasteDeliveryTiming(4*time.Millisecond, time.Millisecond)()
+	// The verdict here is a POLL COUNT, not a wall-clock duration: only the
+	// probes that follow the early absence can downgrade it to unobservable, so
+	// the loop must actually reach them. On a contended runner a single 1ms
+	// sleep can overshoot the whole 8ms window this used to allocate, the loop
+	// returns after ONE capture, and the early absence stands as the terminal
+	// observation — reproducing #3333's exact `expected: 3 / actual: 2`
+	// signature in a sibling the #3339 sweep missed (#3439).
+	useFakePasteDeliveryClock(t)
 	captures := 0
 	cmdExec := cmd_test.MockCmdExec{
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
@@ -1106,10 +1222,13 @@ func TestFinalCaptureFailureMakesEarlierAbsenceUnobservable(t *testing.T) {
 	got := session.waitForPasteDelivered(newDeliveryProbe("DISTINCTIVE_DELIVERY_TAIL"))
 	require.Equal(t, deliveryCouldNotObserve, got.outcome,
 		"an early absence followed by failed probes cannot say whether the paste landed later")
+	require.Equal(t, 4, captures,
+		"the virtual poll budget must reach the failing probes that follow the early absence")
 }
 
 func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
-	defer withPasteDeliveryTiming(8*time.Millisecond, time.Millisecond)()
+	defer withPasteDeliveryTiming(4*time.Millisecond, time.Millisecond)()
+	useFakePasteDeliveryClock(t)
 	captures := 0
 	cmdExec := cmd_test.MockCmdExec{
 		OutputFunc: func(*exec.Cmd) ([]byte, error) {
@@ -1127,6 +1246,8 @@ func TestCaptureFailureBreaksShortTailSightingStreak(t *testing.T) {
 	got := session.waitForPasteDelivered(newDeliveryProbe("ok"))
 	require.Equal(t, deliveryCouldNotObserve, got.outcome,
 		"two weak sightings separated by a failed probe are not consecutive delivery evidence")
+	require.Equal(t, 4, captures,
+		"the virtual poll budget must include the separating and terminal capture failures")
 }
 
 // TestPriorVisibleDeliveryDoesNotAuthorizeALaterNegative pins the payload scope
@@ -1179,12 +1300,39 @@ func captureRawPane(session *TmuxSession) (string, error) {
 	return string(out), nil
 }
 
+// paneLivenessBound is how long a REAL-pane test waits for a real process to
+// render something. It is a liveness bound, not a verdict window: nothing about
+// what these tests prove depends on where inside it the pane settles, and the
+// only thing exhausting it can mean is that bash or tmux never got there at
+// all. That is the opposite of the budgets #3439 converted, where the number of
+// polls that fit WAS the verdict — so this one is deliberately generous rather
+// than virtualized, since no fake clock can make a real subprocess run.
+const paneLivenessBound = 30 * time.Second
+
 // withPasteDeliveryTiming overrides the delivery-poll knobs for a test and
-// returns a restore func for defer.
+// returns a restore func for defer. It also shrinks the #3293 redelivery delay
+// to the poll interval so an observed-absent fixture retries immediately
+// instead of sleeping the production seconds-scale wait.
 func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
-	savedMax, savedPoll := pasteDeliveryMaxWait, pasteDeliveryPollInterval
-	pasteDeliveryMaxWait, pasteDeliveryPollInterval = maxWait, poll
-	return func() { pasteDeliveryMaxWait, pasteDeliveryPollInterval = savedMax, savedPoll }
+	savedMax, savedPoll, savedRedeliver := pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay
+	pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = maxWait, poll, poll
+	return func() {
+		pasteDeliveryMaxWait, pasteDeliveryPollInterval, redeliverAfterAbsentDelay = savedMax, savedPoll, savedRedeliver
+	}
+}
+
+// useFakePasteDeliveryClock makes sleeps advance logical delivery time instead
+// of waiting for scheduler turns. Tests can therefore pin an exact observed
+// poll sequence even when the host is under CPU contention (#3333).
+func useFakePasteDeliveryClock(t *testing.T) {
+	t.Helper()
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	savedNow, savedSleep := pasteDeliveryNow, pasteDeliverySleep
+	pasteDeliveryNow = func() time.Time { return now }
+	pasteDeliverySleep = func(d time.Duration) { now = now.Add(d) }
+	t.Cleanup(func() {
+		pasteDeliveryNow, pasteDeliverySleep = savedNow, savedSleep
+	})
 }
 
 // TestSubmitWaitsForPasteBeforeEnter is the #1982 regression: the submit path
@@ -1200,7 +1348,13 @@ func withPasteDeliveryTiming(maxWait, poll time.Duration) func() {
 // there are zero capture-pane calls, so both assertions fail — it reproduces the
 // defect at the mechanism level (Enter sent without confirming delivery).
 func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
-	defer withPasteDeliveryTiming(2*time.Second, time.Millisecond)()
+	defer withPasteDeliveryTiming(20*time.Millisecond, time.Millisecond)()
+	// Both assertions below are POLL COUNTS: the pane withholds the pasted text
+	// for revealAfter captures, so the loop has to keep polling to see it at
+	// all. A wall-clock budget makes that a race with the scheduler — squeeze
+	// the window and the submit sends Enter having never observed the text,
+	// failing the #1982 property it is asserting rather than the code (#3439).
+	useFakePasteDeliveryClock(t)
 
 	const prompt = "deploy the staging build and report back DELIVERY_TAIL_OK"
 
@@ -1253,6 +1407,8 @@ func TestSubmitWaitsForPasteBeforeEnter(t *testing.T) {
 	defer mu.Unlock()
 	require.Greater(t, captureCalls, revealAfter,
 		"submit must poll capture-pane until the paste lands, not send Enter blind (#1982); got %d captures", captureCalls)
+	require.Equal(t, revealAfter+1, captureCalls,
+		"the virtual poll budget must stop at the first capture that reveals the paste, not spin past it")
 	require.True(t, enterSawConfirmedText,
 		"Enter must be sent only AFTER a capture confirmed the pasted text is present (#1982)")
 }

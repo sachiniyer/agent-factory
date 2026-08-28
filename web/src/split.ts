@@ -261,6 +261,19 @@ function hostLabel(target: string): string {
   }
 }
 
+/**
+ * The fallback line for a failed web-tab probe, attributed to the hop that failed
+ * (#3239). "dead" means the probe got through and nothing usable answered behind the
+ * daemon, so the copy names the dev server. "unreachable" means the browser never
+ * reached the daemon, which observed nothing about the dev server — so the copy names
+ * the daemon and leaves the dev server out of it.
+ */
+export function probeFallbackMsg(health: "dead" | "unreachable", host: string): string {
+  return health === "unreachable"
+    ? `Could not reach the daemon to check ${host}.`
+    : `No dev server is answering at ${host} yet.`;
+}
+
 export class SplitView {
   // Retained layout per session id (in-memory; a nice-to-have to persist across
   // reload is out of scope for v1). Keyed by the stable session id.
@@ -1119,9 +1132,9 @@ export class SplitView {
     //     with a self-refresh / exited-while-starting) at 503. 503 is not in the probe's
     //     dead set {502,504}, so those pass through untouched even where the probe does
     //     run — but probing first would still delay them behind a round trip for no gain.
-    //   - showDead() names a host taken from the target, and a vscode tab has NO target
-    //     by design (its editor is an ephemeral loopback port resolved at proxy time).
-    //     Pointing this at one renders "answering at  yet" — an empty host.
+    //   - showProbeFailure() names a host taken from the target, and a vscode tab has
+    //     NO target by design (its editor is an ephemeral loopback port resolved at
+    //     proxy time). Pointing this at one renders "answering at  yet" — an empty host.
     //
     // The residue is a vscode socket that dies AFTER a successful spawn: the proxy's
     // ErrorHandler is kind-agnostic, so that 502s into the frame as a raw envelope —
@@ -1145,14 +1158,15 @@ export class SplitView {
     // overwrite what a later Retry concluded.
     let probeSeq = 0;
 
-    const showDead = (): void => {
+    const showProbeFailure = (health: "dead" | "unreachable"): void => {
       fallback.classList.add("af-webpane-dead");
-      fbMsg.textContent = `No dev server is answering at ${hostLabel(target)} yet.`;
-      // BOTH open links are withdrawn in the dead state — they point at the same
-      // proxied URL the probe just found 502ing, so following either would open a new
-      // tab showing the daemon's raw 502 JSON, the exact thing this fallback replaces
-      // (Codex P3). The bar's `open` is the one the fallback's fbLink already hides for
-      // its own reason; the two must move together here. Retry stands in for both.
+      fbMsg.textContent = probeFallbackMsg(health, hostLabel(target));
+      // BOTH open links are withdrawn in either failure state — they point at the same
+      // proxied URL the probe just failed on, so following either would open a new tab
+      // showing the daemon's raw 502 JSON (dead) or the browser's own connection error
+      // (unreachable), the exact thing this fallback replaces (Codex P3). The bar's
+      // `open` is the one the fallback's fbLink already hides for its own reason; the
+      // two must move together here. Retry stands in for both.
       fbLink.hidden = true;
       open.hidden = true;
       fbRetry.hidden = false;
@@ -1167,8 +1181,8 @@ export class SplitView {
       fallback.classList.remove("af-webpane-dead");
       fallback.hidden = true;
       fbRetry.hidden = true;
-      // Restore the bar's open link showDead withdrew: a live frame's proxied URL is
-      // now worth opening again.
+      // Restore the bar's open link showProbeFailure withdrew: a live frame's proxied
+      // URL is now worth opening again.
       open.hidden = false;
       frame.hidden = false;
     };
@@ -1193,7 +1207,7 @@ export class SplitView {
       // nothing. Pressing it re-ran load(), which landed right back on this card:
       // no fetch, no navigation, no visible change, no explanation. The escape that
       // does work is the open link (this card's, and the bar's `open` — which this
-      // branch deliberately leaves live, unlike showDead).
+      // branch deliberately leaves live, unlike showProbeFailure).
       //
       // Never restored: `external` is fixed for the life of this render (a target is
       // proxied or it is not), so this state never transitions to a live frame. The
@@ -1258,8 +1272,8 @@ export class SplitView {
         if (disposed || seq !== probeSeq) {
           return; // torn down, or a newer Retry owns this pane now
         }
-        if (health === "dead") {
-          showDead();
+        if (health === "dead" || health === "unreachable") {
+          showProbeFailure(health);
           return;
         }
       }

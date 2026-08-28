@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -20,6 +23,37 @@ func applyConfigTestManager(t *testing.T) *Manager {
 	m, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
 	return m
+}
+
+// A plain `af` launch is the apply boundary for a hand-edited global theme. It
+// must not apply an unrelated listener/auth/program edit as a side effect, and an
+// already-open web client needs an events-plane signal to fetch the new palette.
+func TestApplyThemeChangesOnlyThemeAndPublishes(t *testing.T) {
+	m := applyConfigTestManager(t)
+	_, events := m.events.subscribe()
+	home := os.Getenv("AGENT_FACTORY_HOME")
+	require.NotEmpty(t, home)
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName), []byte(`schema_version = 1
+default_program = "codex"
+listen_addr = "127.0.0.1:9999"
+theme = "zenburn"
+`), 0o600))
+
+	changed, err := m.ApplyTheme()
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Equal(t, "zenburn", m.Config().Theme.Preset())
+	assert.Equal(t, config.DefaultConfig().DefaultProgram, m.Config().DefaultProgram,
+		"theme-only launch apply must not advance unrelated config")
+	assert.Equal(t, config.DefaultConfig().ListenAddr, m.Config().ListenAddr,
+		"theme-only launch apply must never attempt a listener rebind")
+
+	select {
+	case event := <-events:
+		assert.Equal(t, agentproto.EventThemeChanged, event.Type)
+	default:
+		t.Fatal("theme apply did not notify connected event subscribers")
+	}
 }
 
 // TestApplyConfigSwapsLiveConfig: a hot-reloadable key written to disk is live via
@@ -65,16 +99,50 @@ func TestApplyConfigRebuildsLimitDetector(t *testing.T) {
 // (The live-read enforcement and the rebind/brick-prevention behavior are pinned
 // with real listeners in listener_reload_test.go; this pins the classification the
 // save-surface notice reads.)
-func TestApplyConfigReportsNetworkKeysApplied(t *testing.T) {
+func TestApplyConfigReportsCanonicalNetworkKeysApplied(t *testing.T) {
 	m := applyConfigTestManager(t)
 
-	_, err := config.SetGlobalConfigValue("require_token", "true")
-	require.NoError(t, err)
+	values := map[string]string{
+		"network.listen_addr":            "127.0.0.1:0",
+		"network.preview_listen_addr":    "127.0.0.1:0",
+		"network.require_token":          "true",
+		"network.require_loopback_token": "true",
+		"network.cors_allowed_origins":   "https://af.example.com",
+	}
+	for key, value := range values {
+		_, err := config.SetGlobalConfigValue(key, value)
+		require.NoError(t, err)
+	}
 
 	result, err := m.ApplyConfig()
 	require.NoError(t, err)
-	require.Contains(t, result.Applied, "require_token", "a network key applies live since PR2, so it is reported applied, not pending")
-	require.NotContains(t, result.Pending, "require_token")
+	for key := range values {
+		require.Contains(t, result.Applied, key, "a network key applies live, so it is reported under its canonical name")
+		require.NotContains(t, result.Pending, key)
+	}
+}
+
+func TestApplyConfigReportsCanonicalBackendSettingsApplied(t *testing.T) {
+	m := applyConfigTestManager(t)
+	for key, value := range map[string]string{
+		"docker.mount_agent_credentials": "true",
+		"ssh.host_key_verification":      "accept-new",
+		"sandbox.ssh":                    "ssh sandbox.example",
+	} {
+		_, err := config.SetGlobalConfigValue(key, value)
+		require.NoError(t, err)
+	}
+
+	result, err := m.ApplyConfig()
+	require.NoError(t, err)
+	for _, key := range []string{
+		"docker.mount_agent_credentials",
+		"ssh.host_key_verification",
+		"sandbox.ssh",
+	} {
+		require.Contains(t, result.Applied, key)
+		require.NotContains(t, result.Pending, key)
+	}
 }
 
 // TestApplyConfigReportsBranchPrefixPending is the regression for the lie the
@@ -147,7 +215,7 @@ func TestApplyConfig_DisablingRequireTokenRevokesSandboxCredentials(t *testing.T
 	// And the operator must be TOLD, including that this does not re-isolate the
 	// sandboxes — revoking without saying so would read as a security action.
 	joined := strings.Join(result.Warnings, "\n")
-	assert.Contains(t, joined, "require_token is now false")
+	assert.Contains(t, joined, "network.require_token is now false")
 	assert.Contains(t, joined, "does not re-isolate")
 }
 

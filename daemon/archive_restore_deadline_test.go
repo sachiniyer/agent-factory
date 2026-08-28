@@ -135,7 +135,8 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 
 	// Only now: the archive above ran on real git.
 	heal := partialRelocateGitOnPath(t)
-	t.Cleanup(sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond))
+	restoreGitTimeout := sessiongit.SetLocalGitTimeoutForTest(300 * time.Millisecond)
+	t.Cleanup(restoreGitTimeout)
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 
@@ -160,6 +161,14 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 	// collision suffix is what keeps that from being a dead end, so assert the
 	// whole round trip rather than trusting it.
 	heal()
+	// The healed retry runs on the PRODUCTION git budget (#3286). The 300ms
+	// bound above exists only to SIGKILL the shimmed `worktree repair` hang and
+	// produce the cut-off; left in place it also bounds the retry's REAL git
+	// work, and a loaded runner exceeding it fails the very retry this test
+	// requires to succeed. Restoring twice is safe — the restore just reassigns
+	// the saved value — so the Cleanup registration above stays as the backstop
+	// for the failure paths between install and here.
+	restoreGitTimeout()
 	retryPath, _, retryErr := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 	require.NoError(t, retryErr, "the advertised retry must be able to finish the restore")
 	assert.NotEqual(t, expected, retryPath,

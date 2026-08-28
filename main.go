@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 var (
@@ -16,7 +17,7 @@ var (
 	// stable releases also commit the new number here so dev builds report
 	// the latest stable base. Preview releases (vX.Y.Z-preview-N, #1041)
 	// never rewrite this value.
-	version     = "1.0.253"
+	version     = "1.0.266"
 	rootCommand = commands.NewRootCommand
 )
 
@@ -40,6 +41,7 @@ func main() {
 		return agentaccount.Selected(home, agent, name, executable)
 	}
 	sessionenv.HandleInternalExec()
+	sessiontmux.HandleDedicatedServerExec()
 	// Consume the internal __upgrade-recovery invocation (the persistent recovery
 	// job execs the preserved previous binary this way) before Cobra, exactly as
 	// the session exec protocol above. An ordinary invocation returns immediately.

@@ -13,8 +13,8 @@ docs_dir: docs
 theme:
   name: material
   custom_dir: docs/overrides
-  logo: assets/logo.svg
-  favicon: assets/favicon.svg
+  logo: assets/mark.svg
+  favicon: assets/mark.svg
   icon:
     repo: fontawesome/brands/github
   features:
@@ -33,8 +33,8 @@ theme:
     - search.highlight
   palette:
     # Auto (respects the OS): the icon toggles light <-> dark. The accent
-    # teal (ui/theme.go #7cb8bb) and its contrast-safe derivatives are defined
-    # in docs/stylesheets/extra.css, so both schemes use `custom`.
+    # palette and its verified contrast-safe derivatives are defined as
+    # semantic tokens in docs/stylesheets/extra.css, so both schemes use custom.
     - media: "(prefers-color-scheme)"
       toggle:
         icon: material/brightness-auto
@@ -123,17 +123,17 @@ nav:
           - CLI guide: cli.md
           - Configuration: configuration.md
       - Core concepts:
-          - Sessions & worktrees: concepts/worktree-agents.md
+          - Sessions and worktrees: concepts/worktree-agents.md
           - The TUI: concepts/tui.md
           - The web client: web.md
           - The daemon: concepts/daemon.md
-          - Tasks & automation: tasks.md
+          - Tasks and automation: tasks.md
           - Agent plugins: agent-plugins.md
           - Backends (runtimes): backends.md
           - Remote hooks: remote-hooks.md
           - Remote daemon access: remote-http-auth.md
           - Usage limits: usage-limits.md
-      - API & reference:
+      - API and reference:
           - HTTP API guide: http-api.md
           - CLI reference: reference/cli.md
           - HTTP API reference: reference/api.md

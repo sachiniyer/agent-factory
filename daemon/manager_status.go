@@ -581,13 +581,13 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	}
 	projectionChanged := instance.SetAgentModelChangeAtEpoch(obs.ModelChange, epoch)
 	updated, hasPrompt, content := obs.Updated, obs.HasPrompt, obs.Content
-	churnCheckpoint := false
+	settlementCheckpoint := false
 	if updated {
 		// Observation.Updated proves only that captured pane bytes changed. Record
 		// that timestamp without interpreting the bytes as an answer or completion.
 		// The first churn after a prompt is checkpointed below even if the row stays
 		// Running; later spinner churn does not create an event/write storm.
-		_, churnCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
+		_, settlementCheckpoint = instance.RecordPaneChurnCheckpointAtEpoch(nowFunc(), epoch)
 	}
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
@@ -661,11 +661,19 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		}
 	}
 	if observedAlive {
-		m.noteAliveObservationAtGeneration(repoID, instance, observationGeneration)
+		accepted := m.noteAliveObservationAtGeneration(repoID, instance, observationGeneration)
+		// A terminal restore error belongs to a Lost runtime. Once this same,
+		// still-tracked runtime has both answered and crossed back out of Lost, the
+		// prior give-up state is stale. Make its retirement a durable checkpoint so
+		// the next daemon cannot reload the old outage and suppress recovery again.
+		if accepted && instance.GetLiveness() != session.LiveLost &&
+			instance.ClearLostRestoreFailureAtObservation(observationGeneration) {
+			settlementCheckpoint = true
+		}
 	}
 
 	// Persist a liveness OR usage-limit reset-time change (#1146); see limit.go.
-	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, churnCheckpoint)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, settlementCheckpoint)
 
 	// The run this session was spawned for may have just finished on the idle edge
 	// above. Apply the owning task's declared lifecycle (#2595) — last, after the
@@ -681,4 +689,4 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 // as a straight per-repo marshal (#960 PR 4). With the daemon the sole writer of
 // instances.json there is no competing snapshot to reconcile, so this is no
 // longer a merge. Every mutation already persists through a targeted writer
-// (appendInstanceData / persistInstanceData / DeleteInstance) as it happens; this
+// (appendInstanceData / persistInstanceData / DeleteInstanceByStableID) as it happens; this

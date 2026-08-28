@@ -59,11 +59,11 @@ func (m *home) selectionChanged() tea.Cmd {
 		}
 		previewCmd = m.updatePanePreview(selected, previewTab, previewTabSpecific, attachedNow)
 		detachTrace(selectionStart, "selectionChanged-instance-branch-built-cmds")
-		// Lazily refresh PR info when the user lands on an instance that
-		// hasn't been fetched recently. fetchPRInfoCmd is a no-op when the
-		// data is still fresh, so rapid Up/Down navigation doesn't hammer gh.
+		// Lazily poke daemon-owned PR discovery when the user lands on an
+		// instance. refreshPRInfoCmd throttles this window's repeated selection
+		// events; the daemon owns eligibility and the cross-client debounce.
 		if !attachedNow && selected != nil && selected.Started() {
-			prFetch = fetchPRInfoCmd(selected, m.repoID, false)
+			prFetch = refreshPRInfoCmd(selected, m.repoID, false)
 		}
 	} else {
 		// Header row: the menu drops the instance-specific hints; the open

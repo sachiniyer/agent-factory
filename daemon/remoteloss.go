@@ -262,6 +262,7 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// predecessor-owned facts together rather than multiplying reset sites.
 	instance.ClearAgentModelChange()
 	instance.ClearIdleEvidence()
+	instance.ClearLostRestoreFailure()
 	m.clearRemoteLoss(stableSessionKey(repoID, instance))
 }
 
@@ -498,11 +499,12 @@ func (m *Manager) noteAliveObservation(repoID string, instance *session.Instance
 	m.noteAliveObservationLocked(repoID, instance)
 }
 
-func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.Instance) {
+func (m *Manager) noteAliveObservationLocked(repoID string, instance *session.Instance) bool {
 	if m.instances[daemonInstanceKey(repoID, instance.Title)] != instance {
-		return
+		return false
 	}
 	m.aliveObservations[stableSessionKey(repoID, instance)]++
+	return true
 }
 
 // noteAliveObservationAtGeneration is the poll-owned form. It validates the
@@ -512,11 +514,11 @@ func (m *Manager) noteAliveObservationAtGeneration(
 	repoID string,
 	instance *session.Instance,
 	generation session.AgentObservationGeneration,
-) {
+) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !instance.AgentObservationCurrent(generation) {
-		return
+		return false
 	}
-	m.noteAliveObservationLocked(repoID, instance)
+	return m.noteAliveObservationLocked(repoID, instance)
 }

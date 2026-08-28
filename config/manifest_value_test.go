@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"reflect"
 	"strings"
@@ -69,18 +70,11 @@ func TestCurrentValueRoundTripsThroughConfigSet(t *testing.T) {
 		if !e.Settable {
 			continue
 		}
-		spec, ok := settableKeySpecs[e.Key]
+		_, ok := settableKeySpecs[e.Key]
 		if !ok {
 			t.Errorf("manifest marks %q settable but there is no spec — TestManifestAgreesWithSettableKeys should have caught this", e.Key)
 			continue
 		}
-		// A dynamic family (program_overrides, limit_patterns) is settable only
-		// through its leaves; the bare key holds a table, which is neither what
-		// CurrentValue renders for editing nor what `config set` accepts.
-		if spec.dynamic {
-			continue
-		}
-
 		t.Run(e.Key, func(t *testing.T) {
 			writeTempConfig(t, "# a hand-written config\n")
 
@@ -118,7 +112,19 @@ func TestCurrentValueRoundTripsThroughConfigSet(t *testing.T) {
 			valueAfter := fieldAfter.Interface()
 
 			// Compare the Go values, not their rendering — see the doc comment.
-			if !reflect.DeepEqual(valueBefore, valueAfter) {
+			// Theme's unexported preset metadata records whether the source used a
+			// named scalar or a custom table. Sending its displayed JSON deliberately
+			// chooses the table shape, so compare the nineteen user-facing slots; a
+			// named preset gets its own scalar-shape round-trip test.
+			equal := reflect.DeepEqual(valueBefore, valueAfter)
+			if e.Key == "theme" {
+				before := valueBefore.(ThemeConfig)
+				after := valueAfter.(ThemeConfig)
+				before.preset, before.explicitPreset = "", false
+				after.preset, after.explicitPreset = "", false
+				equal = reflect.DeepEqual(before, after)
+			}
+			if !equal {
 				t.Fatalf("saving %s untouched CHANGED it: the editor showed %q, and writing that back turned %#v into %#v.\n"+
 					"an editor must be able to save a field the user never touched without altering it", e.Key, shown, valueBefore, valueAfter)
 			}
@@ -269,28 +275,15 @@ func TestSetResultEchoesKeyAndValue(t *testing.T) {
 		t.Fatalf("echo must carry key and value, got %+v", res)
 	}
 	if !res.RequiresRestart {
-		t.Fatal("RequiresRestart must stay true: config.toml is read at startup, and a surface that omits the notice tells the user the change is live when it is not")
+		t.Fatal("RequiresRestart must stay true: every save surface uses it to show the writer's exact per-key effect notice")
 	}
 }
 
-// TestEditableIsNeverAKeyTheWriterWouldRefuse is the honesty lock behind every
-// editable control in both surfaces.
-//
-// The manifest's Settable means "`af config set` accepts this key — or, for a
-// dynamic family, its leaves". An editor cannot use that: program_overrides is
-// Settable, but the BARE key holds a table, and offering it as one field means
-// pre-filling the map's JSON and having the writer refuse it on save — a dead
-// end the user finds by pressing enter.
-//
-// So this asserts the property the UIs actually need: EVERY key marked Editable
-// can be written with the value the editor shows for it, through the real path.
-// It runs over the manifest, so a future key (or a new dynamic family) is
-// covered the day it is added.
-func TestEditableIsNeverAKeyTheWriterWouldRefuse(t *testing.T) {
+// TestEveryManifestValueIsAcceptedByTheWriter is the honesty lock behind every
+// control in both panes. There is no read-only escape hatch: every value the
+// manifest renders must be accepted by the real writer unchanged.
+func TestEveryManifestValueIsAcceptedByTheWriter(t *testing.T) {
 	for _, e := range ManifestWithValues(DefaultConfig()) {
-		if !e.Editable {
-			continue
-		}
 		t.Run(e.Key, func(t *testing.T) {
 			writeTempConfig(t, "# hand-written\n")
 			cfg, err := LoadConfig()
@@ -299,70 +292,34 @@ func TestEditableIsNeverAKeyTheWriterWouldRefuse(t *testing.T) {
 			}
 			shown, ok := CurrentValue(cfg, e.Key)
 			if !ok {
-				t.Fatalf("%s is offered as editable but has no readable value", e.Key)
+				t.Fatalf("%s has no readable editor value", e.Key)
 			}
 			if _, err := SetGlobalConfigValue(e.Key, shown); err != nil {
-				t.Fatalf("%s is marked Editable, so both editors render a field for it — "+
-					"but saving the value they show is REFUSED: %v", e.Key, err)
+				t.Fatalf("both editors render %s, but saving the value they show is refused: %v", e.Key, err)
 			}
 		})
 	}
 }
 
-// TestDynamicFamiliesAreNotEditableAndSayHow pins the specific case above, and
-// the copy that goes with it.
-//
-// A dynamic family must not be editable — and the hint must NOT say "hand-edit
-// config.toml", because that is false: `af config set program_overrides.claude
-// …` works. Sending a user to a text editor for something af does for them is a
-// smaller lie than the dead-end field, but it is still one.
-func TestDynamicFamiliesAreNotEditableAndSayHow(t *testing.T) {
-	var checked int
+// TestEveryManifestRowIsSettableAndHasNoReadOnlyClass is the owner directive
+// from #3345. The compatibility wire field may only ever say editable=true;
+// no current or pre-upgrade client may receive a read-only row.
+func TestEveryManifestRowIsSettableAndHasNoReadOnlyClass(t *testing.T) {
 	for _, e := range ManifestWithValues(DefaultConfig()) {
-		spec, ok := settableKeySpecs[e.Key]
-		if !ok || !spec.dynamic {
-			continue
-		}
-		checked++
-		if e.Editable {
-			t.Errorf("%s is a dynamic table: the bare key is not settable, so an editor must not offer it as one value", e.Key)
-		}
-		if !strings.Contains(e.EditHint, "af config set "+e.Key+".<name>") {
-			t.Errorf("%s: the hint must name the command that WORKS, not send the user to a text editor.\n got: %q", e.Key, e.EditHint)
+		if !e.Settable {
+			t.Errorf("%s has no config-set writer", e.Key)
 		}
 	}
-	if checked == 0 {
-		t.Fatal("no dynamic families found — this test is asserting nothing")
+	payload, err := json.Marshal(ManifestWithValues(DefaultConfig()))
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-// TestStructuralKeysPointAtTheAssistant pins the other read-only case. There is
-// no single-scalar `af config set` shape for theme/[keys]/root_agents/the lists,
-// but "hand-edit the file yourself" is no longer the answer we give: the hint
-// points at the config assistant, which edits these in the file for the user
-// (#2453 / #2454).
-//
-// The old assertion required the exact string "hand-edited in config.toml", which
-// was the whole concept #2454 removed — so it is inverted here: no read-only key
-// may still send the user to a text editor.
-func TestStructuralKeysPointAtTheAssistant(t *testing.T) {
-	checked := 0
-	for _, e := range ManifestWithValues(DefaultConfig()) {
-		if e.Settable {
-			continue
-		}
-		checked++
-		if e.Editable {
-			t.Errorf("%s is not settable at all; it must not be editable", e.Key)
-		}
-		if e.EditHint != assistantEditHint {
-			t.Errorf("%s: hint is %q, want the assistant hint %q", e.Key, e.EditHint, assistantEditHint)
-		}
-		if strings.Contains(e.EditHint, "hand-edit") {
-			t.Errorf("%s: the hint still tells the user to hand-edit the file (%q) — #2454 removed that", e.Key, e.EditHint)
-		}
+	if !strings.Contains(string(payload), `"editable":true`) {
+		t.Fatalf("wire manifest does not protect active pre-upgrade clients with editable=true: %s", payload)
 	}
-	if checked == 0 {
-		t.Fatal("no read-only structural keys found — this test is asserting nothing")
+	for _, forbidden := range []string{`"editable":false`, `"edit_hint"`} {
+		if strings.Contains(string(payload), forbidden) {
+			t.Errorf("wire manifest still contains read-only state %s: %s", forbidden, payload)
+		}
 	}
 }

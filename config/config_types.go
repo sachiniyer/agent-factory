@@ -255,10 +255,10 @@ type Config struct {
 	// additionally tracks the automatic 1.x.y-preview-z prereleases.
 	// Any other value falls back to stable with a warning.
 	UpdateChannel string `json:"update_channel" toml:"update_channel"`
-	// Theme is the global-only TOML [theme] table (#1389): editable TUI color
-	// slots defaulting to the Zenburn palette. It is intentionally TOML-only
-	// because legacy config.json is frozen and a cloned repo must never be able
-	// to recolor a user's TUI.
+	// Theme is the global-only TOML palette (#1389): either a named preset or a
+	// custom [theme] table, shared by the TUI and web. It is intentionally
+	// TOML-only because legacy config.json is frozen and a cloned repo must never
+	// be able to recolor a user's interfaces.
 	Theme ThemeConfig `json:"-" toml:"theme"`
 	// RootAgents opts specific repositories into an always-ensured "root"
 	// session (#1106): for each entry the daemon creates a reserved session
@@ -275,9 +275,8 @@ type Config struct {
 	// applies to registered projects only (never by scanning disk for repos);
 	// the built-in Enabled=false keeps root agents opt-in. A per-project personal
 	// override (ProjectConfig.RootAgent) and the legacy RootAgents entries layer
-	// with it in config.ResolveRootAgent. Structured [root_agent] table, so
-	// (like [theme]) it is hand-edited or set through the config assistant, not
-	// `af config set`.
+	// with it in config.ResolveRootAgent. Its structured value is accepted as
+	// compact JSON by `af config set root_agent`.
 	RootAgent RootAgent `json:"root_agent,omitempty" toml:"root_agent,omitempty"`
 	// LimitPatterns optionally overrides, per agent, the built-in usage-limit
 	// banner-detection regex (#1146) so drifting vendor banners can be patched

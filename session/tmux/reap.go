@@ -155,16 +155,17 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 
 // markedOrphanProcesses filters a previously captured pane process tree down to
 // processes whose immutable launch environment proves they belong to this exact
-// tmux session and AF home. The capture happens while the listed session still
-// exists; if ownership lookup then loses the session, AF_SESSION and AF_HOME
-// provide the authority that the vanished tmux environment no longer can.
+// tmux generation and AF home. The capture happens while the listed session
+// still exists; if ownership lookup then loses the session, AF_SESSION,
+// AF_SESSION_GEN, and AF_HOME provide the authority that the vanished tmux
+// environment no longer can.
 //
 // The candidate set is load-bearing. Scanning every same-user process would
 // turn an unrelated unreadable /proc environment into a possible helper and
 // make successful absence impossible on hardened hosts. Within the captured
 // tree, unreadable or mismatched provenance is genuinely UNKNOWN and blocks
 // worktree deletion rather than being collapsed into "not ours".
-func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string) ([]proctree.Process, error) {
+func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome string, generations orphanGenerationSet) ([]proctree.Process, error) {
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -241,6 +242,22 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 		if filepath.Clean(processHome) != cleanHome {
 			continue
 		}
+		processGeneration, hasGeneration := processEnvValue(environ, EnvMarkerGeneration)
+		switch {
+		case hasGeneration && !generations.values[processGeneration]:
+			// Marker scans are filtered before they enter this bounded set. A
+			// different generation already present here may be a descendant that
+			// changed its environment after capture, so absence is not proved. It
+			// must remain a refusal rather than being silently reclassified as a
+			// replacement (#3309 review).
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks generation %s outside the vanished session %s generation cohort",
+				process.PID, processGeneration, sanitizedName))
+			continue
+		case !hasGeneration && !generations.legacy:
+			inspectErrs = append(inspectErrs, fmt.Errorf("captured live pid %d marks session %s but has no %s generation marker",
+				process.PID, sanitizedName, EnvMarkerGeneration))
+			continue
+		}
 		if selfChain[process.PID] {
 			inspectErrs = append(inspectErrs, fmt.Errorf("refusing to reap reset process or ancestor pid %d for vanished session %s",
 				process.PID, sanitizedName))
@@ -251,18 +268,64 @@ func markedOrphanProcesses(candidates []proctree.Process, sanitizedName, ownHome
 	return owned, errors.Join(inspectErrs...)
 }
 
+// orphanGenerationSet is the immutable cohort present when a vanished-session
+// sweep begins. A pre-generation process is represented by legacy; every newer
+// tmux launch carries a random value. Later marker refreshes may add helpers from
+// this cohort, but never processes from a same-named replacement (#3309).
+type orphanGenerationSet struct {
+	legacy bool
+	values map[string]bool
+}
+
+func orphanGenerations(candidates []proctree.Process, sanitizedName string) orphanGenerationSet {
+	generations := orphanGenerationSet{values: make(map[string]bool)}
+	for _, process := range candidates {
+		same, err := proctree.SameIdentity(process)
+		if err != nil || !same {
+			continue
+		}
+		environ, err := proctree.Environ(process.PID)
+		if err != nil {
+			continue
+		}
+		if session, ok := processEnvValue(environ, EnvMarkerSession); !ok || session != sanitizedName {
+			continue
+		}
+		generation, ok := processEnvValue(environ, EnvMarkerGeneration)
+		if !ok {
+			generations.legacy = true
+			continue
+		}
+		generations.values[generation] = true
+	}
+	return generations
+}
+
+func (g orphanGenerationSet) contains(environ []string) bool {
+	generation, ok := processEnvValue(environ, EnvMarkerGeneration)
+	if !ok {
+		return g.legacy
+	}
+	return g.values[generation]
+}
+
+func (g orphanGenerationSet) empty() bool {
+	return !g.legacy && len(g.values) == 0
+}
+
 // refreshOrphanCandidates closes the capture-to-marker TOCTOU window. A pane
 // can launch another helper after the pre-marker snapshot but before the marker
 // lookup observes that tmux removed the session. Once absence is authoritative,
 // no pane remains to launch more work, so a fresh process-table snapshot can add
 // every process still tied to the captured kernel sessions/trees plus any
-// readable process carrying the exact AF_SESSION marker.
+// readable process carrying the exact AF_SESSION marker from the generation
+// cohort fixed at sweep entry.
 //
 // Environment failures on unrelated processes are deliberately ignored: they
 // are not evidence of membership. Failures on captured/SID/descendant
 // candidates remain visible when markedOrphanProcesses validates the bounded
 // set, preserving unknown without making hardened hosts globally unreadable.
-func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) ([]proctree.Process, error) {
+func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string, generations *orphanGenerationSet) ([]proctree.Process, error) {
 	refreshed, snap, err := refreshCapturedAncestry(captured, sanitizedName)
 	if err != nil {
 		return captured, err
@@ -276,7 +339,8 @@ func refreshOrphanCandidates(captured []proctree.Process, sanitizedName string) 
 		if envErr != nil {
 			continue
 		}
-		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName {
+		if session, ok := processEnvValue(environ, EnvMarkerSession); ok && session == sanitizedName &&
+			(generations == nil || generations.contains(environ)) {
 			refreshed = addOrReplaceOrphanCandidate(refreshed, byPID, process)
 		}
 	}

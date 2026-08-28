@@ -74,33 +74,15 @@ func (b *LocalBackend) Capabilities() Capabilities {
 	}
 }
 
-// WorktreeUnavailableError marks a recover/respawn failure caused by the
-// persisted worktree path being unavailable before tmux is touched. The daemon
-// uses the typed shape to add one-shot diagnostics for vanished live worktrees
-// without parsing error strings (#1303).
-type WorktreeUnavailableError struct {
-	Title        string
-	WorktreePath string
-	Err          error
-}
-
-func (e *WorktreeUnavailableError) Error() string {
-	return fmt.Sprintf("recover: session %q worktree unavailable: %v", e.Title, e.Err)
-}
-
-func (e *WorktreeUnavailableError) Unwrap() error {
-	return e.Err
-}
-
 // Start brings a local session up in two explicit phases (#1592 Phase 1 PR4):
 // provision establishes WHERE the agent will run (the tmux session handle bound
 // to the instance, plus — for a fresh create — the git worktree record and its
 // branch), then launch starts WHAT runs in it (materializing the worktree on
 // disk and spawning/reconnecting the agent process and its tabs). The split is
 // behavior-preserving: Start = provision then launch is exactly the monolithic
-// Start it replaced (same order, side effects, and errors), and it prepares the
-// backend for the future agent-server "provision-and-expose" model, where
-// provision spins up an off-box workspace and launch exposes the agent stream.
+// Start it replaced (same order, side effects, and errors), and it is the same
+// split the off-box runtimes follow, where Provision spins up the remote
+// workspace (and its agent-server endpoint) and Launch starts the agent in it.
 func (b *LocalBackend) Start(i *Instance, firstTimeSetup bool) error {
 	if err := b.Provision(i, firstTimeSetup); err != nil {
 		return err
@@ -132,11 +114,17 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = existingSession
 	} else {
+		repo, err := config.RepoFromPath(i.Path)
+		if err != nil {
+			return fmt.Errorf("failed to resolve repository identity for tmux session: %w", err)
+		}
 		// Create new tmux session with repo-scoped name. The program
 		// passed here is a placeholder — SetProgram below replaces it
 		// with the override-resolved + system-prompt-injected form
-		// before Start/Restore.
-		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
+		// before Start/Restore. Use the repository identity rather than
+		// the requested checkout so admission and runtime claim the same
+		// namespace for linked worktrees, including bare clones (#3358).
+		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
 	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
 		return err
@@ -594,6 +582,11 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	// rewritten value would omit `--resume <id>` and the boundary would refuse the
 	// recovered pane as carrying undeclared arguments (#3083 review).
 	declarationBase := resolvedProgram
+	// Flipped once a missing worktree is rebuilt below: from that point a
+	// failure is no longer an untouched one — the rebuild has already recreated
+	// durable workspace state (and a fresh rebuild recreates the branch) — so
+	// the later error returns carry RecoverRebuiltWorkspaceError (#3236).
+	rebuilt := false
 	if _, err := os.Stat(workDir); err != nil {
 		if !os.IsNotExist(err) {
 			// Surface the real cause instead of a generic tmux new-session error:
@@ -624,8 +617,10 @@ func (b *LocalBackend) respawn(i *Instance) error {
 			// GeneratedArgsBetween describes only the later system-prompt additions and
 			// the account boundary refuses `--resume <id>` as undeclared (#3083 review).
 			resolvedProgram = exactProgram
+			rebuilt = true
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from recorded base and recreated branch %s", i.Title, workDir, gw.GetBranchName())
 		} else {
+			rebuilt = true
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 		}
 	}
@@ -634,13 +629,13 @@ func (b *LocalBackend) respawn(i *Instance) error {
 	setLaunchProgram(ts, program,
 		accountLaunchProof(declarationBase, program, resolution.trustBase))
 	if err := refreshSessionEnvironment(i, ts); err != nil {
-		return fmt.Errorf("recover: %w", err)
+		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: %w", err))
 	}
 	if err := ts.Restore(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
 		}
-		return fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err)
+		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
 	b.setupTabs(i)
 

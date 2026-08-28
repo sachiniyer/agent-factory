@@ -23,10 +23,14 @@ import (
 // CreateSession asks the daemon to create, start, and persist a session.
 func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
 	var resp daemon.CreateSessionResponse
-	if err := c.call("CreateSession", req, &resp); err != nil {
+	err := c.call("CreateSession", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a retained failed create (#3233) still has a durable row the
+	// caller may need to address. Only a clean failure has nothing to return.
+	if err != nil && !IsMutationCommitted(err) {
 		return nil, err
 	}
-	return &resp.Instance, nil
+	return &resp.Instance, err
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -105,10 +109,14 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 // caller cannot accidentally discard the destructive-addressing handle.
 func (c *Client) CreateTab(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var resp daemon.CreateTabResponse
-	if err := c.call("CreateTab", req, &resp); err != nil {
+	err := c.call("CreateTab", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the caller may need to target.
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab and returns the resolved
@@ -131,9 +139,9 @@ func (c *Client) CloseTab(req daemon.CloseTabRequest) (string, error) {
 // code whose only caller was its own test. Add them the day the TUI grows a
 // rename/reorder surface.
 
-// SetPRInfo asks the daemon to record (or clear) a session's GitHub PR info.
-func (c *Client) SetPRInfo(req daemon.SetPRInfoRequest) error {
-	return c.call("SetPRInfo", req, &daemon.SetPRInfoResponse{})
+// RefreshPRInfo asks the daemon to discover and project a session's GitHub PR.
+func (c *Client) RefreshPRInfo(req daemon.RefreshPRInfoRequest) error {
+	return c.call("RefreshPRInfo", req, &daemon.RefreshPRInfoResponse{})
 }
 
 // PauseStatusPoll asks the daemon to pause its capture-pane liveness poll for
@@ -158,23 +166,32 @@ func (c *Client) AddTask(t task.Task) error {
 // given id and re-arm its schedule, returning the merged record (#1700). Only
 // the patch's non-nil fields are written, so a single-field edit never clobbers
 // a concurrent edit another client made to a different field.
-func (c *Client) UpdateTask(id string, update task.TaskUpdate) (task.Task, error) {
+//
+// expect carries the project binding the caller authorized the id against
+// (task.ExpectProject on the record it displayed), re-verified by the daemon
+// atomically with the write — see task.ProjectExpectation (#3230). It is a
+// required parameter, not an option: dropping it silently reopens the
+// stale-authorization race the CAS exists to close.
+func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
 	var resp daemon.UpdateTaskResponse
-	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update}, &resp); err != nil {
+	if err := c.call("UpdateTask", daemon.UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil
 }
 
-// RemoveTask asks the daemon to delete a task and re-arm its schedule.
-func (c *Client) RemoveTask(id string) error {
-	return c.call("RemoveTask", daemon.RemoveTaskRequest{ID: id}, &daemon.RemoveTaskResponse{})
+// RemoveTask asks the daemon to delete a task and re-arm its schedule. expect
+// is the same required project compare-and-swap as UpdateTask's — this is the
+// destructive verb the CAS most exists for (#3230).
+func (c *Client) RemoveTask(id string, expect task.ProjectExpectation) error {
+	return c.call("RemoveTask", daemon.RemoveTaskRequest{ID: id, Expect: expect}, &daemon.RemoveTaskResponse{})
 }
 
 // TriggerTask asks the daemon to fire a task now through the shared RunTask
-// firing path (the same entrypoint the scheduler uses).
-func (c *Client) TriggerTask(id string) error {
-	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id}, &daemon.TriggerTaskResponse{})
+// firing path (the same entrypoint the scheduler uses). expect is the same
+// required project compare-and-swap as UpdateTask's (#3230).
+func (c *Client) TriggerTask(id string, expect task.ProjectExpectation) error {
+	return c.call("TriggerTask", daemon.TriggerTaskRequest{ID: id, Expect: expect}, &daemon.TriggerTaskResponse{})
 }
 
 // SnapshotWithAlarms is Snapshot plus the persistent delivery-failure alarms

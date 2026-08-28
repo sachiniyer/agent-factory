@@ -176,7 +176,7 @@ var httpRoutes = []HTTPRoute{
 		Method:         http.MethodPost,
 		Path:           "/v1/Snapshot",
 		sandboxAllowed: true,
-		Description:    "List sessions from the daemon's authoritative in-memory state (empty repo_id = all repos).",
+		Description:    "List sessions from the daemon's authoritative in-memory state, with optional live/status, created-after, and limit filters applied before transfer (empty repo_id = all repos).",
 		requestType:    reflect.TypeOf(SnapshotRequest{}),
 		// rpcHandlerCtx, not rpcHandler: the handler needs the request context to
 		// see whether the caller is a sandbox and narrow to its own session (#3056).
@@ -187,7 +187,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/KillSession",
 		Description: "Tear down a session: kill its tmux/agent and remove its worktree and record.",
 		requestType: reflect.TypeOf(KillSessionRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.KillSession) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.killSession) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -289,7 +289,7 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/CloseTab",
 		Description: "Close a non-agent tab of a session (the agent tab cannot be closed). Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back — closing is destructive, so a misroute kills the wrong tab's session.",
 		requestType: reflect.TypeOf(CloseTabRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.CloseTab) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.closeTab) },
 	},
 	{
 		Method:      http.MethodPost,
@@ -308,9 +308,16 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/SetPRInfo",
-		Description: "Record or clear the GitHub PR info for a session. Address the session by id when available: it is authoritative over title/repo_id, so an asynchronous result cannot land on a different session that reused the title.",
+		Description: "Compatibility route for older clients to record or clear GitHub PR info. New clients should call RefreshPRInfo with session identity only so discovery and projected fields stay daemon-owned.",
 		requestType: reflect.TypeOf(SetPRInfoRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetPRInfo) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/RefreshPRInfo",
+		Description: "Ask the daemon to refresh a session's GitHub PR projection. The request carries session identity only; discovery is cancellable and server-side debounced. Returns an error when gh is unavailable in the daemon environment.",
+		requestType: reflect.TypeOf(RefreshPRInfoRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.refreshPRInfo) },
 	},
 
 	// Config. The read/write pair behind the web config editor; both are thin
@@ -325,12 +332,18 @@ var httpRoutes = []HTTPRoute{
 	},
 	{
 		Method:      http.MethodPost,
+		Path:        "/v1/GetTheme",
+		Description: "Return the daemon's resolved semantic color palette for renderer clients.",
+		requestType: reflect.TypeOf(GetThemeRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetTheme) },
+	},
+	{
+		Method:      http.MethodPost,
 		Path:        "/v1/SetConfigValue",
 		Description: "Set one global config key, exactly as `af config set` does (validated, locked, atomic).",
 		requestType: reflect.TypeOf(SetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConfigValue) },
 	},
-
 	// Tasks.
 	{
 		Method:      http.MethodPost,

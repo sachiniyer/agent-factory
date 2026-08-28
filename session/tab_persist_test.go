@@ -117,7 +117,7 @@ func TestRestartSurvival_AgentAndShellTabsReconnect(t *testing.T) {
 
 	const repoPath = "/tmp/restart-survival-repo"
 	const agentName = "af_abc123_restart"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	origExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	pty := persistPtyFactory{t: t, cmdExec: origExec}

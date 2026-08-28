@@ -765,6 +765,64 @@ func TestCheckAndHandleTrustPrompt_CodexUnselectedYesInjectsNothing(t *testing.T
 	require.Empty(t, sentKeystrokes(cmds))
 }
 
+// ef6c955e shipped CodexTrustPromptPresent as a pure text match. The dialog's
+// prose ending the visible pane — quoted in logs/diffs or echoed while the
+// composer is active — made the daemon's continuous poll inject Enter into a
+// running agent. A visible terminal cursor proves no ListSelectionView modal
+// owns the pane: Codex hides the cursor for modals, the composer shows one.
+// This is the same guard inspectCodexSafetyPrompt already required (#3302).
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogAtEndWithVisibleCursorInjectsNothing(t *testing.T) {
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				// The ordinary Codex composer owns a visible cursor. The
+				// directory-trust dialog text is quoted transcript, not an
+				// active modal.
+				return []byte("20 0 1"), nil
+			}
+			return []byte(codexDirectoryTrustDialog), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.False(t, session.CheckAndHandleTrustPrompt(),
+		"a visible cursor means the composer is active, not a directory-trust modal")
+	require.Empty(t, sentKeystrokes(commands),
+		"directory-trust text above a live composer must never receive Enter; got %v", commands)
+}
+
+// A cursor-read failure is not proof the modal is gone, so the directory-trust
+// handler fails closed like inspectCodexSafetyPrompt: it reports the dialog as
+// still in the way (true) WITHOUT injecting Enter, letting the next poll retry.
+// Returning false would let task.DismissTrustPrompt type the user's prompt into
+// a real modal af failed to confirm (#3302).
+func TestCheckAndHandleTrustPrompt_CodexDirectoryDialogCursorReadErrorFailsClosed(t *testing.T) {
+	var commands []string
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			commands = append(commands, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return nil, errors.New("display-message refused")
+			}
+			return []byte(codexDirectoryTrustDialog), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("trust", ""), ProgramCodex, NewMockPtyFactory(t), cmdExec)
+
+	require.True(t, session.CheckAndHandleTrustPrompt(),
+		"a cursor-read error must be treated as a blocking dialog, not a dialog-free pane")
+	require.Empty(t, sentKeystrokes(commands),
+		"no Enter may be injected when the modal state cannot be confirmed; got %v", commands)
+}
+
 // The bug: ordinary agent output that happens to contain the documentation
 // phrase must NOT get keystrokes injected into it.
 func TestCheckAndHandleTrustPrompt_DocPhraseInOutputInjectsNothing(t *testing.T) {

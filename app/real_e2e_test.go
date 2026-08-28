@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // ----------------------------------------------------------------------------
@@ -165,12 +165,8 @@ func newRealE2EHarness(t *testing.T) *e2eHarness {
 	eh := &e2eHarness{t: t, home: h}
 	installDirectSessionStarter(t)
 
-	// Stub PR fetcher: return no PR, zero log noise. Don't count calls —
-	// we don't care here, the PR behaviour is covered by the faked tests.
-	restoreFetcher := SetPRInfoFetcherForTest(func(repoPath, branch string) (*git.PRInfo, error) {
-		return nil, nil
-	})
-	t.Cleanup(restoreFetcher)
+	// Do not dial a real daemon from incidental selection changes.
+	t.Cleanup(SetPRInfoRefresherForTest(func(daemon.RefreshPRInfoRequest) error { return nil }))
 
 	// Stub program: `cat` hangs on stdin, so the tmux session stays alive
 	// indefinitely (until we kill it) without needing Claude installed.

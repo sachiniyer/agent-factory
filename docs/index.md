@@ -71,7 +71,7 @@ normal git review path.
 
 </div>
 
-## How Agent Factory Fits
+## How Agent Factory fits
 
 Agent Factory is not a chat UI and it is not just tmux with a README. The TUI,
 CLI, and HTTP API are thin clients over a daemon that owns all session state,
@@ -80,11 +80,11 @@ task schedules, worktree operations, and usage-limit recovery.
 ```mermaid
 flowchart TB
     tui["af TUI<br/>sidebar · Agent tab · attach · tabs"]
-    cli["CLI + HTTP API<br/>JSON commands · local Unix socket"]
+    cli["CLI · HTTP API<br/>JSON commands · local Unix socket"]
     daemon["daemon<br/>single writer of all state<br/>sessions · tasks · usage limits"]
-    sessions["sessions<br/>one git worktree + branch per agent<br/>local or remote hooks"]
+    sessions["sessions<br/>one git worktree · branch per agent<br/>local or remote hooks"]
 
-    tui -->|"read projection + RPC"| daemon
+    tui -->|"read projection · RPC"| daemon
     cli -->|"RPC"| daemon
     daemon -->|"owns"| sessions
 ```
@@ -92,7 +92,7 @@ flowchart TB
 That design is what lets you close the TUI, reboot, script a task, or call the
 API without splitting the world into different sources of truth.
 
-## Start Here
+## Start here
 
 <div class="grid cards" markdown>
 

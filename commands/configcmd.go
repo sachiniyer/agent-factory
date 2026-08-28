@@ -3,10 +3,10 @@ package commands
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -19,25 +19,6 @@ import (
 
 	"github.com/spf13/cobra"
 )
-
-// reportConfigApply prints how a saved global config key took effect (#2480),
-// per the #2479 principle — it never tells the user to run a command. The honest
-// per-key answer comes from config.EffectNotice, the same one the daemon hands the
-// web form and the TUI pane uses, so all three surfaces say the same thing. A
-// socket key (listen_addr / preview_listen_addr, #2480 PR2) whose live rebind FAILED
-// is reported deferred instead of applied, and the actionable reason plus any
-// exposure notice are printed after it (on stderr). applyErr is non-nil when no
-// daemon was running to apply the change.
-func reportConfigApply(cmd *cobra.Command, key string, resp daemon.ApplyConfigResponse, applyErr error) {
-	if applyErr == nil && slices.Contains(resp.FailedListenerKeys, key) {
-		fmt.Fprintln(cmd.OutOrStdout(), config.ListenerRebindDeferredNotice(key))
-	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), config.EffectNotice(key, applyErr == nil))
-	}
-	for _, w := range resp.Warnings {
-		fmt.Fprintln(cmd.ErrOrStderr(), w)
-	}
-}
 
 // jsonWrapError honors the --json contract for the CLI commands in this
 // package: when jsonMode is set, a failure is emitted as the shared {data,error}
@@ -106,11 +87,11 @@ var globalConfigReadOrder = []string{
 	"program_overrides",
 	"session_env_passthrough",
 	"auto_update",
-	"listen_addr",
-	"require_token",
-	"require_loopback_token",
-	"preview_listen_addr",
-	"cors_allowed_origins",
+	"network.listen_addr",
+	"network.require_token",
+	"network.require_loopback_token",
+	"network.preview_listen_addr",
+	"network.cors_allowed_origins",
 	"daemon_poll_interval",
 	"log_max_size_mb",
 	"log_max_backups",
@@ -125,9 +106,9 @@ var globalConfigReadOrder = []string{
 	"root_agent",
 	"limit_auto_resume",
 	"global_agent_skills",
-	"docker_mount_agent_credentials",
-	"ssh_host_key_verification",
-	"sandbox_ssh",
+	"docker.mount_agent_credentials",
+	"ssh.host_key_verification",
+	"sandbox.ssh",
 	"limit_retry_interval",
 	"limit_patterns",
 	"keys",
@@ -238,13 +219,14 @@ inspect another project. Outside a git repository they fall back to global
 defaults. --explain shows every candidate and why it did or did not supply the
 effective value.
 
-"set"/"unset" write config. Without --project they edit the global config,
-changing a single settable key in place so all comments and ordering are
-preserved. With --project <id-or-path> they edit that registered project's
-machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. "af config set" applies a change to
-a running daemon in place where the key allows it (#2480), so most take effect
-without a restart; a raw hand-edit of config.toml still applies on the next start.`,
+"set"/"unset" write config in place so all comments and ordering are preserved.
+Without --project, set changes one settable global key and unset clears one
+migrated grouped/flat alias pair. With --project <id-or-path> they edit that
+registered project's machine-local override instead (built-in < global <
+in-repo < personal project), which is never checked into the repository. "af
+config set" applies a change to a running daemon in place where the key allows
+it (#2480), so most take effect without a restart; a raw hand-edit of config.toml
+still applies on the next start.`,
 }
 
 var configGetCmd = &cobra.Command{
@@ -271,26 +253,60 @@ resolved value with the complete source trace.`,
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
-		if configGetExplainFlag || projectSelector != "" || strings.Contains(args[0], ".") {
+		canonicalKey := config.CanonicalConfigKey(args[0])
+		globalAliasKey := config.LegacyConfigKey(canonicalKey) != canonicalKey
+		if configGetExplainFlag || !globalAliasKey && (projectSelector != "" || strings.Contains(args[0], ".")) {
 			resolved, err := loadResolvedConfig(projectSelector)
 			if err != nil {
-				return jsonWrapError(cmd, configJSONFlag, err)
+				// The layered load fails on exactly the states the specialized
+				// root_agent resolution absorbs into a fail-closed explanation
+				// (#3264): an unloadable personal config, an unlistable project
+				// registry. For root_agent keys, degrade the surrounding
+				// explanation context to global scope and let the specialized
+				// value below answer; every other key keeps the loud error.
+				if !isRootAgentExplainKey(args[0]) {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				resolved, err = loadResolvedConfig("")
+				if err != nil {
+					return jsonWrapError(cmd, configJSONFlag, err)
+				}
+				// Keep the explanation header honest: the value shown below is
+				// resolved for the SELECTED repository even though the layered
+				// load degraded to global scope — a "global defaults" header
+				// would contradict the project-specific fail-closed candidates
+				// (#3264 review). projectSelector is non-empty here: a global
+				// load cannot fail on a project layer, so the degraded branch is
+				// only reachable with a repository in scope.
+				if abs, pathErr := config.ResolveUserPath(projectSelector); pathErr == nil {
+					if repo, repoErr := config.RepoFromPath(abs); repoErr == nil {
+						// selectedProjectDisplayRoot keeps the user-selected
+						// spelling, exactly as the normal load path does.
+						resolved.ProjectRoot = selectedProjectDisplayRoot(abs, repo.Root)
+					} else {
+						resolved.ProjectRoot = abs
+					}
+				}
 			}
 			value, ok := resolved.ResolvedValuePath(args[0])
-			if !ok {
-				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
-			}
 			// root_agent resolves through FOUR layers in the daemon
 			// (built-in/global/legacy/personal), but the generic resolver only
 			// knows its two singleton layers. Use the daemon's real four-layer
 			// resolution for both the concise value and --explain, or the two
-			// read modes can contradict each other (#2607).
+			// read modes can contradict each other (#2607). The specialized path
+			// also OWNS unknown-key detection for these keys: gating on the
+			// generic resolution first would reject valid fail-closed leaves —
+			// root_agent.program has no generic origin when no global program is
+			// configured, so the generic lookup reports it unknown before the
+			// fail-closed projector can answer (#3264 review).
 			if isRootAgentExplainKey(args[0]) {
 				specialized, err := rootAgentReadValue(projectSelector, args[0], explicitProject)
 				if err != nil {
 					return jsonWrapError(cmd, configJSONFlag, err)
 				}
 				value = specialized
+			} else if !ok {
+				return jsonWrapError(cmd, configJSONFlag, unknownConfigKeyError(args[0]))
 			}
 			if configGetExplainFlag {
 				if configJSONFlag {
@@ -314,8 +330,9 @@ resolved value with the complete source trace.`,
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
+		requestedKey := config.CanonicalConfigKey(args[0])
 		for _, e := range entries {
-			if e.Key == args[0] {
+			if e.Key == requestedKey {
 				if configJSONFlag {
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(e))
 				}
@@ -365,7 +382,10 @@ or null. JSON output preserves the typed effective values.`,
 					}
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(output))
 				}
-				return writeConfigExplanations(cmd.OutOrStdout(), resolved, values)
+				if err := writeConfigExplanations(cmd.OutOrStdout(), resolved, values); err != nil {
+					return err
+				}
+				return writeRootAgentShapeLegend(cmd.OutOrStdout())
 			}
 			entries := configEntriesFromResolution(values)
 			if configJSONFlag {
@@ -375,7 +395,10 @@ or null. JSON output preserves the typed effective values.`,
 			for _, entry := range entries {
 				fmt.Fprintf(tw, "%s\t%s\n", entry.Key, formatConfigListValue(entry))
 			}
-			return tw.Flush()
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			return writeRootAgentShapeLegend(cmd.OutOrStdout())
 		}
 
 		entries, err := loadGlobalConfigEntries()
@@ -389,8 +412,16 @@ or null. JSON output preserves the typed effective values.`,
 		for _, e := range entries {
 			fmt.Fprintf(tw, "%s\t%s\n", e.Key, formatConfigListValue(e))
 		}
-		return tw.Flush()
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		return writeRootAgentShapeLegend(cmd.OutOrStdout())
 	},
+}
+
+func writeRootAgentShapeLegend(w io.Writer) error {
+	_, err := fmt.Fprintln(w, "# root_agents: legacy path map; root_agent: current project profile")
+	return err
 }
 
 func unknownConfigKeyError(key string) error {
@@ -402,29 +433,36 @@ func unknownConfigKeyError(key string) error {
 
 var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
-	Short: "Set a single settable global config key",
+	Short: "Set one global config key",
 	Long: fmt.Sprintf(`Write one key into the global config.toml, editing only that value in place —
-every comment, blank line, section header, and key ordering is preserved (the
-file is not regenerated). Only a curated set of scalar keys is settable; the
-value is validated with the same rules the config loader uses before anything is
+preserving every unrelated comment, blank line, section header, and key ordering
+(the file is not regenerated). Every global config key is settable. Scalar values
+use their ordinary text form; tables and non-comma lists use compact JSON. Values
+are validated with the same rules the config loader uses before anything is
 written, so set can never leave a config that fails to load.
 
 Settable keys:
   default_program            agent enum (%s)
+  program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
+  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
+  session_env_passthrough    compact JSON array of exact environment variable names
+  root_agents                compact JSON object keyed by repository path
+  root_agent                 compact JSON object with enabled and optional program
+  keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
-  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+  network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and require_token defaults to FALSE —
-                             set require_token = true in the same breath, or anyone who can reach the
+                             full control plane on the network, and network.require_token defaults to FALSE —
+                             set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
-  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
-  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
-  preview_listen_addr        host:port for a separate per-tab web-tab preview origin (and, on a loopback
+  network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
-                             Kept apart from listen_addr on purpose: it serves previews/editors only, never
-                             the control API. Same address grammar as listen_addr.
+                             Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
+                             the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -436,31 +474,38 @@ Settable keys:
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
+  limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
-  docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
-  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
-  cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
-  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
+  network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Structural keys (root_agents, [theme], the [keys] rebind table) and the
-session_env_passthrough list have no single-scalar shape, so they are not settable
-here. Ask the config assistant to change them (it edits the file and validates), or
-edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480); only the
-structural keys above take effect on the next daemon start.
+Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
+require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
+ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
+canonical grouped values.
+
+Structured values must be shell-quoted so the JSON remains one argument. A write
+uses the same apply-on-save path as the TUI and web config panes (#2480). Most
+keys apply to the running daemon immediately; each successful set prints its
+exact effect notice.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides.<agent>, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
   af config set default_program codex
   af config set auto_update false
+  af config set theme zenburn
+  af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo`, tmux.SupportedProgramsString()),
@@ -486,15 +531,17 @@ Examples:
 			return nil
 		}
 
-		res, err := config.SetGlobalConfigValue(args[0], args[1])
+		// The write goes through a running daemon's admission-gated SetConfigValue
+		// (#3231) — the same handler the web form posts — so a daemon that is
+		// quiescing or validating an upgrade refuses BEFORE the file changes,
+		// instead of the CLI writing first and live-applying through an ungated
+		// poke. With no daemon running it writes locally, as before (#2480: the
+		// value then takes effect on the next start). Never spawns a daemon.
+		resp, err := daemon.SetGlobalConfigValue(args[0], args[1])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)
 		}
-		// Apply the write to a running daemon in place (#2480) so a config change
-		// takes effect without a manual `af daemon restart` (the #2479 principle).
-		// Best-effort and non-spawning: with no daemon running there is nothing to
-		// apply live and the value takes effect on the next start.
-		applyResp, applyErr := daemon.RequestApplyConfig()
+		res := resp.Result
 		if configJSONFlag {
 			return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
 		}
@@ -504,7 +551,12 @@ Examples:
 		for _, w := range res.Warnings {
 			fmt.Fprintln(cmd.ErrOrStderr(), w)
 		}
-		reportConfigApply(cmd, res.Key, applyResp, applyErr)
+		// The per-key effect notice (#2480), computed by the write path itself:
+		// live now, deferred rebind, or next daemon start.
+		fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+		for _, w := range resp.Warnings {
+			fmt.Fprintln(cmd.ErrOrStderr(), w)
+		}
 		return nil
 	},
 }
@@ -525,13 +577,10 @@ var configValidateCmd = &cobra.Command{
 daemon do at startup and report whether it loads. It writes nothing and
 materializes nothing — a read-only check.
 
-This is the companion to a hand-edit. Most keys go through "af config set",
-which validates before it writes and so can never leave a broken file; but the
-structured settings (theme, the [keys] rebinds, root_agents, and the
-session_env_passthrough list) are edited in the file directly, and a broken edit
-there is a hard startup failure with no fallback to defaults. Run this after such
-an edit: exit 0 means the next start will load it, a non-zero exit names what is
-wrong so it can be fixed before restarting.`,
+This is the companion to a raw hand-edit. "af config set" validates every scalar
+and structured key before it writes and so cannot leave a broken file. A manual
+edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
+names what must be fixed before the next launch.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -559,29 +608,47 @@ wrong so it can be fixed before restarting.`,
 }
 
 var configUnsetCmd = &cobra.Command{
-	Use:   "unset <key> --project <id-or-path>",
-	Short: "Clear a per-project config override",
+	Use:   "unset <key>",
+	Short: "Clear a config override or migrated global setting",
 	Long: `Remove one key's personal override for a project so the value falls back to
 the lower layers again (built-in < global < in-repo). Clearing an override is
 deliberately different from setting a value equal to the lower layer, which is
 still a present, winning override.
 
---project <id-or-path> is required: unset targets a project's machine-local
-config (a prj_ id from 'af projects list', or a path inside a registered
-repository). It edits only the target key, preserving every other comment and
-value, and is a clean no-op when there is no override to clear. There is no
-global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. The cleared override stops applying to sessions created in that project
-from now on.`,
+With --project, unset targets a project's machine-local config (a prj_ id from
+'af projects list', or a path inside a registered repository). Without
+--project, it clears one migrated global backend setting: docker.mount_agent_credentials,
+ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+accepted aliases. Global unset removes both on-disk spellings together, so a
+conflicting legacy value cannot silently reappear. Every path edits only the
+target setting, preserves unknown keys and comments, and is a clean no-op when
+there is nothing to clear.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
 
 		if configUnsetProjectFlag == "" {
-			return jsonWrapError(cmd, configJSONFlag,
-				fmt.Errorf("unset requires --project <id-or-path>; there is no global unset (edit config.toml by hand or `af config set` a new value)"))
+			resp, err := daemon.UnsetGlobalConfigValue(args[0])
+			if err != nil {
+				return jsonWrapError(cmd, configJSONFlag, err)
+			}
+			res := resp.Result
+			if configJSONFlag {
+				return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(res))
+			}
+			if !res.Removed {
+				fmt.Fprintf(cmd.OutOrStdout(), "no %s value to clear in %s\n", res.Key, prettyPath(res.Path))
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "cleared %s in %s\n", res.Key, prettyPath(res.Path))
+			fmt.Fprintln(cmd.OutOrStdout(), resp.RestartNotice)
+			for _, warning := range resp.Warnings {
+				fmt.Fprintln(cmd.ErrOrStderr(), warning)
+			}
+			return nil
 		}
+
 		res, err := config.UnsetProjectConfigValue(configUnsetProjectFlag, args[0])
 		if err != nil {
 			return jsonWrapError(cmd, configJSONFlag, err)

@@ -471,12 +471,28 @@ func TestGuardProjectBinding_IgnoresProjectsOutsideAfHome(t *testing.T) {
 	require.NoError(t, guardProjectBinding(&config.RepoContext{Root: repo, ID: config.RepoIDFromRoot(repo)}, false))
 }
 
+func TestGuardProjectBinding_UsesBareIdentityOutsideAfHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	identity := filepath.Join(t.TempDir(), "origin.git")
+	workspace := filepath.Join(home, "worktrees", "bare-session")
+	repo := &config.RepoContext{
+		Root: workspace, IdentityRoot: identity, ID: config.RepoIDFromRoot(identity),
+	}
+	require.NoError(t, guardProjectBinding(repo, false),
+		"an AF-managed workspace is legitimate when its bare repository identity is outside AF home")
+}
+
 // resetScopeFlags clears the scope-related package globals between tests.
 func resetScopeFlags(t *testing.T) {
 	t.Helper()
 	reset := func() {
 		repoFlag = ""
 		sessionsListAllFlag = false
+		sessionsListLiveFlag = false
+		sessionsListStatusesFlag = nil
+		sessionsListMaxAgeFlag = 0
+		sessionsListLimitFlag = 0
 		tasksListAllFlag = false
 	}
 	t.Cleanup(reset)

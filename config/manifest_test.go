@@ -69,6 +69,7 @@ func configTomlFields(t *testing.T) map[string]string {
 				"or `toml:\"-\"` if it must not be config at all.", f.Name, tag)
 			continue
 		}
+		key = canonicalConfigKey(key)
 		fields[key] = f.Name
 	}
 	if len(fields) == 0 {
@@ -316,6 +317,21 @@ func TestManifestEntriesAreWellFormed(t *testing.T) {
 		if !validTypes[e.Type] {
 			t.Errorf("%s: type %q is not one of string/bool/int/duration/table/list", e.Key, e.Type)
 		}
+		if len(e.AcceptedTypes) > 0 {
+			seen := make(map[string]bool, len(e.AcceptedTypes))
+			for _, acceptedType := range e.AcceptedTypes {
+				if !validTypes[acceptedType] {
+					t.Errorf("%s: accepted type %q is not one of string/bool/int/duration/table/list", e.Key, acceptedType)
+				}
+				if seen[acceptedType] {
+					t.Errorf("%s: accepted type %q is duplicated", e.Key, acceptedType)
+				}
+				seen[acceptedType] = true
+			}
+			if !seen[e.Type] {
+				t.Errorf("%s: accepted types %v omit primary type %q", e.Key, e.AcceptedTypes, e.Type)
+			}
+		}
 		if !validTiers[e.Tier] {
 			t.Errorf("%s: tier %d is not one of TierCore/TierCommon/TierAdvanced", e.Key, e.Tier)
 		}
@@ -355,8 +371,8 @@ func TestManifestIsTierOrdered(t *testing.T) {
 // first, so an addition to it is a product decision, not a drive-by.
 func TestManifestTierAssignments(t *testing.T) {
 	wantCore := []string{
-		"default_program", "listen_addr", "require_token",
-		"require_loopback_token", "update_channel", "auto_update",
+		"default_program", "network.listen_addr", "network.require_token",
+		"network.require_loopback_token", "update_channel", "auto_update",
 	}
 	wantCommon := []string{"theme", "vscode_server_binary"}
 
@@ -408,6 +424,33 @@ func TestRenderBriefingCoversEveryTierAndKey(t *testing.T) {
 	}
 }
 
+// TestRootAgentManifestDistinguishesLegacyMapFromCurrentProfile pins the copy
+// shared by the manifest, TUI/web editors, and config assistant. The two
+// permanent spellings must never be presented as unlabeled peer tables.
+func TestRootAgentManifestDistinguishesLegacyMapFromCurrentProfile(t *testing.T) {
+	entries := map[string]ManifestEntry{}
+	for _, entry := range Manifest() {
+		entries[entry.Key] = entry
+	}
+
+	if !strings.Contains(entries["root_agents"].Purpose, "Legacy path map") {
+		t.Errorf("root_agents purpose does not label the legacy path map: %q", entries["root_agents"].Purpose)
+	}
+	if !strings.Contains(entries["root_agent"].Purpose, "Current project profile") {
+		t.Errorf("root_agent purpose does not label the current project profile: %q", entries["root_agent"].Purpose)
+	}
+
+	briefing := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	for _, want := range []string{"Legacy path map", "Current project profile"} {
+		if !strings.Contains(briefing, want) {
+			t.Errorf("briefing does not contain %q:\n%s", want, briefing)
+		}
+	}
+	if strings.Contains(briefing, "root_agents_by_path") {
+		t.Error("the migration must not introduce a third spelling")
+	}
+}
+
 // TestRenderBriefingShowsCurrentValues is the reason the briefing takes a *Config
 // at all: an agent asked to change a setting needs to know what it is NOW, not
 // just what it defaults to. It uses values that differ from every default, so a
@@ -447,28 +490,78 @@ func TestRenderBriefingShowsCurrentValues(t *testing.T) {
 }
 
 // TestRenderBriefingTellsAgentHowToSet checks the actionable half of the
-// briefing: a settable key must carry its real `af config set` form (with the
-// ".<name>" leaf for a dynamic family), and a hand-edited key must say so rather
-// than advertise a command that would be rejected.
+// briefing: every global manifest key must carry its real bare `af config set`
+// form. Structured values use the compact JSON rendered in their current value.
 func TestRenderBriefingTellsAgentHowToSet(t *testing.T) {
 	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
 
 	for _, want := range []string{
 		"`af config set default_program <value>`",
-		"`af config set listen_addr <value>`",
-		"`af config set require_loopback_token <value>`",
-		"`af config set program_overrides.<name> <value>`",
-		"`af config set limit_patterns.<name> <value>`",
+		"`af config set network.listen_addr <value>`",
+		"`af config set network.require_loopback_token <value>`",
+		"`af config set program_overrides <value>`",
+		"`af config set limit_patterns <value>`",
+		"`af config set theme <value>`",
+		"`af config set session_env_passthrough <value>`",
+		"`af config set root_agents <value>`",
+		"`af config set root_agent <value>`",
+		"`af config set keys <value>`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("briefing is missing the set hint %s", want)
 		}
 	}
+}
 
-	// The structural tables must not be advertised as settable.
-	for _, key := range []string{"theme", "root_agents", "keys"} {
-		if strings.Contains(out, "`af config set "+key+" <value>`") {
-			t.Errorf("briefing advertises `af config set %s`, which the CLI rejects — %s is hand-edited", key, key)
+func TestRenderBriefingIntroducesValidatedSetPathAndPerKeyTiming(t *testing.T) {
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	for _, want := range []string{
+		"Every global key can be changed with `af config set <key> <value>`",
+		"leaves unrelated comments and the file's ordering untouched",
+		"Each successful set reports when that key takes effect",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("briefing introduction is missing %q", want)
+		}
+	}
+	for _, obsolete := range []string{
+		"leaves every comment",
+		"tables you edit in the file by hand",
+		"Either way the change applies the next time af and its background service start",
+	} {
+		if strings.Contains(out, obsolete) {
+			t.Errorf("briefing introduction still contains obsolete guidance %q", obsolete)
+		}
+	}
+}
+
+func TestRenderBriefingDescribesThemeAsScalarOrTable(t *testing.T) {
+	entry := manifestKeyIndex(t)["theme"]
+	if !reflect.DeepEqual(entry.AcceptedTypes, []string{"string", "table"}) {
+		t.Fatalf("theme accepted types = %v, want string and table", entry.AcceptedTypes)
+	}
+
+	out := RenderBriefing(DefaultConfig(), "/tmp/af/config.toml")
+	themeStart := strings.Index(out, "### `theme`")
+	if themeStart < 0 {
+		t.Fatal("briefing has no theme section")
+	}
+	themeEnd := strings.Index(out[themeStart+1:], "\n### `")
+	if themeEnd < 0 {
+		themeEnd = len(out) - themeStart - 1
+	}
+	theme := out[themeStart : themeStart+1+themeEnd]
+
+	if !strings.Contains(theme, "- type: string or table") {
+		t.Errorf("theme briefing does not describe both accepted shapes:\n%s", theme)
+	}
+	if strings.Contains(theme, "not a single value") {
+		t.Errorf("theme briefing contradicts the scalar preset syntax:\n%s", theme)
+	}
+
+	for _, rendered := range ManifestWithValues(DefaultConfig()) {
+		if rendered.Key == "theme" && !reflect.DeepEqual(rendered.AcceptedTypes, entry.AcceptedTypes) {
+			t.Errorf("rendered theme accepted types = %v, want %v", rendered.AcceptedTypes, entry.AcceptedTypes)
 		}
 	}
 }

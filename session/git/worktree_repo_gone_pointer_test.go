@@ -1,0 +1,197 @@
+package git
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
+)
+
+// TestResolveRepoMetadataRoot_Layouts pins the three origin layouts (#3278
+// review): a plain .git directory, a symlinked .git (followed to the
+// directory, never treated as a redirect file), and a separate-git-dir
+// redirect file.
+func TestResolveRepoMetadataRoot_Layouts(t *testing.T) {
+	t.Run("plain directory", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "repo")
+		require.NoError(t, exec.Command("git", "init", "-b", "main", repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(repo, ".git"), got)
+	})
+	t.Run("bare directory", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "repo.git")
+		require.NoError(t, exec.Command("git", "init", "--bare", repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		assert.Equal(t, repo, got)
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		require.NoError(t, exec.Command("git", "init", "-b", "main", repo).Run())
+		moved := filepath.Join(root, "metadata")
+		require.NoError(t, os.Rename(filepath.Join(repo, ".git"), moved))
+		require.NoError(t, os.Symlink(moved, filepath.Join(repo, ".git")))
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err, "a symlinked .git directory must not be treated as a redirect file")
+		assert.Equal(t,
+			pathutil.ResolveForCompare(filepath.Join(repo, ".git")),
+			pathutil.ResolveForCompare(got))
+	})
+	t.Run("separate git dir redirect", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		meta := filepath.Join(root, "meta")
+		require.NoError(t, exec.Command("git", "init", "-b", "main",
+			"--separate-git-dir", meta, repo).Run())
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err)
+		// git may write the redirect in symlink-resolved form (macOS TMPDIR),
+		// which is exactly why production compares via ResolveForCompare.
+		assert.Equal(t, pathutil.ResolveForCompare(meta), pathutil.ResolveForCompare(got))
+	})
+	t.Run("symlinked redirect file", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "repo")
+		meta := filepath.Join(root, "meta")
+		require.NoError(t, exec.Command("git", "init", "-b", "main",
+			"--separate-git-dir", meta, repo).Run())
+		redirect := filepath.Join(repo, ".git")
+		movedRedirect := filepath.Join(root, "redirect-file")
+		require.NoError(t, os.Rename(redirect, movedRedirect))
+		require.NoError(t, os.Symlink(movedRedirect, redirect))
+		got, err := resolveRepoMetadataRoot(repo)
+		require.NoError(t, err,
+			"a .git symlink to a gitdir redirect file must be resolved, not refused with ELOOP")
+		assert.Equal(t, pathutil.ResolveForCompare(meta), pathutil.ResolveForCompare(got))
+	})
+}
+
+func TestVerifyRegisteredWorktreeOccupant_BareOrigin(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	bare := filepath.Join(root, "origin.git")
+	worktree := filepath.Join(root, "worktree")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", source).Run())
+	commit := exec.Command("git", "-C", source, "commit", "--allow-empty", "-m", "initial")
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	require.NoError(t, commit.Run())
+	require.NoError(t, exec.Command("git", "clone", "--bare", source, bare).Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", worktree).Run())
+
+	require.NoError(t, VerifyRegisteredWorktreeOccupant(worktree, bare),
+		"a linked worktree pointer into a bare origin must authorize its own occupant")
+}
+
+// TestVerifyWorktreePointerShape_NewlinePathPreserved: git writes filesystem
+// paths literally into pointer files, so a newline INSIDE the target path must
+// survive the parse (#3278 review) — only the terminating newline is stripped.
+func TestVerifyWorktreePointerShape_NewlinePathPreserved(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "odd\nrepo", ".git", "worktrees", "wt")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+		[]byte("gitdir: "+target+"\n"), 0o644))
+	got, err := verifyWorktreePointerShape(dir)
+	require.NoError(t, err, "an interior newline in the gitdir path must not truncate the parse")
+	assert.Equal(t, target, got)
+}
+
+// TestVerifyWorktreePointerShape_TrailingWhitespacePreserved: a separate git
+// dir whose name ends in whitespace is a layout git creates and operates on
+// (#3278 review); only the format's single separator space and terminating
+// newline may be stripped, never the path's own whitespace.
+func TestVerifyWorktreePointerShape_TrailingWhitespacePreserved(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "meta ") + "/worktrees/wt"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+		[]byte("gitdir: "+target+"\n"), 0o644))
+	got, err := verifyWorktreePointerShape(dir)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Clean(target), got,
+		"whitespace inside the gitdir path must survive the parse")
+	assert.Contains(t, got, "meta ", "the trailing space of the metadata dir name is path content")
+}
+
+// TestVerifyArchivedWorktreePointer_Shapes pins the pointer check's refusal
+// polarity (#3278 review): only a regular, bounded .git file with a
+// linked-worktree gitdir line whose target is conclusively absent passes.
+// Symlinks and special files must be refused by the descriptor itself — the
+// open never follows links and the read is bounded — so a same-UID race
+// swapping the file cannot stall the kill or feed it an unbounded read.
+func TestVerifyArchivedWorktreePointer_Shapes(t *testing.T) {
+	newWorktreeDir := func(t *testing.T) string {
+		t.Helper()
+		return t.TempDir()
+	}
+
+	t.Run("valid pointer with absent gitdir passes", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		gone := filepath.Join(dir, "gone-repo", ".git", "worktrees", "wt")
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+			[]byte("gitdir: "+gone+"\n"), 0o644))
+		assert.NoError(t, VerifyArchivedWorktreePointer(dir))
+	})
+
+	t.Run("missing pointer refused", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		assert.Error(t, VerifyArchivedWorktreePointer(dir))
+	})
+
+	t.Run("symlink pointer refused without following", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		target := filepath.Join(dir, "real-file")
+		require.NoError(t, os.WriteFile(target, []byte("gitdir: /x/.git/worktrees/wt\n"), 0o644))
+		require.NoError(t, os.Symlink(target, filepath.Join(dir, ".git")))
+		err := VerifyArchivedWorktreePointer(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "without following links")
+	})
+
+	t.Run("fifo pointer refused without blocking", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		require.NoError(t, syscall.Mkfifo(filepath.Join(dir, ".git"), 0o644))
+		err := VerifyArchivedWorktreePointer(dir)
+		require.Error(t, err, "a FIFO at .git must be refused, not block the kill on open or read")
+		assert.Contains(t, err.Error(), "not a regular file")
+	})
+
+	t.Run("oversized pointer refused by the bounded read", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		huge := "gitdir: /x/.git/worktrees/" + strings.Repeat("a", archivedWorktreePointerMaxSize) + "\n"
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"), []byte(huge), 0o644))
+		err := VerifyArchivedWorktreePointer(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "too large")
+	})
+
+	t.Run("non-worktree gitdir refused", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+			[]byte("gitdir: /somewhere/plain\n"), 0o644))
+		err := VerifyArchivedWorktreePointer(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a linked-worktree metadata directory")
+	})
+
+	t.Run("live gitdir target refused", func(t *testing.T) {
+		dir := newWorktreeDir(t)
+		live := filepath.Join(dir, "live-repo", ".git", "worktrees", "wt")
+		require.NoError(t, os.MkdirAll(live, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".git"),
+			[]byte("gitdir: "+live+"\n"), 0o644))
+		err := VerifyArchivedWorktreePointer(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "which still exists")
+	})
+}

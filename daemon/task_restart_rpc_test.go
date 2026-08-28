@@ -34,8 +34,8 @@ func TestControlRestartTaskRefusesPersistedUnsafeTarget(t *testing.T) {
 	watchers, _ := newTestSupervisor(t, task.LoadTasks)
 	server := &controlServer{manager: manager, scheduler: newTaskScheduler(), watchers: watchers}
 	err := server.RestartTask(RestartTaskRequest{ID: tsk.ID}, &RestartTaskResponse{})
-	require.ErrorContains(t, err, "materialize",
-		"explicit restart must not bypass the same target-lifecycle refusal as startup and reload")
+	require.ErrorContains(t, err, "no root agent is configured",
+		"explicit restart must not bypass the same target-lifecycle refusal as startup and reload, and the refusal names its cause (#3264)")
 	require.Empty(t, watchers.watchingTaskIDs(), "an unsafe target must remain unarmed")
 }
 

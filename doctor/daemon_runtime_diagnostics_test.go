@@ -53,9 +53,9 @@ func TestDaemonConfig_MismatchNamesRunningAndFileValues(t *testing.T) {
 
 	c := findCheck(t, report, "daemon config")
 	require.Equal(t, StatusWarn, c.Status)
-	require.Contains(t, c.Detail, `listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`)
-	require.Contains(t, c.Detail, "require_token: running false, file true")
-	require.Contains(t, c.Detail, "require_loopback_token: running false, file true")
+	require.Contains(t, c.Detail, `network.listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`)
+	require.Contains(t, c.Detail, "network.require_token: running false, file true")
+	require.Contains(t, c.Detail, "network.require_loopback_token: running false, file true")
 	require.Contains(t, c.Remediation, "af daemon restart")
 	require.True(t, c.Problem)
 }

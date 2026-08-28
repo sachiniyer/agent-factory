@@ -1222,7 +1222,7 @@ func TestDaemonUnauthenticatedListenerWarnsWithoutFailing(t *testing.T) {
 	require.Contains(t, listenerRows[0].Detail, "0.0.0.0:8443")
 	require.Contains(t, listenerRows[0].Detail, "DeliverPrompt",
 		"say what an unauthenticated peer can actually do, not just that auth is off")
-	require.Contains(t, listenerRows[0].Remediation, "require_token true")
+	require.Contains(t, listenerRows[0].Remediation, "network.require_token true")
 }
 
 // TestDaemonNotRunningStillPassesOnASafeConfig guards the other direction: the

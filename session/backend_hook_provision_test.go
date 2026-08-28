@@ -174,7 +174,7 @@ func TestProvisionedSessionKeepsTheHookBackendIdentity(t *testing.T) {
 	p.hooks.DeleteCmd = "/bin/echo"
 	p.hooks.ProvisionCmd = "/bin/echo"
 
-	backend := p.provisionedBackend(func() error { return nil })
+	backend := p.provisionedBackend()
 	assert.Equal(t, "remote", backend.Type(),
 		"a provision_cmd session must persist as a hook session, or restore looks for sandbox_ssh")
 

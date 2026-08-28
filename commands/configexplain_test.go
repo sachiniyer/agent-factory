@@ -234,7 +234,7 @@ func TestConfigSetUnsetProjectRoundTrip(t *testing.T) {
 	_ = home
 }
 
-func TestConfigUnsetRequiresProject(t *testing.T) {
+func TestConfigGlobalUnsetRejectsNonMigratedKey(t *testing.T) {
 	tempAFHome(t)
 	oldUnset := configUnsetProjectFlag
 	t.Cleanup(func() { configUnsetProjectFlag = oldUnset })
@@ -243,8 +243,8 @@ func TestConfigUnsetRequiresProject(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 	err := configUnsetCmd.RunE(cmd, []string{"default_program"})
-	require.Error(t, err, "there is no global unset")
-	require.Contains(t, err.Error(), "--project")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "not a globally unsettable migrated config key")
 }
 
 func TestConfigGetDottedLeafUsesResolvedProvenance(t *testing.T) {
@@ -340,6 +340,17 @@ func TestConfigListExplainJSONContainsEveryProjectResolution(t *testing.T) {
 		assert.NotEmpty(t, value.Precedence)
 		assert.NotEmpty(t, value.Candidates)
 	}
+}
+
+func TestConfigListExplainLabelsRootAgentMigrationShapes(t *testing.T) {
+	_, _ = setupConfigExplainCommandTest(t, "schema_version = 1\n")
+	t.Chdir(t.TempDir())
+	setConfigListReadFlags(t, "", true, false)
+
+	output, err := runConfigListForTest(t)
+	require.NoError(t, err)
+	assert.Contains(t, output, "root_agents: legacy path map")
+	assert.Contains(t, output, "root_agent: current project profile")
 }
 
 func TestConfigExplainPreservesSelectedPathSpellingForEverySourceReference(t *testing.T) {

@@ -32,6 +32,7 @@ func metadataForSource(data []byte, path string, format ConfigFormat) (sourceMet
 	shape := make(map[string]any)
 	switch format {
 	case FormatTOML:
+		data = stripUTF8BOM(data)
 		if err := toml.Unmarshal(data, &shape); err != nil {
 			return sourceMetadata{}, err
 		}
@@ -48,11 +49,29 @@ func metadataForSource(data []byte, path string, format ConfigFormat) (sourceMet
 }
 
 func (m sourceMetadata) topLevel(key string) (any, bool) {
-	if m.shape == nil {
-		return nil, false
-	}
-	value, present := m.shape[key]
+	value, present, _ := m.topLevelWithKeyPath(key)
 	return value, present
+}
+
+func (m sourceMetadata) topLevelWithKeyPath(key string) (any, bool, string) {
+	canonical := canonicalConfigKey(key)
+	if m.shape == nil {
+		return nil, false, canonical
+	}
+	if alias, ok := configAliasForCanonical(canonical); ok {
+		if m.format == FormatTOML {
+			if value, present := aliasGroupedValue(m.shape, alias); present {
+				return value, true, alias.canonical
+			}
+		}
+		value, present := m.shape[alias.legacy]
+		if present {
+			return value, true, alias.legacy
+		}
+		return nil, false, alias.canonical
+	}
+	value, present := m.shape[canonical]
+	return value, present, canonical
 }
 
 func attachConfigSource(cfg *Config, data []byte, path string, format ConfigFormat) error {
@@ -66,16 +85,19 @@ func attachConfigSource(cfg *Config, data []byte, path string, format ConfigForm
 	return nil
 }
 
-// snapshotConfig copies every exported value recursively and deliberately
-// drops loader-only metadata. The reflection walk means a future map, slice,
-// pointer, or table default cannot accidentally alias the value that decoding
-// mutates; adding such a field needs no second hand-maintained copy list.
+// snapshotConfig copies every exported value recursively and deliberately drops
+// loader-only metadata. Theme preset identity is private implementation state but
+// semantic user data — it controls Preset() and scalar-vs-table serialization — so
+// it is restored explicitly after the reflection walk. A future map, slice,
+// pointer, or table default still cannot alias the value that decoding mutates.
 func snapshotConfig(cfg *Config) *Config {
 	if cfg == nil {
 		return nil
 	}
 	copyValue := cloneExportedValue(reflect.ValueOf(*cfg))
 	copyConfig := copyValue.Interface().(Config)
+	copyConfig.Theme.preset = cfg.Theme.preset
+	copyConfig.Theme.explicitPreset = cfg.Theme.explicitPreset
 	return &copyConfig
 }
 

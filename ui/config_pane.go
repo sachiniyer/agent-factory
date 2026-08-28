@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -13,33 +12,30 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 )
 
-// applyingConfigSet writes a global config key and then asks a running daemon to
-// apply it in place (#2480), so a TUI config edit takes effect without a restart.
-// The apply is best-effort and never spawns a daemon (RequestApplyConfig uses the
-// no-ensure path): the write already succeeded, so its result is what the pane
-// echoes regardless of whether a daemon was reachable to apply it live.
+// applyingConfigSet writes a global config key through a running daemon's
+// admission-gated SetConfigValue (#3231) — the same handler the web form posts —
+// so a daemon that is quiescing or validating an upgrade refuses BEFORE the
+// file changes, instead of the pane writing first and live-applying through an
+// ungated poke. The daemon applies an accepted write to itself in place
+// (#2480), so a TUI config edit still takes effect without a restart; with no
+// daemon reachable the write lands locally, as before. Never spawns a daemon.
 //
-// It returns the per-key effect notice (config.EffectNotice) so the pane shows the
-// honest outcome — live now, next daemon start, or next af launch — rather than one
-// canned sentence. daemonApplied is whether the apply reached a running daemon.
+// It returns the per-key effect notice so the pane shows the honest outcome —
+// live now, deferred rebind, next daemon start, or next af launch — computed by
+// the write path itself rather than one canned sentence. Any warnings (the
+// exposure notice, or a rebind's actionable reason) are folded into the one
+// line the pane shows so a TUI edit that exposes the API or could not rebind
+// still tells the user.
 func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
-	res, err := config.SetGlobalConfigValue(key, value)
+	resp, err := daemon.SetGlobalConfigValue(key, value)
 	if err != nil {
-		return res, "", err
+		return nil, "", err
 	}
-	applyResp, applyErr := daemon.RequestApplyConfig()
-	notice := config.EffectNotice(res.Key, applyErr == nil)
-	// A socket key whose live rebind failed (#2480 PR2) is reported deferred, not
-	// applied. Any warnings (the exposure notice, or the rebind's actionable reason)
-	// are folded into the one line the pane shows so a TUI edit that exposes the API
-	// or could not rebind still tells the user.
-	if applyErr == nil && slices.Contains(applyResp.FailedListenerKeys, res.Key) {
-		notice = config.ListenerRebindDeferredNotice(res.Key)
+	notice := resp.RestartNotice
+	if len(resp.Warnings) > 0 {
+		notice = notice + " " + strings.Join(resp.Warnings, " ")
 	}
-	if len(applyResp.Warnings) > 0 {
-		notice = notice + " " + strings.Join(applyResp.Warnings, " ")
-	}
-	return res, notice, nil
+	return resp.Result, notice, nil
 }
 
 // ConfigPane is the direct config editor: a form over the config manifest,
@@ -50,11 +46,12 @@ func applyingConfigSet(key, value string) (*config.SetResult, string, error) {
 // description of config — config.ManifestWithValues — so neither can drift from
 // config_types.go or from each other. This pane holds NO key list, no per-key
 // type switch, and no copy of the defaults or validation rules: every row it
-// renders comes from the manifest, and every write goes to
-// config.SetGlobalConfigValue, the same validated/locked/atomic call
-// `af config set` makes. Adding a key to config_types.go surfaces it here with
-// no edit to this file, which is what TestConfigPaneRendersEveryManifestKey
-// pins.
+// renders comes from the manifest, and every write goes through
+// daemon.SetGlobalConfigValue — the daemon's admission-gated SetConfigValue
+// when one is running, the same validated/locked/atomic
+// config.SetGlobalConfigValue write otherwise — exactly as `af config set`
+// does. Adding a key to config_types.go surfaces it here with no edit to this
+// file, which is what TestConfigPaneRendersEveryManifestKey pins.
 //
 // What this pane must never do is misstate WHEN an edit takes effect. Since #2480
 // most keys reach a running daemon in place, but not all do, so the pane shows the
@@ -94,10 +91,10 @@ type ConfigPane struct {
 	hasFocus bool
 
 	// save is the write path, injected so tests drive the REAL
-	// config.SetGlobalConfigValue against a temp AGENT_FACTORY_HOME while
-	// staying a plain unit test. It is never nil in production
-	// (NewConfigPane wires it); a test that swaps it is testing the pane's
-	// plumbing, not inventing a second writer.
+	// applyingConfigSet against a temp AGENT_FACTORY_HOME while staying a
+	// plain unit test. It is never nil in production (NewConfigPane wires
+	// it); a test that swaps it is testing the pane's plumbing, not
+	// inventing a second writer.
 	save func(key, value string) (result *config.SetResult, notice string, err error)
 
 	// assistantRequested is set when the user presses the assistant key in normal
@@ -117,17 +114,14 @@ type configRow struct {
 	entry   *config.ConfigEntry
 }
 
-// isSelectable reports whether the cursor may land on this row. Headings and
-// rows that cannot be edited here are skipped: stopping on a row whose only
-// possible action is "you cannot edit this here" wastes the user's keystrokes.
-//
-// It reads Editable, NOT the manifest's Settable. Settable is true for a dynamic
-// family (program_overrides), meaning its LEAVES are settable — the bare key is
-// not. Keying off Settable let the cursor land on program_overrides, opened a
-// field pre-filled with the map's JSON, and had the writer refuse it on save:
-// a dead end the user only discovered by pressing enter.
+// isSelectable reports whether the cursor may land on this row. Every manifest
+// entry is editable since #3345; only tier headings are skipped. A pre-#3345
+// daemon may reject a newly supported structured save during version skew; that
+// rejection stays visible in this real field. Turning the row read-only would
+// restore the class #3345 explicitly removed, while a local-write fallback
+// would bypass the running daemon's lifecycle admission gate.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil && r.entry.Editable
+	return r.entry != nil
 }
 
 var (
@@ -136,7 +130,6 @@ var (
 	configKeyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	configValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))
 	configPurposeStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	configReadOnlyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	configSelectedStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205"))
 	configErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	configOKStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
@@ -177,7 +170,7 @@ func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, path string) {
 func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
 	c.height = height
-	c.input.Width = max(20, width-24)
+	c.sizeEditField()
 }
 
 func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
@@ -344,12 +337,13 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 // so saving an untouched field is a no-op rather than a corruption.
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
-	if entry == nil || !entry.Editable {
+	if entry == nil {
 		return
 	}
 	c.editing = true
 	c.status = ""
 	c.restartNotice = ""
+	c.sizeEditField()
 	c.input.SetValue(entry.Value)
 	c.input.CursorEnd()
 	c.input.Focus()
@@ -393,8 +387,8 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 // commitEdit writes the edited value through the real path and reports the
 // outcome.
 //
-// Validation is NOT done here. The value goes straight to
-// config.SetGlobalConfigValue, which applies the loader's own rules and refuses
+// Validation is NOT done here. The value goes straight to the write path,
+// where config.SetGlobalConfigValue applies the loader's own rules and refuses
 // before writing; a rejection surfaces the validator's message verbatim. A
 // second copy of the rules in this pane is exactly how a UI comes to accept a
 // value the loader rejects at the next startup — the user then meets it as a
@@ -495,14 +489,13 @@ func (c *ConfigPane) renderHeader() string {
 	if c.path != "" {
 		b.WriteString(configPurposeStyle.Render("  " + c.path))
 	}
-	b.WriteString("\n\n")
-	return b.String()
+	// The path is the one part of this line the pane does not control the length
+	// of, so it is clipped rather than allowed to wrap (#3430). "Config" plus a
+	// clipped path still says which file is open; a wrapped header costs a list
+	// row at exactly the width where rows are scarcest, and makes countLines lie.
+	return c.fitPaneLine(b.String()) + "\n\n"
 }
 
-// renderRowLines renders every row to lines, reporting the line span of the
-// selected row so the window can keep it on screen. A row is not one line: the
-// selected row also shows its purpose and its allowed values, so the span is
-// what must stay visible, not a single index.
 func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 	selStart, selEnd = -1, -1
 	for i, row := range c.rows {
@@ -585,33 +578,35 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	}
 	b.WriteString(cursor)
 
-	key := configKeyStyle.Render(e.Key)
+	keyText := e.Key
+	if selected && c.editing {
+		// Clip the KEY, not the field — see editRowSplit. Clipped as plain text
+		// before styling, so the truncation never lands inside an escape sequence.
+		if budget, _ := c.editRowSplit(e.Key); budget < lipgloss.Width(keyText) {
+			keyText = fitLine(keyText, budget)
+		}
+	}
+	key := configKeyStyle.Render(keyText)
 	if selected {
-		key = configSelectedStyle.Render(e.Key)
+		key = configSelectedStyle.Render(keyText)
 	}
 	b.WriteString(key)
 	b.WriteString("  ")
 
-	switch {
-	case selected && c.editing:
+	if selected && c.editing {
 		b.WriteString(c.input.View())
-	case !e.Editable:
-		b.WriteString(configValueStyle.Render(c.displayValue(e)))
-	default:
+	} else {
 		b.WriteString(configValueStyle.Render(c.displayValue(e)))
 	}
+	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
+	// this row, but neither can shrink the KEY: at a narrow pane the key alone
+	// (network.require_loopback_token is 30 cells) plus the cursor and the gap
+	// outgrows the box, and a wrapped row is the failure the height window cannot
+	// survive. The purpose lines below wrap on purpose and are already bounded.
+	line := c.fitPaneLine(b.String())
+	b.Reset()
+	b.WriteString(line)
 	b.WriteString("\n")
-
-	if !e.Editable && e.EditHint != "" {
-		// Say WHY it cannot be edited here, and what to do instead — on its own
-		// wrapped line, not inline. The hint is derived from the real allowlist,
-		// so for a dynamic family it names the command that DOES work rather than
-		// sending the user to a text editor for something af can do. That makes it
-		// long ("set one entry: af config set program_overrides.<name> <value>"),
-		// and inline it pushed the row to 106 cells in a 72-cell pane — which the
-		// frame would wrap, breaking the height window's line count.
-		b.WriteString(c.wrapIndented("· "+e.EditHint, configReadOnlyStyle))
-	}
 
 	if selected {
 		b.WriteString(c.wrapIndented(e.Purpose, configPurposeStyle))
@@ -622,52 +617,6 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 	return b.String()
 }
 
-// displayValue renders a value for the LIST, which is a different job from
-// rendering it into an edit field.
-//
-// Two decorations live here and MUST NOT leak into the edit field (c.input is
-// always filled from e.Value directly):
-//
-//   - An unset value reads as "(unset)". A blank column looks like a rendering
-//     bug; the empty edit field it opens does not.
-//   - A long value is truncated. A [theme] table serializes to ~700 characters
-//     of JSON — rendered whole it wraps over the entire pane and buries every
-//     row after it. Truncating is honest here precisely because the key is
-//     read-only: the file is where you edit it, and the row says so.
-//
-// This is the same split CurrentValue documents: what you SHOW and what you can
-// SAVE BACK are different, and conflating them is how `""` ends up in a user's
-// config.toml.
-func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
-	if e.Value == "" {
-		return "(unset)"
-	}
-	// Leave room for the cursor and the key. The read-only hint no longer shares
-	// this line (it wraps onto its own), so the only competition is the key.
-	budget := c.width - len(e.Key) - 8
-	if budget < 12 {
-		budget = 12
-	}
-	runes := []rune(e.Value)
-	if len(runes) <= budget {
-		return e.Value
-	}
-	return string(runes[:budget-1]) + "…"
-}
-
-// wrapIndented renders prose wrapped to the pane's width, indented under its key.
-//
-// Wrapping HERE rather than letting the overlay frame do it is load-bearing, not
-// cosmetic. The window's budget counts the lines renderRowLines produces, so a
-// line the frame later wraps into three physical rows makes that count a lie and
-// the pane overflows its box anyway — the selection scrolls off exactly as it did
-// before the window existed. A purpose line is genuinely long (worktree_root's is
-// 147 characters, over 2x a 72-column pane), so this is the common case, not an
-// edge one.
-//
-// Prose WRAPS rather than truncating, unlike a value (displayValue): a value's
-// tail is usually noise, but a sentence's is the half that says what the setting
-// does.
 func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
 	const indent = "    "
 	width := c.width - len(indent) - 2
@@ -724,33 +673,28 @@ func (c *ConfigPane) wrap(text string, style lipgloss.Style) string {
 // from it, and an off-by-one there is an overflowing pane.
 func (c *ConfigPane) renderHints() string {
 	if c.editing {
-		return "\n" + configHintStyle.Render("↵ save · esc cancel") + "\n"
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↵ save", drop: 1},
+			{text: "esc cancel"},
+		})) + "\n"
 	}
 	advanced := "a show advanced"
 	if c.showAdvanced {
 		advanced = "a hide advanced"
 	}
+	// Display order left to right; `drop` is the shed order (see fitHints).
+	//
 	// "C assistant" is the button #2453 adds: the discoverable way to open the
 	// config assistant from the config surface. It sits before "esc close" so the
 	// exit stays last, where a reader looks for it.
-	//
-	// Adding a hint is a WIDTH change (#1936). With the assistant hint the full row
-	// is ~1 column past the 64-wide box's inner width, so at the real geometries it
-	// would wrap "esc close" onto a second line. Rather than wrap, shed the most
-	// droppable hint when the row will not fit: the advanced toggle, because `a`
-	// still works and pressing it reveals the tier — whereas the assistant button
-	// and the exit must always show. This is the hintDropOrder pattern, scoped to
-	// the one optional hint this row has.
-	full := "↑/↓ move · ↵ edit · " + advanced + " · C assistant · esc close"
-	if c.width > 0 && lipgloss.Width(full) > c.width {
-		full = "↑/↓ move · ↵ edit · C assistant · esc close"
-	}
-	return "\n" + configHintStyle.Render(full) + "\n"
+	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+		{text: "↑/↓ move", drop: 2},
+		{text: "↵ edit", drop: 3},
+		{text: advanced, drop: 1},
+		{text: "C assistant", drop: 4},
+		{text: "esc close"},
+	})) + "\n"
 }
 
-// SetEditValueForTest and EditValueForTest expose the value field's buffer to
-// the app package's tests, which drive the REAL handleStateConfigEditor (where
-// the #1961 quit-key bug class lives) and must assert what actually reached the
-// field. The pane's own tests reach c.input directly; app's cannot.
 func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }
 func (c *ConfigPane) EditValueForTest() string     { return c.input.Value() }

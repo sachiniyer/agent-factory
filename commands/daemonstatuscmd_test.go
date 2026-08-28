@@ -144,8 +144,8 @@ func TestCollectDaemonStatusCorrelatesResponderUnitAndConfig(t *testing.T) {
 	require.True(t, info.Running)
 	require.Equal(t, "yes", info.Supervised)
 	require.Equal(t, "no", info.ConfigMatches)
-	require.Contains(t, info.ConfigDetail, "listen_addr")
-	require.Contains(t, info.ConfigDetail, "require_token")
+	require.Contains(t, info.ConfigDetail, "network.listen_addr")
+	require.Contains(t, info.ConfigDetail, "network.require_token")
 }
 
 func TestCollectDaemonStatusDoesNotAttributeForeignHomeUnit(t *testing.T) {
@@ -256,7 +256,7 @@ func TestPrintDaemonStatusHumanNamesPIDMismatchAndStaleConfig(t *testing.T) {
 		UnitPID:          99,
 		Supervised:       "no",
 		ConfigMatches:    "no",
-		ConfigDetail:     `listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`,
+		ConfigDetail:     `network.listen_addr: running "0.0.0.0:8443", file "127.0.0.1:8443"`,
 	})
 
 	got := out.String()
@@ -310,7 +310,7 @@ func TestCollectDaemonStatusReportsExposureWithoutClaimingItCannotStart(t *testi
 	info := collectDaemonStatus()
 	require.False(t, info.Running)
 	require.NotEmpty(t, info.ExposureWarning, "an exposed listener must be reported, not implied")
-	require.Contains(t, info.ExposureWarning, "require_token")
+	require.Contains(t, info.ExposureWarning, "network.require_token")
 	require.Contains(t, info.ExposureWarning, "0.0.0.0:8443")
 
 	cmd := &cobra.Command{}

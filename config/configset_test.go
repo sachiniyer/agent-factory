@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // TestSetTOMLScalarReplacePreservesComments is the crux guard: replacing a
@@ -185,6 +188,143 @@ func TestSetTOMLScalarEscapedQuoteInDoubleQuotedString(t *testing.T) {
 	}
 }
 
+func TestSetTOMLStructuredReplacesMultilineValueAndTable(t *testing.T) {
+	in := "# top\nsession_env_passthrough = [\n  'OLD_ONE',\n  'OLD_TWO',\n]\nkeep = 'yes'\n\n" +
+		"[program_overrides]\nclaude = 'old'\n# target comment\n\n[unrelated]\nvalue = 'kept'\n"
+
+	got, err := setTOMLStructured(in, "session_env_passthrough", "session_env_passthrough = ['NEW']\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = setTOMLStructured(got, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range []string{"# top", "keep = 'yes'", "[unrelated]", "value = 'kept'"} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("structured replacement dropped unrelated text %q:\n%s", kept, got)
+		}
+	}
+	for _, removed := range []string{"OLD_ONE", "OLD_TWO", "claude = 'old'", "# target comment"} {
+		if strings.Contains(got, removed) {
+			t.Errorf("structured replacement left old target text %q:\n%s", removed, got)
+		}
+	}
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("replacement is not valid TOML: %v\n%s", err, got)
+	}
+}
+
+func TestSetTOMLStructuredPreservesCommentIntroducingNextTable(t *testing.T) {
+	in := "[program_overrides]\nclaude = 'old'\n# security settings\n[unrelated]\nvalue = 'kept'\n"
+	got, err := setTOMLStructured(in, "program_overrides", "[program_overrides]\ncodex = 'new'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "# security settings\n[unrelated]") {
+		t.Fatalf("replacement dropped the next table's leading comment:\n%s", got)
+	}
+}
+
+func TestSetTOMLStructuredInsertsRootValueBeforeArrayTable(t *testing.T) {
+	in := "# future extension\n[[future_workers]]\nname = 'one'\n"
+	got, err := setTOMLStructured(in, "session_env_passthrough", "session_env_passthrough = [\"HTTP_PROXY\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# future extension\nsession_env_passthrough = [\"HTTP_PROXY\"]\n[[future_workers]]\nname = 'one'\n"
+	if got != want {
+		t.Fatalf("root value landed inside an array table:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSetTOMLStructuredInsertsRootValueBeforeQuotedArrayTable(t *testing.T) {
+	in := "# future extension\n[[\"array]name\"]]\nname = 'one'\n"
+	got, err := setTOMLStructured(in, "session_env_passthrough", "session_env_passthrough = [\"HTTP_PROXY\"]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# future extension\nsession_env_passthrough = [\"HTTP_PROXY\"]\n[[\"array]name\"]]\nname = 'one'\n"
+	if got != want {
+		t.Fatalf("root value landed inside a quoted array table:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSetTOMLStructuredPreservesUnrelatedTrailingBlankLines(t *testing.T) {
+	in := "[unrelated]\nvalue = 'kept'\n\n\n"
+	got, err := setTOMLStructured(in, "keys", "[keys]\nquit = 'Q'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[unrelated]\nvalue = 'kept'\n\n[keys]\nquit = 'Q'\n\n\n"
+	if got != want {
+		t.Fatalf("structured append normalized unrelated trailing blank lines:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestSetGlobalConfigValuePreservesUnknownStructuredMembers(t *testing.T) {
+	cases := []struct {
+		name, input, key, value, preserved string
+	}{
+		{
+			name:      "theme direct member",
+			input:     "[theme]\nfuture_policy = 'keep'\n",
+			key:       "theme",
+			value:     `{"accent":"#112233"}`,
+			preserved: "future_policy = 'keep'",
+		},
+		{
+			name:      "root agent direct member",
+			input:     "[root_agent]\nprogram = 'claude'\nfuture_policy = 'keep'\n",
+			key:       "root_agent",
+			value:     `{"enabled":true,"program":"codex"}`,
+			preserved: "future_policy = 'keep'",
+		},
+		{
+			name:      "root agents nested member",
+			input:     "[root_agents.'/tmp/repo']\nprogram = 'claude'\nfuture_policy = 'keep'\n",
+			key:       "root_agents",
+			value:     `{"/tmp/repo":{"program":"codex"}}`,
+			preserved: "future_policy = 'keep'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTempConfig(t, tc.input)
+			if _, err := SetGlobalConfigValue(tc.key, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			written, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(written), tc.preserved) {
+				t.Fatalf("structured write dropped unknown member %q:\n%s", tc.preserved, written)
+			}
+		})
+	}
+}
+
+func TestSetGlobalConfigValueRefusesToDiscardUnknownMemberOnShapeChange(t *testing.T) {
+	path := writeTempConfig(t, "[theme]\nfuture_policy = 'keep'\n")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = SetGlobalConfigValue("theme", "zenburn")
+	if err == nil || !strings.Contains(err.Error(), "theme.future_policy") {
+		t.Fatalf("shape-changing set error = %v, want unknown member path", err)
+	}
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("refused shape change modified the file:\n%s", after)
+	}
+}
+
 func TestResolveSettable(t *testing.T) {
 	if s, leaf, _, ok := resolveSettable("default_program"); !ok || s != "" || leaf != "default_program" {
 		t.Fatalf("default_program resolve wrong: s=%q leaf=%q ok=%v", s, leaf, ok)
@@ -212,6 +352,20 @@ func TestEncodeTOMLString(t *testing.T) {
 		if got := encodeTOMLString(in); got != want {
 			t.Errorf("encodeTOMLString(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestEncodeTOMLStringRoundTripsQuotedControlInput(t *testing.T) {
+	want := "single' double\" slash\\ newline\ncontrol\x01"
+	encoded := "value = " + encodeTOMLString(want) + "\n"
+	var decoded struct {
+		Value string `toml:"value"`
+	}
+	if err := toml.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("encoded user string is not valid TOML: %v\n%s", err, encoded)
+	}
+	if decoded.Value != want {
+		t.Fatalf("encoded user string round-tripped as %q, want %q", decoded.Value, want)
 	}
 }
 
@@ -365,8 +519,14 @@ func TestSetGlobalConfigValueRejectsRemovedAutoYesWithGuidance(t *testing.T) {
 
 func TestSettableKeysSorted(t *testing.T) {
 	keys := SettableKeys()
-	if len(keys) != len(settableKeySpecs) {
-		t.Fatalf("SettableKeys len %d != specs %d", len(keys), len(settableKeySpecs))
+	wantLen := len(settableKeySpecs)
+	for _, spec := range settableKeySpecs {
+		if spec.dynamic && spec.structured {
+			wantLen++
+		}
+	}
+	if len(keys) != wantLen {
+		t.Fatalf("SettableKeys len %d != expected forms %d", len(keys), wantLen)
 	}
 	for i := 1; i < len(keys); i++ {
 		if keys[i-1] > keys[i] {
@@ -551,22 +711,240 @@ func TestSetGlobalConfigValueRejectsInvalidNewKeys(t *testing.T) {
 	}
 }
 
-// TestSetGlobalConfigValueStillRejectsStructuralKeys locks the deliberate
-// exclusions in place. Widening the allowlist must not have made the structural
-// tables settable by accident: root_agents, [theme] and the [keys] rebinds have
-// no scalar shape. The manifest marks them Settable: false, and
-// TestManifestAgreesWithSettableKeys ties that claim to this rejection.
-//
-// cors_allowed_origins is deliberately NOT in this list any more: #2564 made it a
-// settable comma-separated list, so it must be tested for round-trip and origin
-// validation, not rejection (a stale entry here would pass only because "x" is a
-// malformed origin, hiding that the key is now settable).
-func TestSetGlobalConfigValueStillRejectsStructuralKeys(t *testing.T) {
+// TestSetGlobalConfigValueStillRejectsMachineManagedSchemaVersion keeps the one
+// non-user config field out of the writer. Every manifest entry is settable;
+// schema_version is deliberately absent from that manifest.
+func TestSetGlobalConfigValueStillRejectsMachineManagedSchemaVersion(t *testing.T) {
 	writeTempConfig(t, "default_program = 'claude'\n")
-	for _, key := range []string{"theme", "root_agents", "keys", "schema_version"} {
-		if _, err := SetGlobalConfigValue(key, "x"); err == nil {
-			t.Errorf("`af config set %s` must be rejected — it is not a settable scalar key", key)
-		}
+	if _, err := SetGlobalConfigValue("schema_version", "2"); err == nil {
+		t.Error("schema_version is machine-managed and must not be settable")
+	}
+}
+
+// TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip is the source-layer
+// acceptance lock for #3345. The panes send structured rows as compact JSON,
+// and the same validated writer used by `af config set` must replace the whole
+// value and return exactly what CurrentValue will render on refresh.
+func TestSetGlobalConfigValueFormerlyImmutableKeysRoundTrip(t *testing.T) {
+	want := DefaultConfig()
+	want.Theme.Accent = "#112233"
+	if want.ProgramOverrides == nil {
+		want.ProgramOverrides = map[string]string{}
+	}
+	want.ProgramOverrides["codex"] = "codex --model gpt-5"
+	want.SessionEnvPassthrough = []string{"AF_TEST_ONE", "AF_TEST_TWO"}
+	want.LimitPatterns = map[string]string{"claude": "usage limit reached"}
+	want.RootAgents = map[string]RootAgentConfig{"/tmp/repo": {Program: "codex"}}
+	want.RootAgent = RootAgent{Enabled: true, Program: "codex"}
+	want.Keys = map[string]any{"quit": "Q"}
+
+	for _, key := range []string{
+		"theme",
+		"program_overrides",
+		"session_env_passthrough",
+		"limit_patterns",
+		"root_agents",
+		"root_agent",
+		"keys",
+	} {
+		t.Run(key, func(t *testing.T) {
+			writeTempConfig(t, "# hand-written\n")
+			value, ok := CurrentValue(want, key)
+			if !ok {
+				t.Fatalf("CurrentValue cannot render %s", key)
+			}
+
+			res, err := SetGlobalConfigValue(key, value)
+			if err != nil {
+				t.Fatalf("set %s=%s: %v", key, value, err)
+			}
+			if res.Value != value {
+				t.Fatalf("set echoed %q, want %q", res.Value, value)
+			}
+
+			got, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("load after setting %s: %v", key, err)
+			}
+			roundTrip, ok := CurrentValue(got, key)
+			if !ok || roundTrip != value {
+				t.Fatalf("%s round-tripped as %q (ok=%v), want %q", key, roundTrip, ok, value)
+			}
+		})
+	}
+}
+
+func TestSetGlobalConfigValueThemePresetRoundTripsWithoutExpandingToATable(t *testing.T) {
+	path := writeTempConfig(t, "# custom theme\n[theme]\naccent = '#112233'\n")
+
+	res, err := SetGlobalConfigValue("theme", "zenburn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Value != "zenburn" {
+		t.Fatalf("theme echo = %q, want zenburn", res.Value)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "theme = 'zenburn'") || strings.Contains(string(written), "[theme]") {
+		t.Fatalf("named preset did not replace the custom table as a scalar:\n%s", written)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Theme.Preset() != "zenburn" {
+		t.Fatalf("loaded preset = %q, want zenburn", cfg.Theme.Preset())
+	}
+	if shown, ok := CurrentValue(cfg, "theme"); !ok || shown != "zenburn" {
+		t.Fatalf("theme editor value = %q (ok=%v), want zenburn", shown, ok)
+	}
+}
+
+func TestSetGlobalConfigValuePartialThemeMergesTheCurrentPalette(t *testing.T) {
+	writeTempConfig(t, "theme = 'zenburn'\n")
+	before, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := before.Theme
+	want.Accent = "#123456"
+	want.preset = ""
+	want.explicitPreset = false
+
+	res, err := SetGlobalConfigValue("theme", `{"accent":"#123456"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Theme, want) {
+		t.Fatalf("partial theme edit reset omitted slots:\n got: %#v\nwant: %#v\necho: %s", after.Theme, want, res.Value)
+	}
+}
+
+func TestSetGlobalConfigValueWholeProgramOverridesCanRemoveDetectedDefault(t *testing.T) {
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+	writeTempConfig(t, "default_program = 'claude'\n")
+
+	before, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ProgramOverrides["claude"] == "" {
+		t.Fatal("test setup did not produce the auto-detected Claude override")
+	}
+
+	res, err := SetGlobalConfigValue("program_overrides", `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(after, "claude"); got != "claude" {
+		t.Fatalf("whole-map deletion restored the detected override: ResolveProgram = %q", got)
+	}
+	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{}` || res.Value != `{}` {
+		t.Fatalf("deleted override refreshed as shown=%q (ok=%v), echo=%q; want {}", shown, ok, res.Value)
+	}
+}
+
+func TestSetGlobalConfigValuePreservesHiddenTombstoneWhileDetectorIsUnavailable(t *testing.T) {
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	availablePath := binDir + ":" + os.Getenv("PATH")
+	t.Setenv("PATH", availablePath)
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+	writeTempConfig(t, "default_program = 'claude'\n")
+
+	if _, err := SetGlobalConfigValue("program_overrides", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	if _, err := SetGlobalConfigValue("program_overrides", `{"codex":"codex --model gpt-5"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", availablePath)
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(after, "claude"); got != "claude" {
+		t.Fatalf("saving while detection was unavailable dropped the hidden tombstone: ResolveProgram = %q", got)
+	}
+	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{"codex":"codex --model gpt-5"}` {
+		t.Fatalf("editor value = %q (ok=%v), want only the submitted codex override", shown, ok)
+	}
+}
+
+func TestSetGlobalConfigValueStructuredValidationRejectsBeforeWrite(t *testing.T) {
+	cases := []struct {
+		key, value, want string
+	}{
+		{"theme", `{"accent":"red"}`, "#RRGGBB"},
+		{"theme", `{"accent":null}`, "must not be null"},
+		{"program_overrides", `{"not-an-agent":"cmd"}`, "must be one of"},
+		{"session_env_passthrough", `["SECRET=value"]`, "exact POSIX name"},
+		{"limit_patterns", `{"claude":"("}`, "regular expression"},
+		{"root_agents", `[]`, "cannot unmarshal"},
+		{"root_agent", `{"enabled":true,"future_field":"x"}`, "unknown field"},
+		{"keys", `{"quit":"enter"}`, "reserved"},
+		{"keys", `null`, "got null"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			path := writeTempConfig(t, "# untouched\ndefault_program = 'claude'\n")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = SetGlobalConfigValue(tc.key, tc.value)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("set %s=%s error = %v, want substring %q", tc.key, tc.value, err, tc.want)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatalf("rejected structured value changed the file:\n%s", after)
+			}
+		})
+	}
+}
+
+func TestSetGlobalConfigValueDynamicLeafStillWorksAfterWholeMap(t *testing.T) {
+	writeTempConfig(t, "# hand-written\n")
+	if _, err := SetGlobalConfigValue("program_overrides", `{"codex":"old"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SetGlobalConfigValue("program_overrides.codex", "new"); err != nil {
+		t.Fatalf("leaf update after whole-map save: %v", err)
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProgramOverrides["codex"] != "new" {
+		t.Fatalf("codex override = %q, want new", cfg.ProgramOverrides["codex"])
 	}
 }
 
@@ -721,7 +1099,7 @@ func TestSetGlobalConfigValueWarnsOnTokenlessNetworkListener(t *testing.T) {
 			}
 			w := res.Warnings[0]
 			// The warning has to say what is wrong AND what to do about it.
-			for _, want := range []string{"require_token", "af config set require_token true"} {
+			for _, want := range []string{"network.require_token", "af config set network.require_token true"} {
 				if !strings.Contains(w, want) {
 					t.Errorf("warning must mention %q, got: %s", want, w)
 				}

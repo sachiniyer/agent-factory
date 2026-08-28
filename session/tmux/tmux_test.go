@@ -25,6 +25,7 @@ import (
 // InfoLog/ErrorLog (e.g. Restore's re-spawn fallback) do not nil-deref.
 func TestMain(m *testing.M) {
 	sessionenv.HandleInternalExec()
+	HandleDedicatedServerExec()
 	// #837: fail the package loudly if any test touches the real config.json.
 	verifyRealConfig := testguard.ConfigTripwire()
 	// #1056: fail loudly if a test leaks an af_ session onto the ambient tmux

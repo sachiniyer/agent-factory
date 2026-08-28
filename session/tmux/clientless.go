@@ -14,9 +14,9 @@ import "fmt"
 //   - ResizeWindow sets the window size with `resize-window`, which pins the
 //     window to a manual size independent of any attached client.
 //
-// This is the structural move the epic set up: once the daemon produces the
-// stream clientlessly, PR6 can delete the attach-session render client the TUI
-// still uses today. Every command uses the exact `=name:` target so a
+// This is the structural move the epic set up: with the daemon producing the
+// stream clientlessly, the attach-session render client the TUI once used is
+// gone (retired in PR7). Every command uses the exact `=name:` target so a
 // prefix-matched sibling session (e.g. a `__shell` tab) can never be driven by
 // mistake (#1006).
 

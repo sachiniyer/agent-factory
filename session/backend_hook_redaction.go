@@ -37,14 +37,8 @@ func redactHookOutputTokens(output string) string {
 // followed by trailing malformed bytes, which would put an unparseable payload
 // back into the supposedly precise branch.
 func redactHookJSONDocument(document string) (string, bool) {
-	if !json.Valid([]byte(document)) {
-		return "", false
-	}
-
-	decoder := json.NewDecoder(strings.NewReader(document))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, parsed := decodeHookJSONDocument(document)
+	if !parsed {
 		return "", false
 	}
 
@@ -59,6 +53,20 @@ func redactHookJSONDocument(document string) (string, bool) {
 		return hookOutputRedaction, true
 	}
 	return string(encoded), true
+}
+
+func decodeHookJSONDocument(document string) (any, bool) {
+	if !json.Valid([]byte(document)) {
+		return nil, false
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(document))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	return value, true
 }
 
 func redactHookJSONValue(value any) (any, bool) {
@@ -89,23 +97,45 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string beginning with a JSON container or string opener may itself be a
-		// serialized document. Objects and arrays can structurally contain a token
-		// field, while a string can wrap either one through further serialization.
-		// Those three openers are the closed set that can eventually reach a token
-		// field; ordinary diagnostic strings are not reinterpreted as payloads.
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[' && trimmed[0] != '"') {
+		// A string can itself be a serialized payload, so one that could carry an
+		// object gets the same closed-set rule the top level applies to the whole
+		// output: parse it, or replace it. One that could not is left alone entirely
+		// — not even re-encoded, so an unrelated diagnostic stays byte-exact.
+		if !hookStringMayCarrySerializedObject(value) {
 			return value, false
 		}
 		redacted, parsed := redactHookJSONDocument(value)
 		if !parsed {
-			// Its opening establishes that this is a structured child payload, but a
-			// failed parse leaves no trustworthy field boundaries inside it.
 			return hookOutputRedaction, true
 		}
 		return redacted, redacted != value
 	default:
 		return value, false
 	}
+}
+
+// hookStringMayCarrySerializedObject reports whether a string the JSON parser
+// rejected could still be carrying a serialized object, and with it a token
+// field.
+//
+// A token field exists only inside an object, and an object needs a `{`. That
+// byte reaches an unparseable string in exactly two spellings: literally, or
+// escaped for a serialization layer this decode did not unwrap — `{`, or a
+// `{` behind further backslashes. A backslash is the only way to write the
+// second, so `{` and `\` together close the set: a string holding neither cannot
+// name a token field however many times it is re-parsed, and survives
+// byte-exact. That keeps ordinary diagnostics — "[INFO] connection failed",
+// "quota exceeded", `he said "token": no` — readable in the error.
+//
+// The inverse is deliberately blunt. Once a rejected string does hold an object
+// opener, this replaces the whole string instead of hunting for the token field
+// inside it. That hunt is the open-ended half of the JSON grammar — escapes,
+// truncation, raw controls, duplicate members, comments, recovery after a syntax
+// error — and each round of hardening it received answered one spelling while
+// leaving the next one reachable. Absence of evidence is not the property a
+// redaction boundary can be built on, so the boundary is drawn where the parser
+// stops instead: over-redacting a brace-bearing diagnostic costs a line of
+// context, and under-redacting one persists a credential.
+func hookStringMayCarrySerializedObject(value string) bool {
+	return strings.ContainsAny(value, `{\`)
 }

@@ -64,7 +64,7 @@ anything. Do not proxy this socket to a network interface.
     To drive the daemon from a **different host** — a remote TUI, or the
     browser web client — don't proxy this socket. SSH to the host and run `af`
     there, or expose the HTTP+token TCP listener to the network (it's on by
-    default on loopback; point `listen_addr` at a routable host:port). The
+    default on loopback; point `network.listen_addr` at a routable host:port). The
     listener is plain HTTP — front it with a TLS-terminating proxy or a private
     network. Both are covered in [Remote daemon access](remote-http-auth.md).
 
@@ -203,6 +203,14 @@ unspecified field — and the scheduler-owned fields — as-stored, so a single-
 edit cannot clobber a concurrent edit another client made (#1700). See
 [tasks.md](tasks.md) for the task shape.
 
+`Snapshot` accepts additive list filters in the request body: `live: true`
+excludes archived sessions; `statuses` is an array of lifecycle names
+(`running`, `ready`, `lost`, `dead`, `archived`, or `limit-reached`) matched as
+OR alternatives; `created_after` is an RFC 3339 creation-time lower bound; and
+`limit` is a positive maximum row count. These filters compose, run after
+`repo_id` scoping, and are applied by the daemon before the response is encoded.
+Omitting all four preserves the complete response and its existing stable order.
+
 `UpdateTask`, `RemoveTask`, and `TriggerTask` also accept an optional `expect`
 object — `{ "enforce": true, "project_path": "/repos/alpha" }` — asserting the
 project the task was bound to when the caller authorized it. The daemon
@@ -212,6 +220,53 @@ checks scope in one request and mutates in another cannot act on a task that
 moved projects in between. Omitting `expect` (or sending `enforce: false`) skips
 the check, which is what a caller with no project context does — existing
 clients are unaffected.
+
+### Session idle diagnosis
+
+The `<session>` objects above mirror `af sessions list` output. Two of their
+fields carry the daemon's **idle diagnosis** (#3168, #3175) and deserve a
+contract statement, because reading more into them than they promise is exactly
+the mistake they were designed to prevent:
+
+**`idle_reason`** (string, omitted when no reason is established) — the daemon's
+mechanically established explanation for why a session is not doing visible
+work. The vocabulary is closed:
+
+| Value | The daemon observed |
+|-------|---------------------|
+| `usage-limit` | The session is parked at a [usage-limit wall](usage-limits.md). |
+| `process-exited` | The agent process is gone — the row's liveness is Lost or Dead. |
+| `restore-gave-up` | The process is gone and automatic Lost-session recovery exhausted its attempt budget. See `lost_restore_failure` below. |
+| `recreate-pending` | A recognized recreate notice is waiting, unacknowledged, on the root session. |
+| `prompt-not-delivered` | The last prompt send observed that the prompt did not arrive. |
+| `delivery-unconfirmed` | The last send ended `sent-unverified` or `could-not-confirm` (uncertainty, not failure — see `SendPrompt` above), and no pane change has been observed since. |
+| `no-pane-change-since-delivery` | The last prompt was delivered, and the pane has not changed since. |
+| `settled-after-pane-change` | The row settled back to Ready, and the pane changed *after* the last prompt attempt. When later churn resolves an unconfirmed send, this is all af reports — it never retroactively claims delivery (#3162). |
+
+**`lost_restore_failure`** (object, omitted unless automatic recovery gave up) —
+the durable terminal restore result: `{ "attempts": 6, "error": "..." }`. The
+session remains Lost, and the daemon does not automatically retry it again. An
+explicit restore remains available; a successful runtime replacement clears the
+field. Because it is stored on the session record, daemon restarts and the TUI,
+web, and HTTP clients retain the same last error.
+
+**`last_pane_churn_at`** (RFC 3339 timestamp, omitted when no churn is on
+record) — when the daemon last observed the session's pane **render different
+bytes**. The evidence is cleared when the agent process is replaced, so a
+retired process's output is never attributed to its successor.
+
+**No value in this vocabulary means "the task finished" — and none means "asked
+a question" or "wedged".** The daemon observes pane churn (bytes changing in a
+terminal) and prompt-delivery evidence, not the meaning of the agent's output. A
+completed task, a question waiting for your answer, and a stuck agent can render
+exactly alike, so af reports the observation — `settled-after-pane-change` —
+and leaves the interpretation to you: read the pane. An absent `idle_reason` is
+likewise "no reason established" (the row is working, an operation is in flight,
+or there is no delivery evidence yet), not "all clear".
+
+The vocabulary can grow. Treat an unknown value as no reason — the TUI and web
+rows render no idle-reason label for values they don't know, so an older client
+never mislabels a newer daemon's observation.
 
 ## Examples
 

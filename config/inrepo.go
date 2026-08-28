@@ -315,6 +315,9 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	for key := range metadata.shape {
 		presentKeys[key] = true
 	}
+	if key, present := globalOnlyGroupedAliasInShape(metadata.shape); present {
+		return nil, nil, fmt.Errorf("in-repo config %s: %q is a global setting and cannot be set per-repo; move it to %s and remove it from this file", prettyPath, key, tomlGlobalConfigLocation)
+	}
 	for key := range presentKeys {
 		if inRepoGlobalOnlyKeys[key] {
 			// TOML-only global keys (the [keys] keymap, #1026) must point at
@@ -342,7 +345,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 
 	var cfg InRepoConfig
 	if isToml {
-		if err := toml.Unmarshal(data, &cfg); err != nil {
+		if err := toml.Unmarshal(stripUTF8BOM(data), &cfg); err != nil {
 			return nil, nil, tomlParseError("in-repo config "+prettyPath, err)
 		}
 	} else {
@@ -585,6 +588,7 @@ func SaveInRepoPostWorktreeCommands(repoRoot string, commands []string) error {
 	if err != nil {
 		return err
 	}
+	data = stripUTF8BOM(data)
 	if commands == nil {
 		commands = []string{}
 	}

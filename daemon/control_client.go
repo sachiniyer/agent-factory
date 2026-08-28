@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/rpc"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -368,13 +369,171 @@ func RequestApplyConfig() (ApplyConfigResponse, error) {
 	return resp, err
 }
 
+// SetGlobalConfigValue writes one global config key through a running daemon's
+// SetConfigValue — the same admission-gated handler the web form posts to — so
+// every first-class save surface consults the same lifecycle predicate
+// (upgrade probation, quiescing) and a refusal lands BEFORE anything reaches
+// disk (#3231). The daemon applies an accepted write to itself in place and
+// reports the per-key effect notice, so callers echo its answer rather than
+// computing their own.
+//
+// With no daemon answering the control socket it falls back to the direct
+// local write (config.SetGlobalConfigValue) — `af config set` must keep
+// working with the daemon stopped. The fallback is decided by the DIAL, never
+// by the daemon's answer: once a daemon has answered, an error (validation or
+// admission refusal) is final, because writing locally after a refusal would
+// reopen exactly the split #3231 closes. It never STARTS a daemon, like
+// RequestApplyConfig.
+func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
+	var resp SetConfigValueResponse
+	if socketPath, err := DaemonSocketPath(); err == nil {
+		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
+			client := rpc.NewClient(conn)
+			defer client.Close()
+			// The flat alias is the version-skew wire spelling: an older daemon's
+			// SetConfigValue allowlist predates the grouped TOML name, while a new
+			// daemon canonicalizes the same alias before writing. Normalize its
+			// echo so new callers always see the canonical public key.
+			wireKey := config.LegacyConfigKey(key)
+			callErr := client.Call(controlServiceName+".SetConfigValue",
+				SetConfigValueRequest{Key: wireKey, Value: value}, &resp)
+			if callErr == nil && resp.Result != nil {
+				resp.Result.Key = config.CanonicalConfigKey(resp.Result.Key)
+			}
+			if callErr == nil || !isRPCMethodMissing(callErr) {
+				return resp, callErr
+			}
+			// A daemon old enough to lack SetConfigValue (pre-#1960) expects its
+			// clients to write locally and poke ApplyConfig; fall through to that
+			// sequence. Skew-only — delete once the oldest supported daemon
+			// serves SetConfigValue.
+		}
+	}
+	// A failed dial does not prove "no upgrade in flight": the hand-off leaves a
+	// window with NO daemon on the socket — the quiescing daemon has exited and
+	// the committed candidate has not bound yet — and a local write landing there
+	// bypasses the very admission this function exists to consult, mutating
+	// config after the candidate validated (and loaded) it. The durable upgrade
+	// journal covers that window; consult it exactly as EnsureDaemon does, and
+	// refuse the fallback only while a forward upgrade or rollback restore is
+	// provably live (fail-open otherwise — a bad journal must not wedge
+	// `af config set`, same doctrine as the launch path).
+	if homeDir, ok := configHomeDir(); ok {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress:
+			return SetConfigValueResponse{}, fmt.Errorf(
+				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
+		case upgradeGateRestoringPrevious:
+			return SetConfigValueResponse{}, fmt.Errorf(
+				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
+		}
+	}
+	result, err := config.SetGlobalConfigValue(key, value)
+	if err != nil {
+		return SetConfigValueResponse{}, err
+	}
+	resp = SetConfigValueResponse{Result: result}
+	applyResp, applyErr := RequestApplyConfig()
+	applied := applyErr == nil
+	if applied {
+		resp.Applied = applyResp.Applied
+		resp.Pending = applyResp.Pending
+		resp.Warnings = applyResp.Warnings
+	}
+	// Mirror the notice logic of controlServer.SetConfigValue: a socket key whose
+	// live rebind failed did not apply, so it reports deferred, not applied.
+	if applied && slices.Contains(applyResp.FailedListenerKeys, result.Key) {
+		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
+	} else {
+		resp.RestartNotice = config.EffectNotice(result.Key, applied)
+	}
+	return resp, nil
+}
+
+// UnsetGlobalConfigValue routes a global alias removal through a running
+// daemon's mutation-admission gate. With no daemon it performs the same locked
+// local edit and best-effort live apply used by SetGlobalConfigValue.
+func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
+	var resp UnsetConfigValueResponse
+	if socketPath, err := DaemonSocketPath(); err == nil {
+		if conn, dialErr := net.DialTimeout("unix", socketPath, daemonDialTimeout); dialErr == nil {
+			client := rpc.NewClient(conn)
+			defer client.Close()
+			callErr := client.Call(controlServiceName+".UnsetConfigValue",
+				UnsetConfigValueRequest{Key: key}, &resp)
+			if callErr == nil || !isRPCMethodMissing(callErr) {
+				return resp, callErr
+			}
+		}
+	}
+	if homeDir, ok := configHomeDir(); ok {
+		switch decision, gateErr := checkUpgradeGate(homeDir, false); decision {
+		case upgradeGateInProgress:
+			return UnsetConfigValueResponse{}, fmt.Errorf(
+				"config change refused during daemon upgrade handoff: %w; retry after the upgrade finishes", gateErr)
+		case upgradeGateRestoringPrevious:
+			return UnsetConfigValueResponse{}, fmt.Errorf(
+				"config change refused while rollback restores the previous daemon: %w; retry after rollback recovery finishes", gateErr)
+		}
+	}
+	result, err := config.UnsetGlobalConfigValue(key)
+	if err != nil {
+		return UnsetConfigValueResponse{}, err
+	}
+	resp.Result = result
+	applyResp, applyErr := RequestApplyConfig()
+	applied := applyErr == nil
+	if applied {
+		resp.Applied = applyResp.Applied
+		resp.Pending = applyResp.Pending
+		resp.Warnings = applyResp.Warnings
+	}
+	resp.RestartNotice = config.EffectNotice(result.Key, applied)
+	return resp, nil
+}
+
+// isRPCMethodMissing reports whether a net/rpc call failed because the serving
+// daemon does not register the method at all — the version-skew case, distinct
+// from a handler that ran and refused. net/rpc flattens both into
+// rpc.ServerError, so the stable "can't find" prefixes are the only signal.
+func isRPCMethodMissing(err error) bool {
+	var srv rpc.ServerError
+	if !errors.As(err, &srv) {
+		return false
+	}
+	return strings.HasPrefix(string(srv), "rpc: can't find method") ||
+		strings.HasPrefix(string(srv), "rpc: can't find service")
+}
+
+// RequestApplyTheme asks a RUNNING daemon to reload only the palette. Like the
+// full apply path it never starts a daemon; a later daemon start reads the file.
+// No daemon and a pre-ApplyTheme daemon are therefore benign. Once a daemon
+// answers the socket, however, its refusal is final: ping distinguishes that
+// active answer from absence so the caller cannot mount a TUI with a palette
+// newer than the one the daemon is still serving to web clients.
+func RequestApplyTheme() (ApplyThemeResponse, error) {
+	var resp ApplyThemeResponse
+	err := callDaemonNoEnsure("ApplyTheme", ApplyThemeRequest{}, &resp)
+	if err == nil || isRPCMethodMissing(err) {
+		return resp, nil
+	}
+	if _, pingErr := pingDaemonResponse(); pingErr != nil {
+		return resp, nil
+	}
+	return resp, err
+}
+
 // CreateSession asks the daemon to create, start, and persist a session.
 func CreateSession(req CreateSessionRequest) (*session.InstanceData, error) {
 	var resp CreateSessionResponse
-	if err := callDaemon("CreateSession", req, &resp); err != nil {
+	err := callDaemon("CreateSession", req, &resp)
+	// callDaemon classifies the committed outcome generically; keep the payload
+	// on that path — a retained failed create (#3233) still has a durable row
+	// the CLI may need to report. Only a clean failure has nothing to return.
+	if err != nil && !isMutationCommitted(err) {
 		return nil, err
 	}
-	return &resp.Instance, nil
+	return &resp.Instance, err
 }
 
 // ListBackends asks the daemon which runtimes a create against req.RepoPath may
@@ -400,10 +559,15 @@ func ListBackends(req ListBackendsRequest) (ListBackendsResponse, error) {
 // together with its resolved and tmux names across the gob transport.
 func CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 	var resp CreateTabResponse
-	if err := callDaemon("CreateTab", req, &resp); err != nil {
+	err := callDaemon("CreateTab", req, &resp)
+	// callDaemon classifies the committed outcome generically; keep the payload
+	// on that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the CLI must report so the survivor
+	// can be targeted. Only a clean failure has nothing to return.
+	if err != nil && !isMutationCommitted(err) {
 		return CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab on an existing session and
@@ -440,8 +604,9 @@ func ReorderTab(req ReorderTabRequest) (string, int, error) {
 }
 
 // The TUI's control + read path moved onto the HTTP apiclient in #1592 Phase 2
-// PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo,
-// PauseStatusPoll, ResumeStatusPoll (here) and ResumeFromLimit /
+// PR3, so the net/rpc client wrappers only the TUI called — SetPRInfo (later
+// replaced by HTTP RefreshPRInfo in #3296), PauseStatusPoll, ResumeStatusPoll
+// (here) and ResumeFromLimit /
 // SnapshotWithAlarms (in limit.go / snapshot.go) — are gone.
 // The controlServer handlers stay: the gob control socket still SERVES every
 // verb for CLI/internal callers; only the TUI-only Go client wrappers were

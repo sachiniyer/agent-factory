@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
@@ -111,6 +112,37 @@ func probeSession(cmdExec cmd.Executor, name string) (exists bool, known bool) {
 	// tmux answered: the usual `has-session` exit 1 for "no such session", or any
 	// other error, which this probe has always conflated with absence.
 	return false, true
+}
+
+// recoveryWindowObserver is notified when a vanished-session recovery's bounded
+// GRACE WAIT opens and closes. Production leaves it nil, so this costs one nil
+// check per wait.
+//
+// It exists because concurrency here can only be inferred from the OUTSIDE by
+// timing the whole sweep, and that inference makes the machine the judge. The
+// concurrent floor is two grace waits; three sessions' real tmux and /proc work
+// sits on top of it, so on a loaded runner a perfectly concurrent
+// implementation blows any bound tight enough to also catch a serial one — the
+// #3439 flake class, measured failing 8 runs out of 8 at load 75. Overlapping
+// waits ARE the property, so the regression observes them directly instead
+// (see TestCleanupSessionsRecoversVanishedSessionsConcurrently).
+//
+// It brackets the WAIT rather than the worker goroutine on purpose. Launching
+// the workers together is not the property: a recovery that serialized its
+// grace waits behind a shared mutex or semaphore would still let every worker
+// start, so an observer at the top of the goroutine would record full overlap
+// while reset latency grew by a grace period per session again — the very
+// regression this test exists to catch.
+var recoveryWindowObserver func(match string, entered bool)
+
+// observeOrphanAncestryObserved is observeOrphanAncestry with the bounded grace
+// wait bracketed for recoveryWindowObserver.
+func observeOrphanAncestryObserved(captured []proctree.Process, match string, wait time.Duration) ([]proctree.Process, error) {
+	if observer := recoveryWindowObserver; observer != nil {
+		observer(match, true)
+		defer observer(match, false)
+	}
+	return observeOrphanAncestry(captured, match, wait)
 }
 
 // probeSessionStrict is the non-lossy existence probe for CleanupSessions'
@@ -549,8 +581,14 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// home's sweep.
 	preMarkerProcesses := make(map[string][]proctree.Process, len(prefixed))
 	preMarkerCaptureErrs := make(map[string]error, len(prefixed))
+	preMarkerGenerations := make(map[string]orphanGenerationSet, len(prefixed))
 	for _, match := range prefixed {
 		preMarkerProcesses[match], preMarkerCaptureErrs[match] = captureSessionProcessTrees(cmdExec, match)
+		// Retain the generation while the captured pane tree is still alive.
+		// Waiting until a vanished-session recovery begins may be too late to
+		// read its immutable environment, especially when a helper starts after
+		// this snapshot and the pane root then exits (#3309 review).
+		preMarkerGenerations[match] = orphanGenerations(preMarkerProcesses[match], match)
 		if errors.Is(preMarkerCaptureErrs[match], ErrTmuxTimeout) {
 			// The server is already known to be wedged. Do not launch the
 			// ownership probe against it and pay another full timeout for an
@@ -585,7 +623,8 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			// reaper, so the absent branch performs an ownership-scoped process sweep.
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
-				if reapErr := reapVanishedSessionProcesses(match, ownHome, preMarkerProcesses[match], preMarkerCaptureErrs[match]); reapErr != nil {
+				if reapErr := reapVanishedSessionProcessCohort(match, ownHome, preMarkerProcesses[match],
+					preMarkerCaptureErrs[match], preMarkerGenerations[match]); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -642,6 +681,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 				markerCandidates:   preMarkerProcesses[match],
 				markerCaptureError: preMarkerCaptureErrs[match],
 				captureError:       captureErr,
+				generations:        preMarkerGenerations[match],
 			})
 			continue
 		}
@@ -736,6 +776,7 @@ type vanishedSessionRecovery struct {
 	markerCandidates   []proctree.Process
 	markerCaptureError error
 	captureError       error
+	generations        orphanGenerationSet
 }
 
 func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome string) error {
@@ -747,23 +788,49 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 	candidates := make([]proctree.Process, 0, len(recovery.markerCandidates)+len(recovery.verifiedProcesses))
 	candidates = append(candidates, recovery.markerCandidates...)
 	candidates = append(candidates, recovery.verifiedProcesses...)
-	return reapVanishedSessionProcesses(recovery.match, ownHome, candidates, recovery.markerCaptureError)
+	return reapVanishedSessionProcessCohort(recovery.match, ownHome, candidates,
+		recovery.markerCaptureError, recovery.generations)
 }
 
 func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
+	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,
+		orphanGenerations(candidates, match))
+}
+
+func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
+	generations orphanGenerationSet,
+) error {
 	var sweepErr error
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
 	}
+	// Establish the generation cohort once, before the grace window opens, from
+	// captured predecessor evidence. A blind recovery cannot manufacture that
+	// identity from a post-absence marker scan: the first process it finds may be
+	// a same-named replacement. In that case inspect only to distinguish harmless
+	// foreign-home processes from a local or unattributable occupant, then refuse
+	// without signalling anything (#3309 review).
+	if generations.empty() {
+		blindCandidates, refreshErr := refreshOrphanCandidates(candidates, match, nil)
+		_, inspectErr := markedOrphanProcesses(blindCandidates, match, ownHome, generations)
+		return errors.Join(sweepErr, refreshErr, inspectErr)
+	}
+	initialCandidates, initialErr := refreshOrphanCandidates(candidates, match, &generations)
+	sweepErr = errors.Join(sweepErr, initialErr)
+	candidates = initialCandidates
 	// Two refresh/reap passes cover a helper that appears after the pre-marker
 	// snapshot and a child it forks during the first bounded grace period. A
 	// final non-destructive refresh below is the evidence that cleanup finished.
-	for range 2 {
-		refreshed, beforeErr := refreshOrphanCandidates(candidates, match)
-		observed, observeErr := observeOrphanAncestry(refreshed, match, reapGraceWait)
-		refreshed, afterErr := refreshOrphanCandidates(observed, match)
+	for pass := range 2 {
+		refreshed := candidates
+		var beforeErr error
+		if pass > 0 {
+			refreshed, beforeErr = refreshOrphanCandidates(candidates, match, &generations)
+		}
+		observed, observeErr := observeOrphanAncestryObserved(refreshed, match, reapGraceWait)
+		refreshed, afterErr := refreshOrphanCandidates(observed, match, &generations)
 		sweepErr = errors.Join(sweepErr, beforeErr, observeErr, afterErr)
-		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome)
+		marked, inspectErr := markedOrphanProcesses(refreshed, match, ownHome, generations)
 		sweepErr = errors.Join(sweepErr, inspectErr)
 		// The tmux session is GONE and these processes are still alive carrying its
 		// ownership markers: they outlived the pane tree that was supposed to
@@ -779,8 +846,8 @@ func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.P
 		}
 		candidates = refreshed
 	}
-	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match)
-	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome)
+	finalCandidates, refreshErr := refreshOrphanCandidates(candidates, match, &generations)
+	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	if len(left) > 0 {
 		pids := make([]string, 0, len(left))

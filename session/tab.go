@@ -60,12 +60,6 @@ const vscodeTabName = "vscode"
 // which a rename decouples from the tab's current name.
 const tmuxTabSeparator = "__"
 
-// shellTmuxSuffix extends an instance's agent tmux session name to derive its
-// shell tab's session name (e.g. af_<repoHash>_<title>__shell). Deterministic
-// so the shell session is collision-free across instances and restorable by
-// exact name across a restart.
-const shellTmuxSuffix = tmuxTabSeparator + shellTabName
-
 // There is deliberately no cap on tabs per instance (#3023).
 //
 // #930 PR 4 set one at 9 to match the 1-9 number-key jump range, so every tab was
@@ -77,11 +71,10 @@ const shellTmuxSuffix = tmuxTabSeparator + shellTabName
 // Anything that renders a roster therefore has to cope with an arbitrary count
 // rather than assume it fits — see the web tab bar, which scrolls.
 
-// TabKind enumerates the kinds of process a Tab can host within an instance's
-// worktree. PR 1 of the #930 ephemeral-tabs epic only materializes the Agent
-// kind (the single per-instance agent session); Shell and Process are defined
-// here so later PRs can add the human-spawned terminal tab and CLI-spawned
-// process tabs without reshaping the type. See issue #930.
+// TabKind enumerates the categories of roster entry a Tab can be (the #930
+// ephemeral-tabs epic). Not every kind owns a process: web tabs have none, and
+// a VS Code tab references a session-shared daemon-managed one — see HasTmux
+// and TabKindRequires.
 type TabKind int
 
 const (
@@ -89,11 +82,11 @@ const (
 	// system-prompt injection and trust-prompt handling. Exactly one
 	// per instance today, at Tabs[0].
 	TabKindAgent TabKind = iota
-	// TabKindShell is a plain $SHELL session in the worktree (the future
-	// human-spawned terminal tab). Not created in PR 1.
+	// TabKindShell is a plain $SHELL session in the worktree — the
+	// human-spawned terminal tab (spawned via tab_spawn.go).
 	TabKindShell
-	// TabKindProcess runs an arbitrary command in the worktree (the future
-	// CLI-spawned tab). Not created in PR 1.
+	// TabKindProcess runs an arbitrary command in the worktree — the
+	// CLI-spawned tab (spawned via tab_spawn.go).
 	TabKindProcess
 	// TabKindWeb is a URL/iframe tab: it has NO tmux PTY and no process. It
 	// carries a target URL (a loopback dev-server address the daemon
@@ -187,12 +180,12 @@ func TabKindRequires(kind TabKind) TabKindNeed {
 	}
 }
 
-// Tab is one process running in an instance's worktree, backed by a single tmux
-// session. It is an internal wrapper introduced in PR 1 of #930: an instance
-// holds exactly one Agent tab that wraps today's single tmux session, and the
-// instance's tmux-touching methods route through it. Tab lifecycle
-// (create/close) and per-tab persistence land in later PRs; PR 1 keeps the
-// on-disk format and all behavior unchanged.
+// Tab is one slot in an instance's tab roster (#930): the Agent tab at Tabs[0]
+// and any shell/process tabs each run a process backed by their own tmux
+// session, while web and VS Code tabs carry no tmux PTY (TabKind.HasTmux). The
+// instance's tmux-touching methods route through it; lifecycle lives in
+// tab_spawn.go (create) and tab_close.go (close), and each tab persists as a
+// TabData record (storage.go).
 type Tab struct {
 	// ID is the tab's stable identity (#1738), minted at creation and persisted.
 	// It is the collision-proof key streams and pane bindings address the tab by —

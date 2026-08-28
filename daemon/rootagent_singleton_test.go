@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -172,6 +175,345 @@ func TestEnsureRootAgentsPersonalDisablesLegacyRoot(t *testing.T) {
 	}
 	if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
 		t.Fatalf("repoRootAgentWillMaterialize must be false for a personal-disabled root — a send-prompt must not wait for a root that will never come")
+	}
+}
+
+// makePersonalRootAgentUnreadable revokes read permission on a registered
+// project's personal config file, so LoadProjectConfig fails with EACCES
+// instead of reporting an absent layer. It skips — never silently passes —
+// where the fixture cannot exist: under root, and on mounts that do not
+// enforce permission bits, both proven by an actual probe read after the
+// chmod (the worktree_copy_link_unreadable_test.go idiom). Without the probe
+// the fixture would be a readable enabled=false, which produces the same
+// assertions' outcome through the ordinary personal-disable path and turns
+// the regression test into a silent no-op.
+func makePersonalRootAgentUnreadable(t *testing.T, projectID string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0o000 does not make a file unreadable")
+	}
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod personal config unreadable: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(path, 0o644)
+	})
+	if _, err := os.ReadFile(path); err == nil {
+		t.Skip("environment does not enforce file permission bits; the unreadable fixture cannot exist here")
+	}
+}
+
+// breakPersonalRootAgentToml overwrites a registered project's personal config
+// with syntactically invalid TOML, so LoadProjectConfig fails at parse — the
+// portable member of the #3241 failure class: no chmod, no skips, it runs on
+// every platform and runner.
+func breakPersonalRootAgentToml(t *testing.T, projectID string) {
+	t.Helper()
+	path, err := config.ProjectConfigTomlPath(projectID)
+	if err != nil {
+		t.Fatalf("ProjectConfigTomlPath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("[root_agent]\nenabled = tru\n"), 0o644); err != nil {
+		t.Fatalf("write malformed personal config: %v", err)
+	}
+}
+
+// TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed is the #3241
+// regression, across the LoadProjectConfig failure class and both
+// lower-precedence enables. In every case the personal config held
+// `enabled = false` and then became unloadable — unreadable permissions, or
+// TOML that no longer parses — and the daemon must fail CLOSED: collapsing the
+// failed load into "no personal layer" let the lower enable start a root the
+// user deliberately disabled. The decision is unknown, and unknown is not
+// permission. (Commit 1 of this PR carried the unreadable cases standalone;
+// CI showed them red against the unfixed code with `got 1 creates`.)
+func TestEnsureRootAgentsUnloadablePersonalConfigFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		// corrupt makes the personal config unloadable after the disable was
+		// written (it may skip where its fixture cannot exist).
+		corrupt func(t *testing.T, projectID string)
+		// managerConfig supplies the lower-precedence enable that must not win.
+		managerConfig func(t *testing.T, repoPath string) *config.Config
+	}{
+		{
+			name:    "unreadable file under a legacy enable",
+			corrupt: makePersonalRootAgentUnreadable,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			name:    "unreadable file under a global enable",
+			corrupt: makePersonalRootAgentUnreadable,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return loadGlobalConfigWithRootAgent(t, "enabled = true")
+			},
+		},
+		{
+			name:    "unparseable TOML under a legacy enable",
+			corrupt: breakPersonalRootAgentToml,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			// The portable case for the SINGLETON sweep: on root runners both
+			// chmod cases skip, and without this row the
+			// ensureSingletonRootAgent arm of the gate would go untested there.
+			name:    "unparseable TOML under a global enable",
+			corrupt: breakPersonalRootAgentToml,
+			managerConfig: func(t *testing.T, repoPath string) *config.Config {
+				return loadGlobalConfigWithRootAgent(t, "enabled = true")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			project := registerTestProject(t, repoPath)
+			writePersonalRootAgent(t, project.ID, "enabled = false")
+			tc.corrupt(t, project.ID)
+
+			// The fail-closed WARNING fires from the snapshot inside NewManager,
+			// so the capture goes in first (httpserver_test.go idiom).
+			var warnings bytes.Buffer
+			prevWarning := log.WarningLog.Writer()
+			log.WarningLog.SetOutput(&warnings)
+			t.Cleanup(func() { log.WarningLog.SetOutput(prevWarning) })
+
+			manager, err := NewManager(tc.managerConfig(t, repoPath))
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != 0 {
+				t.Fatalf("an unloadable personal config must fail closed, got %d creates — a failed load is not an absent enabled=false", len(*seen))
+			}
+			if findRootInstance(t, manager, repoPath) != nil {
+				t.Fatalf("no root instance may exist while the personal config is unloadable")
+			}
+			if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+				t.Fatalf("repoRootAgentWillMaterialize must be false while the personal config is unloadable — a delivery must not wait for a root the ensure loop will not create")
+			}
+			if got := warnings.String(); !strings.Contains(got, "failing closed") || !strings.Contains(got, project.ID) {
+				t.Fatalf("the snapshot must warn that project %s fails closed; warnings were:\n%s", project.ID, got)
+			}
+		})
+	}
+}
+
+// breakProjectRegistryEnumeration makes the registry fail at ENUMERATION on
+// every platform and runner: the registry path becomes a regular file, so
+// os.ReadDir fails with ENOTDIR — no permission bits involved. Enumeration
+// failure is the one registry failure that stays machine-wide fail-closed
+// after the #3297 granularity split (a bad RECORD suppresses only itself).
+// Existing records are set aside and restored by the returned repair func,
+// which is the heal tests' "registry repaired mid-run" transition. Both the
+// break and the repair are probe-proven, so the fixture can never silently
+// no-op.
+func breakProjectRegistryEnumeration(t *testing.T) (repair func()) {
+	t.Helper()
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir project registry: %v", err)
+	}
+	aside := dir + ".aside"
+	if err := os.Rename(dir, aside); err != nil {
+		t.Fatalf("set registry aside: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write registry-path file: %v", err)
+	}
+	if _, err := config.ListProjects(); err == nil {
+		t.Fatalf("fixture failed: ListProjects still succeeds with the registry path not a directory")
+	}
+	return func() {
+		if err := os.Remove(dir); err != nil {
+			t.Fatalf("remove registry-path file: %v", err)
+		}
+		if err := os.Rename(aside, dir); err != nil {
+			t.Fatalf("restore registry: %v", err)
+		}
+		if _, err := config.ListProjects(); err != nil {
+			t.Fatalf("fixture repair failed: ListProjects still errors: %v", err)
+		}
+	}
+}
+
+// TestEnsureRootAgentsUnlistableRegistryFailsClosed is the #3247 ListProjects
+// arm. The registry is the only index of the personal configs that hold the
+// highest-precedence enabled=false, so when it cannot be listed at daemon
+// start NO repo can be proven un-disabled and no root agent may start —
+// legacy-only entries included. The unfixed early return dropped only the
+// singleton layers: fail-closed for singleton-enabled roots, fail-open for
+// singleton-DISABLED ones, because the legacy sweep kept ensuring with no
+// personal layer at all.
+func TestEnsureRootAgentsUnlistableRegistryFailsClosed(t *testing.T) {
+	cases := []struct {
+		name string
+		// setup lays down project state before the registry is corrupted and
+		// returns the manager config carrying the legacy enable.
+		setup func(t *testing.T, repoPath string) *config.Config
+	}{
+		{
+			// The headline regression: the personal disable sits readable on
+			// disk; only the registry that would have NAMED it does not list.
+			name: "registered personal disable under a legacy enable",
+			setup: func(t *testing.T, repoPath string) *config.Config {
+				project := registerTestProject(t, repoPath)
+				writePersonalRootAgent(t, project.ID, "enabled = false")
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+		{
+			// The blast-radius case the issue scopes deliberately: a legacy-only
+			// root with no registration is suppressed too, because an unlistable
+			// registry means "there may be a project record with a disable we
+			// cannot see" — for every repo.
+			name: "legacy-only entry",
+			setup: func(t *testing.T, repoPath string) *config.Config {
+				return rootTestConfig(repoPath, config.RootAgentConfig{})
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			cfg := tc.setup(t, repoPath)
+			breakProjectRegistryEnumeration(t)
+
+			// The fail-closed ERROR fires from the snapshot inside NewManager,
+			// so the capture goes in first (httpserver_test.go idiom).
+			var errorLog bytes.Buffer
+			prevError := log.ErrorLog.Writer()
+			log.ErrorLog.SetOutput(&errorLog)
+			t.Cleanup(func() { log.ErrorLog.SetOutput(prevError) })
+
+			manager, err := NewManager(cfg)
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != 0 {
+				t.Fatalf("an unlistable project registry must fail every root agent closed, got %d creates — the registry is the only index of personal disables", len(*seen))
+			}
+			if findRootInstance(t, manager, repoPath) != nil {
+				t.Fatalf("no root instance may exist while the project registry is unlistable")
+			}
+			if manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) {
+				t.Fatalf("repoRootAgentWillMaterialize must be false while the project registry is unlistable — a delivery must not wait for a root the ensure loop will not create")
+			}
+			if got := errorLog.String(); !strings.Contains(got, config.ProjectRegistryDirName) || !strings.Contains(got, "failing closed") {
+				t.Fatalf("the snapshot must log an ERROR naming the registry and the fail-closed consequence; errors were:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer is the #3247
+// RepoFromPath arm: a registered project whose recorded root does not resolve
+// at daemon start (an absent mount, a checkout deleted and restored later)
+// must keep its personal [root_agent] layer, attributed by the recorded path —
+// whose hash IS the repo ID a checkout resolving at that path gets. The
+// unfixed code skipped the project wholesale, so the moment the path returned
+// the legacy sweep's per-tick retry (#1122) ensured the root with
+// Personal=nil, bypassing an enabled=false that sat readable in the AF home
+// the whole time.
+func TestEnsureRootAgentsUnresolvableProjectRootKeepsPersonalLayer(t *testing.T) {
+	cases := []struct {
+		name string
+		// personal is the [root_agent] body written before the root vanishes;
+		// corrupt optionally makes the file unloadable afterwards.
+		personal    string
+		corrupt     func(t *testing.T, projectID string)
+		wantCreates int
+		wantProgram string
+	}{
+		{
+			// The headline regression: a readable personal disable must win even
+			// though the repo was unresolvable when the daemon snapshotted.
+			name:        "readable personal disable",
+			personal:    "enabled = false",
+			wantCreates: 0,
+		},
+		{
+			// Fail closed composes (#3241): unloadable personal AND unresolvable
+			// root is still "decision unknown", keyed by the recorded path. The
+			// corrupt step overwrites the disable wholesale — the row proves an
+			// unparseable file fails closed regardless of what it once held, not
+			// that the disable survives corruption.
+			name:        "unloadable personal config",
+			personal:    "enabled = false",
+			corrupt:     breakPersonalRootAgentToml,
+			wantCreates: 0,
+		},
+		{
+			// Attribution is a true resolution, not a blanket refusal: a personal
+			// enable's program must reach the create verbatim. The unfixed code
+			// also creates here — but with the default profile, proving the
+			// personal layer was dropped rather than merged.
+			name:        "readable personal program",
+			personal:    "enabled = true\nprogram = \"/opt/claude --model opus\"",
+			wantCreates: 1,
+			wantProgram: "/opt/claude --model opus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			seen := installOptionsRecordingBackend(t)
+			repoPath := setupControlRepo(t)
+			project := registerTestProject(t, repoPath)
+			writePersonalRootAgent(t, project.ID, tc.personal)
+			if tc.corrupt != nil {
+				tc.corrupt(t, project.ID)
+			}
+
+			// The recorded root must NOT resolve while NewManager snapshots …
+			hidden := repoPath + ".hidden"
+			if err := os.Rename(repoPath, hidden); err != nil {
+				t.Fatalf("hide repo dir: %v", err)
+			}
+			manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+			// … and must resolve again by the time the ensure loop ticks: the
+			// mount is back, and the legacy retry sees the repo for the first time.
+			if err := os.Rename(hidden, repoPath); err != nil {
+				t.Fatalf("restore repo dir: %v", err)
+			}
+			manager.EnsureRootAgents()
+
+			if len(*seen) != tc.wantCreates {
+				t.Fatalf("want %d creates, got %d — a project unresolvable at snapshot time must keep its personal layer by recorded path", tc.wantCreates, len(*seen))
+			}
+			if tc.wantProgram != "" {
+				if len(*seen) == 0 {
+					t.Fatalf("test row error: wantProgram is set but the row expects no create, so the program could never be asserted")
+				}
+				if (*seen)[0].Program != tc.wantProgram {
+					t.Fatalf("the personal program must reach CreateSession verbatim, got %q", (*seen)[0].Program)
+				}
+			}
+			if want := tc.wantCreates == 1; manager.repoRootAgentWillMaterialize(repoID(t, repoPath)) != want {
+				t.Fatalf("repoRootAgentWillMaterialize must be %v here, agreeing with the ensure loop", want)
+			}
+		})
 	}
 }
 

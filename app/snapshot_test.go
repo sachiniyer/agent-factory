@@ -2,6 +2,8 @@ package app
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -203,6 +205,32 @@ func TestFetchSnapshotCmd_UsesFetcherSeam(t *testing.T) {
 	require.True(t, h.handleSnapshot(snap), "the fetched session is a change")
 	require.NotNil(t, findSidebarInstance(h, "viaseam"),
 		"the snapshot fetched through the seam must reconcile into the sidebar")
+}
+
+func TestFetchSnapshotCmdUsesKnownRepoIDForTaskScope(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/recorded/workspace"
+	h.repoID = "already-resolved-repo-id"
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func() ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-probed")
+	git := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(git, []byte("#!/bin/sh\n: > \"$AF_TASK_SCOPE_GIT_MARKER\"\nexit 1\n"), 0o755))
+	t.Setenv("AF_TASK_SCOPE_GIT_MARKER", marker)
+	t.Setenv("PATH", binDir)
+
+	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.tasksErr)
+	_, err := os.Stat(marker)
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"the poll already has repoID and must not rediscover its target identity through Git")
 }
 
 // TestHandleSnapshot_WarmingDaemonLeavesSidebarIntact: a warming-daemon fetch

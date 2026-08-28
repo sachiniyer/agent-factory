@@ -198,6 +198,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 		IsRoot: true, UserKilled: true, StartupStateUnknown: true,
 		Height: 40, Width: 120,
 		IdleReason:               session.IdleReasonDeliveryUnconfirmed,
+		LostRestoreFailure:       &session.LostRestoreFailure{Attempts: 6, Error: "host path failed"},
 		LastPromptAttemptAt:      time.Unix(100, 0).UTC(),
 		LastPromptDeliveryStatus: session.PromptCouldNotConfirm,
 		LastPaneChurnAt:          time.Unix(90, 0).UTC(),
@@ -240,6 +241,7 @@ func TestSandboxSafeInstanceData_WithholdsEverythingNotExplicitlyAllowed(t *test
 	assert.Equal(t, time.Unix(100, 0).UTC(), got.LastPromptAttemptAt)
 	assert.Equal(t, session.PromptCouldNotConfirm, got.LastPromptDeliveryStatus)
 	assert.Equal(t, time.Unix(90, 0).UTC(), got.LastPaneChurnAt)
+	assert.Nil(t, got.LostRestoreFailure, "restore errors can carry host paths and stay outside sandbox snapshots")
 	assert.Empty(t, got.Path, "the host's absolute repo root is the field this projection exists for")
 	assert.Empty(t, got.Worktree.WorktreePath, "the worktree carries host paths too, so the whole struct is withheld")
 }

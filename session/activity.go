@@ -43,6 +43,17 @@ const (
 // create begins, before any liveness exists and while its asynchronous
 // post-worktree hooks still run (#1892).
 //
+// VERSION SKEW IS PART OF THE CONTRACT (#3450). The record may come from a remote
+// daemon NEWER than this binary, so every axis can hold a value this build has no
+// constant for, and an unknown value is not a definite state. Each axis therefore
+// fails closed onto ActivityPending rather than guessing: any non-zero InFlightOp
+// counts as in flight, an unrecognized Liveness falls to the pending return at the
+// end, and classifyActivityByStatus defaults there too. Pending is the only safe
+// landing spot, because it is the one outcome that COMPLETES nothing — `af sessions
+// watch` keeps polling (bounded by its --timeout) and the #1892 cap keeps holding
+// the slot. Idle is the outcome that must never be reached by fallthrough: it exits
+// watch 0 and tells automation a mid-operation session is ready for review.
+//
 // The LivenessUnset branch falls back to the composed legacy Status for records
 // that predate the liveness field. That fallback is load-bearing, not vestigial:
 // LivenessForStatus maps the transient Loading/Deleting to LiveReady, so
@@ -72,11 +83,32 @@ func ClassifyActivity(data InstanceData) (Activity, string) {
 	if data.PendingHandoffMission != "" {
 		return ActivityPending, ""
 	}
-	// Any operation in flight (create, kill, archive, restore, respawn) means the session
-	// is mid-transition; wait for it to settle rather than reporting the
-	// transient composed status.
-	switch data.InFlightOp {
-	case OpCreating, OpKilling, OpArchiving, OpRestoring, OpReplacing, OpRespawning:
+	// ANY operation in flight means the session is mid-transition; wait for it to
+	// settle rather than reporting the transient composed status.
+	//
+	// Deliberately a non-zero test and NOT a switch over the ops this build knows
+	// (#3450). The set of operation values is not closed: a newer remote daemon can
+	// send one this binary has no constant for, JSON decoding accepts it, and
+	// inFlightOpFromData carries it through verbatim. An enumerated switch lets that
+	// value fall past the op axis onto a liveness field that is stale precisely
+	// BECAUSE an operation is running — and the stale value is usually LiveReady, so
+	// the answer comes back `idle`: the one verdict that makes `af sessions watch`
+	// exit 0 and releases a #1892 concurrency slot. Automation then prompts a session
+	// mid-create, and a task admits a run over its cap.
+	//
+	// Unknown must therefore resolve to pending rather than idle, and pending is the
+	// safe direction on both consumers: watch keeps polling until the op clears (its
+	// --timeout is the backstop) and the cap keeps holding the slot. Neither COMPLETES
+	// on a state this build cannot read, which is the #504 version-skew rule.
+	//
+	// Do not "tidy" this back into a switch with a default arm. There is nothing to
+	// enumerate: naming the unknown value is exactly what this build cannot do, which
+	// is why opLabel renders it as InFlightOp(%d) instead of guessing, and why
+	// classifyWatchStop in api/sessions_watch_fleet.go tests the same way. Both other
+	// axes here already fail safe — an unrecognized liveness falls to the pending
+	// return at the end of this function, and classifyActivityByStatus defaults to
+	// pending too — so an enumerated op switch was the only axis that failed open.
+	if data.InFlightOp != OpNone {
 		return ActivityPending, ""
 	}
 
@@ -143,6 +175,10 @@ type LifecycleView struct {
 	// Recoverable is the backend's Recover capability: whether a lost session can
 	// be revived in place at all.
 	Recoverable bool
+	// LostRestoreGaveUp is the durable terminal gate for automatic recovery. An
+	// explicit restore remains legal and clears this when its replacement crosses
+	// the live boundary.
+	LostRestoreGaveUp bool
 }
 
 // LifecycleView snapshots the session's lifecycle state under ONE lock. Every
@@ -175,8 +211,9 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		// same non-reentrant lock would deadlock against a queued restore writer
 		// (#2096). Resolving it here also keeps the capability in the SAME critical
 		// section as the liveness axes, so the two can never disagree.
-		Recoverable:   i.capabilitiesLocked().Recover,
-		TaskRunActive: i.taskRunActive,
+		Recoverable:       i.capabilitiesLocked().Recover,
+		LostRestoreGaveUp: i.lostRestoreFailure.valid(),
+		TaskRunActive:     i.taskRunActive,
 	}
 }
 

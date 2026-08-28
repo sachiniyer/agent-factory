@@ -25,6 +25,21 @@ export type DotKind = "ready" | "lost" | "dead" | "archived" | "limit";
  *  what makes it the key the status filter (filter.ts) partitions the rail by. */
 export type RowKind = DotKind | "working";
 
+/** The operator-level vocabulary for scanning the rail. It deliberately groups the
+ * daemon's finer mechanical reasons by the next action, while keeping Archived as a
+ * separate inactive-history bucket outside the four live-work groups. */
+export type OperatorKind = "needs-you" | "working" | "waiting-limit" | "broken" | "archived";
+
+/** Human labels shared by the rail rows and their filter. The visible words carry
+ * the state independently of color, and stay sentence case per #3220. */
+export const OPERATOR_KIND_LABELS: Record<OperatorKind, string> = {
+  "needs-you": "Needs you",
+  working: "Working",
+  "waiting-limit": "Waiting on a limit",
+  broken: "Broken",
+  archived: "Archived",
+};
+
 /** The one-word state labels, keyed by RowKind. Single source of truth: the row's
  *  own aria/title label (rowStatus) and the filter menu's checkbox labels both read
  *  this map, so the two surfaces cannot drift into calling the same state different
@@ -53,6 +68,7 @@ export interface RowStatus {
 const IDLE_REASON_LABELS: Record<IdleReason, string> = {
   "usage-limit": "usage limit",
   "process-exited": "process exited",
+  "restore-gave-up": "restore gave up",
   "recreate-pending": "recreate notice pending",
   "prompt-not-delivered": "prompt not delivered",
   "delivery-unconfirmed": "delivery unknown",
@@ -68,6 +84,13 @@ export function idleReasonDetail(s: SessionData, now: Date = new Date()): string
     return "";
   }
   let detail = label;
+  if (s.idle_reason === "restore-gave-up" && s.lost_restore_failure) {
+    const { attempts, error } = s.lost_restore_failure;
+    if (Number.isInteger(attempts) && attempts > 0 && error.trim() !== "") {
+      const noun = attempts === 1 ? "attempt" : "attempts";
+      detail = `restore gave up after ${attempts} ${noun}: ${error}`;
+    }
+  }
   if (s.last_pane_churn_at) {
     const churn = new Date(s.last_pane_churn_at);
     if (!Number.isNaN(churn.getTime())) {
@@ -148,6 +171,34 @@ export function isCreating(s: SessionData): boolean {
  */
 export function rowKind(s: SessionData): RowKind {
   return rowStatus(s).kind ?? "working";
+}
+
+/** Groups liveness + idle_reason by what the operator should do next.
+ *
+ * In-flight work wins over stale evidence because rowStatus applies that daemon
+ * overlay first. A positive non-delivery result is broken even though its process
+ * is Ready; uncertainty remains Needs you rather than being mislabeled as failure.
+ * Unknown future idle reasons fall back to the mechanically established liveness. */
+export function operatorKind(s: SessionData): OperatorKind {
+  const displayed = rowKind(s);
+  if (displayed === "working") {
+    return "working";
+  }
+  if (displayed === "archived") {
+    return "archived";
+  }
+  if (displayed === "limit" || s.idle_reason === "usage-limit") {
+    return "waiting-limit";
+  }
+  if (
+    displayed === "lost" ||
+    displayed === "dead" ||
+    s.idle_reason === "process-exited" ||
+    s.idle_reason === "prompt-not-delivered"
+  ) {
+    return "broken";
+  }
+  return "needs-you";
 }
 
 /** The daemon always emits `liveness`; this only guards a pre-#1195 record by
@@ -238,6 +289,31 @@ export function isLimitReached(s: SessionData): boolean {
  *  Fails closed — `=== true`, so an older daemon that omits the field offers nothing. */
 export function canHandoff(s: SessionData): boolean {
   return s.can_handoff === true;
+}
+
+/** The pane header's PR badge (#3285), or null when the session has no usable PR.
+ *
+ *  The web CONSUMES the daemon-discovered pr_info projection (#3232/#3287) — the
+ *  same discipline as can_kill/can_handoff: no gh call, no derivation, just the
+ *  snapshot field every surface receives. Fails closed twice over: the wire
+ *  carries `pr_info: {}` when nothing is known (Go omitempty cannot drop a
+ *  struct), and a record without both a number and a url renders nothing — the
+ *  badge exists to be FOLLOWED, so the link target is part of the minimum, not
+ *  an extra.
+ *
+ *  Copy: sentence case, ` · ` separator, static text (#1766). gh reports state
+ *  uppercase (OPEN/MERGED/CLOSED); it is lowercased for display rather than
+ *  mapped through a table so an unrecognized future state renders honestly
+ *  instead of vanishing. */
+export function prBadgeContent(s: SessionData): { label: string; url: string; tooltip: string } | null {
+  const pr = s.pr_info;
+  if (!pr || !pr.number || pr.number <= 0 || !pr.url) {
+    return null;
+  }
+  const state = (pr.state ?? "").toLowerCase();
+  const label = state === "" ? `PR #${pr.number}` : `PR #${pr.number} · ${state}`;
+  const tooltip = pr.title ? `${pr.title} — open on GitHub` : `Open PR #${pr.number} on GitHub`;
+  return { label, url: pr.url, tooltip };
 }
 
 /**

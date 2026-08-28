@@ -87,14 +87,6 @@ func TestTaskPaneWatchRunNowNoticeIsTransient(t *testing.T) {
 	pressRune(tp, "j")
 	assert.NotContains(t, tp.String(), "not on manual trigger",
 		"the notice must clear on the next keypress")
-
-	// Mouse-wheel scrolling moves the selection without a keypress, so it
-	// retires the notice too.
-	pressRune(tp, "r")
-	assert.Contains(t, tp.String(), "not on manual trigger")
-	tp.ScrollDown()
-	assert.NotContains(t, tp.String(), "not on manual trigger",
-		"the notice must clear when the selection scrolls")
 }
 
 // TestTaskPaneWatchRunNowNoticeSurvivesAClampedList: a task list taller than

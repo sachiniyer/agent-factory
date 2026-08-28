@@ -106,6 +106,25 @@ func TestSelectionOverlayRegistersRowZones(t *testing.T) {
 	}
 }
 
+func TestSelectionOverlayRegistersBudgetedWindowZones(t *testing.T) {
+	items := []string{"claude", "aider", "codex"}
+	s := NewSelectionOverlay("Select program", items)
+	s.SetMaxSize(50, 8)
+	s.SetSelectedIndex(1)
+	reg := zones.NewRegistry()
+	origin := layout.Point{X: 8, Y: 4}
+	s.RegisterZones(reg, origin)
+
+	r, ok := reg.Find(zones.OverlaySelectRow(1))
+	require.True(t, ok, "zone for the visible budgeted row; got %v", reg.IDs())
+	line := strings.Split(s.Render(), "\n")[r.Y-origin.Y]
+	assert.Contains(t, xansi.Strip(line), items[1])
+	for _, hidden := range []int{0, 2} {
+		_, ok := reg.Find(zones.OverlaySelectRow(hidden))
+		assert.False(t, ok, "hidden item %d must not have a zone", hidden)
+	}
+}
+
 func TestSearchOverlayRegistersRowZonesAndSetSelectedIndex(t *testing.T) {
 	instances := []*session.Instance{
 		{Title: "alpha"},

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -752,6 +753,10 @@ func TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	// Marked Lost during an outage; the transport has since healed.
 	inst, backend := registerStartedRemote(t, manager, repoID, repoPath, "remote-healed", srv.URL, session.Lost)
+	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("previous restore failure"))
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist terminal restore failure: %v", err)
+	}
 
 	if _, _, err := manager.RestoreSession(RestoreSessionRequest{Title: "remote-healed", RepoID: repoID}); err != nil {
 		t.Fatalf("RestoreSession: %v", err)
@@ -762,6 +767,12 @@ func TestRestoreSession_AliveRemoteSandboxIsNotReprovisioned(t *testing.T) {
 	}
 	if got := inst.GetLiveness(); got == session.LiveLost {
 		t.Fatal("liveness is still LiveLost: a restore that proves the sandbox alive must clear the mark, not leave the row stranded")
+	}
+	if failure := inst.LostRestoreFailureSnapshot(); failure != nil {
+		t.Fatalf("healed runtime retained stale restore failure: %#v", failure)
+	}
+	if failure := persistedInstanceByTitle(t, repoID, inst.Title).LostRestoreFailure; failure != nil {
+		t.Fatalf("persisted runtime retained stale restore failure: %#v", failure)
 	}
 }
 

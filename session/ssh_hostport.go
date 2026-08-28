@@ -28,6 +28,15 @@ import (
 // did not ask for. The error names both values so it is obvious which to delete.
 // Agreement is fine: "10.0.0.7:2222" with port 2222 says one thing twice.
 //
+// A port with NO host (":22") is refused for the same reason (#3303). It is a
+// valid net.SplitHostPort input, so the port survives the split and the empty
+// host used to come back as success — and an empty host is not "no machine", it
+// is LOCALHOST: net.JoinHostPort("", 22) is ":22", which the OS dials on the
+// operator's own machine, while `ssh-keygen -F ""` matches nothing, so pinning
+// and cleanup degraded silently instead of erroring. A colon with nothing in
+// front of it is not a preference for localhost; it is a mistake, and the error
+// names the input so it is obvious what to fix.
+//
 // A returned port of 0 means "not specified"; the caller applies its own default
 // (the ssh runtime uses 22, and the hook path lets the ssh binary decide).
 func resolveSSHHostPort(address string, port int) (string, int, error) {
@@ -46,6 +55,11 @@ func resolveSSHHostPort(address string, port int) (string, int, error) {
 			return "", 0, fmt.Errorf("ssh port %d is out of range", port)
 		}
 		return host, port, nil
+	}
+	if embeddedHost == "" {
+		return "", 0, fmt.Errorf("ssh address %q has a port but no host; an empty host means localhost to "+
+			"the OS, and af will not guess that was meant — name the machine in front of the colon",
+			address)
 	}
 	if port != 0 && port != embeddedPort {
 		return "", 0, fmt.Errorf("ssh address %q embeds port %d but the port field says %d; "+

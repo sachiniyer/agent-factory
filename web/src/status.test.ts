@@ -17,8 +17,11 @@ import {
   isCreating,
   isLimitReached,
   isWorking,
+  type OperatorKind,
+  operatorKind,
   rowStatus,
   rowTitle,
+  prBadgeContent,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -41,6 +44,50 @@ test("idle detail renders only mechanical reason values and observed churn age",
   assert.equal(
     idleReasonDetail(sess({ idle_reason: "something-later" as never, last_pane_churn_at: "bad" }), now),
     "",
+  );
+  assert.equal(
+    idleReasonDetail(
+      sess({
+        liveness: Liveness.Lost,
+        idle_reason: "restore-gave-up",
+        lost_restore_failure: { attempts: 6, error: "agent exited at startup" },
+      }),
+      now,
+    ),
+    "restore gave up after 6 attempts: agent exited at startup",
+  );
+});
+
+test("operator status groups every mechanical idle reason by the action it needs", () => {
+  const cases: Array<[string, Partial<SessionData>, OperatorKind]> = [
+    ["running", { liveness: Liveness.Running }, "working"],
+    ["in-flight", { liveness: Liveness.Ready, in_flight_op: InFlightOp.Restoring }, "working"],
+    ["usage limit", { liveness: Liveness.LimitReached, idle_reason: "usage-limit" }, "waiting-limit"],
+    ["process exited", { liveness: Liveness.Lost, idle_reason: "process-exited" }, "broken"],
+    ["restore gave up", { liveness: Liveness.Lost, idle_reason: "restore-gave-up" }, "broken"],
+    ["prompt absent", { liveness: Liveness.Ready, idle_reason: "prompt-not-delivered" }, "broken"],
+    ["recreate notice", { liveness: Liveness.Ready, idle_reason: "recreate-pending" }, "needs-you"],
+    ["delivery unknown", { liveness: Liveness.Ready, idle_reason: "delivery-unconfirmed" }, "needs-you"],
+    ["no pane change", { liveness: Liveness.Ready, idle_reason: "no-pane-change-since-delivery" }, "needs-you"],
+    ["settled after churn", { liveness: Liveness.Ready, idle_reason: "settled-after-pane-change" }, "needs-you"],
+    ["ready without evidence", { liveness: Liveness.Ready }, "needs-you"],
+    ["archived history", { liveness: Liveness.Archived }, "archived"],
+  ];
+  for (const [name, data, want] of cases) {
+    assert.equal(operatorKind(sess(data)), want, name);
+  }
+});
+
+test("an in-flight operation wins over stale idle evidence", () => {
+  assert.equal(
+    operatorKind(
+      sess({
+        liveness: Liveness.Ready,
+        in_flight_op: InFlightOp.Restoring,
+        idle_reason: "prompt-not-delivered",
+      }),
+    ),
+    "working",
   );
 });
 
@@ -257,3 +304,44 @@ function isoTodayAt(hour: number, min: number): string {
   d.setHours(hour, min, 0, 0);
   return d.toISOString();
 }
+
+// The PR badge (#3285) CONSUMES the daemon-discovered pr_info projection
+// (#3232/#3287) — number, state, url — never deriving anything in the browser.
+test("prBadgeContent renders number + lowercased state as a sentence-case label with the repo separator", () => {
+  const badge = prBadgeContent(
+    sess({ pr_info: { number: 12, state: "OPEN", url: "https://github.com/o/r/pull/12", title: "Fix the thing" } }),
+  );
+  assert.ok(badge, "a discovered PR with a number and url must render");
+  assert.equal(badge.label, "PR #12 · open");
+  assert.equal(badge.url, "https://github.com/o/r/pull/12");
+  assert.ok(badge.tooltip.includes("Fix the thing"), "the projected PR title rides in the tooltip");
+});
+
+test("prBadgeContent keeps an unknown future state honest instead of hiding it", () => {
+  const badge = prBadgeContent(
+    sess({ pr_info: { number: 7, state: "MERGED", url: "https://github.com/o/r/pull/7" } }),
+  );
+  assert.ok(badge);
+  assert.equal(badge.label, "PR #7 · merged");
+  const stateless = prBadgeContent(sess({ pr_info: { number: 7, url: "https://github.com/o/r/pull/7" } }));
+  assert.ok(stateless);
+  assert.equal(stateless.label, "PR #7", "no state → number alone, no dangling separator");
+});
+
+// Go's omitempty cannot drop a struct field, so a session with no discovered PR
+// arrives as pr_info: {} — the badge must fail CLOSED on it, and on any record
+// missing the link target the badge exists to be followed to.
+test("prBadgeContent fails closed on empty or linkless projections", () => {
+  assert.equal(prBadgeContent(sess()), null, "absent pr_info renders nothing");
+  assert.equal(prBadgeContent(sess({ pr_info: {} })), null, "the wire's empty struct renders nothing");
+  assert.equal(
+    prBadgeContent(sess({ pr_info: { number: 3, state: "OPEN" } })),
+    null,
+    "a PR without a url has nowhere to go — no badge",
+  );
+  assert.equal(
+    prBadgeContent(sess({ pr_info: { url: "https://github.com/o/r/pull/9" } })),
+    null,
+    "a url without a number is not a renderable PR identity",
+  );
+});

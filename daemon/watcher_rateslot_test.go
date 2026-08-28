@@ -3,11 +3,13 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -245,5 +247,78 @@ func TestWatcherHandleEvent_SuccessfulDeliveryConsumesRateSlot(t *testing.T) {
 	}
 	if got := w.queue.pendingCount(); got != 0 {
 		t.Fatalf("pending = %d, want 0 (a delivered event is not queued)", got)
+	}
+}
+
+// TestWatcherHandleEvent_RefundsWhenRootAgentRefusesPreFlight is the #3477
+// regression at the layer the leak is actually paid for. Both refusals in
+// deliverToReemergingRoot are pre-flight — the manager decides before a byte
+// reaches any pane — so the slot the watcher reserved must come back. It did not,
+// because the refusals said "event not delivered" while the wire protocol
+// re-mints the sentinel from "prompt not delivered".
+//
+// Nothing here is a copied string: deliverPromptForTask routes through the REAL
+// manager and reconstitutes its error from TEXT, which is exactly what net/rpc
+// does on the daemon's own control socket. A regression that rewords either
+// message back into a near-miss fails this test with spentSlots = 1 — the slot
+// leak the issue reports, and the leak that drains a monitor task's per-minute
+// budget for as long as the root outage lasts.
+func TestWatcherHandleEvent_RefundsWhenRootAgentRefusesPreFlight(t *testing.T) {
+	for i, tc := range rootRefusalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, repoPath := tc.build(t)
+
+			taskID := fmt.Sprintf("cafe3477%d", i)
+			if err := task.AddTask(task.Task{
+				ID:            taskID,
+				Name:          "root-monitor",
+				Prompt:        "Triage: {{line}}",
+				WatchCmd:      "watch.sh",
+				TargetSession: session.RootSessionTitle,
+				ProjectPath:   repoPath,
+				Enabled:       true,
+				CreatedAt:     time.Now(),
+			}); err != nil {
+				t.Fatalf("seed task: %v", err)
+			}
+
+			// The daemon's own control socket, faithfully: the watch path reaches
+			// the manager over net/rpc, which rebuilds the server error from its
+			// text and destroys *notAttemptedError on the way.
+			var wire string
+			origDeliver := deliverPromptForTask
+			deliverPromptForTask = func(req DeliverPromptRequest) (string, error) {
+				status, err := manager.DeliverPrompt(req)
+				if err == nil {
+					return status, nil
+				}
+				wire = err.Error()
+				return "", fmt.Errorf("%s", wire)
+			}
+			t.Cleanup(func() { deliverPromptForTask = origDeliver })
+
+			w := newRateSlotWatcher(t, taskID, deliverWatchEvent)
+			close(w.stopCh) // no drainer behind the assertions
+
+			w.handleEvent("new issue #9", &tailBuffer{})
+
+			// Prove the delivery took the root path under test. Without this a
+			// fixture that drifted into some other refusal — one that already
+			// carries the marker — would refund and "pass" while #3477 stood.
+			if !strings.Contains(wire, tc.wantIn) {
+				t.Fatalf("precondition: the delivery did not take the %q path; wire text: %q", tc.wantIn, wire)
+			}
+			if got := spentSlots(w); got != 0 {
+				t.Fatalf("rate slots spent = %d, want 0.\n\n"+
+					"The manager refused BEFORE sending anything, so nothing was delivered and the slot must be "+
+					"refunded. It was not: the refusal came back over net/rpc as plain text, and that text did not "+
+					"carry %q, so isNotAttemptedErr could not re-mint the sentinel and the watcher charged the "+
+					"attempt anyway (#3477). Every retry during the outage charges another.\nwire text: %q",
+					got, notDeliveredMarker, wire)
+			}
+			if got := w.queue.pendingCount(); got != 1 {
+				t.Fatalf("pending = %d, want 1 (a failed delivery is queued for replay; refunding must not drop it)", got)
+			}
+		})
 	}
 }

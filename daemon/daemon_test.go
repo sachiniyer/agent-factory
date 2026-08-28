@@ -18,10 +18,12 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func TestMain(m *testing.M) {
 	sessionenv.HandleInternalExec()
+	sessiontmux.HandleDedicatedServerExec()
 	// A re-exec of this test binary standing in for code-server (see
 	// writeFakeVSCodeBinary): serve and exit. It must return BEFORE the tripwires
 	// and sandboxing below — it is a child process of a test, not a test run, and

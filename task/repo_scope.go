@@ -45,17 +45,31 @@ type repoResolution struct {
 
 // newRepoScope canonicalizes the target side.
 //
-// repoRoot is contractually a main-worktree root (config.CurrentRepo /
-// RepoFromPath), which every caller passes, so hashing it directly yields the
-// same canonical ID the task side resolves to — no git call needed for the
-// common path. A caller that passes something else degrades to the raw path
-// equality this filter used before, never to "no tasks".
+// repoRoot is normally a main-worktree root, but a bare repository has no main
+// worktree and RepoContext.Root remains the requesting checkout (#3358). Resolve
+// an existing root through Git before hashing; a caller that passes something
+// unavailable still degrades to the raw path equality this filter used before,
+// never to "no tasks".
 func newRepoScope(repoRoot string) *repoScope {
+	return newRepoScopeWithID(repoRoot, config.RepoIDForPath(repoRoot))
+}
+
+func newRepoScopeWithID(repoRoot, repoID string) *repoScope {
 	return &repoScope{
 		root: repoRoot,
-		id:   config.RepoIDFromRoot(repoRoot),
+		id:   repoID,
 		seen: map[string]repoResolution{},
 	}
+}
+
+// LoadTasksForKnownRepo is the polling/display loader for a caller that already
+// resolved repoID. Reusing that identity avoids a git probe every 750ms and, in
+// registry mode, an empty ID means there is no active task scope at all.
+func LoadTasksForKnownRepo(repoRoot, repoID string) ([]Task, error) {
+	if repoID == "" {
+		return nil, nil
+	}
+	return loadTasksForScope(newRepoScopeWithID(repoRoot, repoID))
 }
 
 // matches reports both whether t belongs to this display scope and whether that

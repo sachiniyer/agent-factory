@@ -17,7 +17,11 @@ import (
 // onArchiveHookTimeout bounds an operator hook that never returns. Archive is a
 // synchronous lifecycle operation, but real dependency-tree sweeps can take
 // minutes on a large worktree, so this is intentionally generous.
-const onArchiveHookTimeout = 30 * time.Minute
+//
+// A var (not a const) only so tests can shorten it — the deadline's interaction
+// with WaitDelay cleanup is exactly what #3407 got wrong, and it is not testable
+// on a 30-minute clock. Production never reassigns it.
+var onArchiveHookTimeout = 30 * time.Minute
 
 const onArchiveHookWaitDelay = 2 * time.Second
 
@@ -68,7 +72,18 @@ type onArchiveHookContext struct {
 // while LoadInRepoConfig rejects the same key before any repository-controlled
 // command can execute.
 func runOnArchiveHook(hookCtx onArchiveHookContext) error {
-	resolved, err := config.ResolveConfig(hookCtx.repoRoot)
+	// Prefer the live worktree so a bare repository's identity directory is
+	// never treated as a checkout. If Git metadata is already unavailable, keep
+	// the historical identity-root fallback: on_archive_command is admitted only
+	// from operator config and can still be useful while salvaging a lost repo.
+	repo, repoErr := config.RepoFromPath(hookCtx.worktree)
+	var resolved *config.ResolvedConfig
+	var err error
+	if repoErr == nil {
+		resolved, err = config.ResolveConfigForRepo(repo)
+	} else {
+		resolved, err = config.ResolveConfig(hookCtx.repoRoot)
+	}
 	if err != nil {
 		return fmt.Errorf("load on-archive hook configuration: %w", err)
 	}
@@ -115,14 +130,35 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		// cwd or inherited pipe in the worktree.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	if ctx.Err() != nil {
-		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, archiveHookOutput(output.String()))
-	}
+	// What the hook ITSELF did outranks what the clock says (#3407). Both checks
+	// below used to run in the opposite order, so a deadline that fired anywhere in
+	// this window reported a timeout for a hook that had already finished — and an
+	// archive hook is a committed operation whose outcome an operator reads out of
+	// this one message.
 	if errors.Is(err, exec.ErrWaitDelay) {
-		// The shell itself succeeded; WaitDelay only found an inherited process
-		// still holding the capture pipe, and the process-group kill above reaped
-		// it. Match the existing post-worktree hook contract.
+		// The shell itself succeeded — a non-zero exit surfaces as an *exec.ExitError,
+		// never as this — and WaitDelay only found an inherited process still holding
+		// the capture pipe, which the process-group kill above reaped. Match the
+		// existing post-worktree hook contract.
+		//
+		// This is checked BEFORE ctx.Err() because both are routinely true together:
+		// a hook that exits in milliseconds after backgrounding a child keeps Run
+		// blocked on that child's pipe for the full WaitDelay, and any deadline
+		// shorter than that elapses inside the wait. The hook had already succeeded;
+		// only the cleanup crossed the line.
 		return nil
+	}
+	// A deadline that fires while the hook is still RUNNING is a timeout. One that
+	// fires after the hook reached its own exit is not — the hook ran, and its exit
+	// status is the outcome to report, straggler or no straggler. ProcessState is
+	// what tells them apart: Exited() is true only when the shell terminated on its
+	// own terms, and false when the deadline's SIGKILL ended it (Run reports
+	// "signal: killed" and the exit code is -1). Without that second clause a hook
+	// that exited 23 while a child held the pipe past the deadline was reported as
+	// "timed out after 1s" — a failure the operator cannot act on, standing in for a
+	// specific exit status and its output, which they can.
+	if ctx.Err() != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Exited()) {
+		return fmt.Errorf("timed out after %s%s", onArchiveHookTimeout, archiveHookOutput(output.String()))
 	}
 	if err != nil {
 		return fmt.Errorf("%w%s", err, archiveHookOutput(output.String()))

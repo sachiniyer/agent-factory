@@ -24,10 +24,15 @@ var errSessionNotFound = errors.New("not found")
 // request's own (possibly stale) id under a cross-repo title collision (#1592
 // Phase 5 follow-up).
 func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, error) {
+	return m.killSessionRequestedBy(req, "internal daemon caller")
+}
+
+func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester string) (session.InstanceData, error) {
 	instance, repoID, title, resolvedID, data, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
 		return session.InstanceData{}, err
 	}
+	log.InfoLog.Printf("KillSession requested for session %q (id %s, repo %s) by %s", title, resolvedID, repoID, requester)
 	// Canonicalize to the resolved session's title so the killsInFlight key,
 	// storage delete, and event all key off the identity we actually resolved
 	// (by id), not the request's title. req is a value copy, so this is local.
@@ -114,6 +119,18 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// brokers or the local backend tears panes down. Cleanup's later backstop can
 	// retain a record, but it cannot undo teardown that already happened.
 	if instance != nil {
+		// A direct kill of an archived session may be the first operation to
+		// learn its origin repo is gone (#3176). Nothing failed before this
+		// kill, so no relocation record exists and the admission below would
+		// read that absence as permission. Establish and persist the
+		// identity-qualified cleanup authorization first — the same record a
+		// failed restore leaves — or refuse before the tombstone, leaving at
+		// most a conservative, non-destructive fence.
+		stage.set("checking archived origin state")
+		if prepErr := m.prepareDirectRepoGoneKillCleanup(repoID, req.Title, instance); prepErr != nil {
+			return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: %w", req.Title, prepErr)
+		}
+		stage.set("validating destruction admission")
 		if admissionErr := instance.ValidateWorktreeDestructionAdmission(); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of session %q was not started because its worktree relocation is unresolved; nothing was changed: %w",
@@ -121,6 +138,16 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			)
 		}
 	} else if data != nil {
+		// The ghost twin of the producer above (#3278 review): an archived,
+		// record-free ghost cannot have cleanup authorization built for it, so
+		// an origin that cannot be proven present refuses the kill instead of
+		// letting ordinary ghost cleanup settle against it and orphan the
+		// archive.
+		if ghostErr := ghostDirectRepoGoneKillGuard(data); ghostErr != nil {
+			return session.InstanceData{}, fmt.Errorf(
+				"kill of ghost session %q was not started: %w", req.Title, ghostErr,
+			)
+		}
 		if admissionErr := validateGhostWorktreeDestructionAdmission(data); admissionErr != nil {
 			return session.InstanceData{}, fmt.Errorf(
 				"kill of ghost session %q was not started because its persisted worktree recovery is not safe to consume; nothing was changed — retry archive or restore before destructive cleanup: %w",
@@ -130,7 +157,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	}
 
 	// Persist the kill-intent tombstone BEFORE teardown begins (#1108): if the
-	// daemon dies or the teardown errors between here and DeleteInstance, the
+	// daemon dies or the teardown errors between here and DeleteInstanceByStableID, the
 	// surviving record is provably a user kill — the status poll finishes the
 	// teardown instead of classifying the vanished session Lost and restoring
 	// it. Best-effort: a failed tombstone write degrades to today's crash
@@ -146,8 +173,13 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	// because the failure stops here.
 	stage.set("persisting kill tombstone")
 	if err := m.persistKillTombstone(repoID, instance, data); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; nothing was changed — retry the kill: %w", req.Title, err)
+		return session.InstanceData{}, fmt.Errorf("kill of session %q was not started: its kill intent could not be recorded, and tearing the session down without that record risks it being restored later; the session was not torn down — retry the kill: %w", req.Title, err)
 	}
+	// Past the commit point. Every error below leaves the kill durably recorded
+	// (and usually the tombstoned row retained as its retry handle), so each one
+	// is wrapped as a mutationCommittedError carrying the resolved stable
+	// identity — a plain error here tells control/HTTP clients
+	// failed-nothing-committed about a session that IS marked killed (#3234).
 
 	// Revoke this session's sandbox callback credential (#2999), anchored to the
 	// commit point immediately above rather than to the top of the function
@@ -182,7 +214,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 	vscodeKey := daemonInstanceKey(repoID, req.Title)
 	stage.set("stopping vscode editor")
 	if err := m.stopVSCodeForInstance(vscodeKey, targetID); err != nil {
-		return session.InstanceData{}, fmt.Errorf("kill of session %q could not safely stop its VS Code editor, so its tombstoned record was kept for a retry: %w", req.Title, err)
+		return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not safely stop its VS Code editor, so its tombstoned record was kept for a retry: %w", req.Title, err)}
 	}
 
 	// Carried to the record delete below, which refuses on a non-nil teardown.
@@ -220,7 +252,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)
+			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)}
 		}
 		// Checkpoint the settled live teardown BEFORE either fallible tail step.
 		// CleanupClaimedRepoGone consumes its in-memory recovery record after the
@@ -233,7 +265,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// after the in-memory recovery handle is gone.
 		stage.set("persisting settled teardown")
 		if err := m.persistInstanceErr(repoID, instance); err != nil {
-			return session.InstanceData{}, fmt.Errorf("kill of session %q completed its live teardown but could not record that settlement; its tombstoned row was kept and will be retried automatically: %w", req.Title, err)
+			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q completed its live teardown but could not record that settlement; its tombstoned row was kept and will be retried automatically: %w", req.Title, err)}
 		}
 	} else if data != nil {
 		stage.set("cleaning up ghost record")
@@ -247,7 +279,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		decoded := data.RestoreArchiveRollbackFence()
 		decoded, decodeErr := decoded.RestoreRelocationRecoveryOriginals()
 		if decodeErr != nil {
-			return session.InstanceData{}, fmt.Errorf("kill of ghost session %q could not decode its cleanup ownership after admission: %w", req.Title, decodeErr)
+			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of ghost session %q could not decode its cleanup ownership after admission: %w", req.Title, decodeErr)}
 		}
 		recovery := decoded.Worktree.RelocationRecovery
 		descriptorCleanup := recovery != nil && recovery.IdentityKnown &&
@@ -279,10 +311,10 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 			// result is reconciled above, while the process fence blocks duplicates.
 			if descriptorStalled {
 				log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, and no second descriptor cleanup may start in this process — restart the daemon before retrying if the first worker does not settle: %v", req.Title, teardownErr)
-				return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)
+				return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — restart the daemon before retrying once the cause clears: %w", req.Title, teardownErr)}
 			}
 			log.WarningLog.Printf("kill of session %q could not complete its ghost teardown; the record is kept, but nothing will retry it automatically (a ghost has no live instance for the poll to visit) — retry the kill once the cause clears: %v", req.Title, teardownErr)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)
+			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; this one is not retried automatically — run the kill again once the cause clears: %w", req.Title, teardownErr)}
 		}
 	}
 
@@ -295,7 +327,7 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		if settledDescriptorGhostCleanup {
 			m.reconcileSettledGhostCleanup(repoID, req.Title, key, targetID)
 		}
-		return session.InstanceData{}, fmt.Errorf("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)
+		return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not confirm its VS Code editor stopped, so its tombstoned record was kept for a retry: %w", req.Title, err)}
 	}
 
 	stage.set("deleting record from storage")
@@ -315,9 +347,9 @@ func (m *Manager) KillSession(req KillSessionRequest) (session.InstanceData, err
 		// the session undeletable until a daemon restart.
 		if errors.Is(err, config.ErrLockTimeout) {
 			log.WarningLog.Printf("kill of session %q: the instances record is locked by another agent-factory process; the kill is committed and the daemon will finish it on a later poll: %v", req.Title, err)
-			return session.InstanceData{}, fmt.Errorf("kill of session %q could not update its record because another agent-factory process is holding the repo's instances lock; the session is already marked killed and will be reaped automatically — retry if it lingers: %w", req.Title, err)
+			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not update its record because another agent-factory process is holding the repo's instances lock; the session is already marked killed and will be reaped automatically — retry if it lingers: %w", req.Title, err)}
 		}
-		return session.InstanceData{}, fmt.Errorf("failed to delete instance from storage: %w", err)
+		return resolved, &mutationCommittedError{err: fmt.Errorf("failed to delete instance from storage: %w", err)}
 	}
 	if !deleted {
 		log.InfoLog.Printf("kill of session %q skipped storage delete: current record has a different instance identity", req.Title)

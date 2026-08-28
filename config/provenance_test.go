@@ -46,6 +46,37 @@ func candidateForLayer(t *testing.T, value ResolvedValue, layer ConfigSource) Ca
 	return CandidateTrace{}
 }
 
+func TestAliasProvenanceUsesPhysicalSourceSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name, data, path, want string
+		format                 ConfigFormat
+	}{
+		{name: "flat TOML", data: `ssh_host_key_verification = "accept-new"`, path: "config.toml", format: FormatTOML, want: "ssh_host_key_verification"},
+		{name: "grouped TOML", data: "[ssh]\nhost_key_verification = \"accept-new\"", path: "config.toml", format: FormatTOML, want: "ssh.host_key_verification"},
+		{name: "flat JSON", data: `{"ssh_host_key_verification":"accept-new"}`, path: "config.json", format: FormatJSON, want: "ssh_host_key_verification"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg *Config
+			var err error
+			if tc.format == FormatTOML {
+				cfg, err = parseLoadedConfigTOML([]byte(tc.data+"\n"), tc.path, tc.path)
+			} else {
+				cfg, err = parseLoadedConfigJSON([]byte(tc.data), tc.path, tc.path)
+			}
+			require.NoError(t, err)
+			documents, err := globalResolutionDocuments(cfg)
+			require.NoError(t, err)
+			resolved, err := materializeResolution(cfg, "", Manifest(), documents, false)
+			require.NoError(t, err)
+
+			value := requireResolvedValue(t, resolved, "ssh.host_key_verification")
+			require.NotNil(t, value.Winner)
+			assert.Equal(t, tc.want, value.Winner.KeyPath)
+			assert.Equal(t, tc.want, candidateForLayer(t, value, SourceGlobal).KeyPath)
+		})
+	}
+}
+
 func TestResolveGlobalConfigTracksPresenceInsteadOfComparingValues(t *testing.T) {
 	setupProvenanceTest(t, `
 schema_version = 1
@@ -241,9 +272,9 @@ program = "claude"
 
 func TestResolveConfigExplainsLegacyAndExplicitEmptyRepoValue(t *testing.T) {
 	repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
-	require.NoError(t, SaveRepoConfig(RepoIDFromRoot(repoRoot), &RepoConfig{
+	writeLegacyRepoConfig(t, RepoIDFromRoot(repoRoot), &RepoConfig{
 		PostWorktreeCommands: []string{"legacy-command"},
-	}))
+	})
 	writeInRepoTomlConfig(t, repoRoot, "post_worktree_commands = []\n")
 
 	resolved, err := ResolveConfig(repoRoot)
@@ -304,6 +335,49 @@ accent = "#8cd0d3"
 	require.NotNil(t, accent.Winner)
 	assert.Equal(t, SourceGlobal.String(), accent.Winner.Layer)
 	assert.Contains(t, candidateForLayer(t, accent, SourceGlobal).Reason, "load-time normalization changed")
+}
+
+func TestResolveConfigTreatsNamedThemePresetAsConfiguredPalette(t *testing.T) {
+	repoRoot := setupProvenanceTest(t, "schema_version = 1\ntheme = \"zenburn\"\n")
+
+	for _, resolve := range []struct {
+		name string
+		fn   func() (*ResolvedConfig, error)
+	}{
+		{name: "global", fn: ResolveGlobalConfig},
+		{name: "project", fn: func() (*ResolvedConfig, error) { return ResolveConfig(repoRoot) }},
+	} {
+		t.Run(resolve.name, func(t *testing.T) {
+			resolved, err := resolve.fn()
+			require.NoError(t, err)
+			assert.Equal(t, "zenburn", resolved.Theme.Preset())
+			assert.Equal(t, "#3F3F3F", resolved.Theme.Background)
+			assert.Equal(t, "#8CD0D3", resolved.Theme.Accent)
+			written, err := marshalConfigTOML(&resolved.Config)
+			require.NoError(t, err)
+			assert.Contains(t, string(written), "theme = 'zenburn'")
+			assert.NotContains(t, string(written), "[theme]")
+
+			value := requireResolvedValue(t, resolved, "theme")
+			for _, leaf := range []string{"background", "accent", "selection_background"} {
+				origin, present := value.Origins[leaf]
+				require.True(t, present, "missing origin for preset-derived theme.%s", leaf)
+				assert.Equal(t, SourceGlobal.String(), origin.Layer)
+			}
+			global := candidateForLayer(t, value, SourceGlobal)
+			assert.Equal(t, "zenburn", global.Value)
+			assert.Equal(t, "contributed", global.Result)
+		})
+	}
+}
+
+func TestResolveGlobalConfigPreservesBuiltInThemePresetIdentity(t *testing.T) {
+	setupProvenanceTest(t, "schema_version = 1\n")
+
+	resolved, err := ResolveGlobalConfig()
+	require.NoError(t, err)
+	assert.Equal(t, DefaultThemePreset, resolved.Theme.Preset())
+	assert.Equal(t, DefaultThemeConfig(), resolved.Theme)
 }
 
 func TestResolveGlobalConfigExplainsNormalizedKeyBindingLeaves(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -67,32 +68,27 @@ const (
 	nonExpandableArrow = " "
 )
 
-var readyStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#7F9F7F"))
+var readyStyle = lipgloss.NewStyle()
 
 // deadStyle paints the status dot of a session whose backing tmux/remote
 // session has vanished (#935). A muted gray — the same recede treatment used
 // for a deleting row — keeps a corpse from reading as a healthy green session.
-var deadStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#989890"))
+var deadStyle = lipgloss.NewStyle()
 
 // lostStyle paints the status dot of a Lost session (#1108): amber, not the
 // corpse gray — the session is expected to come back, but must not read as a
 // healthy green either.
-var lostStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#F0DFAF"))
+var lostStyle = lipgloss.NewStyle()
 
 // archivedStyle paints an archived session's dot + dims its title (#1028): the
 // same muted gray as a deleting/dead recede, so a filed-away session never reads
 // as live. Reused for the title/desc foreground below.
-var archivedStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#989890"))
+var archivedStyle = lipgloss.NewStyle()
 
 // limitStyle paints the status glyph of a usage-limit-blocked session (#1146): a
 // warning red-orange, distinct from the ready-green, lost-amber, and dead/
 // archived gray so the blocked state is unmistakable at a glance.
-var limitStyle = lipgloss.NewStyle().
-	Foreground(lipgloss.Color("#CC9393"))
+var limitStyle = lipgloss.NewStyle()
 
 // limitBadgePrefix returns the sidebar title prefix for a usage-limit-blocked
 // session (#1146): "[limit] resets <t> " when a reset time is known, else a bare
@@ -129,56 +125,57 @@ func formatLimitReset(reset, now time.Time) string {
 // stacked below the tree — the automations rail (#1126) — can paint their own
 // titles in the exact same color and the two lists can never drift apart, the
 // same single-definition discipline AccentColor uses for the accent.
-var InstanceTitleColor lipgloss.TerminalColor = lipgloss.Color("#DCDCCC")
+var InstanceTitleColor lipgloss.TerminalColor
 
-var titleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
-	Foreground(InstanceTitleColor)
+var titleStyle = lipgloss.NewStyle()
 
-var listDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
-	Foreground(lipgloss.Color("#989890"))
+var listDescStyle = lipgloss.NewStyle()
 
-var selectedTitleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
-	Background(lipgloss.Color("#4F4F4F")).
-	Foreground(lipgloss.Color("#FFFFEF"))
+var selectedTitleStyle = lipgloss.NewStyle()
 
-var selectedDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
-	Background(lipgloss.Color("#4F4F4F")).
-	Foreground(lipgloss.Color("#FFFFEF"))
+var selectedDescStyle = lipgloss.NewStyle()
 
 // tabRowStyle renders tab child rows in the same primary foreground as the
 // Agent/active tab label (#1456). Selection still supplies the row highlight.
-var tabRowStyle = lipgloss.NewStyle().
-	Foreground(InstanceTitleColor)
+var tabRowStyle = lipgloss.NewStyle()
 
 // tabRowActiveStyle keeps tab rows in the same foreground; the tmux-style "*"
 // marker carries the active cue.
-var tabRowActiveStyle = lipgloss.NewStyle().
-	Foreground(InstanceTitleColor)
+var tabRowActiveStyle = lipgloss.NewStyle()
 
 // tabRowSelectedStyle highlights the tab row under the tree cursor with the
 // same background the selected instance row uses.
-var tabRowSelectedStyle = lipgloss.NewStyle().
-	Background(lipgloss.Color("#4F4F4F")).
-	Foreground(lipgloss.Color("#FFFFEF"))
+var tabRowSelectedStyle = lipgloss.NewStyle()
 
 // deletingTitleColor dims a mid-deletion row — title and branch line —
 // to the description gray so it visually recedes while its teardown runs in
 // the background (#844, #853).
-var deletingTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
+var deletingTitleColor lipgloss.TerminalColor
 
 // placeholderTitleColor renders the autocreate-name shadow text (#2470) in the
 // muted foreground so it reads as a suggestion, not a real name — the same
 // treatment the task/prompt forms give their placeholders.
-var placeholderTitleColor lipgloss.TerminalColor = lipgloss.Color("#989890")
+var placeholderTitleColor lipgloss.TerminalColor
 
 // archiveWarningColor makes an incomplete archive visible independently of its
 // ordinary liveness glyph. The warning prose itself remains the daemon's bounded
 // projection and includes the retained source location.
-var archiveWarningColor lipgloss.TerminalColor = lipgloss.Color("#F0DFAF")
+var archiveWarningColor lipgloss.TerminalColor
+
+func init() {
+	t := config.DefaultThemeConfig()
+	ApplyTheme(Theme{
+		Foreground:          lipgloss.Color(t.Foreground),
+		ForegroundStrong:    lipgloss.Color(t.ForegroundStrong),
+		ForegroundMuted:     lipgloss.Color(t.ForegroundMuted),
+		ForegroundDim:       lipgloss.Color(t.ForegroundDim),
+		SelectionBackground: lipgloss.Color(t.SelectionBackground),
+		SelectionForeground: lipgloss.Color(t.SelectionForeground),
+		Success:             lipgloss.Color(t.Success),
+		Warning:             lipgloss.Color(t.Warning),
+		Error:               lipgloss.Color(t.Error),
+	})
+}
 
 // ApplyTheme rebuilds package-level tree styles after the TUI palette changes.
 func ApplyTheme(t Theme) {
@@ -501,8 +498,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 	description := branch
-	if reason, churnAt := i.IdleReasonSnapshot(); reason != session.IdleReasonNone {
+	if reason, restoreFailure, churnAt := i.IdleReasonDetailSnapshot(); reason != session.IdleReasonNone {
 		detail := idleReasonDetail(reason, churnAt, time.Now())
+		if reason == session.IdleReasonRestoreGaveUp && restoreFailure != nil {
+			detail = restoreFailure.Detail()
+		}
 		if branch == "" {
 			description = detail
 		} else {

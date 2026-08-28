@@ -277,7 +277,7 @@ func TestFromInstanceData_ArchivedLoadsInert(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const agentName = "af_archived_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	// Inject a spawn-counting exec so we can prove no tmux session is created on
 	// load. Because the Archived branch skips Start entirely, no Restore/spawn

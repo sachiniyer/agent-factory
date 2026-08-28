@@ -24,6 +24,24 @@ func TestSnapshotReconcilesModelChangeWithoutLivenessChange(t *testing.T) {
 	require.Nil(t, inst.AgentModelChange())
 }
 
+func TestSnapshotReconcilesLostRestoreFailureWithoutLivenessChange(t *testing.T) {
+	h := newTestHome(t)
+	inst := instanceWithFakeBackend(t, "restore-gave-up")
+	inst.SetStatusForTest(session.Lost)
+	data := inst.ToInstanceData()
+	data.LostRestoreFailure = &session.LostRestoreFailure{Attempts: 6, Error: "agent exited at startup"}
+
+	require.True(t, h.updateInstanceFromSnapshot(inst, data))
+	failure := inst.LostRestoreFailureSnapshot()
+	require.Equal(t, data.LostRestoreFailure, failure)
+	reason, _ := inst.IdleReasonSnapshot()
+	require.Equal(t, session.IdleReasonRestoreGaveUp, reason)
+
+	data.LostRestoreFailure = nil
+	require.True(t, h.updateInstanceFromSnapshot(inst, data), "clearing a recovered terminal state is a row change")
+	require.Nil(t, inst.LostRestoreFailureSnapshot())
+}
+
 func TestSnapshotReconcilesArchiveWarningWithoutLivenessChange(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "archive-warning")

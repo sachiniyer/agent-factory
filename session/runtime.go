@@ -330,5 +330,5 @@ func resolveRepoConfig(absPath string) (*config.ResolvedConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	return config.ResolveConfig(repo.Root)
+	return config.ResolveConfigForRepo(repo)
 }

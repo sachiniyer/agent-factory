@@ -137,7 +137,7 @@ func defaultProgramFor(globalDefault, repoPath string) string {
 	if err != nil {
 		return globalDefault
 	}
-	resolved, rerr := config.ResolveConfig(repo.Root)
+	resolved, rerr := config.ResolveConfigForRepo(repo)
 	if rerr != nil {
 		return globalDefault
 	}

@@ -15,18 +15,6 @@ func (i *Instance) ToInstanceData() InstanceData {
 	return i.toInstanceDataLocked()
 }
 
-// ToInstanceDataWithEpoch returns the serializable form together with the
-// observation epoch it was read at, both under ONE hold of i.mu (#2135). The epoch
-// deliberately does not cover every field in InstanceData (tabs are the notable
-// example), so it may correlate pane observations but must not be used as a
-// whole-projection freshness guard. Writers of the whole payload re-read it in
-// their ordering domain instead; see daemon.persistPollChange.
-func (i *Instance) ToInstanceDataWithEpoch() (InstanceData, uint64) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.toInstanceDataLocked(), i.stateEpoch
-}
-
 // toInstanceDataLocked is the shared body. Caller holds i.mu (read or write).
 func (i *Instance) toInstanceDataLocked() InstanceData {
 	data := InstanceData{
@@ -49,6 +37,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		IsRoot:                   IsReservedTitle(i.Title),
 		ModelChange:              agentModelChangeForLiveness(i.agentModelChange, i.liveness),
 		ArchiveWarning:           i.archiveWarning,
+		LostRestoreFailure:       cloneLostRestoreFailure(i.lostRestoreFailure),
 		LastPromptAttemptAt:      i.lastPromptAttemptAt,
 		LastPromptDeliveryStatus: i.lastPromptDeliveryStatus,
 		LastPaneChurnAt:          i.lastPaneChurnAt,
@@ -324,6 +313,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		limitResetAt:             data.LimitResetAt,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
+		lostRestoreFailure:       lostRestoreFailureFromData(data.LostRestoreFailure),
 		lastPromptAttemptAt:      data.LastPromptAttemptAt,
 		lastPromptDeliveryStatus: data.LastPromptDeliveryStatus,
 		lastPaneChurnAt:          data.LastPaneChurnAt,

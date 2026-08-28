@@ -201,3 +201,41 @@ func TestProjectsHeaderSpacingMatchesAutomations(t *testing.T) {
 	compact := stripANSI(strings.Split(p.String(), "\n")[0])
 	assert.NotContains(t, compact, "  · ", "the compact summary doubles up the same way")
 }
+
+// TestProjectsPaneDegradedNotice pins #3298 in the section: a failed registry
+// read renders the incompleteness notice, replaces the "no other projects
+// yet" empty-state claim the failed read cannot support, marks the compact
+// count, and reports flag changes so background refreshes repaint.
+func TestProjectsPaneDegradedNotice(t *testing.T) {
+	p := newTestProjects(testProjectRows())
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
+	if !p.SetDegraded(true) {
+		t.Fatal("flipping degraded on must report a change")
+	}
+	if p.SetDegraded(true) {
+		t.Fatal("an unchanged degraded flag must not report a change")
+	}
+	out := p.String()
+	if !strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a degraded section must carry the incompleteness notice, got:\n%s", out)
+	}
+
+	empty := newTestProjects(nil)
+	empty.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
+	empty.SetDegraded(true)
+	out = empty.String()
+	if strings.Contains(out, "no other projects yet") {
+		t.Fatalf("a degraded empty section must not claim there are no projects, got:\n%s", out)
+	}
+	if !strings.Contains(out, "registry unreadable") {
+		t.Fatalf("a degraded empty section must carry the notice instead, got:\n%s", out)
+	}
+
+	compact := newTestProjects(testProjectRows())
+	compact.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 1})
+	compact.SetCompact(true)
+	compact.SetDegraded(true)
+	if out := compact.String(); !strings.Contains(out, "?") {
+		t.Fatalf("the compact count must mark a degraded read, got:\n%s", out)
+	}
+}

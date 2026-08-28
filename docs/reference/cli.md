@@ -23,8 +23,8 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config`](#af-config) — Read global or project-effective config and write global config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
-- [`af config set`](#af-config-set) — Set a single settable global config key
-- [`af config unset`](#af-config-unset) — Clear a per-project config override
+- [`af config set`](#af-config-set) — Set one global config key
+- [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 - [`af daemon`](#af-daemon) — Manage the background daemon: serves the web UI and schedules tasks
 - [`af daemon adopt`](#af-daemon-adopt) — Hand a detached daemon back to the installed autostart unit
@@ -125,6 +125,7 @@ af [flags]
 | `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
 | `-p`, `--program` | `string` | Program to run in new sessions (one of: claude, codex, aider, gemini, amp, opencode, devin) |
 | `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+| `-v`, `--version` |  | version for af |
 
 ## af accounts
 
@@ -247,7 +248,7 @@ listener that requires a bearer token on every request.
 This does not start the web UI, and serves no frontend at all — opening its port
 in a browser returns a 404 saying so. If you want the browser app, run the
 daemon — any 'af' command starts it — and open http://localhost:8443. The web UI
-is bundled into the daemon and served from its listen_addr; agent-server is only
+is bundled into the daemon and served from its network.listen_addr; agent-server is only
 the headless per-workspace backend that a daemon drives, and it exists to be
 consumed by a daemon rather than opened by a person.
 
@@ -258,7 +259,7 @@ to host one workspace as a backend for a daemon on another machine.
 
 The listener always requires the token and serves plain HTTP (no TLS) — reach it
 over a private network or a tunnel (the docker/ssh runtimes forward a loopback
-port). Its token is mandatory for every peer, whatever the global require_token
+port). Its token is mandatory for every peer, whatever the global network.require_token
 key says: that key governs only the daemon's own web listener. On startup
 it prints one JSON line to stdout carrying the bound address and the bearer
 token. On SIGINT/SIGTERM it tears the workspace down (kills tmux, removes the
@@ -562,13 +563,14 @@ inspect another project. Outside a git repository they fall back to global
 defaults. --explain shows every candidate and why it did or did not supply the
 effective value.
 
-"set"/"unset" write config. Without --project they edit the global config,
-changing a single settable key in place so all comments and ordering are
-preserved. With --project <id-or-path> they edit that registered project's
-machine-local override instead (built-in < global < in-repo < personal project),
-which is never checked into the repository. "af config set" applies a change to
-a running daemon in place where the key allows it (#2480), so most take effect
-without a restart; a raw hand-edit of config.toml still applies on the next start.
+"set"/"unset" write config in place so all comments and ordering are preserved.
+Without --project, set changes one settable global key and unset clears one
+migrated grouped/flat alias pair. With --project <id-or-path> they edit that
+registered project's machine-local override instead (built-in < global <
+in-repo < personal project), which is never checked into the repository. "af
+config set" applies a change to a running daemon in place where the key allows
+it (#2480), so most take effect without a restart; a raw hand-edit of config.toml
+still applies on the next start.
 
 ```
 af config
@@ -578,8 +580,8 @@ af config
 
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
-- [`af config set`](#af-config-set) — Set a single settable global config key
-- [`af config unset`](#af-config-unset) — Clear a per-project config override
+- [`af config set`](#af-config-set) — Set one global config key
+- [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
 
 **Global flags**
@@ -658,30 +660,37 @@ af config list [flags]
 
 ## af config set
 
-Set a single settable global config key
+Set one global config key
 
 Write one key into the global config.toml, editing only that value in place —
-every comment, blank line, section header, and key ordering is preserved (the
-file is not regenerated). Only a curated set of scalar keys is settable; the
-value is validated with the same rules the config loader uses before anything is
+preserving every unrelated comment, blank line, section header, and key ordering
+(the file is not regenerated). Every global config key is settable. Scalar values
+use their ordinary text form; tables and non-comma lists use compact JSON. Values
+are validated with the same rules the config loader uses before anything is
 written, so set can never leave a config that fails to load.
 
 Settable keys:
   default_program            agent enum (claude, codex, aider, gemini, amp, opencode, devin)
+  program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
+  theme                      nord | zenburn | compact JSON object of #RRGGBB color slots
+  session_env_passthrough    compact JSON array of exact environment variable names
+  root_agents                compact JSON object keyed by repository path
+  root_agent                 compact JSON object with enabled and optional program
+  keys                       compact JSON object of TUI action-to-key rebinds
   auto_update                true | false
-  listen_addr                host:port serving the web UI + API, or "" to turn the web server off.
+  network.listen_addr        host:port serving the web UI + API, or "" to turn the web server off.
                              DANGER: a non-loopback address (0.0.0.0, a LAN/Tailscale IP) puts af's
-                             full control plane on the network, and require_token defaults to FALSE —
-                             set require_token = true in the same breath, or anyone who can reach the
+                             full control plane on the network, and network.require_token defaults to FALSE —
+                             set network.require_token = true in the same breath, or anyone who can reach the
                              address controls this machine. af serves plain HTTP, so front a routable
                              listener with a TLS-terminating proxy or a private network.
-  require_token              true | false  (default false: the web UI needs no token; set true to require one from network peers)
-  require_loopback_token     true | false  (default false: also require the token from same-machine browsers; only has an effect with require_token = true)
-  preview_listen_addr        host:port for a separate per-tab web-tab preview origin (and, on a loopback
+  network.require_token      true | false  (default false: the web UI needs no token; set true to require one from network peers)
+  network.require_loopback_token  true | false  (default false: also require the token from same-machine browsers; only has an effect with network.require_token = true)
+  network.preview_listen_addr  host:port for a separate per-tab web-tab preview origin (and, on a loopback
                              fixed port, a per-session VS Code editor origin), or "" to disable (default "").
-                             Kept apart from listen_addr on purpose: it serves previews/editors only, never
-                             the control API. Same address grammar as listen_addr.
+                             Kept apart from network.listen_addr on purpose: it serves previews/editors only, never
+                             the control API. Same address grammar as network.listen_addr.
   daemon_poll_interval       Go duration (e.g. 1500ms or 30m), or legacy positive integer (ms)
   log_max_size_mb            positive integer
   log_max_backups            non-negative integer
@@ -693,31 +702,38 @@ Settable keys:
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
+  limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
   global_agent_skills        true | false
-  docker_mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
-  ssh_host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
-  cors_allowed_origins       comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
-  sandbox_ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
+  ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
+  network.cors_allowed_origins  comma-separated browser origins (scheme://host[:port]) allowed to call the API cross-origin, or "" to allow none — the whole list is replaced
+  sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
 
-Structural keys (root_agents, [theme], the [keys] rebind table) and the
-session_env_passthrough list have no single-scalar shape, so they are not settable
-here. Ask the config assistant to change them (it edits the file and validates), or
-edit config.toml directly and run "af config validate".
-A settable key applies to a running daemon in place (#2480); only the
-structural keys above take effect on the next daemon start.
+Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
+require_loopback_token, cors_allowed_origins, docker_mount_agent_credentials,
+ssh_host_key_verification, and sandbox_ssh remain accepted and edit the same
+canonical grouped values.
+
+Structured values must be shell-quoted so the JSON remains one argument. A write
+uses the same apply-on-save path as the TUI and web config panes (#2480). Most
+keys apply to the running daemon immediately; each successful set prints its
+exact effect notice.
 
 With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides.<agent>, branch_prefix, on_archive_command); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, root_agent, branch_prefix, on_archive_command); a global-only key
 is rejected with the location it actually belongs to. Clear an override with
 'af config unset <key> --project <id-or-path>'.
 
 Examples:
   af config set default_program codex
   af config set auto_update false
+  af config set theme zenburn
+  af config set session_env_passthrough '["HTTP_PROXY","NO_PROXY"]'
+  af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
@@ -742,23 +758,24 @@ af config set <key> <value> [flags]
 
 ## af config unset
 
-Clear a per-project config override
+Clear a config override or migrated global setting
 
 Remove one key's personal override for a project so the value falls back to
 the lower layers again (built-in < global < in-repo). Clearing an override is
 deliberately different from setting a value equal to the lower layer, which is
 still a present, winning override.
 
---project <id-or-path> is required: unset targets a project's machine-local
-config (a prj_ id from 'af projects list', or a path inside a registered
-repository). It edits only the target key, preserving every other comment and
-value, and is a clean no-op when there is no override to clear. There is no
-global unset — remove a line from config.toml by hand, or 'af config set' a new
-value. The cleared override stops applying to sessions created in that project
-from now on.
+With --project, unset targets a project's machine-local config (a prj_ id from
+'af projects list', or a path inside a registered repository). Without
+--project, it clears one migrated global backend setting: docker.mount_agent_credentials,
+ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
+accepted aliases. Global unset removes both on-disk spellings together, so a
+conflicting legacy value cannot silently reappear. Every path edits only the
+target setting, preserves unknown keys and comments, and is a clean no-op when
+there is nothing to clear.
 
 ```
-af config unset <key> --project <id-or-path> [flags]
+af config unset <key> [flags]
 ```
 
 **Flags**
@@ -783,13 +800,10 @@ Read the global config (~/.agent-factory/config.toml) exactly as af and the
 daemon do at startup and report whether it loads. It writes nothing and
 materializes nothing — a read-only check.
 
-This is the companion to a hand-edit. Most keys go through "af config set",
-which validates before it writes and so can never leave a broken file; but the
-structured settings (theme, the [keys] rebinds, root_agents, and the
-session_env_passthrough list) are edited in the file directly, and a broken edit
-there is a hard startup failure with no fallback to defaults. Run this after such
-an edit: exit 0 means the next start will load it, a non-zero exit names what is
-wrong so it can be fixed before restarting.
+This is the companion to a raw hand-edit. "af config set" validates every scalar
+and structured key before it writes and so cannot leave a broken file. A manual
+edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
+names what must be fixed before the next launch.
 
 ```
 af config validate [flags]
@@ -827,20 +841,20 @@ With af running, open:
     http://localhost:8443
 
 It needs no token by default, so the page connects as soon as it loads. Set
-listen_addr to change the address (or to "" to turn the web server off).
-require_token = true demands a bearer token ('af token show') from network
+network.listen_addr to change the address (or to "" to turn the web server off).
+network.require_token = true demands a bearer token ('af token show') from network
 peers; on the default loopback listener same-host callers stay exempt, so the
-UI keeps opening with no login on this machine. Add require_loopback_token =
+UI keeps opening with no login on this machine. Add network.require_loopback_token =
 true to require the token from localhost as well.
 Note that 'af agent-server' does not serve the web UI: it is the headless
 per-workspace backend a daemon drives on a remote machine.
 
 Clients reach the daemon over a local Unix socket by default. To drive one from
-another machine, either ssh to that host and run 'af' there, or give listen_addr
+another machine, either ssh to that host and run 'af' there, or give network.listen_addr
 a routable address and point a client at it with the persistent --daemon-url and
 --token flags. A routable listener is allowed with the token off, but af warns
-once at daemon start: with require_token = false anyone who can reach the
-address drives your agents, so set require_token = true unless you trust the
+once at daemon start: with network.require_token = false anyone who can reach the
+address drives your agents, so set network.require_token = true unless you trust the
 network. That listener speaks plain HTTP either way, so put it behind a reverse
 proxy or a private network (Tailscale/VPN) if you need TLS.
 Full guide: https://sachiniyer.github.io/agent-factory/remote-http-auth/
@@ -1301,7 +1315,7 @@ autostart unit is only paused when it serves this AGENT_FACTORY_HOME; a daemon
 or unit for a different AF home is never touched.
 
 KEEPS your real git repositories (working tree, .git, and your own branches),
-and KEEPS the daemon configuration (config.toml: listen_addr, defaults,
+and KEEPS the daemon configuration (config.toml: network.listen_addr, defaults,
 root_agents, update_channel, and per-repo config). After the wipe the
 supervised daemon restarts with empty session/task state and the same config;
 root_agents in config re-register, which is intended.
@@ -1631,7 +1645,7 @@ List sessions in the current project
 
 List sessions in the current project.
 
-Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed.
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
 
 ```
 af sessions list [flags]
@@ -1642,6 +1656,10 @@ af sessions list [flags]
 | Flag | Type | Description |
 |------|------|-------------|
 | `--all` |  | List sessions across every project instead of only the current one |
+| `--limit` | `int` | Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded) (default `0`) |
+| `--live` |  | Exclude archived sessions |
+| `--max-age` | `duration` | Only list sessions created within this duration (for example 24h) (default `0s`) |
+| `--status` | `stringArray` | Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached) |
 
 **Global flags**
 
@@ -2455,7 +2473,7 @@ Manage the daemon's bearer token for the direct-TCP API
 Manage the bearer token that authenticates the daemon's direct-TCP HTTP API.
 
 The token grants full access under the single-owner auth model. It is only used
-by the TCP listener (enabled with the listen_addr config key); the local unix
+by the TCP listener (enabled with the network.listen_addr config key); the local unix
 socket stays unauthenticated (its 0600 filesystem perms are the local auth).
 The token is stored in the af home (~/.agent-factory) with 0600 permissions.
 

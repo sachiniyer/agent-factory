@@ -518,7 +518,8 @@ func TestHandoffSession_ReplacementFenceCoversMissionDelivery(t *testing.T) {
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "fenced-delivery", backend)
 	attemptedAt := time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC)
 	inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt)
-	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), inst.StateEpoch())
+	_, epoch := inst.InFlightOpAndEpoch()
+	inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Minute), epoch)
 	inst.SetLimitReached(time.Date(2026, 7, 22, 9, 0, 0, 0, time.UTC))
 	done := make(chan error, 1)
 	go func() {

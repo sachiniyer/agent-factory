@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -123,14 +124,20 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	case probeAlive:
 		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
+		instance.ClearLostRestoreFailure()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
 		m.clearRemoteLoss(stateKey)
-		m.persistInstance(repoID, instance)
 		m.mu.Lock()
 		delete(m.lostRestoreStates, stateKey)
 		m.mu.Unlock()
+		if settleErr := m.persistSettlement(repoID, key, instance); settleErr != nil {
+			failure := fmt.Errorf(
+				"session %q was confirmed alive, but its healed state could not be written to disk: %w",
+				title, settleErr)
+			return restoredArchiveResult(instance, instance.GetWorktreePath(), failure)
+		}
 		return restoredArchiveResult(instance, instance.GetWorktreePath())
 	case probeUnknown:
 		// Unreachable is not gone. Refuse, and NAME the release — a guard that blocks
@@ -190,8 +197,33 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
-		m.persistInstance(repoID, instance)
+		// Error-returning, not the logging wrapper: the committed arm below must
+		// not claim "recorded" for a write that failed (#3353 review), so the
+		// outcome of this persist is part of the message. The plain arm keeps the
+		// prior best-effort behavior, logged with persistInstance's own wording.
+		persistErr := m.persistInstanceErr(repoID, instance)
+		if persistErr != nil {
+			log.WarningLog.Printf("failed to persist instance %q: %v", instance.Title, persistErr)
+		}
 		m.recordLostRestoreFailure(key, repoID, instance, err, lostRestoreManual)
+		// Recovery that rebuilt the missing worktree (and possibly recreated its
+		// branch) before failing has already mutated durable workspace state — the
+		// git side lives on disk regardless of the record write. The session is
+		// NOT restored — the message says retry — but a raw error with an empty
+		// worktree_path would read as failed-nothing-committed about a mutation
+		// that landed (#3236). A pre-mutation failure stays the plain error below.
+		var rebuilt *session.RecoverRebuiltWorkspaceError
+		if errors.As(err, &rebuilt) {
+			failure := fmt.Errorf(
+				"restore of session %q failed after recovery rebuilt its worktree at %s; the rebuilt state is recorded — retry the restore: %w",
+				title, instance.GetWorktreePath(), err)
+			if persistErr != nil {
+				failure = fmt.Errorf(
+					"restore of session %q failed after recovery rebuilt its worktree at %s, and the rebuilt state could not be written to disk (%v) — retry the restore once the cause clears: %w",
+					title, instance.GetWorktreePath(), persistErr, err)
+			}
+			return instance.GetWorktreePath(), &mutationCommittedError{err: failure}
+		}
 		return "", err
 	}
 	// Reset FIRST, before the persist below: recovery replaced the runtime the

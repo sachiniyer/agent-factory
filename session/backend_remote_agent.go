@@ -4,12 +4,7 @@ package session
 // plane is an AgentServer reached through the daemon. Docker, SSH, and hook
 // runtimes differ only in how they provision and reap that workspace; after
 // provisioning, their lifecycle and agent-facing operations must stay identical.
-type remoteAgentBackend struct {
-	// reap tears down the provisioned workspace. It is shared with the runtime's
-	// Teardown / AgentServer Kill path and is idempotent behind the closure. A nil
-	// reap marks an inert backend rebuilt from disk.
-	reap func() error
-}
+type remoteAgentBackend struct{}
 
 // Capabilities reports the common off-box runtime contract. Tab management is
 // false because the AgentServer's tab API is data-plane only: it can drive an
@@ -78,9 +73,6 @@ func (b *remoteAgentBackend) Kill(i *Instance) error {
 	i.mu.Lock()
 	i.started = false
 	i.mu.Unlock()
-	if b.reap != nil {
-		return b.reap()
-	}
 	return nil
 }
 

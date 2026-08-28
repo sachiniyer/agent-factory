@@ -147,6 +147,9 @@ var testHookPollBeforeSettlementRecord = func() {}
 // writing it to disk. This is the event-plane half of projection-only state: a
 // quiet session can change its diagnostic while liveness and reset time remain
 // identical, and already-open clients must not wait for an unrelated transition.
+// settlementCheckpoint marks a durable one-shot change outside liveness/reset,
+// currently the first post-prompt churn edge or retirement of a terminal Lost
+// restore failure after positive liveness evidence.
 //
 // A concurrent client op (create/kill/archive) means that op's executor owns the
 // durable state, so the poll never persists over it. Split from
@@ -185,7 +188,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	before session.Liveness,
 	beforeReset time.Time,
 	projectionChanged bool,
-	idleEvidenceCheckpoint bool,
+	settlementCheckpoint bool,
 ) {
 	if instance.GetInFlightOp() != session.OpNone {
 		return
@@ -193,7 +196,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || idleEvidenceCheckpoint
+	durableChanged := livenessChanged || resetChanged || settlementCheckpoint
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -202,9 +205,9 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	testHookPollBeforePersistLock()
 	repoStartLock.Lock()
 	// Re-read the WHOLE projection after joining the same ordering domain as tab
-	// mutations and session creation. StateEpoch intentionally covers lifecycle
-	// state only, so using it as a whole-payload change detector lets an untracked
-	// roster mutation publish first and then get erased by this stale event.
+	// mutations and session creation. InFlightOpAndEpoch intentionally covers
+	// lifecycle state only, so using it as a whole-payload change detector lets
+	// an untracked roster mutation publish first and then get erased by this stale event.
 	data = instance.ToInstanceData()
 	var err error
 	if durableChanged {
@@ -216,9 +219,9 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	case err == nil && durableChanged:
 		// Any successful whole-row checkpoint subsumes an older evidence write.
 		m.recordSettlementWrite(repoID, key, instance, nil)
-	case err != nil && idleEvidenceCheckpoint:
-		// The first post-prompt churn edge is one-shot in memory. Preserve the
-		// obligation after a failed write so a later poll can make it durable.
+	case err != nil && settlementCheckpoint:
+		// These checkpoint edges are one-shot in memory. Preserve the obligation
+		// after a failed write so a later poll can make the outcome durable.
 		m.recordSettlementWrite(repoID, key, instance, err)
 	}
 	// Push the change onto the events plane (#1592 PR5): this is the single choke

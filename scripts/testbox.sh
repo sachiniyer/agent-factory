@@ -646,6 +646,7 @@ web-selftest)
         -v af-web-selftest-gobuild:/cache/gobuild \
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \
         --memory "${AF_WEB_TESTBOX_MEMORY:-4g}" \
+        -e AF_PLAYWRIGHT_ARGS \
         "$WEB_IMAGE" bash /src/scripts/container/web-selftest-entry.sh || rc=$?
     finish_image_start
     exit "$rc"

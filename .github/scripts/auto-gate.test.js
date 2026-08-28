@@ -87,29 +87,42 @@ test("Auto Gate can be recovered manually by PR number", () => {
   assert.doesNotMatch(helper, /payload\.action|context\.payload\.action/);
 });
 
-test("failed aggregate invalidations retry before entering the serialized lane", () => {
-  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
-  const invalidationBlock = workflow.match(
-    /- name: Make the aggregate non-green immediately[\s\S]*?\n  apply-gate:/,
-  )?.[0];
+test("failed aggregate invalidations retry before entering the serialized lane", async () => {
+  const exhausted = { head_sha: HEAD_SHA };
+  const fenced = { head_sha: OTHER_SHA };
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [exhausted, fenced],
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "read-only" }, { writeState: "read-only" }],
+      [OTHER_SHA]: [{ writeState: "created" }],
+    },
+  });
 
-  assert.ok(invalidationBlock, "aggregate invalidation workflow block is missing");
-  assert.match(
-    invalidationBlock,
-    /const invalidateAggregate = async \(aggregate\) => \{[\s\S]*?await autoGate\.invalidateAggregateDecision/,
+  assert.deepEqual(
+    run.attempts,
+    [HEAD_SHA, HEAD_SHA, OTHER_SHA],
+    "a failed invalidation must retry exactly once before the serialized lane",
   );
-  const invalidationAttempts = [
-    ...invalidationBlock.matchAll(/await invalidateAggregate\(aggregate\)/g),
-  ];
-  assert.equal(invalidationAttempts.length, 2);
-  assert.match(
-    invalidationBlock,
-    /const invalidatedHeads = \[\][\s\S]*?core\.setOutput\("invalidated_heads", JSON\.stringify\(invalidatedHeads\)\)/,
+  assert.deepEqual(
+    JSON.parse(run.outputs.invalidated_heads),
+    [fenced],
+    "a head whose invalidation exhausted its retry must not enter the serialized lane",
   );
-  assert.ok(
-    invalidationAttempts[1].index < invalidationBlock.lastIndexOf('core.setOutput("invalidated_heads"'),
-    "failed invalidations must retry before the head enters the serialized lane",
-  );
+  assert.ok(run.error, "an exhausted invalidation must still fail the invalidate step");
+  assert.match(run.error.message, /1 aggregate invalidation\(s\) failed after the pre-lane retry/);
+});
+
+test("a retried invalidation that succeeds admits its head to the serialized lane", async () => {
+  const run = await runInvalidateGateStep({
+    aggregateHeads: [{ head_sha: HEAD_SHA }],
+    invalidateResults: {
+      [HEAD_SHA]: [{ writeState: "read-only" }, { writeState: "created" }],
+    },
+  });
+
+  assert.deepEqual(run.attempts, [HEAD_SHA, HEAD_SHA]);
+  assert.deepEqual(JSON.parse(run.outputs.invalidated_heads), [{ head_sha: HEAD_SHA }]);
+  assert.equal(run.error, null, "a rescued head must not fail the invalidate step");
 });
 
 test("manual recovery reports a previously absent gate distinctly", async () => {
@@ -1197,11 +1210,185 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
   assert.equal(settled.shouldMerge, true);
 });
 
-test("a Codex rate-limit message waits without becoming a verdict", async () => {
+test("a Codex rate-limit message never becomes a verdict", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
   assert.equal(result.shouldMerge, false);
   assert.match(result.reasons.join("\n"), /has not reviewed head.*usage-limited/);
+});
+
+// #3378: the reviewer account ran out of credits and every open PR became
+// unmergeable, because a usage-limited response was only ever cosmetic suffix
+// text on a reason that waits for a verdict that cannot arrive. Observed
+// usage-limited degrades to the existing manual-merge path; unknown does not.
+test("an observed usage-limited reviewer degrades to maintainer review instead of waiting forever", async () => {
+  const result = await evaluateGate({ issueComments: [codexRateLimit()] });
+
+  assert.equal(result.manualMergeRequired, true, "the gate must degrade, not wait");
+  assert.equal(result.shouldMerge, false, "degrading must never auto-merge");
+  assert.match(result.summary, /^PASS:/);
+  assert.match(result.summary, /usage-limited/);
+  assert.match(result.summary, /has NOT been reviewed/);
+
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  const report = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(report.state, "manual");
+  assert.equal(github.createdChecks[0].conclusion, "success");
+  assert.match(github.createdChecks[0].output.title, /usage-limited/);
+});
+
+test("reviewer silence with no usage-limit evidence keeps blocking exactly as before", async () => {
+  const result = await evaluateGate({ issueComments: [] });
+
+  assert.equal(result.manualMergeRequired, false, "silence is not evidence of a usage limit");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /has not reviewed head/);
+  assert.doesNotMatch(result.reasons.join("\n"), /usage-limited/);
+
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+    manual: false,
+  });
+
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+});
+
+// A usage-limit message proves the reviewer was out of quota when it answered,
+// which says nothing about a head pushed after it: the reviewer may be back in
+// quota and simply not there yet, which is the silence case. Without this the
+// degradation is also sticky — one usage-limit comment would put the PR in
+// manual-merge mode for every later push, forever.
+test("a usage-limit response older than the head is stale evidence and keeps blocking", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: "2026-07-09T01:30:00Z",
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "evidence about an older head is not evidence");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /predates this head/);
+});
+
+test("an unknown head timestamp never degrades the gate", async () => {
+  const result = await evaluateGate({
+    headCommittedDate: null,
+    issueComments: [codexRateLimit()],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "an unknown order is not a proven one");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// Degrading waives exactly one requirement: the verdict that cannot arrive.
+// Every other gate is independent of the reviewer, and manualMergeRequired
+// makes the decision pass, so waiving them together would let "the reviewer is
+// down" quietly green-light a PR with a known finding or a missing label.
+test("a usage-limited reviewer does not waive an unrelated blocker", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit()],
+    files: ["app/termpane.go"],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "an unrelated gate must still block");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.match(result.reasons.join("\n"), /usage-limited/);
+});
+
+test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit()],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "a live finding is not the missing verdict");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /1 unresolved live Codex inline finding/);
+});
+
+// "Latest response" has to mean latest across comments AND reviews. A review
+// posted after the quota message proves the reviewer answered again, so the
+// quota message is no longer current — reading only issue comments misses it.
+test("a Codex review newer than the quota message means it is no longer current", async () => {
+  const result = await evaluateGate({
+    issueComments: [codexRateLimit("2026-07-09T01:20:00Z")],
+    reviews: [codexReview(OTHER_SHA, "Suggestions for an earlier head.", "2026-07-09T01:25:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "the reviewer answered after the quota message");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// The detector is an unanchored substring match, so a review that discusses the
+// gate itself trips it. Such a body already fails parseReviewedCommit, so it is
+// not a verdict either — the safe landing is "keep blocking", never "degrade".
+test("a review body that merely quotes the usage-limit text is not quota evidence", async () => {
+  const quoting = {
+    ...codexVerdict(HEAD_SHA),
+    body:
+      "### Codex Review\n\nThe detector fires on “reached your Codex usage limits for code " +
+      `reviews” anywhere in a body.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+  };
+  const result = await evaluateGate({ issueComments: [quoting] });
+
+  assert.equal(result.manualMergeRequired, false, "a review body is not a quota response");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+test("a usage-limited reviewer unblocks the aggregate without merging anything", async () => {
+  const github = fakeGateGithub({ nativeAutoMergeEnabled: true, issueComments: [codexRateLimit()] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.equal(transaction.aggregate.ok, true, "the aggregate must stop sitting red");
+  assert.equal(github.mergedWith, null, "degrading must never merge");
+  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "success");
+  assert.match(exactDecision.output.summary, /has NOT been reviewed/);
+});
+
+test("a usage-limited reviewer does not excuse an exact-head verdict carrying a finding", async () => {
+  const verdictWithFinding = {
+    ...codexVerdict(HEAD_SHA),
+    body: `Codex Review: P1 — unsafe write ordering.\n\n**Reviewed commit:** \`${HEAD_SHA.slice(0, 10)}\``,
+  };
+  const result = await evaluateGate({
+    issueComments: [verdictWithFinding, codexRateLimit("2026-07-09T01:25:00Z")],
+  });
+
+  assert.equal(result.manualMergeRequired, false, "a real verdict exists; nothing to degrade");
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+  assert.match(result.reasons.join("\n"), /P0-P3 finding/);
 });
 
 test("a clean exact-head verdict cannot override live Codex findings", async () => {
@@ -1645,6 +1832,75 @@ async function evaluateGate(options = {}) {
   });
 }
 
+// invalidateGateScript extracts the invalidate-gate step's inline script from
+// the workflow and compiles it the way actions/github-script does: an async
+// function receiving github/context/core/require, with process reachable in
+// scope. Executing the real step body is the point — a text-level assertion on
+// the YAML stays green when the control flow inverts (#3224).
+function invalidateGateScript() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const step = workflow.match(
+    /- name: Make the aggregate non-green immediately[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S)/,
+  );
+  assert.ok(step, "the aggregate invalidation step script is missing from auto-gate.yml");
+  const indent = step[1].match(/^( +)\S/m);
+  assert.ok(indent, "the aggregate invalidation step script is empty");
+  const body = step[1]
+    .split("\n")
+    .map((line) => line.slice(indent[1].length))
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  return new AsyncFunction("github", "context", "core", "require", "process", body);
+}
+
+// runInvalidateGateStep executes the extracted step against a scripted helper:
+// invalidateResults maps each head SHA to the sequence of results its
+// invalidateAggregateDecision calls return, and attempts records the real call
+// order the step made.
+async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
+  const script = invalidateGateScript();
+  const attempts = [];
+  const helper = {
+    invalidateAggregateDecision: async ({ headSha }) => {
+      attempts.push(headSha);
+      const remaining = invalidateResults[headSha];
+      assert.ok(
+        remaining && remaining.length > 0,
+        `unexpected extra invalidation attempt for ${headSha}`,
+      );
+      return remaining.shift();
+    },
+  };
+  const workspace = "/workspace";
+  const helperPath = path.join(workspace, ".github/scripts/auto-gate.js");
+  const requireStub = (id) => {
+    if (id === "path") {
+      return path;
+    }
+    if (id === helperPath) {
+      return helper;
+    }
+    throw new Error(`unexpected require(${JSON.stringify(id)}) in the invalidate-gate step`);
+  };
+  const outputs = {};
+  const warnings = [];
+  const core = {
+    ...fakeCore(),
+    setOutput: (name, value) => {
+      outputs[name] = value;
+    },
+    warning: (message) => warnings.push(message),
+  };
+  const env = { GITHUB_WORKSPACE: workspace, AGGREGATE_HEADS: JSON.stringify(aggregateHeads) };
+  let error = null;
+  try {
+    await script({}, {}, core, requireStub, { env });
+  } catch (stepError) {
+    error = stepError;
+  }
+  return { attempts, outputs, warnings, error };
+}
+
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
@@ -1971,12 +2227,12 @@ function codexVerdict(sha, timestamp = "2026-07-09T01:20:00Z") {
   };
 }
 
-function codexRateLimit() {
+function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: "You have reached your Codex usage limits for code reviews.",
-    created_at: "2026-07-09T01:20:00Z",
-    updated_at: "2026-07-09T01:20:00Z",
+    created_at: timestamp,
+    updated_at: timestamp,
   };
 }
 

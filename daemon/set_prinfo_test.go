@@ -134,9 +134,9 @@ func TestSetPRInfo_ClearsWithZeroValue(t *testing.T) {
 }
 
 // TestSetPRInfo_PublishesSessionUpdated pins the multi-client half of the
-// mutation (#2769). SetPRInfo is how the TUI's async `gh pr view` fetch lands, so
-// the PR badge it records is state every OTHER connected client — a second TUI
-// window, an open web rail — has to repaint from. A client only re-Snapshots
+// mutation (#2769). The daemon discovery path records through this guarded
+// writer, so the PR badge is state every connected client — another TUI window,
+// an open web rail — has to repaint from. A client only re-Snapshots
 // after its OWN mutation, so without this event the badge stays invisible
 // everywhere else until something unrelated happens to republish the session.
 //
@@ -193,5 +193,33 @@ func TestControlServer_SetPRInfo_GatedAndValidated(t *testing.T) {
 	err = ready.SetPRInfo(SetPRInfoRequest{Title: "x", RepoID: "foo/../bar"}, &resp)
 	if err == nil || !strings.Contains(err.Error(), "rejected RPC request") {
 		t.Fatalf("SetPRInfo traversal RepoID: want rejection, got: %v", err)
+	}
+}
+
+// TestControlServer_RefreshPRInfo_GatedAndValidated keeps the new poke under
+// the same readiness, probation, and path-validation boundary as other session
+// mutations before it can start daemon-owned discovery.
+func TestControlServer_RefreshPRInfo_GatedAndValidated(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	shell, err := newManagerShell(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("newManagerShell: %v", err)
+	}
+	var resp RefreshPRInfoResponse
+	err = (&controlServer{manager: shell}).RefreshPRInfo(RefreshPRInfoRequest{Title: "x"}, &resp)
+	if !IsDaemonStartingErr(err) {
+		t.Fatalf("RefreshPRInfo on warming manager: want daemon-starting error, got: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	err = (&controlServer{manager: manager}).RefreshPRInfo(
+		RefreshPRInfoRequest{Title: "x", RepoID: "foo/../bar"}, &resp,
+	)
+	if err == nil || !strings.Contains(err.Error(), "rejected RPC request") {
+		t.Fatalf("RefreshPRInfo traversal RepoID: want rejection, got: %v", err)
 	}
 }

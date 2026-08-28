@@ -18,6 +18,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // restoreManagerForStartup is the warm-up restore entry point RunDaemon uses.
@@ -235,6 +236,21 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// warm-up exit paths deliberately skip SaveInstances: nothing has been
 	// restored, and saving the empty instance map would wipe every persisted
 	// session.
+	//
+	// Establish shared tmux infrastructure at this last pre-restore barrier. The
+	// control socket remains early (#829), while warming rejects every concurrent
+	// mutation, so no session can spawn before this finishes. The launch is
+	// additive and fail-open: an unavailable user systemd manager leaves the
+	// historical per-session scope fallback in place.
+	if home, homeErr := config.GetConfigDir(); homeErr != nil {
+		log.WarningLog.Printf("cannot configure dedicated tmux server launch; session creation will use its fallback: %v", homeErr)
+	} else {
+		restoreTmuxServerConfig := sessiontmux.ConfigureDaemonServer(home)
+		defer restoreTmuxServerConfig()
+		if serverErr := sessiontmux.EnsureDaemonServer(); serverErr != nil {
+			log.WarningLog.Printf("dedicated tmux server launch failed; session creation will use its fallback: %v", serverErr)
+		}
+	}
 	log.InfoLog.Printf("control socket bound; restoring instances")
 	restoreDone := make(chan error, 1)
 	// Capture the seam on the main flow: reading the package var inside the
@@ -306,6 +322,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	wg := &sync.WaitGroup{}
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
+
+	// The daemon discovers each session's PR info itself (#3232), so a session
+	// used only from the web or the CLI still gets its pr_info projection
+	// populated — before this loop the TUI was the only producer.
+	startPRInfoRefreshLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an
@@ -514,7 +535,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 							continue
 						}
 					}
-					if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
+					if rawTaskRunHoldsSlot(item) {
 						ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					}
 					continue
@@ -547,7 +568,10 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// runs against m.instances, which is exactly where a ghost is absent. A
 				// tombstoned row that stops loading would therefore hold its slot for
 				// good and park every later event for that task (#2418).
-				if item.TaskID != "" && item.TaskRunActive && !item.StartupStateUnknown && !item.UserKilled {
+				// LostRestoreFailure is likewise terminal: the retry loop deliberately
+				// released the slot after giving up, so an unloadable copy cannot reclaim
+				// it as a ghost on the next daemon start (#3310).
+				if rawTaskRunHoldsSlot(item) {
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
 					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
 				}

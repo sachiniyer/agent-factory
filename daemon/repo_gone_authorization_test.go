@@ -122,15 +122,33 @@ func TestRestoreArchived_OriginProbeFailurePersistsUnresolvedClaim(t *testing.T)
 	require.NoError(t, err)
 	archivedPath := inst.GetWorktreePath()
 	require.Nil(t, recordFor(t, repoID, "probe-unknown").Worktree.RelocationRecovery)
+	originalPath := os.Getenv("PATH")
 	t.Setenv("PATH", t.TempDir())
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "probe-unknown", RepoID: repoID})
 	require.Error(t, err)
+	assert.ErrorContains(t, err, "cannot establish origin repo state",
+		"an unexecutable probe is an unknown answer, not proof the origin is gone")
+	assert.NotErrorIs(t, err, sessiongit.ErrRepoGone)
 	assert.True(t, exists(archivedPath), "unknown origin probe must leave the archive intact")
 	recovery := recordFor(t, repoID, "probe-unknown").Worktree.RelocationRecovery
 	require.NotNil(t, recovery, "record-free claim must become a durable non-destructive fence")
 	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
 	assert.True(t, recovery.IdentityKnown)
+	assert.Empty(t, recovery.CleanupLifecycle,
+		"an operational probe failure must not persist destructive cleanup authorization (#3228): "+
+			"storage projects cleanup_ready to claim_stale, so State alone cannot distinguish them")
+
+	// The fence must also refuse consumption: with git healthy again, a kill of
+	// the unresolved record must stop at the admission guard, before its
+	// tombstone — not proceed as if the probe failure had authorized cleanup.
+	t.Setenv("PATH", originalPath)
+	_, err = manager.KillSession(KillSessionRequest{Title: "probe-unknown", RepoID: repoID})
+	require.Error(t, err, "an unresolved fence must refuse a destructive kill")
+	assert.ErrorContains(t, err, "retry archive or restore before destructive cleanup",
+		"the refusal must come from the unresolved-state guard, not a downstream failure")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(archivedPath), "a refused kill must leave the archive intact")
 }
 
 func TestRestoreArchived_PathDerivationFailurePersistsUnresolvedClaim(t *testing.T) {
@@ -166,17 +184,35 @@ func TestRestoreArchived_AuthoritativeProbeFailurePersistsUnresolvedClaim(t *tes
 	archivedPath := inst.GetWorktreePath()
 	require.Nil(t, recordFor(t, repoID, "use-probe-unknown").Worktree.RelocationRecovery)
 
+	originalPath := os.Getenv("PATH")
 	previous := beforeRestoreWorktreeUse
 	beforeRestoreWorktreeUse = func() { t.Setenv("PATH", t.TempDir()) }
 	t.Cleanup(func() { beforeRestoreWorktreeUse = previous })
 
 	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "use-probe-unknown", RepoID: repoID})
 	require.Error(t, err)
+	assert.ErrorContains(t, err, "failed to restore worktree",
+		"an unexecutable authoritative probe must surface as a generic unresolved failure")
+	assert.NotErrorIs(t, err, sessiongit.ErrRepoGone,
+		"an unknown probe answer must not be classified as proof the origin is gone")
 	assert.True(t, exists(archivedPath), "authoritative probe failure must leave the archive intact")
 	recovery := recordFor(t, repoID, "use-probe-unknown").Worktree.RelocationRecovery
 	require.NotNil(t, recovery, "authoritative probe failure must materialize a durable unresolved claim")
 	assert.Equal(t, sessiongit.RelocationRecoveryClaimStale, recovery.State)
 	assert.True(t, recovery.IdentityKnown)
+	assert.Empty(t, recovery.CleanupLifecycle,
+		"an operational probe failure must not persist destructive cleanup authorization (#3228): "+
+			"storage projects cleanup_ready to claim_stale, so State alone cannot distinguish them")
+
+	// Same consumption proof as the early-guard variant above: the persisted
+	// unresolved claim must refuse a destructive kill before its tombstone.
+	t.Setenv("PATH", originalPath)
+	_, err = manager.KillSession(KillSessionRequest{Title: "use-probe-unknown", RepoID: repoID})
+	require.Error(t, err, "an unresolved fence must refuse a destructive kill")
+	assert.ErrorContains(t, err, "retry archive or restore before destructive cleanup",
+		"the refusal must come from the unresolved-state guard, not a downstream failure")
+	assert.False(t, inst.UserKilled(), "the refusal must land before the kill tombstone")
+	assert.True(t, exists(archivedPath), "a refused kill must leave the archive intact")
 }
 
 func TestRestoreArchived_GenericUseFailurePersistsRecordFreeClaim(t *testing.T) {

@@ -637,6 +637,171 @@ func TestFactoryReset_ResilientPartialFailure(t *testing.T) {
 	}
 }
 
+// seedBranchOnlyRepo builds a minimal real repo (no worktrees) whose AF records
+// carry only branch state, so a test can drive the reset's branch pass in
+// isolation. It creates the branch `branch` and writes two records: "kept"
+// (AF created `branch`) and "reused" (the session reused the user's master, so
+// no branch is planned for it).
+func seedBranchOnlyRepo(t *testing.T, branch string) (repo, repoID string) {
+	t.Helper()
+	repo = t.TempDir()
+	runGit(t, repo, "init", "-q")
+	runGit(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	runGit(t, repo, "branch", "-M", "master")
+	runGit(t, repo, "branch", branch)
+
+	repoID = config.RepoIDFromRoot(repo)
+	recs := []session.InstanceData{
+		{
+			Title: "kept", Path: repo, Liveness: session.LiveReady,
+			Worktree: session.GitWorktreeData{
+				RepoPath: repo, BranchName: branch, BranchCreatedByUs: boolPtr(true),
+			},
+		},
+		{
+			Title: "reused", Path: repo, Liveness: session.LiveReady,
+			Worktree: session.GitWorktreeData{
+				RepoPath: repo, BranchName: "master", BranchCreatedByUs: boolPtr(false),
+			},
+		},
+	}
+	raw, err := json.Marshal(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances(repoID, raw); err != nil {
+		t.Fatal(err)
+	}
+	return repo, repoID
+}
+
+// loadInstanceTitles returns the Title of every record stored for repoID.
+func loadInstanceTitles(t *testing.T, repoID string) []string {
+	t.Helper()
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances(%s): %v", repoID, err)
+	}
+	var recs []session.InstanceData
+	if err := json.Unmarshal(raw, &recs); err != nil {
+		t.Fatalf("unmarshal instances for %s: %v", repoID, err)
+	}
+	titles := make([]string, 0, len(recs))
+	for _, r := range recs {
+		titles = append(titles, r.Title)
+	}
+	return titles
+}
+
+// TestFactoryReset_BranchProbeFailureRetainsRecord is the #3243 regression
+// lock, end to end. A branch whose existence PROBE fails is unknown, not
+// absent: the old path read it as a clean no-op, recorded no error, and then
+// deleted the session records — the only durable list of AF-created branch
+// targets — so the still-existing branch was orphaned beyond the reach of any
+// re-run. The honest outcome is refuse-and-retain: surface an error naming what
+// could not be checked, keep exactly the affected records, and let a re-run
+// finish the job once the cause is cleared (the same contract #2110 established
+// for blocked worktrees).
+func TestFactoryReset_BranchProbeFailureRetainsRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod-based EACCES is bypassed by root; this scenario needs a non-root uid")
+	}
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Chdir(t.TempDir())
+
+	// Repo A's refs storage will be unreadable when the branch pass runs; repo B
+	// stays healthy so the same run must still clean it fully.
+	repoA, repoAID := seedBranchOnlyRepo(t, "af-kept")
+	repoB, repoBID := seedBranchOnlyRepo(t, "af-gone")
+
+	plan, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("planFactoryReset: %v", err)
+	}
+	if plan.branchCount() != 2 {
+		t.Fatalf("branchCount = %d, want 2 (af-kept + af-gone)", plan.branchCount())
+	}
+
+	// Break repo A's ref reads AFTER planning: pack the refs, then make
+	// packed-refs unreadable. Both branches still exist; every existence probe
+	// in repo A now fails with EACCES (exit 128), which must not read as
+	// "absent".
+	runGit(t, repoA, "pack-refs", "--all")
+	packed := filepath.Join(repoA, ".git", "packed-refs")
+	if err := os.Chmod(packed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(packed, 0o644) })
+
+	summary, err := executeFactoryReset(plan)
+	if err == nil {
+		t.Fatal("a failed branch-existence probe must fail the reset, not pass as a clean no-op (#3243)")
+	}
+	if !strings.Contains(err.Error(), "af-kept") || !strings.Contains(err.Error(), repoA) {
+		t.Errorf("the error must name the branch and repo that could not be checked, got: %v", err)
+	}
+
+	if err := os.Chmod(packed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The unverified branch survived — and so must its record, or no re-run
+	// could ever find the branch again.
+	if !branchExists(repoA, "af-kept") {
+		t.Error("af-kept must not be deleted while its existence cannot be established")
+	}
+	if got := loadInstanceTitles(t, repoAID); len(got) != 1 || got[0] != "kept" {
+		t.Errorf("repo A retained records = %v, want exactly [kept] — the reused-branch record has no unverified branch and must still be dropped", got)
+	}
+
+	// The healthy repo is fully cleaned in the same run: resilience is per-item.
+	if branchExists(repoB, "af-gone") {
+		t.Error("af-gone (healthy repo) should be deleted despite repo A's probe failure")
+	}
+	if got := loadInstanceTitles(t, repoBID); len(got) != 0 {
+		t.Errorf("repo B records = %v, want none", got)
+	}
+	if summary.branches != 1 {
+		t.Errorf("summary.branches = %d, want 1 (only af-gone was confirmed deleted)", summary.branches)
+	}
+	if summary.unverified != 1 {
+		t.Errorf("summary.unverified = %d, want 1 (af-kept could not be confirmed gone)", summary.unverified)
+	}
+	if summary.sessions != 3 {
+		t.Errorf("summary.sessions = %d, want 3 of 4 (the retained record is not removed)", summary.sessions)
+	}
+	var printed strings.Builder
+	printResetSummary(&printed, summary)
+	if !strings.Contains(printed.String(), "could not be confirmed deleted") ||
+		!strings.Contains(printed.String(), "re-run `af reset`") {
+		t.Errorf("summary must tell the user what was retained and how to finish:\n%s", printed.String())
+	}
+
+	// Recovery: with the cause cleared, the retained record is exactly what the
+	// re-run needs to finish — that is what retention is FOR.
+	plan2, err := planFactoryReset()
+	if err != nil {
+		t.Fatalf("re-run planFactoryReset: %v", err)
+	}
+	if plan2.branchCount() != 1 {
+		t.Fatalf("re-run branchCount = %d, want 1 (af-kept from the retained record)", plan2.branchCount())
+	}
+	summary2, err := executeFactoryReset(plan2)
+	if err != nil {
+		t.Fatalf("re-run should complete cleanly, got: %v", err)
+	}
+	if summary2.branches != 1 {
+		t.Errorf("re-run summary.branches = %d, want 1", summary2.branches)
+	}
+	if branchExists(repoA, "af-kept") {
+		t.Error("af-kept should be deleted by the recovery re-run")
+	}
+	if got := loadInstanceTitles(t, repoAID); len(got) != 0 {
+		t.Errorf("repo A records after recovery = %v, want none", got)
+	}
+}
+
 // stubResetDaemonHandling replaces runReset's daemon/tmux/autostart touchpoints
 // with recorders, restoring the production values on cleanup. It returns the
 // recorded event list. The resume recorder also captures whether the wipe had

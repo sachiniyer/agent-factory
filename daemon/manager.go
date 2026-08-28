@@ -18,10 +18,11 @@ type Manager struct {
 	// cfg is the FROZEN startup config. It is read only by the keys that
 	// deliberately do NOT hot-reload: root_agents (its next-daemon-start contract,
 	// manager.go's deletedRootRepos, carved out of #2480 pending #2216) and
-	// branch_prefix (the title-reservation helpers). The network listener keys
-	// used to read it too; #2480 PR2 made them applied-live (livePosture per
+	// branch_prefix (the title-reservation helpers). The network listener keys used
+	// to read it too; #2480 PR2 made them applied-live (livePosture per
 	// request; listen_addr/preview_listen_addr rebind in place). Everything
-	// hot-reloadable reads live via Config() instead.
+	// hot-reloadable, including GetTheme's renderer generation, reads live via
+	// Config() instead.
 	cfg *config.Config
 	// live is the hot-reloadable global config (#2480). ApplyConfig swaps it in
 	// place so a running daemon applies saved config without a restart or session
@@ -30,6 +31,9 @@ type Manager struct {
 	// two config generations and produce an inconsistent result (e.g. a branch
 	// derived from one generation and a worktree path from the next).
 	live atomic.Pointer[config.Config]
+	// configApplyMu serializes full and theme-only live-config swaps so a launch
+	// cannot restore unrelated fields from a generation an ApplyConfig just replaced.
+	configApplyMu sync.Mutex
 	// pollReloadCh signals the poll goroutine to reset its ticker after ApplyConfig
 	// changed daemon_poll_interval (#2480). Buffered size 1 with a non-blocking
 	// send, so a burst of applies collapses to one reset and ApplyConfig never
@@ -218,27 +222,35 @@ type Manager struct {
 	// written in config.json) for a legacy entry, or by the registered project's
 	// resolved root path for a singleton-only candidate (#2216 Phase 6).
 	rootEnsureStates map[string]*rootEnsureState
-	// rootAgentGlobal is the global [root_agent] singleton layer (#2216 Phase 6),
-	// snapshotted at daemon start (nil when the config declared no [root_agent]).
-	// Like the RootAgents map it is immutable in memory after construction:
-	// root_agent config changes take effect on the next daemon start.
-	rootAgentGlobal *config.RootAgentLayer
-	// rootAgentPersonal maps a registered project's repo ID to its personal
-	// [root_agent] layer, snapshotted at daemon start (projects with no such
-	// override are absent). It is the highest-precedence root-agent source,
-	// merged over global and legacy in config.ResolveRootAgent.
-	rootAgentPersonal map[string]*config.RootAgentLayer
-	// rootAgentProjectRoots maps a registered project's repo ID to its resolved
-	// root path, snapshotted at daemon start. It is the candidate set the ensure
-	// loop visits for a root enabled purely by the global/personal singleton — a
-	// project with no legacy root_agents entry — and supplies the repo root
-	// CreateSession needs. Restart-to-apply, like RootAgents.
-	rootAgentProjectRoots map[string]string
-	// rootAgentLegacyRepoIDs is the set of repo IDs a root_agents path resolved to
-	// at daemon start. The singleton-project sweep skips these so a repo named by
-	// both a legacy entry and a registered project is ensured once — by the legacy
-	// sweep, which merges the personal layer — rather than twice.
-	rootAgentLegacyRepoIDs map[string]bool
+	// rootAgentLayers is the root-agent configuration snapshot every resolution
+	// reads (#2216 Phase 6): the global [root_agent] layer, each registered
+	// project's personal layer and resolved root, the fail-closed unknowns
+	// (#3241/#3247), and the legacy dedup set — one immutable value, republished
+	// wholesale through this atomic pointer, never mutated in place.
+	// Immutability moved from the FIELDS to the VALUE when #3264 added the
+	// safe-direction self-heal: healRootAgentLayers may replace the snapshot
+	// with one carrying FEWER unknowns (a registry that lists again, a personal
+	// config that loads again), so readers Load() once and see a consistent
+	// snapshot, lock-free, exactly as before. Config EDITS remain
+	// restart-to-apply; only a read that failed at daemon start heals mid-run,
+	// by being read successfully for the first time.
+	rootAgentLayers atomic.Pointer[rootAgentSnapshot]
+	// rootHealFailures/rootHealNextAttempt pace healRootAgentLayers on the
+	// shared ensure backoff (rootEnsureBackoffFor, on the injectable nowFunc
+	// clock): while every retried read keeps failing the pass backs off to
+	// rootEnsureBackoffMax instead of re-reading broken files every poll tick.
+	// rootHealRegistryStreak/rootHealRegistryProjects and
+	// rootHealAbsenceStreaks carry the two-strike counters for
+	// absence-classified observations (the applyHomeCheck discipline):
+	// registry recovery publishes on the second consecutive MATCHING
+	// present-and-listable snapshot, and an ENOENT personal config heals to
+	// "removed" on the second consecutive dir-present observation. All
+	// guarded by m.mu, like rootEnsureStates.
+	rootHealFailures         int
+	rootHealNextAttempt      time.Time
+	rootHealRegistryStreak   int
+	rootHealRegistryProjects []config.Project
+	rootHealAbsenceStreaks   map[string]int
 	// rootKilledAt records repos (by repo ID) whose root agent was explicitly
 	// killed, and WHEN. The ensure loop honors the kill only for
 	// rootKillHealDelay, then self-heals a still-configured root (#1223): config
@@ -458,7 +470,7 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 	}
 	vscode := newVSCodeSupervisor()
 	configAgents := newConfigAgentSupervisor()
-	raGlobal, raPersonal, raProjectRoots, raLegacyIDs := buildRootAgentSnapshot(cfg)
+	rootAgentLayers := buildRootAgentSnapshot(cfg)
 	mgr := &Manager{
 		cfg:                    cfg,
 		previewSecret:          previewSecret,
@@ -482,10 +494,6 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		aliveObservations:      make(map[string]uint64),
 		targetLocks:            make(map[string]*sync.Mutex),
 		rootEnsureStates:       make(map[string]*rootEnsureState),
-		rootAgentGlobal:        raGlobal,
-		rootAgentPersonal:      raPersonal,
-		rootAgentProjectRoots:  raProjectRoots,
-		rootAgentLegacyRepoIDs: raLegacyIDs,
 		rootKilledAt:           make(map[string]time.Time),
 		deletedRootRepos:       make(map[string]struct{}),
 		killsInFlight:          make(map[string]struct{}),
@@ -500,10 +508,14 @@ func newManagerShellForDaemon(cfg *config.Config, transactionID string) (*Manage
 		instanceOpLocks:        make(map[string]*sync.Mutex),
 		pausedPolls:            make(map[string]map[string]time.Time),
 		taskRunProbeDue:        make(map[string]time.Time),
+		rootHealAbsenceStreaks: make(map[string]int),
 		events:                 newEventsHub(),
 		vscode:                 vscode,
 		configAgents:           configAgents,
 	}
+	// Publish the start-of-day root-agent snapshot; healRootAgentLayers is the
+	// only later writer, and it republishes wholesale (#3264).
+	mgr.rootAgentLayers.Store(&rootAgentLayers)
 	// Seed the hot-reloadable live config with the startup config (#2480). Config()
 	// reads it; ApplyConfig swaps it in place.
 	mgr.live.Store(cfg)

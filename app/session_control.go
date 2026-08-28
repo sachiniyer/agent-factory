@@ -262,9 +262,9 @@ func SetHandoffRunnerForTest(fn func(daemon.HandoffSessionRequest) (string, erro
 // unconditionally spawned a new session and orphaned the target (#1169). It is a
 // package var so the app test suite can stub the trigger without dialing a real
 // daemon.
-var triggerTaskThroughDaemon = func(taskID string) error {
+var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectation) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.TriggerTask(taskID)
+		return c.TriggerTask(taskID, expect)
 	})
 }
 
@@ -280,7 +280,7 @@ var triggerTaskThroughDaemon = func(taskID string) error {
 // Persistence happens before that refresh; UpdateTask reports the committed
 // outcome explicitly if the refresh fails so the pane advances its baseline.
 // Like the tab
-// create/close RPCs (handleNewTab/handleCloseTab), these are quick daemon writes
+// create/close RPCs (createNewTab/handleCloseTab), these are quick daemon writes
 // dispatched synchronously on the event loop — not the tens-of-seconds ssh
 // teardowns that motivate the async kill/archive cmds — so saveContentPaneState
 // keeps its synchronous error-return contract and its callers still gate on it.
@@ -294,14 +294,14 @@ var (
 	addTaskThroughDaemon = func(t task.Task) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
 	}
-	updateTaskThroughDaemon = func(id string, update task.TaskUpdate) error {
+	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update)
+			_, err := c.UpdateTask(id, update, expect)
 			return err
 		})
 	}
-	removeTaskThroughDaemon = func(id string) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id) })
+	removeTaskThroughDaemon = func(id string, expect task.ProjectExpectation) error {
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.RemoveTask(id, expect) })
 	}
 )
 
@@ -354,13 +354,11 @@ var closeTabThroughDaemon = func(request daemon.CloseTabRequest) error {
 	})
 }
 
-// setPRInfoThroughDaemon routes the TUI's PR-info write (prInfoUpdatedMsg) to the
-// daemon for persistence (#921 write moved daemon-side, #960 PR 2). The gh fetch
-// stays TUI-side; only the persisted write moves. The TUI keeps its in-memory
-// SetPRInfo for instant UI feedback.
-var setPRInfoThroughDaemon = func(request daemon.SetPRInfoRequest) error {
+// refreshPRInfoThroughDaemon pokes daemon-owned PR discovery for the selected
+// session. The TUI sends identity only and learns the result from Snapshot.
+var refreshPRInfoThroughDaemon = func(request daemon.RefreshPRInfoRequest) error {
 	return withDaemonHTTP(func(c *apiclient.Client) error {
-		return c.SetPRInfo(request)
+		return c.RefreshPRInfo(request)
 	})
 }
 
@@ -443,8 +441,9 @@ func SetSessionStarterForTest(f func(*session.Instance, sessionStartRequest) (*s
 }
 
 // SetTaskTriggerForTest swaps the task-trigger seam (#1169) so a test can assert
-// which task ID the TUI "run now" routes to the daemon, without a real daemon.
-func SetTaskTriggerForTest(f func(taskID string) error) func() {
+// which task ID — and which project expectation (#3230) — the TUI "run now"
+// routes to the daemon, without a real daemon.
+func SetTaskTriggerForTest(f func(taskID string, expect task.ProjectExpectation) error) func() {
 	prev := triggerTaskThroughDaemon
 	triggerTaskThroughDaemon = f
 	return func() { triggerTaskThroughDaemon = prev }
@@ -460,13 +459,13 @@ func SetTaskAdderForTest(f func(task.Task) error) func() {
 	return func() { addTaskThroughDaemon = prev }
 }
 
-func SetTaskUpdaterForTest(f func(id string, update task.TaskUpdate) error) func() {
+func SetTaskUpdaterForTest(f func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error) func() {
 	prev := updateTaskThroughDaemon
 	updateTaskThroughDaemon = f
 	return func() { updateTaskThroughDaemon = prev }
 }
 
-func SetTaskRemoverForTest(f func(id string) error) func() {
+func SetTaskRemoverForTest(f func(id string, expect task.ProjectExpectation) error) func() {
 	prev := removeTaskThroughDaemon
 	removeTaskThroughDaemon = f
 	return func() { removeTaskThroughDaemon = prev }
@@ -492,10 +491,10 @@ func SetTabCloserForTest(f func(daemon.CloseTabRequest) error) func() {
 	return func() { closeTabThroughDaemon = prev }
 }
 
-func SetPRInfoSetterForTest(f func(daemon.SetPRInfoRequest) error) func() {
-	prev := setPRInfoThroughDaemon
-	setPRInfoThroughDaemon = f
-	return func() { setPRInfoThroughDaemon = prev }
+func SetPRInfoRefresherForTest(f func(daemon.RefreshPRInfoRequest) error) func() {
+	prev := refreshPRInfoThroughDaemon
+	refreshPRInfoThroughDaemon = f
+	return func() { refreshPRInfoThroughDaemon = prev }
 }
 
 func SetInstanceBuilderForTest(f func(session.InstanceData) (*session.Instance, error)) func() {

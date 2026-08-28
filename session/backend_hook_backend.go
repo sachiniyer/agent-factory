@@ -398,9 +398,8 @@ func (p *hookProvisioner) provision() (ProvisionResult, error) {
 	log.InfoLog.Printf("hook runtime: session %q provisioned via launch_cmd, agent-server at %s", p.spec.Title, ep.URL)
 	return ProvisionResult{
 		Backend: &HookBackend{
-			remoteAgentBackend: remoteAgentBackend{reap: teardown},
-			provisioner:        p,
-			cleanup:            p.cleanupData(),
+			provisioner: p,
+			cleanup:     p.cleanupData(),
 		},
 		Endpoint: ep,
 		Teardown: teardown,

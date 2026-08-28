@@ -95,7 +95,8 @@ it.
 | `j`/`k`,`↓`/`↑` | move tree cursor | | `m` | tasks overlay |
 | `←`/`→` | switch focused pane | | `[`/`]` | previous/next section |
 | `D` | kill instance | | `/` | search |
-| `a` | archive/restore | | `q` | quit |
+| `a` | archive | | `r` | restore |
+| `q` | quit |
 | `p`/`y` | open/copy PR | | `e` | hooks editor |
 | `Ctrl-P` | switch project | | `Ctrl-U`/`Ctrl-D` | preview scroll |
 | `Ctrl-W` | detach (full-screen) |

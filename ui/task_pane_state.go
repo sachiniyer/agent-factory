@@ -93,7 +93,16 @@ func (s *TaskPane) ConsumeDirty() []task.TaskEdit {
 		if update.IsEmpty() {
 			continue
 		}
-		edits = append(edits, task.TaskEdit{ID: t.ID, Update: update})
+		// Pin the project binding of the ORIGINAL record — the copy the user's
+		// edit was authorized against — never the edited task, whose
+		// ProjectPath may itself be the change (#3230). The daemon re-verifies
+		// it under its file lock, so a task rebound by another client while
+		// the pane was open is refused instead of patched.
+		edits = append(edits, task.TaskEdit{
+			ID:     t.ID,
+			Update: update,
+			Expect: task.ExpectProject(s.originals[t.ID]),
+		})
 	}
 	s.dirtyIDs = nil
 	return edits

@@ -1111,6 +1111,45 @@ test("the tokenless path follows the daemon's answer, not loopback detection (#1
   await expect(p.locator(".af-app")).toHaveCount(0);
 
   await ctx.close();
+
+  // The same decision can change while a tokenless client is already open: a
+  // live config apply may begin requiring tokens and publish theme.changed. The
+  // resulting palette 401 must return to a paste-token form, not preserve the
+  // stale auth_required=false choice and offer an empty-credential retry loop.
+  const transitionCtx = await browser.newContext();
+  const live = await transitionCtx.newPage();
+  let rejectTheme = false;
+  await live.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket = socket;
+        }
+        return socket;
+      },
+    });
+  });
+  await live.route("**/v1/GetTheme", (route) => {
+    if (!rejectTheme) return route.continue();
+    return route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: failureBody("token required after live config apply"),
+    });
+  });
+  await openTokenless(live);
+  rejectTheme = true;
+  await live.evaluate(() => {
+    const socket = (window as unknown as { __afAuthTransitionSocket?: WebSocket }).__afAuthTransitionSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect(live.locator("#af-token")).toBeVisible();
+  await expect(live.locator(".af-login-form button[type=submit]")).toContainText("Connect");
+  await expect(live.locator(".af-app")).toHaveCount(0);
+  await transitionCtx.close();
 });
 
 test("a failed login renders the daemon's real message, never [object Object]", async ({ browser }) => {
@@ -1351,7 +1390,7 @@ test("sidebar lists the seeded sessions from the Snapshot/events plane", REAL_FI
   await expect(page.locator(".af-app")).toHaveAttribute("data-live", "open");
 });
 
-test("status dots (#1766): waiting shows a green dot, working shows none, error states are static — no spin anywhere", REAL_FIXTURE, async ({
+test("status semantics (#1766, #3220): action groups are legible and glyphs stay static", REAL_FIXTURE, async ({
   browser,
 }) => {
   // The daemon can't be coerced to Running/Lost/Dead/Limit on demand, so pin the
@@ -1388,20 +1427,22 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
     // distinct branch so its rendered branch line never contains another row's name
     // (the row() locator matches row text by substring).
     const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    const synth = (title: string, liveness: number) => ({
+    const synth = (title: string, liveness: number, idleReason = "") => ({
       ...proto,
       id: `synth-${title}`,
       title,
       branch: `synth-${title}`,
       liveness,
       in_flight_op: 0,
+      idle_reason: idleReason,
     });
     list.push(
       synth("probe-working", 1), // Running → working → no dot
-      synth("probe-waiting", 2), // Ready → waiting → green dot
-      synth("probe-lost", 3),
-      synth("probe-dead", 4),
-      synth("probe-limit", 6),
+      synth("probe-needs-you", 2, "settled-after-pane-change"),
+      synth("probe-broken-prompt", 2, "prompt-not-delivered"),
+      synth("probe-lost", 3, "process-exited"),
+      synth("probe-dead", 4, "process-exited"),
+      synth("probe-limit", 6, "usage-limit"),
     );
     if (snap) {
       snap.instances = list;
@@ -1416,16 +1457,28 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   // would pass for the wrong reason.
   await expect(row(p, "probe-working")).toBeVisible({ timeout: 15_000 });
   await expect(row(p, "probe-working").locator(".af-dot")).toHaveCount(0);
-  // Waiting row: the static filled circle, in the ready color bucket, never spinning.
-  const readyDot = row(p, "probe-waiting").locator(".af-dot");
+  await expect(row(p, "probe-working").locator(".af-row-status")).toHaveCount(1);
+  await expect(row(p, "probe-working").locator(".af-operator-state")).toHaveText("Working");
+  // Needs-you row: the static filled circle, in the ready color bucket, never spinning.
+  const readyDot = row(p, "probe-needs-you").locator(".af-dot");
   await expect(readyDot).toHaveClass(/af-dot-ready/);
   await expect(readyDot.locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(readyDot).not.toHaveClass(/af-dot-spin/);
+  await expect(row(p, "probe-needs-you")).toHaveClass(/af-row-operator-needs-you/);
+  await expect(row(p, "probe-needs-you").locator(".af-operator-state")).toHaveText("Needs you");
+  await expect(row(p, "probe-needs-you").locator(".af-idle-reason")).toContainText("pane changed");
+  // Positive non-delivery is Broken even though the underlying process is Ready.
+  const promptBroken = row(p, "probe-broken-prompt");
+  await expect(promptBroken).toHaveClass(/af-row-operator-broken/);
+  await expect(promptBroken.locator(".af-operator-state")).toHaveText("Broken");
+  await expect(promptBroken.locator(".af-idle-reason")).toContainText("prompt not delivered");
   // Error/terminal states keep distinct STATIC shapes.
   await expect(row(p, "probe-lost").locator('.af-icon[data-icon="circle-dashed"]')).toHaveCount(1);
   await expect(row(p, "probe-lost").locator(".af-dot")).toHaveClass(/af-dot-lost/);
+  await expect(row(p, "probe-lost").locator(".af-operator-state")).toHaveText("Broken");
   await expect(row(p, "probe-dead").locator('.af-icon[data-icon="circle"]')).toHaveCount(1);
   await expect(row(p, "probe-limit").locator('.af-icon[data-icon="diamond"]')).toHaveCount(1);
+  await expect(row(p, "probe-limit").locator(".af-operator-state")).toHaveText("Waiting on a limit");
   // The animation class is gone from every status row, and the removed "working" dot
   // kind never renders anywhere.
   await expect(p.locator(".af-dot-spin")).toHaveCount(0);
@@ -1438,7 +1491,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   const retry = p.locator(".af-term-head button", { hasText: "Retry" });
   await expect(retry).toBeVisible();
   const selectedActions = row(p, "probe-limit").locator(".af-row-actions");
-  const waitingActions = row(p, "probe-waiting").locator(".af-row-actions");
+  const waitingActions = row(p, "probe-needs-you").locator(".af-row-actions");
   await expect(selectedActions).toHaveCSS("opacity", "1");
   await expect(waitingActions).toHaveCount(1);
   await expect(waitingActions).toHaveCSS("opacity", "0");
@@ -1450,13 +1503,13 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await expect(selectedActions).toHaveCSS("opacity", "1");
   await p.mouse.move(0, 0);
   const geometry = () =>
-    row(p, "probe-waiting").evaluate((el) => {
+    row(p, "probe-needs-you").evaluate((el) => {
       const main = el.querySelector(".af-row-main")!.getBoundingClientRect();
       const actions = el.querySelector(".af-row-actions")!.getBoundingClientRect();
       return { mainLeft: main.left, mainWidth: main.width, actionsLeft: actions.left, actionsWidth: actions.width };
     });
   const beforeHover = await geometry();
-  await row(p, "probe-waiting").hover();
+  await row(p, "probe-needs-you").hover();
   await expect(waitingActions).toHaveCSS("opacity", "1");
   expect(await geometry(), "hover reveal keeps the reserved row geometry").toEqual(beforeHover);
   await p.mouse.move(0, 0);
@@ -1465,7 +1518,7 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   // Put focus on the preceding button in DOM order, then use a real Tab keystroke to
   // enter this row. The opacity-zero action remains tabbable and :focus-within makes
   // it visible as soon as focus arrives.
-  const keyboardTarget = railAction(p, "probe-waiting", "Archive session");
+  const keyboardTarget = railAction(p, "probe-needs-you", "Archive session");
   await keyboardTarget.evaluate((target) => {
     const buttons = [...document.querySelectorAll<HTMLButtonElement>('button:not([disabled])')];
     const before = buttons[buttons.indexOf(target as HTMLButtonElement) - 1];
@@ -1478,8 +1531,90 @@ test("status dots (#1766): waiting shows a green dot, working shows none, error 
   await expect(keyboardTarget).toBeFocused();
   await expect(waitingActions).toHaveCSS("opacity", "1");
   await keyboardTarget.evaluate((el) => el.blur());
-  await row(p, "probe-waiting").click();
+  await row(p, "probe-needs-you").click();
   await expect(retry).toBeHidden();
+
+  await ctx.close();
+});
+
+test("pane header PR badge (#3285): the daemon-discovered PR is a safe link, absent when unknown", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // Synthetic rows again, and for the same reason as the status probes above:
+  // pr_info is a pure projection of the snapshot, no daemon can be coerced into
+  // discovering a PR on demand inside the sandbox, and a synthetic id receives no
+  // deltas, so the pinned state is the only state there will ever be. This drives
+  // the REAL render path — prBadgeContent → renderMain/patchMainHead — end to end.
+  const ctx = await browser.newContext();
+  const p = await ctx.newPage();
+  await p.route("**/v1/Snapshot", async (route) => {
+    const resp = await route.fetch();
+    const body = await resp.json();
+    const snap = body?.data as { instances?: Array<Record<string, unknown> & { title: string }> };
+    const list = snap?.instances ?? [];
+    const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
+    list.push(
+      {
+        ...proto,
+        id: "synth-probe-pr",
+        title: "probe-pr",
+        branch: "synth-probe-pr",
+        liveness: 2,
+        in_flight_op: 0,
+        pr_info: {
+          number: 77,
+          state: "OPEN",
+          url: "https://github.com/example/repo/pull/77",
+          title: "Teach the rail to sing",
+        },
+      },
+      // The wire spells "no PR discovered" as pr_info: {} — Go's omitempty cannot
+      // drop a struct field — so the fail-closed side is asserted against that
+      // exact spelling, not against a conveniently absent field.
+      {
+        ...proto,
+        id: "synth-probe-no-pr",
+        title: "probe-no-pr",
+        branch: "synth-probe-no-pr",
+        liveness: 2,
+        in_flight_op: 0,
+        pr_info: {},
+      },
+    );
+    if (snap) {
+      snap.instances = list;
+    }
+    await route.fulfill({ status: resp.status(), contentType: "application/json", body: JSON.stringify(body) });
+  });
+  await p.goto("/");
+  await expect(p.locator(".af-app")).toBeVisible();
+
+  await expect(row(p, "probe-pr")).toBeVisible({ timeout: 15_000 });
+  await row(p, "probe-pr").click();
+  const badge = p.locator(".af-pr-badge");
+  await expect(badge).toBeVisible();
+  // Number + lowercased state, sentence case, the repo's ` · ` separator — and the
+  // chip IS the link, carrying the projected URL.
+  await expect(badge).toHaveText("PR #77 · open");
+  await expect(badge).toHaveAttribute("href", "https://github.com/example/repo/pull/77");
+  // Both halves of the safe-link contract (#3300 delta): _blank alone hands the
+  // opened page a window reference; noopener/noreferrer is what revokes it.
+  await expect(badge).toHaveAttribute("target", "_blank");
+  await expect(badge).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(badge).toHaveAttribute("title", /Teach the rail to sing/);
+
+  // The selected-session mobile shell deliberately hides the repeated title
+  // wrapper to reclaim the only control row (#2354). The PR link is an action,
+  // not repeated chrome, so it must remain reachable when that wrapper vanishes.
+  await p.setViewportSize({ width: 390, height: 844 });
+  await expect(badge, "the PR link remains reachable at phone width").toBeVisible();
+  await p.setViewportSize({ width: 1280, height: 720 });
+
+  // Fail closed: moving the selection to a row whose projection is the empty
+  // struct must withdraw the badge — not leave a stale chip pointing at the
+  // previous session's PR.
+  await row(p, "probe-no-pr").click();
+  await expect(badge).toBeHidden();
 
   await ctx.close();
 });
@@ -3087,20 +3222,36 @@ test("config: the editor renders from the manifest and writes through the real p
   await branch.locator("input").press("Enter");
   await expect(branch.locator(".af-config-echo")).toHaveCount(0);
 
-  // A dynamic table is never offered as one editable value: program_overrides is
-  // settable only through its LEAVES, so a field here could only dead-end at a
-  // save the writer refuses. It names the command that works instead.
-  const overrides = pane.locator('.af-config-row[data-key="program_overrides"]');
-  await expect(overrides.locator("input, select")).toHaveCount(0);
-  await expect(overrides.locator(".af-config-readonly")).toContainText("af config set program_overrides.<name>");
+  // #3345 removes the read-only manifest class completely. These seven rows
+  // formerly carried the immutable marker; each now gets a real field and each save
+  // traverses SetConfigValue -> SetGlobalConfigValue -> ApplyConfig. Read the
+  // server's value back after every save: an echo alone would prove only that
+  // the POST returned, not that the refreshed pane can round-trip the result.
+  await expect(pane.locator(".af-config-readonly")).toHaveCount(0);
 
-  // A structured key with no `af config set` scalar form is shown but never
-  // offered as a field whose save could only be refused. Its hint points at the
-  // config assistant, which edits these in the file — #2454 retired the old
-  // "hand-edit the file yourself" copy, and this assertion moves with it.
-  const readOnly = pane.locator('.af-config-row[data-key="theme"] .af-config-readonly');
-  await expect(readOnly).toHaveText(/config assistant/);
-  await expect(page.locator('.af-config-row[data-key="theme"] input')).toHaveCount(0);
+  const editJSON = async (key: string, change: (current: any) => any): Promise<void> => {
+    const structuredRow = pane.locator(`.af-config-row[data-key="${key}"]`);
+    const input = structuredRow.locator("input");
+    await expect(input).toBeVisible();
+    const next = change(JSON.parse(await input.inputValue()));
+    await input.fill(JSON.stringify(next));
+    await input.press("Enter");
+    await expect(structuredRow.locator(".af-config-echo")).toHaveText(new RegExp(`^set ${key} = `));
+    await expect
+      .poll(async () => JSON.parse(await structuredRow.locator("input").inputValue()))
+      .toEqual(next);
+  };
+
+  await editJSON("theme", (value) => ({ ...value, accent: "#123456" }));
+  await editJSON("program_overrides", (value) => ({ ...value, devin: "devin --web-config-selftest" }));
+  await editJSON("session_env_passthrough", (value) => [...value, "AF_WEB_CONFIG_SELFTEST"]);
+  await editJSON("limit_patterns", (value) => ({ ...value, devin: "AF_WEB_CONFIG_LIMIT" }));
+  await editJSON("root_agents", (value) => ({
+    ...value,
+    "/tmp/af-web-config-selftest": { program: "codex --web-config-selftest" },
+  }));
+  await editJSON("root_agent", (value) => ({ ...value, enabled: false, program: "codex --web-config-selftest" }));
+  await editJSON("keys", (value) => ({ ...value, quit: "Q" }));
 
   // Back to the sessions view for the flows that follow.
   await page.locator('.af-viewtab[data-view="sessions"]').click();
@@ -5264,7 +5415,7 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   // user actually reads, so a default that drifts in filter.ts is caught here too.
   await page.locator(".af-rail-filter").click();
   await expect(filterItem(page, "archived")).toHaveAttribute("aria-checked", "false");
-  for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+  for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
     await expect(filterItem(page, kind), `${kind} must be shown by default`).toHaveAttribute("aria-checked", "true");
   }
   // The default is NOT a "narrowed" state — it must not nag with an indicator the
@@ -5282,17 +5433,15 @@ test("filter (feat): the default shows every state EXCEPT archived", REAL_FIXTUR
   await expect(page.locator(".af-rail-count")).toHaveText(String(shown));
 });
 
-test("filter (feat): Show archived reveals the archived row, muted, and hides it again", REAL_FIXTURE, async () => {
+test("filter (feat): Show archived reveals the archived row as inactive, and hides it again", REAL_FIXTURE, async () => {
   await setFilter(page, "archived", true);
-  // The archived row is back and reads as inactive: it reuses the dimmed archived
-  // styling rather than looking like live work.
+  // The archived row is back and reads as inactive through words + a static glyph.
+  // It keeps full opacity so informative text does not fall below contrast.
   const archived = row(page, SESSION_B);
   await expect(archived).toBeVisible();
-  await expect(archived).toHaveClass(/af-row-archived/);
-  expect(
-    Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity))),
-    "the archived row must render de-emphasized",
-  ).toBeLessThan(1);
+  await expect(archived).toHaveClass(/af-row-archived.*af-row-operator-archived|af-row-operator-archived.*af-row-archived/);
+  await expect(archived.locator(".af-operator-state")).toHaveText("Archived");
+  expect(Number(await archived.evaluate((el) => Number(getComputedStyle(el).opacity)))).toBe(1);
   // Revealing the archive IS a departure from the default, so the control says so.
   await expect(page.locator(".af-rail-filter")).toHaveClass(/af-rail-filter-narrowed/);
   await expect(page.locator(".af-rail-filter-dot")).toHaveClass(/af-rail-filter-dot-on/);
@@ -5352,21 +5501,22 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
     // and vary only what the filter reads. Distinct branches keep each row's text
     // free of another's name (row() matches by substring).
     const proto = { ...(list.find((s) => s.title === SESSION_A) ?? {}) };
-    const synth = (title: string, liveness: number) => ({
+    const synth = (title: string, liveness: number, idleReason = "") => ({
       ...proto,
       id: `synth-filter-${title}`,
       title,
       branch: `synth-filter-${title}`,
       liveness,
       in_flight_op: 0,
+      idle_reason: idleReason,
     });
     list.push(
       synth("filt-working", 1), // LiveRunning
-      synth("filt-ready", 2), // LiveReady
-      synth("filt-lost", 3), // LiveLost
-      synth("filt-dead", 4), // LiveDead
+      synth("filt-needs-you", 2, "settled-after-pane-change"),
+      synth("filt-broken-lost", 3, "process-exited"),
+      synth("filt-broken-prompt", 2, "prompt-not-delivered"),
       synth("filt-archived", 5), // LiveArchived
-      synth("filt-limit", 6), // LiveLimitReached
+      synth("filt-waiting-limit", 6, "usage-limit"),
     );
     if (snap) {
       snap.instances = list;
@@ -5376,38 +5526,45 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   await openTokenless(p);
 
   // Each state's row and the checkbox that governs it, in the menu's own order.
-  const states: Array<{ kind: string; title: string }> = [
-    { kind: "working", title: "filt-working" },
-    { kind: "ready", title: "filt-ready" },
-    { kind: "lost", title: "filt-lost" },
-    { kind: "dead", title: "filt-dead" },
-    { kind: "limit", title: "filt-limit" },
-    { kind: "archived", title: "filt-archived" },
+  const states: Array<{ kind: string; titles: string[] }> = [
+    { kind: "needs-you", titles: ["filt-needs-you"] },
+    { kind: "working", titles: ["filt-working"] },
+    { kind: "waiting-limit", titles: ["filt-waiting-limit"] },
+    { kind: "broken", titles: ["filt-broken-lost", "filt-broken-prompt"] },
+    { kind: "archived", titles: ["filt-archived"] },
   ];
 
   // THE DEFAULT: every state but archived. Asserted per state against a real row, so
   // a default that hides more than the archive is caught here, not by a user.
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     const shown = kind !== "archived";
-    await expect(row(p, title), `${title} default visibility`).toHaveCount(shown ? 1 : 0, { timeout: 15_000 });
+    for (const title of titles) {
+      await expect(row(p, title), `${title} default visibility`).toHaveCount(shown ? 1 : 0, { timeout: 15_000 });
+    }
   }
 
   // Each box hides exactly its own group: uncheck it, that row goes and EVERY other
   // state stays — then recheck and it comes back.
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     if (kind === "archived") {
       continue; // already off by default; its reveal is covered above
     }
     await setFilter(p, kind, false);
-    await expect(row(p, title), `${kind} unchecked ⇒ its row goes`).toHaveCount(0);
+    for (const title of titles) {
+      await expect(row(p, title), `${kind} unchecked ⇒ its row goes`).toHaveCount(0);
+    }
     for (const other of states) {
       if (other.kind === kind || other.kind === "archived") {
         continue;
       }
-      await expect(row(p, other.title), `${kind} unchecked must not disturb ${other.kind}`).toHaveCount(1);
+      for (const title of other.titles) {
+        await expect(row(p, title), `${kind} unchecked must not disturb ${other.kind}`).toHaveCount(1);
+      }
     }
     await setFilter(p, kind, true);
-    await expect(row(p, title), `${kind} rechecked ⇒ its row is back`).toHaveCount(1);
+    for (const title of titles) {
+      await expect(row(p, title), `${kind} rechecked ⇒ its row is back`).toHaveCount(1);
+    }
   }
 
   // Narrowing to a SINGLE state is the "show me only what's working" case: uncheck
@@ -5419,9 +5576,11 @@ test("filter (feat): the default hides ONLY archived, and each state's box hides
   }
   await expect(row(p, "filt-working")).toHaveCount(1);
   await expect(p.locator(".af-rail-list .af-row-archived")).toHaveCount(0);
-  for (const { kind, title } of states) {
+  for (const { kind, titles } of states) {
     if (kind !== "working") {
-      await expect(row(p, title), `${title} must be filtered out`).toHaveCount(0);
+      for (const title of titles) {
+        await expect(row(p, title), `${title} must be filtered out`).toHaveCount(0);
+      }
     }
   }
 
@@ -5453,7 +5612,7 @@ test("#2188: a filtered selected session keeps one visible management surface", 
     // Hide every non-archived state. Selection and the terminal pane intentionally
     // survive this display filter, so management must move with them instead of
     // disappearing with the row.
-    for (const kind of ["working", "ready", "lost", "dead", "limit"]) {
+    for (const kind of ["needs-you", "working", "waiting-limit", "broken"]) {
       await setFilter(p, kind, false);
     }
     await expect(row(p, title)).toHaveCount(0);
@@ -5863,8 +6022,24 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   // then CONVERGES (the retry contract), archiving the now-settled session and removing
   // the project. The modal stays open through refusals, so retry the danger button until
   // it closes on real success (which also cleans the fixture).
+  //
+  // Re-click ONLY while the modal is still open AND idle (#3482). The converging delete
+  // is a REAL archive — tmux teardown, worktree move, registry write — and its documented
+  // worst case is seconds, not milliseconds: the pane-exit wait alone is 3s
+  // (session/tmux/close.go paneExitWait), before the TERM→KILL reaper's 3+2+1s or any
+  // 10s tmux command timeout. So that one RPC routinely outlives the 2500ms budget below,
+  // and every attempt after it is made against a DISABLED danger button. Clicking
+  // unconditionally there blocks on actionability — and when the delete lands it REMOVES
+  // the modal, so the click goes on waiting for a button that never comes back. The loop
+  // wedges until its own 45s budget expires and reports the stale "still busy" sample: a
+  // delete that CONVERGED, reported as a hang. Gating the click keeps every attempt
+  // idempotent AND terminating, so the loop still observes the close on a later pass.
+  // The contract is unchanged — a delete that genuinely never converges still fails here.
+  const dangerBtn = delModal.locator("button.af-danger");
   await expect(async () => {
-    await delModal.locator("button.af-danger").click();
+    if ((await dangerBtn.isVisible().catch(() => false)) && (await dangerBtn.isEnabled().catch(() => false))) {
+      await dangerBtn.click({ timeout: 2500 });
+    }
     await expect(delModal).toBeHidden({ timeout: 2500 });
   }).toPass({ timeout: 45_000 });
 
@@ -6074,6 +6249,40 @@ async function cssVar(p: Page, name: string): Promise<string> {
   return p.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name);
 }
 
+/** WCAG contrast of one semantic foreground token against the surface token. */
+async function tokenContrast(p: Page, foreground: string): Promise<number> {
+  return p.evaluate((fg) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${fg})`;
+    probe.style.backgroundColor = "var(--af-bg-surface)";
+    document.body.append(probe);
+    const parse = (value: string): number[] => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const [fr = 0, fgChannel = 0, fb = 0] = parse(getComputedStyle(probe).color);
+    const [br = 0, bg = 0, bb = 0] = parse(getComputedStyle(probe).backgroundColor);
+    probe.remove();
+    const luminance = (rgb: number[]): number => {
+      const [r = 0, g = 0, b = 0] = rgb.map((channel) => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const front = luminance([fr, fgChannel, fb]);
+    const back = luminance([br, bg, bb]);
+    return (Math.max(front, back) + 0.05) / (Math.min(front, back) + 0.05);
+  }, foreground);
+}
+
+const CONTRAST_TOKENS = [
+  "--af-text-muted",
+  "--af-status-needs-you",
+  "--af-status-working",
+  "--af-status-waiting",
+  "--af-status-broken",
+  "--af-status-inactive",
+  "--af-focus-ring",
+] as const;
+
 test("theme (redesign PR1): a saved dark choice is stamped before the app mounts — no flash", async () => {
   // Persist a dark choice, then install a document-start trap on #app.replaceChildren
   // (how index.ts mounts its content into #app) that records data-theme AT THE EXACT
@@ -6120,6 +6329,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // to their dark values.
   const darkTerm = await cssVar(page, "--af-bg-term");
   const darkBorderSubtle = await cssVar(page, "--af-border-subtle");
+  for (const token of CONTRAST_TOKENS) {
+    expect(await tokenContrast(page, token), `${token} must hold contrast in dark mode`).toBeGreaterThanOrEqual(4.5);
+  }
 
   // Toggle to Light: the SAME selectors resolve to different token values, proving the
   // chrome is driven by the CSS custom properties, not hardcoded colors.
@@ -6129,6 +6341,9 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   const lightBody = await bgColor(page, "body");
   const lightTerm = await cssVar(page, "--af-bg-term");
   const lightBorderSubtle = await cssVar(page, "--af-border-subtle");
+  for (const token of CONTRAST_TOKENS) {
+    expect(await tokenContrast(page, token), `${token} must hold contrast in light mode`).toBeGreaterThanOrEqual(4.5);
+  }
 
   expect(lightRail).not.toBe(darkRail);
   expect(lightBody).not.toBe(darkBody);
@@ -6136,9 +6351,154 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
   // correctly in both themes (the dark-mode regression this PR fixes).
   expect(lightTerm).not.toBe(darkTerm);
   expect(lightBorderSubtle).not.toBe(darkBorderSubtle);
-  // The light rail surface is the white token (#ffffff → rgb(255, 255, 255)).
-  expect(lightRail).toBe("rgb(255, 255, 255)");
+  // The light rail surface is the Snow Storm-derived token.
+  expect(lightRail).toBe("rgb(227, 231, 239)");
   await expect(page.locator('.af-theme-opt[data-theme-opt="light"]')).toHaveClass(/af-theme-opt-active/);
+
+  // The palette comes from the daemon, not this toggle. Replace GetTheme with the
+  // named legacy palette, reload, and prove the same web tokens now follow it.
+  let servedPalette: "zenburn" | "nord" = "zenburn";
+  let themeRequestCount = 0;
+  let themeFailuresRemaining = 0;
+  let holdNextTheme = false;
+  let heldTheme: { route: Route; palette: "zenburn" | "nord" } | null = null;
+  await page.addInitScript(() => {
+    const NativeWebSocket = window.WebSocket;
+    const TrackingWebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = Reflect.construct(target, args) as WebSocket;
+        if (String(args[0]).includes("/v1/events")) {
+          (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket = socket;
+        }
+        return socket;
+      },
+    });
+    window.WebSocket = TrackingWebSocket;
+  });
+  const fulfillTheme = (route: Route, palette: "zenburn" | "nord"): Promise<void> => {
+    const theme =
+      palette === "zenburn"
+        ? {
+            name: "zenburn",
+            foreground: "#DCDCCC",
+            foreground_strong: "#FFFFEF",
+            foreground_muted: "#989890",
+            foreground_dim: "#656555",
+            background: "#3F3F3F",
+            background_subtle: "#494949",
+            background_panel: "#4F4F4F",
+            accent: "#8CD0D3",
+          }
+        : {
+            name: "nord",
+            foreground: "#D8DEE9",
+            foreground_strong: "#ECEFF4",
+            foreground_muted: "#C3CBD6",
+            foreground_dim: "#A7B0BE",
+            background: "#2E3440",
+            background_subtle: "#3B4252",
+            background_panel: "#434C5E",
+            accent: "#88C0D0",
+          };
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { theme }, error: null }),
+    });
+  };
+  await page.route("**/v1/GetTheme", (route) => {
+    themeRequestCount += 1;
+    const palette = servedPalette;
+    if (themeFailuresRemaining > 0) {
+      themeFailuresRemaining -= 1;
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ data: null, error: { message: "temporary palette read failure" } }),
+      });
+    }
+    if (holdNextTheme) {
+      holdNextTheme = false;
+      heldTheme = { route, palette };
+      return;
+    }
+    return fulfillTheme(route, palette);
+  });
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
+  await page.locator('.af-theme-opt[data-theme-opt="dark"]').click();
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  expect(await cssVar(page, "--af-accent")).toBe("#8CD0D3");
+
+  // A daemon restart can change config without reloading this page. Force the
+  // self-healing events socket through its real reconnect path, switch the mocked
+  // daemon palette meanwhile, and require both chrome and open xterms to be
+  // refreshed by the reconnect's resync callback.
+  const requestsBeforeReconnect = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeReconnect);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  // Frost cyan is lifted just enough to stay AA on every Nord elevation.
+  await expect.poll(() => cssVar(page, "--af-accent")).toBe("#90C4D3");
+
+  // Two quick reconnects can overlap GetTheme reads under the same credential.
+  // Hold the older Zenburn response, let a newer Nord response win, then release
+  // the stale response and prove it cannot rewind the palette generation.
+  holdNextTheme = true;
+  servedPalette = "zenburn";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => heldTheme !== null).toBe(true);
+  const requestsBeforeNewerRefresh = themeRequestCount;
+  servedPalette = "nord";
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("reconnected events WebSocket was not captured");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeNewerRefresh);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  const staleTheme = heldTheme;
+  if (!staleTheme) throw new Error("older GetTheme request was not held");
+  await fulfillTheme(staleTheme.route, staleTheme.palette);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+
+  // Establish Zenburn as the last good palette, then prove a healthy socket can
+  // outlive one failed additive HTTP read. The failure must not reset to Nord;
+  // retry without another socket reconnect and apply Nord only on real success.
+  servedPalette = "zenburn";
+  const requestsBeforeZenburn = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry setup");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeZenburn);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+
+  themeFailuresRemaining = 1;
+  servedPalette = "nord";
+  const requestsBeforeTransientFailure = themeRequestCount;
+  await page.evaluate(() => {
+    const socket = (window as unknown as { __afEventsSocket?: WebSocket }).__afEventsSocket;
+    if (!socket) throw new Error("events WebSocket was not captured before the retry check");
+    socket.close();
+  });
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure);
+  await page.waitForTimeout(100);
+  expect(await cssVar(page, "--af-bg-canvas")).toBe("#3F3F3F");
+  await expect.poll(() => themeRequestCount).toBeGreaterThan(requestsBeforeTransientFailure + 1);
+  await expect.poll(() => cssVar(page, "--af-bg-canvas")).toBe("#2E3440");
+  await page.unroute("**/v1/GetTheme");
 
   // Reset to Auto and clear the saved choice so the page is left in its default theme.
   // Auto removes data-theme entirely (follow prefers-color-scheme).
@@ -6147,6 +6507,8 @@ test("theme (redesign PR1): toggling Light vs Dark changes token-driven colors l
     .poll(() => page.evaluate(() => document.documentElement.hasAttribute("data-theme")))
     .toBe(false);
   await page.evaluate(() => localStorage.removeItem("af-theme"));
+  await page.reload();
+  await expect(page.locator(".af-app")).toBeVisible();
 });
 
 interface TerminalGeometry {
@@ -7388,25 +7750,25 @@ test("theme-color is declared per scheme, and an explicit theme choice repoints 
 
   const metas = p.locator('meta[name="theme-color"]');
   await expect(metas).toHaveCount(2);
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   // The audit item is "the chrome matches the app theme", and per-scheme metas alone
   // don't deliver that: they follow the OS, so an explicit Dark on a light OS would
   // leave a white chrome over a dark app. Picking Dark must collapse BOTH metas.
   await p.locator('.af-theme-opt[data-theme-opt="dark"]').click();
   await expect(p.locator("html")).toHaveAttribute("data-theme", "dark");
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#141a22");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#3B4252");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
 
   await p.locator('.af-theme-opt[data-theme-opt="light"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#ffffff");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#E3E7EF");
 
   // Back to Auto and the metas go per-scheme again, handing the decision back to the
   // media queries.
   await p.locator('.af-theme-opt[data-theme-opt="auto"]').click();
-  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#ffffff");
-  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#141a22");
+  await expect(p.locator('meta[name="theme-color"][media*="light"]')).toHaveAttribute("content", "#E3E7EF");
+  await expect(p.locator('meta[name="theme-color"][media*="dark"]')).toHaveAttribute("content", "#3B4252");
   await ctx.close();
 });
 
@@ -7965,6 +8327,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             await expect(p.locator(".af-rail")).toBeVisible();
           }
 
+          // Exercise a deterministic set of live placements. Session status icons
+          // legitimately come and go as the seeded agent moves between Needs you and
+          // Working, so they cannot be the reason this coverage happens to exceed its
+          // floor. The default filter always exposes four checked semantic groups.
+          await p.getByRole("button", { name: "Filter sessions" }).click();
+          await expect(p.locator(".af-filter-menu")).toBeVisible();
+          await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
           const projectIcon = p.locator(".af-project-glyph");
           const filterIcon = p.locator(".af-rail-filter-glyph");
           await expect(projectIcon).toBeVisible();
@@ -8011,6 +8381,13 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
             }).length;
             return {
               count: visible.length,
+              placements: visible.map(
+                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
+              ),
+              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+                className: row.className,
+                text: (row.innerText ?? "").trim(),
+              })),
               allHiddenFromAT: visible.every(
                 (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
               ),
@@ -8023,7 +8400,11 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
                 .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
             };
           });
-          expect(audit.count, "the live shell must exercise several real icon placements").toBeGreaterThan(5);
+          expect(
+            audit.count,
+            `the live shell must exercise several real icon placements; ` +
+              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
+          ).toBeGreaterThan(5);
           expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
           expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
           expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);

@@ -30,9 +30,13 @@ import type { ProgramCatalog } from "./programs.js";
 import type {
   ConfigResponse,
   ConfigSetResponse,
+  ProjectExpectation,
   SessionData,
   SnapshotResponse,
+  DaemonTheme,
+  ThemeResponse,
   TaskData,
+  TaskMutationRef,
   TasksResponse,
   TaskUpdate,
 } from "./types.js";
@@ -266,6 +270,13 @@ export async function fetchSnapshot(token: string): Promise<SessionData[]> {
   return resp.instances ?? [];
 }
 
+/** Fetches the daemon's resolved semantic palette. The browser owns only the
+ * light/dark choice; it never substitutes a second product palette. */
+export async function getTheme(token: string): Promise<DaemonTheme> {
+  const resp = await af<ThemeResponse>("GetTheme", {}, token);
+  return resp.theme;
+}
+
 /**
  * Validates a token by probing an authed endpoint with it. Snapshot is the auth
  * check (design §1.2): a 200 means the token is accepted; a 401 means it is not.
@@ -382,7 +393,15 @@ export async function createSession(input: CreateSessionInput, token: string): P
   if (backend !== "") {
     body.backend = backend;
   }
-  const resp = await af<{ instance: SessionData }>("CreateSession", body, token);
+  const resp = await af<{ instance: SessionData; warning?: string }>("CreateSession", body, token);
+  if (resp.warning) {
+    // A committed-but-failed create: the daemon retained and durably recorded
+    // the session/workspace (#3233). Surface it through the shared
+    // mutation-committed path — the caller resyncs (rendering the retained
+    // row) and shows the daemon's unmodified explanation — instead of
+    // selecting the retained tombstone as though it were a fresh session.
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.instance;
 }
 
@@ -417,9 +436,15 @@ export async function pauseStatusPoll(id: string, token: string): Promise<void> 
 }
 
 /** Kills a session (mirrors `af sessions kill`). The session.killed event removes
- *  its row from the rail live. */
+ *  its row from the rail live. A committed-but-unfinished kill (the daemon
+ *  durably recorded the kill but retained the row for its teardown retry)
+ *  answers ok with a warning; surface it as the shared mutation-committed
+ *  outcome so the caller resyncs instead of treating the row as untouched. */
 export async function killSession(id: string, title: string, token: string): Promise<void> {
-  await af("KillSession", { id, title, repo_id: "" }, token);
+  const result = await af<{ warning?: string }>("KillSession", { id, title, repo_id: "" }, token);
+  if (result.warning) {
+    throw new ApiError(200, result.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
 }
 
 /** Archives a session (mirrors `af sessions archive`) — non-destructive, keeps it
@@ -634,11 +659,18 @@ function requireSessionID(id: string, action: string): void {
  *  daemon's resolved, collision-suffixed tab name. Refuses a session with no id. */
 export async function createTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a tab");
-  const resp = await af<{ name: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: true, command: "", name: "" },
     token,
   );
+  if (resp.warning) {
+    // A committed-but-failed tab create (#3237): the spawned tmux session may
+    // have survived a failed rollback. Route it through the shared
+    // mutation-committed path so the caller resyncs and shows the daemon's
+    // explanation instead of rendering the unpersisted tab as created.
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 
@@ -650,11 +682,15 @@ export async function createTab(id: string, title: string, token: string): Promi
  *  collision-suffixed tab name. Refuses a session with no id. */
 export async function createVSCodeTab(id: string, title: string, token: string): Promise<string> {
   requireSessionID(id, "create a VS Code tab");
-  const resp = await af<{ name: string }>(
+  const resp = await af<{ name: string; warning?: string }>(
     "CreateTab",
     { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
     token,
   );
+  if (resp.warning) {
+    // Same committed contract as createTab (#3237).
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 
@@ -744,8 +780,14 @@ export async function reorderTab(
 
 // --- web-tab health (#1813) -------------------------------------------------
 
-/** Whether a web tab's upstream is answering, as seen from the PARENT document. */
-export type WebTabHealth = "ok" | "dead";
+/**
+ * Whether a web tab's upstream is answering, as seen from the PARENT document.
+ * "dead" means the probe got through to the daemon and nothing usable answered
+ * behind it; "unreachable" means the probe never reached the daemon at all, so
+ * nothing was observed about the dev server (#3239) — the two need different
+ * copy, because they send the user to different components.
+ */
+export type WebTabHealth = "ok" | "dead" | "unreachable";
 
 /**
  * The marker the daemon's proxy sets on a 502 IT generated — i.e. the dev server never
@@ -843,9 +885,12 @@ export async function fetchPreviewOrigin(sessionId: string, tabId: string, token
  * `timeoutMs` bounds the wait (Codex P2): a loopback target that ACCEPTS the
  * connection but never sends headers would otherwise leave this awaiting forever, and
  * the pane blank with no fallback and no Retry. An AbortController fires at the
- * deadline; a timed-out probe is treated as dead, exactly like a transport failure —
- * a target that cannot answer within the window is not answering. The caller passes
- * the same tunable the fallback UI uses (webFallbackMs), so a test can shrink it.
+ * deadline; a timed-out probe is treated as dead — a target that cannot answer within
+ * the window is not answering. A rejection BEFORE the deadline is different (#3239):
+ * that is the browser failing to reach the daemon origin itself, which observes
+ * nothing about the dev server behind it, so it is reported "unreachable" rather than
+ * folded into "dead". The caller passes the same tunable the fallback UI uses
+ * (webFallbackMs), so a test can shrink it.
  */
 export async function probeWebTab(path: string, token: string, timeoutMs: number): Promise<WebTabHealth> {
   const headers: Record<string, string> = {};
@@ -869,9 +914,16 @@ export async function probeWebTab(path: string, token: string, timeoutMs: number
     // error is its page to render (#1909).
     return resp.headers.get(WEBTAB_ERROR_HEADER) !== null ? "dead" : "ok";
   } catch {
-    // A transport failure (daemon down) OR our own abort (the target accepted but
-    // stalled past the deadline): either way nothing usable answered — dead.
-    return "dead";
+    // Our own abort: the request was in flight and the deadline passed with no
+    // answer — the dead-server fallback's state. Keyed on the signal WE armed, not
+    // on how the browser spells the abort rejection.
+    if (controller.signal.aborted) {
+      return "dead";
+    }
+    // A rejection before the deadline is the browser failing to reach the daemon
+    // origin itself. That observes nothing about the dev server behind the proxy,
+    // so it must not be attributed to it (#3239).
+    return "unreachable";
   } finally {
     clearTimeout(timer);
   }
@@ -918,31 +970,48 @@ export async function addTask(task: TaskData, token: string): Promise<void> {
   await af("AddTask", { task }, token);
 }
 
+/** Builds the project compare-and-swap from the record the caller displayed —
+ *  the web's mirror of Go's task.ExpectProject, and the ONE place the web builds
+ *  admission for a task mutation (#3230, the #3190 one-predicate rule). Always
+ *  enforced: a caller holding a record always has a binding to pin, including
+ *  the unbound one (project_path ""), which `enforce` distinguishes from "no
+ *  expectation". The mutations below take the displayed record (TaskMutationRef)
+ *  rather than a bare id precisely so no call site can send an id without its
+ *  binding. */
+function projectExpectation(task: TaskMutationRef): ProjectExpectation {
+  return { enforce: true, project_path: task.project_path ?? "" };
+}
+
 /** Updates a task (mirrors `af tasks update`) — the edit + enable/disable path.
  *  Sends a FIELD-LEVEL patch (#1700): only the fields in `update` are changed, so
  *  a toggle shipping just `{ enabled }` can never clobber a concurrent edit another
  *  client made to a different field. The daemon merges the patch onto the
  *  freshly-loaded record under its file lock and leaves scheduler-owned fields
  *  (last_run_*, created_at) untouched. Refuses a task with no stable id, before
- *  issuing the request. */
-export async function updateTask(id: string, update: TaskUpdate, token: string): Promise<void> {
-  requireTaskID(id, "update a task");
-  await af("UpdateTask", { id, update }, token);
+ *  issuing the request. Takes the DISPLAYED record: the request pins its project
+ *  binding, so a task rebound by another client while this pane was stale is
+ *  refused rather than patched (#3230). */
+export async function updateTask(task: TaskMutationRef, update: TaskUpdate, token: string): Promise<void> {
+  requireTaskID(task.id, "update a task");
+  await af("UpdateTask", { id: task.id, update, expect: projectExpectation(task) }, token);
 }
 
 /** Fires a task NOW (mirrors `af tasks trigger`). The daemon runs it through the same
  *  scheduler path it uses for a scheduled fire, and refuses disabled + watch tasks.
- *  Refuses a task with no stable id, before issuing the request. */
-export async function triggerTask(id: string, token: string): Promise<void> {
-  requireTaskID(id, "trigger a task");
-  await af("TriggerTask", { id }, token);
+ *  Refuses a task with no stable id, before issuing the request. Takes the
+ *  DISPLAYED record and pins its project binding (#3230). */
+export async function triggerTask(task: TaskMutationRef, token: string): Promise<void> {
+  requireTaskID(task.id, "trigger a task");
+  await af("TriggerTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
 
-/** Removes a task by id (mirrors `af tasks remove`). Refuses a task with no stable
- *  id, before issuing the request. */
-export async function removeTask(id: string, token: string): Promise<void> {
-  requireTaskID(id, "remove a task");
-  await af("RemoveTask", { id }, token);
+/** Removes a task (mirrors `af tasks remove`). Refuses a task with no stable
+ *  id, before issuing the request. Takes the DISPLAYED record and pins its
+ *  project binding — the destructive verb the CAS most exists for: a stale
+ *  project-A delete must not land on a task rebound to project B (#3230). */
+export async function removeTask(task: TaskMutationRef, token: string): Promise<void> {
+  requireTaskID(task.id, "remove a task");
+  await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token);
 }
 
 /** Fetches the config manifest zipped with the user's live values: every

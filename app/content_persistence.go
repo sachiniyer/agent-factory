@@ -107,7 +107,7 @@ func (m *home) saveContentPaneState() error {
 	// partial fix. A patch that turns out empty (edited then reverted) is a
 	// harmless no-op the daemon still validates.
 	for _, edit := range sp.ConsumeDirty() {
-		if err := updateTaskThroughDaemon(edit.ID, edit.Update); err != nil {
+		if err := updateTaskThroughDaemon(edit.ID, edit.Update, edit.Expect); err != nil {
 			if apiclient.IsMutationCommitted(err) {
 				// The task write landed; only the daemon's schedule refresh
 				// failed. Keep surfacing that failure, but advance this task's
@@ -123,7 +123,10 @@ func (m *home) saveContentPaneState() error {
 		sp.AcknowledgeSavedEdit(edit.ID)
 	}
 	for _, tsk := range sp.ConsumeDeleted() {
-		if err := removeTaskThroughDaemon(tsk.ID); err != nil {
+		// tsk is the record as the pane displayed it; pin its project binding
+		// so a delete authorized under this project cannot land on a task
+		// another client rebound elsewhere while the pane was open (#3230).
+		if err := removeTaskThroughDaemon(tsk.ID, task.ExpectProject(tsk)); err != nil {
 			if apiclient.IsMutationCommitted(err) {
 				// The durable removal landed and the reload below will project
 				// it. Keep the schedule failure visible without telling the user

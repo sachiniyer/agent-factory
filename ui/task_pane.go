@@ -321,32 +321,6 @@ func (s *TaskPane) ConsumePendingTrigger() *task.Task {
 	return nil
 }
 
-// ScrollUp moves the selection up one row. Used by scroll keys and mouse wheel
-// regardless of focus, so the user can browse the task list without first
-// focusing the pane. No-op while a task is being edited or created so the
-// background selection doesn't drift out from under the form.
-func (s *TaskPane) ScrollUp() {
-	if s.editing || s.creating {
-		return
-	}
-	// Moving the selection retires a notice about the row being left behind.
-	s.listNotice = ""
-	if s.selectedIdx > 0 {
-		s.selectedIdx--
-	}
-}
-
-// ScrollDown moves the selection down one row. See ScrollUp.
-func (s *TaskPane) ScrollDown() {
-	if s.editing || s.creating {
-		return
-	}
-	s.listNotice = ""
-	if s.selectedIdx < len(s.tasks)-1 {
-		s.selectedIdx++
-	}
-}
-
 // HandleKeyPress processes a key press. Returns true if consumed.
 func (s *TaskPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if !s.hasFocus {
@@ -427,6 +401,14 @@ func (s *TaskPane) deleteSelectedTask() {
 		return
 	}
 	deleted := s.tasks[s.selectedIdx]
+	// Queue the record as LOADED, not the pane copy: an unsaved edit (which the
+	// delete below discards) may have retargeted ProjectPath, and the deletion's
+	// project CAS must pin the binding the daemon actually stores — pinning a
+	// never-persisted path would falsely refuse the delete (#3230). The pane
+	// copy is the fallback only for a record SetTasks never snapshotted.
+	if original, ok := s.originals[deleted.ID]; ok {
+		deleted = original
+	}
 	s.deleted = append(s.deleted, deleted)
 	s.tasks = append(s.tasks[:s.selectedIdx], s.tasks[s.selectedIdx+1:]...)
 	// A task queued for deletion must not also be in the update set:

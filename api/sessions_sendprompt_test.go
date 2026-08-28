@@ -295,7 +295,7 @@ func TestSendPromptReportsClosedDeliveryOutcome(t *testing.T) {
 // belongs in test output.
 func silenceCLIOutput(t *testing.T) {
 	t.Helper()
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}

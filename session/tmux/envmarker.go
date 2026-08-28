@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
 )
@@ -27,7 +30,23 @@ const (
 	// session, so doctor never confuses sessions from another install or a
 	// test's temp home with its own.
 	EnvMarkerHome = "AF_HOME"
+	// EnvMarkerGeneration distinguishes successive tmux sessions that reuse
+	// the same sanitized name and Agent Factory home. AF_SESSION proves the
+	// reusable name, not which process generation carried it (#3309).
+	EnvMarkerGeneration = "AF_SESSION_GEN"
 )
+
+// newSessionGeneration mints the process-generation identity stamped into one
+// tmux launch. It is a package var so tests can make exact argv assertions. The
+// timestamp fallback keeps session creation available if the entropy read fails;
+// uniqueness, not secrecy, is the requirement.
+var newSessionGeneration = func() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return fmt.Sprintf("ts-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(value[:])
+}
 
 // newSessionEnvSupportedOverride forces the `-e` support probe's answer in
 // tests (mock executors can't answer a real `tmux -V`); nil probes the real
@@ -38,7 +57,7 @@ var newSessionEnvSupportedOverride *bool
 // new-session`, or nil when the running tmux predates `-e` (added in 3.2) —
 // passing it there would fail session creation outright, which is far worse
 // than a missing diagnostic marker.
-func sessionEnvFlags(sanitizedName string) []string {
+func sessionEnvFlags(sanitizedName, generation string) []string {
 	supported := tmuxSupportsNewSessionEnv
 	if newSessionEnvSupportedOverride != nil {
 		supported = func() bool { return *newSessionEnvSupportedOverride }
@@ -46,7 +65,10 @@ func sessionEnvFlags(sanitizedName string) []string {
 	if !supported() {
 		return nil
 	}
-	flags := []string{"-e", EnvMarkerSession + "=" + sanitizedName}
+	flags := []string{
+		"-e", EnvMarkerSession + "=" + sanitizedName,
+		"-e", EnvMarkerGeneration + "=" + generation,
+	}
 	if home, err := afHomeDir(); err == nil {
 		flags = append(flags, "-e", EnvMarkerHome+"="+home)
 	}
@@ -169,10 +191,13 @@ func tmuxSupportsNewSessionEnv() bool {
 	return newSessionEnvSupported
 }
 
-// versionSupportsNewSessionEnv parses a `tmux -V` string ("tmux 3.4",
-// "tmux 3.3a", "tmux next-3.6", "tmux master") and reports whether
-// `new-session -e` (tmux >= 3.2) is available.
 func versionSupportsNewSessionEnv(version string) bool {
+	return tmuxVersionAtLeast(version, 3, 2)
+}
+
+// tmuxVersionAtLeast parses a `tmux -V` string ("tmux 3.4", "tmux 3.3a",
+// "tmux next-3.6", "tmux master") for feature gates tied to a release.
+func tmuxVersionAtLeast(version string, wantMajor, wantMinor int) bool {
 	v := strings.TrimPrefix(version, "tmux ")
 	v = strings.TrimPrefix(v, "next-")
 	if v == "master" {
@@ -200,7 +225,7 @@ func versionSupportsNewSessionEnv(version string) bool {
 	if err != nil {
 		return false
 	}
-	return major > 3 || (major == 3 && minor >= 2)
+	return major > wantMajor || (major == wantMajor && minor >= wantMinor)
 }
 
 // afHomeDir mirrors config.GetConfigDir — $AGENT_FACTORY_HOME (tilde-expanded)

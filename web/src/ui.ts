@@ -42,7 +42,10 @@ import {
   idleReasonDetail,
   isLimitReached,
   isRootSession,
-  type RowKind,
+  OPERATOR_KIND_LABELS,
+  type OperatorKind,
+  operatorKind,
+  prBadgeContent,
   rowStatus,
   rowTitle,
 } from "./status.js";
@@ -298,7 +301,7 @@ export interface Actions {
   /** Shows/hides one session state in the rail (feat: hide archived by default): the
    *  filter menu's checkboxes and the empty state's inline "Show archived" route
    *  here; index.ts flips the store and persists the whole filter. */
-  setStatusFilter(kind: RowKind, on: boolean): void;
+  setStatusFilter(kind: OperatorKind, on: boolean): void;
   /** Restores the default filter — every state but archived. */
   resetStatusFilter(): void;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
@@ -814,6 +817,12 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
+  // The PR badge link and the signature of what it currently draws (#3285). Same
+  // in-place treatment as retryBtn/handoffBtn: the daemon's sweep discovers a
+  // session's PR — or its state flips open → merged — WITHOUT a selection change,
+  // so patchMainHead fills it rather than deciding once at build time.
+  private prBadge: HTMLAnchorElement | null = null;
+  private prBadgeSig = "";
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -1592,9 +1601,9 @@ export class AppShell {
   }
 
   /** One state's checkbox in the filter menu: a check when shown, the state's label
-   *  (the row's own word — status.ts ROW_KIND_LABELS), and how many sessions in this
+   *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
-  private filterItem(kind: RowKind, on: boolean, count: number): HTMLElement {
+  private filterItem(kind: OperatorKind, on: boolean, count: number): HTMLElement {
     const check = h("span", { class: "af-filter-check" }, ...(on ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
     const item = h(
@@ -1898,10 +1907,21 @@ export class AppShell {
       return;
     }
     this.headTitle = h("span", { class: "af-term-title" }, selected.title);
-    // Title only. The "Live · master" meta that used to sit beside it — terminal
-    // connection state joined to the session's branch — was removed as chrome
-    // nobody wanted to look at (#2458). The wrapper stays: it owns the header's
-    // layout, and the tab bar beside it flexes against it.
+    // The PR badge is the web's session.pr.open (#3285): the daemon-discovered
+    // number + state (#3232/#3287) as a plain link — the browser's native
+    // analogue of the TUI's p/y keys. Built hidden and filled by patchMainHead,
+    // NOT decided here: discovery normally lands while the session is already
+    // selected (the daemon sweep refreshes pr_info with no selection change),
+    // the same render-time trap Retry hit (#1932).
+    const prBadge = h("a", { class: "af-pr-badge", target: "_blank", rel: "noopener noreferrer" });
+    prBadge.hidden = true;
+    this.prBadge = prBadge;
+    this.prBadgeSig = "";
+    // The title wrapper remains title-only: the mobile shell hides that repeated
+    // chrome to reclaim its sole control row (#2354), while the PR link must stay
+    // reachable there. The "Live · master" meta that used to sit beside the title
+    // was removed as chrome nobody wanted to look at (#2458); the badge is not
+    // that — it carries an action (follow the PR), not ambient state.
     const titleBox = h("div", { class: "af-term-head-main" }, this.headTitle);
 
     // Retry, for a session parked at a usage-limit wall (#1934). The web rendered
@@ -1976,7 +1996,7 @@ export class AppShell {
     // Retry and the filtered-selection fallback are fixed pane-level actions. Their
     // hidden containers create no flex items on the common path, while visible
     // controls cannot shrink behind the tabs.
-    const head = h("div", { class: "af-term-head" }, titleBox, tabBar, headActions, handoffBtn, retryBtn);
+    const head = h("div", { class: "af-term-head" }, titleBox, prBadge, tabBar, headActions, handoffBtn, retryBtn);
     const warningText = archiveWarningText(selected);
     const archiveWarning = h("div", { class: "af-archive-warning", role: "status" }, warningText);
     archiveWarning.hidden = warningText === "";
@@ -2552,6 +2572,25 @@ export class AppShell {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
     }
+
+    // Fill/patch the PR badge (#3285) in place, like Retry/Handoff above and for
+    // the same reason: the daemon's sweep discovers a PR while the session is
+    // already selected, which is no selection change, so renderMain never runs.
+    // The sig covers everything the badge draws, so an unrelated snapshot never
+    // touches the DOM and a state flip (open → merged) patches exactly once.
+    if (this.prBadge) {
+      const badge = prBadgeContent(selected);
+      const sig = badge ? `${badge.url}\0${badge.label}\0${badge.tooltip}` : "";
+      if (sig !== this.prBadgeSig) {
+        this.prBadgeSig = sig;
+        if (badge) {
+          this.prBadge.textContent = badge.label;
+          this.prBadge.href = badge.url;
+          this.prBadge.title = badge.tooltip;
+        }
+        this.prBadge.hidden = badge === null;
+      }
+    }
   }
 
   /** Keeps management reachable when the selected session's rail row is filtered
@@ -2910,6 +2949,7 @@ function sessionRow(
   buildActions: (session: ManagedSession) => HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
+  const operator = operatorKind(s);
   const creating = isCreating(s);
   const actionable = isActionableSession(s);
   const killable = isKillableSession(s);
@@ -2917,7 +2957,10 @@ function sessionRow(
 
   const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const idleDetail = idleReasonDetail(s);
-  const branchParts: Array<Node | string> = [icon("git-branch", "af-branch-icon")];
+  const branchParts: Array<Node | string> = [
+    h("span", { class: "af-operator-state" }, OPERATOR_KIND_LABELS[operator]),
+    " · ",
+  ];
   if (idleDetail) {
     const idle = h("span", { class: "af-idle-reason" }, `${idleDetail} · `);
     idle.dataset.idleReason = s.idle_reason ?? "";
@@ -2926,22 +2969,31 @@ function sessionRow(
     }
     branchParts.push(idle);
   }
-  branchParts.push(s.branch || "—");
+  branchParts.push(
+    h(
+      "span",
+      { class: "af-row-branch-name" },
+      icon("git-branch", "af-branch-icon"),
+      s.branch || "—",
+    ),
+  );
   const branch = h("div", { class: "af-row-branch" }, ...branchParts);
   const main = h("div", { class: "af-row-main" }, title, branch);
 
-  const cls = `af-row${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
+  const cls = `af-row af-row-operator-${operator}${selected ? " af-row-selected" : ""}${isArchived(s) ? " af-row-archived" : ""}${
     actionable ? "" : " af-row-inert"
   }${creating ? " af-row-creating" : ""}`;
   const row = h("li", { class: cls });
   // A working/busy row shows NO status dot (#1766) — only Ready/error states draw
-  // one. When there is no dot the span is omitted entirely (kind is null), matching
-  // the TUI's blank status cell.
+  // one. The empty fixed-width slot matches the TUI's blank status cell and keeps
+  // every title aligned without inventing a working indicator.
+  const statusSlot = h("span", { class: "af-row-status" });
+  statusSlot.setAttribute("aria-hidden", "true");
   if (status.kind && status.icon) {
     const dot = h("span", { class: `af-dot af-dot-${status.kind}` }, icon(status.icon));
-    dot.setAttribute("aria-hidden", "true");
-    row.append(dot);
+    statusSlot.append(dot);
   }
+  row.append(statusSlot);
   row.append(main);
   if (managed) {
     row.append(buildActions(s));
@@ -2953,7 +3005,7 @@ function sessionRow(
     : "";
   const idleReason = idleDetail ? `; ${idleDetail}` : "";
   const archiveWarning = archiveWarningText(s);
-  row.dataset.idleTitleBase = `${s.title} — ${status.label}`;
+  row.dataset.idleTitleBase = `${s.title} — ${OPERATOR_KIND_LABELS[operator]}`;
   row.dataset.idleTitleModel = modelChange;
   row.dataset.idleTitleArchive = archiveWarning === "" ? "" : `; ${archiveWarning}`;
   row.setAttribute(

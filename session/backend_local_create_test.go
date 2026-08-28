@@ -8,10 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -47,6 +49,46 @@ func TestLocalBackendProvisionUsesResolvedBranchPrefixSnapshot(t *testing.T) {
 	require.NoError(t, config.SaveConfig(cfg))
 	require.NoError(t, inst.backend.Provision(inst, true))
 	require.Equal(t, "foo", inst.Branch)
+}
+
+// TestLocalBackendProvisionScopesBareCloneSessionToBareIdentity pins the
+// runtime-name half of #3358. The create reservation and the tmux handle must
+// use the same repository identity even though the session's requested
+// workspace remains the linked worktree.
+func TestLocalBackendProvisionScopesBareCloneSessionToBareIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	run(parent, "init", source)
+	run(source, "commit", "--allow-empty", "-m", "initial")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	inst, err := NewInstance(InstanceOptions{
+		Title: "bare-alpha", Path: worktree, Program: "claude", Backend: BackendLocal,
+	})
+	require.NoError(t, err)
+	require.NoError(t, inst.backend.Provision(inst, true))
+
+	data := inst.ToInstanceData()
+	assert.Equal(t, tmux.SanitizedNameForRepo(inst.Title, bare), data.TmuxName,
+		"the live tmux namespace must use the same bare-repo identity as admission")
+	assert.Equal(t, worktree, data.Path, "the requested linked worktree remains the workspace")
+	assert.Equal(t, bare, data.Worktree.RepoPath, "worktree lifecycle state uses the bare repository identity")
 }
 
 func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {

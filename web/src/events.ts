@@ -25,6 +25,12 @@
 
 import type { WireEvent } from "./types.js";
 
+/** Theme events carry no renderer tokens; clients fetch the daemon's latest
+ *  semantic palette so the event remains a small invalidation signal. */
+export function eventRequestsPaletteRefresh(event: WireEvent): boolean {
+  return event.type === "theme.changed";
+}
+
 /** The connection state surfaced to the UI for a subtle liveness indicator. */
 export type EventStreamStatus = "connecting" | "open" | "reconnecting";
 

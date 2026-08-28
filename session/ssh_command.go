@@ -391,7 +391,7 @@ func sshHostKeyOptions(cfg config.SSHConfig, posture, host string) (knownHosts, 
 		// Same warning the x/crypto path logged, for the same reason: this is the
 		// posture under which a man-in-the-middle sees the bearer token.
 		log.WarningLog.Printf("backend=ssh: host-key verification is DISABLED for %s "+
-			"(ssh_host_key_verification=insecure) — a man-in-the-middle on this connection can capture "+
+			"(ssh.host_key_verification=insecure) — a man-in-the-middle on this connection can capture "+
 			"the bearer token that controls the agent session", host)
 		// /dev/null is the equivalent of InsecureIgnoreHostKey: nothing is verified
 		// and nothing is recorded.

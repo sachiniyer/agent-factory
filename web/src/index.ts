@@ -27,6 +27,7 @@ import {
   fetchSnapshot,
   killSession,
   getConfig,
+  getTheme,
   isMutationCommittedError,
   handoffSession,
   listBackends,
@@ -51,7 +52,7 @@ import {
 } from "./api.js";
 import { createKeyedQueue } from "./config.js";
 import { type ConfigAssistantController, openConfigAssistant } from "./config_assistant.js";
-import { EventStream, type EventStreamStatus } from "./events.js";
+import { eventRequestsPaletteRefresh, EventStream, type EventStreamStatus } from "./events.js";
 import {
   addProjectModal,
   confirmDeleteProjectModal,
@@ -74,11 +75,23 @@ import {
 } from "./sessions.js";
 import type { DragPayload } from "./layout.js";
 import { SplitView } from "./split.js";
-import { canHandoff, isArchived, type RowKind } from "./status.js";
+import { canHandoff, isArchived, type OperatorKind } from "./status.js";
 import { isRenameableTab } from "./tablabel.js";
 import { Store } from "./store.js";
 import { registerServiceWorker } from "./serviceworker.js";
-import { bootStampTheme, persistThemeChoice, stampTheme, type ThemeChoice } from "./theme.js";
+import {
+  applyDaemonTheme,
+  bootStampTheme,
+  connectionAttemptMayCommit,
+  createLatestRequestGate,
+  hasConnectedToken,
+  paletteFetchFailurePlan,
+  persistThemeChoice,
+  refreshThemeMode,
+  resetDaemonTheme,
+  stampTheme,
+  type ThemeChoice,
+} from "./theme.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -157,6 +170,11 @@ const store = new Store<AppState>({
 // restore/retry/attach would be silently skipped because `!"" === true`.
 let token: string | null = null;
 let stream: EventStream | null = null;
+const connectionGate = createLatestRequestGate();
+const paletteRefreshGate = createLatestRequestGate();
+const PALETTE_RETRY_MS = 1000;
+let paletteRetryTimer: number | null = null;
+let hasDaemonPalette = false;
 
 /** Fetches the agent catalog for a project (#1970), shared by the three forms that
  *  offer a program picker: new session, add task, edit task. One helper rather than
@@ -320,11 +338,13 @@ function rerender(): void {
  *  failure surfaces an actionable error on the login view — forgetting the stored
  *  token only when the daemon REJECTED it (shouldForgetToken). */
 async function connect(candidate: string): Promise<void> {
+  const attempt = connectionGate.begin();
   store.set({ connecting: true, loginError: null });
   let sessions: SessionData[];
   try {
     sessions = await probeToken(candidate);
   } catch (e) {
+    if (!attempt.isCurrent()) return;
     // A rejected credential is forgotten so the next load prompts cleanly instead of
     // retrying a dead token forever; a transport failure keeps it, because "the
     // daemon is down" is not evidence the token is bad (see shouldForgetToken).
@@ -335,11 +355,22 @@ async function connect(candidate: string): Promise<void> {
     store.set({ phase: "login", connecting: false, loginError: describeError(e) });
     return;
   }
+  if (!attempt.isCurrent()) return;
   token = candidate;
   // Persist only a REAL token so the next visit can resume it; the empty-token
   // sentinel (no-auth client, #1696) is never stored — bootstrap re-probes
   // /v1/auth-info on every load, so a tokenless daemon needs nothing on disk.
   storeToken(candidate);
+  // Palette and mode have separate owners (#3220): the daemon supplies the
+  // semantic colors, while the browser keeps its local Auto/Light/Dark choice.
+  // Apply before mounting the app phase so the first authenticated paint and a
+  // newly constructed xterm use the same palette. A failed additive read keeps
+  // the built-in Nord floor rather than blocking an otherwise valid login.
+  await refreshDaemonPalette(candidate);
+  // A token can rotate after Snapshot accepted it but before GetTheme returns.
+  // That rejection routes through disconnect(), which clears token and returns to
+  // login; do not let this older connect continue mounting the authenticated app.
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the tasks BEFORE choosing the initial project scope (redesign PR2, Greptile
   // follow-on Fix 2): the persisted selection must reconcile against the FULL project
   // list — sessions AND tasks — so a persisted TASK-ONLY project restores AS ITSELF,
@@ -352,11 +383,15 @@ async function connect(candidate: string): Promise<void> {
   } catch {
     tasks = [];
   }
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Fetch the registered projects too (the #2456 union): the reconcile must see a
   // registered-but-sessionless project as a real, restorable selection, or a persisted
   // choice on an empty registered repo would fall back on connect. Degrades to none on
   // a transport failure — the projects.changed resync refetches it.
   const registeredProjects = await fetchRegisteredProjects(candidate);
+  // A delayed palette retry can reject the credential while tasks/projects are
+  // loading. Fence the FINAL app commit, not only the first palette response.
+  if (!connectionAttemptMayCommit(attempt, token, candidate)) return;
   // Scope to a project on connect: resume the persisted choice if it is still a real
   // project (session-, task-, OR registry-derived), else the most-recently-active default.
   const selectedProject = reconcileProject(sessions, tasks, loadProjectChoice(), null, registeredProjects);
@@ -396,18 +431,22 @@ async function fetchRegisteredProjects(tok: string): Promise<string[]> {
  *  terminal, and returns to login. This is the "forget the saved token" affordance
  *  now that the credential persists across visits: on a shared machine, or after a
  *  rotation, Disconnect is what makes the next load prompt again. */
-function disconnect(): void {
+function disconnect(loginError: string | null = null, authRequired = store.get().authRequired): void {
+  connectionGate.invalidate();
   stopStream();
   closeModal();
   closeConfigAssistant();
   token = null;
   clearToken();
+  resetDaemonTheme();
+  hasDaemonPalette = false;
   store.set({
     phase: "login",
     view: "sessions",
     selectedProject: null,
+    authRequired,
     connecting: false,
-    loginError: null,
+    loginError,
     sessions: [],
     selectedId: null,
     live: "connecting",
@@ -537,7 +576,7 @@ function switchView(view: View): void {
  * filtered to "Ready" and then typed into one. The row leaves the rail; the pane
  * keeps streaming, and the rail re-highlights it when its state is shown again.
  */
-function setStatusFilter(kind: RowKind, on: boolean): void {
+function setStatusFilter(kind: OperatorKind, on: boolean): void {
   const next = withKind(store.get().statusFilter, kind, on);
   persistFilter(next);
   store.set({ statusFilter: next });
@@ -1397,7 +1436,7 @@ function openEditTask(task: TaskData): void {
         const m = modal;
         m.setBusy(true);
         void updateTask(
-          task.id,
+          task,
           {
             name: input.name,
             prompt: input.prompt,
@@ -1440,7 +1479,7 @@ function toggleTask(task: TaskData): void {
   // Ship ONLY the flipped bit as a field-level patch (#1700): the toggle must
   // not carry the rest of this (possibly-stale) cached task, or it could revert a
   // concurrent edit another client made to the prompt/trigger/target.
-  void updateTask(task.id, { enabled: !task.enabled }, tok)
+  void updateTask(task, { enabled: !task.enabled }, tok)
     .then(refreshTasks)
     .catch((e) => {
       if (isMutationCommittedError(e)) {
@@ -1458,7 +1497,7 @@ function doTriggerTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void triggerTask(task.id, tok)
+  void triggerTask(task, tok)
     .then(refreshTasks)
     .catch((e) => surfaceTabError(e));
 }
@@ -1538,7 +1577,7 @@ function doRemoveTask(task: TaskData): void {
   if (tok === null) {
     return;
   }
-  void removeTask(task.id, tok)
+  void removeTask(task, tok)
     .then(refreshTasks)
     .catch((e) => surfaceTabError(e));
 }
@@ -1572,6 +1611,7 @@ function watchSystemTheme(): void {
   }
   const onChange = (): void => {
     if (store.get().themeChoice === "auto") {
+      refreshThemeMode();
       splitView.applyTheme();
     }
   };
@@ -1690,10 +1730,58 @@ function startStream(tok: string): void {
   stopStream();
   stream = new EventStream(tok, {
     onEvent,
-    onResync: requestResync,
+    onResync: () => {
+      requestResync();
+      void refreshDaemonPalette(tok);
+    },
     onStatus: (s: EventStreamStatus) => store.set({ live: s }),
   });
   stream.start();
+}
+
+function clearPaletteRetry(): void {
+  if (paletteRetryTimer === null) return;
+  window.clearTimeout(paletteRetryTimer);
+  paletteRetryTimer = null;
+}
+
+/** Refreshes the daemon-owned palette for both CSS chrome and every open xterm.
+ *  Called during login and on every events-stream open, including reconnects after
+ *  a daemon restart. Transient failures retain the last good palette and retry. */
+async function refreshDaemonPalette(tok: string): Promise<void> {
+  clearPaletteRetry();
+  const request = paletteRefreshGate.begin();
+  let paletteChanged = false;
+  try {
+    const theme = await getTheme(tok);
+    if (token !== tok || !request.isCurrent()) return;
+    applyDaemonTheme(theme);
+    hasDaemonPalette = true;
+    paletteChanged = true;
+  } catch (error) {
+    if (token !== tok || !request.isCurrent()) return;
+    const status = error instanceof ApiError ? error.status : 0;
+    const plan = paletteFetchFailurePlan(status, hasDaemonPalette);
+    if (plan.reauthenticate) {
+      // Reuse the one credential-rejection path: stop every authenticated stream,
+      // forget the stored bearer, reset the palette, and show the login surface.
+      // Retrying the same rejected token once a second can never recover.
+      disconnect(describeError(error), true);
+      return;
+    }
+    if (plan.reset) {
+      resetDaemonTheme();
+      hasDaemonPalette = false;
+      paletteChanged = true;
+    }
+    if (plan.retry) {
+      paletteRetryTimer = window.setTimeout(() => {
+        paletteRetryTimer = null;
+        if (token === tok) void refreshDaemonPalette(tok);
+      }, PALETTE_RETRY_MS);
+    }
+  }
+  if (paletteChanged) splitView.applyTheme();
 }
 
 function stopStream(): void {
@@ -1701,6 +1789,8 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
+  paletteRefreshGate.invalidate();
+  clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
@@ -1728,6 +1818,10 @@ function stopStream(): void {
  * terminal down for.
  */
 function onEvent(ev: WireEvent): void {
+  if (eventRequestsPaletteRefresh(ev)) {
+    if (hasConnectedToken(token)) void refreshDaemonPalette(token);
+    return;
+  }
   // Task deltas (#1592 Phase 5 PR8) don't touch the session list; the daemon owns
   // tasks.json, so a task.created/updated/removed event just triggers a debounced
   // ListTasks refetch (the authoritative task projection). The session reducer

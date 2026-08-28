@@ -15,6 +15,10 @@ import (
 // with its display name (repo basename), absolute main-worktree root, and the
 // number of sessions currently tracked for it.
 type Project struct {
+	// RepoID is the identity used to aggregate this row. Carrying it through to
+	// the sidebar prevents destructive actions from re-resolving a stale display
+	// root into an unrelated enclosing repository.
+	RepoID       string
 	Name         string
 	Root         string
 	SessionCount int
@@ -55,6 +59,12 @@ type ProjectPickerOverlay struct {
 	// TakeAddRequest consumes it. Kept separate from submitted so the caller can
 	// reject an invalid path (SetAddError) and keep the overlay open.
 	addRequested bool
+
+	// degraded marks a failed project-registry read (#3298): the rows still
+	// render from the other discovery sources, but every registered
+	// sessionless project may be missing, and the picker must say so instead
+	// of presenting the list as complete.
+	degraded bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -76,6 +86,10 @@ func NewProjectPickerOverlay(projects []Project, currentRoot string) *ProjectPic
 
 // SetWidth sets the overlay width.
 func (p *ProjectPickerOverlay) SetWidth(width int) { p.width = width }
+
+// SetDegraded records whether the project registry read failed (#3298), so
+// the picker warns that the list may be incomplete.
+func (p *ProjectPickerOverlay) SetDegraded(degraded bool) { p.degraded = degraded }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
@@ -187,18 +201,7 @@ func (p *ProjectPickerOverlay) handleAddKey(msg tea.KeyMsg) bool {
 // visibleWindow returns the [start, end) window over the navigable rows Render
 // shows: at most maxVisible rows, slid so the selected row is always included.
 func (p *ProjectPickerOverlay) visibleWindow(maxVisible int) (startIdx, endIdx int) {
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-	total := p.rowCount()
-	if p.selectedIdx >= maxVisible {
-		startIdx = p.selectedIdx - maxVisible + 1
-	}
-	endIdx = startIdx + maxVisible
-	if endIdx > total {
-		endIdx = total
-	}
-	return startIdx, endIdx
+	return selectionWindow(p.selectedIdx, p.rowCount(), maxVisible)
 }
 
 // Render renders the project picker overlay.
@@ -227,6 +230,13 @@ func (p *ProjectPickerOverlay) Render() string {
 	var lines []string
 	lines = append(lines, truncateOverlayLine(titleStyle.Render("Switch project"), cw))
 	lines = append(lines, "")
+	warnStyle := lipgloss.NewStyle().Foreground(t.Warning)
+	if p.degraded && !p.adding {
+		// A failed registry read may hide every registered sessionless
+		// project — say so rather than render the remainder as complete
+		// (#3298).
+		lines = append(lines, truncateOverlayLine(warnStyle.Render("registry unreadable · list may be incomplete"), cw))
+	}
 
 	if p.adding {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render("Add project — enter a repo path:"), cw))
@@ -240,20 +250,24 @@ func (p *ProjectPickerOverlay) Render() string {
 		return finishRender(style, fit, textRect, lines)
 	}
 
-	// Reserve rows for the fixed chrome (title, blank, blank, hint) and window
-	// the navigable rows into what remains.
+	// Reserve rows for the fixed chrome (title, blank, blank, hint — plus the
+	// degraded notice when present) and window the navigable rows into what
+	// remains.
 	avail := textRect.H - 4
+	if p.degraded {
+		avail--
+	}
 	if avail < 1 {
 		avail = 1
 	}
-	start, end := p.visibleWindow(avail)
-	if start > 0 {
+	start, end, showAbove, showBelow := budgetedSelectionWindow(p.selectedIdx, p.rowCount(), avail, 0)
+	if showAbove {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
 		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
 	}
-	if end < p.rowCount() {
+	if showBelow {
 		lines = append(lines, truncateOverlayLine(normalStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
 	}
 

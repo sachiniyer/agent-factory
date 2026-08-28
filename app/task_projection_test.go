@@ -23,8 +23,10 @@ func TestTaskTriggerRoutesThroughDaemonSharedPath(t *testing.T) {
 	h := newTestHome(t)
 
 	var gotID string
-	restore := SetTaskTriggerForTest(func(taskID string) error {
+	var gotExpect task.ProjectExpectation
+	restore := SetTaskTriggerForTest(func(taskID string, expect task.ProjectExpectation) error {
 		gotID = taskID
+		gotExpect = expect
 		return nil
 	})
 	defer restore()
@@ -36,6 +38,7 @@ func TestTaskTriggerRoutesThroughDaemonSharedPath(t *testing.T) {
 		CronExpr:      "0 0 * * *",
 		Prompt:        "echo hi",
 		TargetSession: "todo-add",
+		ProjectPath:   "/repo/hello",
 		Enabled:       true,
 	}})
 	sp.SelectTask(0)
@@ -49,6 +52,8 @@ func TestTaskTriggerRoutesThroughDaemonSharedPath(t *testing.T) {
 
 	require.Equal(t, "task-abc", gotID,
 		"run-now must route the task's own ID through the shared daemon trigger path")
+	require.Equal(t, task.ProjectExpectation{Enforce: true, ProjectPath: "/repo/hello"}, gotExpect,
+		"run-now must pin the displayed record's project binding (#3230) — a zero-value expectation disables the daemon-side CAS")
 	require.Equal(t, before, h.store.NumInstances(),
 		"run-now must NOT spawn a divergent per-run session (#1169); the daemon owns create-or-deliver")
 }
@@ -121,7 +126,7 @@ func TestTaskTriggerWatchRefused(t *testing.T) {
 	h.errBox.SetSize(200, 1)
 
 	var gotID string
-	restore := SetTaskTriggerForTest(func(taskID string) error {
+	restore := SetTaskTriggerForTest(func(taskID string, _ task.ProjectExpectation) error {
 		gotID = taskID
 		return errTest("task w1 is a watch task; it fires when its watch command emits output")
 	})
@@ -151,7 +156,7 @@ func TestTaskTriggerDisabledMatchesDaemonCLIBehavior(t *testing.T) {
 	h.errBox.SetSize(200, 1)
 
 	var gotID string
-	restore := SetTaskTriggerForTest(func(taskID string) error {
+	restore := SetTaskTriggerForTest(func(taskID string, _ task.ProjectExpectation) error {
 		gotID = taskID
 		return errTest("task d1 is disabled")
 	})

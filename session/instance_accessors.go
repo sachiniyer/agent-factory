@@ -429,13 +429,23 @@ func (i *Instance) ResolvedAgent() string {
 // was resolved inside the sandbox and is not represented by a local tmux
 // session (#2210).
 func (i *Instance) ResolvedPaneAgent() string {
+	program := i.ResolvedPaneProgram()
+	if strings.TrimSpace(program) == "" {
+		return ""
+	}
+	return tmux.DetectAgentFromCommand(program)
+}
+
+// ResolvedPaneProgram returns the concrete command frozen onto the local agent
+// pane at launch. It is empty when the instance has no local tmux binding.
+func (i *Instance) ResolvedPaneProgram() string {
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
-	if ts == nil || strings.TrimSpace(ts.Program()) == "" {
+	if ts == nil {
 		return ""
 	}
-	return tmux.DetectAgentFromCommand(ts.Program())
+	return ts.Program()
 }
 
 // SetTmuxSession sets the agent tab's tmux session for testing purposes,

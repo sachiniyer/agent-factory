@@ -200,13 +200,17 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 
 // SetConfigValue writes one config key on the caller's behalf, through
 // config.SetGlobalConfigValue — the identical validated, file-locked, atomic
-// path `af config set` and the TUI editor use. The daemon adds nothing: no
-// second validator, no second writer, no reordering.
+// path a daemonless `af config set` uses. The daemon adds nothing: no second
+// validator, no second writer, no reordering.
 //
-// It exists because a browser cannot write the user's disk, not because the
-// daemon owns config.toml (it does not — see the control_types.go note). The
-// file lock is what makes this safe against a concurrent hand-edit or CLI write,
-// and it is taken inside SetGlobalConfigValue, so this method must not
+// Since #3231 this is the one write path every first-class surface routes
+// through while a daemon is running — the web form posts it, and `af config
+// set` and the TUI editor call it over the control socket — so the mutation
+// admission gate above answers "is a config write admissible right now"
+// identically for all of them, and a refusal lands before anything reaches
+// disk. The daemon does not own config.toml (see the control_types.go note);
+// the file lock inside SetGlobalConfigValue is what makes this safe against a
+// concurrent hand-edit or daemonless CLI write, so this method must not
 // pre-read, cache, or merge anything around it.
 //
 // Errors (unknown key, invalid value) propagate verbatim so the web form shows
@@ -248,11 +252,21 @@ func (s *controlServer) SetConfigValue(req SetConfigValueRequest, resp *SetConfi
 }
 
 // ApplyConfig makes the running daemon reflect the on-disk global config in place
-// (#2480), so `af config set` (which writes the file itself) does not require a
-// manual restart to take effect. Reports which changed keys are live vs pending.
-// Not gated on mutation admission: it reloads config, touches no session state,
-// and is safe during warmup.
+// (#2480), so a config write does not require a manual restart to take effect.
+// Reports which changed keys are live vs pending. Since #3231 the first-class
+// clients route their writes through SetConfigValue, which applies internally;
+// this remains for older CLIs that write the file themselves and poke it after.
+//
+// Gated on mutation admission like SetConfigValue (#3231): an apply is not
+// inert — it swaps the live config, rebinds listeners, and changes auth
+// posture — so during upgrade probation it would mutate the very posture the
+// supervisor is validating, and during quiescing it would race the hand-off.
+// Ordinary warm-up is still admitted (mutationAdmissionError allows it), so a
+// write during a normal start keeps applying live.
 func (s *controlServer) ApplyConfig(_ ApplyConfigRequest, resp *ApplyConfigResponse) error {
+	if err := s.requireMutationAdmission(); err != nil {
+		return err
+	}
 	if s.manager == nil {
 		return nil
 	}
@@ -536,7 +550,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		return err
 	}
 	data, err := s.manager.CreateSession(ctx, req)
-	if err != nil {
+	// A committed retained create (#3233) lands in the envelope with the
+	// retained projection in Instance; a genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Instance = data
@@ -577,21 +593,28 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 		return err
 	}
 	created, err := s.manager.CreateTab(req)
-	if err != nil {
+	// Assign before recording so the envelope survives the copy: a committed
+	// outcome (#3237) carries the minted identity in the response; a genuine
+	// failure returns unchanged (net/rpc sends no reply body on error).
+	*resp = created
+	if !resp.record(err) {
 		return err
 	}
-	*resp = created
 	return nil
 }
 
 func (s *controlServer) CloseTab(req CloseTabRequest, resp *CloseTabResponse) error {
+	return s.closeTab(context.Background(), req, resp)
+}
+
+func (s *controlServer) closeTab(ctx context.Context, req CloseTabRequest, resp *CloseTabResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	name, err := s.manager.CloseTab(req)
+	name, err := s.manager.closeTabRequestedBy(req, rpcRequester(ctx))
 	if err != nil {
 		return err
 	}
@@ -645,6 +668,10 @@ func (s *controlServer) SetPRInfo(req SetPRInfoRequest, resp *SetPRInfoResponse)
 }
 
 func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionResponse) error {
+	return s.killSession(context.Background(), req, resp)
+}
+
+func (s *controlServer) killSession(ctx context.Context, req KillSessionRequest, resp *KillSessionResponse) error {
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
@@ -656,12 +683,19 @@ func (s *controlServer) KillSession(req KillSessionRequest, resp *KillSessionRes
 	// exact session, never the request's own id, which under a cross-repo title
 	// collision could point at a different (or gone) session (#1592 Phase 5 PR5 +
 	// follow-up: the write-path analogue of the id-keyed read/stream paths).
-	killed, err := s.manager.KillSession(req)
+	killed, err := s.manager.killSessionRequestedBy(req, rpcRequester(ctx))
 	if !resp.record(err) {
 		return err
 	}
 	resp.OK = true
-	s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
+	// Publish only when the kill actually completed. A committed-but-unfinished
+	// kill (err recorded above) retains its tombstoned row, and session.killed
+	// means the durable row and authoritative map entry disappeared — that event
+	// is published by finishUserKill/the late ghost worker when the row actually
+	// goes (#3234).
+	if err == nil {
+		s.manager.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: killed.ID, Title: killed.Title})
+	}
 	return nil
 }
 

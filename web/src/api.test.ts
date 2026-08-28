@@ -16,6 +16,7 @@ import {
   createTab,
   errorText,
   fetchPreviewOrigin,
+  getTheme,
   handoffSession,
   isMutationCommittedError,
   killSession,
@@ -36,6 +37,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
+import type { TaskData } from "./types.js";
 
 interface Captured {
   url: string;
@@ -195,6 +197,29 @@ test("suggestSessionName asks the daemon and returns the name", async () => {
   assert.equal(name, "shell", "the resolved name is read from the envelope");
 });
 
+test("getTheme returns the daemon palette instead of a browser-owned default", async () => {
+  const theme = { name: "nord", accent: "#88C0D0", background: "#2E3440" };
+  const cap: Captured = { url: "", body: {}, auth: undefined, calls: 0 };
+  (globalThis as { fetch: unknown }).fetch = async (url: string, init: RequestInit): Promise<Response> => {
+    cap.calls += 1;
+    cap.url = url;
+    cap.body = JSON.parse(String(init.body));
+    cap.auth = (init.headers as Record<string, string>).Authorization;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ data: { theme }, error: null }),
+    } as unknown as Response;
+  };
+
+  const got = await getTheme("tok");
+  assert.equal(cap.url, "/v1/GetTheme");
+  assert.equal(cap.auth, "Bearer tok");
+  assert.deepEqual(cap.body, {});
+  assert.deepEqual(got, theme);
+});
+
 test("killSession posts the stable id as the primary key alongside the title", async () => {
   const cap = stubFetch();
   await killSession("id-repoB", "feature", "tok");
@@ -330,9 +355,24 @@ test("closeTab posts the stable tab id alongside the current name (#1971)", asyn
 
 // --- task mutations (#1592 Phase 5 PR8) ------------------------------------
 
+/** A TaskData record as the tasks pane displays it — the record whose project
+ *  binding every mutation must pin (#3230). */
+function displayedTask(overrides: Partial<TaskData> = {}): TaskData {
+  return {
+    id: "t-abc123",
+    prompt: "do it",
+    cron_expr: "0 0 * * *",
+    project_path: "/repo/one",
+    program: "claude",
+    enabled: true,
+    created_at: "2026-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
 test("updateTask posts a field-level patch keyed by the stable id", async () => {
   const cap = stubFetch();
-  await updateTask("t-abc123", { enabled: false }, "tok");
+  await updateTask(displayedTask(), { enabled: false }, "tok");
   assert.equal(cap.url, "/v1/UpdateTask");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(cap.body.id, "t-abc123", "the daemon resolves the task by its unique id, not its name");
@@ -345,13 +385,36 @@ test("updateTask posts a field-level patch keyed by the stable id", async () => 
 
 test("triggerTask / removeTask post the stable id", async () => {
   const cap = stubFetch();
-  await triggerTask("t-abc123", "tok");
+  await triggerTask(displayedTask(), "tok");
   assert.equal(cap.url, "/v1/TriggerTask");
   assert.equal(cap.body.id, "t-abc123");
 
-  await removeTask("t-abc123", "tok");
+  await removeTask(displayedTask(), "tok");
   assert.equal(cap.url, "/v1/RemoveTask");
   assert.equal(cap.body.id, "t-abc123");
+});
+
+test("task mutations pin the displayed record's project binding (#3230)", async () => {
+  const cap = stubFetch();
+  const pinned = { enforce: true, project_path: "/repo/one" };
+  // A request whose expect is absent decodes daemon-side as the zero-value
+  // task.ProjectExpectation — "no expectation" — which disables the admission
+  // check entirely. That is the exact request shape the web sent before this
+  // fix, letting a stale action delete or run a task another client rebound.
+  await updateTask(displayedTask(), { enabled: false }, "tok");
+  assert.deepEqual(cap.body.expect, pinned, "update must pin the binding the pane displayed");
+
+  await triggerTask(displayedTask(), "tok");
+  assert.deepEqual(cap.body.expect, pinned, "run-now must pin the binding the pane displayed");
+
+  await removeTask(displayedTask(), "tok");
+  assert.deepEqual(cap.body.expect, pinned, "remove — the destructive verb — must pin the binding the pane displayed");
+
+  // A task displayed as unbound pins the UNBOUND binding: enforce stays true,
+  // because expecting project_path "" is distinct from having no expectation
+  // (task.ProjectExpectation.Enforce exists precisely for this).
+  await removeTask(displayedTask({ project_path: "" }), "tok");
+  assert.deepEqual(cap.body.expect, { enforce: true, project_path: "" });
 });
 
 test("updateTask / triggerTask / removeTask FAIL CLOSED on a missing task id", async () => {
@@ -359,17 +422,17 @@ test("updateTask / triggerTask / removeTask FAIL CLOSED on a missing task id", a
   // A task with no id must NOT be mutated by a daemon first-match on another task —
   // the task analogue of the #1678 id-scoping class. Each refuses BEFORE any request.
   await assert.rejects(
-    () => updateTask("", { enabled: false }, "tok"),
+    () => updateTask(displayedTask({ id: "" }), { enabled: false }, "tok"),
     (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
     "updateTask with an empty id must reject",
   );
   await assert.rejects(
-    () => triggerTask("", "tok"),
+    () => triggerTask(displayedTask({ id: "" }), "tok"),
     (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
     "triggerTask with an empty id must reject",
   );
   await assert.rejects(
-    () => removeTask("", "tok"),
+    () => removeTask(displayedTask({ id: "" }), "tok"),
     (e: unknown) => e instanceof ApiError && /no stable id/.test((e as ApiError).message),
     "removeTask with an empty id must reject",
   );
@@ -422,7 +485,7 @@ test("an envelope error preserves its machine-readable outcome code", async () =
       },
     }),
   });
-  const err = await updateTask("t-committed", { enabled: false }, "tok").then(
+  const err = await updateTask(displayedTask({ id: "t-committed" }), { enabled: false }, "tok").then(
     () => null,
     (e: unknown) => e,
   );
@@ -663,11 +726,14 @@ test("probeWebTab: a redirect is an ANSWERING server — ok, and the frame follo
   assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "ok", "a redirecting server is alive");
 });
 
-test("probeWebTab: a transport failure is dead", async () => {
+test("probeWebTab: a transport failure is unreachable, not dead (#3239)", async () => {
+  // The fetch rejected before the deadline: the browser never reached the daemon, so
+  // nothing was observed about the dev server behind it. Reporting this as "dead"
+  // routed it to the dev-server fallback copy — blaming a hop that was never asked.
   (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> => {
     throw new TypeError("Failed to fetch");
   };
-  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "dead");
+  assert.equal(await probeWebTab("/v1/webtab/s/t/", "", 1000), "unreachable");
 });
 
 test("probeWebTab: a fetch that never resolves is aborted at the timeout and reported dead (Codex P2)", async () => {

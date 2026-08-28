@@ -1,27 +1,40 @@
-# Agent Factory
+<p align="center">
+  <img src="docs/assets/mark.svg" width="96" height="96" alt="Agent Factory — a terminal prompt branching into three worktrees">
+</p>
 
-[![Latest release](https://img.shields.io/github/v/release/sachiniyer/agent-factory?sort=semver)](https://github.com/sachiniyer/agent-factory/releases/latest)
-[![Docs](https://img.shields.io/badge/docs-live-2e7c80)](https://sachiniyer.github.io/agent-factory/)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-2e7c80)](LICENSE.md)
+<h1 align="center">Agent Factory</h1>
 
-**Run a fleet of AI coding agents at once — each in its own git worktree, all on one screen.**
+<p align="center"><strong>Run a fleet of AI coding agents at once — isolated workspaces, one control plane.</strong></p>
 
-[![Agent Factory demo video preview: multiple AI coding agents running in isolated git worktrees, with live Agent tabs, scheduled automations, helper tabs, and full-screen attach](docs/assets/demo.gif)](docs/assets/demo.mp4)
+<p align="center">
+  <a href="docs/assets/demo.mp4"><img src="docs/assets/demo.gif" alt="Agent Factory demo video preview: three Codex agents working in parallel in isolated git worktrees while an operator moves between live Agent panes and opens a Terminal tab to run tests"></a>
+</p>
 
-**Demo video:** [MP4](docs/assets/demo.mp4) · [WebM](docs/assets/demo.webm) · [GIF fallback](docs/assets/demo.gif)
+<p align="center">
+  One daemon keeps local and off-box sessions, tabs, scheduled tasks, and usage-limit recovery visible from a dense TUI, the web UI, and a JSON CLI; launches can also be pinned to Claude or Codex credential accounts.
+</p>
+
+<p align="center">
+  <a href="https://github.com/sachiniyer/agent-factory/releases/latest"><img src="https://img.shields.io/github/v/release/sachiniyer/agent-factory?sort=semver&amp;style=flat-square&amp;label=release&amp;labelColor=494949&amp;color=3F3F3F&amp;logo=github&amp;logoColor=8CD0D3" alt="Latest release"></a>
+  <a href="https://sachiniyer.github.io/agent-factory/"><img src="https://img.shields.io/badge/docs-live-3F3F3F?style=flat-square&amp;labelColor=494949&amp;logo=materialformkdocs&amp;logoColor=8CD0D3" alt="Documentation"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-AGPL--3.0-3F3F3F?style=flat-square&amp;labelColor=494949&amp;logo=gnu&amp;logoColor=8CD0D3" alt="AGPL v3 license"></a>
+</p>
+
+<p align="center">
+  <a href="https://sachiniyer.github.io/agent-factory/">Docs</a> ·
+  Demo: <a href="docs/assets/demo.mp4">MP4</a> · <a href="docs/assets/demo.webm">WebM</a> · <a href="docs/assets/demo.gif">GIF</a>
+</p>
 
 Agent Factory (`af`) supervises Claude Code, Codex, Aider, Gemini, Amp,
-opencode, and Devin. Each session gets a dedicated branch and worktree, so
-agents never trample the same checkout.
+opencode, and Devin. A session gets its own branch and workspace by default, so
+parallel agents do not share a checkout.
 
 One agent in one terminal is easy. Several is not — they collide in the same
 checkout, you lose track of which is working and which is stuck waiting on you,
-and there is nowhere to look that shows all of them. Agent Factory gives every
-agent an isolated branch you review like any other, keeps it alive under a
-background daemon, and puts the whole fleet on one screen — in your terminal or
-in a browser.
-
-**Full docs:** [sachiniyer.github.io/agent-factory](https://sachiniyer.github.io/agent-factory/)
+and there is nowhere to look that shows all of them. Agent Factory normally
+gives each agent an isolated branch you review like any other, keeps the session
+under a background daemon, and puts the whole fleet on one screen — in your
+terminal or in a browser.
 
 ## Install
 
@@ -61,22 +74,23 @@ daemon serves the web UI on loopback by default: no token, no login screen.
 
 Three ideas carry the whole tool.
 
-- **Session — one agent, one worktree.** Creating a session cuts a branch and a
-  git worktree, then launches your agent inside it. The branch stays an ordinary
-  git artifact you can diff, push, or open a PR from. Pass `--here` when you
-  deliberately want the agent in your current checkout instead.
+- **Session — one agent, one workspace.** A local session cuts a branch and git
+  worktree; an off-box backend provisions an isolated remote workspace instead.
+  The branch stays an ordinary git artifact you can diff, push, or open a PR
+  from. Pass `--here` when you deliberately want a local agent in your current
+  checkout instead.
 - **Tabs — more than one thing per session.** Every session has its agent tab,
   and a local session can open more beside it in the same worktree: `t` chooses a
   terminal or VS Code editor, while `af sessions tab-create` adds a named
-  long-running command or web view. Sessions on the docker, ssh, and hook
+  long-running command or web view. Sessions on the docker, ssh, sandbox, and hook
   backends run off-box, so they admit only external HTTPS web tabs — shell,
   process, and VS Code tabs need a local worktree.
 - **Daemon — the thing that actually owns state.** A background daemon runs the
   sessions, schedules tasks, serves the web UI, and is the single source of
   truth. Opening the TUI starts one, as does any enabled task; read-only commands
   like `af config list` and `af tasks list` leave it down. The
-  TUI, the browser, and the CLI are all thin clients reading the same state, so
-  they never disagree.
+  TUI, the browser, and the CLI are all thin clients reading the same daemon
+  state.
 
 ## Three ways to drive it
 
@@ -85,9 +99,11 @@ Three ideas carry the whole tool.
 - **Web** — <http://localhost:8443>. The same sessions, tabs, projects, and tasks
   in a browser, with real terminals. Bundled into the daemon and on by default.
 - **CLI** — `af sessions` and `af tasks` emit JSON, so scripts and other agents
-  can drive everything the TUI does.
+  can create, inspect, prompt, watch, archive, and restore sessions and manage
+  their tabs and scheduled tasks.
 
 ```bash
+af sessions list --live --max-age 24h --limit 50
 af sessions create --name fix-auth --prompt "Fix the login redirect loop"
 af sessions preview fix-auth
 af sessions watch fix-auth      # block until it goes idle
@@ -109,12 +125,26 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
   an existing one. See [tasks](docs/tasks.md).
 - **Backends** — sessions run locally by default. Set a repo's `backend` key to
   `docker` to run in a container (with `docker.image`), to `ssh` to run on
-  another machine (with `ssh.host`), or to `hook` to launch on your own
-  infrastructure. See [backends](docs/backends.md).
-- **Agent plugins** — install the `agent-factory` skill into Codex, Claude Code,
-  Gemini, or amp (`codex plugin marketplace add sachiniyer/agent-factory`) and
-  an agent `af` never launched knows how to run and schedule af sessions. See
-  [agent plugins](docs/agent-plugins.md).
+  another machine (with `ssh.host`), to `sandbox` through the operator's
+  global `sandbox.ssh` command, or to `hook` to launch on your own infrastructure. See
+  [backends](docs/backends.md).
+- **Account scoping** — register separate Claude or Codex credential homes with
+  `af accounts add`, then select one for a local or docker session with
+  `--account`. `af` refuses an unproved fallback and never rotates accounts on its
+  own. See [`af accounts`](docs/reference/cli.md#af-accounts).
+- **Explicit idle and limit state** — state never relies on colour or motion:
+  static glyphs and text distinguish ready, lost, dead, archived, and
+  limit-blocked sessions, while an empty state cell means working. Ready rows
+  report only mechanical facts such as `delivery unknown` or `no change after
+  delivery`; limit walls can be retried, handed off, or resumed automatically
+  when opted in. The read-only `af quota` command reports observed walls and says
+  `not reported` where a provider exposes no quota API. See [usage
+  limits](docs/usage-limits.md).
+- **Agent plugins** — teach Codex, Claude Code, Gemini, or amp how to run and
+  schedule af sessions even when af did not launch that agent. For Codex, add
+  the marketplace with `codex plugin marketplace add sachiniyer/agent-factory`,
+  then install with `codex plugin add agent-factory@agent-factory`. See [agent
+  plugins](docs/agent-plugins.md).
 - **Auto-update** — `af` updates itself on launch, at most once every 6 hours,
   and relaunches into the new build. Pin it with `auto_update = false`; track
   early builds with `update_channel = "preview"`. `af upgrade` updates on demand.
@@ -154,7 +184,9 @@ the daemon that answered, and whether that daemon has applied the config on disk
   [backends](docs/backends.md) ·
   [remote hooks](docs/remote-hooks.md) ·
   [remote daemon access](docs/remote-http-auth.md) ·
-  [usage limits](docs/usage-limits.md)
+  [usage limits](docs/usage-limits.md) ·
+  [accounts](docs/reference/cli.md#af-accounts) ·
+  [quota](docs/reference/cli.md#af-quota)
 - Reference: [HTTP API](docs/http-api.md) · [CLI reference](docs/reference/cli.md) ·
   [API reference](docs/reference/api.md)
 - [Comparison](docs/comparison.md) with tmux, manual worktrees, and peers.
@@ -162,9 +194,9 @@ the daemon that answered, and whether that daemon has applied the config on disk
 ## Exposing it beyond localhost
 
 The web UI and HTTP API listen on `127.0.0.1:8443` and skip auth on loopback.
-Pointing `listen_addr` at a routable address exposes them to your network, so
-set `require_token = true` or keep it behind a VPN or proxy — the listener is
-plain HTTP. Turn the web UI off entirely with `listen_addr = ""`. See
+Pointing `network.listen_addr` at a routable address exposes them to your network, so
+set `network.require_token = true` or keep it behind a VPN or proxy — the listener is
+plain HTTP. Turn the web UI off entirely with `network.listen_addr = ""`. See
 [remote daemon access](docs/remote-http-auth.md).
 
 ## Maintenance

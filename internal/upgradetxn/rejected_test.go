@@ -118,12 +118,58 @@ func TestRecordRejectedCandidate_IsIdempotentAndBounded(t *testing.T) {
 // TestRejectedLedger_IsOwnerOnly — the ledger decides whether a binary may be
 // activated, so a user who can write it can re-enable a release this box refused.
 func TestRejectedLedger_IsOwnerOnly(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "af")
+	// State the directory posture rather than inheriting it (#3465). The ledger's
+	// mode is DERIVED from the directory's, so leaving the fixture at whatever
+	// umask produced it tests the developer's environment, not the contract.
+	//
+	// t.TempDir() is not the 0700 that os.MkdirTemp suggests: it calls MkdirTemp
+	// and THEN creates the numbered subdirectory it returns with
+	// os.Mkdir(dir, 0777), which the umask reduces. Measured at 0775 under umask
+	// 002 — group rwx, no other-write, i.e. shared — so this asserted 0600 against
+	// the shared branch'"'"'s 0660. See TestWithExecutableLock_LeavesAPrivateLockFile.
+	executable := sharedInstallDir(t, 0o700)
+	_, shared := directoryWriterGroup(filepath.Dir(executable))
+	require.False(t, shared, "precondition: a privately-owned install directory")
+
 	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
 
 	info, err := os.Stat(rejectedLedgerPath(executable))
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+// The other branch, pinned rather than merely tolerated. The owner-only mode
+// exists so a user who can write the ledger cannot re-enable a release this box
+// refused — but on a directory the group can already install into, that group can
+// replace the binary outright, so an owner-only ledger withholds nothing from
+// them and instead blocks the authorized writers the widening exists to admit
+// (install_lock.go:245-262).
+//
+// Scoped to the MODE. The group the ledger carries is a separate claim, and a
+// single-user fixture cannot test it — the temp dir's group already equals the
+// creator's primary group, so "file gid == dir gid" passes against unfixed code.
+// TestExecutableLock_TakesTheDirectorysGroup owns that one, and retargets the
+// directory to a SECONDARY group to give the assertion teeth.
+//
+// The sibling ledger tests cover the READ path (realign on
+// readRejectedLedger); this is the initial WRITE, which goes through
+// durableAtomicWriteFileInGroup instead.
+func TestRejectedLedger_WidensOnAGroupInstallableDirectory(t *testing.T) {
+	executable := sharedInstallDir(t, 0o770)
+	if _, shared := directoryWriterGroup(filepath.Dir(executable)); !shared {
+		// Not a failure. Where ACL state cannot be read — macOS, and any filesystem
+		// that presents one — the classifier declines and the ledger stays private,
+		// which is the correct behaviour. Asserting the widening there would make a
+		// red job out of a right answer, and teach the next reader to ignore it.
+		t.Skip("this filesystem/uid does not present the directory as group-installable")
+	}
+
+	require.NoError(t, RecordRejectedCandidate(executable, digest([]byte("bad")), "1.0.207", "rolled back"))
+
+	info, err := os.Stat(rejectedLedgerPath(executable))
+	require.NoError(t, err)
+	require.Equal(t, rejectedLedgerSharedMode, info.Mode().Perm(),
+		"a ledger the authorized group cannot read leaves them unable to see what this box refused")
 }
 
 // TestCandidateRejected_StructurallyInvalidLedgerErrors — decoding successfully is
@@ -413,15 +459,36 @@ func TestRejectedLedgerRefusesAHardLinkedInode(t *testing.T) {
 func TestRejectedLedgerRealignNeverRestylesALinkedExecutable(t *testing.T) {
 	dir := t.TempDir()
 	executable := filepath.Join(dir, "af")
-	require.NoError(t, os.WriteFile(executable, []byte("bin"), 0o755))
+	// 0755 is the FIXTURE's choice here, not a mode the product promises — what
+	// realign guarantees for a linked inode is that it does not touch the mode at
+	// ALL. So the assertion below is invariance, and the literal is gone (#3470).
+	//
+	// The value still has to be STATED rather than inherited: os.WriteFile's mode
+	// is umask-masked, so under 077 this landed 0700 and the old assertion checked
+	// an executable bit that was never set. sharedInstallDir's comment named this
+	// very test as the casualty of that trap — "the hard-link test then asserts a
+	// 0755 that was never there" — before anyone fixed it.
+	writeFileWithMode(t, executable, []byte("bin"), 0o755)
 	path := rejectedLedgerPath(executable)
 	require.NoError(t, os.Link(executable, path), "the ledger path is a second name for the executable")
 	require.NoError(t, os.Chmod(dir, 0o750))
 
+	before, err := os.Stat(executable)
+	require.NoError(t, err)
+	// Invariance is only a real assertion while the fixture differs from what a
+	// restyle would produce. Both directions, because either one bricks it.
+	require.NotEqual(t, rejectedLedgerMode, before.Mode().Perm(),
+		"the fixture must differ from the narrowing target, or 'unchanged' could not fail")
+	require.NotEqual(t, rejectedLedgerSharedMode, before.Mode().Perm(),
+		"and from the widening target, for the same reason")
+
 	alignRejectedLedgerWithDirectoryWriters(path)
 
-	info, err := os.Stat(executable)
+	after, err := os.Stat(executable)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(),
-		"the executable must still be executable; a chmod through the link would have bricked it")
+	require.Equal(t, before.Mode().Perm(), after.Mode().Perm(),
+		"realign must leave a hard-linked inode alone: a chmod through the second name "+
+			"rewrites the executable itself")
+	require.NotZero(t, after.Mode().Perm()&0o111,
+		"and the bricking this guards against is specifically the executable bit going away")
 }
