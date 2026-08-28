@@ -91,13 +91,13 @@ type rootEnsureState struct {
 	// got an answer out of git (#3500), so the escalation ERROR can only claim
 	// a persistent cause when something actually established one.
 	unansweredFailures int
-	// escalated and escalatedAllUnanswered record whether this streak has
-	// already logged its escalation ERROR and what it was able to claim, so a
-	// streak that starts unanswerable and LATER gets a real answer escalates
-	// once more with the cause it can now name (#3500 review).
-	escalated              bool
-	escalatedAllUnanswered bool
-	nextAttempt            time.Time
+	// escalated and escalatedPersistent record whether this streak has already
+	// logged its escalation ERROR and whether that ERROR was allowed to claim a
+	// persistent cause, so a streak escalated without that evidence can escalate
+	// once more if the evidence arrives (#3500 review).
+	escalated           bool
+	escalatedPersistent bool
+	nextAttempt         time.Time
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
@@ -761,7 +761,7 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	st.consecutiveFailures = 0
 	st.unansweredFailures = 0
 	st.escalated = false
-	st.escalatedAllUnanswered = false
+	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
 	m.mu.Unlock()
@@ -789,18 +789,26 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	st.nextAttempt = time.Now().Add(backoff)
 	if rootEnsureShouldEscalate(st) {
 		st.escalated = true
-		st.escalatedAllUnanswered = rootEnsureAllUnanswered(st)
+		st.escalatedPersistent = rootEnsureCauseIsEstablished(st)
 		log.ErrorLog.Printf("root agent ensure for %q failed %d consecutive times; %s — will keep retrying every %s: %v", path, st.consecutiveFailures, rootEnsureEscalationCause(st), rootEnsureBackoffMax, err)
 		return
 	}
 	log.WarningLog.Printf("root agent ensure for %q failed (attempt %d), retrying in %s: %v", path, st.consecutiveFailures, backoff, err)
 }
 
-// rootEnsureAllUnanswered reports whether every failure in the current streak
-// went unanswered — the one predicate both the escalation decision and its
-// wording read, so they cannot drift apart. Caller holds m.mu.
-func rootEnsureAllUnanswered(st *rootEnsureState) bool {
-	return st.unansweredFailures >= st.consecutiveFailures
+// rootEnsureAnsweredFailures counts the failures in the current streak that
+// produced a real error rather than ending before git could answer. Caller
+// holds m.mu.
+func rootEnsureAnsweredFailures(st *rootEnsureState) int {
+	return st.consecutiveFailures - st.unansweredFailures
+}
+
+// rootEnsureCauseIsEstablished reports whether the streak has the evidence a
+// persistence claim needs: a full threshold of failures that actually reported
+// something. It is the one predicate both the escalation decision and its
+// wording read, so the two cannot drift apart. Caller holds m.mu.
+func rootEnsureCauseIsEstablished(st *rootEnsureState) bool {
+	return rootEnsureAnsweredFailures(st) >= rootEnsureEscalationThreshold
 }
 
 // rootEnsureShouldEscalate decides whether a streak gets an escalation ERROR
@@ -812,24 +820,29 @@ func rootEnsureAllUnanswered(st *rootEnsureState) bool {
 // would be logged as warnings forever while the root stayed down (#3500
 // review).
 //
-// The upgrade carries the SAME evidence bar the first escalation had: a full
-// threshold of failures that actually answered. One is not enough, and the
-// reason is that this function does not see only repo probes —
-// rootEnsureFailed also records a failed session create and a failed dead-root
-// reap, neither of which carries the unanswered sentinel. Without the bar, one
-// transient tmux failure after an unanswerable streak would upgrade "cause
-// unknown" to "looks persistent" on the spot, which is the same fabricated
-// verdict this PR exists to remove (#3500 review round 2).
+// The trigger and the CLAIM are deliberately separate. Visibility is owed after
+// a threshold of consecutive failures whatever they were — the root has been
+// down that long either way — but "the cause looks persistent" is owed only
+// once a threshold of failures has actually reported something. So the first
+// ERROR always fires on the count, worded for the evidence, and the upgrade
+// fires once that evidence arrives.
 //
-// Bounded at two ERRORs per streak: the reverse transition cannot happen, since
-// an answered failure is never un-answered later in the same streak. Caller
-// holds m.mu.
+// The bar is a full threshold rather than a single answered failure because
+// this path does not see only repo probes: rootEnsureFailed also records a
+// failed session create and a failed dead-root reap, neither of which carries
+// the unanswered sentinel. One transient tmux failure must not turn "cause
+// unknown" into "looks persistent" (#3500 review round 2) — and a MIXED first
+// streak must not either, nor lock itself out of the upgrade by having claimed
+// persistence on that one failure (round 3).
+//
+// Bounded at two ERRORs per streak: escalatedPersistent only ever goes false to
+// true, since an answered failure is never un-answered later in the same
+// streak. Caller holds m.mu.
 func rootEnsureShouldEscalate(st *rootEnsureState) bool {
 	if !st.escalated {
 		return st.consecutiveFailures >= rootEnsureEscalationThreshold
 	}
-	answered := st.consecutiveFailures - st.unansweredFailures
-	return st.escalatedAllUnanswered && answered >= rootEnsureEscalationThreshold
+	return !st.escalatedPersistent && rootEnsureCauseIsEstablished(st)
 }
 
 // rootEnsureEscalationCause words what the escalation ERROR is entitled to
@@ -840,9 +853,12 @@ func rootEnsureShouldEscalate(st *rootEnsureState) bool {
 // that never got an answer out of git has established nothing about the
 // repository or the configuration. Caller holds m.mu.
 func rootEnsureEscalationCause(st *rootEnsureState) string {
+	answered := rootEnsureAnsweredFailures(st)
 	switch {
-	case rootEnsureAllUnanswered(st):
+	case answered == 0:
 		return "no attempt got an answer out of git, so the cause is unknown; a repo probe that keeps dying says nothing about the repository or its configuration"
+	case !rootEnsureCauseIsEstablished(st):
+		return fmt.Sprintf("only %d of those attempts reported a real error and the rest ended before git could answer, so the cause is not established", answered)
 	case st.unansweredFailures > 0:
 		return fmt.Sprintf("the cause looks persistent, though %d of those attempts ended before git could answer", st.unansweredFailures)
 	default:

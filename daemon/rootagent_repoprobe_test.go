@@ -292,3 +292,55 @@ func TestRootEnsureReEscalatesOnceTheCauseIsFinallyEstablished(t *testing.T) {
 		t.Fatalf("the escalation must not repeat once the cause is established: %q", got)
 	}
 }
+
+// TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade: a
+// first streak that crosses the threshold on MOSTLY unanswered probes plus one
+// real error must not claim a persistent cause on that one failure — and it
+// must stay eligible for the upgrade, which is what an escalation flag keyed to
+// "was the streak all-unanswered" got wrong: a mixed streak recorded itself as
+// already-established and could never escalate again (#3500 review round 3).
+func TestRootEnsureMixedStreakNeitherClaimsPersistenceNorLocksOutTheUpgrade(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	prevBase := rootEnsureBackoffBase
+	rootEnsureBackoffBase = 0
+	t.Cleanup(func() { rootEnsureBackoffBase = prevBase })
+
+	path := t.TempDir() // a real directory, and really not a git repository
+	manager, err := NewManager(rootTestConfig(path, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	letGitAnswer := installUnanswerableGit(t)
+	_, errorLog := captureRootEnsureLogs(t)
+
+	// One short of the threshold, all unanswered; then git answers, and that
+	// single real error is what crosses it.
+	for i := 0; i < rootEnsureEscalationThreshold-1; i++ {
+		manager.EnsureRootAgents()
+	}
+	letGitAnswer()
+	manager.EnsureRootAgents()
+
+	got := errorLog.String()
+	if !strings.Contains(got, fmt.Sprintf("failed %d consecutive times", rootEnsureEscalationThreshold)) {
+		t.Fatalf("the streak still crossed the threshold and still owes an ERROR, got: %q", got)
+	}
+	if strings.Contains(got, "the cause looks persistent") {
+		t.Fatalf("one real error among %d unanswered probes is not a persistent cause: %q", rootEnsureEscalationThreshold-1, got)
+	}
+	if !strings.Contains(got, "so the cause is not established") {
+		t.Fatalf("the ERROR must say what the streak actually established, got: %q", got)
+	}
+
+	// The evidence arrives: a full threshold of real errors. The upgrade must
+	// still be available — this is the half a streak-class flag locked out.
+	errorLog.Reset()
+	for i := 1; i < rootEnsureEscalationThreshold; i++ {
+		manager.EnsureRootAgents()
+	}
+	if got := errorLog.String(); !strings.Contains(got, "the cause looks persistent") {
+		t.Fatalf("a mixed first escalation must stay eligible for the upgrade, got: %q", got)
+	}
+}
