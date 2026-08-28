@@ -599,6 +599,14 @@ func TestUpdateDriverReadsTheSharedCacheFile(t *testing.T) {
 	require.Equal(t, filepath.Join(home, autoupdate.CheckCacheFileName), driver.cachePath)
 
 	// And it parses what the launch path writes.
+	//
+	// The file lock is NOT redundant, and must not be dropped as such: this write
+	// sits OUTSIDE the already-locked update cycle. Inside that cycle
+	// (commands.withUpdateCheckLock → autoupdate.TryWithCheckCache) the lock is
+	// already held and the body calls cache.Record directly; bookkeeping from out
+	// here has to acquire it itself. Blocking rather than the launch path's
+	// try-lock, so the seed cannot silently skip and leave the parse below
+	// asserting against an unwritten file.
 	require.NoError(t, config.WithFileLock(driver.cachePath, func() error {
 		return autoupdate.ReadCheckCache(driver.cachePath).Record(config.UpdateChannelStable, "v1.0.200", "1.0.200", time.Now().UTC())
 	}))
