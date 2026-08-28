@@ -12,11 +12,12 @@ import (
 // about its job, its limits, and the user's current settings is in this string.
 //
 // It is deliberately not a new seam. The daemon's create path already runs
-// task.StartAndSendPrompt (Start → WaitForReady → trust-prompt dismissal →
-// SendPrompt), and SendPrompt delivers through a tmux paste buffer over stdin,
-// so a long briefing costs nothing and there is no ARG_MAX ceiling. Passing the
-// briefing as a CLI flag instead would be actively harmful: an unknown flag
-// kills the agent at exec and surfaces as an opaque readiness timeout.
+// task.StartAndSendPromptWithConversationCapture (Start → WaitForReady →
+// trust-prompt dismissal → SendPrompt), and SendPrompt delivers through a tmux
+// paste buffer over stdin, so a long briefing costs nothing and there is no
+// ARG_MAX ceiling. Passing the briefing as a CLI flag instead would be actively
+// harmful: an unknown flag kills the agent at exec and surfaces as an opaque
+// readiness timeout.
 //
 // The manifest half comes from config.RenderBriefing (phase 1) — tier-ordered,
 // with the user's CURRENT value for every key. This file only adds the

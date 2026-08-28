@@ -487,7 +487,8 @@ func configAgentCodexReceiptHome(program, workingDir string) (string, error) {
 }
 
 // dismissConfigAgentTrustPrompt clears the agent's first-run trust dialog, the
-// same loop task.StartAndSendPrompt runs for a normal session.
+// same loop task.StartAndSendPromptWithConversationCapture runs for a normal
+// session.
 //
 // The per-agent gate is tmux.ProgramNeedsTrustDismissal — the same call
 // LocalBackend.CheckAndHandleTrustPrompt makes, not a copy of its list. This
