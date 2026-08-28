@@ -429,6 +429,9 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return unknownIfCutOff(fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err))
 	}
+	// Every refusal is behind us and no bytes have moved yet: reap the writers
+	// that would otherwise be left pointed at a vacated pathname (#3391).
+	vacated := reapRelocationSourceWriters(src, dest)
 
 	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
 	if inspectErr != nil {
@@ -502,6 +505,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
+		reportRelocationResidue(vacated)
 		return nil
 	}
 	if useFallback {
@@ -614,11 +618,13 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
+		reportRelocationResidue(vacated)
 		return nil
 	}
 
 	// Fast path succeeded: git moved the bytes and updated the registration.
 	finishRelocation()
+	reportRelocationResidue(vacated)
 	return nil
 }
 
