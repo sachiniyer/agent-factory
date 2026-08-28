@@ -21,8 +21,9 @@ import (
 
 // nonStartedWorktreeInstance builds an instance with a real git worktree that is
 // NOT started (the restore-failed shape #2029 is about): GetGitWorktree errors for
-// it, but GetWorktreePath still resolves. Status is set to a
-// non-creating, non-tearing-down value so handleKill opens the confirmation.
+// it, but GetWorktreePath and the GetWorktreeCleanupImpact snapshot still
+// resolve. Status is set to a non-creating, non-tearing-down value so handleKill
+// opens the confirmation.
 func nonStartedWorktreeInstance(t *testing.T, title, repoDir, worktreePath, branch, baseSHA string) *session.Instance {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoDir, Program: "test"})
@@ -58,8 +59,15 @@ func TestHandleKill_NonStarted_UnmergedCommit_StillWarns(t *testing.T) {
 	require.NotEmpty(t, inst.GetWorktreePath(), "the ungated worktree-path accessor must still resolve")
 	impact, ok := inst.GetWorktreeCleanupImpact()
 	require.True(t, ok, "GetWorktreeCleanupImpact must resolve for a non-started instance with a worktree (#2209)")
-	require.NotEmpty(t, impact.Branch, "cleanup impact must expose the branch even for a non-started instance")
-	require.NotEmpty(t, impact.BaseCommitSHA, "cleanup impact must expose the base SHA even for a non-started instance")
+	// EXACT values, not merely non-empty. #2209 added this so cleanup can inspect
+	// the exact ref it would delete, and a snapshot that resolved to some OTHER
+	// worktree's branch or base SHA is non-empty and would sail through a NotEmpty
+	// check — precisely the wrong-branch-identity bug #3408 fixed in
+	// reclaimArchivedBranchLocked. The value is the property worth pinning.
+	require.Equal(t, "dev/nonstarted", impact.Branch,
+		"cleanup impact must expose the instance's OWN branch even for a non-started instance")
+	require.Equal(t, baseSHA, impact.BaseCommitSHA,
+		"cleanup impact must expose the instance's OWN base SHA even for a non-started instance")
 
 	_, hm := armKill(t, inst)
 
