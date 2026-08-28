@@ -191,8 +191,14 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	infoCmd.WaitDelay = repoGitWaitDelay
 	infoOut, err := infoCmd.Output()
 	if err != nil {
-		if ctx.Err() != nil {
-			return repoRootResolution{}, markUnansweredProbe(ctx.Err())
+		// Classified from the command's own outcome, never from ctx state
+		// (#3500 review): git ANSWERING with an error is what authorizes the
+		// main-worktree fallback below — an old git, a shape it will not
+		// describe — and a probe that never answered authorizes nothing.
+		// Falling back there would hand a linked worktree its own toplevel as
+		// its identity root, silently splitting one repository's ID in two.
+		if probeWentUnanswered(err) {
+			return repoRootResolution{}, fmt.Errorf("failed to inspect git directories for %s: %w", toplevel, markUnansweredProbe(err))
 		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
@@ -242,8 +248,11 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		}
 		return repoRootResolution{identityRoot: filepath.Clean(worktree), workspaceRoot: toplevel}, nil
 	}
-	if ctx.Err() != nil {
-		return repoRootResolution{}, markUnansweredProbe(ctx.Err())
+	// Same rule as the probe above: an ANSWER authorizes the fallback. Here the
+	// answer is usually "no such key", which is exactly how a non-submodule repo
+	// reports itself; a killed probe cannot tell that apart from a submodule.
+	if probeWentUnanswered(err) {
+		return repoRootResolution{}, fmt.Errorf("failed to read core.worktree for %s: %w", commonDir, markUnansweredProbe(err))
 	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return repoRootResolution{identityRoot: filepath.Dir(commonDir), workspaceRoot: toplevel}, nil

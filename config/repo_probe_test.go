@@ -153,3 +153,50 @@ exit 128
 		"both probes answered; nothing here is unknown")
 	assert.ErrorIs(t, err, ErrNotGitRepository)
 }
+
+// TestRepoFromPathClassifiesAKilledWorktreeProbeAsUnanswered: the toplevel
+// probe answers, and the SECOND probe — the one that tells a linked worktree
+// from a main one — is killed. Its answered failure has a documented fallback
+// (treat the toplevel as the identity root); an unanswered one must not take
+// it, because for a linked worktree that fallback silently splits one
+// repository's ID in two (#3500 review).
+func TestRepoFromPathClassifiesAKilledWorktreeProbeAsUnanswered(t *testing.T) {
+	toplevel := t.TempDir()
+	t.Setenv("AF_TEST_TOPLEVEL", toplevel)
+	installFakeGit(t, `#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	--git-dir) kill -9 $$ ;;
+	--show-toplevel) printf '%s\n' "$AF_TEST_TOPLEVEL"; exit 0 ;;
+	esac
+done
+exit 1
+`)
+
+	_, err := RepoFromPath(toplevel)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRepoProbeUnanswered,
+		"the probe that would have identified a linked worktree was killed; its fallback must not be taken on that")
+}
+
+// TestRepoFromPathKeepsTheAnsweredWorktreeFallback is the guard on the case
+// above: when that second probe ANSWERS with an error, the documented
+// main-worktree fallback still applies and resolution still succeeds.
+func TestRepoFromPathKeepsTheAnsweredWorktreeFallback(t *testing.T) {
+	toplevel := t.TempDir()
+	t.Setenv("AF_TEST_TOPLEVEL", toplevel)
+	installFakeGit(t, `#!/bin/sh
+for arg in "$@"; do
+	case "$arg" in
+	--show-toplevel) printf '%s\n' "$AF_TEST_TOPLEVEL"; exit 0 ;;
+	esac
+done
+printf '%s\n' 'fatal: this version does not know that' >&2
+exit 128
+`)
+
+	repo, err := RepoFromPath(toplevel)
+	require.NoError(t, err, "an answered probe keeps its fallback; only an unanswered one is fatal")
+	assert.Equal(t, toplevel, repo.Root)
+	assert.Equal(t, toplevel, repo.IdentityPath())
+}
