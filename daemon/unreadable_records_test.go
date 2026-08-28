@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -42,20 +44,37 @@ func assertNamesFileAndCause(t *testing.T, err error, path string) {
 	}
 }
 
-// TestCollectTitleRepoPathsOnDiskRefusesUnreadableRepo pins the helper that
-// backs the daemon's cross-project ambiguity guard. Its whole job is to widen a
-// lone in-memory match with the persisted rows a partial restore hid, so an
-// answer assembled from a partial READ is the one thing it must never return:
-// the caller reads a short list as "no other project holds this title".
-func TestCollectTitleRepoPathsOnDiskRefusesUnreadableRepo(t *testing.T) {
+// TestCollectTitleRepoPathsOnDiskKeepsReadableMatchesBesideTheGap is the
+// counterpart to the refusal above, and the one the first cut of this PR got
+// wrong: refusing EARLY threw away the matches the readable repos did yield.
+//
+// That is strictly worse than the fail-open it replaced. The caller unions this
+// set with its live match to DETECT ambiguity, so discarding a readable second
+// project's row removes a positive finding — and the caller then resolves the
+// live match anyway. A gap in the evidence must be reported alongside the
+// evidence, never instead of it.
+func TestCollectTitleRepoPathsOnDiskKeepsReadableMatchesBesideTheGap(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	rows, err := json.Marshal([]session.InstanceData{{Title: "foo", Path: "/repos/visible", Program: "claude"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances("visible-repo", rows); err != nil {
+		t.Fatalf("save: %v", err)
+	}
 	path := seedUnreadableRepoHolding(t, "blocked-repo", "foo", "/repos/blocked")
 
-	got, err := collectTitleRepoPathsOnDisk("foo")
-	if err == nil {
-		t.Fatalf("the ambiguity guard must not report a set it could not finish reading (got %v)", got)
+	found, gaps, err := collectTitleRepoPathsOnDisk("foo")
+	if err != nil {
+		t.Fatalf("a per-repo read failure is a gap to report, not a reason to abandon the scan: %v", err)
 	}
-	assertNamesFileAndCause(t, err, path)
+	if got := found["visible-repo"]; got != "/repos/visible" {
+		t.Errorf("the readable repo's match must survive the gap; found = %v", found)
+	}
+	if len(gaps) != 1 || !strings.Contains(config.DescribeRepoInstancesSkips(gaps), path) {
+		t.Errorf("the unreadable file must still be reported so the caller can refuse on it; gaps = %v", gaps)
+	}
 }
 
 // TestFindInstanceDataByTitleRefusesUnscopedWhenARepoIsUnreadable is the
@@ -140,5 +159,122 @@ func TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution(t *testing.
 		t.Fatalf("the daemon load gate must refuse a scoped lookup too while a record is unreadable")
 	} else {
 		assertNamesFileAndCause(t, err, path)
+	}
+}
+
+// withCollectTitleRepoPaths swaps findSession's disk-side ambiguity probe for
+// the duration of one test. The daemon's load gate refuses an unreadable record
+// before findSession runs, so the gap branch cannot be reached from a fixture;
+// driving the seam is the only way to test the resolution logic that sits on top
+// of it, and that logic is where the identity decision is actually made.
+func withCollectTitleRepoPaths(t *testing.T, fn func(string) (map[string]string, []config.RepoInstancesSkip, error)) {
+	t.Helper()
+	prev := collectTitleRepoPaths
+	collectTitleRepoPaths = fn
+	t.Cleanup(func() { collectTitleRepoPaths = prev })
+}
+
+// managerWithLiveSession returns a manager holding exactly one live session, so
+// findSession's unscoped branch reaches the one-live-match path where the
+// cross-project ambiguity guard runs.
+func managerWithLiveSession(t *testing.T, title string) (*Manager, string) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.CreateSession(context.Background(), CreateSessionRequest{
+		Title: title, RepoPath: repoPath, Program: "claude",
+	}); err != nil {
+		t.Fatalf("create %q: %v", title, err)
+	}
+	return manager, repoPath
+}
+
+// TestFindSessionPrefersDetectedAmbiguityOverTheGap keeps the gap refusal from
+// swallowing a better answer. A collision the readable repos DID show is
+// definitive — no unread file can make a title that is provably held twice
+// unique again — so it must be reported as ambiguity, naming both projects,
+// rather than downgraded to "could not verify".
+func TestFindSessionPrefersDetectedAmbiguityOverTheGap(t *testing.T) {
+	manager, _ := managerWithLiveSession(t, "foo")
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return map[string]string{"other-repo": "/repos/other"},
+			[]config.RepoInstancesSkip{{RepoID: "blocked", Path: "/af/instances/blocked/instances.json", Err: os.ErrPermission}},
+			nil
+	})
+
+	_, _, _, err := manager.findSession("foo", "")
+	if err == nil {
+		t.Fatalf("a title held by two projects must not resolve")
+	}
+	if !errors.Is(err, session.ErrAmbiguousTitle) {
+		t.Fatalf("a collision the readable repos showed is definitive and must surface as ambiguity, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/repos/other") {
+		t.Errorf("ambiguity error must name the other project so --repo can disambiguate, got: %v", err)
+	}
+}
+
+// TestFindSessionRefusesWhenUniquenessIsUnprovenByAGap is the fail-closed case:
+// nothing readable holds the title twice, but the check did not see everything,
+// so uniqueness is unproven rather than established. Resolving here is what an
+// unscoped kill or archive would act on.
+func TestFindSessionRefusesWhenUniquenessIsUnprovenByAGap(t *testing.T) {
+	manager, _ := managerWithLiveSession(t, "foo")
+	const blockedPath = "/af/instances/blocked/instances.json"
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return map[string]string{},
+			[]config.RepoInstancesSkip{{RepoID: "blocked", Path: blockedPath, Err: os.ErrPermission}},
+			nil
+	})
+
+	inst, rid, _, err := manager.findSession("foo", "")
+	if err == nil {
+		t.Fatalf("unscoped lookup resolved %q to repo %s though a project record could not be read (inst=%v)", "foo", rid, inst != nil)
+	}
+	if !strings.Contains(err.Error(), blockedPath) {
+		t.Errorf("refusal must name the unreadable file so it can be repaired, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "--repo") {
+		t.Errorf("refusal must point at the escape hatch that still works, got: %v", err)
+	}
+}
+
+// TestFindSessionRefusesWhenAmbiguityCheckCannotEnumerate covers the remaining
+// hole: failing to enumerate repos AT ALL is strictly less evidence than one
+// unreadable file, so it cannot keep failing open while that case refuses.
+func TestFindSessionRefusesWhenAmbiguityCheckCannotEnumerate(t *testing.T) {
+	manager, _ := managerWithLiveSession(t, "foo")
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return nil, nil, errors.New("instances directory unreadable")
+	})
+
+	inst, rid, _, err := manager.findSession("foo", "")
+	if err == nil {
+		t.Fatalf("unscoped lookup resolved %q to repo %s though the ambiguity check could not run at all (inst=%v)", "foo", rid, inst != nil)
+	}
+	if !strings.Contains(err.Error(), "instances directory unreadable") {
+		t.Errorf("refusal must carry the underlying cause, got: %v", err)
+	}
+}
+
+// TestFindSessionResolvesWhenTheCheckIsCompleteAndClean is the non-regression
+// floor: a complete check that finds no second project still resolves.
+func TestFindSessionResolvesWhenTheCheckIsCompleteAndClean(t *testing.T) {
+	manager, repoPath := managerWithLiveSession(t, "foo")
+	withCollectTitleRepoPaths(t, func(string) (map[string]string, []config.RepoInstancesSkip, error) {
+		return map[string]string{}, nil, nil
+	})
+
+	inst, _, _, err := manager.findSession("foo", "")
+	if err != nil {
+		t.Fatalf("a complete, clean ambiguity check must resolve the live match: %v", err)
+	}
+	if inst == nil || inst.Path != repoPath {
+		t.Fatalf("resolved the wrong session: %v", inst)
 	}
 }

@@ -210,22 +210,29 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 // failure to enumerate repos at all, or a per-repo file that could not be READ,
 // is returned as an error.
 //
-// The read failure is not optional detail: the caller unions this set with its
-// live match and reads a short list as "no other project holds this title",
-// which is the one conclusion a partial read cannot support (#3479). Defence in
-// depth today — refreshDaemonInstances runs
+// The second return names the repos whose file could not be READ. It is not
+// optional detail: the caller unions this set with its live match and reads a
+// short set as "no other project holds this title", which is the one conclusion
+// a partial read cannot support (#3479).
+//
+// It is a second RETURN rather than an early error on purpose. A gap must be
+// reported ALONGSIDE the evidence, never instead of it: refusing here would
+// discard the matches the readable repos did yield, and those matches are
+// positive findings that settle the ambiguity question on their own. Returning
+// them empty made the caller — which resolves its live match when this errors —
+// miss a readable second project it used to catch, i.e. strictly worse than the
+// fail-open being fixed. Caught in review of #3479 bucket 1.
+//
+// Defence in depth today: refreshDaemonInstances runs
 // config.MigrateAllRepoInstancesForDaemonLoad first, which already refuses hard
 // on an unreadable per-repo file, so findSession never reaches here in that
 // state (pinned by TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution).
 // Correct on its own terms anyway: an identity guard should not depend on an
 // upstream gate nobody thinks of as part of it.
-func collectTitleRepoPathsOnDisk(title string) (map[string]string, error) {
+func collectTitleRepoPathsOnDisk(title string) (map[string]string, []config.RepoInstancesSkip, error) {
 	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load instances: %w", err)
-	}
-	if len(unreadable) > 0 {
-		return nil, fmt.Errorf("%s, and any of them may hold this title too", config.DescribeRepoInstancesSkips(unreadable))
+		return nil, nil, fmt.Errorf("failed to load instances: %w", err)
 	}
 	found := make(map[string]string)
 	for rid, raw := range allInstances {
@@ -241,7 +248,7 @@ func collectTitleRepoPathsOnDisk(title string) (map[string]string, error) {
 			}
 		}
 	}
-	return found, nil
+	return found, unreadable, nil
 }
 
 func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, string, error) {
