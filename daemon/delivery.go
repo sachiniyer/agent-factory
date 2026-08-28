@@ -69,13 +69,32 @@ var errTargetBusy = errors.New("target session is attached; delivery deferred un
 // over-refunding breaks the guarantee.
 var errNotAttempted = errors.New("delivery not attempted")
 
-// notAttempted tags err as a pre-flight failure that provably delivered nothing.
-// The wrapper is TRANSPARENT — Error() is the wrapped message verbatim — so these
-// errors reach `af sessions send-prompt` users and the broadcast error field with
-// no internal token trailing a pasteable command (#2512). nil in, nil out.
+// notAttempted tags err as a pre-flight failure that provably delivered nothing,
+// and GUARANTEES the resulting message carries notDeliveredMarker so the tag
+// survives the net/rpc flattening described below. It is otherwise TRANSPARENT —
+// Error() is the wrapped message, and the marker is natural user-facing text
+// rather than an internal token — so these errors reach `af sessions send-prompt`
+// users and the broadcast error field with nothing machine-shaped trailing a
+// pasteable command (#2512). nil in, nil out.
+//
+// The marker used to be a PROSE invariant every call site had to remember, and
+// two messages that read fine to a human broke it by saying "event not
+// delivered" instead (#3477) — silently costing the watcher its rate-slot refund
+// on the root-agent paths. A substring contract cannot be enforced by a comment,
+// so it is enforced here, at the one constructor every pre-flight failure passes
+// through: whatever a call site writes, the wire text is refundable. Call sites
+// should still SPELL the marker where it reads naturally (most already do, and
+// notattempted_marker_test.go lints the near-misses) — the append below is the
+// floor, not the style.
 func notAttempted(err error) error {
 	if err == nil {
 		return nil
+	}
+	// Append only when absent: a message that already says it must not grow a
+	// second copy trailing a pasteable command (#2512), and %w keeps errors.Is/As
+	// against the underlying cause working through the extra layer.
+	if !strings.Contains(err.Error(), notDeliveredMarker) {
+		err = fmt.Errorf("%w; %s", err, notDeliveredMarker)
 	}
 	return &notAttemptedError{err: err}
 }
@@ -94,9 +113,11 @@ func (e *notAttemptedError) Is(target error) bool { return target == errNotAttem
 // the classification back to the watcher (that is why the first cut of #2501 did
 // not actually refund). Same idiom, same reason, as atConcurrencyLimitErrText
 // (#1892) — but chosen to be NATURAL user-facing text that already belongs in
-// these messages ("... prompt not delivered"), NOT an appended token, so the wire
-// survivability costs the user nothing. Every pre-flight message reachable from
-// the watch path carries it; deliverTaskPrompt re-mints the sentinel on a match.
+// these messages ("... prompt not delivered") rather than a machine token, so the
+// wire survivability costs the user nothing even where it has to be appended.
+// Every pre-flight message reachable from the watch path carries it —
+// notAttempted() guarantees that rather than trusting each call site to remember
+// (#3477); deliverTaskPrompt re-mints the sentinel on a match.
 const notDeliveredMarker = "prompt not delivered"
 
 // isNotAttemptedErr reports whether err — INCLUDING one flattened by net/rpc on
