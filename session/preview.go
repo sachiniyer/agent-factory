@@ -131,20 +131,6 @@ func (i *Instance) PreviewTabFullHistory(idx int) (string, error) {
 	return snapshot.Content, err
 }
 
-// PreviewTabByID captures the tab named by stable id without ever converting
-// that identity into an ordinal used by a later live-list lookup. The instance
-// lock resolves the id directly to the target tmux pointer and stays held through
-// the bounded non-agent capture. A concurrent close/reorder therefore waits; it
-// cannot redirect the capture to a sibling or a same-name replacement (#2200).
-//
-// The agent tab retains the backend-specific preview path. It is pinned at slot
-// zero and cannot be closed or reordered, so snapshotting its backend under the
-// same lock preserves both its identity and the formatting contract.
-func (i *Instance) PreviewTabByID(tabID string, full bool) (string, error) {
-	snapshot, err := i.PreviewTabSnapshotByID(tabID, full)
-	return snapshot.Content, err
-}
-
 // PreviewTabSnapshotByID binds content and terminal modes to one stable tab
 // identity. A mode read can fail without losing a valid capture; HasModes=false
 // makes that uncertainty explicit to routing clients.
@@ -234,7 +220,7 @@ func (i *Instance) PreviewTabSnapshotByID(tabID string, full bool) (PreviewSnaps
 // therefore cannot shift a new target under the ordinal in between (#2200).
 //
 // Local capture must not use this helper: its capture path re-enters i.mu. It has
-// PreviewTabByID above, which selects the tmux pointer directly instead.
+// PreviewTabSnapshotByID above, which selects the tmux pointer directly instead.
 func (i *Instance) previewByIDAsOrdinal(tabID string, capture func(int) (string, error)) (string, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
