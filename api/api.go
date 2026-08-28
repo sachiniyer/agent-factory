@@ -215,7 +215,7 @@ var errTitleNotFound = errors.New("not found")
 // ErrAmbiguousTitle naming each repo rather than picking one, since the map walk
 // below makes "first match" nondeterministic across runs.
 func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load sessions: %w", err)
 	}
@@ -250,11 +250,27 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 		projected := matches[0].ProjectIdleReason()
 		return &projected, matchRepoIDs[0], nil
 	}
-	if len(corrupted) > 0 {
-		return nil, "", fmt.Errorf("session %q not found; %s", title, corruptedReposSuffix(corrupted))
+	// A repo whose file could not be READ is the same kind of gap as one whose
+	// JSON would not parse (#3479): either could hold this session, so neither
+	// leaves a definitive not-found behind. LoadAllRepoInstances dropped the
+	// unreadable ones silently, so the miss came back looking clean.
+	//
+	// This sits AFTER the positive branches on purpose, preserving the pinned
+	// contract that a session in a healthy repo stays findable while another
+	// file is unusable: a PRESENCE this scan can see is not weakened by a file
+	// it could not read. Only the ABSENCE below is.
+	var gaps []string
+	if len(unreadable) > 0 {
+		gaps = append(gaps, config.DescribeRepoInstancesSkips(unreadable)+", and any of them may be hiding it")
 	}
-	// Wrap the sentinel so a clean miss stays distinguishable from a
-	// corruption-tainted miss (#861); the user-facing text is unchanged.
+	if len(corrupted) > 0 {
+		gaps = append(gaps, corruptedReposSuffix(corrupted))
+	}
+	if len(gaps) > 0 {
+		return nil, "", fmt.Errorf("session %q not found; %s", title, strings.Join(gaps, "; "))
+	}
+	// Wrap the sentinel so a clean miss stays distinguishable from an
+	// under-read one (#861); the user-facing text is unchanged.
 	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
@@ -533,9 +549,18 @@ func scopedInstancesForRepo(repoID string) ([]scopedInstance, error) {
 // value so the caller fails loudly instead of broadcasting to a truncated set
 // (#730) — the same contract as loadAllInstancesAggregate.
 func allScopedInstances() ([]scopedInstance, []string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, nil, err
+	}
+	// The target set IS the answer here, so a partial read is not a smaller
+	// answer — it is a wrong one. The caller already refuses to broadcast when a
+	// repo's JSON is corrupted, on the stated grounds that a hidden session
+	// which never receives the prompt is worse than an error; a file that could
+	// not be read truncates the set identically and was not covered (#3479).
+	if len(unreadable) > 0 {
+		return nil, nil, fmt.Errorf("cannot enumerate broadcast targets: %s, so sessions in them would silently miss the prompt; repair or remove the file(s), or scope the broadcast with --repo",
+			config.DescribeRepoInstancesSkips(unreadable))
 	}
 	var out []scopedInstance
 	var corrupted []string

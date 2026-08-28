@@ -446,6 +446,17 @@ func FormatRepoInstancesSkips(skips []RepoInstancesSkip) string {
 	return strings.Join(parts, "; ")
 }
 
+// DescribeRepoInstancesSkips renders the standard "could not be read" clause
+// every refusal built on a partial load shares.
+//
+// One phrase, one vocabulary: api/ and daemon/ cannot share a helper, and
+// letting each invent its own wording for the same condition is how a reader
+// stops recognising it as the same condition (#3479).
+func DescribeRepoInstancesSkips(skips []RepoInstancesSkip) string {
+	return fmt.Sprintf("%d project record file(s) could not be read: %s",
+		len(skips), FormatRepoInstancesSkips(skips))
+}
+
 // LoadAllRepoInstancesReportingSkips is LoadAllRepoInstances plus the repoIDs it
 // could not read, so a caller can tell "this home has no such record" from "I
 // could not read one of the files that would have said so".
