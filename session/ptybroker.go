@@ -205,6 +205,12 @@ type ptyBroker struct {
 	// the teardown itself is identical. Set under mu in the same section that
 	// latches closed, so a subscriber can never observe one without the other.
 	tabClosed bool
+	// subscribeRegisteredHook, when non-nil, is called in subscribe() after the
+	// subscriber has been registered in b.subs and b.mu has been released, but
+	// BEFORE ensureCaptureStarted() acquires captureMu. Tests use this to
+	// deterministically signal that the goroutine has reached the point where it
+	// will block on captureMu, replacing a fixed sleep.
+	subscribeRegisteredHook func()
 }
 
 func newPTYBroker(ch clientlessChannel) *ptyBroker {
@@ -277,6 +283,14 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	b.subs[sub.id] = sub
 	b.mu.Unlock()
 
+	// Signal that this subscriber has been registered and is about to block on
+	// captureMu. Tests that need to deterministically exercise the interleaving
+	// where a subscriber is registered while recovery holds captureMu can wait on
+	// this hook before releasing recovery, avoiding a fixed sleep.
+	if h := b.subscribeRegisteredHook; h != nil {
+		h()
+	}
+
 	// Bring up the clientless capture through the serialized reconcile — NOT inline
 	// under b.mu — so it can never interleave with a teardown that races it (#1661).
 	// Register-first (above) means the reconcile sees this subscriber, so a
@@ -293,14 +307,19 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 	// A subscriber that registered while recovery was blocked in stop() computed
 	// needRepaint against the PRE-recovery base; by the time captureMu is released
 	// and we get here, recovery has advanced base past this subscriber's cursor,
-	// making the decision stale. Re-check against the post-recovery base, and when a
-	// repaint is now owed, move the cursor to the live tail: the repaint reconstructs
-	// the whole screen, so the retained ring must not be replayed on top of it (see
-	// the needRepaint comment above). base is monotonic, so the decision can only
-	// flip false→true here, never back.
+	// making the decision stale. Re-check against the post-recovery base using the
+	// subscriber's actual clamped cursor (not the raw `since`): when a since past
+	// head was clamped to head, sub.cursor is the value that may now lie below the
+	// new base, and `since` may not reflect that. When a repaint is now owed, move
+	// the cursor to the live tail ONLY if the decision flipped from false to true:
+	// a since==0 subscriber already had its cursor set to the pre-start head (above),
+	// and advancing it further to the post-start head skips bytes emitted while
+	// ensureCaptureStarted() was running — those bytes must remain replayable. base is
+	// monotonic, so the decision can only flip false→true here, never back.
 	b.mu.Lock()
-	needRepaint = since == 0 || since < b.base
-	if needRepaint {
+	prevNeedRepaint := needRepaint
+	needRepaint = since == 0 || sub.cursor < b.base
+	if needRepaint && !prevNeedRepaint {
 		sub.cursor = b.headLocked()
 	}
 	b.mu.Unlock()

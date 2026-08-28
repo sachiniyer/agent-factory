@@ -17,12 +17,11 @@ import (
 // The fix re-checks needRepaint AFTER ensureCaptureStarted() unblocks, so the
 // decision uses the post-recovery base and the subscriber is correctly repainted.
 //
-// Synchronization is deterministic via the existing stopEntered/stopRelease hooks
-// (see TestPTYBrokerTeardownDoesNotClobberReconnect): recovery parks inside
-// StopCapture, the test starts B's subscribe while it is parked, then releases
-// recovery. The 50ms sleep is a safety margin for B to reach the captureMu block,
-// not the synchronization mechanism — the same pattern the #1661 regression test
-// uses.
+// Synchronization is deterministic via two hooks: stopEntered/stopRelease gate
+// recovery inside StopCapture, and subscribeRegisteredHook signals that B has
+// registered and is about to block on captureMu. Recovery is only released after
+// both signals have fired, so the test deterministically exercises the
+// stale-decision interleaving without a fixed sleep.
 func TestPTYBrokerSubscribeDuringRecoveryRace(t *testing.T) {
 	ch := &fakeClientlessChannel{
 		snapshot:    []byte("SCREEN-BEFORE-DEATH"),
@@ -67,6 +66,12 @@ func TestPTYBrokerSubscribeDuringRecoveryRace(t *testing.T) {
 	// B subscribes while recovery is parked in stop(). B's `since` is valid under the
 	// pre-recovery base, so subscribe() computes needRepaint=false, registers, releases
 	// b.mu, and then blocks in ensureCaptureStarted() on captureMu (held by recovery).
+	// subscribeRegisteredHook fires after registration and before the captureMu block,
+	// so we can wait for it before releasing recovery — ensuring the interleaving is
+	// exercised deterministically.
+	bRegistered := make(chan struct{}, 1)
+	br.subscribeRegisteredHook = func() { bRegistered <- struct{}{} }
+
 	type subResult struct {
 		sub *ptySub
 		err error
@@ -77,10 +82,11 @@ func TestPTYBrokerSubscribeDuringRecoveryRace(t *testing.T) {
 		bres <- subResult{s, e}
 	}()
 
-	// Safety margin for B to reach the captureMu block. Not the synchronization
-	// mechanism — stopEntered/stopRelease is. Mirrors the pattern in
-	// TestPTYBrokerTeardownDoesNotClobberReconnect.
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-bRegistered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscribe B never reached the registration hook")
+	}
 
 	// Release recovery: stop() returns, the ring is discarded (base → head=16), and
 	// the capture is restarted. B's cursor (5) is now below the new base (16).
@@ -173,6 +179,9 @@ func TestPTYBrokerSubscribeDuringRecoveryFreshSubscriber(t *testing.T) {
 		t.Fatal("recovery never reached StopCapture")
 	}
 
+	bRegistered := make(chan struct{}, 1)
+	br.subscribeRegisteredHook = func() { bRegistered <- struct{}{} }
+
 	type subResult struct {
 		sub *ptySub
 		err error
@@ -182,7 +191,12 @@ func TestPTYBrokerSubscribeDuringRecoveryFreshSubscriber(t *testing.T) {
 		s, e := br.subscribe(0)
 		bres <- subResult{s, e}
 	}()
-	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-bRegistered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subscribe B never reached the registration hook")
+	}
 	close(ch.stopRelease)
 
 	select {
