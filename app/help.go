@@ -285,7 +285,7 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 
 func (h helpTypeInstanceStart) toContent() string {
 	// Remote instances block `t` (new tab) and `w` (close tab) — those actions
-	// surface a "not available for remote" error (see handleNewTab /
+	// surface a "not available for remote" error (see showNewTabPicker /
 	// handleCloseTab in app/handle_actions.go) — so only advertise the tab keys
 	// that actually work for the instance type. The tab jump works for both (#988);
 	// tabs also live in the left-rail tree since the layout cutover (#1024 PR 4).

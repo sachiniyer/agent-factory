@@ -78,13 +78,13 @@ func RunningConfigDifference(boot *DaemonBootConfig, current *config.Config) str
 	}
 	var diffs []string
 	if strings.TrimSpace(boot.ListenAddr) != strings.TrimSpace(current.ListenAddr) {
-		diffs = append(diffs, fmt.Sprintf("listen_addr: running %q, file %q", boot.ListenAddr, current.ListenAddr))
+		diffs = append(diffs, fmt.Sprintf("network.listen_addr: running %q, file %q", boot.ListenAddr, current.ListenAddr))
 	}
 	if boot.RequireToken != current.RequireToken {
-		diffs = append(diffs, fmt.Sprintf("require_token: running %t, file %t", boot.RequireToken, current.RequireToken))
+		diffs = append(diffs, fmt.Sprintf("network.require_token: running %t, file %t", boot.RequireToken, current.RequireToken))
 	}
 	if boot.RequireLoopbackToken != current.RequireLoopbackToken {
-		diffs = append(diffs, fmt.Sprintf("require_loopback_token: running %t, file %t",
+		diffs = append(diffs, fmt.Sprintf("network.require_loopback_token: running %t, file %t",
 			boot.RequireLoopbackToken, current.RequireLoopbackToken))
 	}
 	return strings.Join(diffs, "; ")

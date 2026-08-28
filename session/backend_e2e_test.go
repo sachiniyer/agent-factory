@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,22 @@ func writeE2EScript(t *testing.T, dir, name, body string) string {
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte("#!/usr/bin/env bash\nset -euo pipefail\n"+body), 0755))
 	return path
+}
+
+// writeLegacyRepoConfig materializes the legacy per-repo config at
+// ~/.agent-factory/repos/<repoID>/config.json with the given RepoConfig.
+// Production code stopped writing here after #800 pulled writes into the
+// in-repo file; only test fixtures need this writer, so it lives in test scope.
+func writeLegacyRepoConfig(t *testing.T, repoID string, cfg *config.RepoConfig) {
+	t.Helper()
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	dir := filepath.Join(configDir, "repos", repoID)
+	path := filepath.Join(dir, config.RepoConfigFileName)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0644))
 }
 
 func TestE2ELocalBackendStillWorks(t *testing.T) {
@@ -82,10 +99,10 @@ func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
 			DeleteCmd: "/bin/echo",
 		},
 	}
-	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
+	writeLegacyRepoConfig(t, repo.ID, cfg)
 
-	// loadRemoteHooksForPath must reject an empty launch_cmd.
-	_, err = loadRemoteHooksForPath(repoDir)
+	// loadRemoteHooksForPathIfConfigured must reject an empty launch_cmd.
+	_, _, err = loadRemoteHooksForPathIfConfigured(repoDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "launch_cmd")
 }
@@ -140,7 +157,7 @@ func TestE2ERemoteHooksRelativePaths(t *testing.T) {
 
 	// Backend resolution rewrites the commands to absolute paths under the repo
 	// root before they reach any exec site.
-	hooks, err := loadRemoteHooksForPath(repoDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(repoDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/launch.sh"), hooks.LaunchCmd)
 	assert.Equal(t, filepath.Join(repo.Root, ".agent-factory/hooks/delete.sh"), hooks.DeleteCmd)
@@ -162,14 +179,14 @@ func TestE2ERemoteHooksRelativePathsLinkedWorktree(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, mainRepo.Root, repo.Root, "linked worktree must resolve to the main repo root")
 
-	hooks, err := loadRemoteHooksForPath(worktreeDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(worktreeDir)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(mainRepo.Root, ".agent-factory/hooks/launch.sh"), hooks.LaunchCmd,
 		"hooks must resolve against the main repo root, not the worktree")
 	assert.NotContains(t, hooks.LaunchCmd, worktreeDir)
 }
 
-// TestE2EBackendResolutionWithInRepoConfig verifies that loadRemoteHooksForPath
+// TestE2EBackendResolutionWithInRepoConfig verifies that loadRemoteHooksForPathIfConfigured
 // reads the in-repo .agent-factory/config.json (#800) and that it shadows the
 // legacy per-repo location.
 func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
@@ -192,14 +209,14 @@ func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
 	// A conflicting legacy config is shadowed by the in-repo file.
 	repo, err := config.RepoFromPath(repoDir)
 	require.NoError(t, err)
-	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
 		RemoteHooks: &config.RemoteHooks{
 			LaunchCmd: "/bin/echo legacy",
 			DeleteCmd: "/bin/echo",
 		},
-	}))
+	})
 
-	hooks, err := loadRemoteHooksForPath(repoDir)
+	hooks, _, err := loadRemoteHooksForPathIfConfigured(repoDir)
 	require.NoError(t, err)
 	assert.Equal(t, "/bin/echo in-repo", hooks.LaunchCmd)
 }

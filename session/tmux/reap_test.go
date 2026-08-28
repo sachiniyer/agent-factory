@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -375,11 +376,70 @@ func TestCleanupSessionsRecoversVanishedSessionsConcurrently(t *testing.T) {
 	}
 	t.Setenv("AGENT_FACTORY_HOME", home)
 
-	started := time.Now()
+	// Observe that the recovery windows OVERLAP instead of timing the whole
+	// sweep. The elapsed-time form inferred the property, and the inference put
+	// machine speed in charge of the verdict: the concurrent floor is already
+	// two grace waits, and three sessions' real tmux and /proc work has to fit
+	// in what the bound leaves over. On the dev box at load 75 a correct
+	// concurrent implementation measured 2.7s against a 2.5s bound and failed 8
+	// runs out of 8 (#3439). The bound was also too loose to do its job in the
+	// other direction — a serial sweep costs ~3s of waits, which the same 2.5s
+	// bound only caught because overhead pushed it over.
+	//
+	// A barrier makes the observation exact rather than probable: each recovery
+	// holds at the top of its bounded grace wait until every one has arrived.
+	// Concurrent recoveries release each other at once; a serial sweep can never
+	// raise the count, falls through the bound, and the peak below reports one
+	// window instead of three. No machine speed enters the verdict.
+	//
+	// The observer brackets the WAIT, not the worker goroutine, and the
+	// difference is the whole test: a recovery that launched all three workers
+	// and then serialized their waits behind a shared lock would satisfy a
+	// worker-level observer while reset latency grew per session again.
+	// Mutation-tested both ways.
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	allOverlapped := make(chan struct{})
+	var once sync.Once
+	recoveryWindowObserver = func(_ string, entered bool) {
+		mu.Lock()
+		if entered {
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+		} else {
+			inFlight--
+		}
+		reached := inFlight == len(names)
+		mu.Unlock()
+		if !entered {
+			return
+		}
+		if reached {
+			once.Do(func() { close(allOverlapped) })
+		}
+		select {
+		case <-allOverlapped:
+		case <-time.After(overlapBarrierBound):
+		}
+	}
+	t.Cleanup(func() { recoveryWindowObserver = nil })
+
 	require.NoError(t, CleanupSessions(vanishDuringCaptureExecutor(t, names...)))
-	require.Less(t, time.Since(started), 2500*time.Millisecond,
-		"vanished-session recovery waits ran serially")
+
+	mu.Lock()
+	got := peak
+	mu.Unlock()
+	require.Equal(t, len(names), got,
+		"vanished-session recovery waits ran serially: only %d of %d windows were ever open at once", got, len(names))
 }
+
+// overlapBarrierBound releases a recovery that is waiting for siblings which
+// are never going to arrive. It is reached only when the implementation has
+// already failed the assertion, so it costs nothing on a passing run and only
+// keeps a failing one from hanging until the package deadline.
+const overlapBarrierBound = 5 * time.Second
 
 // A generic capture error can accompany a verified partial process tree. The
 // session may also own a process that sanitized away its diagnostic markers.

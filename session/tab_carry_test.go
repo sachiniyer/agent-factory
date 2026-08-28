@@ -23,7 +23,7 @@ import (
 func carriedRoster(agentName string) []TabData {
 	return []TabData{
 		{ID: "tab-agent", Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
-		{ID: "tab-shell", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + shellTmuxSuffix},
+		{ID: "tab-shell", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + tmuxTabSeparator + shellTabName},
 		{ID: "tab-logs", Name: "logs", Kind: TabKindProcess, Command: "tail -f log.txt", TmuxName: agentName + tmuxTabSeparator + "logs"},
 		{ID: "tab-web", Name: "web", Kind: TabKindWeb, URL: "http://localhost:5173/"},
 		{ID: "tab-vscode", Name: "vscode", Kind: TabKindVSCode},
@@ -90,7 +90,7 @@ func TestStartRestoresCarriedTabs(t *testing.T) {
 
 	assert.True(t, inst.TabAlive(1), "the carried terminal tab must come back on a live tmux session")
 	assert.True(t, inst.TabAlive(2), "the carried process tab must come back on a live tmux session")
-	assert.Equal(t, agentName+shellTmuxSuffix, tabs[1].tmux.SanitizedName(),
+	assert.Equal(t, agentName+tmuxTabSeparator+shellTabName, tabs[1].tmux.SanitizedName(),
 		"the replacement root derives the same agent name, so the tab keeps its own tmux session name")
 	assert.Equal(t, agentName+tmuxTabSeparator+"logs", tabs[2].tmux.SanitizedName())
 	assert.Nil(t, tabs[3].tmux, "a web tab has no PTY")
@@ -164,8 +164,8 @@ func TestRestoreCarriedTabsRepairsCollidingRecords(t *testing.T) {
 		backend: &LocalBackend{},
 		carriedTabs: []TabData{
 			{ID: "tab-agent", Name: agentTabName, Kind: TabKindAgent, TmuxName: agentName},
-			{ID: "tab-a", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + shellTmuxSuffix},
-			{ID: "tab-b", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + shellTmuxSuffix},
+			{ID: "tab-a", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + tmuxTabSeparator + shellTabName},
+			{ID: "tab-b", Name: shellTabName, Kind: TabKindShell, TmuxName: agentName + tmuxTabSeparator + shellTabName},
 			{ID: "tab-c", Name: "", Kind: TabKindShell, TmuxName: ""},
 		},
 	}

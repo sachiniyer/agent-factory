@@ -60,12 +60,6 @@ const vscodeTabName = "vscode"
 // which a rename decouples from the tab's current name.
 const tmuxTabSeparator = "__"
 
-// shellTmuxSuffix extends an instance's agent tmux session name to derive its
-// shell tab's session name (e.g. af_<repoHash>_<title>__shell). Deterministic
-// so the shell session is collision-free across instances and restorable by
-// exact name across a restart.
-const shellTmuxSuffix = tmuxTabSeparator + shellTabName
-
 // There is deliberately no cap on tabs per instance (#3023).
 //
 // #930 PR 4 set one at 9 to match the 1-9 number-key jump range, so every tab was

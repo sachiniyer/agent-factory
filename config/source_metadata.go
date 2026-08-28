@@ -32,6 +32,7 @@ func metadataForSource(data []byte, path string, format ConfigFormat) (sourceMet
 	shape := make(map[string]any)
 	switch format {
 	case FormatTOML:
+		data = stripUTF8BOM(data)
 		if err := toml.Unmarshal(data, &shape); err != nil {
 			return sourceMetadata{}, err
 		}
@@ -48,11 +49,29 @@ func metadataForSource(data []byte, path string, format ConfigFormat) (sourceMet
 }
 
 func (m sourceMetadata) topLevel(key string) (any, bool) {
-	if m.shape == nil {
-		return nil, false
-	}
-	value, present := m.shape[key]
+	value, present, _ := m.topLevelWithKeyPath(key)
 	return value, present
+}
+
+func (m sourceMetadata) topLevelWithKeyPath(key string) (any, bool, string) {
+	canonical := canonicalConfigKey(key)
+	if m.shape == nil {
+		return nil, false, canonical
+	}
+	if alias, ok := configAliasForCanonical(canonical); ok {
+		if m.format == FormatTOML {
+			if value, present := aliasGroupedValue(m.shape, alias); present {
+				return value, true, alias.canonical
+			}
+		}
+		value, present := m.shape[alias.legacy]
+		if present {
+			return value, true, alias.legacy
+		}
+		return nil, false, alias.canonical
+	}
+	value, present := m.shape[canonical]
+	return value, present, canonical
 }
 
 func attachConfigSource(cfg *Config, data []byte, path string, format ConfigFormat) error {

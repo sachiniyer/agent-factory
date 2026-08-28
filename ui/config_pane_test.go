@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,66 @@ func TestConfigPaneEditWritesThroughTheRealPathAndEchoes(t *testing.T) {
 	}
 }
 
+// TestConfigPaneFormerlyImmutableKeysRoundTrip proves the TUI half of #3345
+// through the real config-set path. Each row that used to be read-only must
+// open a field, save, survive a real load, and refresh to the saved value.
+func TestConfigPaneFormerlyImmutableKeysRoundTrip(t *testing.T) {
+	want := config.DefaultConfig()
+	want.Theme.Accent = "#112233"
+	if want.ProgramOverrides == nil {
+		want.ProgramOverrides = map[string]string{}
+	}
+	want.ProgramOverrides["codex"] = "codex --model gpt-5"
+	want.SessionEnvPassthrough = []string{"AF_TEST_ONE", "AF_TEST_TWO"}
+	want.LimitPatterns = map[string]string{"claude": "usage limit reached"}
+	want.RootAgents = map[string]config.RootAgentConfig{"/tmp/repo": {Program: "codex"}}
+	want.RootAgent = config.RootAgent{Enabled: true, Program: "codex"}
+	want.Keys = map[string]any{"quit": "Q"}
+
+	for _, key := range []string{
+		"theme",
+		"program_overrides",
+		"session_env_passthrough",
+		"limit_patterns",
+		"root_agents",
+		"root_agent",
+		"keys",
+	} {
+		t.Run(key, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("AGENT_FACTORY_HOME", home)
+			if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("# hand-written\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			value, ok := config.CurrentValue(want, key)
+			if !ok {
+				t.Fatalf("CurrentValue cannot render %s", key)
+			}
+
+			c := newTestConfigPane(t)
+			selectKey(t, c, key)
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			if !c.IsEditing() {
+				t.Fatalf("enter did not open %s for editing", key)
+			}
+			c.input.SetValue(value)
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			if c.IsEditing() || c.statusIsError {
+				t.Fatalf("save %s failed: %s", key, c.status)
+			}
+
+			got, err := config.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, ok := config.CurrentValue(got, key)
+			if !ok || roundTrip != value {
+				t.Fatalf("%s round-tripped as %q (ok=%v), want %q", key, roundTrip, ok, value)
+			}
+		})
+	}
+}
+
 // TestConfigPaneSurfacesRestartNoticeAtTheMomentOfTheEdit is requirement 3 for
 // the TUI.
 //
@@ -231,72 +292,25 @@ func TestConfigPaneRejectsInvalidValueWithTheValidatorsOwnError(t *testing.T) {
 	}
 }
 
-// TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse pins that the pane trusts
-// ConfigEntry.Editable — the honest, allowlist-derived answer — rather than the
-// manifest's Settable.
-//
-// The distinction is the whole finding: program_overrides is Settable, because
-// its LEAVES are settable. The bare key holds a table. Keying the cursor off
-// Settable let it land there, opened a field pre-filled with the map's JSON, and
-// had the writer refuse it on save — a dead end found only by pressing enter.
-//
-// So: the cursor must never come to rest on a non-editable row, and every such
-// row must say what to do instead.
-//
-// HONEST LIMIT: this test cannot catch the drift itself. It iterates rows that
-// are ALREADY marked non-editable, so a regression that wrongly marks a key
-// editable simply removes it from this loop and the test stays green — watched
-// doing exactly that. What catches the drift is
-// config.TestEditableIsNeverAKeyTheWriterWouldRefuse, which comes from the other
-// direction: it asks the REAL writer to accept the value every Editable key
-// shows, and fails when one is refused. This test's job is narrower and still
-// worth having — it pins that clampSelection and beginEdit actually honor the
-// flag once it is right.
-func TestConfigPaneNeverOffersAKeyTheWriterWouldRefuse(t *testing.T) {
+// TestConfigPaneOffersEveryManifestRowForEditing pins the TUI half of the
+// removed read-only class: every entry row accepts the cursor and Enter opens
+// its complete CurrentValue, including structured JSON values.
+func TestConfigPaneOffersEveryManifestRowForEditing(t *testing.T) {
 	c := newTestConfigPane(t)
-
-	var readOnly int
 	for i, row := range c.rows {
-		if row.entry == nil || row.entry.Editable {
+		if row.entry == nil {
 			continue
 		}
-		readOnly++
-
-		// Park the cursor on it and let the pane settle: it must move away.
 		c.selectedIdx = i
 		c.clampSelection()
-		if landed := c.selectedEntry(); landed != nil && !landed.Editable {
-			t.Errorf("the cursor rested on %q, which the writer would refuse — enter there can only dead-end", landed.Key)
+		if landed := c.selectedEntry(); landed == nil || landed.Key != row.entry.Key {
+			t.Errorf("the cursor skipped editable row %q", row.entry.Key)
 		}
-
-		// And pressing enter on it must not open a field.
-		c.selectedIdx = i
 		c.beginEdit()
-		if c.IsEditing() {
-			t.Errorf("enter opened an edit field on %q, whose save the writer would refuse", row.entry.Key)
-			c.cancelEdit()
+		if !c.IsEditing() {
+			t.Errorf("enter did not open editable row %q", row.entry.Key)
 		}
-
-		if row.entry.EditHint == "" {
-			t.Errorf("%q is read-only but says nothing about how to change it", row.entry.Key)
-		}
-	}
-	if readOnly == 0 {
-		t.Fatal("no read-only rows found — this test is asserting nothing")
-	}
-}
-
-// TestConfigPaneNamesTheCommandForDynamicTables pins the COPY for a dynamic
-// family. "hand-edited in config.toml" would be false here: `af config set
-// program_overrides.claude …` works, and sending a user to a text editor for
-// something af does for them is a smaller lie than the dead-end field, but still
-// one.
-func TestConfigPaneNamesTheCommandForDynamicTables(t *testing.T) {
-	c := newTestConfigPane(t)
-	view := c.String()
-
-	if !strings.Contains(view, "af config set program_overrides.<name>") {
-		t.Errorf("the editor must name the command that WORKS for a dynamic table.\n--- view ---\n%s", view)
+		c.cancelEdit()
 	}
 }
 
@@ -304,12 +318,12 @@ func TestConfigPaneNamesTheCommandForDynamicTables(t *testing.T) {
 // keyboard while open: a config value is arbitrary text, and the global key map
 // must not eat it.
 //
-// "127.0.0.1:8080" is the real case (listen_addr) — it contains ".", ":" and
+// "127.0.0.1:8080" is the real case (network.listen_addr) — it contains ".", ":" and
 // digits, and the digits 1-9 are the TUI's tab-jump keys. If the pane did not
 // consume them, typing an address would jump tabs instead.
 func TestConfigPaneEditFieldTakesArbitraryValueText(t *testing.T) {
 	c := newTestConfigPane(t)
-	selectKey(t, c, "listen_addr")
+	selectKey(t, c, "network.listen_addr")
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	c.input.SetValue("")
@@ -753,5 +767,434 @@ func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 		if !strings.Contains(view, e.Key) {
 			t.Errorf("unsized, the pane must render everything; %q is missing", e.Key)
 		}
+	}
+}
+
+// configPaneSweepWidths are the widths #3430's measurement table names. A single
+// width is not enough: the pane composes several rows whose arithmetic differs,
+// so a fix can hold at 72 and break at 36 (which is exactly what #3430 was).
+var configPaneSweepWidths = []int{30, 36, 44, 50, 56, 64, 72}
+
+// TestConfigPaneFitsItsBoxAtEveryWidth is #3430: the hard invariant is that the
+// pane NEVER renders a line wider than itself, at any width, in any state.
+//
+// The hint row is what broke it. renderHints composed five hints, shed the one
+// hintDropOrder could shed (#1936), and the remainder was still 43 cells — so
+// below ~44 the hint row was the widest line the pane drew with nothing left to
+// drop. Reachable on a ~70-column terminal, not a pathological one: the config
+// overlay takes the #1821 full-screen fallback there, which hands the pane the
+// terminal width minus the frame.
+//
+// Once the frame wraps that row the height window's line count is a lie — the
+// window budgets by counting the lines renderRowLines produces — so the pane
+// overflows its box and the selection scrolls off, the same mechanism
+// TestConfigPaneNeverRendersALineWiderThanThePane documents at 72.
+//
+// The walk covers the editing hint row too, because it is the same function's
+// other return path and was unconditional.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: a 43-cell hint row at widths 30 and 36.
+func TestConfigPaneFitsItsBoxAtEveryWidth(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
+			c := NewConfigPane()
+			c.SetSize(w, paneHeight)
+			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+			c.SetFocus(true)
+			c.showAdvanced = true
+			c.rebuildRows()
+			c.status = `update_channel must be one of [stable, preview], got "nightly".`
+			c.statusIsError = true
+
+			assertFits := func(step int, state string) {
+				t.Helper()
+				for _, line := range strings.Split(c.String(), "\n") {
+					if got := lipgloss.Width(line); got > w {
+						t.Fatalf("step %d (%s, %s): rendered a %d-cell line into a %d-cell pane — the frame wraps it, which makes the height window's line count a lie (#3430).\n  line: %q",
+							step, c.selectedEntry().Key, state, got, w, line)
+					}
+				}
+			}
+
+			for step := 0; step < 45; step++ {
+				assertFits(step, "list")
+				// The edit hint row is the same function's other return path.
+				c.beginEdit()
+				assertFits(step, "editing")
+				c.cancelEdit()
+				c.move(1)
+			}
+		})
+	}
+}
+
+// TestConfigPaneHintsAlwaysAdvertiseTheExit is the priority half of #3430: what
+// the degradation ladder is allowed to take, and what it must never take.
+//
+// A hint row that has shed everything must still tell the user how to LEAVE. A
+// modal whose escape route is invisible is the #2830 failure — an advertised key
+// that is not live where focus is — run backwards: the key still works, but a
+// user who cannot see it is stuck in a pane they did not know how to close. So
+// `esc` survives every width, and the assistant button (#2453, deliberately
+// always-on) is the last thing dropped before it.
+func TestConfigPaneHintsAlwaysAdvertiseTheExit(t *testing.T) {
+	for _, w := range append([]int{4, 9, 12, 20, 23, 32, 43}, configPaneSweepWidths...) {
+		c := NewConfigPane()
+		c.SetSize(w, paneHeight)
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetFocus(true)
+		c.rebuildRows()
+
+		hints := c.renderHints()
+		if !strings.Contains(hints, "esc") {
+			t.Errorf("w=%d: the hint row shed the exit: %q", w, hints)
+		}
+		c.beginEdit()
+		editing := c.renderHints()
+		if !strings.Contains(editing, "esc") {
+			t.Errorf("w=%d: the editing hint row shed the exit: %q", w, editing)
+		}
+		c.cancelEdit()
+	}
+}
+
+// TestConfigPaneEditFieldFitsItsRowWithoutClipping tests sizeEditField's
+// arithmetic directly, WITHOUT the fitPaneLine backstop in the way.
+//
+// This is the assertion the width sweep cannot make. A field one cell too wide
+// still leaves the pane fitting its box — the backstop clips the row — so the
+// sweep passes while the user loses the last character of the value they are
+// editing. The play-test caught exactly that (`…TAILMAR…` where TAILMARK
+// should have been), which is what a focused textinput's extra cursor cell costs
+// if the budget does not account for it.
+//
+// The floor is the one exemption: at a narrow pane with a long key there is no
+// arithmetic that fits, and the backstop is then the honest answer.
+func TestConfigPaneEditFieldFitsItsRowWithoutClipping(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		c := NewConfigPane()
+		c.SetSize(w, paneHeight)
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetFocus(true)
+		c.showAdvanced = true
+		c.rebuildRows()
+
+		for step := 0; step < 45; step++ {
+			e := c.selectedEntry()
+			if e == nil {
+				c.move(1)
+				continue
+			}
+			c.beginEdit()
+			keyBudget, _ := c.editRowSplit(e.Key)
+			row := entryRowChromeWidth + keyBudget + lipgloss.Width(c.input.View())
+			// No exemption: since editRowSplit yields the KEY rather than the field
+			// (#3430 review), every width in the table has a split that fits, so the
+			// backstop must never be what saves this row.
+			if row > w {
+				t.Errorf("w=%d %s: the open value field composes a %d-cell row — the pane clips it, so the value loses its tail (keyBudget=%d, input.Width=%d, prompt=%d, view=%d)",
+					w, e.Key, row, keyBudget, c.input.Width, lipgloss.Width(c.input.Prompt), lipgloss.Width(c.input.View()))
+			}
+			if c.input.Width < minEditFieldWidth {
+				t.Errorf("w=%d %s: the value field was squeezed to %d cells, below the %d-cell floor",
+					w, e.Key, c.input.Width, minEditFieldWidth)
+			}
+			c.cancelEdit()
+			c.move(1)
+		}
+	}
+}
+
+// TestConfigPaneDisplayRowsStayOneLine covers the height axis of the same
+// invariant: a value holding a newline must not turn one list row into several.
+//
+// An unrestricted string key accepts embedded newlines, and lipgloss.Width
+// reports the WIDEST line of a multi-line string — so a line-oriented clip
+// measures such a value as narrow and passes it through whole. The row count then
+// disagrees with what renderRowLines reported, which is the same way the height
+// window breaks.
+func TestConfigPaneDisplayRowsStayOneLine(t *testing.T) {
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	seeded := false
+	for i := range entries {
+		if entries[i].Key == "on_archive_command" {
+			entries[i].Value = "echo one\necho two\techo three\r\necho four"
+			seeded = true
+		}
+	}
+	if !seeded {
+		t.Fatal("on_archive_command left the manifest — this test is vacuous")
+	}
+
+	c := NewConfigPane()
+	c.SetSize(72, paneHeight)
+	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	for step := 0; step < 45; step++ {
+		for _, line := range strings.Split(c.String(), "\n") {
+			if strings.Contains(line, "echo one") && strings.Contains(line, "echo four") {
+				// Everything on ONE row is the point; the clip may cut it shorter.
+				break
+			}
+			if strings.Contains(line, "echo two") && !strings.Contains(line, "echo one") {
+				t.Fatalf("step %d: a multiline value spilled onto its own row: %q", step, line)
+			}
+		}
+		c.move(1)
+	}
+}
+
+// TestConfigPaneEditFieldSurvivesTheTightestRow is the #3430 review's P1: making
+// the row fit must not fit it by deleting the thing the user is looking at.
+//
+// af renders normally down to layout.HardMinWidth (40 columns), which
+// app/render.go turns into 34 content cells for this pane. The cursor,
+// network.require_loopback_token (30 cells) and the gap consume all 34 by
+// themselves — so clipping the composed row from the right satisfies the width
+// invariant by removing the entire focused input, and the user types into a field
+// they cannot see. The key yields instead.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the row renders as the full key followed by
+// an ellipsis, with no prompt, no value and no cursor.
+func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
+	const (
+		w   = 34 // a 40-column terminal, af's supported minimum
+		key = "network.require_loopback_token"
+	)
+	c := NewConfigPane()
+	c.SetSize(w, paneHeight)
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+
+	found := false
+	for step := 0; step < 60; step++ {
+		e := c.selectedEntry()
+		if e != nil && e.Key == key {
+			found = true
+			break
+		}
+		c.move(1)
+	}
+	if !found {
+		t.Fatalf("%s left the manifest — this test is vacuous", key)
+	}
+
+	c.beginEdit()
+	// Find it by the SELECTION CURSOR, not by the key: the key is truncated by
+	// the fix, and a prefix match would land on the shorter network.require_token.
+	var row string
+	for _, line := range strings.Split(c.String(), "\n") {
+		if strings.Contains(line, "› ") {
+			row = line
+			break
+		}
+	}
+	if row == "" {
+		t.Fatal("the editing row did not render at all")
+	}
+	if got := lipgloss.Width(row); got > w {
+		t.Errorf("the editing row is %d cells in a %d-cell pane: %q", got, w, row)
+	}
+	// The field must be there: its prompt, and the value it was filled with.
+	if !strings.Contains(row, c.input.Prompt) {
+		t.Errorf("the value field's prompt was clipped away — the user cannot see what they are editing: %q", row)
+	}
+	if !strings.Contains(row, "false") {
+		t.Errorf("the value was clipped away, so the field is invisible while focused: %q", row)
+	}
+	// And the key is what paid for it.
+	if strings.Contains(row, key) {
+		t.Errorf("the full key survived, so the field cannot have had room: %q", row)
+	}
+	if !strings.Contains(row, "…") {
+		t.Errorf("the key was not truncated, so nothing yielded: %q", row)
+	}
+}
+
+// TestConfigPaneEditFieldReflowsOnResize is the #3430 review's reflow finding.
+//
+// textinput recomputes its horizontal viewport in handleOverflow, which runs from
+// SetValue and SetCursor and NOT from a bare Width assignment. So narrowing the
+// terminal mid-edit updated Width while offset/offsetRight still described the old
+// width: View() kept rendering the old, wider slice, fitPaneLine clipped it from
+// the right, and the value's tail and the cursor vanished until the next keystroke
+// happened to recompute the viewport.
+//
+// The assertion is on the FIELD, not the row: the row fits either way because the
+// backstop clips it, which is exactly why this needs its own test.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: after narrowing 72 -> 38, the field still
+// renders its 72-cell slice.
+func TestConfigPaneEditFieldReflowsOnResize(t *testing.T) {
+	const key = "vscode_server_binary"
+	long := "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
+
+	// EVERY cursor position, not just the end. handleOverflow moves the offsets only
+	// when the cursor is OUTSIDE the window it already has (pos < offset, or
+	// pos >= offsetRight), so a test that leaves the cursor at CursorEnd always
+	// satisfies the second condition and passes while an interior cursor is still
+	// stranded — which is what the first version of this test did.
+	//
+	// A FRESH pane per case, deliberately: sharing one leaks viewport state from the
+	// previous case, and a case that inherits an already-narrow window passes without
+	// exercising anything. Measured — with the pane shared, the interior case passed
+	// against an implementation the start case had just failed.
+	for _, tc := range []struct {
+		name string
+		// posOf picks the cursor position from the value's length.
+		posOf func(n int) int
+	}{
+		{name: "cursor at the start", posOf: func(int) int { return 0 }},
+		{name: "cursor in the interior", posOf: func(n int) int { return n / 2 }},
+		{name: "cursor at the end", posOf: func(n int) int { return n }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := config.ManifestWithValues(config.DefaultConfig())
+			seeded := false
+			for i := range entries {
+				if entries[i].Key == key {
+					entries[i].Value = long
+					seeded = true
+				}
+			}
+			if !seeded {
+				t.Fatalf("%s left the manifest — this test is vacuous", key)
+			}
+
+			c := NewConfigPane()
+			c.SetSize(72, paneHeight)
+			c.SetEntries(entries, "/tmp/config.toml")
+			c.SetFocus(true)
+			c.showAdvanced = true
+			c.rebuildRows()
+			for step := 0; step < 60; step++ {
+				if e := c.selectedEntry(); e != nil && e.Key == key {
+					break
+				}
+				c.move(1)
+			}
+			if e := c.selectedEntry(); e == nil || e.Key != key {
+				t.Fatalf("never landed on %s", key)
+			}
+			c.beginEdit()
+			pos := tc.posOf(len(c.input.Value()))
+			c.input.SetCursor(pos)
+
+			// The terminal narrows while the edit is open. SetSize is what a resize calls.
+			c.SetSize(38, paneHeight)
+
+			budget := c.input.Width + lipgloss.Width(c.input.Prompt) + editFieldCursorWidth
+			if got := lipgloss.Width(c.input.View()); got > budget {
+				t.Fatalf("after narrowing to 38 with the %s, the field renders %d cells for a %d-cell budget (Width=%d) — the viewport still describes the old width, so the row gets clipped and the value's tail and cursor disappear",
+					tc.name, got, budget, c.input.Width)
+			}
+			// And the reflow must not have dragged the cursor.
+			if c.input.Position() != pos {
+				t.Errorf("the reflow moved the cursor: position %d, want %d", c.input.Position(), pos)
+			}
+		})
+	}
+}
+
+// TestConfigPaneEditFieldUnboundedWhileUnsized is the review's other half: an
+// unsized pane constrains nothing.
+//
+// fitPaneLine, fitHints and window all pass content through at width 0, and
+// textinput reads Width 0 as unbounded. Deriving a field width from a pane with no
+// width put this one member out of step with all three and rendered a narrow
+// scrolling tail where there is no box to fit.
+func TestConfigPaneEditFieldUnboundedWhileUnsized(t *testing.T) {
+	long := "/opt/" + strings.Repeat("very-long-path-segment/", 8) + "bin"
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	for i := range entries {
+		if entries[i].Key == "vscode_server_binary" {
+			entries[i].Value = long
+		}
+	}
+
+	// No SetSize at all.
+	c := NewConfigPane()
+	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	c.beginEdit()
+	if c.input.Width != 0 {
+		t.Errorf("an unsized pane bounded its value field to %d cells", c.input.Width)
+	}
+
+	// And a pane that loses its size goes back to unbounded rather than keeping a
+	// stale width.
+	c.SetSize(72, paneHeight)
+	if c.input.Width == 0 {
+		t.Fatal("a sized pane left the field unbounded")
+	}
+	c.SetSize(0, 0)
+	if c.input.Width != 0 {
+		t.Errorf("a pane resized to nothing kept a %d-cell field width", c.input.Width)
+	}
+}
+
+// TestConfigPaneNeverOverflowsOnWideCharacterValues is #3421: the same "fits in
+// its box" invariant as TestConfigPaneNeverRendersALineWiderThanThePane, for
+// values whose runes are not one cell wide.
+//
+// A CJK ideograph or an emoji renders 2+ terminal cells, so a budget counted in
+// RUNES under-truncates the value and the composed row runs past the pane — at a
+// 72-column pane, a CJK path rendered an 85-cell line. That is not a cosmetic
+// overflow: the overlay frame wraps the long row into several physical rows, the
+// height window's line count becomes a lie, and the selection scrolls off the
+// pane exactly as it did before the window existed.
+//
+// Non-ASCII paths are ordinary for the two keys seeded here, and the walk covers
+// every row (with a wide-character status line up, since the status wraps through
+// a different path than the value truncates through).
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: the vscode_server_binary row is 13 cells wider
+// than the pane.
+func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
+	const w = 72
+	wide := map[string]string{
+		// A real-shaped path: user directory, project directory, versioned binary.
+		"vscode_server_binary": "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin",
+		"worktree_root":        "/home/пользователь/工作区/代理工厂/セッション/树根/非常长的路径/结束",
+		// Emoji, including a ZWJ cluster and a flag — the cases where rune count,
+		// grapheme count and cell width all disagree.
+		"default_program": "claude 🚀🎉🔥 --team 🧑‍🚀🧑‍🚀 --region 🇯🇵🇯🇵 --tail 🌏🌏🌏🌏🌏🌏🌏🌏",
+	}
+
+	entries := config.ManifestWithValues(config.DefaultConfig())
+	seeded := 0
+	for i := range entries {
+		if v, ok := wide[entries[i].Key]; ok {
+			entries[i].Value = v
+			seeded++
+		}
+	}
+	if seeded != len(wide) {
+		t.Fatalf("seeded %d of %d wide values — a manifest rename made this test vacuous", seeded, len(wide))
+	}
+
+	c := NewConfigPane()
+	c.SetSize(w, paneHeight)
+	c.SetEntries(entries, "~/.agent-factory/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	c.status = `vscode_server_binary は "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin" に設定されました — 変更は次回の起動時に反映されます 🎉`
+
+	for step := 0; step < 40; step++ {
+		for _, line := range strings.Split(c.String(), "\n") {
+			if got := lipgloss.Width(line); got > w {
+				t.Fatalf("step %d (%s): rendered a %d-cell line into a %d-cell pane — a wide-character value was truncated by rune count, not display width (#3421).\n  line: %s",
+					step, c.selectedEntry().Key, got, w, line)
+			}
+		}
+		c.move(1)
 	}
 }

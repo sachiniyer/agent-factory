@@ -181,6 +181,21 @@ func (m *Manager) CreateTab(req CreateTabRequest) (CreateTabResponse, error) {
 		// new tab's ID into rollback rather than assuming it is still the last slot.
 		if closeErr := instance.CloseTabByID(tab.ID); closeErr != nil {
 			log.WarningLog.Printf("CreateTab %q: rolling back unpersisted tab failed: %v", title, closeErr)
+			// The rollback could not prove the spawned tmux session absent, so a
+			// live tab may survive with a cleanup handle retained in memory. That
+			// is a landed side effect, not an untouched failure (#3237): report it
+			// committed and hand back the minted identity so the caller can
+			// explain or target the survivor. Only a CONFIRMED rollback below
+			// keeps the clean, freely retryable shape. The tmux name rides the
+			// MESSAGE too, not just the response: the interactive clients render
+			// only the warning text, and that name is what an operator targets
+			// (#3359 review).
+			tmuxName := tabTmuxNameByID(data.Tabs, tab.ID)
+			return CreateTabResponse{
+					ID: tab.ID, Name: tab.Name, TmuxName: tmuxName,
+				}, &mutationCommittedError{err: fmt.Errorf(
+					"failed to persist new tab %q, and rolling back its just-spawned tmux session %q could not confirm it closed (%v); the tab may still be live and its cleanup is retained for retry: %w",
+					tab.Name, tmuxName, closeErr, err)}
 		}
 		return CreateTabResponse{}, fmt.Errorf("failed to persist new tab: %w", err)
 	}

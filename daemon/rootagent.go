@@ -274,6 +274,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		m.rootEnsureSucceeded(st)
 		return
 	}
+	workspace := repo.WorkspacePath()
 
 	// A project deleted at runtime (#1735) is suppressed for the rest of this
 	// daemon's life: DeleteProject already stopped its root and removed it from
@@ -303,7 +304,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			st.suppressLogged = true
 			m.mu.Unlock()
 			if logSuppression {
-				log.InfoLog.Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", repo.Root, rootKillHealDelay)
+				log.InfoLog.Printf("root agent for %s was explicitly killed; honoring the stop, will re-create it in ~%s (config is the source of truth for an always-on root — remove it from root_agents to keep it down)", workspace, rootKillHealDelay)
 			}
 			return
 		}
@@ -315,7 +316,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		delete(m.rootKilledAt, repo.ID)
 		st.suppressLogged = false
 		m.mu.Unlock()
-		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", repo.Root)
+		log.InfoLog.Printf("root agent for %s: kill grace window elapsed; re-creating (always-on self-heal, #1223)", workspace)
 	}
 
 	// What the vanished root was, snapshotted before the reap deletes the record
@@ -334,7 +335,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 			// and whoever created it — is the root agent. The one mutation is
 			// refreshing a recorded Claude conversation from durable transcript
 			// evidence, so a later outage does not carry a rotated-away id (#3306).
-			m.refreshRootClaudeConversation(repo.ID, key, repo.Root, inst, st)
+			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
@@ -361,7 +362,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// (#2628): a fresh create comes up with only its agent tab, so everything
 		// else the user had open — a terminal, a process tab, a dev-server web
 		// tab, an editor — would vanish with the record that listed it.
-		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", repo.Root)
+		log.WarningLog.Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
 		var err error
 		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
 		if err != nil {
@@ -373,31 +374,31 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		}
 	}
 
-	program := rootAgentProgramForProfile(repo.Root, resolution.RootAgent)
+	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
 	skipRecordedResume := false
 	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
 		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
 		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, carried.conversation)
+			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
 		}
 		switch {
 		case inspectErr != nil:
 			log.WarningLog.Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				repo.Root, carried.conversation.ID, inspectErr)
+				workspace, carried.conversation.ID, inspectErr)
 		case !state.RecordedExists && state.Resume.HasID():
 			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				repo.Root, carried.conversation.ID, state.Resume.ID)
+				workspace, carried.conversation.ID, state.Resume.ID)
 			carried.conversation = state.Resume
 		case !state.RecordedExists:
 			log.WarningLog.Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				repo.Root, carried.conversation.ID)
+				workspace, carried.conversation.ID)
 			skipRecordedResume = true
 		}
 	}
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
-		RepoPath: repo.Root,
+		RepoPath: workspace,
 		Program:  program,
 		InPlace:  true,
 		// Say local out loud, because InPlace already decided it. A root agent is
@@ -442,17 +443,17 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
 		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(repo.Root, resolution.RootAgent)
+			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
 			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
 			if inspectErr == nil {
-				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, repo.Root, req.resumeConversation)
+				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
 			}
 			if inspectErr != nil {
 				log.WarningLog.Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
-					repo.Root, req.resumeConversation.ID, inspectErr)
+					workspace, req.resumeConversation.ID, inspectErr)
 			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
 				log.WarningLog.Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					repo.Root, req.resumeConversation.ID, err, state.Resume.ID)
+					workspace, req.resumeConversation.ID, err, state.Resume.ID)
 				req.resumeConversation = state.Resume
 				carried.conversation = state.Resume
 				data, err = m.CreateSession(context.Background(), req)
@@ -461,7 +462,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	}
 	if err != nil && req.resumeConversation.HasID() {
 		log.WarningLog.Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
-			repo.Root, req.resumeConversation.Agent, req.resumeConversation.ID, err)
+			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.CreateSession(context.Background(), req)
 	}
@@ -469,10 +470,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to create root session: %w", err))
 		return
 	}
-	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", repo.Root, program)
+	log.InfoLog.Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
 	if reapedRoot {
-		reportRootConversationCarry(repo.Root, carried.conversation, data.AgentConversation, data.CurrentAgent)
-		reportRootTabCarry(repo.Root, carried.tabs, data.Tabs)
+		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
+		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
 	m.rootEnsureSucceeded(st)
 }
@@ -594,13 +595,13 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	default:
 		// Pre-flight refusal: nothing was sent, so the rate slot is refunded
 		// (#2501), and the error names what actually stops the root.
-		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q will not materialize: %s; event not delivered", repo.Root, rootAgentUnavailableDetail(verdict)))
+		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q will not materialize: %s; %s", repo.Root, rootAgentUnavailableDetail(verdict), notDeliveredMarker))
 	}
 	if err := m.waitForTargetSession(repo.ID, req.Title); err != nil {
 		// Pre-flight: the root never reappeared within the wait, so nothing was
 		// sent — refund the rate slot (#2501). This is the reserved-root outage
 		// path a monitor task targeting `root` hits during a tmux blip.
-		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); event not delivered this attempt: %w", repo.Root, err))
+		return "", session.PromptCouldNotConfirm, true, notAttempted(fmt.Errorf("root agent for %q is being recreated (tmux momentarily absent); %s this attempt: %w", repo.Root, notDeliveredMarker, err))
 	}
 	// A TUI can attach to root during the wait above, so re-check the defer lease
 	// before sending — otherwise this path pastes into an attached pane the
@@ -793,9 +794,15 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
 		return ra.Program
 	}
 	program := "claude"
-	if resolved, err := config.ResolveConfig(repoRoot); err == nil {
-		program = config.ResolveProgram(&resolved.Config, "claude")
-	} else {
+	repo, err := config.RepoFromPath(repoRoot)
+	if err == nil {
+		var resolved *config.ResolvedConfig
+		resolved, err = config.ResolveConfigForRepo(repo)
+		if err == nil {
+			program = config.ResolveProgram(&resolved.Config, "claude")
+		}
+	}
+	if err != nil {
 		log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
 	}
 	// Only ensure the claude-only flag when the resolved command actually

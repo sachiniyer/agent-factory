@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
-
-	"github.com/pelletier/go-toml/v2"
 )
 
 const (
@@ -248,20 +246,6 @@ func DetectJSONSchemaVersion(raw []byte) (int, error) {
 	default:
 		return LegacySchemaVersion, fmt.Errorf("JSON root must be an object or array, got %T", root)
 	}
-}
-
-// DetectTOMLSchemaVersion detects schema_version from a TOML document. Missing
-// schema_version is legacy v0.
-func DetectTOMLSchemaVersion(raw []byte) (int, error) {
-	var root map[string]any
-	if err := toml.Unmarshal(raw, &root); err != nil {
-		return LegacySchemaVersion, err
-	}
-	value, ok := root[SchemaVersionField]
-	if !ok {
-		return LegacySchemaVersion, nil
-	}
-	return schemaVersionFromValue(value)
 }
 
 func validateSchemaMigrationPlan(plan SchemaMigrationPlan) error {

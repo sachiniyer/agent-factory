@@ -73,11 +73,17 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = existingSession
 	} else {
+		repo, err := config.RepoFromPath(i.Path)
+		if err != nil {
+			return fmt.Errorf("failed to resolve repository identity for tmux session: %w", err)
+		}
 		// Create new tmux session with repo-scoped name. The program
 		// passed here is a placeholder — SetProgram below replaces it
 		// with the override-resolved + system-prompt-injected form
-		// before Start/Restore.
-		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, i.Path, i.Program)
+		// before Start/Restore. Use the repository identity rather than
+		// the requested checkout so admission and runtime claim the same
+		// namespace for linked worktrees, including bare clones (#3358).
+		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
 	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
 		return err

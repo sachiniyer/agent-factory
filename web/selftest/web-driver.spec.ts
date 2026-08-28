@@ -3222,20 +3222,36 @@ test("config: the editor renders from the manifest and writes through the real p
   await branch.locator("input").press("Enter");
   await expect(branch.locator(".af-config-echo")).toHaveCount(0);
 
-  // A dynamic table is never offered as one editable value: program_overrides is
-  // settable only through its LEAVES, so a field here could only dead-end at a
-  // save the writer refuses. It names the command that works instead.
-  const overrides = pane.locator('.af-config-row[data-key="program_overrides"]');
-  await expect(overrides.locator("input, select")).toHaveCount(0);
-  await expect(overrides.locator(".af-config-readonly")).toContainText("af config set program_overrides.<name>");
+  // #3345 removes the read-only manifest class completely. These seven rows
+  // formerly carried the immutable marker; each now gets a real field and each save
+  // traverses SetConfigValue -> SetGlobalConfigValue -> ApplyConfig. Read the
+  // server's value back after every save: an echo alone would prove only that
+  // the POST returned, not that the refreshed pane can round-trip the result.
+  await expect(pane.locator(".af-config-readonly")).toHaveCount(0);
 
-  // A structured key with no `af config set` scalar form is shown but never
-  // offered as a field whose save could only be refused. Its hint points at the
-  // config assistant, which edits these in the file — #2454 retired the old
-  // "hand-edit the file yourself" copy, and this assertion moves with it.
-  const readOnly = pane.locator('.af-config-row[data-key="theme"] .af-config-readonly');
-  await expect(readOnly).toHaveText(/config assistant/);
-  await expect(page.locator('.af-config-row[data-key="theme"] input')).toHaveCount(0);
+  const editJSON = async (key: string, change: (current: any) => any): Promise<void> => {
+    const structuredRow = pane.locator(`.af-config-row[data-key="${key}"]`);
+    const input = structuredRow.locator("input");
+    await expect(input).toBeVisible();
+    const next = change(JSON.parse(await input.inputValue()));
+    await input.fill(JSON.stringify(next));
+    await input.press("Enter");
+    await expect(structuredRow.locator(".af-config-echo")).toHaveText(new RegExp(`^set ${key} = `));
+    await expect
+      .poll(async () => JSON.parse(await structuredRow.locator("input").inputValue()))
+      .toEqual(next);
+  };
+
+  await editJSON("theme", (value) => ({ ...value, accent: "#123456" }));
+  await editJSON("program_overrides", (value) => ({ ...value, devin: "devin --web-config-selftest" }));
+  await editJSON("session_env_passthrough", (value) => [...value, "AF_WEB_CONFIG_SELFTEST"]);
+  await editJSON("limit_patterns", (value) => ({ ...value, devin: "AF_WEB_CONFIG_LIMIT" }));
+  await editJSON("root_agents", (value) => ({
+    ...value,
+    "/tmp/af-web-config-selftest": { program: "codex --web-config-selftest" },
+  }));
+  await editJSON("root_agent", (value) => ({ ...value, enabled: false, program: "codex --web-config-selftest" }));
+  await editJSON("keys", (value) => ({ ...value, quit: "Q" }));
 
   // Back to the sessions view for the flows that follow.
   await page.locator('.af-viewtab[data-view="sessions"]').click();
@@ -6006,8 +6022,24 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   // then CONVERGES (the retry contract), archiving the now-settled session and removing
   // the project. The modal stays open through refusals, so retry the danger button until
   // it closes on real success (which also cleans the fixture).
+  //
+  // Re-click ONLY while the modal is still open AND idle (#3482). The converging delete
+  // is a REAL archive — tmux teardown, worktree move, registry write — and its documented
+  // worst case is seconds, not milliseconds: the pane-exit wait alone is 3s
+  // (session/tmux/close.go paneExitWait), before the TERM→KILL reaper's 3+2+1s or any
+  // 10s tmux command timeout. So that one RPC routinely outlives the 2500ms budget below,
+  // and every attempt after it is made against a DISABLED danger button. Clicking
+  // unconditionally there blocks on actionability — and when the delete lands it REMOVES
+  // the modal, so the click goes on waiting for a button that never comes back. The loop
+  // wedges until its own 45s budget expires and reports the stale "still busy" sample: a
+  // delete that CONVERGED, reported as a hang. Gating the click keeps every attempt
+  // idempotent AND terminating, so the loop still observes the close on a later pass.
+  // The contract is unchanged — a delete that genuinely never converges still fails here.
+  const dangerBtn = delModal.locator("button.af-danger");
   await expect(async () => {
-    await delModal.locator("button.af-danger").click();
+    if ((await dangerBtn.isVisible().catch(() => false)) && (await dangerBtn.isEnabled().catch(() => false))) {
+      await dangerBtn.click({ timeout: 2500 });
+    }
     await expect(delModal).toBeHidden({ timeout: 2500 });
   }).toPass({ timeout: 45_000 });
 

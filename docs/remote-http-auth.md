@@ -3,7 +3,7 @@
 By default the Agent Factory daemon is reachable **only** from the machine it
 runs on. Local clients use a Unix socket whose `0600` permissions are the entire
 auth story (see the [HTTP API guide](http-api.md#authentication)), and the
-bundled web client is served on a **loopback** port (`listen_addr` defaults to
+bundled web client is served on a **loopback** port (`network.listen_addr` defaults to
 `127.0.0.1:8443`) that only the same machine can reach. Neither is exposed to the
 network, and no shared secret is needed on the same box — anyone who can reach
 either already runs as your user.
@@ -60,6 +60,7 @@ rather than exposing it to the network:
 ```toml
 # ~/.agent-factory/config.toml on the HOST — loopback only, never 0.0.0.0
 # (this is already the default; shown here to be explicit)
+[network]
 listen_addr = "127.0.0.1:8443"
 ```
 
@@ -85,7 +86,7 @@ optional **bearer token**.
 The local Unix socket is **unaffected** — it stays tokenless and keeps working
 for local clients exactly as before.
 
-The TCP listener is **on by default, bound to loopback** (`listen_addr` defaults
+The TCP listener is **on by default, bound to loopback** (`network.listen_addr` defaults
 to `127.0.0.1:8443`) so the bundled web client works out of the box on the same
 machine. This section is about the other case: making it reachable **from the
 network**, which is always an explicit opt-in — and which you should front with
@@ -94,25 +95,26 @@ TLS termination or a private network (see
 
 ### 1. Point the listener at the network
 
-`listen_addr` is a **global-only** key (a cloned repo must never be able to open
-a network port). Set it with `af config set listen_addr <host:port>`, or
+`network.listen_addr` is a **global-only** key (a cloned repo must never be able to open
+a network port). Set it with `af config set network.listen_addr <host:port>`, or
 hand-edit your global config directly. Change the default loopback address to a
 routable one:
 
 ```toml
 # ~/.agent-factory/config.toml
+[network]
 listen_addr = "0.0.0.0:8443"   # routable — reachable from the network (opt-in)
-                               # (the default "127.0.0.1:8443" is loopback-only)
-require_token = true           # STRONGLY recommended: the default is false (no token)
+                                # (the default "127.0.0.1:8443" is loopback-only)
+require_token = true            # STRONGLY recommended: the default is false (no token)
 ```
 
-Set `require_token = true` in the same edit. It defaults to `false`, so a network
+Set `network.require_token = true` in the same edit. It defaults to `false`, so a network
 bind without it serves an **unauthenticated** control plane to everyone who can
 route to the port. af allows that and warns — it does not stop you — so omit the
 token only if the network is one you fully trust (a private tailnet/VPN) or an
 authenticating proxy sits in front.
 
-`af config set listen_addr` rebinds the listener in place — no restart; a raw
+`af config set network.listen_addr` rebinds the listener in place — no restart; a raw
 hand-edit of the block above still needs `af daemon restart`.
 
 On enable, the daemon logs a one-time banner with the bound address and the
@@ -124,7 +126,7 @@ daemon HTTP TCP listener enabled on 0.0.0.0:8443 (plain HTTP — terminate TLS a
   listener is network-bound: every peer must present the token above, INCLUDING loopback-origin requests …
 ```
 
-Had you left `require_token` at its `false` default, the daemon would still have
+Had you left `network.require_token` at its `false` default, the daemon would still have
 bound the port — and logged a warning instead of that last line, because nothing
 would be authenticating anyone. See [the tokenless network
 warning](#the-tokenless-network-warning).
@@ -208,7 +210,7 @@ af serves plain HTTP and speaks no TLS. That is deliberate: the mandatory
 self-signed certificate the old listener generated was pure friction (accept a
 cert, pin a fingerprint) with no benefit on a private network, and anyone who
 wants real TLS already runs a proxy or a tunnel that does it better. So when you
-expose `listen_addr` to anything beyond loopback, put encryption in front of it:
+expose `network.listen_addr` to anything beyond loopback, put encryption in front of it:
 
 - **A reverse proxy** — nginx or Caddy terminating TLS on `:443` and proxying to
   af's plaintext `127.0.0.1:8443`. This is the right choice for a public or LAN
@@ -225,7 +227,7 @@ expose `listen_addr` to anything beyond loopback, put encryption in front of it:
 > address** (see [Reverse proxies and the loopback
 > exemption](#reverse-proxies-and-the-loopback-exemption)): a proxy in front of a
 > **loopback-bound** af is exempt (auth is then the proxy's job, unless you set
-> `require_loopback_token = true`), while a **network-bound** af enforces the token
+> `network.require_loopback_token = true`), while a **network-bound** af enforces the token
 > even for the proxy's loopback connection — so the proxy must forward the token.
 > A same-host proxy can never silently bypass the token on a network-bound listener.
 
@@ -244,7 +246,7 @@ over, because a browser silently **discards** a `Secure` cookie delivered over
 
 | how the browser reached af | `Secure` |
 |---|---|
-| plain HTTP straight to `listen_addr` (Tailscale/VPN/LAN) | omitted |
+| plain HTTP straight to `network.listen_addr` (Tailscale/VPN/LAN) | omitted |
 | HTTPS to a **TLS-terminating proxy** that sets `X-Forwarded-Proto: https` | set |
 | direct TLS (`r.TLS`) | set |
 
@@ -267,22 +269,22 @@ The token itself is always verified by the gate regardless.
 
 ## When is a token required? Loopback vs network
 
-**The token is off by default.** `require_token` defaults to `false`, so a fresh
+**The token is off by default.** `network.require_token` defaults to `false`, so a fresh
 daemon serves its web UI and API to every peer with **no token at all**. Auth is
-strictly **opt-in**: set `require_token = true` to turn it on. What keeps that
-default safe is the *other* default — `listen_addr` is loopback-only
+strictly **opt-in**: set `network.require_token = true` to turn it on. What keeps that
+default safe is the *other* default — `network.listen_addr` is loopback-only
 (`127.0.0.1:8443`), so nothing off the machine can reach it until you say so.
 
 Once you do enable the token, it is enforced **per connection**, judged from the
 peer's real transport address — never from a header:
 
-| Peer | Default (`require_token` unset/`false`) | `require_token = true` |
+| Peer | Default (`network.require_token` unset/`false`) | `network.require_token = true` |
 |---|---|---|
-| **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** | **No token** on a loopback bind (unless `require_loopback_token = true`) |
+| **Loopback** (`127.0.0.1` / `::1`) — a browser or client on the **same machine** | **No token** | **No token** on a loopback bind (unless `network.require_loopback_token = true`) |
 | **Network** — any other source address | **No token** — served to anyone who can reach the port | **Token required** (401 without it) |
 
-> **A non-loopback `listen_addr` should set `require_token = true`.** That
-> combination — `listen_addr` on a routable interface *and* the tokenless default
+> **A non-loopback `network.listen_addr` should set `network.require_token = true`.** That
+> combination — `network.listen_addr` on a routable interface *and* the tokenless default
 > — is an unauthenticated control plane. af **serves it** and warns once at daemon
 > start (see [the tokenless network warning](#the-tokenless-network-warning)); the
 > decision is yours to make.
@@ -298,7 +300,7 @@ connects. The web client reads the daemon's answer from `/v1/auth-info` and skip
 its login screen whenever no token is required.
 
 The trade-off is deliberate: `af` ships open rather than closed, and the
-loopback-only `listen_addr` is what bounds the blast radius — the tokenless
+loopback-only `network.listen_addr` is what bounds the blast radius — the tokenless
 posture is only ever allowed to front a listener nothing off-box can reach.
 Exposing the daemon to a network is an explicit act, and it carries the token
 with it: af will not start a network listener without one.
@@ -306,11 +308,11 @@ with it: af will not start a network listener without one.
 ### Loopback is exempt even with the token on
 
 A browser on the **same machine** as the daemon already has the local trust the
-Unix socket grants, so even with `require_token = true` loopback peers still
+Unix socket grants, so even with `network.require_token = true` loopback peers still
 connect with **no token** — the token is asked of network peers only. Set
-`require_loopback_token = true` to close that too (see below).
+`network.require_loopback_token = true` to close that too (see below).
 
-The exemption applies **only when `listen_addr` is loopback-bound** (the default
+The exemption applies **only when `network.listen_addr` is loopback-bound** (the default
 `127.0.0.1:8443`, or `::1`/`localhost`). On a **network** bind (`0.0.0.0`, a
 routable/Tailscale IP, or `:port` = every interface) it is **withheld**: the token
 is enforced for every peer, loopback-origin requests included. That is the fix
@@ -337,7 +339,7 @@ scoped to af's **own bind address**, which is what makes the exemption safe:
   requests reach af with no token, and the **proxy** is responsible for auth
   (terminate it there, or enforce nothing if the proxy itself is access-controlled).
   To make af **also** demand the token from the proxy, set
-  `require_loopback_token = true`.
+  `network.require_loopback_token = true`.
 - **af bound to a network address** (`0.0.0.0` or a routable/Tailscale IP). af
   **enforces** the token even for the proxy's loopback connection, so the proxy
   must forward it (`proxy_set_header Authorization` in nginx, or a client cert /
@@ -346,7 +348,7 @@ scoped to af's **own bind address**, which is what makes the exemption safe:
 
 Either way, don't assume "the proxy connects over loopback, so af trusts it": on a
 network-bound listener af does **not**, and on a loopback-bound listener the trust
-is a deliberate convenience you can tighten with `require_loopback_token`.
+is a deliberate convenience you can tighten with `network.require_loopback_token`.
 
 #### Shared machines: the loopback exemption is weaker than the Unix socket
 
@@ -358,12 +360,13 @@ token. On a single-user machine that's equivalent to the Unix socket (anyone who
 runs a process as you already has that access); on a **shared / multi-user
 machine** it is strictly weaker.
 
-Close the gap with **`require_loopback_token`** (default `false`). Set it `true`
+Close the gap with **`network.require_loopback_token`** (default `false`). Set it `true`
 and loopback peers must present the bearer token too — the same credential a
 network peer uses — so a same-machine account without the token is rejected:
 
 ```toml
 # ~/.agent-factory/config.toml — require the token even from loopback
+[network]
 require_loopback_token = true
 ```
 
@@ -371,49 +374,51 @@ require_loopback_token = true
 af daemon restart
 ```
 
-The daemon then logs `require_loopback_token=true: loopback peers … must present
+The daemon then logs `network.require_loopback_token=true: loopback peers … must present
 the token above`, and the browser web client shows its paste-token login for
 same-machine visitors. (To turn the web server off entirely instead, set
-`listen_addr = ""`.)
+`network.listen_addr = ""`.)
 
-> **`require_loopback_token` does nothing on its own.** It only *tightens* the
+> **`network.require_loopback_token` does nothing on its own.** It only *tightens* the
 > loopback path, so it has effect only while tokens are otherwise enforced — and
-> `require_token` now defaults to `false`, which disables the token for everyone,
+> `network.require_token` now defaults to `false`, which disables the token for everyone,
 > loopback included. To lock down a shared machine you must set **both**:
 >
 > ```toml
+> [network]
 > require_token = true
 > require_loopback_token = true
 > ```
 
-### Turning auth on (`require_token = true`)
+### Turning auth on (`network.require_token = true`)
 
-`require_token` is a **global-only** boolean (a cloned repo can never change your
-daemon's auth posture), settable with `af config set require_token true` or by
+`network.require_token` is a **global-only** boolean (a cloned repo can never change your
+daemon's auth posture), settable with `af config set network.require_token true` or by
 hand-editing the global config:
 
 ```toml
 # ~/.agent-factory/config.toml (global-only), default false
+[network]
 require_token = true
 ```
 
 `af config set` applies the change to a running daemon at once: the auth gate reads
-`require_token` from live config on every request, so it takes effect on the next
+`network.require_token` from live config on every request, so it takes effect on the next
 request — no rebind, no restart (a raw hand-edit still needs `af daemon restart`).
 Network peers must then present the token
 (401 without it); loopback peers stay exempt on a loopback bind unless you also
-set `require_loopback_token = true`. The web client picks the change up on its
+set `network.require_loopback_token = true`. The web client picks the change up on its
 next load and shows its paste-token login. Get the credential with
 `af token show`.
 
-Set it whenever `listen_addr` is anything but loopback, unless you genuinely
+Set it whenever `network.listen_addr` is anything but loopback, unless you genuinely
 trust every host that can route to the port. af will not stop you either way —
 it warns once and serves. Remember the token still travels over plain HTTP, so
 pair it with TLS termination or a private network.
 
 ### The tokenless network warning
 
-Leaving the default `require_token = false` while binding `listen_addr` to a
+Leaving the default `network.require_token = false` while binding `network.listen_addr` to a
 routable interface would mean anyone who can reach the port has full control with
 no credential — including `DeliverPrompt`, which types instructions into a running
 agent and submits them, so it is remote code execution, not just data exposure.
@@ -424,11 +429,11 @@ and will do the right thing. What you get instead is one warning line in the
 daemon log when the listener binds:
 
 ```
-WARNING: listen_addr "0.0.0.0:8443" is reachable from the network and require_token
+WARNING: network.listen_addr "0.0.0.0:8443" is reachable from the network and network.require_token
 is false, so af serves its full control API — including DeliverPrompt, which runs
 instructions through your agents — to anyone who can reach that address, with no
-authentication and no TLS · set require_token = true to require a bearer token
-(`af token show` prints it), or set listen_addr to 127.0.0.1:8443 to serve this
+authentication and no TLS · set network.require_token = true to require a bearer token
+(`af token show` prints it), or set network.listen_addr to 127.0.0.1:8443 to serve this
 machine only
 ```
 
@@ -441,16 +446,16 @@ The warning is scoped to network binds: the ordinary loopback default is tokenle
 too and says nothing — nothing off-box can reach it, which is exactly what makes
 the tokenless default safe.
 
-Note that `require_loopback_token = true` does **not** substitute for the token. It
-only withdraws the loopback exemption, and while `require_token` is `false` the
+Note that `network.require_loopback_token = true` does **not** substitute for the token. It
+only withdraws the loopback exemption, and while `network.require_token` is `false` the
 token is disabled for *every* peer, so that exemption is already moot. A network
-bind that you want authenticated needs `require_token = true`.
+bind that you want authenticated needs `network.require_token = true`.
 
 **Upgrading from a version that refused?** If your config explicitly sets a
-non-loopback `listen_addr` with `require_token = false`, your daemon starts again
+non-loopback `network.listen_addr` with `network.require_token = false`, your daemon starts again
 — including under the autostart unit, which previously crash-looped against the
 refusal (#2168). It is serving an unauthenticated control plane, deliberately;
-if that was never what you wanted, set `require_token = true`.
+if that was never what you wanted, set `network.require_token = true`.
 
 On a network you fully trust — a private Tailscale tailnet, a locked-down VPN —
 a tokenless listener may feel reasonable, but af no longer distinguishes trusted
@@ -480,11 +485,12 @@ After rotating, the **old token is dead**: a new connection presenting it gets a
 ## CORS (for the browser web client)
 
 Browsers enforce CORS, so a web client served from a different origin than the
-daemon needs that origin explicitly allow-listed. `cors_allowed_origins` is an
+daemon needs that origin explicitly allow-listed. `network.cors_allowed_origins` is an
 **exact-match** allow-list (no wildcards, no suffix matching):
 
 ```toml
 # ~/.agent-factory/config.toml (global-only)
+[network]
 listen_addr = "0.0.0.0:8443"
 cors_allowed_origins = ["https://af.example.com"]
 ```
@@ -509,32 +515,32 @@ plaintext backend.
   single-owner model. Store it with the same care as an SSH private key; never
   commit it or paste it into shared logs.
 - **af is plain HTTP — the token is not encrypted in transit by af.** Never
-  expose `listen_addr` on an untrusted network without a TLS-terminating proxy, a
+  expose `network.listen_addr` on an untrusted network without a TLS-terminating proxy, a
   private network (Tailscale/VPN), or an SSH tunnel in front of it.
-- **Prefer loopback + SSH over `0.0.0.0`.** Binding `listen_addr` to `127.0.0.1`
+- **Prefer loopback + SSH over `0.0.0.0`.** Binding `network.listen_addr` to `127.0.0.1`
   and forwarding over SSH (Option 1) keeps the port off the network entirely and
   encrypts the channel. Only bind a routable interface when you must (e.g. serving
   the web client), and put it behind a proxy and a firewall.
 - **The local socket is still local.** Enabling the TCP listener does not weaken
   the Unix socket, and it does not add a token requirement for local clients.
 - **The loopback exemption is scoped to a loopback bind.** It applies only when
-  `listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`), judged from the real
+  `network.listen_addr` is loopback (`127.0.0.1`/`::1`/`localhost`), judged from the real
   connection address. On a **network** bind (`0.0.0.0`/routable) the token is
   enforced for every peer, loopback-origin included — so a same-host reverse proxy
   cannot bypass it. Behind a proxy on a loopback-bound af, auth is the proxy's job
-  (or set `require_loopback_token = true`). See
+  (or set `network.require_loopback_token = true`). See
   [Reverse proxies and the loopback exemption](#reverse-proxies-and-the-loopback-exemption).
 - **Loopback trust is machine-wide, not per-user.** The default loopback web UI
   is reachable with **no token by any local account** — weaker than the Unix
   socket's `0600` owner-only gate. On a **shared / multi-user machine**, set
-  **both** `require_token = true` and `require_loopback_token = true` (the latter
-  is inert on its own), or `listen_addr = ""` (disable the web server). See
+  **both** `network.require_token = true` and `network.require_loopback_token = true` (the latter
+  is inert on its own), or `network.listen_addr = ""` (disable the web server). See
   [Shared machines](#shared-machines-the-loopback-exemption-is-weaker-than-the-unix-socket).
-- **The default is tokenless — auth is opt-in.** `require_token` defaults to
-  `false`, so what protects a stock install is the loopback-only `listen_addr`,
-  not a credential. Pointing `listen_addr` at a network would serve an
+- **The default is tokenless — auth is opt-in.** `network.require_token` defaults to
+  `false`, so what protects a stock install is the loopback-only `network.listen_addr`,
+  not a credential. Pointing `network.listen_addr` at a network would serve an
   unauthenticated control plane. af allows it and warns once at daemon start, so
-  the guard is you — set `require_token = true` (or put the listener behind a
+  the guard is you — set `network.require_token = true` (or put the listener behind a
   private network/proxy). See [the tokenless network
   warning](#the-tokenless-network-warning).
 - **Rotate on suspected exposure.** `af token rotate` invalidates the old token

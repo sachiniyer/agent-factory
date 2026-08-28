@@ -107,9 +107,10 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 		return err
 	}
 
-	cfg, cfgErr := config.ResolveConfig(repo.Root)
-	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, repo.Root)
-	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, repo.Root)
+	workspace := repo.WorkspacePath()
+	cfg, cfgErr := config.ResolveConfigForRepo(repo)
+	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace)
+	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)
 	return nil
 }
 

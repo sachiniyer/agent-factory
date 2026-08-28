@@ -66,13 +66,15 @@ func TestRuntimeReplacementClearsPriorModelChange(t *testing.T) {
 	inst := registerStarted(
 		t, manager, repoID, repoPath, "model-change-replaced", session.NewFakeBackend(), true, session.Ready,
 	)
+	_, epoch := inst.InFlightOpAndEpoch()
 	require.True(t, inst.SetAgentModelChangeAtEpoch(
 		session.NewAgentModelChange("gpt-5.6-sol max", "gpt-5.6-luna low"),
-		inst.StateEpoch(),
+		epoch,
 	))
 	attemptedAt := time.Now().Add(-time.Minute)
 	require.True(t, inst.RecordPromptAttempt(session.PromptDelivered, attemptedAt))
-	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), inst.StateEpoch()))
+	_, epoch = inst.InFlightOpAndEpoch()
+	require.True(t, inst.RecordPaneChurnAtEpoch(attemptedAt.Add(time.Second), epoch))
 
 	manager.noteRuntimeReplaced(repoID, inst)
 

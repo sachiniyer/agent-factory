@@ -252,3 +252,38 @@ func TestDescribeWatchState_InFlightOps(t *testing.T) {
 		}
 	}
 }
+
+// TestDescribeWatchState_UnknownInFlightOp: #3450 made an operation this build
+// cannot name hold the session pending, so a client watching a NEWER daemon can
+// now sit until --timeout with a perfectly healthy session in flight. The label
+// has to say so. Against the liveness fallback alone this reads "working", which
+// is both wrong (the agent may not be running at all) and useless — it hides the
+// version skew that is the entire cause and names no remedy.
+func TestDescribeWatchState_UnknownInFlightOp(t *testing.T) {
+	// LiveReady is the case that matters: it is what a newer daemon leaves on the
+	// liveness axis while an operation runs, and it is what made the old classifier
+	// report `idle`.
+	for _, lv := range []session.Liveness{session.LiveReady, session.LiveRunning, session.LivenessUnset} {
+		d := &session.InstanceData{InFlightOp: session.InFlightOp(9999), Liveness: lv}
+		got := describeWatchState(d)
+		if !strings.Contains(got, "upgrade af") {
+			t.Errorf("describeWatchState(unknown op, liveness=%v) = %q, want a version-skew label naming the upgrade", lv, got)
+		}
+	}
+}
+
+// TestClassifyWatch_UnknownInFlightOpKeepsPolling is the end-to-end half of
+// #3450 on the CLI side: the watch state machine must stay in watchPending for an
+// operation it cannot name. watchReady is the dangerous verdict — watchForReady
+// returns a nil error there and `af sessions watch` exits 0, handing a
+// mid-operation session to whatever automation was waiting on it.
+func TestClassifyWatch_UnknownInFlightOpKeepsPolling(t *testing.T) {
+	for _, lv := range []session.Liveness{
+		session.LiveReady, session.LiveRunning, session.LiveLost, session.LiveArchived,
+	} {
+		d := &session.InstanceData{InFlightOp: session.InFlightOp(9999), Liveness: lv}
+		if got, _ := classifyWatch(d); got != watchPending {
+			t.Errorf("classifyWatch(unknown op, liveness=%v) = %v, want watchPending", lv, got)
+		}
+	}
+}

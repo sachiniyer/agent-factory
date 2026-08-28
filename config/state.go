@@ -405,23 +405,82 @@ func DeleteRepoInstances(repoID string) error {
 // that does something with the records it got. A caller that reasons from what
 // is MISSING — "this tmux session has no record, so it leaked", "no record names
 // this branch, so nothing owns it" — is reasoning from an absence that may just
-// be an unread file, and must take LoadAllRepoInstancesReportingSkips instead
-// (#2874).
+// be an unread file, and must take LoadAllRepoInstancesReportingSkips — or,
+// to name the file and the cause in a user-facing refusal,
+// LoadAllRepoInstancesReportingSkipDetails — instead (#2874).
 func LoadAllRepoInstances() (map[string]json.RawMessage, error) {
-	result, _, err := LoadAllRepoInstancesReportingSkips()
+	result, _, err := LoadAllRepoInstancesReportingSkipDetails()
 	return result, err
+}
+
+// RepoInstancesSkip names one repo whose instances.json could not be read,
+// alongside the path that was tried and the error that came back.
+//
+// The repoID on its own is an opaque hash. A caller that REFUSES an operation
+// because this file could not be read has to say which file and why, or the
+// refusal is unactionable — "the check could not be completed", with nothing to
+// go repair, is barely better than the silent fail-open it replaces (#3476).
+type RepoInstancesSkip struct {
+	RepoID string
+	Path   string
+	Err    error
+}
+
+// String renders the skip as "<path>: <error>", the actionable form. It falls
+// back to the repoID on the one path that has no file name to offer — a repoID
+// so malformed that it does not resolve to a path at all.
+func (s RepoInstancesSkip) String() string {
+	if s.Path == "" {
+		return fmt.Sprintf("repo %s: %v", s.RepoID, s.Err)
+	}
+	return fmt.Sprintf("%s: %v", s.Path, s.Err)
+}
+
+// FormatRepoInstancesSkips joins skips into one clause for an error message,
+// in the loader's repoID order.
+func FormatRepoInstancesSkips(skips []RepoInstancesSkip) string {
+	parts := make([]string, 0, len(skips))
+	for _, skip := range skips {
+		parts = append(parts, skip.String())
+	}
+	return strings.Join(parts, "; ")
 }
 
 // LoadAllRepoInstancesReportingSkips is LoadAllRepoInstances plus the repoIDs it
 // could not read, so a caller can tell "this home has no such record" from "I
 // could not read one of the files that would have said so".
+//
+// A caller that puts the skip in front of a user wants
+// LoadAllRepoInstancesReportingSkipDetails instead: this form keeps only the
+// opaque repoID, and leaves the path and the cause in the warning log.
 func LoadAllRepoInstancesReportingSkips() (map[string]json.RawMessage, []string, error) {
+	result, skips, err := LoadAllRepoInstancesReportingSkipDetails()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(skips) == 0 {
+		return result, nil, nil
+	}
+	ids := make([]string, 0, len(skips))
+	for _, skip := range skips {
+		ids = append(ids, skip.RepoID)
+	}
+	return result, ids, nil
+}
+
+// LoadAllRepoInstancesReportingSkipDetails is the primitive the two forms above
+// narrow: the records it could load, plus a RepoInstancesSkip per repo it could
+// not, carrying the file path and the underlying I/O error.
+//
+// Skips arrive in repoID order (os.ReadDir sorts), so a message built from them
+// is stable across runs.
+func LoadAllRepoInstancesReportingSkipDetails() (map[string]json.RawMessage, []RepoInstancesSkip, error) {
 	dir, err := instancesDirPath()
 	if err != nil {
 		return nil, nil, err
 	}
 	result := make(map[string]json.RawMessage)
-	var skipped []string
+	var skipped []RepoInstancesSkip
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -438,7 +497,10 @@ func LoadAllRepoInstancesReportingSkips() (map[string]json.RawMessage, []string,
 		data, err := loadRepoInstancesForAll(repoID)
 		if err != nil {
 			log.WarningLog.Printf("failed to load instances for repo %s: %v", repoID, err)
-			skipped = append(skipped, repoID)
+			// Best-effort: repoInstancesPath only fails on a repoID that is not
+			// a legal directory name, and String() falls back to the id then.
+			path, _ := repoInstancesPath(repoID)
+			skipped = append(skipped, RepoInstancesSkip{RepoID: repoID, Path: path, Err: err})
 			continue
 		}
 		result[repoID] = data

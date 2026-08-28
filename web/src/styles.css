@@ -3393,25 +3393,6 @@ button:disabled,
   accent-color: var(--af-accent);
 }
 
-/* A hand-edited key: shown, never offered as a field whose save could only fail. */
-.af-config-value {
-  font-family: var(--af-font-mono);
-  font-size: var(--af-fs-xs);
-  color: var(--af-text-2);
-  background: var(--af-bg-inset);
-  border-radius: var(--af-r-sm);
-  padding: 0.15rem 0.35rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.af-config-readonly {
-  font-size: var(--af-fs-2xs);
-  color: var(--af-text-muted);
-  white-space: nowrap;
-}
-
 /* The write outcome, on the row it belongs to. Spans both columns so a long
  * validator message or restart notice reads as a sentence. */
 .af-config-echo,

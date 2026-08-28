@@ -323,6 +323,60 @@ func (i *Instance) SetRepoGoneFinalizationCheckpoint(checkpoint func() error) fu
 	return gw.SetRepoGoneFinalizationCheckpoint(checkpoint)
 }
 
+// WorktreeRelocationRecovery snapshots the durable relocation lifecycle — a
+// recovery record or an active consumed claim, projected to record form — for
+// this instance's worktree. Deliberately not gated on started: destruction
+// admission runs against archived instances, whose runtime is inert.
+func (i *Instance) WorktreeRelocationRecovery() (git.RelocationRecovery, bool) {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return git.RelocationRecovery{}, false
+	}
+	return gw.GetRelocationRecovery()
+}
+
+// SettleStalledWorktreeRelocationForAbsentPath clears an identity-unknown
+// stalled relocation record once its pathname conclusively answers ENOENT.
+// See GitWorktree.SettleStalledRelocationForAbsentPath.
+func (i *Instance) SettleStalledWorktreeRelocationForAbsentPath() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot settle stalled worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return gw.SettleStalledRelocationForAbsentPath()
+}
+
+// RestoreStalledWorktreeFenceAfterFailedSettle re-materializes the reclaimable
+// stalled fence after a failed settle. See
+// GitWorktree.RestoreStalledFenceAfterFailedSettle.
+func (i *Instance) RestoreStalledWorktreeFenceAfterFailedSettle() error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot restore stalled worktree fence for %q: instance has no worktree", i.Title)
+	}
+	return gw.RestoreStalledFenceAfterFailedSettle()
+}
+
+// SettleWorktreeRelocationClaim revalidates a consumed recovery claim and
+// releases its ownership without relocating anything. The kill admission
+// producer uses it when a reclaimed stalled record turns out to need no
+// cleanup authority because the origin repository answered present.
+func (i *Instance) SettleWorktreeRelocationClaim(claim git.RelocationClaim) error {
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw == nil {
+		return fmt.Errorf("cannot settle worktree relocation for %q: instance has no worktree", i.Title)
+	}
+	return gw.SettleRelocationClaim(claim)
+}
+
 // ValidateWorktreeDestructionAdmission is the pre-commit guard. The local
 // backend separately consumes and revalidates the exact cleanup identity before
 // pane teardown; it must not repeat the origin-path admission after the durable

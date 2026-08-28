@@ -550,7 +550,9 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		return err
 	}
 	data, err := s.manager.CreateSession(ctx, req)
-	if err != nil {
+	// A committed retained create (#3233) lands in the envelope with the
+	// retained projection in Instance; a genuine failure returns unchanged.
+	if !resp.record(err) {
 		return err
 	}
 	resp.Instance = data
@@ -591,10 +593,13 @@ func (s *controlServer) CreateTab(req CreateTabRequest, resp *CreateTabResponse)
 		return err
 	}
 	created, err := s.manager.CreateTab(req)
-	if err != nil {
+	// Assign before recording so the envelope survives the copy: a committed
+	// outcome (#3237) carries the minted identity in the response; a genuine
+	// failure returns unchanged (net/rpc sends no reply body on error).
+	*resp = created
+	if !resp.record(err) {
 		return err
 	}
-	*resp = created
 	return nil
 }
 

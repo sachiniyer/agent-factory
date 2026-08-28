@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,11 +14,49 @@ import (
 
 	"github.com/sachiniyer/agent-factory/cmd"
 	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
+
+// TestRecordedTmuxNamesResolvesBareCloneIdentity covers the legacy-record
+// fallback that has to reconstruct a missing tmux_name. Exact persisted names
+// remain authoritative; only an absent name is derived from current repository
+// identity, so a bare clone's linked worktree must hash the bare directory.
+func TestRecordedTmuxNamesResolvesBareCloneIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	parent := testguard.CanonicalTempDir(t)
+	source := filepath.Join(parent, "source")
+	bare := filepath.Join(parent, "bare.git")
+	worktree := filepath.Join(parent, "worktree")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	run(parent, "init", source)
+	run(source, "commit", "--allow-empty", "-m", "initial")
+	run(parent, "clone", "--bare", source, bare)
+	run(bare, "worktree", "add", worktree)
+
+	raw, err := json.Marshal([]map[string]string{{"title": "bare-alpha", "path": worktree}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(config.RepoIDFromRoot(bare), raw))
+
+	names, err := recordedTmuxNames()
+	require.NoError(t, err)
+	require.True(t, names[tmux.SanitizedNameForRepo("bare-alpha", bare)],
+		"a missing tmux_name must be reconstructed from the bare repository identity")
+}
 
 // These tests pin the same property #1939 pinned for the process table, on the
 // other input `af doctor` reasons about: A FAILED READ IS NOT AN EMPTY RESULT.

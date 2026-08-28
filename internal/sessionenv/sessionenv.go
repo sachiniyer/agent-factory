@@ -273,17 +273,13 @@ func filterAllowed(source []string, allowed map[string]struct{}) []string {
 	return out
 }
 
-// ImportNames returns the deterministic variable-name list tmux should import
-// from a filtered client when it creates a session on an existing server. The
-// values remain solely in the client environment; this list is safe for argv.
+// ImportNamesForCommand returns the deterministic variable-name list tmux should
+// import from a filtered client when it creates a session on an existing server.
+// The values remain solely in the client environment; this list is safe for argv.
 // Names absent from source are included so tmux marks stale server values as
 // removed instead of reviving an old credential in a new pane.
-func ImportNames(source []string, agent string, extras []string) []string {
-	return ImportNamesForCommand(source, agent, "", extras)
-}
-
-// ImportNamesForCommand is ImportNames with the same command-local cloud-mode
-// policy as FilterForCommand.
+//
+// It applies the same command-local cloud-mode policy as FilterForCommand.
 func ImportNamesForCommand(source []string, agent, command string, extras []string) []string {
 	allowed := allowedNames(source, agent, command, extras)
 	for _, entry := range source {

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/rpc"
 	"os"
@@ -41,6 +42,11 @@ func TestConfigMutationsRefusedWhileQuiescing(t *testing.T) {
 	setErr := server.SetConfigValue(SetConfigValueRequest{Key: "auto_update", Value: "false"}, &setResp)
 	require.True(t, IsDaemonQuiescingErr(setErr),
 		"SetConfigValue while quiescing reached handler logic instead of the admission gate: %v", setErr)
+
+	var unsetResp UnsetConfigValueResponse
+	unsetErr := server.UnsetConfigValue(UnsetConfigValueRequest{Key: "sandbox.ssh"}, &unsetResp)
+	require.True(t, IsDaemonQuiescingErr(unsetErr),
+		"UnsetConfigValue while quiescing reached handler logic instead of the admission gate: %v", unsetErr)
 }
 
 // configClientHome sandboxes both halves of the client under test: the config
@@ -80,6 +86,10 @@ func serveControlStub(t *testing.T, svc any) {
 type quiescingConfigControl struct{}
 
 func (s *quiescingConfigControl) SetConfigValue(_ SetConfigValueRequest, _ *SetConfigValueResponse) error {
+	return errDaemonQuiescing()
+}
+
+func (s *quiescingConfigControl) UnsetConfigValue(_ UnsetConfigValueRequest, _ *UnsetConfigValueResponse) error {
 	return errDaemonQuiescing()
 }
 
@@ -136,6 +146,12 @@ func TestSetGlobalConfigValueRefusalIsFinal(t *testing.T) {
 	written, readErr := os.ReadFile(tomlPath)
 	require.NoError(t, readErr)
 	require.Equal(t, orig, string(written), "a daemon refusal must leave config.toml untouched")
+
+	_, err = UnsetGlobalConfigValue("sandbox.ssh")
+	require.True(t, IsDaemonQuiescingErr(err), "want the daemon's own unset refusal, got: %v", err)
+	written, readErr = os.ReadFile(tomlPath)
+	require.NoError(t, readErr)
+	require.Equal(t, orig, string(written), "an unset refusal must leave config.toml untouched")
 }
 
 // TestSetGlobalConfigValueRefusesFallbackDuringLiveUpgrade pins the hand-off
@@ -249,6 +265,31 @@ func (s *answeringConfigControl) SetConfigValue(req SetConfigValueRequest, resp 
 	resp.RestartNotice = "stub notice"
 	resp.Applied = []string{req.Key}
 	return nil
+}
+
+type flatAliasConfigControl struct {
+	received chan string
+}
+
+func (s *flatAliasConfigControl) SetConfigValue(req SetConfigValueRequest, resp *SetConfigValueResponse) error {
+	s.received <- req.Key
+	if strings.Contains(req.Key, ".") {
+		return errors.New("unknown config key")
+	}
+	resp.Result = &config.SetResult{Key: req.Key, Value: req.Value, Path: "/daemon/config.toml"}
+	return nil
+}
+
+func TestSetGlobalConfigValueUsesFlatAliasAcrossDaemonVersionSkew(t *testing.T) {
+	configClientHome(t)
+	stub := &flatAliasConfigControl{received: make(chan string, 1)}
+	serveControlStub(t, stub)
+
+	resp, err := SetGlobalConfigValue("ssh.host_key_verification", "accept-new")
+	require.NoError(t, err)
+	require.NotNil(t, resp.Result)
+	require.Equal(t, "ssh.host_key_verification", resp.Result.Key)
+	require.Equal(t, "ssh_host_key_verification", <-stub.received)
 }
 
 // TestSetGlobalConfigValueDaemonAnswerIsVerbatim pins that with a daemon

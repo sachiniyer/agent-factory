@@ -288,32 +288,25 @@ func (i *Instance) reprovisionRemote() error {
 	if err != nil {
 		return fmt.Errorf("failed to re-provision sandbox for session %q: %w", i.Title, err)
 	}
+	// EVERY exit below this line disposes of the replacement through
+	// discardUnusableReplacement — the same reason the credential revoke above is a
+	// defer rather than a line per branch. What the exits share is not the message
+	// but the RULE, and a rule each branch restates is a rule each branch can get
+	// wrong: these two got it wrong in opposite directions until #3475, with the
+	// bind exit retaining an unconfirmed cleanup handle and the revalidation exit
+	// beside it discarding one.
+	//
 	// Same post-provision revalidation the create path performs. Doing it in one
-	// and not the other is exactly how these two drifted the first time — and so is
-	// the cleanup: this reaps the replacement and revokes its credential through
-	// the same helper, because the previous runtime was already reset, so nothing
-	// else holds a handle and the next restore would see nothing to reap and
-	// provision a second sandbox alongside this orphan.
+	// and not the other is exactly how these two drifted the first time.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
 		return fmt.Errorf("re-provisioned sandbox for session %q, but its callback credential was invalidated while it was being provisioned: %w",
-			i.Title, discardUnusableSandbox(res, creds, rerr))
+			i.Title, i.discardUnusableReplacement(res, rerr))
 	}
-	if err := i.bindProvisionResult(res); err != nil {
-		// The sandbox is up but its endpoint could not be wired — reap it so a
-		// bad restore never leaks a container/remote. An unknown reap keeps the
-		// new backend + cleanup handle installed (without its invalid client) so
-		// the next restore retries that cleanup before provisioning again.
-		if res.Teardown != nil {
-			if cleanupErr := res.Teardown(); cleanupErr != nil {
-				if TeardownStateUnknown(cleanupErr) {
-					i.retainProvisionResultCleanup(res)
-					return fmt.Errorf("failed to bind re-provisioned sandbox for session %q and its cleanup state is unknown: %w",
-						i.Title, errors.Join(err, cleanupErr))
-				}
-				log.WarningLog.Printf("session %q: unbound replacement sandbox teardown reported a completed error: %v", i.Title, cleanupErr)
-			}
-		}
-		return fmt.Errorf("failed to bind re-provisioned sandbox for session %q: %w", i.Title, err)
+	// The sandbox is up but its endpoint could not be wired — reap it so a bad
+	// restore never leaks a container/remote.
+	if bindErr := i.bindProvisionResult(res); bindErr != nil {
+		return fmt.Errorf("failed to bind re-provisioned sandbox for session %q: %w",
+			i.Title, i.discardUnusableReplacement(res, bindErr))
 	}
 	// The replacement is bound and live, so its credential belongs to it now. From
 	// here the runtime's own lifetime owns revocation again — resetRemoteRuntime on
@@ -362,6 +355,27 @@ func (i *Instance) retainProvisionResultCleanup(res ProvisionResult) {
 	i.runtimeTeardown = res.Teardown
 	i.runtimeCleanupStateUnknown = true
 	i.mu.Unlock()
+}
+
+// discardUnusableReplacement disposes of a freshly provisioned replacement this
+// instance could not adopt, and is THE exit for every post-provision failure in
+// reprovisionRemote.
+//
+// It is the create path's discardUnusableSandbox with the one difference that
+// path cannot express: there IS an instance here, so an unconfirmed teardown has
+// somewhere to put the handle. Routing the replacement path through the create
+// helper is what shipped #3475 — the reap ran, the outcome came back unknown,
+// and the handle was dropped anyway, because the helper had nothing to hand it
+// to. The previous runtime was already reset by the reap above, so that handle
+// was the last pointer to a sandbox that may still be running, and the next
+// restore, finding nothing to reap, provisioned a second one beside it.
+//
+// The credential is deliberately NOT settled here, unlike on the create path:
+// reprovisionRemote's replacementLive defer already owns that for every exit
+// below the mint, and splitting one decision across two owners is the same
+// duplication this function removes, in the other axis.
+func (i *Instance) discardUnusableReplacement(res ProvisionResult, cause error) error {
+	return reapUnusableSandbox(i.Title, res, cause, i.retainProvisionResultCleanup)
 }
 
 // resetRemoteRuntime clears the instance's remote-runtime wiring after its
@@ -461,6 +475,23 @@ func (i *Instance) teardownAfterStartFailure() error {
 func isSandboxBackendType(t string) bool {
 	_, err := backendKindForType(t)
 	return err == nil
+}
+
+// lostSandboxRecord reports whether a persisted row is a sandbox session that
+// loaded INERT and Lost — the one shape whose started=false says nothing about
+// whether the record is disposable. FromInstanceData skips Start() for a
+// non-archived sandbox row on purpose: its container/remote did not survive the
+// daemon restart and only the branch it pushed to origin did, so the row stays out
+// of the poll and restore loops behind the started=false fence until an explicit
+// restore re-provisions it.
+//
+// That makes the record the user's ONLY pointer to real work on origin, so the
+// storage checkpoint treats this as a durable retention claim rather than
+// never-started junk (#3422). It is scoped to the exact shape the loader produces:
+// a LOCAL session that is Lost loads started=true and already survives, and a
+// local row that never started is the junk the checkpoint's !Started() skip is for.
+func lostSandboxRecord(data InstanceData) bool {
+	return isSandboxBackendType(data.BackendType) && data.Liveness == LiveLost
 }
 
 // newInertSandboxBackend rebuilds a sandbox backend with NO live sandbox handle,

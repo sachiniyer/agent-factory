@@ -23,10 +23,14 @@ import (
 // CreateSession asks the daemon to create, start, and persist a session.
 func (c *Client) CreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
 	var resp daemon.CreateSessionResponse
-	if err := c.call("CreateSession", req, &resp); err != nil {
+	err := c.call("CreateSession", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a retained failed create (#3233) still has a durable row the
+	// caller may need to address. Only a clean failure has nothing to return.
+	if err != nil && !IsMutationCommitted(err) {
 		return nil, err
 	}
-	return &resp.Instance, nil
+	return &resp.Instance, err
 }
 
 // KillSession asks the daemon to kill a session and remove it from storage.
@@ -105,10 +109,14 @@ func (c *Client) HandoffSession(req daemon.HandoffSessionRequest) (daemon.Handof
 // caller cannot accidentally discard the destructive-addressing handle.
 func (c *Client) CreateTab(req daemon.CreateTabRequest) (daemon.CreateTabResponse, error) {
 	var resp daemon.CreateTabResponse
-	if err := c.call("CreateTab", req, &resp); err != nil {
+	err := c.call("CreateTab", req, &resp)
+	// call() classifies a committed outcome generically; keep the payload on
+	// that path — a spawned tab whose rollback could not prove it absent
+	// (#3237) still has a minted identity the caller may need to target.
+	if err != nil && !IsMutationCommitted(err) {
 		return daemon.CreateTabResponse{}, err
 	}
-	return resp, nil
+	return resp, err
 }
 
 // CloseTab asks the daemon to close a non-agent tab and returns the resolved

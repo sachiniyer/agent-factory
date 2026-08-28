@@ -97,25 +97,16 @@ func redactHookJSONValue(value any) (any, bool) {
 		}
 		return value, changed
 	case string:
-		// A string beginning with a JSON container or string opener may itself be a
-		// serialized document. Objects and arrays can structurally contain a token
-		// field, while a string can wrap either one through further serialization.
-		// Those three openers are the closed set that can eventually reach a token
-		// field; ordinary diagnostic strings are not reinterpreted as payloads.
-		trimmed := strings.TrimSpace(value)
-		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[' && trimmed[0] != '"') {
+		// A string can itself be a serialized payload, so one that could carry an
+		// object gets the same closed-set rule the top level applies to the whole
+		// output: parse it, or replace it. One that could not is left alone entirely
+		// — not even re-encoded, so an unrelated diagnostic stays byte-exact.
+		if !hookStringMayCarrySerializedObject(value) {
 			return value, false
 		}
 		redacted, parsed := redactHookJSONDocument(value)
 		if !parsed {
-			// The opener alone does not distinguish a serialized document from an
-			// ordinary diagnostic such as "[INFO] connection failed".
-			if truncatedHookJSONDocumentContainsToken(value) {
-				// Preserve the established fail-closed boundary for a document whose
-				// token field parses after restoring only its missing container closer.
-				return hookOutputRedaction, true
-			}
-			return value, false
+			return hookOutputRedaction, true
 		}
 		return redacted, redacted != value
 	default:
@@ -123,43 +114,28 @@ func redactHookJSONValue(value any) (any, bool) {
 	}
 }
 
-func truncatedHookJSONDocumentContainsToken(document string) bool {
-	trimmed := strings.TrimSpace(document)
-	if trimmed == "" {
-		return false
-	}
-
-	var closer byte
-	switch trimmed[0] {
-	case '{':
-		closer = '}'
-	case '[':
-		closer = ']'
-	default:
-		return false
-	}
-
-	value, parsed := decodeHookJSONDocument(document + string(closer))
-	return parsed && hookJSONValueContainsToken(value)
-}
-
-func hookJSONValueContainsToken(value any) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			if strings.EqualFold(key, "token") || hookJSONValueContainsToken(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if hookJSONValueContainsToken(child) {
-				return true
-			}
-		}
-	case string:
-		nested, parsed := decodeHookJSONDocument(value)
-		return parsed && hookJSONValueContainsToken(nested)
-	}
-	return false
+// hookStringMayCarrySerializedObject reports whether a string the JSON parser
+// rejected could still be carrying a serialized object, and with it a token
+// field.
+//
+// A token field exists only inside an object, and an object needs a `{`. That
+// byte reaches an unparseable string in exactly two spellings: literally, or
+// escaped for a serialization layer this decode did not unwrap — `{`, or a
+// `{` behind further backslashes. A backslash is the only way to write the
+// second, so `{` and `\` together close the set: a string holding neither cannot
+// name a token field however many times it is re-parsed, and survives
+// byte-exact. That keeps ordinary diagnostics — "[INFO] connection failed",
+// "quota exceeded", `he said "token": no` — readable in the error.
+//
+// The inverse is deliberately blunt. Once a rejected string does hold an object
+// opener, this replaces the whole string instead of hunting for the token field
+// inside it. That hunt is the open-ended half of the JSON grammar — escapes,
+// truncation, raw controls, duplicate members, comments, recovery after a syntax
+// error — and each round of hardening it received answered one spelling while
+// leaving the next one reachable. Absence of evidence is not the property a
+// redaction boundary can be built on, so the boundary is drawn where the parser
+// stops instead: over-redacting a brace-bearing diagnostic costs a line of
+// context, and under-redacting one persists a credential.
+func hookStringMayCarrySerializedObject(value string) bool {
+	return strings.ContainsAny(value, `{\`)
 }

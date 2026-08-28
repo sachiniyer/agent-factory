@@ -105,25 +105,27 @@ func TestTranslateMouseUnknownButton(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// waitTrackingEnabled blocks until MouseTrackingEnabled reports want; the DECSET
-// bytes flow through the run goroutine's emu.Write, so the callback lands
-// asynchronously.
+// waitTrackingEnabled blocks until TerminalModes().MouseTrackingEnabled() reports
+// want; the DECSET bytes flow through the run goroutine's emu.Write, so the
+// callback lands asynchronously.
 func waitTrackingEnabled(t *testing.T, tp *TermPane, want bool, msg string) {
 	t.Helper()
 	require.Eventuallyf(t, func() bool {
-		return tp.MouseTrackingEnabled() == want
+		modes, _ := tp.TerminalModes()
+		return modes.MouseTrackingEnabled() == want
 	}, 2*time.Second, 5*time.Millisecond, msg)
 }
 
-// TestMouseTrackingEnabledReflectsDECSET: MouseTrackingEnabled tracks the inner
-// app's DECSET/DECRST for the mouse-tracking modes (#1024 wheel fix). This is the
-// signal the host router keys wheel ownership off of, so it must go true when the
-// app requests tracking and false when it releases it — and it must ignore the SGR
-// ENCODING mode (1006), which changes how reports are encoded, not whether the app
-// gets them.
+// TestMouseTrackingEnabledReflectsDECSET: TerminalModes().MouseTrackingEnabled()
+// tracks the inner app's DECSET/DECRST for the mouse-tracking modes (#1024 wheel
+// fix). This is the signal the host router keys wheel ownership off of, so it must
+// go true when the app requests tracking and false when it releases it — and it
+// must ignore the SGR ENCODING mode (1006), which changes how reports are encoded,
+// not whether the app gets them.
 func TestMouseTrackingEnabledReflectsDECSET(t *testing.T) {
 	tp, s := newSingleStreamPane(t, 40, 6)
-	require.False(t, tp.MouseTrackingEnabled(), "a fresh pane has no mouse tracking")
+	modes, _ := tp.TerminalModes()
+	require.False(t, modes.MouseTrackingEnabled(), "a fresh pane has no mouse tracking")
 
 	// The SGR encoding mode alone is not tracking — no reports happen.
 	s.feed("\x1b[?1006h")

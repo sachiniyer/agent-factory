@@ -145,7 +145,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 	candidates := make([]sourceCandidate, 0, len(documents))
 	for _, document := range documents {
 		allowed := sourceInPrecedence(document.layer, entry.Precedence)
-		configured, present := document.metadata.topLevel(entry.Key)
+		configured, present, keyPath := document.metadata.topLevelWithKeyPath(entry.Key)
 		if document.isBuiltIn() {
 			present = allowed
 		}
@@ -153,7 +153,7 @@ func resolveManifestEntry(entry ManifestEntry, documents []sourceDocument) (comp
 			Layer:   document.layer.String(),
 			Path:    document.metadata.path,
 			Format:  sourceFormatName(document.metadata.format),
-			KeyPath: entry.Key,
+			KeyPath: keyPath,
 			Allowed: allowed,
 			Present: present,
 			Value:   nil,
@@ -211,7 +211,7 @@ func resolveReplace(entry ManifestEntry, result ResolvedValue, candidates []sour
 		!jsonEquivalent(winnerTrace.Value, clonedInterface(candidates[winner].typed)) {
 		winnerTrace.Reason += "; load-time normalization changed the configured value before resolution"
 	}
-	ref := sourceReference(candidates[winner].document, entry.Key)
+	ref := sourceReference(candidates[winner].document, winnerTrace.KeyPath)
 	result.Winner = &ref
 
 	for i := range candidates {
@@ -426,6 +426,9 @@ func valueFromSchemas(schemas []any, key string) (reflect.Value, bool) {
 }
 
 func taggedFieldByKey(value reflect.Value, key string) (reflect.Value, bool) {
+	if alias, ok := configAliasForCanonical(canonicalConfigKey(key)); ok {
+		key = alias.legacy
+	}
 	for value.IsValid() && value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			value = reflect.Zero(value.Type().Elem())
@@ -678,6 +681,7 @@ func pluralize(word string, count int) string {
 // leaf is projected from the already-resolved value and origins; it never runs
 // a second precedence algorithm.
 func (r *ResolvedConfig) ResolvedValuePath(keyPath string) (ResolvedValue, bool) {
+	keyPath = canonicalConfigKey(keyPath)
 	if value, ok := r.ResolvedValue(keyPath); ok {
 		return value, true
 	}

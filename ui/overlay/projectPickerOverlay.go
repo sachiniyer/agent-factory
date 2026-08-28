@@ -15,6 +15,10 @@ import (
 // with its display name (repo basename), absolute main-worktree root, and the
 // number of sessions currently tracked for it.
 type Project struct {
+	// RepoID is the identity used to aggregate this row. Carrying it through to
+	// the sidebar prevents destructive actions from re-resolving a stale display
+	// root into an unrelated enclosing repository.
+	RepoID       string
 	Name         string
 	Root         string
 	SessionCount int

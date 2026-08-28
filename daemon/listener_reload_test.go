@@ -147,7 +147,7 @@ func TestWebListenerRebindFailureKeepsOldListenerServing(t *testing.T) {
 	failed, rerr := wl.reconcile(&next)
 	require.Error(t, rerr, "a rebind onto an occupied port must fail")
 	require.Contains(t, rerr.Error(), occupied, "the error must name the address")
-	require.Contains(t, failed, "listen_addr")
+	require.Contains(t, failed, "network.listen_addr")
 
 	// The property: the OLD listener is still serving — the daemon is not bricked.
 	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"),

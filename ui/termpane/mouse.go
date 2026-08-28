@@ -43,20 +43,6 @@ func (t *TermPane) SendMouse(msg tea.MouseMsg, x, y int) bool {
 	return true
 }
 
-// MouseTrackingEnabled reports whether the inner application has requested mouse
-// reporting — i.e. it has a mouse-tracking DECMode active (X10 9, normal 1000,
-// highlight 1001, button-event 1002, or any-event 1003). This is exactly the set
-// emu.SendMouse consults before it encodes anything, so a true here means a
-// forwarded event would actually reach the program. The host uses it to decide
-// who owns the mouse WHEEL (tmux semantics): a program that has NOT enabled
-// tracking leaves the wheel to pane scrollback (#1024 wheel fix). The read is
-// under the same lock the mode-change callbacks write beneath.
-func (t *TermPane) MouseTrackingEnabled() bool {
-	t.gridMu.RLock()
-	defer t.gridMu.RUnlock()
-	return len(t.mouseModes) > 0
-}
-
 // isMouseTrackingMode reports whether mode is one of the DECModes that makes the
 // terminal report mouse events to the inner app. It mirrors the tracking-mode
 // list emu.SendMouse iterates; the SGR encoding mode (1006) is deliberately

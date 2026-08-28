@@ -133,6 +133,9 @@ func TestInRepoGlobalOnlyKeysAreExactlyTheManifestsGlobalOnlyKeys(t *testing.T) 
 	for _, entry := range configManifest {
 		if entry.Sources.Has(SourceGlobal) && !entry.Sources.Has(SourceRepoShared) {
 			want[entry.Key] = true
+			if alias, ok := configAliasForCanonical(entry.Key); ok {
+				want[alias.legacy] = true
+			}
 		}
 	}
 	require.NotEmpty(t, want, "the manifest must declare at least one global-only key, or this test proves nothing")

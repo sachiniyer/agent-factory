@@ -61,7 +61,7 @@ func newReconcileTestInstanceWithExec(t *testing.T, agentName string, exec cmd_t
 // its EXACT persisted tmux session by name, leaving it immediately attachable.
 func TestReconcileTabsFromData_AddsOutOfBandTab(t *testing.T) {
 	const agentName = "af_snap_agent"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true, shellName: true})
 
 	require.Len(t, inst.GetTabs(), 1, "instance starts with only the agent tab")
@@ -94,7 +94,7 @@ func TestReconcileTabsFromData_AddsOutOfBandTab(t *testing.T) {
 // drop it locally WITHOUT re-killing the already-gone tmux session.
 func TestReconcileTabsFromData_DropsClosedTab(t *testing.T) {
 	const agentName = "af_snap_agent2"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true, shellName: true})
 
 	// Add the shell tab first.
@@ -375,7 +375,7 @@ func TestReconcileTabsFromData_NotStartedIsNoOp(t *testing.T) {
 // the PTY, reorder the tab, and close any pane bound to it).
 func TestReconcileTabsFromData_RenamesInPlaceByID(t *testing.T) {
 	const agentName = "af_snap_rename"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true, shellName: true})
 
 	// Add a shell tab carrying a stable id (the daemon owns the id).
@@ -429,7 +429,7 @@ func TestReconcileTabsFromData_RenamesInPlaceByID(t *testing.T) {
 // layer can close the orphaned pane.
 func TestReconcileTabsFromData_CloseRecreateSameNameIsIDKeyed(t *testing.T) {
 	const agentName = "af_snap_recreate"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inst, _ := newReconcileTestInstance(t, agentName, map[string]bool{agentName: true, shellName: true})
 
 	agent := inst.GetTabs()[0].Name

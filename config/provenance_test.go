@@ -46,6 +46,37 @@ func candidateForLayer(t *testing.T, value ResolvedValue, layer ConfigSource) Ca
 	return CandidateTrace{}
 }
 
+func TestAliasProvenanceUsesPhysicalSourceSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name, data, path, want string
+		format                 ConfigFormat
+	}{
+		{name: "flat TOML", data: `ssh_host_key_verification = "accept-new"`, path: "config.toml", format: FormatTOML, want: "ssh_host_key_verification"},
+		{name: "grouped TOML", data: "[ssh]\nhost_key_verification = \"accept-new\"", path: "config.toml", format: FormatTOML, want: "ssh.host_key_verification"},
+		{name: "flat JSON", data: `{"ssh_host_key_verification":"accept-new"}`, path: "config.json", format: FormatJSON, want: "ssh_host_key_verification"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg *Config
+			var err error
+			if tc.format == FormatTOML {
+				cfg, err = parseLoadedConfigTOML([]byte(tc.data+"\n"), tc.path, tc.path)
+			} else {
+				cfg, err = parseLoadedConfigJSON([]byte(tc.data), tc.path, tc.path)
+			}
+			require.NoError(t, err)
+			documents, err := globalResolutionDocuments(cfg)
+			require.NoError(t, err)
+			resolved, err := materializeResolution(cfg, "", Manifest(), documents, false)
+			require.NoError(t, err)
+
+			value := requireResolvedValue(t, resolved, "ssh.host_key_verification")
+			require.NotNil(t, value.Winner)
+			assert.Equal(t, tc.want, value.Winner.KeyPath)
+			assert.Equal(t, tc.want, candidateForLayer(t, value, SourceGlobal).KeyPath)
+		})
+	}
+}
+
 func TestResolveGlobalConfigTracksPresenceInsteadOfComparingValues(t *testing.T) {
 	setupProvenanceTest(t, `
 schema_version = 1
@@ -241,9 +272,9 @@ program = "claude"
 
 func TestResolveConfigExplainsLegacyAndExplicitEmptyRepoValue(t *testing.T) {
 	repoRoot := setupProvenanceTest(t, "schema_version = 1\ndefault_program = \"claude\"\n")
-	require.NoError(t, SaveRepoConfig(RepoIDFromRoot(repoRoot), &RepoConfig{
+	writeLegacyRepoConfig(t, RepoIDFromRoot(repoRoot), &RepoConfig{
 		PostWorktreeCommands: []string{"legacy-command"},
-	}))
+	})
 	writeInRepoTomlConfig(t, repoRoot, "post_worktree_commands = []\n")
 
 	resolved, err := ResolveConfig(repoRoot)

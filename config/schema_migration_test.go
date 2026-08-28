@@ -80,49 +80,6 @@ func TestDetectJSONSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestDetectTOMLSchemaVersion(t *testing.T) {
-	tests := []struct {
-		name    string
-		raw     string
-		want    int
-		wantErr string
-	}{
-		{
-			name: "missing field is legacy",
-			raw:  "default_program = 'claude'\n",
-			want: LegacySchemaVersion,
-		},
-		{
-			name: "version field",
-			raw:  "schema_version = 3\n",
-			want: 3,
-		},
-		{
-			name:    "non-integer version",
-			raw:     "schema_version = '3'\n",
-			wantErr: "schema_version must be an integer",
-		},
-		{
-			name:    "invalid toml",
-			raw:     "schema_version = [\n",
-			wantErr: "toml",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := DetectTOMLSchemaVersion([]byte(tt.raw))
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestMigrateSchemaBytesMultiHopPreservesUnknownFields(t *testing.T) {
 	registry := NewSchemaMigrationRegistry()
 	require.NoError(t, registry.Register(0, func(raw []byte) ([]byte, error) {

@@ -6283,6 +6283,9 @@ async function createSession(input, token2) {
     body.backend = backend;
   }
   const resp = await af("CreateSession", body, token2);
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.instance;
 }
 async function pauseStatusPoll(id, token2) {
@@ -6346,6 +6349,9 @@ async function createTab(id, title, token2) {
     { id, title, repo_id: "", shell: true, command: "", name: "" },
     token2
   );
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 async function createVSCodeTab(id, title, token2) {
@@ -6355,6 +6361,9 @@ async function createVSCodeTab(id, title, token2) {
     { id, title, repo_id: "", shell: false, command: "", name: "", kind: "vscode" },
     token2
   );
+  if (resp.warning) {
+    throw new ApiError(200, resp.warning, MUTATION_COMMITTED_ERROR_CODE);
+  }
   return resp.name;
 }
 async function closeTab(id, title, tabName, tabId, token2) {
@@ -6530,9 +6539,6 @@ function tiersInOrder(entries) {
 }
 var TIER_ADVANCED = 3;
 function controlKind(e) {
-  if (!e.editable) {
-    return "readonly";
-  }
   if (e.type === "bool") {
     return "checkbox";
   }
@@ -6714,27 +6720,14 @@ var ConfigPane = class {
     return row;
   }
   /** The control for one key, chosen from the manifest's own description of it:
-   *  a picker when the values are enumerated, a checkbox for a bool, a text
-   *  field otherwise — and a read-only value when `af config set` will not take
-   *  the key at all.
+   *  a picker when the values are enumerated, a checkbox for a bool, and a text
+   *  field otherwise. Structured rows use the compact JSON CurrentValue emits.
    *
-   *  The mapping reads `settable` and `enum` from the manifest rather than
-   *  deciding locally, because both are pinned Go-side against the real
-   *  allowlist. A form that offered a field the writer would refuse is a dead
-   *  end the user only discovers by pressing save. */
+   *  The enum and type come from the manifest; Go-side coverage separately pins
+   *  every global row to the real writer so a rendered field cannot dead-end at
+   *  a save the writer refuses. */
   renderControl(e) {
     const kind = controlKind(e);
-    if (kind === "readonly") {
-      return h(
-        "div",
-        { class: "af-config-control" },
-        h("code", { class: "af-config-value" }, e.value),
-        // edit_hint is always populated for a read-only row (the manifest's
-        // assistantEditHint since #2454); the fallback only guards a malformed
-        // payload and must not resurrect the retired "hand-edit the file" copy.
-        h("span", { class: "af-config-readonly" }, e.edit_hint ?? "the config assistant can change this for you")
-      );
-    }
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
       box.checked = e.value === "true";

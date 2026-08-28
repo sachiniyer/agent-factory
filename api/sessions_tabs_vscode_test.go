@@ -33,7 +33,7 @@ func withTabCreateFlags(t *testing.T, kind, url, command string, port int) *daem
 	}
 	t.Cleanup(func() { createTabViaDaemon = prevCreate })
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}

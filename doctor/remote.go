@@ -30,7 +30,7 @@ func defaultRemoteConfig() (*config.RemoteHooks, string, error) {
 		// remote_hooks we could validate. Skip cleanly rather than fail.
 		return nil, "", nil
 	}
-	cfg, err := config.ResolveConfig(repo.Root)
+	cfg, err := config.ResolveConfigForRepo(repo)
 	if err != nil {
 		return nil, repo.Root, err
 	}

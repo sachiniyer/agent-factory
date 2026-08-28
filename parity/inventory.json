@@ -219,6 +219,24 @@
       "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. (The TUI writes config directly in-process rather than via the SetConfigValue RPC — same capability, different transport, like session.send-prompt.)"
     },
     {
+      "id": "config.unset-global-alias",
+      "title": "Clear a migrated global config setting and both compatibility spellings",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configcmd.go config unset without --project -> daemon.UnsetGlobalConfigValue"
+      },
+      "verdict": "deliberate",
+      "notes": "#3221 adds this compatibility-specific clear operation for the three backend settings migrating from flat keys to grouped TOML. It removes both spellings under the shared-file lock so a conflicting flat value cannot reappear. The TUI and web editors expose only the canonical logical setting and can set its effective value; they do not expose storage spellings. The config assistant can use the CLI operation when cleanup is requested, so duplicating the compatibility repair as a form control is deliberately out of scope."
+    },
+    {
       "id": "config.write-project",
       "title": "Set or clear a personal per-project config override",
       "tui": {
@@ -825,6 +843,25 @@
       "notes": ""
     },
     {
+      "id": "session.list.filters",
+      "title": "Bound session lists by lifecycle, creation age, and count",
+      "tui": {
+        "status": "no",
+        "pointer": "app/session_control.go requests an unfiltered Snapshot for the authoritative navigation rail"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "web/src/api.ts fetchSnapshot requests the complete rail"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions.go sessionsListCmd maps --live/--status/--max-age/--limit onto SnapshotRequest"
+      },
+      "verdict": "deliberate",
+      "issue": "#3362",
+      "notes": "The CLI and public POST /v1/Snapshot API are query surfaces, so they expose composable daemon-side bounds before transfer. The TUI and web use Snapshot as their authoritative navigation rail and must reconcile every session; filtering that rail would make an omitted row indistinguishable from deletion and strand it from interactive management. A separate client-side search/view control could hide rows without narrowing the authoritative snapshot, but that is a different UI feature rather than parity for this bounded scripting query."
+    },
+    {
       "id": "session.pr.open",
       "title": "Open / copy a session's PR URL",
       "tui": {
@@ -1412,12 +1449,12 @@
         "pointer": "web/src/api.ts:281 et al send id"
       },
       "cli": {
-        "status": "no",
-        "pointer": "api/sessions.go:733 et al send {Title, RepoID}"
+        "status": "partial",
+        "pointer": "api/sessions.go et al send {Title, RepoID}; `sessions archive --self` sends the resolved row's stable id"
       },
       "verdict": "real-gap",
       "issue": "#2358",
-      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit; the CLI remains deliberately repo+title scoped because each invocation resolves and dispatches one command without retained UI intent."
+      "notes": "#2322 disproved the old blanket 'repo-scoped title is enough' rationale for an action that survives a modal or async command: a killed/recreated row can reuse the title while the user's intent still names the prior stable session. Handoff, kill, archive, restore, usage-limit retry, and tab create/close now carry captured identity through retained boundaries and daemon dispatch; close also sends the stable tab ID when the projection has adopted one. Requests whose wire type still lacks a session ID remain for action-by-action audit. The CLI remains deliberately repo+title scoped wherever a command resolves one target from its own arguments, which carries no retained UI intent. `sessions archive --self` is the exception and now sends the stable id: it does not take a target, it resolves the CALLER's own row, and identity there cannot come from the arguments. Deriving it from the recorded workspace path was unsound for a worktree-less row, whose projected worktree is empty and whose path is mutable \u2014 and under #3358 that path is not even a spelling of the id the row is pinned under (see api/scope.go sessionRepoID). Kill and send-prompt keep the title contract."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1459,7 +1496,7 @@
       "af config get": "config.read",
       "af config list": "config.read",
       "af config set": "config.write",
-      "af config unset": "config.write-project",
+      "af config unset": "config.unset-global-alias",
       "af config validate": "config.validate",
       "af daemon adopt": "daemon.lifecycle",
       "af daemon install": "daemon.lifecycle",
@@ -1736,6 +1773,10 @@
       "af sessions kill --help": "meta.discovery",
       "af sessions list --all": "session.list",
       "af sessions list --help": "meta.discovery",
+      "af sessions list --limit": "session.list.filters",
+      "af sessions list --live": "session.list.filters",
+      "af sessions list --max-age": "session.list.filters",
+      "af sessions list --status": "session.list.filters",
       "af sessions preview --full": "session.preview-full",
       "af sessions preview --plain": "session.preview-plain",
       "af sessions preview --help": "meta.discovery",
@@ -1850,6 +1891,30 @@
       "web_rpcs: keyed by RPC method -> json field."
     ],
     "requests": {
+      "SnapshotRequest": {
+        "cli": {
+          "created_after": {
+            "ok": "Reached by sessionsListCmd after Cobra parses --max-age (api/sessions.go assigns req.CreatedAfter). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
+          },
+          "limit": {
+            "ok": "Reached by sessionsListCmd after Cobra parses --limit (api/sessions.go assigns req.Limit). The CLI AST derivation recognizes composite-literal fields but not this conditional field assignment, so it conservatively reports the field as absent."
+          }
+        },
+        "tui": {
+          "created_after": {
+            "ok": "Deliberate: the TUI snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their archive/restore/kill controls; bounded history is a CLI/public-API query, not rail state."
+          },
+          "limit": {
+            "ok": "Deliberate: the TUI must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
+          },
+          "live": {
+            "ok": "Deliberate: archived sessions remain visible in the TUI so users can restore or permanently remove them. The TUI cannot request only live rows without removing those lifecycle controls."
+          },
+          "statuses": {
+            "ok": "Deliberate: the TUI rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
+          }
+        }
+      },
       "PreviewRequest": {
         "tui": {
           "tab_name": {
@@ -1915,13 +1980,6 @@
         }
       },
       "KillSessionRequest": {
-        "cli": {
-          "id": {
-            "gap": "wire.id-addressing"
-          }
-        }
-      },
-      "ArchiveSessionRequest": {
         "cli": {
           "id": {
             "gap": "wire.id-addressing"
@@ -2125,6 +2183,20 @@
       }
     },
     "web_rpcs": {
+      "Snapshot": {
+        "created_after": {
+          "ok": "Deliberate: the web snapshot is the authoritative navigation rail. An age-filtered snapshot would make older sessions look deleted and remove their interactive lifecycle controls."
+        },
+        "limit": {
+          "ok": "Deliberate: the web must reconcile every session in its authoritative rail. Truncating the snapshot would make the omitted tail look deleted and strand those sessions from interactive management."
+        },
+        "live": {
+          "ok": "Deliberate: archived sessions stay in the web rail so users can restore or permanently remove them; requesting only live rows would remove those controls."
+        },
+        "statuses": {
+          "ok": "Deliberate: the web rail is an authoritative all-state projection, not a query result. Server-side status filtering would make sessions disappear from management when their lifecycle changes."
+        }
+      },
       "CreateSession": {
         "title": {
           "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) — the TUI's friendly behavior. See session.create.opt.title."

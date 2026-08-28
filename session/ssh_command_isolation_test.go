@@ -226,7 +226,7 @@ func TestSharedTransportErrorsCarryTheOwningBackend(t *testing.T) {
 	assert.Contains(t, sandboxP.sandboxErr(errors.New("clone failed")).Error(), "backend=sandbox:",
 		"the zero value must keep meaning sandbox, so no existing construction site changes meaning")
 
-	assert.Contains(t, sandboxTransportConfigKey(string(BackendSandbox)), "sandbox_ssh")
+	assert.Contains(t, sandboxTransportConfigKey(string(BackendSandbox)), "sandbox.ssh")
 	assert.Contains(t, sandboxTransportConfigKey(string(BackendSSH)), "ssh.host")
 }
 

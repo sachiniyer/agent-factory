@@ -325,3 +325,317 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 	require.True(t, foundOwnedServer,
 		"the detached agent-server was not run as the bind-mounted account owner; calls=%v", calls)
 }
+
+// TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase pins the Docker
+// spelling of a mount target rather than one casing of it. Docker reads a
+// --mount value as a single CSV record and lowercases each field's key before
+// matching it, so every spelling below names the same container path that a
+// plain `dst=` does. A case-sensitive comparison let a repo's run_args install
+// `DST=/af-account/.config` over af's account boundary (#3398).
+//
+// Verified against Docker 29.4.0: each value here mounts (an unknown key such
+// as `mydst=` is refused by Docker itself, which is why this check stays an
+// exact whole-key match rather than a substring one).
+func TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "lowercase dst", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}},
+		{name: "lowercase destination", args: []string{"--mount", "type=bind,src=/tmp/other,destination=/af-account"}},
+		{name: "lowercase target", args: []string{"--mount", "type=bind,src=/tmp/other,target=/af-account"}},
+		{name: "uppercase dst", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account"}},
+		{name: "uppercase destination", args: []string{"--mount", "type=bind,src=/tmp/other,DESTINATION=/af-account"}},
+		{name: "uppercase target", args: []string{"--mount", "type=bind,src=/tmp/other,TARGET=/af-account"}},
+		{name: "mixed case dst", args: []string{"--mount", "type=bind,src=/tmp/other,DsT=/af-account"}},
+		{name: "mixed case destination", args: []string{"--mount", "type=bind,src=/tmp/other,DeStInAtIoN=/af-account"}},
+		{name: "mixed case target", args: []string{"--mount", "type=bind,src=/tmp/other,TaRgEt=/af-account"}},
+		{name: "uppercase dst on a subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"}},
+		{name: "mixed case target on a subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,TaRgEt=/af-account/auth.json"}},
+		{name: "uppercase dst on the runtime home", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-home"}},
+		{name: "uppercase destination on a runtime subdirectory", args: []string{"--mount", "type=bind,src=/tmp/other,DESTINATION=/af-home/.config"}},
+		{name: "uppercase keys throughout", args: []string{"--mount", "TYPE=bind,SRC=/tmp/other,DST=/af-account"}},
+		{name: "uppercase dst in the inline form", args: []string{"--mount=type=bind,src=/tmp/other,DST=/af-account"}},
+		{name: "uppercase dst before other fields", args: []string{"--mount", "DST=/af-account,type=bind,src=/tmp/other"}},
+		{name: "uppercase dst with readonly", args: []string{"--mount", "type=bind,src=/tmp/other,DST=/af-account,readonly"}},
+		{name: "uppercase dst on a volume mount", args: []string{"--mount", "type=volume,src=repo-vol,DST=/af-account"}},
+		{name: "uppercase dst on a tmpfs mount", args: []string{"--mount", "type=tmpfs,DST=/af-account/.config"}},
+		{name: "quoted lowercase dst", args: []string{"--mount", `type=bind,src=/tmp/other,"dst=/af-account"`}},
+		{name: "quoted uppercase dst", args: []string{"--mount", `type=bind,src=/tmp/other,"DST=/af-account"`}},
+		{name: "quoted target on a subdirectory", args: []string{"--mount", `type=bind,src=/tmp/other,"TARGET=/af-account/.config"`}},
+		{name: "quoted dst in the inline form", args: []string{`--mount=type=bind,src=/tmp/other,"dst=/af-home"`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "repo-controlled run_args mounted over the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsNonProtectedMountTargetsInAnyFieldCase holds the other
+// half of #3398: case-folding the FIELD NAME must not turn this check into a
+// substring or case-insensitive PATH match. Container paths are case-sensitive
+// on Linux, and /af-account-cache is a different directory from /af-account —
+// Docker mounts each exactly where it says, so af refuses neither.
+func TestDockerAccount_AllowsNonProtectedMountTargetsInAnyFieldCase(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "uppercase dst on a similarly named path", args: []string{"--mount", "type=bind,src=/tmp/cache,DST=/af-account-cache"}},
+		{name: "mixed case target on a similarly named path", args: []string{"--mount", "type=bind,src=/tmp/cache,TaRgEt=/af-accountant"}},
+		{name: "uppercase destination on a similarly named runtime path", args: []string{"--mount", "type=bind,src=/tmp/cache,DESTINATION=/af-homework"}},
+		{name: "uppercase dst on a differently cased path", args: []string{"--mount", "type=bind,src=/tmp/cache,DST=/AF-ACCOUNT"}},
+		{name: "quoted uppercase dst on a similarly named path", args: []string{"--mount", `type=bind,src=/tmp/cache,"DST=/af-account-cache"`}},
+		{name: "uppercase source only", args: []string{"--mount", "type=bind,SRC=/tmp/af-account,dst=/workspace/cache"}},
+		{name: "volume form on a similarly named path", args: []string{"-v", "/tmp/cache:/af-account-cache"}},
+		{name: "tmpfs form on a similarly named path", args: []string{"--tmpfs", "/af-account-cache"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "harmless mount refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_RejectsProtectedTargetsInColonMountForms guards the ':'
+// halves of the same check against the #3398 fix. --volume and --tmpfs carry no
+// field names to fold, so their targets must keep being refused exactly as
+// before.
+func TestDockerAccount_RejectsProtectedTargetsInColonMountForms(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "short volume", args: []string{"-v", "/tmp/other:/af-account"}},
+		{name: "short volume inline", args: []string{"-v/tmp/other:/af-account/.config"}},
+		{name: "long volume", args: []string{"--volume", "/tmp/other:/af-account/.config"}},
+		{name: "long volume inline", args: []string{"--volume=/tmp/other:/af-home"}},
+		{name: "read-only volume", args: []string{"--volume", "/tmp/other:/af-account/auth.json:ro"}},
+		{name: "relabelled volume", args: []string{"-v", "/tmp/other:/af-home/.config:z"}},
+		{name: "tmpfs", args: []string{"--tmpfs", "/af-account/.config"}},
+		{name: "tmpfs inline with options", args: []string{"--tmpfs=/af-home:size=64m"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a colon-form mount reached the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerRunShorthandTables_CoverEveryDockerShorthand pins the two tables
+// checkShorthandCluster reads against the short options `docker run --help`
+// documents (Docker 29.4.0). A shorthand missing from both is treated as
+// unknown and fails closed, which is safe but refuses arguments af could have
+// read; a shorthand in the WRONG table is the unsafe direction, because it
+// stops or misdirects the walk through a combined short option (#3401).
+func TestDockerRunShorthandTables_CoverEveryDockerShorthand(t *testing.T) {
+	documented := map[byte]bool{
+		'a': false, 'c': false, 'e': false, 'h': false, 'l': false,
+		'm': false, 'p': false, 'u': false, 'v': false, 'w': false,
+		'd': true, 'i': true, 'P': true, 'q': true, 't': true,
+	}
+	for shorthand, isBoolean := range documented {
+		_, boolean := dockerRunBooleanShorthands[shorthand]
+		_, takesValue := dockerRunValueShorthands[shorthand]
+		require.Falsef(t, boolean && takesValue, "-%c is in both shorthand tables", shorthand)
+		require.Equalf(t, isBoolean, boolean, "-%c is classified as boolean=%v; `docker run --help` says boolean=%v", shorthand, boolean, isBoolean)
+		require.Equalf(t, !isBoolean, takesValue, "-%c is classified as value-taking=%v; `docker run --help` says value-taking=%v", shorthand, takesValue, !isBoolean)
+	}
+	require.Len(t, dockerRunBooleanShorthands, 5, "a shorthand was added to the boolean table without a --help entry to back it")
+	require.Len(t, dockerRunValueShorthands, 10, "a shorthand was added to the value table without a --help entry to back it")
+	for _, guarded := range []byte(dockerGuardedShorthands) {
+		require.Containsf(t, dockerRunValueShorthands, guarded, "guarded -%c must take a value", guarded)
+	}
+}
+
+// TestDockerAccount_RejectsProtectedMountsInCombinedShortOptions covers the
+// recognition half of the guard. Docker's flag parser walks a combined short
+// option positionally, so the `v` behind a boolean option is the volume option
+// itself — `docker run -tv /evil:/af-account` mounts exactly as `-v` does
+// (measured on Docker 29.4.0), while the validator matched only an argument
+// that WAS `-v` or began with it (#3401).
+func TestDockerAccount_RejectsProtectedMountsInCombinedShortOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "tty then volume", args: []string{"-tv", "/tmp/other:/af-account"}},
+		{name: "interactive tty then volume", args: []string{"-itv", "/tmp/other:/af-account/.config"}},
+		{name: "cluster with an inline value", args: []string{"-tv/tmp/other:/af-account"}},
+		{name: "cluster with an equals value", args: []string{"-tv=/tmp/other:/af-account"}},
+		{name: "publish-all then volume", args: []string{"-Ptv", "/tmp/other:/af-home"}},
+		{name: "quiet then volume", args: []string{"-qtv", "/tmp/other:/af-account/auth.json"}},
+		{name: "every boolean then volume", args: []string{"-idPqtv", "/tmp/other:/af-account"}},
+		{name: "cluster on the runtime home with a mode", args: []string{"-itv", "/tmp/other:/af-home/.config:ro"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a combined short option mounted over the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "account mount")
+		})
+	}
+}
+
+// TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions covers the
+// identity half of the same gap: `-e` behind a boolean option sets an
+// environment variable exactly as `-e` alone does (measured: `docker create
+// -ite AF_PROBE=leaked` records AF_PROBE=leaked in .Config.Env).
+func TestDockerAccount_RejectsIdentityEnvInCombinedShortOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "interactive then env", args: []string{"-ie", "CODEX_API_KEY=repo-identity"}, wantErr: "CODEX_API_KEY"},
+		{name: "interactive tty then env", args: []string{"-ite", "OPENAI_API_KEY=repo-identity"}, wantErr: "OPENAI_API_KEY"},
+		{name: "tty then env", args: []string{"-te", "CODEX_ACCESS_TOKEN=repo-identity"}, wantErr: "CODEX_ACCESS_TOKEN"},
+		{name: "cluster with an inline value", args: []string{"-teCODEX_API_KEY=repo-identity"}, wantErr: "CODEX_API_KEY"},
+		{name: "cluster with an equals value", args: []string{"-te=CODEX_ACCESS_TOKEN=repo-identity"}, wantErr: "CODEX_ACCESS_TOKEN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a combined short option set an identity variable: %v", tt.args)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestDockerAccount_RefusesUnreadableCombinedShortOptions is the fail-closed
+// rule. When a cluster holds a character af cannot classify, af cannot tell
+// whether a later `v` or `e` is an option or part of that character's value —
+// so it refuses and names the argument rather than guessing. A refusal is an
+// annoyance with an obvious remedy; an accept is a credential-boundary breach.
+func TestDockerAccount_RefusesUnreadableCombinedShortOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown option before a volume", args: []string{"-Xv", "/tmp/other:/af-account"}},
+		{name: "unknown option before a harmless volume", args: []string{"-Xv", "/tmp/cache:/af-account-cache"}},
+		{name: "unknown option before an env", args: []string{"-Ze", "CODEX_API_KEY=repo-identity"}},
+		{name: "unknown option after a boolean", args: []string{"-itYv", "/tmp/other:/af-account"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "an unreadable combined short option was accepted: %v", tt.args)
+			require.Contains(t, err.Error(), "combined short option")
+			require.Contains(t, err.Error(), tt.args[0], "the refusal must name the argument the operator has to fix")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsCombinedShortOptionsItCanRead is the other direction:
+// failing closed must not become refusing everything. Each case here is one af
+// can read to the end, so it stays allowed.
+func TestDockerAccount_AllowsCombinedShortOptionsItCanRead(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "boolean cluster", args: []string{"-itd"}},
+		{name: "boolean cluster with an unknown trailer", args: []string{"-itX"}},
+		{name: "cluster mounting a similarly named path", args: []string{"-itv", "/tmp/cache:/af-account-cache"}},
+		{name: "cluster mounting a similarly named path inline", args: []string{"-itv/tmp/cache:/af-account-cache"}},
+		{name: "cluster setting a harmless variable", args: []string{"-ite", "TZ=UTC"}},
+		// -u takes a value, so Docker reads the `v` as the START of that value,
+		// not as --volume: `docker run -uv /tmp/evil:/af-account` fails with
+		// "invalid reference format" because the path became the IMAGE name,
+		// and nothing is mounted (measured on Docker 29.4.0). af reads it the
+		// same way rather than refusing an argument Docker never acts on.
+		{name: "value-taking option consumes the v", args: []string{"-uv", "/tmp/other:/af-account"}},
+		{name: "value-taking option consumes the e", args: []string{"-ue", "CODEX_API_KEY=repo-identity"}},
+		{name: "inline user value containing guarded letters", args: []string{"-udev"}},
+		{name: "inline workdir value containing guarded letters", args: []string{"-w/workspace/service"}},
+		{name: "inline label value containing guarded letters", args: []string{"-lenv=prod"}},
+		{name: "publish with an inline value", args: []string{"-p8080:80"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a readable combined short option was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument is the trap the fix
+// had to avoid. Docker gives `-ie` the NEXT argument as its value, so a
+// validator that consumed that argument the way Docker does would step over a
+// real --mount written after the cluster and never check it. The scan stays
+// non-consumptive so every later argument is still examined on its own.
+func TestDockerAccount_ClusterScanDoesNotSkipTheNextArgument(t *testing.T) {
+	tests := [][]string{
+		{"-ie", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"-ie", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+		{"-it", "--mount", `type=bind,src=/tmp/other,"DST=/af-home"`},
+		{"-tv", "/tmp/cache:/af-account-cache", "--volume", "/tmp/other:/af-account"},
+		{"-Xv", "/tmp/cache:/af-account-cache", "-v", "/tmp/other:/af-account"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"a mount after a combined short option escaped validation: %v", args)
+		})
+	}
+}
+
+// TestDockerAccount_AllowsExplicitBooleanShortOptions covers the `-f=value`
+// form, which pflag resolves BEFORE it consults an option's own kind: an
+// explicit `=` makes the entire suffix that option's value, boolean included,
+// so `-t=false` ends the cluster rather than continuing into `false`
+// (parseSingleShortArg, pflag v1.0.6). Walking into the suffix rejected
+// `docker.run_args = ["-t=false"]` — a valid configuration — because `false`
+// contains an `e`, which would stop an account session from starting at all.
+//
+// Measured on Docker 29.4.0: every form below runs, and `-t=v/tmp:/probe`
+// fails with "invalid argument ... for -t, --tty flag: strconv.ParseBool",
+// proving the suffix is the boolean's value and never a nested option.
+func TestDockerAccount_AllowsExplicitBooleanShortOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "tty false", args: []string{"-t=false"}},
+		{name: "detach true", args: []string{"-d=true"}},
+		{name: "interactive false", args: []string{"-i=false"}},
+		{name: "quiet true", args: []string{"-q=true"}},
+		{name: "publish-all false", args: []string{"-P=false"}},
+		{name: "explicit boolean after a boolean", args: []string{"-it=false"}},
+		// The suffix is -t's value even when it looks like a mount, so Docker
+		// rejects the value rather than mounting anything.
+		{name: "explicit boolean with a mount-shaped value", args: []string{"-t=v/tmp/other:/af-account"}},
+		{name: "explicit boolean beside a harmless mount", args: []string{"-t=false", "-v", "/tmp/cache:/af-account-cache"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
+				"a valid explicit boolean was refused, which would stop the session from starting: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount is the safety half of
+// the case above: ending the cluster scan at an explicit boolean must not let
+// anything after it through unchecked.
+func TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount(t *testing.T) {
+	tests := [][]string{
+		{"-t=false", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"-t=false", "--mount", "type=bind,src=/tmp/other,DST=/af-account/.config"},
+		{"-i=false", "-v", "/tmp/other:/af-home"},
+		{"-t=false", "-tv", "/tmp/other:/af-account"},
+		{"-tv=/tmp/other:/af-account"},
+		{"-te=CODEX_API_KEY=repo-identity"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"an explicit boolean shadowed a later guarded option: %v", args)
+		})
+	}
+}

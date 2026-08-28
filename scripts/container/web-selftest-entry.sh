@@ -738,4 +738,9 @@ export AF_BROWSE_REPO="$BROWSE_REPO"
 export AF_BROWSE_PLAIN="$BROWSE_PLAIN"
 export AF_BROWSE_DOOMED="$BROWSE_DOOMED"
 
-npx playwright test
+# Extra `playwright test` arguments, so investigating a flake does not require
+# hand-editing this file inside the image (#3482). Unset = the whole suite, exactly
+# as before. Deliberately unquoted so a caller can pass several words, e.g.
+# AF_PLAYWRIGHT_ARGS='-g 2549 --repeat-each=15' make web-selftest-container
+# shellcheck disable=SC2086
+npx playwright test ${AF_PLAYWRIGHT_ARGS:-}

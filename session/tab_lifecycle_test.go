@@ -84,7 +84,7 @@ func TestFreshStart_OnlyAgentTab(t *testing.T) {
 	assert.Equal(t, TabKindAgent, tabs[0].Kind)
 
 	shellTs := tmux.NewTmuxSessionFromSanitizedNameWithDeps(
-		agentName+shellTmuxSuffix, defaultShell(), pty, cmdExec)
+		agentName+tmuxTabSeparator+shellTabName, defaultShell(), pty, cmdExec)
 	assert.False(t, shellTs.ExistsOrUnknown(),
 		"no __shell tmux session may be spawned on a fresh start (#1100)")
 

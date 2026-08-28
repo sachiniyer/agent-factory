@@ -71,7 +71,7 @@ func TestSessionsKill_UnknownTitle(t *testing.T) {
 	}
 	defer func() { killSessionViaDaemon = prevKill }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSessionsKill_HonorsRepoScoping(t *testing.T) {
 	}
 	defer func() { killSessionViaDaemon = prevKill }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestSessionsSendPrompt_HonorsRepoScoping(t *testing.T) {
 	}
 	defer func() { sendPromptViaDaemon = prevSend }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestSessionsSendPrompt_CreateRoutesThroughDeliverPrompt(t *testing.T) {
 		sendPromptViaDaemon = prevSend
 	}()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -549,7 +549,7 @@ func TestSessionsTabCreate_RequiresCommand(t *testing.T) {
 	}
 	defer func() { createTabViaDaemon = prevCreate }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -661,7 +661,7 @@ func TestSessionsTabDelete_RequiresName(t *testing.T) {
 	}
 	defer func() { closeTabViaDaemon = prevClose }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -770,7 +770,7 @@ func TestSessionsTabDelete_SurfacesDaemonError(t *testing.T) {
 	}
 	defer func() { closeTabViaDaemon = prevClose }()
 
-	devnull, err := os.Open(os.DevNull)
+	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatalf("open devnull: %v", err)
 	}
@@ -1190,7 +1190,7 @@ func TestSessionsSendPrompt_BroadcastRequiresScope(t *testing.T) {
 
 	sendPromptAllFlag = true
 	origStderr := os.Stderr
-	devnull, _ := os.Open(os.DevNull)
+	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	os.Stderr = devnull
 	err = sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{"hello"})
 	os.Stderr = origStderr
@@ -1255,7 +1255,7 @@ func TestSessionsSendPrompt_BroadcastAllReposSpansRepos(t *testing.T) {
 	// --all-repos + --repo must be a clean mutual-exclusion error.
 	repoFlag = "/some/path"
 	origStderr := os.Stderr
-	devnull, _ := os.Open(os.DevNull)
+	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	os.Stderr = devnull
 	err = sessionsSendPromptCmd.RunE(sessionsSendPromptCmd, []string{"x"})
 	os.Stderr = origStderr
@@ -1296,7 +1296,7 @@ func TestSessionsSendPrompt_BroadcastFlagWithoutAll(t *testing.T) {
 			// cobra runs before RunE, and where the generic arity error would
 			// otherwise win. Silence the JSON error write to stderr.
 			origStderr := os.Stderr
-			devnull, _ := os.Open(os.DevNull)
+			devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 			os.Stderr = devnull
 			err := sessionsSendPromptCmd.Args(sessionsSendPromptCmd, tc.args)
 			os.Stderr = origStderr

@@ -3,6 +3,9 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -448,6 +451,72 @@ func TestDaemonSaveUsesResolvedRepoPathForSymlinkedRepo(t *testing.T) {
 	result := readDisk(t, ms, resolvedRepoPath)
 	require.Len(t, result, 1, "exactly one record should be persisted for the repo")
 	assert.Equal(t, "from-tui", result[0].Title)
+}
+
+func TestDaemonSaveRetainsLoadedLegacyStorageKey(t *testing.T) {
+	ancestor := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", ancestor).Run())
+	legacyRoot := filepath.Join(ancestor, "recorded-parent")
+	require.NoError(t, os.Mkdir(legacyRoot, 0o755))
+	legacyID := config.RepoIDFromRoot(legacyRoot)
+	ancestorID := config.RepoIDForPath(legacyRoot)
+	require.NotEqual(t, legacyID, ancestorID,
+		"fixture must resolve the recorded parent into a different enclosing repository")
+
+	createdByUs := true
+	record := InstanceData{
+		ID: "legacy-bare-row", Title: "legacy", Path: legacyRoot,
+		Status: Archived, Liveness: LiveArchived, Program: "claude",
+		Worktree: GitWorktreeData{
+			RepoPath: legacyRoot, WorktreePath: filepath.Join(t.TempDir(), "archive"),
+			SessionName: "legacy", BranchName: "af/legacy", BranchCreatedByUs: &createdByUs,
+		},
+	}
+	raw, err := json.Marshal([]InstanceData{record})
+	require.NoError(t, err)
+	ms := newMockStorage()
+	ms.data[legacyID] = raw
+	storage, err := NewStorage(ms, "")
+	require.NoError(t, err)
+	loaded, err := storage.LoadInstances()
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+
+	require.NoError(t, storage.SaveInstances(loaded))
+	assert.Contains(t, ms.data, legacyID, "the loaded row must stay under its recorded storage key")
+	assert.NotContains(t, ms.data, ancestorID,
+		"a shutdown checkpoint must not duplicate the row under an enclosing repository")
+}
+
+func TestRepoIDForStorageReturnsRememberedIDWithoutGit(t *testing.T) {
+	fakeBin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "git-called")
+	fakeGit := filepath.Join(fakeBin, "git")
+	require.NoError(t, os.WriteFile(fakeGit, []byte("#!/bin/sh\n: > \"$AF_STORAGE_ID_GIT_MARKER\"\nexit 1\n"), 0o755))
+	t.Setenv("PATH", fakeBin)
+	t.Setenv("AF_STORAGE_ID_GIT_MARKER", marker)
+
+	inst := &Instance{Path: "/recorded/on/unreachable-mount", storageRepoID: "remembered-id"}
+	assert.Equal(t, "remembered-id", inst.repoIDForStorage())
+	_, err := os.Stat(marker)
+	assert.ErrorIs(t, err, os.ErrNotExist,
+		"a loaded row already has an authoritative key and must not invoke Git")
+}
+
+func TestRepoIDForStorageKeepsFreshRecordedWorktreeIdentity(t *testing.T) {
+	ancestor := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", ancestor).Run())
+	recordedRoot := filepath.Join(ancestor, "deleted-nested-origin")
+	require.NoError(t, os.Mkdir(recordedRoot, 0o755))
+	require.NotEqual(t, config.RepoIDForRecordedRoot(recordedRoot), config.RepoIDForPath(recordedRoot))
+	gw, err := git.NewGitWorktreeFromStorage(
+		recordedRoot, filepath.Join(t.TempDir(), "managed"), "fresh", "af/fresh", "", false, true,
+	)
+	require.NoError(t, err)
+	inst := &Instance{Path: recordedRoot, gitWorktree: gw}
+
+	assert.Equal(t, config.RepoIDForRecordedRoot(recordedRoot), inst.repoIDForStorage(),
+		"a recorded worktree origin must not adopt an enclosing repository before first save")
 }
 
 // TestDaemonSaveFallsBackToPathForRemoteBackend verifies that the daemon

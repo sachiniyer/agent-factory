@@ -19,6 +19,9 @@ import (
 // The app derives these from the same discovery the ctrl+p picker uses
 // (buildProjectList) and pushes them via ProjectsPane.SetProjects.
 type SidebarProject struct {
+	// RepoID is the identity established while aggregating the row. Destructive
+	// actions must carry it rather than infer identity again from Root.
+	RepoID       string
 	Name         string
 	Root         string
 	SessionCount int

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -118,8 +117,13 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 		return err
 	}
 
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+	// Bounded, and it ABORTS the rebuild on a stall rather than continuing into
+	// the unbounded `worktree add` below (#3424). A rebuild reaches this with the
+	// directory already gone from git's point of view but possibly still on a
+	// filesystem that no longer answers, which is exactly the stall.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
 	baseCommit, err := g.rebuildBaseCommit()
 	if err != nil {
@@ -239,21 +243,14 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	// We are reusing a pre-existing branch — Cleanup() must not delete it.
 	g.branchCreatedByUs = false
 
-	// Clean up any existing worktree first. Ignore the error (the worktree
-	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
-	// deleting the directory: at this point the path has not been
-	// established as a session-owned worktree, and a path that stays
-	// blocked surfaces loudly via the `worktree add` below (#802 audit).
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
-
-	// Prune stale worktree metadata BEFORE re-adding. If the worktree
-	// directory was deleted externally (rm -rf, disk cleanup, etc.), git
-	// still tracks it internally and `worktree add <same-path>` fails with
-	// "missing but already registered worktree". Recent git clears that
-	// registration on the `worktree remove -f` above, but older git errors
-	// ("is not a working tree") and leaves it behind; pruning here recovers
-	// either way. Mirrors the prune-before-add ordering in setupNewWorktree.
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
+	// Clear the path: remove any worktree still registered there, then prune
+	// stale registrations before re-adding. Both commands are bounded and an
+	// ordinary failure is still ignored (the worktree usually doesn't exist) —
+	// see clearStaleWorktreePath for why a STALL must abort instead (#3424) and
+	// for the #802 rule that keeps this path from deleting the directory.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
@@ -306,22 +303,21 @@ func (g *GitWorktree) setupNewWorktree() error {
 	// We are creating the branch ourselves — Cleanup() may delete it.
 	g.branchCreatedByUs = true
 
-	// Clean up any existing worktree first. Ignore the error (the worktree
-	// usually doesn't exist) and, unlike Cleanup(), do NOT fall back to
-	// deleting the directory: at this point the path has not been
-	// established as a session-owned worktree, and a path that stays
-	// blocked surfaces loudly via the `worktree add` below (#802 audit).
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath)
+	// Clear the path: remove any worktree still registered there, then prune
+	// stale registrations BEFORE the branch delete below. Both commands are
+	// bounded and an ordinary failure is still ignored (the worktree usually
+	// doesn't exist) — see clearStaleWorktreePath for why a STALL must abort
+	// instead (#3424), for the prune-before-`branch -D` ordering, and for the
+	// #802 rule that keeps this path from deleting the directory.
+	if err := g.clearStaleWorktreePath(); err != nil {
+		return err
+	}
 
-	// Prune stale worktree metadata BEFORE deleting the branch. If `worktree
-	// remove -f` above failed (corrupted .git pointer, etc.), git still tracks
-	// the worktree internally and `branch -D` will fail with "branch is
-	// checked out", leaving the orphaned branch behind and blocking
-	// `worktree add -b` below.
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "prune")
-
-	// Clean up any existing branch using git CLI (much faster than go-git PlainOpen)
-	_, _ = g.runGitCommand(g.repoPath, "branch", "-D", g.branchName) // Ignore error if branch doesn't exist
+	// Clean up any existing branch using git CLI (much faster than go-git
+	// PlainOpen). A missing branch is still ignored; only a stall aborts.
+	if err := g.deleteStaleSetupBranch(); err != nil {
+		return err
+	}
 
 	// Try to base the new branch off origin's default branch for a fresh starting point.
 	// Fall back to HEAD if no remote is available.
@@ -396,10 +392,6 @@ type cleanupRun struct {
 	errs    []error
 	unknown bool
 }
-
-// cleanupWorktreeStat is a seam for proving that a known-stalled workspace is
-// rejected before Cleanup touches its path. Production always uses os.Stat.
-var cleanupWorktreeStat = os.Stat
 
 // git runs one bounded local git command and RECORDS a tripped deadline. This is
 // the only place in the cleanup path that decides what a deadline means.
@@ -504,11 +496,12 @@ func (r *cleanupRun) state() CleanupState {
 	return CleanupSettled
 }
 
-// Cleanup removes the worktree and associated branch. It reports whether it
+// cleanup removes the worktree and associated branch. It reports whether it
 // ESTABLISHED the outcome (see CleanupState) alongside any error: callers that go
 // on to delete the session's record MUST gate on the state, not on the error.
-// If the worktree was not created by agent-factory (externalWorktree), only prune is done.
-func (g *GitWorktree) Cleanup() (CleanupState, error) {
+// If the worktree was not created by agent-factory (externalWorktree), only prune
+// is done. The exported entry points live in worktree_cleanup_modes.go.
+func (g *GitWorktree) cleanup(allowUnregisteredRemoval bool) (CleanupState, error) {
 	// The run owns the state from the first line, so even the early returns below
 	// derive it instead of asserting one (#1917). Nothing in this function names a
 	// CleanupState constant: that is the rule that makes the next command added here
@@ -556,8 +549,21 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		return r.state(), errors.Join(r.errs...)
 	}
 
-	// Check if worktree path exists before attempting removal
-	if _, err := cleanupWorktreeStat(g.worktreePath); err == nil {
+	worktreeExists, probeErr := r.probeCleanupWorktreePath()
+	if probeErr != nil {
+		return r.state(), probeErr
+	}
+	if worktreeExists {
+		// The registered-only mode proves ownership at BOTH ends of the reap
+		// (#3278 review). Before it: the writer reap terminates every process
+		// under the path, which is itself destructive against a replacement
+		// directory whose only possible end state here is retention — refuse
+		// unlisted or mismatched occupants before touching their processes.
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
+		}
 		// Reap any process still writing inside the tree BEFORE removing it
 		// (#2025). Both the git remove below and the os.RemoveAll fallback delete
 		// recursively and fail "directory not empty" only when a live writer keeps
@@ -565,6 +571,19 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 		// session whose agent backgrounded a survivor (installer, dev server) leaks
 		// the worktree otherwise. Best-effort and bounded — see reapWorktreeWriters.
 		reapWorktreeWriters(g.worktreePath)
+
+		// ...and again after it, immediately before the destructive remove:
+		// the reap can take seconds, and the verification belongs as close to
+		// the removal as git allows. git offers no compare-and-swap between a
+		// listing and a remove, so the probe-to-remove interval is the
+		// irreducible check-then-act residue; a same-UID actor re-plumbing
+		// registrations inside af's private namespace within it is the
+		// deliberate-reconstruction class the review already accepted.
+		if !allowUnregisteredRemoval {
+			if err := r.requireRegisteredBranchMatch(); err != nil {
+				return r.state(), errors.Join(r.errs...)
+			}
+		}
 
 		// Remove the worktree using git command. Bounded by localGitTimeout
 		// (#1917): this recursive delete is the one local git command that
@@ -601,23 +620,31 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 			// unknown, and r.removeDir refuses on that, so no timeout can reach the
 			// unbounded os.RemoveAll.
 			if r.shouldRemoveWorktreeDir(err) {
-				r.removeDir(g.worktreePath)
+				if allowUnregisteredRemoval {
+					r.removeDir(g.worktreePath)
+				} else {
+					// The caller forbade the unregistered fallback: nothing can
+					// vouch that this directory is the one the record describes,
+					// so refusing IS an unknown outcome — the directory stays
+					// and the record must too.
+					r.unknown = true
+					r.errs = append(r.errs, fmt.Errorf(
+						"refusing to delete %s: git no longer vouches for it and this cleanup may not delete an unregistered directory; leaving it and the record in place",
+						g.worktreePath,
+					))
+				}
 			} else {
 				r.errs = append(r.errs, err)
 			}
 		}
-	} else if !os.IsNotExist(err) {
-		// Only append error if it's not a "not exists" error
-		r.errs = append(r.errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
 	// Prune stale worktree metadata BEFORE deleting the branch. When the
 	// `git worktree remove -f` above fails (e.g. the worktree's `.git`
 	// pointer file was removed externally), git still tracks the worktree
 	// internally and `git branch -D` will fail with "branch is checked
-	// out", leaving an orphaned branch behind. Mirrors the ordering in
-	// CleanupWorktreesForRepo (#330). Best-effort: a prune failure here
-	// should not block the branch-delete attempt.
+	// out", leaving an orphaned branch behind. Best-effort: a prune failure
+	// here should not block the branch-delete attempt.
 	r.prune()
 
 	// Only delete the branch if this session actually created it. When we
@@ -640,7 +667,7 @@ func (g *GitWorktree) Cleanup() (CleanupState, error) {
 	}
 
 	// Final prune to clean up any remaining references. Usually a no-op
-	// after the prune above, but mirrors CleanupWorktreesForRepo.
+	// after the prune above.
 	r.prune()
 
 	if len(r.errs) > 0 {
@@ -659,31 +686,6 @@ var (
 	repoGoneReapMatching          = reapWorktreeWritersMatching
 	repoGoneOpenWorkingDir        = proctree.OpenWorkingDir
 )
-
-// shouldRemoveWorktreeDir decides whether Cleanup may delete the worktree
-// directory itself after `git worktree remove -f` returned removeErr. It is the
-// #802/#726 decision tree documented at the call site.
-//
-// It no longer needs its own timeout guard: the probe runs through r.git, so a
-// timed-out probe marks the run unknown and r.removeDir refuses regardless of what
-// this returns. That is the point of the run — the safety no longer depends on this
-// function remembering anything. It still refuses on an UNKNOWN registration rather
-// than falling back to the string gate, so a probe that could not be asked is never
-// read as "not ours" (#1917 round 4).
-func (r *cleanupRun) shouldRemoveWorktreeDir(removeErr error) bool {
-	registered, ok := r.registered()
-	if !ok && r.unknown {
-		// The probe TIMED OUT. Never act on a verdict we could not obtain, and never
-		// re-enter the unbounded delete on a filesystem that just stalled. The run
-		// is already unknown, so the record is retained and a retry can finish.
-		//
-		// This branch is the RUN's, not the rule's — which is why it lives here and
-		// the rule itself is the shared function below. Conflating a stall with an
-		// error was itself a bug (found reviewing #1917's own diff).
-		return false
-	}
-	return mayDeleteWorktreeDir(registered, ok, removeErr)
-}
 
 // isWorktreeRegistered reports whether git still lists g.worktreePath as a
 // registered worktree of the repo. Used after a failed `git worktree remove`
@@ -878,109 +880,4 @@ func pathAtOrUnder(root, p string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
-}
-
-// CleanupWorktreesForRepo removes all worktrees and their associated branches
-// for the given repo root. The main worktree (the repo itself) is preserved.
-// The repoRoot must be the main repo path; callers should resolve linked
-// worktree paths to the main repo root before invoking this function.
-func CleanupWorktreesForRepo(repoRoot string) error {
-	if repoRoot == "" {
-		return fmt.Errorf("repo root is empty")
-	}
-
-	// Skip cleanup if the repo path no longer exists on disk. `af reset`
-	// iterates over collected repo roots, which may include deleted, moved,
-	// or unmounted paths; without this check, `git -C` would fail and abort
-	// the entire reset before subsequent repos (and DeleteAllInstances) ran.
-	if _, err := os.Stat(repoRoot); os.IsNotExist(err) {
-		log.WarningLog.Printf("skipping cleanup for deleted repo: %s", repoRoot)
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to access repo path: %w", err)
-	}
-
-	// List all worktrees from the repo. If the path exists but is no longer a
-	// git repo (e.g. `.git` was removed), `git -C` exits non-zero. Treat that
-	// like the missing-directory case above: log and skip, so `af reset` can
-	// still clean up other repos and reset storage (issue #370).
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain")
-	output, err := cmd.Output()
-	if err != nil {
-		log.WarningLog.Printf("skipping cleanup for non-git path: %s", repoRoot)
-		return nil
-	}
-
-	// Parse output to get (worktreePath, branchName) pairs.
-	// Each block is separated by a blank line. A worktree may have no branch (detached HEAD).
-	type worktreeInfo struct {
-		path   string
-		branch string // empty if detached HEAD
-	}
-	var worktrees []worktreeInfo
-	currentPath := ""
-	currentBranch := ""
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		} else if strings.HasPrefix(line, "branch ") {
-			branchPath := strings.TrimPrefix(line, "branch ")
-			currentBranch = strings.TrimPrefix(branchPath, "refs/heads/")
-		} else if line == "" {
-			if currentPath != "" {
-				worktrees = append(worktrees, worktreeInfo{path: currentPath, branch: currentBranch})
-			}
-			currentPath = ""
-			currentBranch = ""
-		}
-	}
-	// Handle last entry if output doesn't end with a blank line
-	if currentPath != "" {
-		worktrees = append(worktrees, worktreeInfo{path: currentPath, branch: currentBranch})
-	}
-
-	// Skip the first entry (the main worktree / repo itself)
-	if len(worktrees) > 1 {
-		for _, wt := range worktrees[1:] {
-			// Remove the worktree FIRST (git refuses to delete a branch checked out in a worktree)
-			removeCmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "-f", wt.path)
-			if err := removeCmd.Run(); err != nil {
-				log.ErrorLog.Printf("failed to remove worktree %s: %v", wt.path, err)
-				// Fallback: remove directory manually. Unconditional — no
-				// registration re-check needed here, unlike Cleanup(): wt.path
-				// was emitted by `git worktree list` moments ago, so git
-				// ownership is already established, and `af reset` semantics
-				// are "tear everything down" (#802 audit).
-				if err := os.RemoveAll(wt.path); err != nil {
-					log.ErrorLog.Printf("failed to remove worktree directory %s: %v", wt.path, err)
-				}
-			}
-
-			// Prune stale worktree metadata (best-effort) BEFORE deleting the
-			// branch. When the `git worktree remove -f` above fails and we fall
-			// back to os.RemoveAll, git still tracks the worktree internally,
-			// causing `git branch -D` to fail with "branch is checked out".
-			pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
-			if err := pruneCmd.Run(); err != nil {
-				log.ErrorLog.Printf("failed to prune worktree metadata before deleting branch %s: %v", wt.branch, err)
-			}
-
-			// THEN delete the branch
-			if wt.branch != "" {
-				deleteCmd := exec.Command("git", "-C", repoRoot, "branch", "-D", wt.branch)
-				if err := deleteCmd.Run(); err != nil {
-					log.ErrorLog.Printf("failed to delete branch %s: %v", wt.branch, err)
-				}
-			}
-		}
-	}
-
-	// Prune worktree references
-	pruneCmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
-	if _, err := pruneCmd.Output(); err != nil {
-		return fmt.Errorf("failed to prune worktrees: %w", err)
-	}
-
-	return nil
 }

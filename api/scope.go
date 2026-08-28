@@ -160,21 +160,30 @@ func (c *projectIDCache) resolve(projectPath string) config.ResolvedProject {
 	return got
 }
 
-// sessionRepoRoot derives the root of the project a session belongs to FROM THE
-// SESSION'S OWN RECORD, mirroring Storage's root→repoID derivation (#667): the
-// worktree's RepoPath is the canonical root (sessions create stores the
-// git-resolved repo.Root there), and Path is the fallback for worktree-less
-// rows (remote backends). Returns "" when neither is known.
-//
-// Shared by `archive --self` and `whoami` so the two cannot drift. Hashing
-// data.Path directly is the trap this exists to prevent: Path is stored as
-// entered and may never have been git-resolved, so RepoIDFromRoot(data.Path)
-// can differ from the canonical ID of the very same project.
+// sessionRepoRoot returns the record's preferred project spelling for
+// diagnostics; identity decisions belong in sessionRepoID below.
 func sessionRepoRoot(data *session.InstanceData) string {
 	if data.Worktree.RepoPath != "" {
 		return data.Worktree.RepoPath
 	}
 	return data.Path
+}
+
+// sessionRepoID derives project identity FROM THE SESSION'S OWN RECORD. A
+// worktree's RepoPath is already the authoritative identity root (sessions
+// create stores RepoContext.IdentityPath there), so resolving it through Git
+// would let a surviving directory from a deleted nested repo adopt an unrelated
+// ancestor. Worktree-less remote rows retain the historical Path resolution.
+//
+// Shared by `archive --self` and `whoami` so the two cannot drift.
+func sessionRepoID(data *session.InstanceData) string {
+	if data.Worktree.RepoPath != "" {
+		return config.RepoIDForRecordedRoot(data.Worktree.RepoPath)
+	}
+	if data.Path != "" {
+		return config.RepoIDForPath(data.Path)
+	}
+	return ""
 }
 
 // requireTaskInScope enforces the contract on a task command that takes an id.
@@ -213,11 +222,11 @@ func requireTaskInScope(t *task.Task, scope projectScope) error {
 // intended project, and leaving the automation invisible from that project's
 // view.
 //
-// This deliberately keys off the RESOLVED repo root, not the cwd. Sessions run
-// in linked worktrees under af's home (worktrees/, archived/) and those resolve
-// back to the real project root (config.CurrentRepo), so agents working inside
-// a normal session never trip this — only a self-contained clone does, which is
-// precisely the accident being guarded.
+// This deliberately keys off the RESOLVED repo identity, not the cwd or
+// operational workspace. Sessions run in linked worktrees under af's home
+// (worktrees/, archived/), and a bare repository has no main checkout to put in
+// Root, so IdentityPath is the one value that distinguishes those legitimate
+// workspaces from a self-contained clone under the home.
 //
 // An explicit --repo is the escape hatch: a caller who names the path has
 // stated the binding rather than inherited it, so legitimate uses stay open.
@@ -229,11 +238,12 @@ func guardProjectBinding(repo *config.RepoContext, explicit bool) error {
 	if err != nil {
 		return nil // cannot tell; never block on an unrelated failure
 	}
-	if !pathIsInside(home, repo.Root) {
+	identity := repo.IdentityPath()
+	if !pathIsInside(home, identity) {
 		return nil
 	}
 	return fmt.Errorf("--repo is required here: the current directory resolves to the git repository %s, which is inside af's home (%s) — that is a stray clone, not a project, and binding to it hides the automation from the intended project's view. Pass --repo <project path> to name the project explicitly",
-		repo.Root, home)
+		identity, home)
 }
 
 // pathIsInside reports whether child is parent or lives beneath it, comparing

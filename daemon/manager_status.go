@@ -689,4 +689,4 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 // as a straight per-repo marshal (#960 PR 4). With the daemon the sole writer of
 // instances.json there is no competing snapshot to reconcile, so this is no
 // longer a merge. Every mutation already persists through a targeted writer
-// (appendInstanceData / persistInstanceData / DeleteInstance) as it happens; this
+// (appendInstanceData / persistInstanceData / DeleteInstanceByStableID) as it happens; this

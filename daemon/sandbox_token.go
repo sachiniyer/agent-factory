@@ -49,7 +49,7 @@ type sandboxTokenRegistry struct {
 	//
 	// It lives here rather than on the listener, and that IS the fix: the counter it
 	// replaces was the listener's binding generation, so it advanced for socket
-	// changes and stayed put for an auth-only change like require_token going false
+	// changes and stayed put for an auth-only change like network.require_token going false
 	// — and a mint in flight across that change survived the sweep meant to catch
 	// it. Every invalidation routes through revokeAll, so counting revokeAll counts
 	// invalidations by construction, whatever causes the next one.
@@ -157,15 +157,15 @@ func (r *sandboxTokenRegistry) invalidationCount() uint64 {
 
 // requireTokenFixHint is the one-line fix named by the refusal below. Kept beside
 // the refusal so the message and the key cannot drift.
-const requireTokenFixHint = "af config set require_token true"
+const requireTokenFixHint = "af config set network.require_token true"
 
 // errSandboxCallbackNeedsRequireToken refuses to hand a sandbox a credential for
 // a listener that does not ask for one (#2999).
 //
 // This is the load-bearing refusal, so the reasoning is here rather than at the
-// call site. require_token defaults to FALSE, and #2168 Phase 0 reversed #2090's
+// call site. network.require_token defaults to FALSE, and #2168 Phase 0 reversed #2090's
 // refusal to bind a tokenless network listener — af now binds it and warns once.
-// So the moment an operator points listen_addr somewhere a sandbox can reach, the
+// So the moment an operator points network.listen_addr somewhere a sandbox can reach, the
 // whole control plane answers every caller with no credential at all.
 //
 // Injecting a token into that would be worse than doing nothing: it manufactures
@@ -179,7 +179,7 @@ const requireTokenFixHint = "af config set require_token true"
 // single config key that fixes it, is the only honest option.
 func errSandboxCallbackNeedsRequireToken() error {
 	return fmt.Errorf(
-		"refusing to give this sandbox a callback credential: require_token is false, so the daemon's "+
+		"refusing to give this sandbox a callback credential: network.require_token is false, so the daemon's "+
 			"listener accepts requests with no token and a scoped credential would enforce nothing. "+
 			"Enable it first: %s",
 		requireTokenFixHint,
@@ -232,17 +232,17 @@ func (m *Manager) mintSandboxCallbackFenced(fence uint64, cfg *config.Config, se
 	// the address is the first of those reads.
 	//
 	// It counts INVALIDATIONS, not listener rebinds (#3065 review). The listener
-	// generation could not see an auth-only change: require_token going false
+	// generation could not see an auth-only change: network.require_token going false
 	// revokes every credential without touching a socket, so the generation stayed
 	// put and a mint in flight across it survived the sweep — provisioning a sandbox
 	// against a daemon that had just stopped authenticating anyone.
 	active := m.activeWebConfigAddr(cfg.ListenAddr)
 	if strings.TrimSpace(active) == "" && strings.TrimSpace(cfg.ListenAddr) != "" {
-		return sandboxGrant{}, fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix listen_addr", cfg.ListenAddr)
+		return sandboxGrant{}, fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is %q but no control-plane listener is accepting on it, so a callback would have nothing to reach. Check the daemon log for the bind failure and fix network.listen_addr", cfg.ListenAddr)
 	}
 	// Dialability first, posture second. Both refuse before any secret exists, but
-	// the ORDER decides which message an operator reads, and a loopback listen_addr
-	// used to answer "enable require_loopback_token" — advice that would have led
+	// the ORDER decides which message an operator reads, and a loopback network.listen_addr
+	// used to answer "enable network.require_loopback_token" — advice that would have led
 	// them to a well-enforced credential their sandbox still could not use.
 	url, err := sandboxCallbackURL(active)
 	if err != nil {
@@ -293,7 +293,7 @@ func (g sandboxGrant) stillValid(r *sandboxTokenRegistry) bool {
 // same event — something voided every outstanding credential while this create was
 // in flight — and the same action answers both.
 func errSandboxCallbackInvalidated(url string) error {
-	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's callback posture changed while this session was being provisioned — the control listener moved or closed, or require_token was disabled — so the callback address %q may already be dead. Retry the create", url)
+	return fmt.Errorf("refusing to give this sandbox a callback credential: the daemon's callback posture changed while this session was being provisioned — the control listener moved or closed, or network.require_token was disabled — so the callback address %q may already be dead. Retry the create", url)
 }
 
 // activeWebConfigAddr is the config address behind the control-plane listener that
@@ -307,7 +307,7 @@ func (m *Manager) activeWebConfigAddr(requested string) string {
 	return m.webListeners.webConfigAddress()
 }
 
-// sandboxCallbackURL renders listen_addr as a URL a sandbox can dial, or refuses.
+// sandboxCallbackURL renders network.listen_addr as a URL a sandbox can dial, or refuses.
 //
 // It never rewrites an address into something routable: guessing an
 // externally-reachable one would invent a fact about the operator's network, and a
@@ -319,11 +319,11 @@ func (m *Manager) activeWebConfigAddr(requested string) string {
 func sandboxCallbackURL(listenAddr string) (string, error) {
 	addr := strings.TrimSpace(listenAddr)
 	if addr == "" {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr is empty, so the daemon serves no HTTP listener for it to call back to. Set listen_addr to an address the sandbox can reach")
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr is empty, so the daemon serves no HTTP listener for it to call back to. Set network.listen_addr to an address the sandbox can reach")
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is not host:port, so no callback URL can be derived from it", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q is not host:port, so no callback URL can be derived from it", addr)
 	}
 	// A BIND address is not automatically a DIALABLE one, and the difference is not
 	// cosmetic: a wildcard or empty host means "every interface HERE", which from
@@ -354,13 +354,13 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	//     (the ssh runtime tunnels daemon→sandbox only).
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q does not name a literal IP address, and a hostname is resolved by the SANDBOX rather than by this daemon — af cannot know what it points at over there. Set listen_addr to a literal IP the sandbox can reach", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q does not name a literal IP address, and a hostname is resolved by the SANDBOX rather than by this daemon — af cannot know what it points at over there. Set network.listen_addr to a literal IP the sandbox can reach", addr)
 	}
 	if ip.IsUnspecified() {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set listen_addr to an address the sandbox can reach", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q binds every interface, which names the SANDBOX rather than the daemon when dialled from inside one. Set network.listen_addr to an address the sandbox can reach", addr)
 	}
 	if ip.IsLoopback() {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set listen_addr to an address the sandbox can reach", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q is loopback, so a sandbox dialling it reaches ITSELF rather than this daemon — and nothing forwards the other way (the ssh runtime tunnels daemon→sandbox only). Set network.listen_addr to an address the sandbox can reach", addr)
 	}
 	// The port is RESOLVED rather than string-matched, for the same reason as the
 	// host above: "", "0", "00" and "000" are four spellings of port zero, they all
@@ -370,10 +370,10 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 	// it rejects could not have been bound either.
 	resolved, perr := net.LookupPort("tcp", port)
 	if perr != nil {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q has no resolvable port, so no callback URL can be derived from it", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q has no resolvable port, so no callback URL can be derived from it", addr)
 	}
 	if resolved == 0 {
-		return "", fmt.Errorf("refusing to give this sandbox a callback credential: listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
+		return "", fmt.Errorf("refusing to give this sandbox a callback credential: network.listen_addr %q asks the kernel to choose a port, so no fixed callback URL exists. Set an explicit port", addr)
 	}
 	// The RESOLVED port goes into the URL, so a service name ("…:http") becomes a
 	// number the sandbox's HTTP client can dial rather than being passed through.
@@ -383,10 +383,10 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 // sandboxCallbackPostureOK reports whether a credential handed out now would
 // actually be CHECKED when it comes back (#3012 review).
 //
-// require_token alone does not establish that, and believing it did was the
+// network.require_token alone does not establish that, and believing it did was the
 // original bug in this refusal. authGate.authRequired exempts loopback peers
-// BEFORE it looks at any token, so on a loopback listen_addr with
-// require_loopback_token at its default false a same-host or host-network
+// BEFORE it looks at any token, so on a loopback network.listen_addr with
+// network.require_loopback_token at its default false a same-host or host-network
 // sandbox reaches the whole control plane with no credential — and therefore no
 // scope at all. Minting there hands out something ceremonial and calls it a
 // boundary.
@@ -394,7 +394,7 @@ func sandboxCallbackURL(listenAddr string) (string, error) {
 // The predicate is "will this request be authenticated", not "is a config key
 // set", which is why it mirrors the gate's own terms rather than restating them.
 //
-// It no longer carries a require_loopback_token branch. That check existed because
+// It no longer carries a network.require_loopback_token branch. That check existed because
 // authGate exempts loopback peers before examining any token, so a loopback
 // listener would have enforced no scope — but sandboxCallbackURL now refuses every
 // loopback address outright, as undialable from a sandbox, so this is only ever

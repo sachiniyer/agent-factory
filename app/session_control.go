@@ -280,7 +280,7 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // Persistence happens before that refresh; UpdateTask reports the committed
 // outcome explicitly if the refresh fails so the pane advances its baseline.
 // Like the tab
-// create/close RPCs (handleNewTab/handleCloseTab), these are quick daemon writes
+// create/close RPCs (createNewTab/handleCloseTab), these are quick daemon writes
 // dispatched synchronously on the event loop — not the tens-of-seconds ssh
 // teardowns that motivate the async kill/archive cmds — so saveContentPaneState
 // keeps its synchronous error-return contract and its callers still gate on it.

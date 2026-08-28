@@ -103,6 +103,7 @@ Three ideas carry the whole tool.
   their tabs and scheduled tasks.
 
 ```bash
+af sessions list --live --max-age 24h --limit 50
 af sessions create --name fix-auth --prompt "Fix the login redirect loop"
 af sessions preview fix-auth
 af sessions watch fix-auth      # block until it goes idle
@@ -125,7 +126,7 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
 - **Backends** — sessions run locally by default. Set a repo's `backend` key to
   `docker` to run in a container (with `docker.image`), to `ssh` to run on
   another machine (with `ssh.host`), to `sandbox` through the operator's
-  `sandbox_ssh` command, or to `hook` to launch on your own infrastructure. See
+  global `sandbox.ssh` command, or to `hook` to launch on your own infrastructure. See
   [backends](docs/backends.md).
 - **Account scoping** — register separate Claude or Codex credential homes with
   `af accounts add`, then select one for a local or docker session with
@@ -193,9 +194,9 @@ the daemon that answered, and whether that daemon has applied the config on disk
 ## Exposing it beyond localhost
 
 The web UI and HTTP API listen on `127.0.0.1:8443` and skip auth on loopback.
-Pointing `listen_addr` at a routable address exposes them to your network, so
-set `require_token = true` or keep it behind a VPN or proxy — the listener is
-plain HTTP. Turn the web UI off entirely with `listen_addr = ""`. See
+Pointing `network.listen_addr` at a routable address exposes them to your network, so
+set `network.require_token = true` or keep it behind a VPN or proxy — the listener is
+plain HTTP. Turn the web UI off entirely with `network.listen_addr = ""`. See
 [remote daemon access](docs/remote-http-auth.md).
 
 ## Maintenance

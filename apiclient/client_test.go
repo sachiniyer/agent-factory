@@ -92,13 +92,21 @@ func TestClientSnapshot_RoundTripsStructsByteIdentically(t *testing.T) {
 		return apiproto.Success(daemon.SnapshotResponse{Instances: want})
 	})
 
-	got, err := c.Snapshot(daemon.SnapshotRequest{RepoID: "repo-x"})
+	limit := 7
+	wantReq := daemon.SnapshotRequest{
+		RepoID:       "repo-x",
+		Live:         true,
+		Statuses:     []string{"ready", "running"},
+		CreatedAfter: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC),
+		Limit:        &limit,
+	}
+	got, err := c.Snapshot(wantReq)
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
 	}
 
-	if gotReq.RepoID != "repo-x" {
-		t.Fatalf("repo scoping lost: server saw RepoID=%q, want repo-x", gotReq.RepoID)
+	if !reflect.DeepEqual(gotReq, wantReq) {
+		t.Fatalf("snapshot request fields lost across HTTP: got %+v, want %+v", gotReq, wantReq)
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded structs differ from server payload:\n got=%+v\nwant=%+v", got, want)

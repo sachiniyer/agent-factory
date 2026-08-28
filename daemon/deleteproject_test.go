@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 
@@ -260,6 +261,98 @@ func TestDeleteProject_RepoIDOnlyRegistryReadFailureLeavesProjectIntact(t *testi
 	assert.Equal(t, session.LiveReady, inst.GetLiveness())
 	_, statErr := os.Stat(source)
 	assert.NoError(t, statErr, "the live worktree must remain in place")
+}
+
+func TestRegisteredProjectRootForRepoID_ResolvesBareWorktreeIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	worktree := filepath.Join(base, "worktree")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", source).Run())
+	commit := exec.Command("git", "-C", source, "commit", "--allow-empty", "-m", "initial")
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	require.NoError(t, commit.Run())
+	require.NoError(t, exec.Command("git", "clone", "--bare", source, bare).Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", worktree).Run())
+	_, err := config.RegisterProject(worktree)
+	require.NoError(t, err)
+	repo, err := config.RepoFromPath(worktree)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(repo.ID)
+	require.NoError(t, err)
+	assert.Equal(t, worktree, got,
+		"repo-ID-only deletion must recover the registered linked workspace from bare identity")
+}
+
+func TestDeleteProjectWithBareIdentityPathDeregistersLinkedWorkspace(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	bare := filepath.Join(base, "origin.git")
+	worktree := filepath.Join(base, "worktree")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", source).Run())
+	commit := exec.Command("git", "-C", source, "commit", "--allow-empty", "-m", "initial")
+	commit.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	require.NoError(t, commit.Run())
+	require.NoError(t, exec.Command("git", "clone", "--bare", source, bare).Run())
+	require.NoError(t, exec.Command("git", "-C", bare, "worktree", "add", worktree).Run())
+	_, err := config.RegisterProject(worktree)
+	require.NoError(t, err)
+	repo, err := config.RepoFromPath(worktree)
+	require.NoError(t, err)
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repo.ID, RepoPath: bare})
+	require.NoError(t, err)
+	assert.True(t, result.Deregistered,
+		"a validated bare identity selector must remove its registered linked workspace")
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	assert.Empty(t, projects)
+}
+
+func TestRegisteredProjectRootForRepoID_RejectsStaleNestedCheckoutAncestor(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	outer := filepath.Join(testguard.CanonicalTempDir(t), "outer")
+	nested := filepath.Join(outer, "nested")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", outer).Run())
+	require.NoError(t, exec.Command("git", "init", "-b", "main", nested).Run())
+	_, err := config.RegisterProject(nested)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(nested, ".git")))
+	outerRepo, err := config.RepoFromPath(outer)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(outerRepo.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got,
+		"a stale nested registration must not resolve upward and select its enclosing repository")
+}
+
+func TestRegisteredProjectRootForRepoID_RejectsReplacementCheckout(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	root := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	require.NoError(t, exec.Command("git", "init", "-b", "main", root).Run())
+	_, err := config.RegisterProject(root)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, ".git")))
+	require.NoError(t, exec.Command("git", "init", "-b", "main", root).Run())
+	replacement, err := config.RepoFromPath(root)
+	require.NoError(t, err)
+
+	got, err := registeredProjectRootForRepoID(replacement.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got,
+		"a reused path without the registered checkout marker must not be deregistered as the replacement repo")
 }
 
 // TestDeleteProject_RejectsMismatchedRepoIDAndPath prevents a split-target

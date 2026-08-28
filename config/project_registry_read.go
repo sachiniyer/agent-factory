@@ -259,7 +259,10 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 		return fmt.Errorf("project %s has relative root outside its checkout: %q", record.ID, record.RelativeRoot)
 	}
 	wantRoot := filepath.Clean(filepath.Join(record.CheckoutRoot, cleanRelative))
-	if !sameProjectPath(wantRoot, record.Root) {
+	// Stored roots are already required to be clean absolute paths, so their
+	// schema relationship is lexical. Consulting the live filesystem here would
+	// let one unrelated stalled checkout block every registry-backed config read.
+	if wantRoot != record.Root {
 		return fmt.Errorf("project %s root %s does not match checkout root %s plus relative root %s", record.ID, record.Root, record.CheckoutRoot, record.RelativeRoot)
 	}
 	return nil

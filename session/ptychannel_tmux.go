@@ -25,10 +25,8 @@ import (
 type tmuxClientlessChannel struct {
 	ts *tmux.TmuxSession
 
-	mu   sync.Mutex
-	dir  string         // temp dir holding the FIFO, removed after its reader drains
-	fifo string         // FIFO path pipe-pane writes to
-	rc   *captureReader // read end of the FIFO
+	mu sync.Mutex
+	rc *captureReader // read end of the FIFO
 }
 
 // captureReader wraps the FIFO's read end so capture teardown can drain every
@@ -183,7 +181,7 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		return nil, err
 	}
 	rc := &captureReader{f: f, keepalive: keepalive, dir: dir}
-	c.dir, c.fifo, c.rc = dir, fifo, rc
+	c.rc = rc
 	return rc, nil
 }
 
@@ -197,7 +195,7 @@ func (c *tmuxClientlessChannel) StopCapture() error {
 	}
 	err := c.ts.DisablePipePane()
 	_ = c.rc.stop(err == nil)
-	c.dir, c.fifo, c.rc = "", "", nil
+	c.rc = nil
 	return err
 }
 
