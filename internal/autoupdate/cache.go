@@ -130,14 +130,3 @@ func (cache *CheckCache) Record(channel, lastSeenTag, currentVersion string, now
 	data = append(data, '\n')
 	return config.AtomicWriteFile(cache.path, data, 0644)
 }
-
-// RecordCheck updates path under the blocking cache lock. This is for
-// bookkeeping outside an already-locked update cycle.
-func RecordCheck(path, channel, lastSeenTag, currentVersion string) error {
-	if path == "" {
-		return nil
-	}
-	return config.WithFileLock(path, func() error {
-		return ReadCheckCache(path).Record(channel, lastSeenTag, currentVersion, time.Now().UTC())
-	})
-}
