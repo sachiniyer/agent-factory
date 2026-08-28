@@ -274,11 +274,11 @@ func TestStartNewRemoteInvalidHooksStillErrors(t *testing.T) {
 	h.errBox.SetSize(120, 1)
 	repo, err := config.CurrentRepo()
 	require.NoError(t, err)
-	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
 		RemoteHooks: &config.RemoteHooks{
 			DeleteCmd: "/bin/echo",
 		},
-	}))
+	})
 
 	model, cmd := h.startNewInstance(true)
 

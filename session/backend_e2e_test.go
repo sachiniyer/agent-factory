@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,22 @@ func writeE2EScript(t *testing.T, dir, name, body string) string {
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte("#!/usr/bin/env bash\nset -euo pipefail\n"+body), 0755))
 	return path
+}
+
+// writeLegacyRepoConfig materializes the legacy per-repo config at
+// ~/.agent-factory/repos/<repoID>/config.json with the given RepoConfig.
+// Production code stopped writing here after #800 pulled writes into the
+// in-repo file; only test fixtures need this writer, so it lives in test scope.
+func writeLegacyRepoConfig(t *testing.T, repoID string, cfg *config.RepoConfig) {
+	t.Helper()
+	configDir, err := config.GetConfigDir()
+	require.NoError(t, err)
+	dir := filepath.Join(configDir, "repos", repoID)
+	path := filepath.Join(dir, config.RepoConfigFileName)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0644))
 }
 
 func TestE2ELocalBackendStillWorks(t *testing.T) {
@@ -82,7 +99,7 @@ func TestE2EBackendResolutionRejectsEmptyHookCommands(t *testing.T) {
 			DeleteCmd: "/bin/echo",
 		},
 	}
-	require.NoError(t, config.SaveRepoConfig(repo.ID, cfg))
+	writeLegacyRepoConfig(t, repo.ID, cfg)
 
 	// loadRemoteHooksForPathIfConfigured must reject an empty launch_cmd.
 	_, _, err = loadRemoteHooksForPathIfConfigured(repoDir)
@@ -192,12 +209,12 @@ func TestE2EBackendResolutionWithInRepoConfig(t *testing.T) {
 	// A conflicting legacy config is shadowed by the in-repo file.
 	repo, err := config.RepoFromPath(repoDir)
 	require.NoError(t, err)
-	require.NoError(t, config.SaveRepoConfig(repo.ID, &config.RepoConfig{
+	writeLegacyRepoConfig(t, repo.ID, &config.RepoConfig{
 		RemoteHooks: &config.RemoteHooks{
 			LaunchCmd: "/bin/echo legacy",
 			DeleteCmd: "/bin/echo",
 		},
-	}))
+	})
 
 	hooks, _, err := loadRemoteHooksForPathIfConfigured(repoDir)
 	require.NoError(t, err)

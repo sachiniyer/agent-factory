@@ -121,10 +121,10 @@ func TestResolveConfigRepoFields(t *testing.T) {
 	t.Run("legacy location still works as fallback", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		repoID := RepoIDFromRoot(repoRoot)
-		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{
+		writeLegacyRepoConfig(t, repoID, &RepoConfig{
 			PostWorktreeCommands: []string{"legacy-cmd"},
 			RemoteHooks:          hooks,
-		}))
+		})
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
@@ -136,10 +136,10 @@ func TestResolveConfigRepoFields(t *testing.T) {
 	t.Run("in-repo shadows legacy", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		repoID := RepoIDFromRoot(repoRoot)
-		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{
+		writeLegacyRepoConfig(t, repoID, &RepoConfig{
 			PostWorktreeCommands: []string{"legacy-cmd"},
 			RemoteHooks:          hooks,
-		}))
+		})
 		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": ["new-cmd"], "remote_hooks": {"launch_cmd": "l2", "delete_cmd": "d2"}}`)
 
 		res, err := ResolveConfig(repoRoot)
@@ -151,7 +151,7 @@ func TestResolveConfigRepoFields(t *testing.T) {
 	t.Run("explicit empty in-repo key disables legacy value", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		repoID := RepoIDFromRoot(repoRoot)
-		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{PostWorktreeCommands: []string{"legacy-cmd"}}))
+		writeLegacyRepoConfig(t, repoID, &RepoConfig{PostWorktreeCommands: []string{"legacy-cmd"}})
 		writeInRepoConfig(t, repoRoot, `{"post_worktree_commands": []}`)
 
 		res, err := ResolveConfig(repoRoot)
@@ -196,12 +196,12 @@ func TestResolveConfigResolvesHookPaths(t *testing.T) {
 	t.Run("legacy-location relative paths get the same resolution", func(t *testing.T) {
 		repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 		repoID := RepoIDFromRoot(repoRoot)
-		require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{
+		writeLegacyRepoConfig(t, repoID, &RepoConfig{
 			RemoteHooks: &RemoteHooks{
 				LaunchCmd: "./hooks/launch.sh",
 				DeleteCmd: "coder-delete",
 			},
-		}))
+		})
 
 		res, err := ResolveConfig(repoRoot)
 		require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestResolveConfigLegacyDeprecationLog(t *testing.T) {
 	buf := captureLog(t, &aflog.WarningLog)
 	repoRoot := setupResolveTest(t, `{"default_program": "claude"}`)
 	repoID := RepoIDFromRoot(repoRoot)
-	require.NoError(t, SaveRepoConfig(repoID, &RepoConfig{PostWorktreeCommands: []string{"legacy-cmd"}}))
+	writeLegacyRepoConfig(t, repoID, &RepoConfig{PostWorktreeCommands: []string{"legacy-cmd"}})
 
 	_, err := ResolveConfig(repoRoot)
 	require.NoError(t, err)
