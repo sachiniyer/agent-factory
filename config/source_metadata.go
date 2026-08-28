@@ -32,6 +32,7 @@ func metadataForSource(data []byte, path string, format ConfigFormat) (sourceMet
 	shape := make(map[string]any)
 	switch format {
 	case FormatTOML:
+		data = stripUTF8BOM(data)
 		if err := toml.Unmarshal(data, &shape); err != nil {
 			return sourceMetadata{}, err
 		}

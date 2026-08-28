@@ -61,6 +61,7 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 		}
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
+	current = stripUTF8BOM(current)
 	updated := string(current)
 	removed := false
 	if structured {
@@ -130,6 +131,7 @@ func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", prettyPath, err)
 		}
+		current = stripUTF8BOM(current)
 		updated, groupedRemoved := deleteTOMLScalar(string(current), alias.section, alias.leaf)
 		updated, legacyRemoved := deleteTOMLScalar(updated, "", alias.legacy)
 		if !groupedRemoved && !legacyRemoved {
