@@ -41,7 +41,7 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 	pidFile := filepath.Join(dir, "escapee.pid")
 	// nohup makes the sleeper ignore the SIGHUP that `tmux kill-session`
 	// delivers, so without reaping it would outlive the session forever.
-	script := fmt.Sprintf("nohup sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300", pidFile)
+	script := "nohup sleep 300 >/dev/null 2>&1 & " + recordPIDShell("$!", pidFile) + "; exec sleep 300"
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
 
@@ -393,6 +393,10 @@ func TestCleanupSessionsRefusesChildForkedDuringPartialRecoveryGrace(t *testing.
 
 	err := CleanupSessions(partialCaptureThenAbsentAfterTriggerExecutor(t, name, trigger, parentPIDFile))
 	require.ErrorContains(t, err, "has no AF_SESSION marker")
+	// The assertion above already proves the child existed and was captured —
+	// nothing else in this fixture is unmarked — so this rendezvous only waits
+	// out the child's own write, and cannot mask a child that never appeared.
+	waitForPIDFile(t, childPIDFile)
 	child := processFromPIDFile(t, childPIDFile)
 	require.True(t, proctree.AliveSame(child),
 		"an unmarked child discovered during recovery must be retained, not signalled")
@@ -606,7 +610,7 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	if len(generation) > 0 {
 		args = append(args, "-e", EnvMarkerGeneration+"="+generation[0])
 	}
-	args = append(args, fmt.Sprintf("nohup sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300", pidFile))
+	args = append(args, "nohup sleep 300 >/dev/null 2>&1 & "+recordPIDShell("$!", pidFile)+"; exec sleep 300")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
 
@@ -640,7 +644,7 @@ func spawnSessionWaitingToStartHelper(t *testing.T, name, home string) (trigger,
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "late-helper.pid")
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"nohup sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300", trigger, pidFile)
+		"nohup sleep 300 >/dev/null 2>&1 & %s; exec sleep 300", trigger, recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
@@ -927,8 +931,8 @@ func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (
 	trigger = filepath.Join(dir, "start-helper")
 	pidFile = filepath.Join(dir, "unmarked-helper.pid")
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300",
-		trigger, pidFile)
+		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		trigger, recordPIDShell("$!", pidFile))
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
@@ -952,10 +956,25 @@ func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (t
 	trigger = filepath.Join(dir, "start-parent")
 	parentPIDFile = filepath.Join(dir, "marked-parent.pid")
 	childPIDFile = filepath.Join(dir, "unmarked-child.pid")
+	// The CHILD records its own pid, from a script file rather than a second
+	// level of nested single quotes. Two reasons, both about who may be killed:
+	//
+	//   - The marked parent is SIGTERMed by the very sweep this test observes.
+	//     Recording the child from the parent puts that write inside a window its
+	//     own killer can interrupt, and no rename can help a process that never
+	//     reaches it. The child is the one process this test asserts is NEVER
+	//     signalled, so it is the safe writer.
+	//   - `$!` is the pid of `nohup`, which is the sleeper's pid only because
+	//     setsid happens not to fork here (it forks only when already a process
+	//     group leader). `$$` inside the child is right either way.
+	recorder := filepath.Join(dir, "record-child-pid.sh")
+	require.NoError(t, os.WriteFile(recorder, []byte("#!/bin/sh\n"+
+		recordPIDShell("$$", "$1")+"\nexec sleep 300\n"), 0o700))
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"nohup sh -c 'echo $$ > %s; sleep 0.1; "+
-		"nohup env -u AF_SESSION -u AF_HOME setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300' "+
-		">/dev/null 2>&1 & exec sleep 300", trigger, parentPIDFile, childPIDFile)
+		"nohup sh -c '%s; sleep 0.1; "+
+		"nohup env -u AF_SESSION -u AF_HOME setsid sh %s %s >/dev/null 2>&1 & exec sleep 300' "+
+		">/dev/null 2>&1 & exec sleep 300",
+		trigger, recordPIDShell("$$", parentPIDFile), recorder, childPIDFile)
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
@@ -1061,4 +1080,19 @@ func TestCloseDoesNotReapWhenSessionSurvives(t *testing.T) {
 	time.Sleep(3 * reapGraceWait)
 	require.NoError(t, child.Process.Signal(syscall.Signal(0)),
 		"processes of a session that survived kill-session must not be reaped")
+}
+
+// recordPIDShell renders a shell fragment that records a pid into pidFile
+// ATOMICALLY: write a sibling temp file, then rename over the target.
+//
+// `echo $! > f` is TWO steps — open(O_CREAT|O_TRUNC), then write — so between
+// them the file EXISTS and is EMPTY. A reader that lands there gets "" and
+// fails with `strconv.Atoi: parsing "": invalid syntax`, a very long way from
+// the cause; a writer killed there leaves the empty file behind permanently.
+// Neither is hypothetical: a tight reader loop against the un-renamed form
+// caught the empty window in 119 of 300 runs of this fixture, and 0 of 300 with
+// the rename. rename(2) is atomic within a directory, so a reader can only ever
+// observe "not there yet" or the complete pid (#3469 CI, run 33149836815).
+func recordPIDShell(pidExpr, pidFile string) string {
+	return fmt.Sprintf("echo %s > \"%s.tmp\" && mv \"%s.tmp\" \"%s\"", pidExpr, pidFile, pidFile, pidFile)
 }
