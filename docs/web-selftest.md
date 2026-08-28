@@ -64,9 +64,13 @@ bundle works. This harness deliberately serves the **committed** `web/dist` rath
 than rebuilding, so it exercises the artifact a released binary embeds — which is
 also why you run `make web-build` before it locally.
 
-Failures give you Playwright's assertion output in the job log but no trace: the
-harness works inside the container's own copy of the tree, so its
-`web/test-results/` never reaches the host. Reproduce locally for a trace.
+Failures give you Playwright's assertion output in the job log **and** the trace.
+The harness works inside the container's own copy of the tree, so its
+`web/test-results/` used to die with the container on every failure (#3505) —
+`scripts/testbox.sh` now bind-mounts that directory, so the trace, the
+screenshots and the daemon logs land in `web/test-results/` on the host, and CI
+uploads them as the `web-selftest-artifacts` artifact on the run's page. Open one
+with `npx playwright show-trace web/test-results/<test>/trace.zip`.
 
 ## What it asserts
 
@@ -99,3 +103,15 @@ The harness is assertion-gated, so it needs no committed artifacts. Per-run
 Playwright outputs (`web/test-results/`, `web/playwright-report/`,
 `web/blob-report/`, `web/selftest/.last-run.json`) are git-ignored; a failing run
 retains a trace under `web/test-results/` for local debugging.
+
+That directory is bind-mounted into the container and **cleared on entry**
+(#3505), so it always holds exactly the last run — an upload can never ship a
+previous run's trace under this run's name. The container runs as root and hands
+ownership back on the way out, so the files are yours to delete. In CI the same
+directory is uploaded as `web-selftest-artifacts` (14-day retention); the upload
+is best-effort and cannot change the job's verdict either way.
+
+The trace records full request and response headers. There is no `Authorization`
+header in it only because the loopback browser is tokenless (#1696) — not because
+Playwright redacts anything. If this harness ever drives a token-bearing request,
+re-check what the upload would publish before trusting it.
