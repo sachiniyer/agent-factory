@@ -196,11 +196,6 @@ func (p *ProjectsPane) HandleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
-// root (#1024 R4): the section/project-row zones registered by String() resolve
-// to focus/switch actions there, so the pane-local fallback consumes nothing.
-func (p *ProjectsPane) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
-
 // SelectedProject returns the row under the cursor, or false when the section
 // holds no projects — the row Enter switches to.
 // HasProjects reports whether the section has any row to put a cursor on. With

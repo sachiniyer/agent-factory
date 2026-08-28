@@ -155,11 +155,6 @@ func (a *AutomationsPane) HandleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
-// root (#1024 R4): the section/task-row zones registered by String() resolve
-// to focus/select actions there, so the pane-local fallback consumes nothing.
-func (a *AutomationsPane) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
-
 // SetZoneRegistry wires the shared mouse hit-test registry (#1024 R4).
 func (a *AutomationsPane) SetZoneRegistry(reg *zones.Registry) {
 	a.zones = reg
