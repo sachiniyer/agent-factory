@@ -756,8 +756,12 @@ func (v *vscodeSupervisor) startOne(key, instanceID, binary string, flavor vscod
 	// ENOENT naming the BINARY ("fork/exec /usr/bin/code-server: no such file or
 	// directory"), which sends the user off debugging a code-server install that
 	// is perfectly fine. Name the directory that is actually missing instead.
-	if fi, err := os.Stat(worktree); err != nil || !fi.IsDir() {
-		return nil, fmt.Errorf("the session worktree %s is not a directory (has it been moved or removed?): %w", worktree, err)
+	fi, err := os.Stat(worktree)
+	if err != nil {
+		return nil, fmt.Errorf("the session worktree %s cannot be accessed (has it been moved or removed?): %w", worktree, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("the session worktree %s is not a directory", worktree)
 	}
 	// Clear a stale socket before the child binds. A crashed daemon (or a SIGKILL
 	// that outran stop's unlink) leaves the file behind, and bind() on an existing
