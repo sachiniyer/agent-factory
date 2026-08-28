@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -69,4 +70,49 @@ func TestLoadAllRepoInstancesReportingSkipsStaysNilWhenNothingIsSkipped(t *testi
 	_, ids, err := LoadAllRepoInstancesReportingSkips()
 	require.NoError(t, err)
 	require.Nil(t, ids)
+}
+
+// TestRepoInstancesSkipRemedyDoesNotSuggestDeletingNewerState is a data-loss
+// guard, not a wording preference.
+//
+// A file this binary is merely too OLD to parse lands in the same skip list as
+// one it cannot read, and the blanket "repair or remove the file(s)" advice
+// therefore told users to delete a NEWER af's session records — orphaning live
+// sessions and worktrees — while the underlying error was telling them to
+// upgrade. The remedy has to follow the cause.
+func TestRepoInstancesSkipRemedyDoesNotSuggestDeletingNewerState(t *testing.T) {
+	newer := []RepoInstancesSkip{{
+		RepoID: "future-repo",
+		Path:   "/af/instances/future-repo/instances.json",
+		Err: &UnsupportedSchemaVersionError{
+			StoreName: InstancesFileName, Path: "/af/instances/future-repo/instances.json",
+			FileVersion: 99, SupportedVersion: InstancesSchemaVersion,
+		},
+	}}
+	remedy := RepoInstancesSkipRemedy(newer)
+	// Assert on the ADVICE, not the vocabulary: "do not delete" is the opposite
+	// of recommending it, so match the destructive suggestion itself.
+	if strings.Contains(remedy, "repair or remove") {
+		t.Fatalf("must not advise removing a newer schema's records; got: %q", remedy)
+	}
+	if !strings.Contains(remedy, "do not delete") {
+		t.Errorf("a newer-schema skip should say plainly that deleting loses sessions; got: %q", remedy)
+	}
+	if !strings.Contains(remedy, "upgrade") {
+		t.Errorf("a newer-schema skip should point at the upgrade the error itself names; got: %q", remedy)
+	}
+
+	unreadable := []RepoInstancesSkip{{
+		RepoID: "blocked", Path: "/af/instances/blocked/instances.json", Err: os.ErrPermission,
+	}}
+	if remedy := RepoInstancesSkipRemedy(unreadable); !strings.Contains(remedy, "repair") {
+		t.Errorf("a plain read failure should still offer the repair advice; got: %q", remedy)
+	}
+
+	// Mixed: the destructive advice must not reappear just because one skip is
+	// an ordinary read failure.
+	mixed := append(append([]RepoInstancesSkip{}, newer...), unreadable...)
+	if remedy := RepoInstancesSkipRemedy(mixed); strings.Contains(remedy, "repair or remove") {
+		t.Errorf("a newer-schema skip anywhere in the set must suppress removal advice; got: %q", remedy)
+	}
 }

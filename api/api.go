@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -199,6 +200,16 @@ func resolveRepo() (*config.RepoContext, error) {
 	return repo, nil
 }
 
+// warnWriter is where a command's own caveats go — the "this answer is
+// INCOMPLETE" notices that accompany a successful result rather than replace it.
+// A package var so tests can capture them; production never reassigns it.
+//
+// Callers must gate writes on !envelopeOutput. Under --json, stderr carries the
+// {data,error} envelope, and a free-form line there hands automation invalid
+// JSON on a SUCCESSFUL command (#3169). See #3511 for the missing structural
+// channel that would let --json carry these too.
+var warnWriter io.Writer = os.Stderr
+
 // errTitleNotFound marks a definitive not-found from findInstanceByTitle: the
 // title matched no instance and every repo's instances.json parsed cleanly. A
 // corruption-tainted search returns a different (un-wrapped) error so callers
@@ -293,10 +304,17 @@ func repoPathsOf(matches []session.InstanceData) []string {
 // lone snapshot match can hide a second repo that also holds the title.
 // Corrupted per-repo files are skipped — this is a best-effort widening of an
 // already-successful lookup, so it must never turn a working read into an error.
-func diskRepoPathsForTitle(title string, known []string) ([]string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+//
+// The second return names repos whose file could not be READ, so the caller can
+// say the widening was incomplete instead of implying it was exhaustive (#3479).
+// Reported rather than refused, unlike the daemon's twin of this guard
+// (collectTitleRepoPathsOnDisk): that one gates the DESTRUCTIVE paths, which
+// resolve through findSession, while this backstops a read where breaking a
+// working lookup costs more than the wrong project name it would prevent.
+func diskRepoPathsForTitle(title string, known []string) ([]string, []config.RepoInstancesSkip, error) {
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	paths := append([]string(nil), known...)
 	for _, raw := range allInstances {
@@ -310,7 +328,7 @@ func diskRepoPathsForTitle(title string, known []string) ([]string, error) {
 			}
 		}
 	}
-	return session.DedupeSorted(paths), nil
+	return session.DedupeSorted(paths), unreadable, nil
 }
 
 // corruptedReposSuffix builds a sorted, human-readable clause naming the repos
@@ -357,9 +375,20 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 	// Don't silently substitute an empty/partial list when a repo file is
 	// corrupted (#730): warn naming each bad repo and fail loudly so users can
 	// tell "no sessions" apart from "sessions hidden behind a corrupt file."
-	allInstances, err := config.LoadAllRepoInstances()
+	//
+	// A file that could not be READ hides sessions identically, so it gets the
+	// same treatment rather than a softer one (#3479). This is the one listing
+	// path that refuses instead of warning, and it is this function's OWN
+	// precedent that decides it: #730 already chose loud-fail here, and the
+	// alternative would mean corrupted and unreadable behaving differently in a
+	// single list.
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, err
+	}
+	if len(unreadable) > 0 {
+		return nil, fmt.Errorf("cannot list sessions: %s, and any of them may hold sessions missing from this list; scope the list with --repo, or %s",
+			config.DescribeRepoInstancesSkips(unreadable), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	type keyedInstance struct {
 		key  string
@@ -399,7 +428,7 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 // matches the current tmux session, keeping the loud corrupt-file behavior
 // (#730) so a hidden match is reported instead of a misleading "not found".
 func diskWhoami(tmuxName string) (*session.InstanceData, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load sessions: %w", err)
 	}
@@ -418,8 +447,18 @@ func diskWhoami(tmuxName string) (*session.InstanceData, error) {
 			}
 		}
 	}
+	// A match SHORT-CIRCUITS above, so nothing here weakens a found session.
+	// What is left is the absence claim, and a file that could not be read is
+	// what would refute it — the same caveat corruption already earns (#3479).
+	var gaps []string
+	if len(unreadable) > 0 {
+		gaps = append(gaps, config.DescribeRepoInstancesSkips(unreadable)+", and any of them may be hiding it")
+	}
 	if len(corrupted) > 0 {
-		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, corruptedReposSuffix(corrupted))
+		gaps = append(gaps, corruptedReposSuffix(corrupted))
+	}
+	if len(gaps) > 0 {
+		return nil, fmt.Errorf("no Agent Factory session found for tmux session %q; %s", tmuxName, strings.Join(gaps, "; "))
 	}
 	return nil, fmt.Errorf("no Agent Factory session found for tmux session %q", tmuxName)
 }
@@ -559,8 +598,8 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 	// which never receives the prompt is worse than an error; a file that could
 	// not be read truncates the set identically and was not covered (#3479).
 	if len(unreadable) > 0 {
-		return nil, nil, fmt.Errorf("cannot enumerate broadcast targets: %s, so sessions in them would silently miss the prompt; repair or remove the file(s), or scope the broadcast with --repo",
-			config.DescribeRepoInstancesSkips(unreadable))
+		return nil, nil, fmt.Errorf("cannot enumerate broadcast targets: %s, so sessions in them would silently miss the prompt; scope the broadcast with --repo, or %s",
+			config.DescribeRepoInstancesSkips(unreadable), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	var out []scopedInstance
 	var corrupted []string

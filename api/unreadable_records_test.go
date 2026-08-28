@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -128,4 +129,15 @@ func TestAllScopedInstances_RefusesUnreadableRepo(t *testing.T) {
 	if !strings.Contains(err.Error(), "is a directory") && !strings.Contains(err.Error(), "permission denied") {
 		t.Errorf("refusal must carry the underlying I/O error, got: %v", err)
 	}
+}
+
+// captureWarnWriter redirects the package's incomplete-answer notices so a test
+// can assert on them, restoring the previous writer afterwards.
+func captureWarnWriter(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := warnWriter
+	warnWriter = &buf
+	t.Cleanup(func() { warnWriter = prev })
+	return &buf
 }
