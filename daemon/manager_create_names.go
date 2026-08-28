@@ -393,8 +393,7 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 	}
 	var problems []string
 	if len(unreadable) > 0 {
-		problems = append(problems, fmt.Sprintf("%d project record file(s) could not be read: %s",
-			len(unreadable), config.FormatRepoInstancesSkips(unreadable)))
+		problems = append(problems, config.DescribeRepoInstancesSkips(unreadable))
 	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)

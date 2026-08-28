@@ -206,12 +206,33 @@ func loadRepoInstanceData(repoID string) ([]session.InstanceData, error) {
 // kill/archive would act on the restored session while the daemon-down disk path
 // would correctly refuse to guess.
 //
-// Corrupted per-repo files are skipped (mirroring findInstanceDataByTitle); only
-// a failure to enumerate repos at all is returned as an error.
-func collectTitleRepoPathsOnDisk(title string) (map[string]string, error) {
-	allInstances, err := config.LoadAllRepoInstances()
+// Corrupted per-repo files are skipped (mirroring findInstanceDataByTitle); a
+// failure to enumerate repos at all, or a per-repo file that could not be READ,
+// is returned as an error.
+//
+// The second return names the repos whose file could not be READ. It is not
+// optional detail: the caller unions this set with its live match and reads a
+// short set as "no other project holds this title", which is the one conclusion
+// a partial read cannot support (#3479).
+//
+// It is a second RETURN rather than an early error on purpose. A gap must be
+// reported ALONGSIDE the evidence, never instead of it: refusing here would
+// discard the matches the readable repos did yield, and those matches are
+// positive findings that settle the ambiguity question on their own. Returning
+// them empty made the caller — which resolves its live match when this errors —
+// miss a readable second project it used to catch, i.e. strictly worse than the
+// fail-open being fixed. Caught in review of #3479 bucket 1.
+//
+// Defence in depth today: refreshDaemonInstances runs
+// config.MigrateAllRepoInstancesForDaemonLoad first, which already refuses hard
+// on an unreadable per-repo file, so findSession never reaches here in that
+// state (pinned by TestDaemonLoadGateRefusesUnreadableRepoBeforeAnyTitleResolution).
+// Correct on its own terms anyway: an identity guard should not depend on an
+// upstream gate nobody thinks of as part of it.
+func collectTitleRepoPathsOnDisk(title string) (map[string]string, []config.RepoInstancesSkip, error) {
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load instances: %w", err)
+		return nil, nil, fmt.Errorf("failed to load instances: %w", err)
 	}
 	found := make(map[string]string)
 	for rid, raw := range allInstances {
@@ -227,7 +248,7 @@ func collectTitleRepoPathsOnDisk(title string) (map[string]string, error) {
 			}
 		}
 	}
-	return found, nil
+	return found, unreadable, nil
 }
 
 func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, string, error) {
@@ -244,9 +265,20 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		return nil, "", fmt.Errorf("instance %q %w", title, errSessionNotFound)
 	}
 
-	allInstances, err := config.LoadAllRepoInstances()
+	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to load instances: %w", err)
+	}
+	// Unscoped, so the answer is "(row, repoID)" AND the claim that no other
+	// project holds the title — the caller treats that repoID as THE project.
+	// A file this could not read is exactly the evidence that would refute the
+	// claim, so unlike the corrupted case below there is no answer left worth
+	// giving: refuse before scanning rather than resolve a match whose
+	// uniqueness is unproven (#3479). The scoped branch above never gets here,
+	// so a project scope remains the escape.
+	if len(unreadable) > 0 {
+		return nil, "", fmt.Errorf("cannot resolve instance %q without a project scope: %s, and any of them may hold this title too; scope the lookup to a project, or repair or remove the file(s)",
+			title, config.DescribeRepoInstancesSkips(unreadable))
 	}
 	var corrupted []string
 	// Titles are unique per-repo: collect all matches so an unscoped lookup
