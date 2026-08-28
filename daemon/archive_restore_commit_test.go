@@ -61,7 +61,8 @@ func TestRestoreArchived_SuccessfulRelocateReportsAFailedPersist(t *testing.T) {
 		return diskFull
 	}
 
-	_, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+	var gotPath string
+	gotPath, _, err = manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
 
 	// Without this, the assertion below fails on the unfixed code whether or not
 	// the seam ever matched — so a later change to what gets written (ForStorage,
@@ -76,6 +77,16 @@ func TestRestoreArchived_SuccessfulRelocateReportsAFailedPersist(t *testing.T) {
 		"a restore whose new location was never written reported success: disk still says Archived at "+
 			"an archive path that no longer exists, so a restart strands the worktree and every later "+
 			"restore fails the source-exists guard")
+	// The relocate itself landed (the bytes moved), so this is a committed
+	// mutation whose follow-up write failed — the same contract the incomplete
+	// archive keeps in TestRestoreArchived_PersistFailuresPreserveIncompleteArchiveReport.
+	// Retrying the archived restore would re-run relocate, fail the source-exists
+	// guard, and strand the moved bytes; the committed marker and the relocated
+	// path are what stop a transport from treating it as failed-nothing-committed.
+	require.True(t, isMutationCommitted(err),
+		"the relocate landed before the durable write failed, so it must not read as a retryable failure: %v", err)
+	require.Equal(t, restored, gotPath,
+		"the committed marker must carry the relocated worktree path, not an empty location")
 	assert.ErrorContains(t, err, restored,
 		"the error must name where the worktree actually is, so the operator can re-register it")
 	assert.ErrorContains(t, err, diskFull.Error(),

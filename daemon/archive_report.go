@@ -72,13 +72,18 @@ func restoredArchiveResult(instance *session.Instance, worktreePath string, extr
 	return worktreePath, &mutationCommittedError{err: errors.Join(warnings...)}
 }
 
-// failedRestoredArchiveResult preserves the ordinary retryable failure for a
-// complete archive, but marks an incomplete restore committed: its worktree has
-// already moved and the Lost loop, not a second archived restore, owns recovery.
+// failedRestoredArchiveResult reports a restore whose worktree relocate already
+// landed but whose follow-up — the durable record, or the agent re-spawn —
+// failed. It is reached only after RestoreArchivedWorktreeWithClaim succeeded,
+// so the worktree has already moved off the archive path: a second archived
+// restore would fail relocate's source-exists guard, and the Lost loop — not a
+// restore retry — owns recovery. The relocated path and committed marker are
+// therefore returned for BOTH complete and incomplete archives, so a transport
+// cannot read a landed move as failed-nothing-committed (#3235) — the same shape
+// keepUnrollableArchiveCommitted gives the archive-side durable mutation. The
+// skipped-file report joins the warning for incomplete archives; a complete
+// archive carries only the failure, still committed because the relocate landed.
 func failedRestoredArchiveResult(instance *session.Instance, worktreePath string, failure error) (string, error) {
-	if instance.GetArchiveReport().Empty() {
-		return "", failure
-	}
 	return restoredArchiveResult(instance, worktreePath, failure)
 }
 
