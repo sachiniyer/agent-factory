@@ -26,6 +26,68 @@ var repoIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // visible rather than being mistaken for "outside git."
 var ErrNotGitRepository = errors.New("not inside a git repository")
 
+// ErrRepoProbeUnanswered marks a repository resolution that failed WITHOUT AN
+// ANSWER: the git child could not be started, died on a signal, or was
+// abandoned mid-read when its WaitDelay expired. It is the deliberate
+// complement of ErrNotGitRepository — "we could not ask git" as against "we
+// asked and the answer is no" — so a caller narrating a resolution failure can
+// tell a claim about the PATH apart from a claim about the SUBPROCESS (#3500).
+//
+// Callers test it with errors.Is. Errors carrying it keep their original text:
+// the sentinel is joined into the chain rather than wrapped around the message,
+// because the classification is for code and the wording belongs to whichever
+// call site narrates the failure.
+var ErrRepoProbeUnanswered = errors.New("git repository probe did not complete")
+
+// unansweredProbeError joins ErrRepoProbeUnanswered into an error's chain
+// without changing what the error prints.
+type unansweredProbeError struct{ err error }
+
+func (e *unansweredProbeError) Error() string   { return e.err.Error() }
+func (e *unansweredProbeError) Unwrap() []error { return []error{ErrRepoProbeUnanswered, e.err} }
+
+// markUnansweredProbe classifies a failed git invocation: err marked with
+// ErrRepoProbeUnanswered when the failure happened to the CHILD rather than to
+// the repository, and err untouched when git ran and answered.
+//
+// Unanswered, in every form this resolver can see it:
+//   - the context was cancelled or its deadline passed, so the child was
+//     signalled rather than read;
+//   - exec could not start git at all (missing binary, not executable);
+//   - Cmd.WaitDelay expired before the output pipe closed, so the read was
+//     abandoned mid-flight — repoGitWaitDelay is 100ms, and a loaded box
+//     reaches it (#3500 was observed on a host whose load baseline is 60-95);
+//   - git died on a signal, which ProcessState reports as a negative exit
+//     code, so its stderr says nothing about the repository.
+//
+// Everything else is git exiting non-zero with a diagnostic of its own: an
+// ANSWER, even when it is one this resolver cannot classify further. Callers
+// may narrate those as facts about the path; they must not narrate the ones
+// above that way.
+func markUnansweredProbe(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if !probeWentUnanswered(ctx, err) {
+		return err
+	}
+	return &unansweredProbeError{err: err}
+}
+
+func probeWentUnanswered(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
+		return true
+	}
+	var startErr *exec.Error
+	if errors.As(err, &startErr) {
+		return true
+	}
+	// ExitCode is -1 for a process terminated by a signal; an ExitError always
+	// means the process exited, so a negative code here can only be that.
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ProcessState != nil && exitErr.ProcessState.ExitCode() < 0
+}
+
 // maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
 // 12 chars; the cap is loose enough to accommodate future schemes while
 // preventing unbounded allocation in path joins or error messages.
@@ -105,7 +167,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 			!gitMetadataMayExist(pathArgs...) {
 			return repoRootResolution{}, fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", err)
+		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", markUnansweredProbe(ctx, err))
 	}
 	toplevel := trimGitOutputLine(topOut)
 
@@ -118,7 +180,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	infoOut, err := infoCmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {
-			return repoRootResolution{}, ctx.Err()
+			return repoRootResolution{}, markUnansweredProbe(ctx, ctx.Err())
 		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
@@ -169,7 +231,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		return repoRootResolution{identityRoot: filepath.Clean(worktree), workspaceRoot: toplevel}, nil
 	}
 	if ctx.Err() != nil {
-		return repoRootResolution{}, ctx.Err()
+		return repoRootResolution{}, markUnansweredProbe(ctx, ctx.Err())
 	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return repoRootResolution{identityRoot: filepath.Dir(commonDir), workspaceRoot: toplevel}, nil
@@ -203,7 +265,7 @@ func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {
 	cmd.WaitDelay = repoGitWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, err)
+		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(ctx, err))
 	}
 	switch value := strings.TrimSpace(string(out)); value {
 	case "true":
