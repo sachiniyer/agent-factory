@@ -316,6 +316,44 @@ func TestCleanupSessionsRefusesUnmarkedPartialCaptureAfterConfirmedAbsence(t *te
 		"an unmarked partial candidate must not be signalled")
 }
 
+// The same fixture with its race REMOVED (#3469). Every Refuses* fixture above
+// kills the only session on its private tmux server, so the has-session that
+// follows races the server's own shutdown. Land after it and tmux answers `no
+// server running on <socket>`, which classifies as absence; land before it and
+// tmux answers `no current target` — exit 1, naming neither session nor socket —
+// which did not, so the partial-capture refusal surfaced instead of the marker
+// refusal these assertions are about. Measured on this box at load ~60: 2
+// failures in 40 runs of the sibling above, and CI hit two DIFFERENT siblings
+// with the identical signature (the 2026-08-25 preview preflight, and PR #3495).
+//
+// `exit-empty off` removes the race by removing the shutdown: the server stays
+// up holding nothing, so the answer that used to be the unlucky one is now the
+// only one. The assertions are deliberately identical to the sibling's — the
+// property is that a given fixture state produces the SAME refusal reason
+// whichever way the server's exit falls.
+func TestCleanupSessionsRefusesUnmarkedPartialCaptureOnSessionlessServer(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("exact detached-session fixture requires setsid")
+	}
+
+	const name = "af_partial_then_sessionless"
+	home := t.TempDir()
+	trigger, pidFile := spawnSessionWaitingToStartUnmarkedHelper(t, name, home)
+	// Server option, so it outlives the session the executor is about to kill.
+	out, setErr := exec.Command("tmux", "set", "-s", "exit-empty", "off").CombinedOutput()
+	require.NoError(t, setErr, "tmux set -s exit-empty off: %s", out)
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	var helper proctree.Process
+
+	err := CleanupSessions(partialCaptureThenAbsentExecutor(t, name, trigger, pidFile, &helper))
+	require.ErrorContains(t, err, "has no AF_SESSION marker")
+	require.NotZero(t, helper.PID, "partial-capture helper identity was not recorded")
+	require.True(t, proctree.AliveSame(helper),
+		"an unmarked partial candidate must not be signalled")
+}
+
 // The owned session can exit after its AF_HOME marker is read and another home
 // can reuse the same tmux name before capture. Even if that replacement also
 // vanishes, its partial tree must not inherit the old session's authorization.
