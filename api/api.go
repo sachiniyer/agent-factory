@@ -387,8 +387,8 @@ func diskListSessions(repoID string) ([]session.InstanceData, error) {
 		return nil, err
 	}
 	if len(unreadable) > 0 {
-		return nil, fmt.Errorf("cannot list sessions: %s, and any of them may hold sessions missing from this list; repair or remove the file(s), or scope the list with --repo",
-			config.DescribeRepoInstancesSkips(unreadable))
+		return nil, fmt.Errorf("cannot list sessions: %s, and any of them may hold sessions missing from this list; scope the list with --repo, or %s",
+			config.DescribeRepoInstancesSkips(unreadable), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	type keyedInstance struct {
 		key  string
@@ -598,8 +598,8 @@ func allScopedInstances() ([]scopedInstance, []string, error) {
 	// which never receives the prompt is worse than an error; a file that could
 	// not be read truncates the set identically and was not covered (#3479).
 	if len(unreadable) > 0 {
-		return nil, nil, fmt.Errorf("cannot enumerate broadcast targets: %s, so sessions in them would silently miss the prompt; repair or remove the file(s), or scope the broadcast with --repo",
-			config.DescribeRepoInstancesSkips(unreadable))
+		return nil, nil, fmt.Errorf("cannot enumerate broadcast targets: %s, so sessions in them would silently miss the prompt; scope the broadcast with --repo, or %s",
+			config.DescribeRepoInstancesSkips(unreadable), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	var out []scopedInstance
 	var corrupted []string

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,5 +86,90 @@ func TestGetSessionByTitle_ReportsIncompleteWideningButStillResolves(t *testing.
 	}
 	if !strings.Contains(warn.String(), "--repo") {
 		t.Errorf("the notice should point at the scope that would settle it; stderr was: %q", warn.String())
+	}
+}
+
+// resetIncompleteNotices clears the once-per-invocation dedupe so each test
+// starts from a clean slate; the production set is process-lifetime by design.
+func resetIncompleteNotices(t *testing.T) {
+	t.Helper()
+	notedIncompleteAnswers.Range(func(k, _ any) bool {
+		notedIncompleteAnswers.Delete(k)
+		return true
+	})
+	t.Cleanup(func() {
+		notedIncompleteAnswers.Range(func(k, _ any) bool {
+			notedIncompleteAnswers.Delete(k)
+			return true
+		})
+	})
+}
+
+// TestIncompleteWideningNoticeIsSaidOnce guards a long-running `sessions watch`.
+// An unscoped watch re-resolves the title every poll — roughly 900 times at the
+// default 30-minute timeout — and a caveat printed each pass buries whatever
+// else the command has to say.
+func TestIncompleteWideningNoticeIsSaidOnce(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	seedRows(t, "blocked-repo", session.InstanceData{Title: "foo", Path: "/repos/blocked"})
+	path := makeRecordsUnreadable(t, "blocked-repo")
+
+	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+	for i := 0; i < 25; i++ {
+		if _, err := getSessionByTitle("foo"); err != nil {
+			t.Fatalf("poll %d: %v", i, err)
+		}
+	}
+	// Count the NOTICE, not the path: the path appears twice within one message
+	// (once from the skip's own rendering, once inside the wrapped I/O error).
+	if got := strings.Count(warn.String(), "warning: could not check every project"); got != 1 {
+		t.Fatalf("the caveat must be said once per invocation, not once per poll; said it %d times", got)
+	}
+	if !strings.Contains(warn.String(), path) {
+		t.Errorf("the one notice must still name the unreadable file; stderr was: %q", warn.String())
+	}
+}
+
+// TestGetSessionByTitle_ReportsEnumerationFailure closes the wider of the two
+// holes. When the instances directory itself cannot be read the loader returns
+// an error rather than per-repo gaps, and nothing was checked at all — so
+// dropping that while reporting the narrower per-repo case would be backwards.
+func TestGetSessionByTitle_ReportsEnumerationFailure(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	_ = captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	// Make the instances DIRECTORY itself unreadable, so enumeration fails
+	// rather than any individual repo. Proven, not assumed.
+	seedRows(t, "some-repo", session.InstanceData{Title: "foo", Path: "/repos/x"})
+	dir := filepath.Join(home, "instances")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if _, err := os.ReadDir(dir); err == nil {
+		t.Skip("cannot make the instances directory unreadable in this environment (running as root?)")
+	}
+
+	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+	got, err := getSessionByTitle("foo")
+	if err != nil {
+		t.Fatalf("a read must not break because its widening could not run: %v", err)
+	}
+	if got == nil || got.Path != "/repos/live" {
+		t.Fatalf("expected the live match to resolve, got: %+v", got)
+	}
+	if !strings.Contains(warn.String(), "could not check any project") {
+		t.Errorf("a total enumeration failure must be reported, not silently dropped; stderr was: %q", warn.String())
 	}
 }

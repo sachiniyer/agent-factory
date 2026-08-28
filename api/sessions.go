@@ -136,12 +136,11 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 			// RPC that runs findSession, or a Snapshot that carries unrestorable
 			// rows); the destructive paths already resolve through findSession.
 			if !apiclient.IsRemoteTarget() {
-				if extra, gaps, err := diskRepoPathsForTitle(title, paths); err == nil {
-					if len(extra) > 1 {
-						return nil, session.AmbiguousTitleError(title, extra)
-					}
-					warnIncompleteTitleWidening(title, gaps)
+				extra, gaps, err := diskRepoPathsForTitle(title, paths)
+				if err == nil && len(extra) > 1 {
+					return nil, session.AmbiguousTitleError(title, extra)
 				}
+				warnIncompleteTitleWidening(title, gaps, err)
 			}
 			return &matches[0], nil
 		}

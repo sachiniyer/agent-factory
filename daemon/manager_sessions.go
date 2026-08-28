@@ -763,8 +763,8 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 				blocking = append(blocking, gap)
 			}
 			if len(blocking) > 0 {
-				return nil, "", nil, fmt.Errorf("cannot resolve session %q without a project scope: %s, and any of them may hold this title too; scope the command with --repo <path>, or repair or remove the file(s)",
-					title, config.DescribeRepoInstancesSkips(blocking))
+				return nil, "", nil, fmt.Errorf("cannot resolve session %q without a project scope: %s, and any of them may hold this title too; scope the command with --repo <path>, or %s",
+					title, config.DescribeRepoInstancesSkips(blocking), config.RepoInstancesSkipRemedy(blocking))
 			}
 			return matched, matchedRepoID, nil, nil
 		}

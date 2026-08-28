@@ -277,8 +277,8 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 	// uniqueness is unproven (#3479). The scoped branch above never gets here,
 	// so a project scope remains the escape.
 	if len(unreadable) > 0 {
-		return nil, "", fmt.Errorf("cannot resolve instance %q without a project scope: %s, and any of them may hold this title too; scope the lookup to a project, or repair or remove the file(s)",
-			title, config.DescribeRepoInstancesSkips(unreadable))
+		return nil, "", fmt.Errorf("cannot resolve instance %q without a project scope: %s, and any of them may hold this title too; scope the lookup to a project, or %s",
+			title, config.DescribeRepoInstancesSkips(unreadable), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	var corrupted []string
 	// Titles are unique per-repo: collect all matches so an unscoped lookup
