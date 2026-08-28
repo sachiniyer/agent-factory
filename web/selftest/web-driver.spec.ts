@@ -6022,8 +6022,24 @@ test("#2549: deleting a registered project whose session is still STARTING is RE
   // then CONVERGES (the retry contract), archiving the now-settled session and removing
   // the project. The modal stays open through refusals, so retry the danger button until
   // it closes on real success (which also cleans the fixture).
+  //
+  // Re-click ONLY while the modal is still open AND idle (#3482). The converging delete
+  // is a REAL archive — tmux teardown, worktree move, registry write — and its documented
+  // worst case is seconds, not milliseconds: the pane-exit wait alone is 3s
+  // (session/tmux/close.go paneExitWait), before the TERM→KILL reaper's 3+2+1s or any
+  // 10s tmux command timeout. So that one RPC routinely outlives the 2500ms budget below,
+  // and every attempt after it is made against a DISABLED danger button. Clicking
+  // unconditionally there blocks on actionability — and when the delete lands it REMOVES
+  // the modal, so the click goes on waiting for a button that never comes back. The loop
+  // wedges until its own 45s budget expires and reports the stale "still busy" sample: a
+  // delete that CONVERGED, reported as a hang. Gating the click keeps every attempt
+  // idempotent AND terminating, so the loop still observes the close on a later pass.
+  // The contract is unchanged — a delete that genuinely never converges still fails here.
+  const dangerBtn = delModal.locator("button.af-danger");
   await expect(async () => {
-    await delModal.locator("button.af-danger").click();
+    if ((await dangerBtn.isVisible().catch(() => false)) && (await dangerBtn.isEnabled().catch(() => false))) {
+      await dangerBtn.click({ timeout: 2500 });
+    }
     await expect(delModal).toBeHidden({ timeout: 2500 });
   }).toPass({ timeout: 45_000 });
 
