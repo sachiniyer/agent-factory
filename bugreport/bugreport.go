@@ -517,9 +517,17 @@ func loadTasksForRedaction(errs []string) ([]task.Task, []string) {
 // collectInstances loads every repo's instances.json and redacts each, sorted
 // by repo id for stable output.
 func collectInstances(r *redactor, errs []string) ([]repoInstances, []string) {
-	all, err := config.LoadAllRepoInstances()
+	all, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
 	if err != nil {
 		return nil, append(errs, fmt.Sprintf("instances: %v", err))
+	}
+	// A bundle that omits a project must say so. Silence here makes the report
+	// look like a complete picture of this machine, which is the one thing a
+	// diagnostic bundle must never do (#3479). Recorded rather than fatal: a
+	// partial bundle still beats no bundle when someone is filing a bug.
+	if len(unreadable) > 0 {
+		errs = append(errs, fmt.Sprintf("instances: %s, so this bundle omits their sessions",
+			config.DescribeRepoInstancesSkips(unreadable)))
 	}
 	repoIDs := make([]string, 0, len(all))
 	for id := range all {
