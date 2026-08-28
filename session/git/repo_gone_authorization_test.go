@@ -416,3 +416,54 @@ func TestDefinitiveMissingRepository_IgnoresReasonWordsInsidePath(t *testing.T) 
 		t.Fatal("a reason phrase inside the quoted pathname authorized deletion despite the terminal permission error")
 	}
 }
+
+// TestDefinitiveNonGitRepository_RecognizesBothOutsideRepositoryVariants pins
+// that deletion authority accepts BOTH of Git's semantically equivalent
+// outside-repository diagnostics: the ceiling message searched to root, and
+// the mount-point message stopped at a filesystem boundary (tmpfs /tmp). Git
+// sets *nongit_ok=1 for both in setup.c, so both must authorize
+// repo-gone cleanup.
+func TestDefinitiveNonGitRepository_RecognizesBothOutsideRepositoryVariants(t *testing.T) {
+	env := repoGoneGitCommandEnvironment()
+	for name, stderr := range map[string]string{
+		"ceiling":     "fatal: not a git repository (or any of the parent directories): .git\n",
+		"mount-point": "fatal: not a git repository (or any parent up to mount point /)\nStopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			probeErr := &exec.ExitError{Stderr: []byte(stderr)}
+			if !definitiveNonGitRepository(probeErr, env) {
+				t.Fatalf("outside-repository diagnostic did not authorize repo-gone: stderr=%q", stderr)
+			}
+		})
+	}
+}
+
+// TestDefinitiveNonGitRepository_FiltersUnrelatedAndGitDirErrors keeps the
+// fail-closed contract: an unrelated git error or a GIT_DIR environment override
+// must never authorize deletion — for either outside-repository variant.
+func TestDefinitiveNonGitRepository_FiltersUnrelatedAndGitDirErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stderr string
+		env    []string
+	}{
+		"unrelated-error": {
+			stderr: "fatal: not our message at all\n",
+			env:    repoGoneGitCommandEnvironment(),
+		},
+		"git-dir-set-ceiling": {
+			stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
+			env:    append(repoGoneGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
+		},
+		"git-dir-set-mount-point": {
+			stderr: "fatal: not a git repository (or any parent up to mount point /)\n",
+			env:    append(repoGoneGitCommandEnvironment(), "GIT_DIR=/tmp/unrelated"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			probeErr := &exec.ExitError{Stderr: []byte(tc.stderr)}
+			if definitiveNonGitRepository(probeErr, tc.env) {
+				t.Fatalf("a non-matching or GIT_DIR-overridden diagnostic authorized deletion: stderr=%q", tc.stderr)
+			}
+		})
+	}
+}

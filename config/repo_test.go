@@ -274,6 +274,29 @@ exit 128
 		"an ordinary outside-repository result must not become a fatal scope error under a translated locale")
 }
 
+// TestResolveRepoRootRecognizesFilesystemBoundaryDiagnostic pins recognition
+// of Git's second outside-repository message. When repo discovery stops at a
+// filesystem boundary (tmpfs /tmp, a separate mount), Git emits the
+// "or any parent up to mount point" variant instead of the ceiling variant.
+// Both set *nongit_ok in setup.c, so both must resolve to ErrNotGitRepository
+// when no .git exists up the path hierarchy (fail-closed guard still applies).
+func TestResolveRepoRootRecognizesFilesystemBoundaryDiagnostic(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGit := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(fakeGit, []byte(`#!/bin/sh
+printf '%s\n' 'fatal: not a git repository (or any parent up to mount point /)' >&2
+printf '%s\n' 'Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).' >&2
+exit 128
+`), 0o755))
+	t.Setenv("PATH", binDir)
+	t.Chdir(t.TempDir())
+
+	_, err := CurrentRepo()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotGitRepository,
+		"Git's filesystem-boundary variant of the outside-repository diagnostic must fall back to global scope")
+}
+
 func TestRepoIDFromRoot(t *testing.T) {
 	id := RepoIDFromRoot("/some/path")
 	assert.Len(t, id, 12) // 6 bytes = 12 hex chars

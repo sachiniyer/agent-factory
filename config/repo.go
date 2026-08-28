@@ -100,7 +100,8 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) &&
-			strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") &&
+			(strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
+				strings.Contains(string(exitErr.Stderr), "not a git repository (or any parent up to mount point")) &&
 			!gitMetadataMayExist(pathArgs...) {
 			return repoRootResolution{}, fmt.Errorf("%w: %s", ErrNotGitRepository, strings.TrimSpace(string(exitErr.Stderr)))
 		}
