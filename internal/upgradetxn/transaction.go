@@ -260,15 +260,6 @@ type Transaction struct {
 	afterRollbackCheckpoint func(RollbackProgress) error
 }
 
-// ExecutableRole identifies bytes without granting recovery authority.
-type ExecutableRole uint8
-
-const (
-	ExecutableUnknown ExecutableRole = iota
-	ExecutablePrevious
-	ExecutableCandidate
-)
-
 // RecoveryLease holds the kernel death-test flock and a second readiness flock.
 // Acquisition first deletes stale status; Heartbeat then publishes this actor's
 // status. Authorization requires both flocks and that current publication.
@@ -392,31 +383,6 @@ func (t *Transaction) Journal() Journal {
 			[]MetadataParentSnapshot(nil), journal.Metadata[index].Parents...)
 	}
 	return journal
-}
-
-// RoleForExecutable hashes a regular executable and compares it with the two
-// immutable transaction identities. This lets an entrypoint distinguish a
-// canonical candidate daemon from a canonical previous daemon after rollback;
-// it does not grant a RecoveryLease.
-func (t *Transaction) RoleForExecutable(path string) (ExecutableRole, error) {
-	canonical, err := canonicalExistingFile(path)
-	if err != nil {
-		return ExecutableUnknown, fmt.Errorf("validate upgrade executable role: %w", err)
-	}
-	data, err := os.ReadFile(canonical)
-	if err != nil {
-		return ExecutableUnknown, fmt.Errorf("read upgrade executable role: %w", err)
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	switch digest(data) {
-	case t.journal.PreviousBinarySHA256:
-		return ExecutablePrevious, nil
-	case t.journal.CandidateSHA256:
-		return ExecutableCandidate, nil
-	default:
-		return ExecutableUnknown, nil
-	}
 }
 
 // RecoveryActorLive reports only the kernel lock fact. A false result is a
