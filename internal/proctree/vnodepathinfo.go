@@ -133,3 +133,36 @@ func cwdIdentityFromVnodePathInfo(buf []byte) (path string, device, inode uint64
 	inode = binary.LittleEndian.Uint64(buf[vnodePathInfoCwdInoOffset:])
 	return path, device, inode, mode, inode != 0
 }
+
+// vnodeDeviceFromFstatDev widens a darwin fstat(2) st_dev into the same uint64
+// that cwdIdentityFromVnodePathInfo produces for vst_dev, so the two can be
+// compared at all.
+//
+// The two sources describe the SAME 32-bit device id with opposite signedness.
+// vinfo_stat.vst_dev is uint32_t, and the decode above widens it with
+// binary.LittleEndian.Uint32 — zero-extension. darwin's struct stat spells that
+// field dev_t, which is __int32_t (bsd/sys/_types/_dev_t.h), so
+// x/sys/unix.Stat_t.Dev is int32 and a plain uint64(stat.Dev) SIGN-extends.
+//
+// Below the high bit the two agree and nothing is wrong. At or above it they
+// never agree: darwin's makedev packs the major number into the top byte, so any
+// major >= 128 sets bit 31, and a device id of 0x80000001 arrives as
+// 0xffffffff80000001 from fstat and as 0x80000001 from the kernel. openWorkingDir
+// then reads a mismatch that does not exist, refuses the handle, and its caller
+// SKIPS the process (#3525).
+//
+// That failure direction is what makes it expensive rather than merely wrong.
+// Skipping looks like the safe answer everywhere else in this package, but the
+// callers are reapWorktreeWriters (#3510), which must see every process holding
+// a worktree open before the tree is moved out from under it, and the reset path
+// (#3519), which must see every process that survived SIGKILL. A writer this
+// silently omits is not reported as unknown — it is not reported at all, on
+// exactly the filesystems whose major number happens to be large, with no error
+// anywhere.
+//
+// Truncating to uint32 first drops the sign extension and keeps the 32 bits the
+// kernel actually reported. Untagged for the same reason as the rest of this
+// file: the arithmetic is what is worth testing, and Linux CI can run it.
+func vnodeDeviceFromFstatDev(dev int32) uint64 {
+	return uint64(uint32(dev))
+}

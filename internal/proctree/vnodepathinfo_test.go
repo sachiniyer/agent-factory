@@ -222,3 +222,52 @@ func TestCwdFromVnodePathInfo(t *testing.T) {
 		assert.Equal(t, "/tmp/wt", got)
 	})
 }
+
+// TestVnodeDeviceFromFstatDev pins the widening that #3525 got wrong. It is
+// untagged on purpose: the defect lives in arithmetic, not in a syscall, so
+// every runner can check it and a darwin-only regression cannot slip past a
+// Linux-only CI leg.
+//
+// The high-bit cases are the whole point. Below 0x80000000 the buggy and the
+// correct conversion agree, which is why this survived review and why a test
+// that only used small device ids would pass against the bug.
+func TestVnodeDeviceFromFstatDev(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// dev is what fstat(2) reports: darwin's dev_t is int32, so a device id
+		// at or above 0x80000000 arrives as a negative number.
+		dev int32
+		// want is what cwdIdentityFromVnodePathInfo produces for the same
+		// device: vst_dev is uint32_t, read with LittleEndian.Uint32.
+		want uint64
+	}{
+		{name: "zero", dev: 0, want: 0},
+		{name: "makedev(1, 5)", dev: 0x01000005, want: 0x01000005},
+		{name: "largest major that stays positive: makedev(127, 0xffffff)",
+			dev: 0x7fffffff, want: 0x7fffffff},
+		{name: "first major with the high bit set: makedev(128, 1)",
+			dev: -2147483647, want: 0x80000001},
+		{name: "makedev(255, 0xffffff)", dev: -1, want: 0xffffffff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, vnodeDeviceFromFstatDev(tc.dev))
+		})
+	}
+}
+
+// TestVnodeDeviceFromFstatDev_RejectsTheSignExtendedForm states the defect
+// itself, so that anyone who "simplifies" the helper back to a plain
+// uint64(dev) — which reads as a harmless widening — fails here with the reason
+// attached rather than shipping the skip again.
+func TestVnodeDeviceFromFstatDev_RejectsTheSignExtendedForm(t *testing.T) {
+	const highBitDevice = uint64(0x80000001) // makedev(128, 1)
+	dev := int32(-2147483647)                // what darwin's dev_t holds for it
+
+	require.Equal(t, uint64(0xffffffff80000001), uint64(dev),
+		"precondition: a plain uint64(int32) must sign-extend — if this ever stops "+
+			"being true the tests below prove nothing")
+	assert.NotEqual(t, highBitDevice, uint64(dev),
+		"the sign-extended form is what made openWorkingDir refuse its own handle")
+	assert.Equal(t, highBitDevice, vnodeDeviceFromFstatDev(dev),
+		"the fixed form must equal what the kernel reported for the same device")
+}
