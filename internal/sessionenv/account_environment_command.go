@@ -73,8 +73,7 @@ func arithmeticAssignmentMutatesAccountEnvironment(expr *syntax.BinaryArithm, na
 		syntax.QuoAssgn, syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn,
 		syntax.XorAssgn, syntax.ShlAssgn, syntax.ShrAssgn, syntax.AndBoolAssgn,
 		syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
-		name, ok := arithmeticAccountEnvironmentName(expr.X)
-		return ok && accountEnvironmentOperandDenied(name, names)
+		return arithmeticTargetMutates(expr.X, names)
 	default:
 		return false
 	}
@@ -84,8 +83,29 @@ func arithmeticIncrementMutatesAccountEnvironment(expr *syntax.UnaryArithm, name
 	if expr.Op != syntax.Inc && expr.Op != syntax.Dec {
 		return false
 	}
-	name, ok := arithmeticAccountEnvironmentName(expr.X)
-	return ok && accountEnvironmentOperandDenied(name, names)
+	return arithmeticTargetMutates(expr.X, names)
+}
+
+// arithmeticTargetMutates decides an arithmetic assignment or increment by its
+// TARGET, and fails closed when it cannot read that target literally.
+//
+// Reading it as "not literal, therefore not a denied name" was the hole:
+// `CODEX_HOME[0]` is an indexed-array element, which this parser reports as a
+// non-literal word, so an assignment straight at the protected name scored as
+// safe. bash applies `(( CODEX_HOME[0]=1 ))` to the exported SCALAR and
+// converts it to an indexed array — after which a child reads CODEX_HOME as
+// EMPTY, so the selected account root is destroyed rather than merely
+// replaced. A dynamic target such as `${name}` is unprovable for the same
+// reason.
+//
+// accountEnvironmentOperandDenied already fails closed on any subscript it CAN
+// read; this is the same rule for the ones it cannot.
+func arithmeticTargetMutates(target syntax.ArithmExpr, names map[string]struct{}) bool {
+	name, ok := arithmeticAccountEnvironmentName(target)
+	if !ok {
+		return true
+	}
+	return accountEnvironmentOperandDenied(name, names)
 }
 
 func arithmeticAccountEnvironmentName(expr syntax.ArithmExpr) (string, bool) {
@@ -234,6 +254,18 @@ func unwrapAccountCommand(words []*syntax.Word, names map[string]struct{}) ([]*s
 		case isAccountCommandName(words[0], "stdbuf"):
 			var unsafe bool
 			words, unsafe = unwrapStdbuf(words[1:])
+			if unsafe {
+				return nil, true
+			}
+		case isAccountCommandName(words[0], "ionice"):
+			var unsafe bool
+			words, unsafe = unwrapIonice(words[1:])
+			if unsafe {
+				return nil, true
+			}
+		case isAccountCommandName(words[0], "taskset"):
+			var unsafe bool
+			words, unsafe = unwrapTaskset(words[1:])
 			if unsafe {
 				return nil, true
 			}

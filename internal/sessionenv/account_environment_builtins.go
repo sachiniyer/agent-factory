@@ -153,14 +153,121 @@ func unwrapStdbuf(words []*syntax.Word) ([]*syntax.Word, bool) {
 	return nil, false
 }
 
-func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
-	sawResultTarget := false
+// unwrapIonice removes an `ionice` prefix so the command it schedules is what
+// gets inspected. util-linux ionice runs an arbitrary COMMAND after its
+// options exactly as nice does, and this repository already models it as an
+// executable wrapper (session/tmux/resume.go). Left unwrapped it read as an
+// opaque leaf program whose arguments were inert, so
+// `ionice -c 3 sh -c 'unset CODEX_HOME; codex'` reached the default-safe
+// return and the nested shell removed the selected root before launch.
+func unwrapIonice(words []*syntax.Word) ([]*syntax.Word, bool) {
 	for len(words) > 0 {
 		option, literal := literalShellWord(words[0])
 		if !literal {
-			// Before an explicit -p, an expanded leading operand can become -p
-			// at runtime. After one, it is the customary expanded job spec.
-			return !sawResultTarget
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			return words[1:], false
+		case option == "-t" || option == "--ignore":
+			words = words[1:]
+		case option == "-c" || option == "--class" || option == "-n" || option == "--classdata":
+			if len(words) < 2 {
+				return nil, true
+			}
+			if _, literal := literalShellWord(words[1]); !literal {
+				return nil, true
+			}
+			words = words[2:]
+		case strings.HasPrefix(option, "-c") || strings.HasPrefix(option, "-n") ||
+			strings.HasPrefix(option, "--class=") || strings.HasPrefix(option, "--classdata="):
+			words = words[1:]
+		case strings.HasPrefix(option, "-"):
+			// -p/-P/-u retune an EXISTING process and run no command at all, so
+			// there is nothing here to unwrap; every other form is unmodelled.
+			return nil, true
+		default:
+			return words, false
+		}
+	}
+	return nil, false
+}
+
+// unwrapTaskset is unwrapIonice for `taskset`, with one extra step: taskset's
+// first OPERAND is the affinity mask (or, after -c, the cpu list), and the
+// command it runs begins only after it.
+func unwrapTaskset(words []*syntax.Word) ([]*syntax.Word, bool) {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			return nil, true
+		}
+		switch {
+		case option == "--":
+			return tasksetCommandAfterMask(words[1:])
+		case option == "-a" || option == "--all-tasks" ||
+			option == "-c" || option == "--cpu-list":
+			words = words[1:]
+		case strings.HasPrefix(option, "-"):
+			// -p rebinds an EXISTING pid and runs no command; anything else is
+			// unmodelled.
+			return nil, true
+		default:
+			return tasksetCommandAfterMask(words)
+		}
+	}
+	return nil, false
+}
+
+func tasksetCommandAfterMask(words []*syntax.Word) ([]*syntax.Word, bool) {
+	if len(words) == 0 {
+		return nil, false
+	}
+	if _, literal := literalShellWord(words[0]); !literal {
+		return nil, true
+	}
+	return words[1:], false
+}
+
+// isLastBackgroundPidWord reports whether a word is exactly `$!`, bare or
+// double-quoted. The shell owns that parameter — it is not assignable — so it
+// always expands to a decimal pid and can never become an option word.
+func isLastBackgroundPidWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		if len(quoted.Parts) != 1 {
+			return false
+		}
+		part = quoted.Parts[0]
+	}
+	exp, ok := part.(*syntax.ParamExp)
+	return ok && exp.Param != nil && exp.Param.Value == "!" &&
+		exp.Exp == nil && exp.Index == nil && exp.Slice == nil && exp.Repl == nil &&
+		!exp.Length && !exp.Width && !exp.Excl && exp.Names == 0
+}
+
+func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct{}) bool {
+	for len(words) > 0 {
+		option, literal := literalShellWord(words[0])
+		if !literal {
+			// `$!` is the ONE expansion that cannot turn into an option: the shell
+			// sets it to the last background pid and it is not assignable, so it is
+			// always a job spec and ends option parsing exactly like a literal
+			// operand does. That keeps `wait -p PID $!` working.
+			if isLastBackgroundPidWord(words[0]) {
+				return false
+			}
+			// Every other dynamic word is unsafe while option parsing is still
+			// open — and for wait it is still open after `-p target`. This used to
+			// concede that a dynamic word following a result target was "the
+			// customary expanded job spec", but bash keeps reading options there:
+			// with x=-p, `wait -p safe "$x" CODEX_HOME $!` expands to a SECOND -p,
+			// retargets at CODEX_HOME, assigns it the job id and drops its export
+			// attribute, so the child inherits no selected root at all.
+			return true
 		}
 		if option == "--" || option == "-" || !strings.HasPrefix(option, "-") {
 			return false
@@ -182,7 +289,6 @@ func waitMutatesAccountEnvironment(words []*syntax.Word, names map[string]struct
 				if !literal || accountEnvironmentOperandDenied(target, names) {
 					return true
 				}
-				sawResultTarget = true
 				consumed = 2
 			default:
 				return true
