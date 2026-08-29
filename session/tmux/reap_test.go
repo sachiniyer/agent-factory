@@ -1096,3 +1096,80 @@ func TestCloseDoesNotReapWhenSessionSurvives(t *testing.T) {
 func recordPIDShell(pidExpr, pidFile string) string {
 	return fmt.Sprintf("echo %s > \"%s.tmp\" && mv \"%s.tmp\" \"%s\"", pidExpr, pidFile, pidFile, pidFile)
 }
+
+// spawnLiveProcess starts a real child that outlives the test body and returns
+// its process identity. Used where a test needs a genuinely live PID rather
+// than a fabricated one, so an assertion about a reported process is about
+// something that actually exists.
+func spawnLiveProcess(t *testing.T) proctree.Process {
+	t.Helper()
+	child := exec.Command("sleep", "300")
+	require.NoError(t, child.Start())
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+	snap, err := proctree.Snapshot()
+	require.NoError(t, err)
+	proc, ok := snap[child.Process.Pid]
+	require.True(t, ok, "child %d not in snapshot", child.Process.Pid)
+	return proc
+}
+
+// TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL is the #3414
+// regression, and it is about a DROPPED RETURN VALUE.
+//
+// CleanupSessions is what `af reset` runs immediately before it deletes every
+// worktree, prunes branches, and erases the records that name them. The reaper
+// it calls returns the processes that were still alive after SIGKILL — the
+// whole point of a bounded escalation is that its verdict can be "I did not
+// win" — and that value was discarded. A process still writing into a worktree
+// therefore left no trace in the returned error, reset saw a clean sweep, and
+// the directory was deleted out from under it.
+//
+// This is the rule the rest of the codebase already applies: an unconfirmed
+// teardown is not a confirmed one. CloseAndWaitForPaneExit refuses on exactly
+// this signal ("pane processes %s are still alive after bounded teardown"),
+// reapUnusableSandbox (#3478) and TeardownStateUnknown refuse to turn "could
+// not confirm" into a verdict, and #3510 reaps worktree writers before
+// relocating an archive for the same reason. CleanupSessions was the one
+// teardown path that looked away.
+//
+// The reap itself stays REAL — the stub delegates to it, so the session's
+// actual escapee is still reaped and the sibling test's contract still holds.
+// Only the verdict is forced, because the states that genuinely survive SIGKILL
+// (uninterruptible sleep, a process this uid may not signal) are not something
+// a test can conjure on demand: proctree counts a zombie as gone, so the usual
+// trick does not produce one either.
+func TestCleanupSessionsReportsProcessesThatSurvivedSIGKILL(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_survivor-report-test"
+	spawnSessionWithEscapee(t, name)
+
+	// The sweep only kills sessions it can prove this home owns (#1122); the
+	// raw `tmux new-session` above does not go through the af creation path.
+	home, err := afHomeDir()
+	require.NoError(t, err)
+	out, err := exec.Command("tmux", "set-environment", "-t", "="+name, EnvMarkerHome, home).CombinedOutput()
+	require.NoError(t, err, "set-environment: %s", out)
+
+	survivor := spawnLiveProcess(t)
+	realReap := reapOnRequestProcesses
+	reapOnRequestProcesses = func(reason reapReason, sanitizedName string, procs []proctree.Process,
+		grace, termWait time.Duration,
+	) []proctree.Process {
+		realReap(reason, sanitizedName, procs, grace, termWait)
+		return []proctree.Process{survivor}
+	}
+	t.Cleanup(func() { reapOnRequestProcesses = realReap })
+
+	err = CleanupSessions(cmd.MakeExecutor())
+	require.Error(t, err, "CleanupSessions returned nil while a process survived SIGKILL — "+
+		"`af reset` goes on to delete this session's worktree with that process still writing to it (#3414)")
+	require.Contains(t, err.Error(), strconv.Itoa(survivor.PID),
+		"the error must name the surviving PID: aborting the reset is only actionable if the user "+
+			"is told what to go look at")
+	require.Contains(t, err.Error(), name, "the error must name the session the survivor came from")
+}
