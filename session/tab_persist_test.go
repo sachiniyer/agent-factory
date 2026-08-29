@@ -195,7 +195,7 @@ func TestRestartSurvival_AccountScopedLiveTabsAreReplaced(t *testing.T) {
 
 	const repoPath = "/tmp/account-restart-survival-repo"
 	const agentName = "af_abc123_account_restart"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	processName := agentName + "__build"
 
 	cmdExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true, processName: true})
@@ -285,7 +285,7 @@ func TestAccountScopedAgentRespawnPreservesLiveTabProcesses(t *testing.T) {
 
 	const repoPath = "/tmp/account-respawn-preserve-repo"
 	const agentName = "af_abc123_account_respawn"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	cmdExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	baseRun := cmdExec.RunFunc
@@ -334,7 +334,7 @@ func TestRestartSurvival_AccountScopedLiveTabRefusesUnconfirmedStop(t *testing.T
 
 	const repoPath = "/tmp/account-restart-refusal-repo"
 	const agentName = "af_abc123_account_refusal"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 
 	cmdExec := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	baseRun := cmdExec.RunFunc

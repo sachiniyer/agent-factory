@@ -77,7 +77,7 @@ func TestRecover_AccountTabFailureStopsSpawnedAgent(t *testing.T) {
 	defer log.Close()
 
 	const agentName = "af_account_recover_failure"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	worktreePath := t.TempDir()
 	var commands []string
 	cmdExec := accountRecoverRefusingSiblingExec(shellName, &commands)
@@ -107,7 +107,7 @@ func TestRecover_AccountTabFailureAfterRebuildKeepsCommittedMarker(t *testing.T)
 	gitOut(t, repoRoot, "branch", branch)
 
 	const agentName = "af_account_recover_rebuilt"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	worktreePath := filepath.Join(t.TempDir(), "missing-worktree")
 	var commands []string
 	cmdExec := accountRecoverRefusingSiblingExec(shellName, &commands)
@@ -133,7 +133,7 @@ func TestLoad_AccountTabFailureStopsAgentBeforeDiscard(t *testing.T) {
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_load_failure"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	var commands []string
 	cmdExec := cmd_test.MockCmdExec{
@@ -243,7 +243,7 @@ func TestLoad_AccountShellPreparationFailureStopsPreScopeSibling(t *testing.T) {
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_shell_prepare_failure"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	var commands []string
 	cmdExec := cmd_test.MockCmdExec{
@@ -292,7 +292,7 @@ func TestLoad_AccountUnknownSiblingProbeRetainsInertRecord(t *testing.T) {
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_unknown_probe"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inner := nameKeyedExec(map[string]bool{agentName: true, shellName: true})
 	var commands []string
 	cmdExec := cmd_test.MockCmdExec{
@@ -407,7 +407,7 @@ func TestLoad_AccountRestoreRaceStopsReattachedPreScopeSibling(t *testing.T) {
 	t.Cleanup(tmux.SetNewSessionEnvSupportForTest(true))
 
 	const agentName = "af_account_restore_race"
-	shellName := agentName + shellTmuxSuffix
+	shellName := agentName + tmuxTabSeparator + shellTabName
 	inner := nameKeyedExec(map[string]bool{agentName: true})
 	var commands []string
 	probeCount := 0
