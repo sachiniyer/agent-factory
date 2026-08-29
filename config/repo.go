@@ -49,9 +49,20 @@ func (e *unansweredProbeError) Unwrap() []error { return []error{ErrRepoProbeUna
 // markUnansweredProbe classifies a failed git invocation: err marked with
 // ErrRepoProbeUnanswered when nothing proves git answered, and err untouched
 // when it did.
-func markUnansweredProbe(err error) error {
+//
+// CLASSIFICATION and ATTRIBUTION are separate steps here, and the order is the
+// whole point. What happened is decided from the command's own outcome and
+// nothing else, so a deadline expiring after a completed ExitError can never
+// retag an answer as unknown (#3500 review). Only once the outcome says
+// unanswered is ctx consulted, and then only to say WHY: a caller whose own
+// deadline killed the child gets `context.DeadlineExceeded` in the chain and
+// can test for it, instead of an opaque "signal: killed" (#3517).
+func markUnansweredProbe(ctx context.Context, err error) error {
 	if err == nil || !probeWentUnanswered(err) {
 		return err
+	}
+	if cause := ctx.Err(); cause != nil {
+		return &unansweredProbeError{err: fmt.Errorf("%w (the caller's context ended first: %w)", err, cause)}
 	}
 	return &unansweredProbeError{err: err}
 }
@@ -160,8 +171,15 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		if bareErr == nil && bareRoot != "" {
 			return repoRootResolution{identityRoot: bareRoot, workspaceRoot: bareRoot}, nil
 		}
+		// The stderr verdict is only as good as the process that produced it.
+		// A diagnostic written by a git that was then killed — a signal, our own
+		// cancellation landing in the window between the write and the exit —
+		// proves nothing, so a COMPLETED exit is required before that text is
+		// read as an answer (#3500 review round 4). Without this gate the one
+		// branch that returns a definite verdict is also the one branch that
+		// never consults the classifier.
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) &&
+		if !probeWentUnanswered(err) && errors.As(err, &exitErr) &&
 			(strings.Contains(string(exitErr.Stderr), "not a git repository (or any of the parent directories)") ||
 				strings.Contains(string(exitErr.Stderr), "not a git repository (or any parent up to mount point")) &&
 			!gitMetadataMayExist(pathArgs...) {
@@ -179,7 +197,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		if !probeWentUnanswered(err) && bareErr != nil && probeWentUnanswered(bareErr) {
 			resolveErr = bareErr
 		}
-		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", markUnansweredProbe(resolveErr))
+		return repoRootResolution{}, fmt.Errorf("failed to get git repo root: %w", markUnansweredProbe(ctx, resolveErr))
 	}
 	toplevel := trimGitOutputLine(topOut)
 
@@ -198,7 +216,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 		// Falling back there would hand a linked worktree its own toplevel as
 		// its identity root, silently splitting one repository's ID in two.
 		if probeWentUnanswered(err) {
-			return repoRootResolution{}, fmt.Errorf("failed to inspect git directories for %s: %w", toplevel, markUnansweredProbe(err))
+			return repoRootResolution{}, fmt.Errorf("failed to inspect git directories for %s: %w", toplevel, markUnansweredProbe(ctx, err))
 		}
 		return repoRootResolution{identityRoot: toplevel, workspaceRoot: toplevel}, nil
 	}
@@ -252,7 +270,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	// answer is usually "no such key", which is exactly how a non-submodule repo
 	// reports itself; a killed probe cannot tell that apart from a submodule.
 	if probeWentUnanswered(err) {
-		return repoRootResolution{}, fmt.Errorf("failed to read core.worktree for %s: %w", commonDir, markUnansweredProbe(err))
+		return repoRootResolution{}, fmt.Errorf("failed to read core.worktree for %s: %w", commonDir, markUnansweredProbe(ctx, err))
 	}
 	// Fallback: parent of .git directory (correct for non-submodule repos)
 	return repoRootResolution{identityRoot: filepath.Dir(commonDir), workspaceRoot: toplevel}, nil
@@ -286,7 +304,7 @@ func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {
 	cmd.WaitDelay = repoGitWaitDelay
 	out, err := cmd.Output()
 	if err != nil {
-		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(err))
+		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(ctx, err))
 	}
 	switch value := strings.TrimSpace(string(out)); value {
 	case "true":

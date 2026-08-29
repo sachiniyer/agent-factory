@@ -1,9 +1,11 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -199,4 +201,62 @@ exit 128
 	require.NoError(t, err, "an answered probe keeps its fallback; only an unanswered one is fatal")
 	assert.Equal(t, toplevel, repo.Root)
 	assert.Equal(t, toplevel, repo.IdentityPath())
+}
+
+// TestRepoFromPathRejectsAStderrVerdictFromAKilledProbe: the definite
+// outside-repository verdict is read out of git's stderr, and that text is only
+// as good as the process that produced it. A git killed after writing the
+// diagnostic but before exiting proves nothing — and that branch was the one
+// place a verdict could be returned without consulting the classifier at all
+// (#3500 review round 4).
+func TestRepoFromPathRejectsAStderrVerdictFromAKilledProbe(t *testing.T) {
+	installFakeGit(t, `#!/bin/sh
+printf '%s\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2
+kill -9 $$
+`)
+
+	_, err := RepoFromPath(t.TempDir())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNotGitRepository,
+		"a diagnostic from a process that never exited is not a verdict about the path")
+	assert.ErrorIs(t, err, ErrRepoProbeUnanswered,
+		"a killed probe is unanswered however far it got before dying")
+}
+
+// TestRepoFromPathContextNamesTheCallersDeadline: when the caller's own
+// deadline is what killed the probe, exec reports "signal: killed" and the
+// context error is nowhere in the chain, so callers cannot tell a timeout from
+// any other death (#3517). Classification still comes from the command outcome
+// — the deadline only supplies the CAUSE once that outcome is unanswered.
+func TestRepoFromPathContextNamesTheCallersDeadline(t *testing.T) {
+	installFakeGit(t, `#!/bin/sh
+sleep 5
+`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := RepoFromPathContext(ctx, t.TempDir())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded,
+		"a caller that owns the cancellation must be able to detect its own timeout")
+	assert.ErrorIs(t, err, ErrRepoProbeUnanswered,
+		"and it is still an unanswered probe, not a verdict on the path")
+}
+
+// TestRepoFromPathDoesNotBlameTheContextForAnAnsweredFailure is the guard on
+// the ordering above: a deadline that expires around an answered probe must not
+// turn that answer into a timeout. Here git answers immediately and the context
+// is already dead by the time the error is classified.
+func TestRepoFromPathDoesNotBlameTheContextForAnAnsweredFailure(t *testing.T) {
+	installFakeGit(t, `#!/bin/sh
+printf '%s\n' 'fatal: not a git repository (or any of the parent directories): .git' >&2
+exit 128
+`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := RepoFromPathContext(ctx, t.TempDir())
+	cancel()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrNotGitRepository, "git answered; the answer stands")
+	assert.NotErrorIs(t, err, ErrRepoProbeUnanswered)
 }
