@@ -123,6 +123,10 @@ func unwrappedAccountCommandMutates(words []*syntax.Word, names map[string]struc
 		return envCallMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "unset"):
 		return unsetMutatesAccountEnvironment(words[1:], names)
+	case isBareName(words[0], "set"):
+		return setMutatesAccountEnvironment(words[1:])
+	case isBareName(words[0], "hash"):
+		return hashMutatesAccountEnvironment(words[1:])
 	case isAccountDeclarationBuiltin(words[0]):
 		return declarationMutatesAccountEnvironment(words[1:], names)
 	case isBareName(words[0], "read"):
@@ -410,6 +414,87 @@ func unsetMutatesAccountEnvironment(words []*syntax.Word, names map[string]struc
 			if accountEnvironmentOperandDenied(value, names) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// setMutatesAccountEnvironment reports whether a `set` call switches the shell
+// into keyword mode, where an assignment-shaped word written AFTER a command
+// name is placed in that command's environment instead of staying an argument.
+//
+// This walk reads every later call under DEFAULT parsing rules, so the mode is
+// not a mutation of its own — it silently invalidates every verdict that
+// follows it. Under `set -k`, `codex CODEX_HOME=/other` is not the two-word
+// call this walk sees: bash removes the assignment from codex's arguments and
+// launches it with the replacement root. Refusing the switch is what keeps the
+// rest of the walk meaningful; tracking the mode across calls instead would
+// have to model the shell's own state machine.
+//
+// Deliberately narrow: a process tab runs an arbitrary user command, and an
+// ordinary `set -e` prologue must keep working. Only keyword mode is refused.
+func setMutatesAccountEnvironment(words []*syntax.Word) bool {
+	for idx := 0; idx < len(words); idx++ {
+		value, literal := literalShellWord(words[idx])
+		if !literal {
+			// An operand this parser cannot evaluate could expand to -k.
+			return true
+		}
+		// `--` and the first non-option operand both end option parsing: every
+		// word after one is a positional parameter, so `set -- -k` assigns the
+		// string "-k" to $1 and enables nothing.
+		if value == "--" || !strings.HasPrefix(value, "-") {
+			return false
+		}
+		// A long-form switch names its mode in the next word. `+o keyword` turns
+		// the mode OFF, so only the minus form is a switch on.
+		if value == "-o" || value == "+o" {
+			if idx+1 >= len(words) {
+				// A bare `set -o` prints the current settings.
+				continue
+			}
+			mode, ok := literalShellWord(words[idx+1])
+			if !ok {
+				return true
+			}
+			if value == "-o" && mode == "keyword" {
+				return true
+			}
+			idx++
+			continue
+		}
+		// Short options cluster, so a guard matching only a lone "-k" walks
+		// straight past "-ek" (the #3402 lesson). "+k" DISABLES keyword mode and
+		// is not a prefix match here.
+		if strings.ContainsRune(value[1:], 'k') {
+			return true
+		}
+	}
+	return false
+}
+
+// hashMutatesAccountEnvironment reports whether a `hash` call remaps a command
+// name to a path of its own choosing.
+//
+// `hash -p pathname name` makes `name` resolve to `pathname`, so every later
+// executable-name check in this walk answers about a different binary than the
+// one that will actually run: after `hash -p /usr/bin/env runner`, the
+// otherwise-unknown `runner` IS env, and `runner CODEX_HOME=/other codex`
+// applies the replacement root through a name this walk never modelled.
+//
+// Only the remapping form is refused — `hash -r` and `hash name` merely
+// maintain the lookup cache and leave every name meaning what it meant.
+func hashMutatesAccountEnvironment(words []*syntax.Word) bool {
+	for _, word := range words {
+		value, literal := literalShellWord(word)
+		if !literal {
+			return true
+		}
+		if value == "--" || !strings.HasPrefix(value, "-") {
+			return false
+		}
+		if strings.ContainsRune(value[1:], 'p') {
+			return true
 		}
 	}
 	return false
