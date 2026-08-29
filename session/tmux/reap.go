@@ -504,6 +504,27 @@ func reapSessionProcesses(reason reapReason, sanitizedName string, procs []proct
 	})
 }
 
+// processPIDs renders a process set as its PIDs, in order.
+func processPIDs(procs []proctree.Process) []string {
+	pids := make([]string, 0, len(procs))
+	for _, process := range procs {
+		pids = append(pids, strconv.Itoa(process.PID))
+	}
+	return pids
+}
+
+// processPIDList renders a process set as a PID list for PROSE. Every teardown
+// path that REFUSES on survivors has to name them — the caller's only move is to
+// go look at them — and each had grown its own copy of this loop.
+//
+// The separator is ", " because this reads inside a sentence. A `ps -p` argument
+// needs the comma WITHOUT the space, so build that from processPIDs directly:
+// joined with ", " it is one space-bearing argument that shellsuggest correctly
+// quotes as a single word, producing a suggestion that does not run.
+func processPIDList(procs []proctree.Process) string {
+	return strings.Join(processPIDs(procs), ", ")
+}
+
 // logReapOutcome writes one per-process reap line at the severity the reason and
 // the outcome agree on. Split out of the closure above so the mapping is one
 // named thing a test can drive through every tier — including the ones an

@@ -788,7 +788,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	// grace waits overlap, while this short-lived reset process still blocks
 	// until every sweep has finished.
 	var wg sync.WaitGroup
-	processSweepErrs := make(chan error, len(recoveries))
+	processSweepErrs := make(chan error, len(killed)+len(recoveries))
 	for _, match := range killed {
 		leaked := leakedBySession[match]
 		if len(leaked) == 0 {
@@ -799,7 +799,18 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			defer wg.Done()
 			// These sessions were just killed BY this sweep, on request: their
 			// processes are being destroyed with them, not caught escaping (#2765).
-			reapSessionProcesses(reapOnRequest, match, leaked, reapGraceWait, reapTermWait)
+			//
+			// The RETURN VALUE is the verdict, not a detail (#3414). A bounded
+			// escalation is allowed to lose, and what it hands back is the set that
+			// was still alive after SIGKILL. Dropping it converted an unconfirmed
+			// teardown into a confirmed one, and `af reset` deletes these sessions'
+			// worktrees as its very next step — so a survivor still writing into one
+			// had its directory removed underneath it, silently. Same rule as
+			// CloseAndWaitForPaneExit, which already refuses on this exact signal.
+			if remaining := reapOnRequestProcesses(reapOnRequest, match, leaked,
+				reapGraceWait, reapTermWait); len(remaining) > 0 {
+				processSweepErrs <- survivingProcessesError(match, remaining)
+			}
 		}(match, leaked)
 	}
 	for _, recovery := range recoveries {
@@ -826,6 +837,30 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 	}
 	return errors.Join(killErr, captureRefusal, processSweepErr)
 }
+
+// survivingProcessesError reports processes that outlived the bounded on-request
+// teardown of a session this sweep killed.
+//
+// It names the PIDs and the session, because aborting a reset is only
+// actionable if the user is told what to go look at: the caller (`af reset`)
+// stops before deleting anything and prints "Nothing was removed", so this
+// message is the entire explanation of why.
+func survivingProcessesError(match string, remaining []proctree.Process) error {
+	return fmt.Errorf("tmux session %s was killed but its processes %s are still alive after bounded teardown"+
+		" — they may still be writing to its worktree, which `af reset` deletes next."+
+		" Stop them and re-run; inspect them with: %s",
+		match, processPIDList(remaining),
+		shellsuggest.Command("ps", "-o", "pid,ppid,args", "-p", strings.Join(processPIDs(remaining), ",")))
+}
+
+// reapOnRequestProcesses is the on-request reaper CleanupSessions runs for each
+// session it killed, behind a package var so a test can force the one outcome it
+// cannot manufacture portably: a process that survives SIGKILL. Only a D-state
+// sleeper or a process this uid may not signal reaches that state, and neither is
+// something a test can conjure on demand — proctree treats a zombie as gone, so
+// the usual trick does not produce one either. Production always runs
+// reapSessionProcesses.
+var reapOnRequestProcesses = reapSessionProcesses
 
 type vanishedSessionRecovery struct {
 	match              string
@@ -894,12 +929,8 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 		// contain them. This is the real leak, and the one worth a WARNING (#2765).
 		remaining := reapSessionProcesses(reapEscaped, match, marked, 0, reapTermWait)
 		if len(remaining) > 0 {
-			pids := make([]string, 0, len(remaining))
-			for _, process := range remaining {
-				pids = append(pids, fmt.Sprintf("%d", process.PID))
-			}
 			sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s are still alive after bounded teardown",
-				strings.Join(pids, ", ")))
+				processPIDList(remaining)))
 		}
 		candidates = refreshed
 	}
@@ -907,12 +938,8 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	left, inspectErr := markedOrphanProcesses(finalCandidates, match, ownHome, generations)
 	sweepErr = errors.Join(sweepErr, refreshErr, inspectErr)
 	if len(left) > 0 {
-		pids := make([]string, 0, len(left))
-		for _, process := range left {
-			pids = append(pids, fmt.Sprintf("%d", process.PID))
-		}
 		sweepErr = errors.Join(sweepErr, fmt.Errorf("marked processes %s appeared or remained after the orphan sweep",
-			strings.Join(pids, ", ")))
+			processPIDList(left)))
 	}
 	return sweepErr
 }

@@ -360,11 +360,8 @@ func (t *TmuxSession) closeAndWaitForPaneExit() (PaneState, bool, error) {
 		return refuse(fmt.Errorf("could not establish the pane's complete process tree before kill-session: %w",
 			processes.captureErr))
 	case len(processes.remaining) > 0:
-		pids := make([]string, 0, len(processes.remaining))
-		for _, process := range processes.remaining {
-			pids = append(pids, strconv.Itoa(process.PID))
-		}
-		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown", strings.Join(pids, ", ")))
+		return refuse(fmt.Errorf("pane processes %s are still alive after bounded teardown",
+			processPIDList(processes.remaining)))
 	case waitForPane && !waitForProcessExit(paneProcess, paneExitWait):
 		// kill-session returning establishes only that SIGHUP was sent, not that
 		// the process stopped writing.
