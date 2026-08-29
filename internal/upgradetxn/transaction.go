@@ -684,6 +684,14 @@ func (t *Transaction) tryAcquireRecoveryAs(actorExecutable string) (*RecoveryLea
 		return nil, errors.New("active upgrade transaction changed before recovery lock acquisition")
 	}
 	t.journal = current
+	// readJournal returns bytes, not a durability guarantee. A takeover process
+	// has no way to know whether the prior writer observed errJournalVisibleNotDurable
+	// (rename landed, directory sync never closed) and died before re-persisting, so
+	// it must be at least as conservative as the writer: mark the adopted journal
+	// unconfirmed and let reaffirmDurableJournal close the barrier before any
+	// irreversible phase arm acts on it (#3453). The redundant write is the cost a
+	// takeover pays for the same guarantee a same-process adoption already enforces.
+	t.journalUnconfirmed = true
 	actorPath, err := canonicalExistingFile(actorExecutable)
 	if err != nil {
 		_ = releaseFileLock(file)

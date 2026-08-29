@@ -284,3 +284,137 @@ func TestSupervisorRunRefusesToActOnAnAdoptedCommittedPhase(t *testing.T) {
 	assert.Zero(t, approved, "an adopted commit must not approve the candidate")
 	assert.Zero(t, disabled, "and must not disarm the recovery job over a journal a crash can lose")
 }
+
+// #3453 review (cross-process takeover). The test above proves Supervisor.Run
+// refuses to act on an ADOPTED PhaseCommitted whose barrier never closed, but
+// only because the SAME process that saw the visible-but-undurable write still
+// holds journalUnconfirmed=true.
+//
+// A fresh process that wins recovery after the writer died has no such memory:
+// it goes through Load() (journalUnconfirmed defaults to false) and then
+// tryAcquireRecoveryAs, which reads the journal from disk. Before the fix that
+// read adopted the bytes without marking them unconfirmed, so
+// reaffirmDurableJournal became a no-op and the PhaseCommitted arm approved the
+// candidate and disarmed the recovery job over a journal a crash can still lose —
+// stranding the candidate_validating entry with no actor left to finish it.
+//
+// A takeover has strictly LESS information about durability than the writer, so
+// it must be at least as conservative: mark every disk read in takeover as
+// unconfirmed so the barrier is re-closed before any irreversible arm runs.
+func TestCrossProcessTakeoverMustReaffirmUnconfirmedJournal(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+
+	injected := errors.New("injected commit sync failure")
+	home := txn.Journal().HomeDir
+	_ = failJournalDirectorySync(t, upgradeRoot(home), -1, injected)
+
+	require.Error(t, lease.Commit())
+	require.Equal(t, PhaseCommitted, txn.Journal().Phase,
+		"precondition: the committed phase was adopted from a visible write")
+
+	// The writer died here. Release the lease and reload from disk so the
+	// takeover process has no in-memory memory of the unconfirmed write.
+	require.NoError(t, lease.Release())
+
+	loaded, err := Load(home)
+	require.NoError(t, err)
+	require.Equal(t, PhaseCommitted, loaded.Journal().Phase,
+		"precondition: the on-disk journal is the visible-but-undurable commit")
+
+	takeover, err := loaded.tryAcquireRecoveryAs(loaded.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = takeover.Release() })
+
+	var approved, disabled int
+	supervisor := Supervisor{Operations: SupervisorOperations{
+		AwaitActivation:    func(context.Context, Journal) error { return nil },
+		StopPrevious:       func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartCandidate:     func(context.Context, Journal) error { return nil },
+		ValidateCandidate:  func(context.Context, Journal) error { return nil },
+		ApproveCandidate:   func(context.Context, Journal) error { approved++; return nil },
+		StopCandidate:      func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartPrevious:      func(context.Context, Journal) error { return nil },
+		ValidatePrevious:   func(context.Context, Journal) error { return nil },
+		DisableRecoveryJob: func(context.Context, Journal) error { disabled++; return nil },
+	}}
+
+	err = supervisor.Run(context.Background(), loaded, takeover)
+	require.ErrorIs(t, err, injected,
+		"a takeover must refuse to act on a phase whose durability it cannot prove")
+	assert.Zero(t, approved, "an adopted commit must not approve the candidate — even across processes")
+	assert.Zero(t, disabled, "and must not disarm the recovery job over a journal a crash can lose — even across processes")
+}
+
+// #3453 review (cross-process takeover, transient failure). The same takeover
+// as the test above, but the directory sync heals before the takeover process
+// runs. The takeover's re-persistence then closes the barrier and the
+// PhaseCommitted arm settles exactly once — the fix must not make a healthy
+// takeover fail forever, nor run the irreversible effects twice.
+//
+// This is the cross-process counterpart of
+// TestRollbackCompletesCheckpointBarrierAfterATransientSyncFailure: an unconfirmed
+// phase adopted from disk becomes durable the moment the barrier can close, and
+// the recovery proceeds rather than choking on a barrier the prior writer left
+// open.
+func TestCrossProcessTakeoverReaffirmsAndThenActsWhenSyncHeals(t *testing.T) {
+	txn, _, _ := prepareFixture(t)
+	lease, err := txn.tryAcquireRecoveryAs(txn.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	require.NoError(t, lease.Advance(PhaseSupervisorReady))
+	require.NoError(t, lease.Advance(PhaseDaemonStopping))
+	require.NoError(t, lease.Advance(PhaseDaemonStopped))
+	require.NoError(t, lease.InstallCandidate())
+	require.NoError(t, lease.Advance(PhaseCandidateStarting))
+	require.NoError(t, lease.Advance(PhaseCandidateValidating))
+
+	injected := errors.New("injected commit sync failure")
+	home := txn.Journal().HomeDir
+	root := upgradeRoot(home)
+	// Always fail during the in-process commit so the journal lands on disk
+	// visible but undurable, exactly the state a takeover inherits.
+	heal := failJournalDirectorySync(t, root, -1, injected)
+
+	require.Error(t, lease.Commit())
+	require.Equal(t, PhaseCommitted, txn.Journal().Phase,
+		"precondition: the committed phase was adopted from a visible write")
+
+	require.NoError(t, lease.Release())
+
+	loaded, err := Load(home)
+	require.NoError(t, err)
+	require.Equal(t, PhaseCommitted, loaded.Journal().Phase)
+
+	// The directory sync heals before the takeover runs, so the takeover's
+	// re-persistence closes the barrier and the committed arm settles once.
+	heal()
+
+	takeover, err := loaded.tryAcquireRecoveryAs(loaded.Journal().PreviousBinaryPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = takeover.Release() })
+
+	var approved, disabled int
+	supervisor := Supervisor{Operations: SupervisorOperations{
+		AwaitActivation:    func(context.Context, Journal) error { return nil },
+		StopPrevious:       func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartCandidate:     func(context.Context, Journal) error { return nil },
+		ValidateCandidate:  func(context.Context, Journal) error { return nil },
+		ApproveCandidate:   func(context.Context, Journal) error { approved++; return nil },
+		StopCandidate:      func(context.Context, Journal) (StopOutcome, error) { return StopConfirmed, nil },
+		StartPrevious:      func(context.Context, Journal) error { return nil },
+		ValidatePrevious:   func(context.Context, Journal) error { return nil },
+		DisableRecoveryJob: func(context.Context, Journal) error { disabled++; return nil },
+	}}
+
+	require.NoError(t, supervisor.Run(context.Background(), loaded, takeover),
+		"once the barrier closes, the takeover must settle the committed phase")
+	assert.Equal(t, 1, approved, "the committed candidate is approved exactly once")
+	assert.Equal(t, 1, disabled, "the recovery job is disarmed exactly once")
+}
