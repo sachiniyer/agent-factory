@@ -55,9 +55,6 @@ func (s *StatusBar) Blur() {}
 // HandleKey implements layout.Pane (never consumes).
 func (s *StatusBar) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Clickable hints are #1024 PR 6.
-func (s *StatusBar) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
-
 // View implements layout.Pane: exactly rect-sized.
 func (s *StatusBar) View() string { return s.String() }
 

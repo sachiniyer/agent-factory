@@ -256,7 +256,7 @@ func TestTerminalTooSmallBannerIsExactlyTerminalSized(t *testing.T) {
 }
 
 // TestWorkspacePanesImplementPaneContract drives every workspace pane through
-// the layout.Pane interface itself: rect, focus flags, key/mouse stubs, and
+// the layout.Pane interface itself: rect, focus flags, key stubs, and
 // the exact-rect View. This is the shared §5.5 contract check run against
 // every pane.
 func TestWorkspacePanesImplementPaneContract(t *testing.T) {
@@ -273,7 +273,6 @@ func TestWorkspacePanesImplementPaneContract(t *testing.T) {
 		p.Blur()
 		require.False(t, p.Focused(), "%s: blurred after Blur", name)
 		_, _ = p.HandleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
-		_ = p.HandleMouse(tea.MouseMsg{}, layout.Point{})
 		requireExactRect(t, p.View(), r, name)
 	}
 }

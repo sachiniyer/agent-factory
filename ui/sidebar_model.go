@@ -267,12 +267,6 @@ func (s *Sidebar) SetProjectName(name string) { s.projectName = name }
 // pane has focus); per-pane routing arrives with the split (#1024 PR 5).
 func (s *Sidebar) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
-// root (#1024 R4): String() registers per-row zones and the root router
-// calls the click primitives (SelectTabRow, ToggleInstanceTree, …) directly,
-// so the pane-local fallback consumes nothing.
-func (s *Sidebar) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
-
 // View implements layout.Pane.
 func (s *Sidebar) View() string { return s.String() }
 
