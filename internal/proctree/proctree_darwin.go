@@ -375,10 +375,36 @@ func openWorkingDir(pid int) (*os.File, string, bool) {
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil ||
-		uint64(stat.Dev) != device || uint64(stat.Ino) != inode ||
-		uint32(stat.Mode)&unix.S_IFMT != mode&unix.S_IFMT {
+		!cwdIdentityMatchesStat(&stat, device, inode, mode) {
 		_ = directory.Close()
 		return nil, "", false
 	}
 	return directory, path, true
+}
+
+// cwdIdentityMatchesStat reports whether an fstat of the opened directory
+// describes the same vnode PROC_PIDVNODEPATHINFO named — the check that closes
+// the window between reading the path and opening it.
+//
+// It is a named function rather than three clauses inside the if above so that
+// the comparison can be handed a synthesized Stat_t. The condition that broke it
+// (#3525) is a device id with the high bit set, and no test can mount a
+// filesystem with a chosen major number on a CI runner; it can hand this one the
+// value such a mount would produce. See proctree_darwin_test.go.
+//
+// The three widenings are deliberately not written alike, because they are not
+// alike:
+//
+//   - Dev is int32 and its kernel counterpart is uint32_t, so it goes through
+//     vnodeDeviceFromFstatDev. That asymmetry IS the bug; the reasoning is
+//     written out there.
+//   - Ino is already uint64 here and vst_ino is uint64_t, so the widths match
+//     and the conversion changes nothing. Kept explicit so the field reads the
+//     same as the others.
+//   - Mode is uint16 and unsigned, so uint32 zero-extends; S_IFMT then keeps
+//     only bits 12-15, nowhere near a sign bit either way.
+func cwdIdentityMatchesStat(stat *unix.Stat_t, device, inode uint64, mode uint32) bool {
+	return vnodeDeviceFromFstatDev(stat.Dev) == device &&
+		uint64(stat.Ino) == inode &&
+		uint32(stat.Mode)&unix.S_IFMT == mode&unix.S_IFMT
 }
