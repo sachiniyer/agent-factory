@@ -78,7 +78,7 @@ inventory:
 | Park→act scheduler | `daemon/limitresume.go:67` `ResumeLimitedSessions` | Yes — handoff is a sibling action |
 | Resume executor | `daemon/limit.go:285` `resumeFromLimitLocked` | Yes — same shape, different program |
 | **Program swap** | `session/backend_local.go:427` `Respawn` + `tmux.SetProgram` | **Yes — this is the executor** |
-| Prompt (re)delivery | `task/start.go:29` `StartAndSendPrompt` | Yes |
+| Prompt (re)delivery | `task/start.go:112` `StartAndSendPromptWithConversationCapture` | Yes |
 | Stored mission | `Instance.Prompt`, persisted `session/storage.go:77` | Yes — this is the anchor (§3) |
 | Agent resolution | `Instance.ResolvedAgent()` `session/instance_accessors.go:201` | Yes — **mandatory**, see §5.3 |
 | Per-agent limit state | — | **Missing** (§8) |

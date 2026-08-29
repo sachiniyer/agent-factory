@@ -17,12 +17,13 @@ import (
 // though killing still force-deletes its branch and orphans the same committed
 // work. The dirty-worktree check (via GetWorktreePath) was NOT so gated, so the two
 // checks covered different session states. The fix runs both under the ungated
-// GetWorktreePath / GetBaseCommitSHA accessors.
+// GetWorktreeCleanupImpact snapshot.
 
 // nonStartedWorktreeInstance builds an instance with a real git worktree that is
 // NOT started (the restore-failed shape #2029 is about): GetGitWorktree errors for
-// it, but GetWorktreePath / GetBaseCommitSHA still resolve. Status is set to a
-// non-creating, non-tearing-down value so handleKill opens the confirmation.
+// it, but GetWorktreePath and the GetWorktreeCleanupImpact snapshot still
+// resolve. Status is set to a non-creating, non-tearing-down value so handleKill
+// opens the confirmation.
 func nonStartedWorktreeInstance(t *testing.T, title, repoDir, worktreePath, branch, baseSHA string) *session.Instance {
 	t.Helper()
 	inst, err := session.NewInstance(session.InstanceOptions{Title: title, Path: repoDir, Program: "test"})
@@ -56,7 +57,17 @@ func TestHandleKill_NonStarted_UnmergedCommit_StillWarns(t *testing.T) {
 	_, gwErr := inst.GetGitWorktree()
 	require.Error(t, gwErr, "GetGitWorktree is started-gated; the old code skipped the unmerged check for this session")
 	require.NotEmpty(t, inst.GetWorktreePath(), "the ungated worktree-path accessor must still resolve")
-	require.Equal(t, baseSHA, inst.GetBaseCommitSHA(), "the ungated base-SHA accessor must still resolve")
+	impact, ok := inst.GetWorktreeCleanupImpact()
+	require.True(t, ok, "GetWorktreeCleanupImpact must resolve for a non-started instance with a worktree (#2209)")
+	// EXACT values, not merely non-empty. #2209 added this so cleanup can inspect
+	// the exact ref it would delete, and a snapshot that resolved to some OTHER
+	// worktree's branch or base SHA is non-empty and would sail through a NotEmpty
+	// check — precisely the wrong-branch-identity bug #3408 fixed in
+	// reclaimArchivedBranchLocked. The value is the property worth pinning.
+	require.Equal(t, "dev/nonstarted", impact.Branch,
+		"cleanup impact must expose the instance's OWN branch even for a non-started instance")
+	require.Equal(t, baseSHA, impact.BaseCommitSHA,
+		"cleanup impact must expose the instance's OWN base SHA even for a non-started instance")
 
 	_, hm := armKill(t, inst)
 

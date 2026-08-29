@@ -398,12 +398,6 @@ func (w *TabbedWindow) Interactive() bool { return w.interactive }
 // consumes nothing; interactive-mode key forwarding is #1089.
 func (w *TabbedWindow) HandleKey(tea.KeyMsg) (tea.Cmd, bool) { return nil, false }
 
-// HandleMouse implements layout.Pane. Mouse dispatch is zone-id-based at the
-// root (#1024 R4): the body/header/term zones registered by String() resolve
-// to focus/interact/scroll/forward actions there, so the pane-local fallback
-// consumes nothing.
-func (w *TabbedWindow) HandleMouse(tea.MouseMsg, layout.Point) tea.Cmd { return nil }
-
 // SetZoneRegistry wires the shared mouse hit-test registry (#1024 R4).
 func (w *TabbedWindow) SetZoneRegistry(reg *zones.Registry) {
 	w.zones = reg

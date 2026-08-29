@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -161,10 +162,15 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 	if ctx.Err() != nil {
 		return false, false, fmt.Errorf("%w: has-session %s after %s", ErrTmuxTimeout, name, tmuxCommandTimeout)
 	}
-	if missingTmuxSession(err, name) {
+	if tmuxProvedSessionAbsent(cmdExec, err, name) {
 		return false, true, nil
 	}
-	return false, false, fmt.Errorf("has-session for %s did not return a usable answer: %w", name, err)
+	// Name what tmux actually said. An (*exec.ExitError).Error() is only "exit
+	// status 1", and a refusal reported with that alone cost #3469 a diagnosis
+	// round trip: the message could not distinguish the answer this probe now
+	// classifies from the ones it still cannot.
+	return false, false, fmt.Errorf("has-session for %s did not return a usable answer%s: %w",
+		name, tmuxDiagnosticSuffix(err), err)
 }
 
 // missingTmuxSession recognizes tmux's explicit exact-target absence answer.
@@ -176,12 +182,63 @@ func probeSessionStrict(cmdExec cmd.Executor, name string) (exists bool, known b
 // named this path explicitly: `tmux ls` may find AF sessions, the socket may then
 // be removed by a /tmp cleaner, and this fallback probe would answer ENOENT while
 // the server and its panes are still running.
+//
+// It reads the DIAGNOSTIC only, and is therefore incomplete on its own: see
+// tmuxProvedSessionAbsent, which every caller that acts on absence goes through.
 func missingTmuxSession(err error, name string) bool {
 	diagnostic, ok := tmuxExitOneDiagnostic(err)
 	if !ok {
 		return false
 	}
 	return diagnostic == "can't find session: "+name || NoServerRunning(err)
+}
+
+// tmuxProvedSessionAbsent reports whether tmux has PROVED the named session is
+// not on its server, for a command that ran and answered with a failure.
+//
+// missingTmuxSession decides that from the diagnostic alone, which is enough for
+// the answers tmux gives while it still has a session to make "current". It is
+// NOT enough when the server holds NO sessions at all: cmd_find_target then
+// fails to establish a current target before it ever looks at `-t`, so
+// has-session and list-panes answer `no current target` — exit 1, naming neither
+// the session nor a socket, and matching none of the strings above. Measured on
+// tmux 3.4 (#3469).
+//
+// That state is not exotic. A server passes through it on the way out after its
+// last session is killed, which is what made the reap suite's refusal family
+// flaky: the fixture kills the only session on a private server, and whether the
+// following has-session lands before the server exits (`no current target`,
+// unclassified) or after it (`no server running on <socket>`, classified)
+// decided which refusal reason CleanupSessions produced. Under `set -s
+// exit-empty off` it is not a window at all but the server's PERMANENT resting
+// state, so on those users' boxes `af reset` refused cleanup of a session that
+// was genuinely gone, every time.
+//
+// The fix is not a third string to be right about. That would still leave
+// `server exited unexpectedly` (also measured, racing the same shutdown) and
+// every future wording unclassified, which is how the mechanism survives a
+// spelling fix. Instead an unrecognized exit 1 is corroborated against tmux's
+// own session listing: ListSessionNames succeeds only on an AUTHORITATIVE
+// answer — exit 0, or a definitive no-server — so a name absent from what it
+// returns is absent from the server, whatever the failed command said. A listing
+// that does not answer leaves the session UNKNOWN, exactly as before. This keeps
+// the package invariant intact rather than bending it: absence is still proved
+// by a read that happened, never inferred from one that failed.
+//
+// Only tmux's own exit 1 is widened this way. Any other status is a failure mode
+// tmux documents no diagnostic for, and was never a candidate for absence.
+func tmuxProvedSessionAbsent(cmdExec cmd.Executor, err error, name string) bool {
+	if missingTmuxSession(err, name) {
+		return true
+	}
+	if _, exitOne := tmuxExitOneDiagnostic(err); !exitOne {
+		return false
+	}
+	names, listErr := ListSessionNames(cmdExec)
+	if listErr != nil {
+		return false
+	}
+	return !slices.Contains(names, name)
 }
 
 // NoServerRunning reports whether a failed tmux command's error is tmux's

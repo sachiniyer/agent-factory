@@ -86,9 +86,25 @@ func updateCheckDueForTest(channel string) bool {
 	)
 }
 
+// recordCheckForTest seeds the throttle cache the way the launch path writes it.
+//
+// The file lock is NOT redundant, and must not be dropped as such: this seeding
+// sits OUTSIDE the already-locked update cycle. Inside that cycle
+// (withUpdateCheckLock → autoupdate.TryWithCheckCache) the lock is already held
+// and the body calls cache.Record directly; bookkeeping from out here has to
+// acquire it itself. It takes the BLOCKING lock rather than the launch path's
+// try-lock on purpose — a seeding step that silently skipped because something
+// else held the lock would leave the test asserting against an unseeded cache.
 func recordCheckForTest(t *testing.T, channel, lastSeenTag, currentVersion string) {
 	t.Helper()
-	if err := autoupdate.RecordCheck(autoupdate.CheckCachePath(), channel, lastSeenTag, currentVersion); err != nil {
+	path := autoupdate.CheckCachePath()
+	// CheckCachePath() is empty when no home resolves; Record would no-op anyway.
+	if path == "" {
+		return
+	}
+	if err := config.WithFileLock(path, func() error {
+		return autoupdate.ReadCheckCache(path).Record(channel, lastSeenTag, currentVersion, time.Now().UTC())
+	}); err != nil {
 		t.Fatalf("record update check: %v", err)
 	}
 }

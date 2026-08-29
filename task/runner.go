@@ -157,8 +157,8 @@ func defaultLimitDetectorForWait() LimitDetector {
 // WaitForReady separately fails fast if the session dies). This replaces the
 // pre-#1131 behavior of falling through to the Claude signals, which spun the
 // full 60s timeout for anything that never prints "❯". This is the single
-// copy: the daemon reaches it via task.StartAndSendPrompt (daemon imports
-// task since #782 inverted the old task→daemon dependency).
+// copy: the daemon reaches it via task.StartAndSendPromptWithConversationCapture
+// (daemon imports task since #782 inverted the old task→daemon dependency).
 // hasLineLeadingGlyph reports whether any line's first non-blank character is
 // needle — the composer is drawn at the START of its line, and a glyph anywhere
 // else on a line is something else (#3085).

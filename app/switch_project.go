@@ -481,8 +481,8 @@ func (m *home) deleteProjectCmd(msg startDeleteProjectMsg) tea.Cmd {
 
 // handleProjectDeleted finalizes an async delete-project (#1735). On success it
 // drops the local root_agents opt-in mirror (the daemon removed it on disk; a
-// separate attached TUI reflects it on its next launch, matching how
-// RegisterRootAgent's persistence is picked up) and refreshes the Projects
+// separate attached TUI reflects it on its next launch, matching how every other
+// daemon-side config and registry write is picked up) and refreshes the Projects
 // section so the now-empty project leaves the list immediately.
 func (m *home) handleProjectDeleted(msg projectDeletedMsg) (tea.Model, tea.Cmd) {
 	committedWarning := msg.err != nil && apiclient.IsMutationCommitted(msg.err)

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -444,6 +445,39 @@ func FormatRepoInstancesSkips(skips []RepoInstancesSkip) string {
 		parts = append(parts, skip.String())
 	}
 	return strings.Join(parts, "; ")
+}
+
+// DescribeRepoInstancesSkips renders the standard "could not be read" clause
+// every refusal built on a partial load shares.
+//
+// One phrase, one vocabulary: api/ and daemon/ cannot share a helper, and
+// letting each invent its own wording for the same condition is how a reader
+// stops recognising it as the same condition (#3479).
+func DescribeRepoInstancesSkips(skips []RepoInstancesSkip) string {
+	return fmt.Sprintf("%d project record file(s) could not be read: %s",
+		len(skips), FormatRepoInstancesSkips(skips))
+}
+
+// RepoInstancesSkipRemedy is the advice that actually fits the skips at hand.
+//
+// "Remove the file" is reasonable for a record that cannot be READ. It is
+// destructive for one this binary is merely too OLD to parse: deleting a newer
+// af's state discards session records this binary cannot see, orphaning live
+// sessions and their worktrees. Both land in the same skip list, so a blanket
+// remedy ends up contradicting UnsupportedSchemaVersionError, which already
+// tells the user to upgrade (#3479 review).
+//
+// One newer-schema skip anywhere in the set suppresses the removal advice for
+// the whole message: the destructive suggestion must not survive because some
+// OTHER repo happened to fail an ordinary read.
+func RepoInstancesSkipRemedy(skips []RepoInstancesSkip) string {
+	for _, skip := range skips {
+		var newer *UnsupportedSchemaVersionError
+		if errors.As(skip.Err, &newer) {
+			return "upgrade af to a version that understands the newer state file, then retry — do not delete these files, they hold sessions this binary cannot read"
+		}
+	}
+	return "repair or remove the file(s), then retry"
 }
 
 // LoadAllRepoInstancesReportingSkips is LoadAllRepoInstances plus the repoIDs it

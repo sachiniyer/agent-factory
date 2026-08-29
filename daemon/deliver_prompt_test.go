@@ -23,9 +23,9 @@ import (
 )
 
 // promptRecorder collects every prompt that reaches a session's backend, across
-// both the create path (StartAndSendPrompt) and the send path
-// (SendPromptCommand), so a delivery test can prove no prompt was dropped and
-// observe the order they landed in.
+// both the create path (StartAndSendPromptWithConversationCapture) and the send
+// path (SendPromptCommand), so a delivery test can prove no prompt was dropped
+// and observe the order they landed in.
 type promptRecorder struct {
 	mu      sync.Mutex
 	prompts []string

@@ -107,13 +107,17 @@ func saveConfigLocked(config *Config) error {
 
 // SaveConfig persists the whole global config under the config file lock, so a
 // standalone write serializes against `af config set` and the root-agent
-// registration writes instead of racing them (#1838).
+// deregistration write instead of racing them (#1838).
 //
 // This is a blind whole-file write: it clobbers whatever another writer changed
 // since the caller's snapshot. Only use it when the config being written is
 // authoritative (first-run seeding, tests). To change one part of an existing
 // config, do the read and the write inside a single withGlobalConfigLock body
-// so no concurrent change is lost — RegisterRootAgent is the model.
+// so no concurrent change is lost — DeregisterRootAgentsForRepo is the model
+// (withGlobalConfigLock → loadConfigLocked → mutate → saveConfigLocked).
+// Note that SetGlobalConfigValue is NOT the model: it writes the one key
+// surgically and deliberately does not carry a loaded snapshot into the write
+// (#2412), so it has no read to serialize against the write in the first place.
 //
 // Must NOT be called from inside a withGlobalConfigLock body: the lock is not
 // reentrant, so the nested acquisition would deadlock. Use saveConfigLocked
