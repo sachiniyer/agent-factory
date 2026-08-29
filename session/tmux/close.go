@@ -481,6 +481,12 @@ func (t *TmuxSession) panePID() (int, error) {
 		if ctx.Err() != nil {
 			return 0, fmt.Errorf("%w: display-message pane_pid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
+		// Diagnostic-only, deliberately: this is the half of
+		// sessionGoneWithNoPaneObserved that gates a worktree deletion, and
+		// display-message has no `no current target` gap to close. Measured on a
+		// server holding no sessions, it answers exit 0 with EMPTY output — the
+		// branch below — rather than the exit 1 that made has-session and
+		// list-panes need tmuxProvedSessionAbsent (#3469).
 		if missingTmuxSession(err, t.sanitizedName) {
 			return 0, errPaneQueryFoundNoPane
 		}

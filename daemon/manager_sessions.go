@@ -664,6 +664,14 @@ func (m *Manager) findSession(title, repoID string) (*session.Instance, string, 
 // restored Web ID from being reinterpreted as somebody else's title (#2187) and
 // prevents a scoped TUI title from being reinterpreted as a foreign ID (#2279
 // review).
+// collectTitleRepoPaths is the disk half of findSession's cross-project
+// ambiguity guard. A package var so tests can drive each of its three outcomes
+// — matches found, gaps reported, enumeration failed — in isolation: the
+// daemon's load gate refuses an unreadable record before findSession runs, so
+// the gap branch is otherwise unreachable from a fixture and would go untested.
+// Mirrors branchesHeldByWorktrees' precedent. Production never reassigns it.
+var collectTitleRepoPaths = collectTitleRepoPathsOnDisk
+
 func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*session.Instance, string, *session.InstanceData, error) {
 	if title == "" {
 		return nil, "", nil, fmt.Errorf("session title is required")
@@ -715,23 +723,48 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 			// gone), so it never reaches m.instances — and resolving here would let
 			// an unscoped kill/archive hit this repo while the daemon-down disk path
 			// would refuse to guess. Union the persisted rows before resolving.
-			if paths, err := collectTitleRepoPathsOnDisk(title); err != nil {
-				// Could not enumerate repos at all: prefer the live match over
-				// failing a working lookup, but say so — this is the one window
-				// where the ambiguity guard cannot be applied.
-				log.WarningLog.Printf("could not check %q for cross-repo ambiguity, resolving the live match in repo %s: %v", title, matchedRepoID, err)
-			} else {
-				repos := map[string]string{matchedRepoID: matched.Path}
-				for rid, p := range paths {
-					repos[rid] = p
+			paths, gaps, err := collectTitleRepoPaths(title)
+			if err != nil {
+				// Could not enumerate repos at all — strictly LESS evidence than
+				// a single unreadable file, so it cannot fail open while that
+				// case refuses (#3479). Resolving here is what an unscoped
+				// kill/archive would then act on.
+				return nil, "", nil, fmt.Errorf("cannot resolve session %q without a project scope: the cross-project ambiguity check could not run, so another project may hold this title too; scope the command with --repo <path>: %w", title, err)
+			}
+			repos := map[string]string{matchedRepoID: matched.Path}
+			for rid, p := range paths {
+				repos[rid] = p
+			}
+			// A collision the readable repos DID show is definitive — no unread
+			// file can make a title that is provably held twice unique again —
+			// so this answer wins over the gap refusal below.
+			if len(repos) > 1 {
+				all := make([]string, 0, len(repos))
+				for _, p := range repos {
+					all = append(all, p)
 				}
-				if len(repos) > 1 {
-					all := make([]string, 0, len(repos))
-					for _, p := range repos {
-						all = append(all, p)
-					}
-					return nil, "", nil, session.AmbiguousTitleError(title, all)
+				return nil, "", nil, session.AmbiguousTitleError(title, all)
+			}
+			// Nothing readable holds it twice, but the check may not have seen
+			// everything — in which case uniqueness is unproven rather than
+			// established.
+			//
+			// A gap in the MATCHED project is not such a case. Ambiguity is
+			// defined across distinct repo IDs, and the live match already
+			// establishes this project's identity, so its own unreadable file
+			// cannot conceal a second project and must not refuse an operation
+			// it cannot affect. Same exclusion hookSlugOwnerInOtherRepos makes
+			// for its own repo (#3476).
+			blocking := make([]config.RepoInstancesSkip, 0, len(gaps))
+			for _, gap := range gaps {
+				if gap.RepoID == matchedRepoID {
+					continue
 				}
+				blocking = append(blocking, gap)
+			}
+			if len(blocking) > 0 {
+				return nil, "", nil, fmt.Errorf("cannot resolve session %q without a project scope: %s, and any of them may hold this title too; scope the command with --repo <path>, or %s",
+					title, config.DescribeRepoInstancesSkips(blocking), config.RepoInstancesSkipRemedy(blocking))
 			}
 			return matched, matchedRepoID, nil, nil
 		}

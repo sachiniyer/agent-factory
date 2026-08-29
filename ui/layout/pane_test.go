@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
-	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 )
 
 // stubPane is a minimal Pane implementation exercising the §2.2 contract
@@ -21,8 +20,7 @@ type stubPane struct {
 	content string
 	consume bool
 
-	keys  []string
-	mouse []layout.Point
+	keys []string
 }
 
 var _ layout.Pane = (*stubPane)(nil)
@@ -35,11 +33,6 @@ func (p *stubPane) Blur()                 { p.focused = false }
 func (p *stubPane) HandleKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	p.keys = append(p.keys, msg.String())
 	return nil, p.consume
-}
-
-func (p *stubPane) HandleMouse(_ tea.MouseMsg, pt layout.Point) tea.Cmd {
-	p.mouse = append(p.mouse, pt)
-	return nil
 }
 
 func (p *stubPane) View() string {
@@ -91,31 +84,4 @@ func TestPaneViewIsExactlyRectSized(t *testing.T) {
 			requireExactSize(t, pane.View(), r.W, r.H)
 		}
 	}
-}
-
-// TestPaneMouseDispatchViaZones mirrors the root model's §2.5 mouse
-// routing: hit-test the click through a zone registry, then hand the pane
-// the zone-local point.
-func TestPaneMouseDispatchViaZones(t *testing.T) {
-	l := layout.Grid{Panes: 1}.Solve(120, 40)
-	require.False(t, l.Fallback)
-
-	panes := map[string]*stubPane{}
-	reg := zones.NewRegistry()
-	for id, r := range visibleRegions(l) {
-		pane := &stubPane{}
-		pane.SetRect(r)
-		panes[id] = pane
-		reg.Register(id, r)
-	}
-
-	click := tea.MouseMsg{X: l.Panes[0].X + 7, Y: l.Panes[0].Y + 3, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
-	id, local, ok := reg.Resolve(click.X, click.Y)
-	require.True(t, ok)
-	require.Equal(t, layout.PaneRegion(0), id)
-
-	var target layout.Pane = panes[id]
-	assert.Nil(t, target.HandleMouse(click, local))
-	assert.Equal(t, []layout.Point{{X: 7, Y: 3}}, panes[id].mouse,
-		"pane receives pane-local coordinates")
 }

@@ -114,8 +114,8 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 	// BECOMES that process — a trailing `sleep 300` as a child would outlive the
 	// Kill below.
 	script := fmt.Sprintf("while [ ! -f %s ]; do sleep 0.01; done; "+
-		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & echo $! > %s; exec sleep 300",
-		trigger, EnvMarkerGeneration, pidFile)
+		"env %s=changed setsid sleep 300 >/dev/null 2>&1 & %s; exec sleep 300",
+		trigger, EnvMarkerGeneration, recordPIDShell("$!", pidFile))
 	parentCmd := exec.Command("sh", "-c", script)
 	parentCmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),

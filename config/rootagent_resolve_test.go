@@ -167,7 +167,7 @@ func TestRootAgentConfigIsFullyAdapted(t *testing.T) {
 
 // TestRootAgentEnabledSerializesExplicitFalse pins P3-b: RootAgent.Enabled has
 // no omitempty, so an explicit `enabled = false` survives a full serialization
-// (RegisterRootAgent/saveConfigLocked marshal the whole Config). With omitempty
+// (saveConfigLocked marshals the whole Config). With omitempty
 // the false would be dropped and a disabling override erased on the next write
 // — the #1700 zero-value-elision class.
 func TestRootAgentEnabledSerializesExplicitFalse(t *testing.T) {

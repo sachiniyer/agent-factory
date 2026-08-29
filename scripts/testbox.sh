@@ -636,12 +636,48 @@ web-selftest)
     # as root, so mixing caches would leave root-owned files the dev-user testbox
     # can't write. Chromium wants more memory + pids than the default suite.
     ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
+    # Playwright's trace zip is THE diagnostic for a selftest failure, and the
+    # reporter PRINTS an invitation to open it — but it is written inside the
+    # container (/work/web/test-results, the config's outputDir) and --rm deleted
+    # it on the way out, on every failure since the harness existed (#3505). So the
+    # log told a maintainer to run `npx playwright show-trace <path>` against a file
+    # that had never existed on the host.
+    #
+    # Bind-mounting the output dir rescues it WITHOUT giving up --rm's guaranteed
+    # teardown, which is the property this harness cares about most (#1171/#2133).
+    # It also beats a copy-out on the path that matters: a container that is KILLED
+    # rather than exiting — the CI 40-minute timeout, a hung browser — never reaches
+    # a `docker cp`, but whatever it had already written is on the host regardless.
+    #
+    # PER-RUN, not a shared path. This harness deliberately supports concurrent
+    # invocations — unique container names AND a unique image tag, both bought after
+    # #1171 — so a single `web/test-results` would have re-introduced exactly the
+    # fixed-name collision those fixes exist to prevent: two runs from one checkout
+    # would interleave their output, and whichever started second would delete the
+    # first's in-progress trace. Scoping to RUN_TOKEN also means the directory is
+    # fresh by construction, so nothing has to clear a shared one to guarantee "these
+    # artifacts are THIS run's".
+    #
+    # The entry script chowns it back to the /src owner on the way out (the container
+    # runs as root; see fix_cache_perms for the same problem in the cache volumes),
+    # and runs Playwright under umask 000 so the files stay removable even when that
+    # graceful path never happens — a SIGKILLed container skips every trap, and that
+    # is precisely the case this mount exists to rescue.
+    WEB_RESULTS="$REPO_ROOT/web/test-results/$RUN_TOKEN"
+    # Old runs are gitignored and only ever created by FAILURES, but they are traces
+    # of ~1MB each, so age them out. Best-effort, and it can never touch a concurrent
+    # run: that directory is minutes old, not days.
+    find "$REPO_ROOT/web/test-results" -mindepth 1 -maxdepth 1 -type d -mtime +7 \
+        -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "$WEB_RESULTS"
+    mkdir -p "$WEB_RESULTS"
     rc=0
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"
     watch_image_start "$WEB_SELFTEST_NAME"
     "$ENGINE" run --rm --label "$LABEL" --init \
         --name "$WEB_SELFTEST_NAME" \
         -v "$REPO_ROOT":/src:ro \
+        -v "$WEB_RESULTS":/work/web/test-results \
         -v af-web-selftest-gomod:/cache/gomod \
         -v af-web-selftest-gobuild:/cache/gobuild \
         --pids-limit "${AF_TESTBOX_PIDS:-2048}" \

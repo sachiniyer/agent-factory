@@ -101,8 +101,12 @@ func captureSessionProcessTrees(cmdExec cmd.Executor, sanitizedName string) ([]p
 		//     writing (#1104/#802).
 		//
 		// Measured: `can't find session: <name>` on a live server, `no server
-		// running on <socket>` when the server itself is gone, both exit 1.
-		if missingTmuxSession(err, sanitizedName) {
+		// running on <socket>` when the server itself is gone, and `no current
+		// target` on a server that is still up but holds no sessions at all —
+		// all exit 1. tmuxProvedSessionAbsent classifies the third by asking for
+		// the session listing, because that answer names nothing to match on
+		// (#3469).
+		if tmuxProvedSessionAbsent(cmdExec, err, sanitizedName) {
 			return nil, fmt.Errorf("%w: %v", ErrSessionVanishedBeforeCapture, err)
 		}
 		return nil, fmt.Errorf("cannot list panes before teardown: %w", err)

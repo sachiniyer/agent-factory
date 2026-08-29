@@ -393,8 +393,7 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 	}
 	var problems []string
 	if len(unreadable) > 0 {
-		problems = append(problems, fmt.Sprintf("%d project record file(s) could not be read: %s",
-			len(unreadable), config.FormatRepoInstancesSkips(unreadable)))
+		problems = append(problems, config.DescribeRepoInstancesSkips(unreadable))
 	}
 	if len(corrupted) > 0 {
 		sort.Strings(corrupted)
@@ -402,8 +401,8 @@ func hookSlugOwnerInOtherRepos(candidate, repoID string) (string, string, error)
 			len(corrupted), strings.Join(corrupted, ", ")))
 	}
 	if len(problems) > 0 {
-		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free — %s; any of them may be hiding a session already using it, so repair or remove the file(s) and retry",
-			errTitleCheckFatal, candidate, strings.Join(problems, "; "))
+		return "", "", fmt.Errorf("%w: cannot verify remote hook name %q is free — %s; any of them may be hiding a session already using it, so %s",
+			errTitleCheckFatal, candidate, strings.Join(problems, "; "), config.RepoInstancesSkipRemedy(unreadable))
 	}
 	return "", "", nil
 }

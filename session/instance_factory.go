@@ -209,8 +209,14 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// left to reap it (#3065 review). This is the same discipline every other
 	// failure exit on a provisioned runtime already follows; a new exit does not
 	// get to skip it.
+	//
+	// And when that reap cannot CONFIRM the sandbox is gone, the identity travels
+	// out with the error so the daemon can tombstone it and keep retrying (#3480).
+	// Reaping was never the gap here; the gap was that an unconfirmed reap left
+	// nothing behind but a sentence.
 	if rerr := revalidateAfterProvision(cred); rerr != nil {
-		return ProvisionResult{}, discardUnusableSandbox(opts.Title, res, opts.SandboxCredentials, rerr)
+		who := sandboxIdentity{id: opts.ID, title: opts.Title, path: absPath, createdAt: opts.CreatedAt}
+		return ProvisionResult{}, discardUnusableSandbox(who, res, opts.SandboxCredentials, rerr)
 	}
 	return res, nil
 }
@@ -261,16 +267,29 @@ func reapUnusableSandbox(title string, res ProvisionResult, cause error, retain 
 // registered against a session whose sandbox no longer exists — a token minted
 // for a runtime that is gone, which is the state this feature exists to prevent.
 //
-// It passes NO retainer, and that is a property of this path rather than an
-// oversight: create fails before an Instance exists, so an unconfirmed teardown
-// has nowhere to install a handle and can only be NAMED in the returned error
-// for an operator to settle. The replacement path does have an instance, and
-// retains — see Instance.discardUnusableReplacement.
-func discardUnusableSandbox(title string, res ProvisionResult, creds SandboxCredentials, cause error) error {
+// Its retainer CAPTURES rather than installs, because create fails before an
+// Instance exists: there is nothing to hang a handle on, so the identity leaves
+// through the returned error as a cleanup-only record instead (#3480). The
+// replacement path has an instance and installs directly — see
+// Instance.discardUnusableReplacement.
+//
+// Going through the hook rather than inspecting the returned error is the
+// load-bearing part. The hook fires ONLY from reapUnusableSandbox's
+// unknown-teardown branch, so the orphan is classified by what the TEARDOWN
+// answered. Testing TeardownStateUnknown on the combined error instead asks a
+// different question — cause can carry a teardown sentinel of its own — and
+// produced an orphan record, a durable tombstone and a held title for a sandbox
+// the reap had already confirmed gone.
+func discardUnusableSandbox(who sandboxIdentity, res ProvisionResult, creds SandboxCredentials, cause error) error {
 	if creds != nil {
 		creds.Revoke()
 	}
-	return reapUnusableSandbox(title, res, cause, nil)
+	unconfirmed := false
+	err := reapUnusableSandbox(who.title, res, cause, func(ProvisionResult) { unconfirmed = true })
+	if !unconfirmed {
+		return err
+	}
+	return newSandboxOrphanError(who, res, err)
 }
 
 // resolveBackendKind decides which runtime a new session uses, in precedence
@@ -532,14 +551,27 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		if err != nil {
 			// The sandbox is already up (backendFactory provisioned it); a bad
 			// endpoint here would strand it, so reap it before failing rather than
-			// leaking a container/remote workspace. No Instance exists to retain a
-			// retry handle, so preserve every cleanup failure in the returned chain
-			// and call out an unknown outcome as a possible orphan.
+			// leaking a container/remote workspace.
+			//
+			// A KNOWN cleanup failure is SURFACED here rather than logged, unlike on
+			// the replacement path. That is deliberate and stays: the sandbox is
+			// provably gone either way, and a create that failed for a reason it can
+			// name should say so to the person who asked for the session.
+			//
+			// An UNKNOWN one is the case that used to end here as prose (#3480). No
+			// Instance exists to retain a handle on, so the identity leaves through the
+			// error instead, and the daemon tombstones it into the cleanup retry it
+			// already runs for a failed Start.
 			if res.Teardown != nil {
 				if cleanupErr := res.Teardown(); cleanupErr != nil {
 					if TeardownStateUnknown(cleanupErr) {
-						return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
-							errors.Join(err, cleanupErr))
+						// Classified HERE, by this teardown's own answer, and handed to the
+						// constructor already decided — never re-derived from the combined
+						// error, which can carry a sentinel from the client-build cause.
+						return nil, newSandboxOrphanError(
+							sandboxIdentity{id: id, title: opts.Title, path: absPath, createdAt: t}, res,
+							fmt.Errorf("failed to build remote agent-server client and sandbox cleanup state is unknown; a sandbox may still be running: %w",
+								errors.Join(err, cleanupErr)))
 					}
 					return nil, fmt.Errorf("failed to build remote agent-server client and sandbox cleanup failed: %w",
 						errors.Join(err, cleanupErr))
@@ -784,4 +816,19 @@ func resolveAccountForProvision(repoRoot, program, accountName string) (sessione
 		return sessionenv.Account{}, fmt.Errorf("account %q resolved to no directory", accountName)
 	}
 	return account, nil
+}
+
+// SetProvisionResultFactoryForTest replaces the backend factory with f and
+// returns a restore function.
+//
+// The full-fidelity sibling of SetBackendFactoryForTest, which adapts a
+// Backend-only stub and therefore hands back a ProvisionResult with no endpoint
+// and no teardown. A test that needs to drive a POST-provision failure exit — a
+// bad endpoint, a teardown that cannot confirm its sandbox is gone — cannot use
+// that seam, because the very fields it exercises are the ones that seam cannot
+// express.
+func SetProvisionResultFactoryForTest(f func(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error)) func() {
+	prev := backendFactory
+	backendFactory = f
+	return func() { backendFactory = prev }
 }
