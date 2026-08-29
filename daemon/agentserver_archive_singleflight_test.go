@@ -76,16 +76,36 @@ func TestSingleFlightArchive_SharesTheFailure(t *testing.T) {
 		return "", boom
 	}
 
+	var entered atomic.Int32
 	var wg sync.WaitGroup
 	results := make([]error, 3)
 	for i := range 3 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			entered.Add(1)
 			_, results[i] = s.do(archive)
 		}()
 	}
-	require.Eventually(t, func() bool { return starts.Load() == 1 }, 2*time.Second, time.Millisecond)
+	// Both waits, then the settle, or this test races its own joiners (#3528).
+	//
+	// Waiting for starts==1 proves only that the LEADER is inside archive(). It
+	// says nothing about the other two, and `close(release)` immediately after
+	// lets the leader finish and clear the slot — so a joiner that had not yet
+	// reached s.mu.Lock() finds s.active nil, becomes a second leader, and runs
+	// a second archive. That is what the failure reports: starts==2, while every
+	// ErrorIs below still passes, because the error sharing was never the part
+	// that broke.
+	//
+	// The sibling test above never had this hole: it sleeps 50ms before
+	// releasing, "to let them pile up on the in-flight attempt". Same window
+	// here, plus an explicit entered==3 so the wait does not depend on three
+	// goroutines being scheduled within it.
+	require.Eventually(t, func() bool { return starts.Load() == 1 }, 2*time.Second, time.Millisecond,
+		"the first caller must have started the archive")
+	require.Eventually(t, func() bool { return entered.Load() == 3 }, 2*time.Second, time.Millisecond,
+		"every caller must have reached do() before the archive is allowed to finish")
+	time.Sleep(50 * time.Millisecond)
 	close(release)
 	wg.Wait()
 
