@@ -375,7 +375,7 @@ func openWorkingDir(pid int) (*os.File, string, bool) {
 	}
 	var stat unix.Stat_t
 	if err := unix.Fstat(int(directory.Fd()), &stat); err != nil ||
-		!cwdIdentityMatchesStat(&stat, device, inode, mode) {
+		!openedDirMatchesVnode(stat.Dev, stat.Ino, uint32(stat.Mode), device, inode, mode) {
 		_ = directory.Close()
 		return nil, "", false
 	}
