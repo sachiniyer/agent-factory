@@ -423,7 +423,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		}
 		// A recovery retry lands here after an earlier attempt already vacated the
 		// candidate this claim did not select — the only path residue can be at.
-		reportRelocationResidue(sourceClaim.AlternatePath)
+		reportRelocationResidue(sourceClaim.AlternatePath, dest)
 		return nil
 	}
 	if pathExists(dest) {
@@ -432,13 +432,6 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return unknownIfCutOff(fmt.Errorf("failed to create destination parent directory for %s: %w", dest, err))
 	}
-	// Every refusal is behind us and no bytes have moved yet: reap the writers a
-	// move would otherwise strand at a vacated pathname (#3391).
-	vacated, reapErr := g.reapRelocationSourceWriters(src, dest, sourceClaim)
-	if reapErr != nil {
-		return reapErr
-	}
-
 	useFallback, inspectErr := worktreeContainsSubmodules(g, src)
 	if inspectErr != nil {
 		// The probe mutates nothing, so a timeout here leaves no partial state of
@@ -456,6 +449,12 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 			"could not inspect worktree %s for submodules (%v); trying git worktree move",
 			src, inspectErr,
 		)
+	}
+	// The LAST refusal is behind us and no bytes have moved yet: reap the writers a
+	// move would otherwise strand at a vacated pathname (#3391).
+	vacated, reapErr := g.reapRelocationSourceWriters(src, dest, sourceClaim)
+	if reapErr != nil {
+		return reapErr
 	}
 	if !useFallback {
 		// The record was consumed at resolution. Revalidate its ephemeral claim
@@ -511,7 +510,7 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 		if err := repairDestination(); err != nil {
 			return err
 		}
-		reportRelocationResidue(vacated)
+		reportRelocationResidue(vacated, dest)
 		return nil
 	}
 	if useFallback {
@@ -624,13 +623,13 @@ func (g *GitWorktree) relocateWorktreeTo(dest, operation string, requiredClaim *
 				)
 			}
 		}
-		reportRelocationResidue(vacated)
+		reportRelocationResidue(vacated, dest)
 		return nil
 	}
 
 	// Fast path succeeded: git moved the bytes and updated the registration.
 	finishRelocation()
-	reportRelocationResidue(vacated)
+	reportRelocationResidue(vacated, dest)
 	return nil
 }
 

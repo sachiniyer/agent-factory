@@ -105,6 +105,14 @@ func (g *GitWorktree) reapRelocationSourceWriters(src, dest string, claim Reloca
 // files to tidy up is the trade this repo does not make — the same call the
 // leftover-source warning beside it makes, with the same by-hand suggestion.
 //
+// It also declines to say the RELOCATED tree is fine, and points at it instead.
+// The reap is best-effort by design — an unreadable process table reaps nothing,
+// and a writer in uninterruptible I/O survives SIGKILL — and a survivor keeps its
+// working directory, which after a rename resolves to the tree at its NEW
+// location. So residue at the vacated pathname (an absolute-path write) is
+// evidence that something is also positioned to write RELATIVE paths straight
+// into the destination. relocated names it so the operator can check both.
+//
 // The probe is BOUNDED, because of where it runs: the bytes and the git
 // registration are already committed and the caller has not returned yet, so an
 // unbounded os.Stat against a filesystem that stalled during the move would
@@ -115,7 +123,7 @@ func (g *GitWorktree) reapRelocationSourceWriters(src, dest string, claim Reloca
 // And a probe that could not answer is NOT an answer of "clear". Only a genuine
 // "does not exist" is silence; every other failure says so, because a check that
 // never ran must not read as a check that passed.
-func reportRelocationResidue(vacated string) {
+func reportRelocationResidue(vacated, relocated string) {
 	if vacated == "" {
 		return
 	}
@@ -125,18 +133,19 @@ func reportRelocationResidue(vacated string) {
 		}
 		log.WarningLog.Printf(
 			"worktree was relocated away from %s, but whether that pathname is now clear could not be "+
-				"established. The relocated worktree is unaffected. Check %s by hand: anything a writer "+
-				"left there is not registered with git, and a later session deriving the same path would "+
-				"inherit it: %v",
-			vacated, vacated, err,
+				"established. Check it by hand: anything a writer left there is not registered with git, "+
+				"and a later session deriving the same path would inherit it: %v",
+			vacated, err,
 		)
 		return
 	}
 	log.WarningLog.Printf(
 		"worktree was relocated away from %s, but that pathname exists again: a writer that outlived the "+
-			"pre-move reap re-created it by absolute path. The relocated worktree is unaffected — this "+
-			"leftover is not part of it and is not registered with git. Inspect it and remove it by hand "+
-			"with `%s`, because a later session deriving the same path would inherit it.",
-		vacated, shellsuggest.Command("rm", "-rf", vacated),
+			"pre-move reap re-created it by absolute path. That leftover is no part of the relocated "+
+			"worktree and is not registered with git — inspect it and remove it by hand with `%s`, because "+
+			"a later session deriving the same path would inherit it. Check the relocated worktree at %s "+
+			"too: the same writer still holds a working directory, which after the move resolves to the "+
+			"tree at its new location, so its relative writes land there.",
+		vacated, shellsuggest.Command("rm", "-rf", vacated), relocated,
 	)
 }

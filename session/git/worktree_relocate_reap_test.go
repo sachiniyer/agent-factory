@@ -3,6 +3,7 @@ package git
 import (
 	"bytes"
 	"context"
+	"fmt"
 	stdlog "log"
 	"os"
 	"os/exec"
@@ -136,6 +137,9 @@ func TestArchiveWorktree_ReportsResidueAtTheVacatedPath(t *testing.T) {
 	assert.Contains(t, warnings.String(), srcPath)
 	assert.Contains(t, warnings.String(), shellsuggest.Command("rm", "-rf", srcPath),
 		"the report must name the by-hand cleanup for the leftover it found")
+	assert.Contains(t, warnings.String(), dest,
+		"the reap is best-effort, so a survivor keeps a working directory that resolves to the tree at its "+
+			"NEW location: residue at the vacated path is evidence the destination needs checking too")
 	assert.True(t, pathExists(srcPath),
 		"af vacated this pathname, so whatever exists there now was created by something else: report, never remove")
 }
@@ -327,7 +331,7 @@ func TestReportRelocationResidue_UnreadableProbeIsNotAssumedClear(t *testing.T) 
 	aflog.WarningLog = stdlog.New(&warnings, "WARNING: ", 0)
 	t.Cleanup(func() { aflog.WarningLog = origWarning })
 
-	reportRelocationResidue(vacated)
+	reportRelocationResidue(vacated, filepath.Join(t.TempDir(), "relocated"))
 
 	assert.Contains(t, warnings.String(), "could not be established",
 		"a failed read is not an empty result")
@@ -344,7 +348,8 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 	relocationIdentityTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { relocationIdentityTimeout = prevTimeout })
 
-	vacated := filepath.Join(t.TempDir(), "stalled")
+	dir := t.TempDir()
+	vacated := filepath.Join(dir, "stalled")
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	prevIdentity := relocationPathIdentity
@@ -368,7 +373,7 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		reportRelocationResidue(vacated)
+		reportRelocationResidue(vacated, filepath.Join(dir, "relocated"))
 		close(done)
 	}()
 	select {
@@ -392,5 +397,44 @@ func TestReportRelocationResidue_BoundsTheProbe(t *testing.T) {
 	case <-entered:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the stalled probe was never entered, so nothing was actually stalled")
+	}
+}
+
+// TestArchiveWorktree_DoesNotReapWhenTheSubmoduleProbeRefusesTheMove: the reap
+// must be the LAST thing before the first relocation step, not merely late.
+//
+// A submodule inspection cut off by its deadline refuses the relocation and
+// leaves the source exactly where it was. Reaping before that check spends the
+// destructive act on a move that never happens — and on restore or an
+// archived-session rename that is a user's processes inside a tree nothing
+// touched.
+func TestArchiveWorktree_DoesNotReapWhenTheSubmoduleProbeRefusesTheMove(t *testing.T) {
+	prev := worktreeContainsSubmodules
+	worktreeContainsSubmodules = func(*GitWorktree, string) (bool, error) {
+		return false, fmt.Errorf("submodule probe stalled: %w", context.DeadlineExceeded)
+	}
+	t.Cleanup(func() { worktreeContainsSubmodules = prev })
+
+	gw, _, srcPath := archiveTestWorktree(t)
+	dest := filepath.Join(testguard.CanonicalTempDir(t), "archived", "repoid", "arch")
+
+	exited, heartbeat := relocationWriterFixture(t, srcPath)
+
+	err := gw.ArchiveWorktree(dest)
+
+	require.Error(t, err, "a submodule inspection cut off by its deadline must refuse the relocation")
+	assert.True(t, pathExists(srcPath), "the refused relocation must leave the source where it was")
+	assert.False(t, pathExists(dest), "nothing may have moved")
+
+	before, statErr := os.Stat(heartbeat)
+	require.NoError(t, statErr)
+	requireEventually(t, 5*time.Second, func() bool {
+		after, err := os.Stat(heartbeat)
+		return err == nil && after.ModTime().After(before.ModTime())
+	}, "a relocation that was refused must leave the processes working in the source running")
+	select {
+	case <-exited:
+		t.Fatal("the reap ran for a relocation that was then refused: nothing moved, so nothing was stranded")
+	default:
 	}
 }
