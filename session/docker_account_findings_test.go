@@ -151,6 +151,8 @@ func TestDockerAccount_RejectsIdentityRunArgs(t *testing.T) {
 		{name: "env file", args: []string{"--env-file", "repo.env"}, wantErr: "env-file"},
 		{name: "account mount", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}, wantErr: "account mount"},
 		{name: "account volume", args: []string{"-v", "/tmp/other:/af-account"}, wantErr: "account mount"},
+		{name: "volumes from", args: []string{"--volumes-from", "repo-donor"}, wantErr: "--volumes-from"},
+		{name: "volumes from inline", args: []string{"--volumes-from=repo-donor"}, wantErr: "--volumes-from"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -636,6 +638,97 @@ func TestDockerAccount_ExplicitBooleanDoesNotHideALaterMount(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
 				"an explicit boolean shadowed a later guarded option: %v", args)
+		})
+	}
+}
+
+// TestDockerAccount_RejectsVolumesFrom covers #3403. --volumes-from names a
+// CONTAINER rather than a path, so no amount of string matching on the argument
+// can tell where the donor's mounts land — and they land at the donor's own
+// container paths, af's account boundary included.
+//
+// Measured on Docker 29.4.0, with af's own `-v <account>:/af-account` mount
+// present exactly as runContainer writes it:
+//
+//	docker create -v /legit:/af-account --volumes-from donor …
+//	  where donor is `docker create -v /evil:/af-account/.config …`
+//	→ .Mounts holds BOTH /af-account=/legit and /af-account/.config=/evil,
+//	  and the running container reads ATTACKER-CONFIG out of
+//	  /af-account/.config/settings.json while /af-account/auth.json still
+//	  reads LEGIT-ACCOUNT.
+//
+// A donor mounting /af-home is worse: af never bind-mounts the runtime home, so
+// nothing shadows it and the donor's content becomes the whole of HOME
+// (measured: `ls /af-home` lists only the donor's file).
+func TestDockerAccount_RejectsVolumesFrom(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "separate value", args: []string{"--volumes-from", "repo-donor"}},
+		{name: "inline value", args: []string{"--volumes-from=repo-donor"}},
+		{name: "read-only donor", args: []string{"--volumes-from", "repo-donor:ro"}},
+		{name: "inline read-only donor", args: []string{"--volumes-from=repo-donor:ro"}},
+		{name: "container id", args: []string{"--volumes-from", "6295d858ca0bc69f6c767a96ade73276cf3c837303367d48343fd21fe27ed370"}},
+		{name: "after a harmless option", args: []string{"-it", "--volumes-from", "repo-donor"}},
+		{name: "after a harmless mount", args: []string{"-v", "/tmp/cache:/af-account-cache", "--volumes-from", "repo-donor"}},
+		{name: "second occurrence", args: []string{"--volumes-from", "harmless-donor", "--volumes-from", "repo-donor"}},
+		{name: "no value at all", args: []string{"--volumes-from"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "--volumes-from installed the donor's mounts over the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "--volumes-from", "the refusal must name the option the operator has to remove")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsSingleDashVolumesFrom is the precision half. The
+// --env-file rule above also refuses `-env-file`, but that spelling is not the
+// long option: pflag reads a single dash as a shorthand cluster, so `-env-file`
+// is `-e` carrying the value `nv-file`. `-volumes-from` is likewise `-v`
+// carrying `olumes-from`, which installs no donor volumes at all — measured,
+// `docker create -volumes-from donor …` fails with "Unable to find image
+// 'donor:latest' locally", because `donor` became the IMAGE. af reads it the
+// same way, as an ordinary -v value that names no protected path.
+func TestDockerAccount_AllowsSingleDashVolumesFrom(t *testing.T) {
+	require.NoError(t, validateAccountDockerRunArgs([]string{"-volumes-from", "repo-donor"}, "codex"))
+}
+
+// TestDockerAccount_RefusesEveryMountInstallingOption is the anti-recurrence
+// pin. This guard knows a hand-list of options, and #3398, #3401 and #3403 were
+// each a member of that list going unnamed; the list below is every `docker run`
+// option (Docker 29.4.0) that can put a caller-chosen filesystem at a
+// caller-chosen container path. Adding a row here without a matching case in
+// validateAccountDockerRunArgs fails.
+//
+// Audited and measured NOT to be members, so a future audit does not have to
+// re-derive them:
+//
+//   - --device puts a device NODE at a container path, but with af's account
+//     mount present `--device /dev/zero:/af-account/.config/settings.json`
+//     leaves the account's own file readable and intact.
+//   - --init mounts docker-init at the fixed path /sbin/docker-init.
+//   - --use-api-socket mounts the Docker socket at the fixed path
+//     /var/run/docker.sock. Not under the boundary — but see #3403's follow-up:
+//     it hands the container the host daemon.
+//   - --volume-driver, --read-only, --privileged, --cap-add, --pid, --userns
+//     install no mount of their own (.Mounts unchanged from the baseline).
+func TestDockerAccount_RefusesEveryMountInstallingOption(t *testing.T) {
+	tests := []struct {
+		option string
+		args   []string
+	}{
+		{option: "--volume", args: []string{"--volume", "/tmp/other:/af-account"}},
+		{option: "--mount", args: []string{"--mount", "type=bind,src=/tmp/other,dst=/af-account"}},
+		{option: "--tmpfs", args: []string{"--tmpfs", "/af-account/.config"}},
+		{option: "--volumes-from", args: []string{"--volumes-from", "repo-donor"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.option, func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(tt.args, "codex"),
+				"%s can install a filesystem at a container path and is not guarded", tt.option)
 		})
 	}
 }
