@@ -234,6 +234,11 @@ type Tab struct {
 	// always nil for remote/hook-backed instances, which drive their agent
 	// session through hook commands rather than a local tmux session.
 	tmux *tmux.TmuxSession
+	// accountScopeProvenanceUnknown marks a tmux-backed sibling reconstructed
+	// from disk. Its still-live pane may predate account scoping, so the first
+	// restore must replace it before the handle can be treated as scoped. Tabs
+	// created by this daemon leave it false and survive an agent-only respawn.
+	accountScopeProvenanceUnknown bool
 }
 
 // newAgentTab returns the single Agent-kind tab that wraps an instance's tmux

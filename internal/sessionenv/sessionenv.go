@@ -33,6 +33,12 @@ const ExecMarker = "__af-session-env-exec"
 // Refusing loudly is the direction this can afford to be wrong in.
 const AccountExecMarker = "__af-session-env-exec-account"
 
+// AccountEnvironmentExecMarker scopes a non-agent sibling pane (shell/process)
+// to the session's selected identity without claiming that the pane command is
+// itself the agent executable. The child still resolves the account name and
+// removes every competing ambient identity before exec.
+const AccountEnvironmentExecMarker = "__af-session-env-exec-account-environment"
+
 var commonNames = nameSet(
 	// Process and terminal basics.
 	"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "COLORTERM",

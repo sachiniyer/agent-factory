@@ -34,6 +34,7 @@ func (t *TmuxSession) SetAccount(name string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.account = name
+	t.accountEnvironmentOnly = false
 	if name == "" {
 		t.accountAgent = ""
 		return
@@ -49,11 +50,41 @@ func (t *TmuxSession) SetAccountForAgent(agent, name string) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.account = name
+	t.accountEnvironmentOnly = false
 	if name == "" {
 		t.accountAgent = ""
 		return
 	}
 	t.accountAgent = agent
+}
+
+// SetAccountEnvironmentForAgent scopes a shell/process sibling to the selected
+// account while keeping its own command shape. This is distinct from claiming
+// the sibling command is the agent executable.
+func (t *TmuxSession) SetAccountEnvironmentForAgent(agent, name string) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+}
+
+// SetAccountShellEnvironmentForAgent scopes an af-created interactive shell.
+// Named-account shells use the startup-file-free form the boundary recognizes.
+func (t *TmuxSession) SetAccountShellEnvironmentForAgent(agent, name string) error {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	if name != "" {
+		program, err := sessionenv.AccountShellCommand(t.program)
+		if err != nil {
+			return err
+		}
+		t.program = program
+	}
+	t.account = name
+	t.accountAgent = agent
+	t.accountEnvironmentOnly = name != ""
+	return nil
 }
 
 // SetLaunchProgram sets the pane command AND af's executable/argument proof
@@ -77,7 +108,7 @@ func (t *TmuxSession) SetLaunchProgram(program string, proof sessionenv.AccountL
 // reason SetLaunchProgram writes them in one: Start used to read program through
 // its own lock and the declaration through another, so a rewrite landing between
 // them paired an old command with a new declaration.
-func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string) {
+func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.AccountLaunchProof, extras []string, account, accountAgent string, accountEnvironmentOnly bool) {
 	t.programMu.RLock()
 	defer t.programMu.RUnlock()
 	return t.program, sessionenv.AccountLaunchProof{
@@ -86,7 +117,8 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 		},
 		append([]string(nil), t.envPassthrough...),
 		t.account,
-		t.accountAgent
+		t.accountAgent,
+		t.accountEnvironmentOnly
 }
 
 // It SNAPSHOTS rather than taking the program as a parameter: the caller used to
@@ -94,20 +126,25 @@ func (t *TmuxSession) launchSnapshot() (program string, proof sessionenv.Account
 // another, so a rewrite landing between them wrapped an old command with a new
 // declaration (#3083 review).
 func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
-	program, proof, extra, account, accountAgent := t.launchSnapshot()
+	wrapped, launchEnv, importNames, _, _, err := t.prepareLaunchEnvironment()
+	return wrapped, launchEnv, importNames, err
+}
+
+func (t *TmuxSession) prepareLaunchEnvironment() (string, []string, []string, []string, string, error) {
+	program, proof, extra, account, accountAgent, accountEnvironmentOnly := t.launchSnapshot()
 	agent := sessionenv.AgentForCommand(program)
 	executable, err := sessionEnvExecutable()
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, "", err
 	}
 	var wrapped string
 	if account != "" {
-		if agent != accountAgent {
+		if agent != accountAgent && !accountEnvironmentOnly {
 			resolved := agent
 			if resolved == "" {
 				resolved = "an unrecognized command"
 			}
-			return "", nil, nil, fmt.Errorf(
+			return "", nil, nil, nil, "", fmt.Errorf(
 				"account %q was selected for %s, but the launch program resolves to %s; refusing rather than "+
 					"looking up the same account name in another agent's namespace",
 				account, accountAgent, resolved)
@@ -116,21 +153,156 @@ func (t *TmuxSession) launchEnvironment() (string, []string, []string, error) {
 		// the ambient account while every visible signal reported the selected one,
 		// spending someone else's quota (#3051).
 		if !newSessionEnvSupportedForAccounts() {
-			return "", nil, nil, fmt.Errorf(
+			return "", nil, nil, nil, "", fmt.Errorf(
 				"account %q cannot be used on this tmux: account-scoped sessions require tmux 3.2 or newer, "+
 					"and af refuses rather than starting the session on the ambient account", account)
 		}
-		wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
+		if accountEnvironmentOnly {
+			wrapped, err = sessionenv.WrapAccountEnvironmentCommand(executable, accountAgent, account, extra, program)
+		} else {
+			wrapped, err = sessionenv.WrapAccountCommand(executable, accountAgent, account, proof, extra, program)
+		}
 	} else {
 		wrapped, err = sessionenv.WrapCommand(executable, agent, extra, program)
 	}
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, "", err
+	}
+	filterAgent := agent
+	if accountEnvironmentOnly {
+		filterAgent = accountAgent
 	}
 	source := os.Environ()
-	return wrapped,
-		sessionenv.FilterForCommand(source, agent, program, extra),
-		sessionenv.ImportNamesForCommand(source, agent, program, extra), nil
+	launchEnv := sessionenv.FilterForCommand(source, filterAgent, program, extra)
+	importNames := sessionenv.ImportNamesForCommand(source, filterAgent, program, extra)
+	var sessionEnv []string
+	if account != "" {
+		boundaryNames := accountSessionBoundaryNames(accountAgent)
+		launchEnv = removeEnvironmentNames(launchEnv, boundaryNames)
+		selectedEnv, resolveErr := sessionenv.ResolveAccountEnvironment(accountAgent, account)
+		if resolveErr != nil {
+			return "", nil, nil, nil, "", resolveErr
+		}
+		// Selected roots belong to this tmux session, not the client environment:
+		// a fresh server copies its first client's environment globally.
+		sessionEnv = selectedEnv
+		// Keep every removed name in update-environment so an existing server
+		// explicitly unsets stale identities and startup hooks before new-session.
+		importNames = appendMissingEnvironmentNames(importNames, boundaryNames)
+	}
+	defaultCommand := ""
+	if account != "" {
+		// tmux otherwise starts its default shell as a login shell for an empty
+		// new-window command. Every scoped session needs an account shim and proven
+		// startup-free shell here, including the main agent session and process tabs
+		// whose primary command is not itself a shell.
+		defaultProgram := program
+		if !accountEnvironmentOnly || !sessionenv.IsAccountShellCommand(defaultProgram) {
+			defaultProgram, err = sessionenv.AccountShellCommand("/bin/sh")
+			if err != nil {
+				return "", nil, nil, nil, "", err
+			}
+			defaultCommand, err = sessionenv.WrapAccountEnvironmentCommand(
+				executable, accountAgent, account, extra, defaultProgram,
+			)
+			if err != nil {
+				return "", nil, nil, nil, "", err
+			}
+		} else {
+			defaultCommand = wrapped
+		}
+	}
+	return wrapped, launchEnv, importNames, sessionEnv, defaultCommand, nil
+}
+
+func accountSessionBoundaryNames(agent string) []string {
+	names := append([]string(nil), sessionenv.AccountIdentityNames(agent)...)
+	names = append(names, sessionenv.AccountShellStartupNames()...)
+	sort.Strings(names)
+	return names
+}
+
+func (t *TmuxSession) refreshRestoredAccountEnvironment() error {
+	_, _, _, account, accountAgent, _ := t.launchSnapshot()
+	if account == "" {
+		return nil
+	}
+	_, _, _, sessionEnv, defaultCommand, err := t.prepareLaunchEnvironment()
+	if err != nil {
+		return err
+	}
+	selected := make(map[string]string, len(sessionEnv))
+	for _, entry := range sessionEnv {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			selected[name] = value
+		}
+	}
+	for _, name := range accountSessionBoundaryNames(accountAgent) {
+		args := []string{"set-environment", "-r", "-t", exactTarget(t.sanitizedName), name}
+		if value, ok := selected[name]; ok {
+			args = []string{"set-environment", "-t", exactTarget(t.sanitizedName), name, value}
+		}
+		if err := t.runRestoredAccountCommand(args...); err != nil {
+			return err
+		}
+	}
+	return t.runRestoredAccountCommand(
+		"set-option", "-t", exactTarget(t.sanitizedName), "default-command", defaultCommand,
+	)
+}
+
+func (t *TmuxSession) runRestoredAccountCommand(args ...string) error {
+	ctx, cancel := tmuxTimeoutContext()
+	err := t.runTmuxBounded(ctx, args...)
+	timedOut := ctx.Err() != nil
+	cancel()
+	if timedOut {
+		return fmt.Errorf("%w: %s while refreshing %s", ErrTmuxTimeout, args[0], t.sanitizedName)
+	}
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", args[0], t.sanitizedName, err)
+	}
+	return nil
+}
+
+func removeEnvironmentNames(environ, names []string) []string {
+	denied := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		denied[name] = struct{}{}
+	}
+	out := environ[:0]
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if _, drop := denied[name]; ok && drop {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func appendMissingEnvironmentNames(names, required []string) []string {
+	// Sized from names alone, not len(names)+len(required). Both operands are
+	// lengths of in-memory env-name slices, so that sum cannot realistically
+	// overflow — but CodeQL's allocation-size-overflow rule reports the
+	// unchecked addition as a high-severity finding and one new high alert
+	// fails the required CodeQL check. Dropping the sum removes the flagged
+	// expression instead of suppressing the rule; the map grows on its own for
+	// the handful of boundary names required adds.
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	for _, name := range required {
+		set[name] = struct{}{}
+	}
+	out := make([]string, 0, len(set))
+	for name := range set {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // importClientEnvironmentArgs makes an existing tmux server copy the approved

@@ -110,6 +110,33 @@ func ValidateAccountCommand(command string, account Account) error {
 		account.Name, account.Agent, account.Agent)
 }
 
+// ValidateAccountEnvironmentCommand protects a shell/process sibling's selected
+// account environment without requiring the sibling command to be the agent.
+// A direct identity assignment would run after the boundary and override it, so
+// it is refused just as it is for the agent pane itself.
+func ValidateAccountEnvironmentCommand(command string, account Account) error {
+	if isAccountShellCommand(command) {
+		return nil
+	}
+	configVar, supported := SupportsAccounts(account.Agent)
+	if !supported {
+		return nil
+	}
+	overrideNames := accountScopedNames(account.Agent, configVar)
+	for _, selector := range AgentAuthSelectors(account.Agent) {
+		overrideNames[selector] = struct{}{}
+	}
+	for name := range accountShellStartupNames {
+		overrideNames[name] = struct{}{}
+	}
+	if commandMutatesAccountEnvironment(command, overrideNames) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope sibling environment for agent %q: its command sets an identity or shell-startup variable itself, which can override the account directory",
+			account.Name, account.Agent)
+	}
+	return nil
+}
+
 func undeclaredAccountArguments(command string, proof commandProof) ([]string, bool) {
 	call, ok := singleSimpleCall(command)
 	if !ok || len(call.Assigns) > 0 || !callIsLiteral(call) {

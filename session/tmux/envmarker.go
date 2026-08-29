@@ -53,6 +53,15 @@ var newSessionGeneration = func() string {
 // tmux binary.
 var newSessionEnvSupportedOverride *bool
 
+// SetNewSessionEnvSupportForTest pins the tmux capability probe for tests whose
+// mock executor cannot answer the otherwise host-dependent `tmux -V` check.
+// The returned restore function must be deferred or registered with Cleanup.
+func SetNewSessionEnvSupportForTest(supported bool) func() {
+	previous := newSessionEnvSupportedOverride
+	newSessionEnvSupportedOverride = &supported
+	return func() { newSessionEnvSupportedOverride = previous }
+}
+
 // sessionEnvFlags returns the `-e VAR=value` arguments for `tmux
 // new-session`, or nil when the running tmux predates `-e` (added in 3.2) —
 // passing it there would fail session creation outright, which is far worse

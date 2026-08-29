@@ -186,10 +186,10 @@ func (i *Instance) UserKilled() bool {
 	return i.userKilled
 }
 
-// MarkStartupStateUnknown retains a failed create as an inert record. Clearing
-// started prevents attach/probe paths from treating the requested runtime name
-// as confirmed; StartupStateUnknown keeps storage checkpoints from dropping the
-// record merely because it is not started.
+// MarkStartupStateUnknown retains an uncertain create or restore as an inert
+// record. Clearing started prevents attach/probe paths from treating the
+// requested runtime name as confirmed; StartupStateUnknown keeps storage
+// checkpoints from dropping the record merely because it is not started.
 func (i *Instance) MarkStartupStateUnknown() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
