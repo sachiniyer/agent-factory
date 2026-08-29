@@ -227,11 +227,11 @@ func worktreeRegisteredIn(repoRoot, worktreePath string) (bool, error) {
 	// loss: mayDeleteWorktreeDir would then treat git's own worktree as ours to
 	// delete. A failed read is not an empty result, so the error is RETURNED and
 	// every caller checks it before trusting the boolean.
-	out, err := runBoundedWorktreeGit(repoRoot, false, "worktree", "list", "--porcelain")
+	out, err := runBoundedWorktreeGit(repoRoot, false, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return false, err
 	}
-	return worktreeListed(string(out), worktreePath), nil
+	return worktreeListed(string(out), worktreePath)
 }
 
 // worktreeStillRegisteredError builds the ACTIONABLE failure for a worktree git
@@ -284,21 +284,62 @@ func mayDeleteWorktreeDir(registered, probeAnswered bool, removeErr error) bool 
 	return strings.Contains(removeErr.Error(), "validation failed")
 }
 
-// worktreeListed reports whether `git worktree list --porcelain` output names
+// worktreeListed reports whether `git worktree list --porcelain -z` output names
 // worktreePath. The single scanner behind every registration probe in this
 // package — the probes differ only in how they BOUND the git call, never in how
 // they read its answer.
-func worktreeListed(porcelain, worktreePath string) bool {
+//
+// It requires -z, and returns an ERROR rather than a bool for anything it could
+// not read. Both halves are the #3423 fix, and the second is the larger one.
+//
+// NUL-delimited, because the newline-delimited format CANNOT REPRESENT THE DATA.
+// A newline is legal in a POSIX path and `git worktree list --porcelain` prints
+// the path verbatim and unquoted (measured, git 2.43), so one entry arrives as
+// two fragments and neither equals the target. -z exists for exactly this; git
+// documents it as "makes it possible to parse the output when a worktree path
+// contains a newline character". Escaping or sanitising here would be treating
+// the symptom — the defect is parsing a format that cannot round-trip the input.
+// worktreeListedBranchBounded already made this move for the archive path
+// (#3278 review); this is the same fix for the probe every deletion consults.
+//
+// And a failed parse must not answer "no". This scanner sits under
+// mayDeleteWorktreeDir, which reads "not registered" as "git has let go of this
+// path, so it is ours to os.RemoveAll". A bool has no way to say "I could not
+// read that", so every unreadable listing was silently answering "absent" — the
+// #3476/#3479 class, failing OPEN on the guard whose entire job is to protect
+// git-owned paths. You cannot prove absence from data you failed to read, so the
+// two integrity conditions below are errors, and every caller already has a
+// "could not ask" path to route them into.
+func worktreeListed(porcelain, worktreePath string) (bool, error) {
+	// A successful `worktree list` on a real repo ALWAYS names at least one
+	// worktree — a bare repo lists itself (measured) — so nothing is a legitimate
+	// empty answer. Callers reach this only after repoRegistersNothing has already
+	// settled the no-repo case from the filesystem.
+	if porcelain == "" {
+		return false, errors.New("git listed no worktrees at all, so the registration could not be read")
+	}
+	// Every -z record is NUL-TERMINATED, so a well-formed listing ends with one.
+	// A listing that does not was truncated in transit, and its last entry is a
+	// partial path that would compare unequal to anything — the precise shape of a
+	// fabricated "not registered". It also catches a listing that never went
+	// through -z at all, which fails closed instead of silently reverting to the
+	// newline parse this function exists to remove.
+	if !strings.HasSuffix(porcelain, "\x00") {
+		return false, errors.New("git's worktree listing is truncated (no trailing NUL), " +
+			"so it cannot be read as a complete set of registrations")
+	}
 	target := normalizeWorktreePath(worktreePath)
-	for _, line := range strings.Split(porcelain, "\n") {
-		if !strings.HasPrefix(line, "worktree ") {
+	// TrimSuffix first so the terminator does not yield a trailing empty record;
+	// the empty records that remain are the entry separators, skipped below.
+	for _, field := range strings.Split(strings.TrimSuffix(porcelain, "\x00"), "\x00") {
+		if !strings.HasPrefix(field, "worktree ") {
 			continue
 		}
-		if normalizeWorktreePath(strings.TrimPrefix(line, "worktree ")) == target {
-			return true
+		if normalizeWorktreePath(strings.TrimPrefix(field, "worktree ")) == target {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // normalizeWorktreePath cleans the path and resolves symlinks so `worktree list`
