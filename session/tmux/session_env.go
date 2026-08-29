@@ -283,7 +283,14 @@ func removeEnvironmentNames(environ, names []string) []string {
 }
 
 func appendMissingEnvironmentNames(names, required []string) []string {
-	set := make(map[string]struct{}, len(names)+len(required))
+	// Sized from names alone, not len(names)+len(required). Both operands are
+	// lengths of in-memory env-name slices, so that sum cannot realistically
+	// overflow — but CodeQL's allocation-size-overflow rule reports the
+	// unchecked addition as a high-severity finding and one new high alert
+	// fails the required CodeQL check. Dropping the sum removes the flagged
+	// expression instead of suppressing the rule; the map grows on its own for
+	// the handful of boundary names required adds.
+	set := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		set[name] = struct{}{}
 	}
