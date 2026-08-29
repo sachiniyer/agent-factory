@@ -73,6 +73,9 @@ func (w *taskWatcher) drainLoop() {
 	// most once per episode anyway: its FIFO gate sends later events straight to
 	// the queue without attempting a delivery.
 	var parkLog parkLogThrottle
+	// loadFailing remembers that the previous peek hit an unreadable queue, so
+	// the first readable one can end the alarm run and shed the outage backoff.
+	loadFailing := false
 	// Account for the replay on EVERY exit, not just the drained-empty one
 	// (#1789). Expiring advances the cursor irreversibly — the record is gone
 	// and no later session can report it — so a stop landing in one of the
@@ -91,6 +94,44 @@ func (w *taskWatcher) drainLoop() {
 		}
 		ev, cursor, ok, err := w.queue.peek()
 		if err != nil {
+			if errors.Is(err, errEventQueueLoadFailed) {
+				// The queue's state is unknown, not corrupt (#3242): peek's
+				// load retry could not read the file. Unlike corruption —
+				// which survives every retry, so parking until reload is
+				// honest — this is the transient-outage shape, and #1128's
+				// never-a-permanent-give-up discipline applies: keep retrying
+				// on the failure cadence so a backlog behind a healed
+				// filesystem replays without waiting for a reload or a live
+				// event. peek re-attempts the load each round. Classified from
+				// the error value peek returned, never by re-reading queue
+				// state here: a concurrent heal (a pendingCount or enqueue
+				// retry landing between peek and this check) would flip a
+				// stale loadFailed() read and misfile the outage as
+				// corruption, parking the freshly recovered backlog.
+				//
+				// A parked replay IS an outage (#1238) — without an alarm, a
+				// restart into an unreadable queue whose script stays quiet
+				// never raises the pending-unknown banner built for exactly
+				// this state. It gets its OWN run, never the delivery one: the
+				// script may still be emitting, and each of those live events
+				// delivering successfully would keep resetting the delivery
+				// run's clock, holding a populated unreadable backlog under
+				// the alarm threshold forever.
+				w.noteQueueUnreadable(err)
+				loadFailing = true
+				if parkLog.allow("load-failed", time.Now()) {
+					log.ErrorLog.Printf("watch task %s: cannot load the event queue; retrying while the storage failure lasts — repeats at most every %s while this holds: %v", w.taskID, watcherParkLogInterval, err)
+				}
+				if !w.sleepStopAware(backoff) {
+					w.stopDraining()
+					return
+				}
+				backoff *= 2
+				if backoff > w.sup.drainMaxBackoff {
+					backoff = w.sup.drainMaxBackoff
+				}
+				continue
+			}
 			log.ErrorLog.Printf("watch task %s: cannot read queued event; replay parked until the next reload: %v", w.taskID, err)
 			w.stopDraining()
 			return
@@ -111,6 +152,15 @@ func (w *taskWatcher) drainLoop() {
 			}
 			expired++
 			continue
+		}
+		if loadFailing {
+			// The backlog was enumerated again: end the unreadable-queue alarm
+			// run (only that run — a concurrent delivery outage keeps its own
+			// clock) and shed the outage backoff, so the first delivery failure
+			// after recovery waits the base delay, not the outage cap.
+			loadFailing = false
+			backoff = w.sup.drainBaseBackoff
+			w.clearQueueUnreadable()
 		}
 		if !ok {
 			w.stopDraining()

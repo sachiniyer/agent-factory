@@ -18,7 +18,10 @@ type AlarmInfo struct {
 	TaskName string
 	Target   string
 	Pending  int
-	Since    time.Time
+	// PendingUnknown marks a backlog that could not be enumerated (the queue
+	// file is unreadable, #3242); Pending is 0 but must not render as such.
+	PendingUnknown bool
+	Since          time.Time
 }
 
 // AlarmBanner is the persistent top-of-screen alarm shown while one or more
@@ -69,8 +72,15 @@ func (b *AlarmBanner) View() string {
 		// there is no named target — describe it rather than print an empty "".
 		target = "a new session per event"
 	}
-	msg := fmt.Sprintf("⚠ events not delivering to %q — %d pending since %s (task: %s)",
-		target, a.Pending, a.Since.Format("15:04"), a.TaskName)
+	pending := fmt.Sprintf("%d pending", a.Pending)
+	if a.PendingUnknown {
+		// A failed read is not an empty result (#3242): the queue file could
+		// not be loaded, so "0 pending" would deny an outage the daemon cannot
+		// measure yet.
+		pending = "pending count unknown (queue unreadable)"
+	}
+	msg := fmt.Sprintf("⚠ events not delivering to %q — %s since %s (task: %s)",
+		target, pending, a.Since.Format("15:04"), a.TaskName)
 	if extra := len(b.alarms) - 1; extra > 0 {
 		msg += fmt.Sprintf("  (+%d more)", extra)
 	}
