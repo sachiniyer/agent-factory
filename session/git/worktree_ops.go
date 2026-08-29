@@ -481,11 +481,23 @@ func (r *cleanupRun) prune() {
 // meaningful when ok is true; a timed-out probe reports ok=false AND marks the run
 // unknown via run.git, so no caller can mistake "could not ask" for "not there".
 func (r *cleanupRun) registered() (yes bool, ok bool) {
-	output, err := r.git("worktree", "list", "--porcelain")
+	output, err := r.git("worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return false, false
 	}
-	return worktreeListed(output, r.g.worktreePath), true
+	listed, parseErr := worktreeListed(output, r.g.worktreePath)
+	if parseErr != nil {
+		// An unreadable listing is an UNKNOWN registration, not an absent one
+		// (#3423). Latching r.unknown is what makes shouldRemoveWorktreeDir refuse
+		// outright instead of falling through to the "validation failed" string
+		// gate — the same move requireRegisteredBranchMatch already makes when its
+		// sibling parser cannot read an entry (#3278 review).
+		r.unknown = true
+		r.errs = append(r.errs, fmt.Errorf(
+			"cannot read the worktree listing for %s: %w", r.g.worktreePath, parseErr))
+		return false, false
+	}
+	return listed, true
 }
 
 // state derives the run's outcome. Settled ONLY if nothing tripped a deadline.
@@ -695,11 +707,11 @@ var (
 func (g *GitWorktree) isWorktreeRegistered() (bool, error) {
 	// Bounded (#1917): this is Cleanup's error-path probe, so it must not be the
 	// step that hangs the kill the bounded `worktree remove` above just rescued.
-	output, err := g.runGitLocalCommand(g.repoPath, "worktree", "list", "--porcelain")
+	output, err := g.runGitLocalCommand(g.repoPath, "worktree", "list", "--porcelain", "-z")
 	if err != nil {
 		return false, err
 	}
-	return worktreeListed(output, g.worktreePath), nil
+	return worktreeListed(output, g.worktreePath)
 }
 
 var (

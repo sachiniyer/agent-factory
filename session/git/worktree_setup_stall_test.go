@@ -154,7 +154,9 @@ func runBounded(t *testing.T, limit time.Duration, what string, fn func() error)
 // repo, read with the real git so a shadowed PATH cannot affect the answer.
 func worktreeRegistered(t *testing.T, realGit, repoRoot, path string) bool {
 	t.Helper()
-	return worktreeListed(gitOut(t, realGit, repoRoot, "worktree", "list", "--porcelain"), path)
+	listed, err := worktreeListed(gitOut(t, realGit, repoRoot, "worktree", "list", "--porcelain", "-z"), path)
+	require.NoError(t, err, "the worktree listing must be readable")
+	return listed
 }
 
 func branchExists(t *testing.T, realGit, repoRoot, branch string) bool {
