@@ -245,16 +245,6 @@ func (m *home) focusedContentPane() (*ui.TabbedWindow, *session.Instance) {
 // fresh content.
 type panesRefreshedMsg struct{}
 
-// refreshPanesCmd runs the active tab's capture off the bubbletea Update
-// goroutine. It shells out to `tmux capture-pane` (~3–5ms locally), which
-// previously blocked the event loop on every previewTickMsg (every 100ms) and
-// on every post-detach repaint. TabPane serialises its state writes against
-// String() reads with an internal mutex, so the goroutine can publish captured
-// content concurrently with the renderer (#579).
-func refreshPanesCmd(tw *ui.TabbedWindow, selected *session.Instance) tea.Cmd {
-	return refreshPaneBindingCmd(tw, selected, tw.GetActiveTab(), tw.ContentSeq())
-}
-
 func refreshPaneBindingCmd(tw *ui.TabbedWindow, selected *session.Instance, activeTab int, seq uint64) tea.Cmd {
 	return func() tea.Msg {
 		cmdStart := time.Now()
