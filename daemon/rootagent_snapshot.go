@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -184,7 +185,12 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
 			unresolvedRoots[repoID] = p.Root
-			log.WarningLog.Printf("root agent snapshot: project %s root %s does not resolve to a git repository; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", p.ID, p.Root, repoErr)
+			// The claim is split at the resolution boundary (#3500): a probe
+			// git never answered is a subprocess outcome, not a verdict on the
+			// recorded root. The handling is deliberately the same either way —
+			// the path is unusable for THIS run whichever it was, and the
+			// per-tick retry is what settles it — so only the wording changes.
+			log.WarningLog.Printf("root agent snapshot: %s; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
