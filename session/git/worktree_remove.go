@@ -318,15 +318,34 @@ func worktreeListed(porcelain, worktreePath string) (bool, error) {
 	if porcelain == "" {
 		return false, errors.New("git listed no worktrees at all, so the registration could not be read")
 	}
-	// Every -z record is NUL-TERMINATED, so a well-formed listing ends with one.
-	// A listing that does not was truncated in transit, and its last entry is a
-	// partial path that would compare unequal to anything — the precise shape of a
-	// fabricated "not registered". It also catches a listing that never went
-	// through -z at all, which fails closed instead of silently reverting to the
-	// newline parse this function exists to remove.
-	if !strings.HasSuffix(porcelain, "\x00") {
-		return false, errors.New("git's worktree listing is truncated (no trailing NUL), " +
-			"so it cannot be read as a complete set of registrations")
+	// Every listing begins with a `worktree <path>` record; that is the porcelain
+	// format's entry anchor. Anything else is not a listing this can read.
+	if !strings.HasPrefix(porcelain, "worktree ") {
+		return false, errors.New("git's worktree listing does not begin with a worktree record, " +
+			"so it cannot be read as a set of registrations")
+	}
+	// It must end with the ENTRY terminator, not merely a field terminator (#3523
+	// review). Entries are separated by an EMPTY record, so a complete listing
+	// ends with two NULs — measured on single, multi, detached, locked, bare and
+	// prunable listings, all of which emit it.
+	//
+	// Requiring only ONE trailing NUL was a real hole: output cut immediately
+	// after any complete field ("worktree /other\x00HEAD abc\x00") satisfied it, so
+	// a listing missing every entry after that point parsed as "complete", the
+	// target was not found, and mayDeleteWorktreeDir read that absence as
+	// permission to os.RemoveAll a still-registered worktree.
+	//
+	// This also catches a listing that never went through -z at all, which fails
+	// CLOSED instead of silently reverting to the newline parse this function
+	// exists to remove.
+	//
+	// What it cannot catch, honestly: truncation exactly at an entry boundary is
+	// byte-identical to a shorter complete listing. Nothing in the bytes separates
+	// them, so that case rests on the git command having exited 0 and been read to
+	// EOF — which every caller checks before calling this.
+	if !strings.HasSuffix(porcelain, "\x00\x00") {
+		return false, errors.New("git's worktree listing is truncated (it does not end with a " +
+			"complete, empty-record-terminated entry), so it cannot be read as a complete set of registrations")
 	}
 	target := normalizeWorktreePath(worktreePath)
 	// TrimSuffix first so the terminator does not yield a trailing empty record;

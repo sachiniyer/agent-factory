@@ -155,6 +155,24 @@ func TestWorktreeListed_UnreadableListingIsAnErrorNotAnAbsence(t *testing.T) {
 			name:      "truncated: no trailing NUL",
 			porcelain: "worktree /repo/other\x00HEAD abc\x00\x00worktree /repo/w",
 		},
+		{
+			// #3523 review. The subtle one: cut immediately after a COMPLETE
+			// field, so the output does end with a NUL. A check that only
+			// required one trailing NUL accepted this, and every entry after
+			// the cut — including the target — simply was not there to find.
+			name:      "truncated: ends with a field terminator, not an entry terminator",
+			porcelain: "worktree /repo/other\x00HEAD abc\x00",
+		},
+		{
+			// The same shape one field earlier, to pin that this is about the
+			// entry terminator and not about which attribute happened to be last.
+			name:      "truncated: complete first entry, second entry cut after its path",
+			porcelain: "worktree /repo/other\x00HEAD abc\x00\x00worktree /repo/second\x00",
+		},
+		{
+			name:      "not a worktree listing (no leading worktree record)",
+			porcelain: "HEAD abc\x00branch refs/heads/x\x00\x00",
+		},
 	}
 	for _, tc := range unreadable {
 		t.Run(tc.name, func(t *testing.T) {
