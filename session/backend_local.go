@@ -237,7 +237,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		restoreResult, err := tmuxSession.RestoreWithResult(workDir)
 		if err != nil {
-			preserveAgentHandle = errors.Is(err, tmux.ErrAccountEnvironmentRefresh)
+			preserveAgentHandle = retainsInertInstance(err)
 			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
 			return setupErr
 		}
@@ -330,6 +330,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 	// pane cannot be replaced: reattaching that process would expose the daemon's
 	// ambient credentials while presenting it as scoped (#3340).
 	if err := b.setupTabs(i); err != nil {
+		// A retained failure leaves the agent RUNNING, so keep the handle that
+		// names it: nilling the ref here would orphan the pane. See the predicate.
+		preserveAgentHandle = retainsInertInstance(err)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}

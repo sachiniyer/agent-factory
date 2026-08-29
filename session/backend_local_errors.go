@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -79,8 +80,29 @@ func finishRecoverTabFailure(
 	return markRecoverRebuilt(rebuilt, setupErr)
 }
 
+// retainsInertInstance reports whether a startup failure is one the loader
+// answers by KEEPING the row rather than dropping it — an inconclusive sibling
+// probe, or a live agent whose in-place scope upgrade did not settle.
+//
+// It is one predicate on purpose, read by all three sites that must agree: the
+// loader that decides to retain, the teardown that decides what to close, and
+// the restore branch that decides whether to keep the agent handle. Those three
+// used to state the rule separately and had already drifted — the handle-keeping
+// site knew about one retained error and the teardown knew about none, so an
+// inconclusive sibling probe closed the live agent and then retained a row whose
+// every "exact cleanup handle" named a session that no longer existed.
+func retainsInertInstance(err error) bool {
+	var unknownScope *accountTabScopeUnknownError
+	return errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh)
+}
+
 func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err error) error {
-	if firstTime || tmuxSession == nil {
+	// A retained failure is not a teardown. The agent here was REATTACHED, not
+	// spawned by this load, and the inconclusive report was about a sibling —
+	// closing it destroys a running agent and its scrollback to report a problem
+	// with a different tab. finishRecoverTabFailure draws the same line by only
+	// closing what it respawned.
+	if firstTime || tmuxSession == nil || retainsInertInstance(err) {
 		return err
 	}
 	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {

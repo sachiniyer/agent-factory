@@ -1,7 +1,6 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
@@ -528,8 +527,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	if err := instance.Start(false); err != nil {
-		var unknownScope *accountTabScopeUnknownError
-		if errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh) {
+		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not
 			// establish a safe runtime boundary. Keep the row inert and explicitly
 			// killable so storage retains every exact tmux cleanup handle.
