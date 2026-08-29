@@ -282,6 +282,32 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			if err := checkEnv(strings.TrimPrefix(arg, "-e")); err != nil {
 				return err
 			}
+		// --volumes-from installs the DONOR container's mounts at the donor's
+		// own container paths, so the argument names a container and never the
+		// path the mount lands on. There is nothing here to match against the
+		// account boundary, and af refuses rather than guesses (#3403).
+		//
+		// Measured on Docker 29.4.0, alongside af's own account mount: a donor
+		// created with `-v /evil:/af-account/.config` lands that bind INSIDE
+		// /af-account, and the container reads the donor's file at the
+		// account's config path. A donor mounting /af-home lands whole, because
+		// af creates the runtime home inside the container rather than mounting
+		// it, so nothing shadows the donor there.
+		//
+		// Resolving the donor with `docker inspect` and checking its
+		// destinations was the alternative. It is a TOCTOU check on a
+		// credential boundary — the donor can be replaced between the inspect
+		// and the run — so the boundary keeps the fail-closed posture --env-file
+		// already has. The remedy costs the operator one line: name the mount.
+		//
+		// Only the double-dash spellings are the option. pflag reads a single
+		// dash as a shorthand cluster, so `-volumes-from` is `-v` carrying the
+		// value `olumes-from` (measured: Docker then treats the donor name as
+		// the IMAGE and fails), which the -v case below already reads correctly.
+		case arg == "--volumes-from" || strings.HasPrefix(arg, "--volumes-from="):
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use --volumes-from for an account-scoped session because af cannot prove what the donor container mounts, and the donor's mounts land at its own container paths — %s included; name the mount explicitly with -v or --mount instead",
+				dockerAccountHome)
 		case arg == "-v" || arg == "--volume" || arg == "--mount" || arg == "--tmpfs":
 			if index+1 < len(args) {
 				index++
