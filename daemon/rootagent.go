@@ -628,16 +628,6 @@ func (m *Manager) deliverToReemergingRoot(repo *config.RepoContext, req DeliverP
 	return "sent", status, true, nil
 }
 
-// repoRootAgentWillMaterialize reports whether the daemon's ensure loop is
-// responsible for (re-)creating the reserved "root" session for this repo: the
-// repo's layered root_agent config resolves to enabled and its project has not
-// been deleted at runtime. Config is the single source of truth for "root should
-// be running" — a root that is Dead, Lost, or even explicitly killed self-heals
-// (the kill only delays re-creation by rootKillHealDelay, #1223), so an enabled
-// root always materializes eventually and a delivery to a momentarily-absent one
-// should wait for the ensure loop rather than auto-create it (which the
-// reserved-name guard would reject).
-//
 // reapedRootState is what a reaped root record hands to its replacement: the
 // state a fresh CreateSession cannot reconstruct on its own, snapshotted from
 // the exact record the reap is about to delete. It is one value rather than a
