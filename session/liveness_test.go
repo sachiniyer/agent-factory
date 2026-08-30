@@ -205,6 +205,7 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 		{name: "startup unknown keeps teardown handle", id: "unknown-id", startupUnknown: true, want: true},
 		{name: "creating has no teardown target", id: "pending-id", op: OpCreating},
 		{name: "replacing already owns the teardown fence", id: "handoff-id", op: OpReplacing},
+		{name: "restoring cannot be killed mid-restore", id: "restore-id", op: OpRestoring},
 		{name: "id-less cannot address teardown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,6 +214,51 @@ func TestKillAddressabilityIsSharedAcrossInstanceAndProjection(t *testing.T) {
 			require.Equal(t, tc.want, inst.ToInstanceData().CanKill, "web projection decision")
 		})
 	}
+}
+
+// TestRestoringRowOffersNoKill mirrors TestRespawningRowOffersNeitherArchiveNorKill
+// (respawn_fence_test.go) for the restore fence. The daemon takes the per-session
+// operation lock for the WHOLE restore (claimRestoreOperation sets killsInFlight in
+// daemon/restore.go), so a Kill pressed during OpRestoring is rejected at the
+// admission gate — before BeginKill is ever reached — with "kill already in
+// progress for session X" (daemon/manager_sessions.go). That error does not match
+// the user's mental model: they started a restore, not a kill, yet the message
+// implies a prior kill. Kill never gets to supersede the op, so advertising it
+// promises an action that fails immediately and confuses. canKillFor hides it for
+// the same "don't show actions that cannot succeed" reason it already hides
+// OpRespawning. The Restore verb has its OWN TUI guard for this state
+// (handleRestore shows an "already being restored" notice rather than
+// dispatching); Kill had no such guard and fell through to the daemon, which is
+// why the exclusion belongs at the shared canKillFor gate. Both surfaces (TUI
+// Instance.CanKill and the web InstanceData.CanKill projection) are asserted, and
+// the teardown handle comes back when the restore completes.
+func TestRestoringRowOffersNoKill(t *testing.T) {
+	i := &Instance{ID: "restore-fence-id", Title: "restoring", liveness: LiveArchived}
+	require.Equal(t, LifecycleActionRestore, i.LifecycleAction(),
+		"an archived row offers Restore before the restore starts")
+	require.True(t, i.CanKill(),
+		"an archived row keeps its explicit teardown handle before the restore starts")
+
+	// BeginRestore is the daemon edge that raises the restore fence (Archived →
+	// Lost + OpRestoring) — the same edge after which claimRestoreOperation takes
+	// killsInFlight, the lock KillSession would have to traverse to reach BeginKill.
+	require.NoError(t, i.Transition(BeginRestore()))
+	require.Equal(t, OpRestoring, i.GetInFlightOp(), "the restore fence is up")
+
+	require.False(t, i.CanKill(),
+		"Kill cannot supersede a restore — KillSession is rejected at the killsInFlight "+
+			"admission gate and reports 'kill already in progress', contradicting a user who "+
+			"started a restore, so advertising it promises an action it cannot perform")
+	projection := i.ToInstanceData()
+	require.False(t, projection.CanKill, "the web projection must hide Kill during a restore too")
+
+	// ConfirmLive is the restore-completion edge (Lost + OpRestoring → live + None):
+	// the daemon settles the restored session and the fence drops. The handle comes
+	// back on both surfaces, exactly as it does when the respawn fence is lowered.
+	require.NoError(t, i.Transition(ConfirmLive()))
+	require.Equal(t, OpNone, i.GetInFlightOp(), "the restore fence is down")
+	require.True(t, i.CanKill(), "and the teardown handle comes back")
+	require.True(t, i.ToInstanceData().CanKill, "as does the web projection")
 }
 
 // TestMarkUserKilledClearsStaleOperationAndKeepsTeardownAddressable pins the

@@ -177,9 +177,23 @@ func lifecycleActionFor(id string, liveness Liveness, op InFlightOp, startupStat
 // owning operation is a separate change to the kill path, and until then a hung
 // remote provision is bounded by the backend's own deadlines rather than by a user
 // gesture. The same is already true of OpCreating/OpReplacing/teardown above.
+//
+// A restoring row is excluded for the symmetrical reason and a sharper one: the
+// daemon takes that same per-session operation lock for the whole restore
+// (claimRestoreOperation sets killsInFlight in daemon/restore.go), so a Kill
+// pressed during it is rejected at the ADMISSION gate — before BeginKill is ever
+// reached — with "kill already in progress for session X"
+// (daemon/manager_sessions.go). That message does not match the user's mental
+// model: they started a restore, not a kill, yet the error implies a prior kill.
+// Kill never gets a chance to supersede the op, so advertising it promises an
+// action that fails immediately and confuses. Hiding it mirrors the OpRespawning
+// exclusion above and the TUI guard the Restore verb already has for this state
+// (handleRestore shows an "already being restored" notice rather than
+// dispatching), closing the asymmetry where Restore was guarded and Kill fell
+// through to the daemon's misleading refusal.
 func canKillFor(id string, op InFlightOp) bool {
 	return id != "" && op != OpCreating && op != OpReplacing && op != OpRespawning &&
-		!opIsTeardown(op)
+		op != OpRestoring && !opIsTeardown(op)
 }
 
 // LifecycleAction returns the shared lifecycle verb for this instance. TUI menus
