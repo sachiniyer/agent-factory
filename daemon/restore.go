@@ -188,27 +188,19 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		}
 	}
 
-	// Raise the restore fence so clients (TUI and web) see OpRestoring and hide
-	// Kill for the duration. ConfirmLive clears it on success; ClearOp lowers it
-	// on failure. This mirrors the archived-restore path (BeginRestore sets
-	// OpRestoring before RestoreFromArchive/Recover), closing the asymmetry where
-	// a Lost/Dead restore left InFlightOp at OpNone and ToInstanceData could still
-	// emit can_kill:true even after canKillFor excluded OpRestoring.
-	_ = instance.Transition(session.MarkRestoring())
-
 	// Settle predecessor evidence at the exact ConfirmLive edge: late enough that
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
-	if err := instance.RecoverWithLiveBoundary(func() {
+	// RecoverFencedWithLiveBoundary raises OpRestoring before the backend runs so
+	// clients (TUI and web) see the fence and hide Kill, mirroring the
+	// archived-restore path (BeginRestore). ConfirmLive clears it on success;
+	// the method lowers it with ClearOp on failure.
+	if err := instance.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
-		// Lower the restore fence so the row does not stay permanently busy.
-		// ConfirmLive clears it on the success path; an error from
-		// RecoverWithLiveBoundary means the backend never reached ConfirmLive.
-		_ = instance.Transition(session.ClearOp())
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the
 		// outcome of this persist is part of the message. The plain arm keeps the
