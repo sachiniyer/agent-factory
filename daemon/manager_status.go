@@ -129,7 +129,15 @@ func (m *Manager) ResumeStatusPollFor(repoID, title, id, holder string) {
 	// still holds the session, and the next paused refresh would rearm it from
 	// scratch — delaying task-run completion, and the concurrency slot it releases,
 	// by another full taskRunPollBackstop.
-	if probeKey != "" && !m.pollLeaseActiveLocked(repoID, title, id, nowFunc()) {
+	//
+	// probeKey is the session's stable id (the same value isPollPaused is asked of
+	// via instance.ID), so it always names the ID-keyed namespace — even when the
+	// resuming caller is legacy (id=""). Passing the raw id instead would check only
+	// the title namespace for a legacy resume and miss an ID-keyed holder still
+	// pausing the session, disarming the backstop while the pause is still in
+	// effect (#3028). When the caller is ID-bearing, probeKey == id, so this is
+	// unchanged for that path.
+	if probeKey != "" && !m.pollLeaseActiveLocked(repoID, title, probeKey, nowFunc()) {
 		delete(m.taskRunProbeDue, probeKey)
 	}
 	m.pausedMu.Unlock()

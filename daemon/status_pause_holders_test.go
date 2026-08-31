@@ -193,3 +193,52 @@ func TestResumeStatusPoll_BackstopSurvivesAHolderInTheOtherNamespace(t *testing.
 		t.Fatal("no holder remains; the backstop entry must be reclaimed with the pause")
 	}
 }
+
+// The reverse ordering of the test above: a LEGACY client (id="") resumes FIRST
+// while an ID-bearing client still holds the pause under the ID-keyed lease. The
+// cleanup predicate isPollPaused uses covers BOTH namespaces, so the backstop
+// must stay armed until the ID-bearing holder also leaves — but the legacy resume
+// only clears the title namespace, and a backstop check that judged it by "this
+// caller's key is now empty" would miss the still-held ID-keyed lease, delete the
+// backstop mid-pause, and delay task-run completion (#1892) detection by another
+// full taskRunPollBackstop when the next paused refresh rearmed it from scratch.
+//
+// The cross-namespace case is exercised above for the ID-bearing-resumes-first
+// ordering; this covers the order the original commit's review missed. See #3028.
+func TestResumeStatusPoll_BackstopSurvivesAHolderInTheOtherNamespaceWhenLegacyResumesFirst(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, manager, repoID, repoPath, "shared", session.NewFakeBackend(), true, session.Running)
+	inst := manager.instances[daemonInstanceKey(repoID, "shared")]
+	probeKey := stableSessionKey(repoID, inst)
+
+	// An ID-bearing client and a legacy ID-less one, holding the same session under
+	// different keys.
+	manager.PauseStatusPollFor(repoID, "shared", inst.ID, "modern")
+	manager.PauseStatusPollFor(repoID, "shared", "", "legacy")
+	manager.pausedMu.Lock()
+	manager.taskRunProbeDue[probeKey] = nowFunc().Add(taskRunPollBackstop)
+	manager.pausedMu.Unlock()
+
+	// The legacy one leaves FIRST. Its title key is now empty, but the session is
+	// still paused by the ID-bearing holder.
+	manager.ResumeStatusPollFor(repoID, "shared", "", "legacy")
+
+	if !manager.isPollPaused(repoID, "shared", inst.ID) {
+		t.Fatal("the ID-bearing holder still holds the pause")
+	}
+	manager.pausedMu.Lock()
+	_, armed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if !armed {
+		t.Fatal("the backstop was disarmed while the session is still paused by the ID-bearing holder, leaving that pause unbounded")
+	}
+
+	// Only when the last namespace releases does the backstop go with it.
+	manager.ResumeStatusPollFor(repoID, "shared", inst.ID, "modern")
+	manager.pausedMu.Lock()
+	_, stillArmed := manager.taskRunProbeDue[probeKey]
+	manager.pausedMu.Unlock()
+	if stillArmed {
+		t.Fatal("no holder remains; the backstop entry must be reclaimed with the pause")
+	}
+}
