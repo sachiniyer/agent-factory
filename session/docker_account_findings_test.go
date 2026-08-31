@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -326,6 +327,160 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 	}
 	require.True(t, foundOwnedServer,
 		"the detached agent-server was not run as the bind-mounted account owner; calls=%v", calls)
+	// readBanner() reads the file startAgentServer() writes, so it must use the
+	// same account-owner user context. A BYO image whose default USER uid differs
+	// from the account owner, combined with a restrictive umask (mode 0600),
+	// otherwise leaves the banner unreadable to the default user and the session
+	// fails with a misleading "did not report a startup banner" timeout whose real
+	// cause is a permission denied on the banner file (#3672a2b oversight).
+	foundBannerReadAsOwner := false
+	for _, call := range calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "cat "+dockerBannerPath) &&
+			strings.Contains(joined, "--user 1000:1000") && strings.Contains(joined, "HOME=/af-home") {
+			foundBannerReadAsOwner = true
+		}
+	}
+	require.True(t, foundBannerReadAsOwner,
+		"readBanner() should run as the account owner, matching startAgentServer(); calls=%v", calls)
+}
+
+// TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner covers the timeout
+// branch of readBanner(): when the agent-server never reports a banner, the
+// diagnostic `cat <dockerLogPath>` that the error pulls the log through must
+// also run as the account owner, not the container's default user. The fix
+// applies sessionExecOptions() to BOTH reads so diagnostics use the same
+// security context as the writer; reading the log as a different user could
+// either fail outright (same 0600/umask condition that broke the banner) or
+// hide a permission issue the account owner would have hit.
+func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
+	f := newDockerAccountFixture(t, "", "codex", nil)
+	// Shorten the banner poll so the deadline trips immediately rather than
+	// holding the test for 45s. These are package vars for exactly this reason
+	// (the dockerReapTimeout precedent): production never reassigns them.
+	prevTimeout, prevInterval := dockerBannerPollTimeout, dockerBannerPollInterval
+	dockerBannerPollTimeout = 30 * time.Millisecond
+	dockerBannerPollInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		dockerBannerPollTimeout = prevTimeout
+		dockerBannerPollInterval = prevInterval
+	})
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if out, err := fakeLocalDockerResponse(args); out != nil || err != nil {
+			return out, err
+		}
+		switch args[0] {
+		case "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case "cp", "rm":
+			return nil, nil
+		case "exec":
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, "stat -c %u:%g "+accountContainerDirForTest):
+				return []byte("1000:1000\n"), nil
+			// Never return a valid banner so readBanner reaches its deadline
+			// and falls into the diagnostic log-read branch.
+			case strings.Contains(joined, "cat "+dockerBannerPath):
+				return nil, fmt.Errorf("permission denied")
+			case strings.Contains(joined, "cat "+dockerLogPath):
+				return []byte("agent-server: failed to start\n"), nil
+			default:
+				return nil, nil
+			}
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	}))
+
+	_, err := createDockerAccountSession(f, "codex", nil)
+	require.Error(t, err, "readBanner() must surface a timeout when no banner is reported")
+	require.Contains(t, err.Error(), "did not report a startup banner")
+	// Both the per-poll banner reads and the diagnostic log read on the timeout
+	// branch must carry the account-owner user context.
+	foundBannerReadAsOwner := false
+	foundLogReadAsOwner := false
+	for _, call := range calls {
+		if len(call) < 2 || call[0] != "exec" {
+			continue
+		}
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "--user 1000:1000") || !strings.Contains(joined, "HOME=/af-home") {
+			continue
+		}
+		switch {
+		case strings.Contains(joined, "cat "+dockerBannerPath):
+			foundBannerReadAsOwner = true
+		case strings.Contains(joined, "cat "+dockerLogPath):
+			foundLogReadAsOwner = true
+		}
+	}
+	require.True(t, foundBannerReadAsOwner,
+		"readBanner() poll reads should run as the account owner; calls=%v", calls)
+	require.True(t, foundLogReadAsOwner,
+		"readBanner() timeout diagnostic log read should run as the account owner; calls=%v", calls)
+}
+
+// TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged pins the other half
+// of the fix: a non-account (daemon-user) session has no containerUser, so
+// sessionExecOptions() returns nil and readBanner() must issue a plain
+// `docker exec <container> cat <banner>` with no --user flag. The account-owner
+// path must not leak a --user into ordinary daemon sessions, where it would
+// either name a nonexistent uid or shadow the image's default USER.
+func TestDockerAccount_ReadBannerLeavesNonAccountReadsUnchanged(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+	repo := initTempGitRepo(t)
+	runGit(t, repo, "remote", "add", "origin", "https://example.invalid/fixture.git")
+	writeInRepoConfig(t, repo, map[string]any{"backend": "docker", "docker": map[string]any{"image": "img:latest"}})
+	t.Cleanup(SetLookPathForTest(func(string) (string, error) { return "/usr/bin/docker", nil }))
+	t.Cleanup(SetDockerSelfBinaryForTest(filepath.Join(t.TempDir(), "af")))
+
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "info":
+			return []byte("non-account-engine\n"), nil
+		case "run":
+			return []byte(dockerCreatedID + "\n"), nil
+		case "cp", "rm":
+			return nil, nil
+		case "port":
+			return []byte("127.0.0.1:49152\n"), nil
+		case "exec":
+			joined := strings.Join(args, " ")
+			if strings.Contains(joined, "cat "+dockerBannerPath) {
+				return []byte(`{"addr":":8000","token":"test-only","title":"non-account"}`), nil
+			}
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unexpected docker call: %v", args)
+		}
+	}))
+
+	_, err := NewInstance(InstanceOptions{
+		Title:   "non-account",
+		Path:    repo,
+		Program: "codex",
+		Backend: BackendDocker,
+	})
+	require.NoError(t, err)
+	// No account → no --user flag on any exec; the banner read is plain
+	// `exec <container> cat <banner>`, matching the pre-account behavior.
+	for _, call := range calls {
+		if len(call) < 2 || call[0] != "exec" {
+			continue
+		}
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "cat "+dockerBannerPath) {
+			continue
+		}
+		require.NotContains(t, joined, "--user",
+			"non-account readBanner() must not carry a --user flag; calls=%v", calls)
+	}
 }
 
 // TestDockerAccount_RejectsProtectedMountTargetsInAnyFieldCase pins the Docker
