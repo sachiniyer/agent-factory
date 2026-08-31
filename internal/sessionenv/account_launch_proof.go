@@ -64,6 +64,15 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 	if !ok || len(words) == 0 {
 		return AccountLaunchProof{}, false
 	}
+	if words[0] == "exec" {
+		words = words[1:]
+		if len(words) > 0 && words[0] == "--" {
+			words = words[1:]
+		}
+	}
+	if len(words) == 0 {
+		return AccountLaunchProof{}, false
+	}
 	if len(words) < len(trustedBaseArgs)+1 {
 		return AccountLaunchProof{}, false
 	}

@@ -321,3 +321,64 @@ func TestGenerateAccountLaunchProof_DoesNotTrustRelativeDetectedExecutable(t *te
 		GeneratedArgs: bareProof.GeneratedArgs,
 	}), "a bare agent name with only af-authored arguments remains safe")
 }
+
+// An `exec`-prefixed absolute executable, the shape a shell alias such as
+// `alias claude='exec /opt/claude --model opus'` reaches after the detector
+// appends its flag, must tokenize identically on the producer and consumer
+// sides. Before the fix the proof kept "exec" as words[0], so
+// filepath.IsAbs("exec") was false and TrustedExecutable stayed empty, while
+// validation stripped "exec" — the two disagreed and a valid account-scoped
+// session was refused (#3108).
+func TestGenerateAccountLaunchProof_ExecPrefixWithAbsolutePath(t *testing.T) {
+	const executable = "/opt/claude"
+	base := "exec " + executable + " --dangerously-skip-permissions"
+	final := base + " --session-id " + genSessionID
+
+	proof, ok := GenerateAccountLaunchProof(base, final, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok, "proof generation should succeed for an exec-prefixed base")
+	require.Equal(t, executable, proof.TrustedExecutable,
+		"the exec prefix must be stripped before extracting TrustedExecutable")
+	require.Equal(t, []string{"--dangerously-skip-permissions", "--session-id", genSessionID}, proof.GeneratedArgs,
+		"the declared suffix is unaffected by stripping the prefix")
+	require.NoError(t, ValidateAccountCommand(final, Account{
+		Agent:             "claude",
+		Name:              "work",
+		TrustedExecutable: proof.TrustedExecutable,
+		GeneratedArgs:     proof.GeneratedArgs,
+	}), "validation strips exec the same way, so the producer/conducer pair must agree")
+
+	// `exec --` separates the builtin's options from the executable; the
+	// consumer strips both, so the proof must too.
+	dashBase := "exec -- " + executable + " --dangerously-skip-permissions"
+	dashFinal := dashBase + " --session-id " + genSessionID
+	dashProof, ok := GenerateAccountLaunchProof(dashBase, dashFinal, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Equal(t, executable, dashProof.TrustedExecutable,
+		"exec -- must also be stripped before extracting TrustedExecutable")
+	require.NoError(t, ValidateAccountCommand(dashFinal, Account{
+		Agent:             "claude",
+		Name:              "work",
+		TrustedExecutable: dashProof.TrustedExecutable,
+		GeneratedArgs:     dashProof.GeneratedArgs,
+	}), "exec -- must tokenize the same way on both sides")
+}
+
+// Stripping the prefix widens executable provenance only for an ABSOLUTE path,
+// matching the rule for a non-prefixed base. An `exec ./bin/claude` override is
+// still a relative executable resolved from the pane workdir, so it must keep
+// failing closed.
+func TestGenerateAccountLaunchProof_ExecPrefixDoesNotTrustRelativeExecutable(t *testing.T) {
+	base := "exec ./bin/claude --dangerously-skip-permissions"
+	final := base + " --session-id " + genSessionID
+
+	proof, ok := GenerateAccountLaunchProof(base, final, []string{"--dangerously-skip-permissions"})
+	require.True(t, ok)
+	require.Empty(t, proof.TrustedExecutable,
+		"an exec-prefixed relative executable still has no path provenance")
+	require.Equal(t, []string{"--dangerously-skip-permissions", "--session-id", genSessionID}, proof.GeneratedArgs)
+	err := ValidateAccountCommand(final, Account{
+		Agent: "claude", Name: "work", TrustedExecutable: proof.TrustedExecutable,
+		GeneratedArgs: proof.GeneratedArgs,
+	})
+	require.Error(t, err, "the relative executable must still fail closed")
+}
