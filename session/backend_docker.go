@@ -103,8 +103,16 @@ const (
 const (
 	dockerProvisionStepTimeout = 5 * time.Minute
 	dockerShortStepTimeout     = 30 * time.Second
-	dockerBannerPollTimeout    = 45 * time.Second
-	dockerBannerPollInterval   = 400 * time.Millisecond
+)
+
+// dockerBannerPollTimeout bounds how long readBanner waits for the in-container
+// agent-server to print its startup banner; dockerBannerPollInterval is the
+// poll cadence between attempts. Both are vars (not consts) only so tests can
+// shorten them to exercise the deadline path; production never reassigns them.
+// Mirrors dockerReapTimeout (networkGitTimeout / tmuxCommandTimeout precedent).
+var (
+	dockerBannerPollTimeout  = 45 * time.Second
+	dockerBannerPollInterval = 400 * time.Millisecond
 )
 
 // dockerReapTimeout bounds the `docker rm -f` container reap. A var (not a const)
@@ -611,10 +619,21 @@ func (p *dockerProvisioner) agentServerCommand() (string, error) {
 // its listener and printed its {addr,token} JSON line, or times out.
 // On timeout it pulls the agent-server's stderr log into the error so a failure
 // to start (bad image, missing tmux, port clash) is self-diagnosing.
+//
+// Both reads run as the account owner via sessionExecOptions(), the same user
+// context startAgentServer used to write the files. A BYO image may set a USER
+// directive whose uid differs from the account owner; a banner file created
+// with a restrictive umask (mode 0600) is then unreadable by that default user.
+// Reading as the writer keeps the diagnostic and the writer in the same security
+// context and avoids a misleading "did not report a startup banner" timeout
+// whose real cause is a permission denied on the banner file.
 func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 	deadline := time.Now().Add(dockerBannerPollTimeout)
 	for {
-		out, err := p.docker(dockerShortStepTimeout, "exec", p.containerID, "cat", dockerBannerPath)
+		args := []string{"exec"}
+		args = append(args, p.sessionExecOptions()...)
+		args = append(args, p.containerID, "cat", dockerBannerPath)
+		out, err := p.docker(dockerShortStepTimeout, args...)
 		if err == nil {
 			var b dockerBanner
 			if jErr := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &b); jErr == nil && b.Addr != "" && b.Token != "" {
@@ -622,7 +641,10 @@ func (p *dockerProvisioner) readBanner() (dockerBanner, error) {
 			}
 		}
 		if time.Now().After(deadline) {
-			logOut, _ := p.docker(dockerShortStepTimeout, "exec", p.containerID, "cat", dockerLogPath)
+			logArgs := []string{"exec"}
+			logArgs = append(logArgs, p.sessionExecOptions()...)
+			logArgs = append(logArgs, p.containerID, "cat", dockerLogPath)
+			logOut, _ := p.docker(dockerShortStepTimeout, logArgs...)
 			return dockerBanner{}, fmt.Errorf("backend=docker: af agent-server did not report a startup banner within %s; container log:\n%s",
 				dockerBannerPollTimeout, strings.TrimSpace(string(logOut)))
 		}
