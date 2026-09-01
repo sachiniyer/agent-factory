@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -161,7 +160,13 @@ func TestParseWorktreeBranchHolds(t *testing.T) {
 	// A detached worktree contributes no hold, a bare main worktree has neither
 	// HEAD nor branch, and a path with spaces (every archived worktree has one)
 	// survives intact.
-	porcelain := strings.Join([]string{
+	//
+	// Records are NUL-TERMINATED, not NUL-separated (#3524), so this appends a
+	// terminator to every record rather than joining with one — a join leaves the
+	// final record unterminated, which is exactly the truncation shape
+	// requireCompleteWorktreeListing now rejects. The empty records are the
+	// entry terminators, so a complete listing ends with two NULs.
+	records := []string{
 		"worktree /repos/main",
 		"HEAD 1111111111111111111111111111111111111111",
 		"branch refs/heads/master",
@@ -174,9 +179,14 @@ func TestParseWorktreeBranchHolds(t *testing.T) {
 		"HEAD 3333333333333333333333333333333333333333",
 		"detached",
 		"",
-	}, "\n")
+	}
+	porcelain := ""
+	for _, record := range records {
+		porcelain += record + "\x00"
+	}
 
-	held := parseWorktreeBranchHolds(porcelain)
+	held, err := parseWorktreeBranchHolds(porcelain)
+	require.NoError(t, err)
 
 	assert.Equal(t, map[string]string{
 		"master": "/repos/main",

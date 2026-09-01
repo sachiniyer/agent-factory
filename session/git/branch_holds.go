@@ -47,7 +47,11 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), worktreeListTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	// -z: NUL-delimited records (#3524). A newline is legal in a POSIX path and
+	// the newline-delimited format prints it verbatim, so a path's own newline is
+	// indistinguishable from a record terminator. Same fix as worktreeListed
+	// (#3423) and worktreeListedBranchBounded (#3278); no new git floor.
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain", "-z")
 	// Bound the post-exit wait so a child that inherited the capture pipe cannot
 	// hold Output() open past the deadline (#856).
 	cmd.WaitDelay = gitWaitDelay
@@ -68,35 +72,60 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
 		}
 		return nil, fmt.Errorf("git worktree list in %s failed: %w", repoRoot, err)
 	}
-	return parseWorktreeBranchHolds(string(output)), nil
+	holds, parseErr := parseWorktreeBranchHolds(string(output))
+	if parseErr != nil {
+		return nil, fmt.Errorf("git worktree list in %s could not be read: %w", repoRoot, parseErr)
+	}
+	return holds, nil
 }
 
-// parseWorktreeBranchHolds reads `git worktree list --porcelain` output into
-// branch -> holding worktree path. Each record is a `worktree <path>` line
-// followed by attribute lines and terminated by a blank line; a record carries a
-// `branch refs/heads/<name>` line only when that worktree has a branch checked
-// out (detached and bare worktrees do not).
+// parseWorktreeBranchHolds reads `git worktree list --porcelain -z` output into
+// branch -> holding worktree path. Each record is a NUL-terminated
+// `worktree <path>` line followed by attribute records and terminated by an
+// EMPTY record; a record carries a `branch refs/heads/<name>` only when that
+// worktree has a branch checked out (detached and bare worktrees do not).
 //
-// Paths are taken verbatim to the end of the line, which is what git emits —
+// Paths are taken verbatim to the end of the record, which is what git emits —
 // every archived worktree path contains spaces, so any whitespace-splitting
-// parse would truncate exactly the paths this exists to report.
-func parseWorktreeBranchHolds(porcelain string) map[string]string {
+// parse would truncate exactly the paths this exists to report. The same is true
+// of NEWLINES, which is why this reads -z and not the newline-delimited form
+// (#3524): a path ending in a newline left an empty trailing fragment that read
+// as a record separator, so the record's branch line was dropped and a branch
+// that WAS checked out came back reported as free.
+//
+// It returns an ERROR for a listing it could not read, and that is the half that
+// generalises. A bare map has no way to say "I could not read that", so a
+// partially-parsed listing arrived looking exactly like one that genuinely held
+// nothing, and every read failure resolved to the permissive answer. The caller
+// already has a deliberate, safe response to an unanswerable probe — log it and
+// proceed, letting `git worktree add` refuse loudly if the name really is held
+// (#2127) — it simply could never be reached. Nil map with the error, never a
+// partial one: a caller that ranges over what arrived would be reading a
+// truncated listing as the complete set.
+//
+// No \r trimming: that only ever made sense for line-delimited output, and under
+// -z a trailing \r is part of the path.
+func parseWorktreeBranchHolds(porcelain string) (map[string]string, error) {
+	if err := requireCompleteWorktreeListing(porcelain); err != nil {
+		return nil, err
+	}
 	holds := make(map[string]string)
 	worktreePath := ""
-	for _, line := range strings.Split(porcelain, "\n") {
-		line = strings.TrimSuffix(line, "\r")
+	// TrimSuffix first so the final terminator does not yield a trailing empty
+	// record; the empty records that remain are the real entry separators.
+	for _, field := range strings.Split(strings.TrimSuffix(porcelain, "\x00"), "\x00") {
 		switch {
-		case line == "":
+		case field == "":
 			// Record separator: nothing after it belongs to the previous path.
 			worktreePath = ""
-		case strings.HasPrefix(line, "worktree "):
-			worktreePath = strings.TrimPrefix(line, "worktree ")
-		case strings.HasPrefix(line, "branch "):
-			branch := strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
+		case strings.HasPrefix(field, "worktree "):
+			worktreePath = strings.TrimPrefix(field, "worktree ")
+		case strings.HasPrefix(field, "branch "):
+			branch := strings.TrimPrefix(strings.TrimPrefix(field, "branch "), "refs/heads/")
 			if branch != "" && worktreePath != "" {
 				holds[branch] = worktreePath
 			}
 		}
 	}
-	return holds
+	return holds, nil
 }

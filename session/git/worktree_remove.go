@@ -310,18 +310,24 @@ func mayDeleteWorktreeDir(registered, probeAnswered bool, removeErr error) bool 
 // git-owned paths. You cannot prove absence from data you failed to read, so the
 // two integrity conditions below are errors, and every caller already has a
 // "could not ask" path to route them into.
-func worktreeListed(porcelain, worktreePath string) (bool, error) {
+// requireCompleteWorktreeListing reports why a `git worktree list --porcelain -z`
+// listing cannot be trusted as a COMPLETE set of records, or nil when it can.
+//
+// Shared by every parser of that listing, because "I could not read this" has to
+// mean the same thing at all of them: each one's caller reads a missing entry as
+// an absence — not registered, not held — and an absence is a claim about data
+// that was actually read.
+func requireCompleteWorktreeListing(porcelain string) error {
 	// A successful `worktree list` on a real repo ALWAYS names at least one
-	// worktree — a bare repo lists itself (measured) — so nothing is a legitimate
-	// empty answer. Callers reach this only after repoRegistersNothing has already
-	// settled the no-repo case from the filesystem.
+	// worktree — a bare repo lists ITSELF (measured) — so there is no legitimate
+	// empty answer to distinguish this from.
 	if porcelain == "" {
-		return false, errors.New("git listed no worktrees at all, so the registration could not be read")
+		return errors.New("git listed no worktrees at all, so the listing could not be read")
 	}
 	// Every listing begins with a `worktree <path>` record; that is the porcelain
 	// format's entry anchor. Anything else is not a listing this can read.
 	if !strings.HasPrefix(porcelain, "worktree ") {
-		return false, errors.New("git's worktree listing does not begin with a worktree record, " +
+		return errors.New("git's worktree listing does not begin with a worktree record, " +
 			"so it cannot be read as a set of registrations")
 	}
 	// It must end with the ENTRY terminator, not merely a field terminator (#3523
@@ -333,19 +339,27 @@ func worktreeListed(porcelain, worktreePath string) (bool, error) {
 	// after any complete field ("worktree /other\x00HEAD abc\x00") satisfied it, so
 	// a listing missing every entry after that point parsed as "complete", the
 	// target was not found, and mayDeleteWorktreeDir read that absence as
-	// permission to os.RemoveAll a still-registered worktree.
+	// permission to os.RemoveAll a still-registered worktree — and the branch-holds
+	// parser would have reported a held branch as free from the same shape.
 	//
 	// This also catches a listing that never went through -z at all, which fails
-	// CLOSED instead of silently reverting to the newline parse this function
-	// exists to remove.
+	// CLOSED instead of silently reverting to the newline parse these parsers
+	// exist to remove.
 	//
 	// What it cannot catch, honestly: truncation exactly at an entry boundary is
 	// byte-identical to a shorter complete listing. Nothing in the bytes separates
 	// them, so that case rests on the git command having exited 0 and been read to
 	// EOF — which every caller checks before calling this.
 	if !strings.HasSuffix(porcelain, "\x00\x00") {
-		return false, errors.New("git's worktree listing is truncated (it does not end with a " +
-			"complete, empty-record-terminated entry), so it cannot be read as a complete set of registrations")
+		return errors.New("git's worktree listing is truncated (it does not end with a " +
+			"complete, empty-record-terminated entry), so it cannot be read as a complete set of records")
+	}
+	return nil
+}
+
+func worktreeListed(porcelain, worktreePath string) (bool, error) {
+	if err := requireCompleteWorktreeListing(porcelain); err != nil {
+		return false, err
 	}
 	target := normalizeWorktreePath(worktreePath)
 	// TrimSuffix first so the terminator does not yield a trailing empty record;
