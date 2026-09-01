@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -113,5 +114,79 @@ func TestDockerMountAgentCredentials_OperatorGrantIsAgentSelective(t *testing.T)
 	}
 	if argsHave(runArgs, ".claude/.credentials.json") {
 		t.Fatalf("codex session must NOT receive the Claude credential; args=%v", runArgs)
+	}
+}
+
+// TestDockerMountAgentCredentials_DevinMountsItsOwnCredential is the devin
+// regression for the path that was unreachable before this fix.
+//
+// devin is a first-class supported agent (tmux.SupportedPrograms) and has an
+// entry in agentCredentialFiles, but it was MISSING from agentNames, so
+// sessionenv.AgentForCommand("devin") returned "". The docker provisioner's
+// agentName() returns "" for a non-empty program whose agent is unknown (the
+// empty-program fallback to claude does not cover this), so
+// resolveAgentCredentialMounts("") looked up agentCredentialFiles[""] and
+// mounted nothing — even with the operator grant on and the file present.
+//
+// This drives the real dockerRuntime.Provision path that was broken: with the
+// grant on and BOTH the devin and claude credential files present, a devin
+// session must mount its OWN config and not the Claude token.
+func TestDockerMountAgentCredentials_DevinMountsItsOwnCredential(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCredFile(t, filepath.Join(home, ".config/devin/config.json"))
+	writeCredFile(t, filepath.Join(home, ".claude/.credentials.json"))
+
+	cfg := config.DefaultConfig()
+	cfg.DockerMountAgentCredentials = true
+	require.NoError(t, config.SaveConfig(cfg))
+
+	runArgs := provisionDockerCapturingRun(t, tmux.ProgramDevin)
+
+	wantDevin := filepath.Join(home, ".config/devin/config.json") + ":" + dockerContainerHome + "/.config/devin/config.json:" + dockerCredentialMountMode
+	if !argsHave(runArgs, wantDevin) {
+		t.Fatalf("operator grant on, devin session: the devin config must be mounted read-only and SELinux-relabeled (%q); args=%v", wantDevin, runArgs)
+	}
+	if argsHave(runArgs, ".claude/.credentials.json") {
+		t.Fatalf("devin session must NOT receive the Claude credential; args=%v", runArgs)
+	}
+}
+
+// TestAgentForCommandResolvesEveryCredentialFileAgent is the cross-map
+// consistency guard that would have caught the devin bug.
+//
+// agentCredentialMounts is reached in production through
+// sessionenv.AgentForCommand(p.program) -> dockerProvisioner.agentName() ->
+// resolveAgentCredentialMounts(agent). Every agent that has a credential file
+// entry therefore MUST also resolve via AgentForCommand, or its mount is
+// unreachable forever — regardless of the file existing on disk. Iterating
+// the map (not a hand-copied list) keeps this guard honest as new agents are
+// added to agentCredentialFiles.
+func TestAgentForCommandResolvesEveryCredentialFileAgent(t *testing.T) {
+	for agent := range agentCredentialFiles {
+		if got := sessionenv.AgentForCommand(agent); got != agent {
+			t.Errorf("agent %q is in agentCredentialFiles but AgentForCommand(%q) = %q; "+
+				"the docker provisioner cannot reach its credential mount",
+				agent, agent, got)
+		}
+	}
+}
+
+// TestAgentForCommandResolvesEverySupportedProgram guards the other direction
+// of the same drift: a new agent added to tmux.SupportedPrograms but missed by
+// agentNames silently degrades to no credentials and (for non-empty programs)
+// no claude fallback either. Every supported program must resolve to itself.
+//
+// This is the production resolution dockerProvisioner.agentName relies on; the
+// empty-program fallback to claude only covers a blank program, not an unknown
+// agent, so membership here is load-bearing.
+func TestAgentForCommandResolvesEverySupportedProgram(t *testing.T) {
+	for _, program := range tmux.SupportedPrograms {
+		if got := sessionenv.AgentForCommand(program); got != program {
+			t.Errorf("program %q is in tmux.SupportedPrograms but AgentForCommand(%q) = %q; "+
+				"a session running it cannot resolve its agent for credential mounting or env filtering",
+				program, program, got)
+		}
 	}
 }

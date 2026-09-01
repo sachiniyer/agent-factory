@@ -122,6 +122,22 @@ var agentNames = map[string]map[string]struct{}{
 		"OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
 		"COHERE_API_KEY", "XAI_API_KEY",
 	),
+	// devin is a cloud agent: it authenticates through its config file
+	// (.config/devin/config.json, which agentCredentialMounts bind-mounts
+	// read-only into the container) rather than API-key environment variables,
+	// so its per-agent allowlist is empty.
+	//
+	// The key MUST exist even though the set is empty. The docker provisioner
+	// derives the session's agent from AgentForCommand
+	// (dockerProvisioner.agentName), and resolveAgentCredentialMounts keys
+	// credential mounting off that result. devin is in agentCredentialFiles,
+	// but without this entry AgentForCommand("devin") returned "" — the
+	// empty-program fallback in agentName() does not cover a non-empty program
+	// — so a devin session resolved to "" and the devin credential mount was
+	// unreachable in production even after an image shipped the CLI. An empty
+	// set keeps the environment boundary at commonNames only while letting the
+	// credential mount fire.
+	"devin": nameSet(),
 }
 
 // geminiCloudNames is Google Cloud's credential group for the Gemini CLI: the
