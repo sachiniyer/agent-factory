@@ -73,6 +73,29 @@ func (i *Instance) RecoverWithLiveBoundary(beforeLive func()) error {
 	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
 }
 
+// RecoverFencedWithLiveBoundary is RecoverWithLiveBoundary with an
+// OpRestoring fence for the duration of the recovery. It validates first
+// (requires OpNone), then raises MarkRestoring so clients see the operation
+// and hide Kill, runs the backend, and lowers the fence with ClearOp on
+// failure (ConfirmLive clears it on success). The manual Lost/Dead restore
+// path uses this to close the asymmetry where the archived-restore path
+// projects OpRestoring via BeginRestore but the lost-restore path did not.
+func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
+	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
+	if err := i.Transition(MarkRestoring()); err != nil {
+		return fmt.Errorf("recover: raise restore fence: %w", err)
+	}
+	err := i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
+	if err != nil {
+		// ConfirmLive clears OpRestoring on success; lower it here on failure so
+		// the row does not stay permanently busy.
+		_ = i.Transition(ClearOp())
+	}
+	return err
+}
+
 func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
 	if beforeLive == nil {
 		return run()

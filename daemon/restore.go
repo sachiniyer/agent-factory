@@ -192,7 +192,11 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
-	if err := instance.RecoverWithLiveBoundary(func() {
+	// RecoverFencedWithLiveBoundary raises OpRestoring before the backend runs so
+	// clients (TUI and web) see the fence and hide Kill, mirroring the
+	// archived-restore path (BeginRestore). ConfirmLive clears it on success;
+	// the method lowers it with ClearOp on failure.
+	if err := instance.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
