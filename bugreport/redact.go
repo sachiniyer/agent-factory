@@ -628,6 +628,29 @@ func redactInstanceData(d *session.InstanceData) {
 	if d.PRInfo.URL != "" {
 		d.PRInfo.URL = redactedMarker
 	}
+	// ArchiveReport.Skipped[].Path carries the relative file names a user chose
+	// for files af could not read (hence permission_denied). They are relative to
+	// the retained worktree root, so the text scrub cannot reach them — there is
+	// no $HOME to collapse to "~" and no username to blank to "[user]", and the
+	// policy above only covers paths the scrub can collapse. The report arrived
+	// with lossless archive storage (#3171) after this policy was written, so a
+	// name a user marked private (e.g. "credential", "private-work.txt",
+	// "generated/private-019") shipped verbatim in every publicly shared bundle's
+	// archive_report.retained_trees[].skipped[].path — the same class as the
+	// title leaks in #2419 and #2776, a field added after the policy was written.
+	// PathBytes is the durable form when Path is not valid UTF-8 and must be
+	// cleared alongside it, or the raw name survives the display redaction. The
+	// retained tree's own path and the skip reason survive: the tree path is the
+	// system worktree path the scrub collapses via $HOME, and the reason is the
+	// diagnostic ("permission denied on N files").
+	if d.ArchiveReport != nil {
+		for i := range d.ArchiveReport.RetainedTrees {
+			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
+				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker
+				d.ArchiveReport.RetainedTrees[i].Skipped[j].PathBytes = nil
+			}
+		}
+	}
 }
 
 func redactTabData(tab *session.TabData) {
