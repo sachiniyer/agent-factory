@@ -72,11 +72,11 @@ func TestRepaintAfterDetachMsg_KicksOffRefresh(t *testing.T) {
 		"repaintAfterDetachMsg must not synchronously flush TUI view-state")
 }
 
-// TestRefreshPanesCmd_ProducesPanesRefreshedMsg verifies the goroutine body
-// itself: with a FakeBackend (no real tmux), the cmd must complete and
+// TestRefreshPaneBindingCmd_ProducesPanesRefreshedMsg verifies the goroutine
+// body itself: with a FakeBackend (no real tmux), the cmd must complete and
 // return panesRefreshedMsg so bubbletea re-runs View() against the freshly
 // captured content.
-func TestRefreshPanesCmd_ProducesPanesRefreshedMsg(t *testing.T) {
+func TestRefreshPaneBindingCmd_ProducesPanesRefreshedMsg(t *testing.T) {
 	h := newTestHome(t)
 	inst := instanceWithFakeBackend(t, "a")
 	h.store.AddInstance(inst)
@@ -85,12 +85,12 @@ func TestRefreshPanesCmd_ProducesPanesRefreshedMsg(t *testing.T) {
 	resizeHome(h, 120, 40)
 	p := openTestPane(t, h, inst, 0)
 	tw := h.paneWindows[p.ID()]
-	cmd := refreshPanesCmd(tw, inst)
+	cmd := refreshPaneBindingCmd(tw, inst, tw.GetActiveTab(), tw.ContentSeq())
 	require.NotNil(t, cmd)
 
 	got := cmd()
 	_, ok := got.(panesRefreshedMsg)
-	require.True(t, ok, "refreshPanesCmd must return panesRefreshedMsg, got %T", got)
+	require.True(t, ok, "refreshPaneBindingCmd must return panesRefreshedMsg, got %T", got)
 
 	// And the handler for the msg must not itself schedule more work
 	// (otherwise we'd loop forever on every repaint).
