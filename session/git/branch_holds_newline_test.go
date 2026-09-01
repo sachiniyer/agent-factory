@@ -83,13 +83,34 @@ func TestBranchesHeldByWorktrees_ReportsHoldsAtNewlineBearingPaths(t *testing.T)
 		"endbranch IS checked out at a path ending in a newline, but was reported as NOT held (#3524). "+
 			"The resolver would hand that branch to a new session, and `git worktree add` then refuses "+
 			"with \"already used by worktree at …\" — the confusing failure #2091 exists to prevent.")
-	assert.Equal(t, endPath, holder, "the hold must name the worktree that actually holds it")
+	assertHolds(t, endPath, holder, "the hold must name the worktree that actually holds it")
 
 	holder, ok = held["midbranch"]
 	require.True(t, ok, "midbranch is checked out and must be reported as held")
-	assert.Equal(t, midPath, holder,
+	assertHolds(t, midPath, holder,
 		"a newline INSIDE the path must not truncate the recorded holder — this value is "+
 			"reported back to the user")
+}
+
+// assertHolds compares a recorded holder against the path the test created,
+// through the same canonicalization the production probes use.
+//
+// git reports the CANONICAL path; a test creates its worktree under whatever
+// spelling t.TempDir() hands out. On macOS those differ — TMPDIR lives under
+// /var, which is a symlink to /private/var — so an exact string compare fails
+// on the prefix while saying nothing about the property under test. That is
+// what normalizeWorktreePath exists for, and worktreeListed already reads every
+// listing through it for exactly this reason.
+//
+// Canonicalizing does not weaken the claim. A TRUNCATED holder (the #3524 bug:
+// ".../mid" instead of ".../mid\nnewline") does not canonicalize to the same
+// path either, so this still fails on the defect. The explicit newline check
+// makes that intent unmissable rather than implied.
+func assertHolds(t *testing.T, want, got, msg string) {
+	t.Helper()
+	assert.Equal(t, normalizeWorktreePath(want), normalizeWorktreePath(got), msg)
+	assert.Contains(t, got, "\n",
+		"the recorded holder must still carry the path's newline — losing it is the truncation this guards")
 }
 
 // TestParseWorktreeBranchHolds_UnreadableListingIsAnErrorNotAnEmptyMap is the
