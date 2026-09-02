@@ -104,6 +104,34 @@ func TestOrdinalNeverReachesDisk(t *testing.T) {
 	assert.Equal(t, map[string]int{"aaa00001": 1, "bbb00002": 2}, rowsByID(tasks))
 }
 
+func TestAddTaskReturnsTheRowTheNextReadWillReport(t *testing.T) {
+	// The record AddTaskChecked hands back is published as EventTaskCreated and
+	// returned as the create response, and it is meant to be CANONICAL — that is
+	// why RepoID is derived and returned rather than echoed from the request. The
+	// row is knowable in the same place for the same reason: the append happens
+	// under the tasks-file lock, so nothing can land between the stamp and the
+	// write.
+	//
+	// Left unstamped, a create reports "no row" for a record the very next read
+	// numbers, so two surfaces disagree about one task in a field a client can
+	// see — and "no row" is the value ApplyLiveArming reads as "nothing to pair
+	// on", so it is not an inert difference either.
+	setupTestTasks(t, []Task{})
+
+	var want []int
+	for i, id := range []string{"aaa00001", "bbb00002", "ccc00003"} {
+		created, err := AddTaskChecked(ordinalRow(id, "row", "0 9 * * *", "/repo"), ActorCLI, nil)
+		require.NoError(t, err)
+		assert.Equal(t, i+1, created.Ordinal, "the create returns the row it landed on")
+		want = append(want, created.Ordinal)
+	}
+
+	read, err := LoadTasks()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"aaa00001": want[0], "bbb00002": want[1], "ccc00003": want[2]},
+		rowsByID(read), "and a later read agrees with every one of them")
+}
+
 func TestRepoFilteringKeepsEachSurvivorsRowNumber(t *testing.T) {
 	// The property the whole design rests on. The rail loads ONE repo's rows while
 	// the daemon answers about every repo, so the two lists have different lengths

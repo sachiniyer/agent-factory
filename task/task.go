@@ -503,6 +503,16 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		// timestamp is the commit's and an entry can never exist for a create
 		// that a validator or a failed write rolled back.
 		appendAudit(&t, actor, AuditCreated, nil, nowFn())
+		// The row this record will occupy is knowable here and nowhere else: the
+		// append happens under the tasks-file lock, so it lands last in the file
+		// that is about to be written. Stamping it is what makes the returned
+		// record canonical in the ordinal too — the same reason RepoID is derived
+		// and returned rather than echoed back from the request. Without it a
+		// create publishes "no row" for a record the very next read numbers, so
+		// EventTaskCreated and GetTask disagree about the same task in a field a
+		// client can see (#3684 review). saveTasks strips it on the way to disk, so
+		// the number lives only on the record handed back.
+		t.Ordinal = len(tasks) + 1
 		tasks = append(tasks, t)
 		return saveTasks(tasks)
 	})
