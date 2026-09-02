@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -215,8 +216,17 @@ func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHom
 // fifty thousand paths inside it. Both numbers are true and neither is the
 // whole story, so both are stated.
 func tempHomeSweepTruncationDetail(tempDir string, sweep tempHomeSweep, budget int) string {
-	detail := fmt.Sprintf("this run did NOT assess every temp home: it finished %d of the %d directories under "+
-		"%s, having inspected %s", sweep.visited, sweep.offered, tempDir,
+	// "at least" when the root's own listing was cut short: we do not know how
+	// many first-level directories exist, only how many we got as far as
+	// naming. Printing that count as a total would be a fabricated denominator
+	// — the same error as a fabricated finding, one level up.
+	total := fmt.Sprintf("the %d directories", sweep.offered)
+	if sweep.rootPartial {
+		total = fmt.Sprintf("at least %d directories (%s is too large to list in full)",
+			sweep.offered, tempDir)
+	}
+	detail := fmt.Sprintf("this run did NOT assess every temp home: it finished %d of %s under "+
+		"%s, having inspected %s", sweep.visited, total, tempDir,
 		plural(len(sweep.candidates), "candidate directory", "candidate directories"))
 	if sweep.visited+sweep.unlistable < sweep.offered {
 		detail += fmt.Sprintf(" against a %d-candidate budget", budget)
@@ -297,6 +307,20 @@ type tempHomeSweep struct {
 	// as fully assessed and report a complete run while nested homes went
 	// unlooked-at.
 	unlistable int
+	// entriesRead counts every directory entry the sweep LOOKED AT, across the
+	// temp root and every directory it expanded.
+	//
+	// This is the quantity that actually bounds the work, and it is not the
+	// candidate count. A directory holding a million plain files yields no
+	// candidates at all, so a candidate budget never stops reading it; and the
+	// temp root is read before a single candidate exists to be counted. Both
+	// shapes re-created the unbounded read this check is supposed to have
+	// stopped.
+	entriesRead int
+	// rootPartial records that the temp root's own listing was cut short, which
+	// makes offered a LOWER BOUND rather than a total — there may be more
+	// first-level directories we never saw the names of.
+	rootPartial bool
 }
 
 // truncated reports whether the sweep gave up before seeing the whole temp dir.
@@ -306,7 +330,9 @@ type tempHomeSweep struct {
 // something it could not read (a first-level directory that would not list).
 // Only entries expanded IN FULL increment visited, so the last two both surface
 // as visited < offered.
-func (s tempHomeSweep) truncated() bool { return s.unreadable || s.visited < s.offered }
+func (s tempHomeSweep) truncated() bool {
+	return s.unreadable || s.rootPartial || s.visited < s.offered
+}
 
 // tempHomeChildBatch is how many directory entries the sweep reads at a time
 // while expanding one first-level directory.
@@ -324,6 +350,24 @@ func (s tempHomeSweep) truncated() bool { return s.unreadable || s.visited < s.o
 // Sorting would mean reading all of them, which is the cost being avoided; a
 // truncated sweep is explicitly a partial view either way, and it says so.
 var tempHomeChildBatch = 1024
+
+// tempHomeReadBudget bounds how many directory entries ONE sweep will read, across
+// the temp root and every directory it expands.
+//
+// This exists because the candidate budget bounds the wrong quantity for two
+// real shapes. A first-level directory holding a million ordinary files and no
+// subdirectories produces no candidates, so a candidate limit never fires and
+// the sweep reads all million. And the temp ROOT is read before any candidate
+// exists, so a root with millions of entries is read in full no matter what the
+// candidate limit says. Both re-create the hang-or-OOM this check is meant to
+// have stopped, and both do it before any incompleteness notice can be emitted.
+//
+// 500,000 is against measurement: a full sweep on the box in #3466 reads 238,382
+// entries (80,031 at the root plus 158,351 across 21,785 first-level
+// directories), so this clears it roughly 2x over and only a genuinely
+// pathological temp dir trips it. As everywhere else here, tripping it is not
+// silent.
+var tempHomeReadBudget = 500000
 
 // scanDirBatch reads the next batch of entries from an open directory.
 //
@@ -347,7 +391,14 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expand
 		if limit > 0 && len(sweep.candidates) >= limit {
 			return false, nil
 		}
+		if sweep.entriesRead >= tempHomeReadBudget {
+			// Charged per ENTRY, not per candidate. Without this a directory of
+			// a million files — which contributes no candidates — is read to
+			// EOF however small the candidate budget is.
+			return false, nil
+		}
 		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
+		sweep.entriesRead += len(batch)
 		for _, entry := range batch {
 			if !entry.IsDir() {
 				continue
@@ -366,6 +417,63 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expand
 	}
 }
 
+// readTempRoot streams the temp dir's own listing, returning the names of its
+// subdirectories. It reports false only when the directory could not be opened
+// at all — a sweep that saw nothing rather than one that found nothing.
+//
+// Streamed for the same reason child expansion is: os.ReadDir reads and sorts
+// EVERY entry before returning, and the root is read before a single candidate
+// exists, so no candidate budget can stop it. A temp root with millions of
+// entries could therefore hang or OOM the process before it emitted the notice
+// saying it had given up.
+//
+// The names ARE sorted before being returned, which matters more than it looks.
+// Any root under the read budget — every non-pathological machine — is read in
+// full, so sorting restores exactly the deterministic, reproducible order
+// os.ReadDir used to give: the same box scanned twice truncates at the same
+// place. Only a root that exceeds the budget loses that, and there the PREFIX
+// that was read is filesystem-ordered anyway, so sorting could not have made it
+// reproducible.
+func readTempRoot(sweep *tempHomeSweep, tempDir string) ([]string, bool) {
+	f, err := os.Open(tempDir)
+	if err != nil {
+		// A temp dir that cannot be opened has told us NOTHING. That is not the
+		// same as telling us it holds no homes, and reporting the second is this
+		// package's signature failure (#1939, #2874).
+		sweep.unreadable = true
+		return nil, false
+	}
+	defer func() { _ = f.Close() }()
+
+	var names []string
+	for {
+		if sweep.entriesRead >= tempHomeReadBudget {
+			sweep.rootPartial = true
+			break
+		}
+		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
+		sweep.entriesRead += len(batch)
+		for _, entry := range batch {
+			if entry.IsDir() {
+				names = append(names, entry.Name())
+				sweep.offered++
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			// Some of the root was read. That is a partial listing, not an
+			// absent one: offered becomes a lower bound and the run is reported
+			// incomplete rather than unreadable.
+			sweep.rootPartial = true
+			break
+		}
+	}
+	sort.Strings(names)
+	return names, true
+}
+
 // candidateTempHomes lists directories one and two levels below tempDir —
 // Go tests produce /tmp/TestName123/001-style homes, manual runs
 // /tmp/tmp.XXXX ones.
@@ -374,28 +482,19 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expand
 // the counts it returns describe whole entries rather than a partially expanded
 // one. A limit <= 0 disables the bound.
 func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
-	level1, err := os.ReadDir(tempDir)
-	if err != nil {
-		// A temp dir that cannot be listed has told us NOTHING. That is not the
-		// same as telling us it holds no homes, and reporting the second is this
-		// package's signature failure (#1939, #2874). The sweep says it is
-		// unreadable and the caller reports the run as incomplete.
-		return tempHomeSweep{unreadable: true}
-	}
 	var sweep tempHomeSweep
-	for _, e := range level1 {
-		if e.IsDir() {
-			sweep.offered++
-		}
+	level1, ok := readTempRoot(&sweep, tempDir)
+	if !ok {
+		return sweep
 	}
-	for _, e := range level1 {
-		if !e.IsDir() {
-			continue
-		}
+	for _, name := range level1 {
 		if limit > 0 && len(sweep.candidates) >= limit {
 			break
 		}
-		dir := filepath.Join(tempDir, e.Name())
+		if sweep.entriesRead >= tempHomeReadBudget {
+			break
+		}
+		dir := filepath.Join(tempDir, name)
 		sweep.candidates = append(sweep.candidates, dir)
 		expanded, listErr := expandTempHomeChildren(&sweep, dir, limit)
 		if listErr != nil {

@@ -567,3 +567,111 @@ func TestTruncationNoticeReportsBothProgressQuantities(t *testing.T) {
 		"the candidate count is what actually shows the work done; without it the notice reads as having done nothing")
 	assert.Contains(t, detail, "a 10-candidate budget")
 }
+
+// TestSweepStopsReadingADirectoryFullOfFiles is the third-round P2, and it is
+// the case my earlier regression test could not see.
+//
+// The candidate budget bounds what is RECORDED. A first-level directory holding
+// a million ordinary files and no subdirectories contributes no candidates at
+// all, so that budget never fires and the directory is read to EOF however
+// small the limit is. My earlier test populated only subdirectories, so every
+// entry it read became a candidate and the two quantities moved together —
+// which is exactly why it could not distinguish "bounded work" from "bounded
+// recording".
+func TestSweepStopsReadingADirectoryFullOfFiles(t *testing.T) {
+	root := t.TempDir()
+	noisy := filepath.Join(root, "TestFoo")
+	require.NoError(t, os.MkdirAll(noisy, 0755))
+	const files = 400
+	for i := 0; i < files; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(noisy, fmt.Sprintf("f%04d", i)), nil, 0644))
+	}
+
+	withSmallReadBudget(t, 64)
+	read := countDirReads(t)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	assert.Empty(t, sweep.candidates[1:],
+		"precondition: a directory of plain files yields no candidates beyond itself, "+
+			"so the candidate budget can never stop this read")
+	assert.Less(t, *read, files,
+		"the read budget must stop a directory of files; the candidate budget cannot see it at all")
+	assert.True(t, sweep.truncated())
+}
+
+// TestSweepStopsReadingAHugeTempRoot is the third-round P1: the temp ROOT was
+// still read with os.ReadDir, which reads and sorts every entry before
+// returning — and the root is read before a single candidate exists, so no
+// candidate budget can bound it. A root with millions of entries could hang or
+// OOM the process before any incompleteness notice was emitted.
+func TestSweepStopsReadingAHugeTempRoot(t *testing.T) {
+	root := t.TempDir()
+	const entries = 400
+	fillTempDir(t, root, entries)
+
+	withSmallReadBudget(t, 64)
+	read := countDirReads(t)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	assert.Less(t, *read, entries, "the root listing itself must be bounded")
+	assert.True(t, sweep.rootPartial)
+	assert.True(t, sweep.truncated())
+	assert.Less(t, sweep.offered, entries,
+		"offered can only count directories we got as far as naming")
+}
+
+// TestTruncationNoticeDoesNotFabricateADenominator: when the root was only
+// partly listed, offered is a LOWER BOUND. Printing it as a total would invent
+// a denominator — the same error as inventing a finding, one level up.
+func TestTruncationNoticeDoesNotFabricateADenominator(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 400)
+	withSmallReadBudget(t, 64)
+
+	sweep := candidateTempHomes(root, 50000)
+	require.True(t, sweep.rootPartial)
+
+	detail := tempHomeSweepTruncationDetail(root, sweep, 50000)
+	assert.Contains(t, detail, "at least")
+	assert.Contains(t, detail, "too large to list in full")
+}
+
+// TestCompleteSweepStillReportsAnExactDenominator is the twin: an ordinary temp
+// root must not be described with the hedge.
+func TestCompleteSweepStillReportsAnExactDenominator(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 12)
+
+	sweep := candidateTempHomes(root, 4)
+	require.True(t, sweep.truncated())
+	require.False(t, sweep.rootPartial, "precondition: the root itself was listed in full")
+
+	detail := tempHomeSweepTruncationDetail(root, sweep, 4)
+	assert.NotContains(t, detail, "at least",
+		"the denominator is exact here; hedging it would understate what doctor knows")
+	assert.Contains(t, detail, "of the 12 directories")
+}
+
+func withSmallReadBudget(t *testing.T, n int) {
+	t.Helper()
+	prevBudget, prevBatch := tempHomeReadBudget, tempHomeChildBatch
+	tempHomeReadBudget, tempHomeChildBatch = n, 16
+	t.Cleanup(func() { tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch })
+}
+
+// countDirReads returns a counter of every directory entry the sweep actually
+// reads, through the seam that exists so this quantity is observable at all.
+func countDirReads(t *testing.T) *int {
+	t.Helper()
+	read := 0
+	prev := scanDirBatch
+	scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) {
+		entries, err := prev(f, n)
+		read += len(entries)
+		return entries, err
+	}
+	t.Cleanup(func() { scanDirBatch = prev })
+	return &read
+}
