@@ -133,11 +133,21 @@ func deleteProjectFailure(result DeleteProjectResult, err error) error {
 // With no such record, the identity is invented and can match nothing, which is
 // the clean idempotent no-op deleting an unknown project must be. That comment
 // used to be aspirational; the namespace split makes it true.
-func normalizeDeleteProjectPath(path string) (string, string, error) {
-	root := config.ExpandTilde(strings.TrimSpace(path))
+func normalizeDeleteProjectPath(path string) (root string, repoID string, matchedRecord bool, err error) {
+	root = config.ExpandTilde(strings.TrimSpace(path))
 	repo, err := config.RepoFromPath(root)
 	if err == nil {
-		return repo.Root, repo.ID, nil
+		return repo.Root, repo.ID, false, nil
+	}
+	if !config.PathIsDeterminatelyFree(root, err) {
+		// "git failed" is not "nothing is there" (#3530 review id 3919346198).
+		// A live checkout whose metadata git will not read — dubious
+		// ownership, an unreadable .git, a permission error — exits normally,
+		// and treating that as unresolved sends the delete into the registry
+		// fallback: it would then archive and suppress a STALE row's project
+		// instead of the checkout the user selected. Refuse; nothing has been
+		// mutated.
+		return "", "", false, fmt.Errorf("delete project: could not determine what is at %q — git could not read it, so which project this names is unknown; nothing was changed — repair the checkout's access or metadata and retry: %w", root, err)
 	}
 	if errors.Is(err, config.ErrRepoProbeUnanswered) {
 		// git never answered, so this is not evidence that the path is
@@ -145,7 +155,7 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 		// stale record's id would archive and suppress the old project while
 		// the user selected the checkout occupying its path (#3530 review id
 		// 3914971755). Refuse; nothing has been mutated (#3500's rule).
-		return "", "", fmt.Errorf("delete project: could not determine what is at %q — git never answered the probe, so which project this names is unknown; nothing was changed — retry once the path is readable: %w", root, err)
+		return "", "", false, fmt.Errorf("delete project: could not determine what is at %q — git never answered the probe, so which project this names is unknown; nothing was changed — retry once the path is readable: %w", root, err)
 	}
 	root = filepath.Clean(root)
 	projects, listErr := config.ListProjects()
@@ -154,7 +164,7 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 		// through would invent an id that matches nothing and report a
 		// successful no-op while the project's sessions and registration are
 		// untouched.
-		return "", "", fmt.Errorf("delete project: could not read the durable project registry to identify %q; nothing was changed: %w", root, listErr)
+		return "", "", false, fmt.Errorf("delete project: could not read the durable project registry to identify %q; nothing was changed: %w", root, listErr)
 	}
 	// Canonically, not lexically (#3530 review id 3918120745). The request may
 	// spell the path through a symlinked ancestor while the record stores what
@@ -178,11 +188,11 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 		// derived from the stored root for the same reason.
 		recorded := filepath.Clean(project.Root)
 		if project.RepoID != "" {
-			return recorded, project.RepoID, nil
+			return recorded, project.RepoID, true, nil
 		}
-		return recorded, config.DerivedRepoIDForUnresolvedRoot(recorded), nil
+		return recorded, config.DerivedRepoIDForUnresolvedRoot(recorded), true, nil
 	}
-	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
+	return root, config.DerivedRepoIDForUnresolvedRoot(root), false, nil
 }
 
 // refuseIfIdentityInTransition stops a delete whose target identity the daemon
@@ -387,7 +397,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		// match, which is the clean idempotent no-op deleting an unknown project
 		// must be (Sachin's locked semantics), not a wrong-project hit.
 		var normErr error
-		repoPath, repoID, normErr = normalizeDeleteProjectPath(repoPath)
+		repoPath, repoID, registeredRootMatched, normErr = normalizeDeleteProjectPath(repoPath)
 		if normErr != nil {
 			return deleteProjectTarget{}, normErr
 		}
@@ -404,9 +414,25 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		// registry row — a split-target partial delete hidden behind success.
 		var pathRepoID string
 		var normErr error
-		repoPath, pathRepoID, normErr = normalizeDeleteProjectPath(repoPath)
+		var pathMatchedRecord bool
+		repoPath, pathRepoID, pathMatchedRecord, normErr = normalizeDeleteProjectPath(repoPath)
 		if normErr != nil {
 			return deleteProjectTarget{repoID: repoID}, normErr
+		}
+		registeredRootMatched = pathMatchedRecord
+		// An UNREGISTERED project whose root no longer resolves is named by the
+		// picker with the historical hash of that path, and both selectors are
+		// sent (#3530 review id 3919346222). Normalization invents d-H for it,
+		// and rejecting H against d-H made such a row undeletable — a
+		// regression from master, where the two were the same value. With no
+		// record at that path there is nothing to protect: no project claims H,
+		// and H is exactly where the sessions and the opt-in the user can see
+		// are filed. Only this exact pairing is honoured, and only when the
+		// registry produced no row.
+		if !pathMatchedRecord && pathRepoID != repoID &&
+			pathRepoID == config.DerivedRepoIDForUnresolvedRoot(repoPath) &&
+			repoID == config.RepoIDFromRoot(filepath.Clean(repoPath)) {
+			pathRepoID = repoID
 		}
 		if pathRepoID != repoID {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)

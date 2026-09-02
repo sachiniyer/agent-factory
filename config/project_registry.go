@@ -291,6 +291,9 @@ func RegisterProject(path string) (Project, error) {
 						return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 					}
 					if !oldRootHasMarker {
+						if err := verifyBindingStillCurrent(binding, "rediscovering its moved checkout for"); err != nil {
+							return err
+						}
 						record.Root = binding.root
 						record.CheckoutRoot = binding.checkoutRoot
 						// A whole-checkout move changes the identity root, so
@@ -313,6 +316,9 @@ func RegisterProject(path string) (Project, error) {
 				// invented id — a rebind is the only thing that moves it, and
 				// it moves it to another REAL id.
 				if record.RepoID == "" && binding.repoID != "" {
+					if err := verifyBindingStillCurrent(binding, "recording the identity of"); err != nil {
+						return err
+					}
 					record.RepoID = binding.repoID
 					if err := writeProjectRecord(dir, record); err != nil {
 						return err
@@ -329,22 +335,8 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
-		if projectRegistryCommitRaceHookForTest != nil {
-			projectRegistryCommitRaceHookForTest()
-		}
-		// The binding was resolved BEFORE this lock was taken, and a path that
-		// was repointed in between would be committed with the previous
-		// repository's identity and marker (#3530 review id 3919195005) —
-		// permanently, since the one-way writer never replaces it. Re-resolve
-		// immediately before publishing and refuse a disagreement, the same
-		// rule resolveProjectBinding applies to its own two probes. This
-		// narrows the window to the write itself rather than the whole
-		// registry scan; check-then-act cannot close it, and a refusal costs
-		// only a retry.
-		if current, err := RepoFromPath(binding.root); err != nil {
-			return fmt.Errorf("re-check repository identity for %q before registering: %w", binding.root, err)
-		} else if current.ID != binding.repoID {
-			return fmt.Errorf("project path %q changed repositories while af was registering it: it resolved to %s and now resolves to %s — nothing was registered; retry once the path is stable", binding.root, binding.repoID, current.ID)
+		if err := verifyBindingStillCurrent(binding, "registering"); err != nil {
+			return err
 		}
 		record := projectRecord{
 			SchemaVersion: projectRegistrySchemaVersion,
@@ -435,6 +427,9 @@ func RebindProject(id, path string) (Project, error) {
 				return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 			}
 		}
+		if err := verifyBindingStillCurrent(binding, "rebinding"); err != nil {
+			return err
+		}
 		record.CheckoutID = checkoutID
 		record.Root = binding.root
 		record.CheckoutRoot = binding.checkoutRoot
@@ -455,6 +450,33 @@ func RebindProject(id, path string) (Project, error) {
 		return Project{}, fmt.Errorf("rebind project: %w", err)
 	}
 	return rebound, nil
+}
+
+// verifyBindingStillCurrent re-resolves a binding's root immediately before a
+// record is written and refuses if the repository there has changed (#3530
+// review ids 3919195005, 3919346204, 3919346210).
+//
+// resolveProjectBinding runs BEFORE the registry lock, so guarding its own two
+// probes against each other leaves the whole registry scan unguarded: a path
+// repointed in that window would be committed pairing the new workspace with
+// the previous repository's identity and marker — permanently, since the
+// one-way writer never replaces what it wrote. Every durable write that
+// publishes binding data goes through here, not just the new-record one.
+//
+// It narrows the window to the write itself; check-then-act cannot close it,
+// and a refusal costs only a retry.
+func verifyBindingStillCurrent(binding projectBinding, verb string) error {
+	if projectRegistryCommitRaceHookForTest != nil {
+		projectRegistryCommitRaceHookForTest()
+	}
+	current, err := RepoFromPath(binding.root)
+	if err != nil {
+		return fmt.Errorf("re-check repository identity for %q before %s: %w", binding.root, verb, err)
+	}
+	if current.ID != binding.repoID {
+		return fmt.Errorf("project path %q changed repositories while af was %s it: it resolved to %s and now resolves to %s — nothing was changed; retry once the path is stable", binding.root, verb, binding.repoID, current.ID)
+	}
+	return nil
 }
 
 func projectRegistryDir() (string, error) {

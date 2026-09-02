@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -154,5 +155,98 @@ func TestRecordedRootOptInWithheldWhenGitNeverAnswers(t *testing.T) {
 
 	if entry, key := LegacyRootAgentForRecordedRoot(cfg, recorded); entry != nil {
 		t.Fatalf("an unanswered probe is not evidence that the path is free, but the opt-in was returned under key %q", key)
+	}
+}
+
+// TestRecordedRootOptInWithheldOnAnOperationalFailure pins #3530 review id
+// 3919346216. Git exiting is not git ANSWERING that the path is free: dubious
+// ownership, an unreadable .git and permission errors all complete, and a live
+// repository at that path owns the key through any of them.
+func TestRecordedRootOptInWithheldOnAnOperationalFailure(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	recorded := filepath.Join(base, "recorded")
+	if err := os.MkdirAll(recorded, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.RootAgents = map[string]RootAgentConfig{recorded: {}}
+	if entry, _ := LegacyRootAgentForRecordedRoot(cfg, recorded); entry == nil {
+		t.Fatalf("fixture precondition: an answered negative must yield the entry")
+	}
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	binDir := t.TempDir()
+	shim := fmt.Sprintf("#!/bin/sh\necho 'fatal: detected dubious ownership in repository' >&2\nexit 128\nexec %q \"$@\"\n", realGit)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if entry, key := LegacyRootAgentForRecordedRoot(cfg, recorded); entry != nil {
+		t.Fatalf("an operational git failure is not evidence that the path is free, but the opt-in was returned under key %q", key)
+	}
+}
+
+// TestRebindRefusesARepointedPathAtCommitTime pins #3530 review id 3919346210:
+// RebindProject publishes binding data too, so it needs the same commit-time
+// identity re-check registration got.
+func TestRebindRefusesARepointedPathAtCommitTime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	initRepoWithCommit(t, source)
+	origin := filepath.Join(base, "origin")
+	initRepoWithCommit(t, origin)
+	repoA := filepath.Join(base, "A.git")
+	repoB := filepath.Join(base, "B.git")
+	for _, bare := range []string{repoA, repoB} {
+		if err := exec.Command("git", "clone", "--quiet", "--bare", source, bare).Run(); err != nil {
+			t.Fatalf("git clone --bare %s: %v", bare, err)
+		}
+	}
+	project, err := RegisterProject(origin)
+	if err != nil {
+		t.Fatalf("RegisterProject: %v", err)
+	}
+	live := filepath.Join(base, "live")
+	if err := exec.Command("git", "-C", repoA, "worktree", "add", "--detach", live).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	flipped := false
+	projectRegistryCommitRaceHookForTest = func() {
+		if flipped {
+			return
+		}
+		flipped = true
+		if err := exec.Command("git", "-C", repoA, "worktree", "remove", "--force", live).Run(); err != nil {
+			t.Fatalf("detach the worktree from A: %v", err)
+		}
+		if err := exec.Command("git", "-C", repoB, "worktree", "add", "--detach", live).Run(); err != nil {
+			t.Fatalf("attach the path to B: %v", err)
+		}
+	}
+	t.Cleanup(func() { projectRegistryCommitRaceHookForTest = nil })
+
+	rebound, err := RebindProject(project.ID, live)
+	if !flipped {
+		t.Fatalf("fixture never ran the flip; the seam is not on the path to the rebind's write")
+	}
+	if err != nil {
+		if !strings.Contains(err.Error(), "changed repositories") {
+			t.Fatalf("refusing is correct, but the message must say what happened: %v", err)
+		}
+		return
+	}
+	rootRepo, rootErr := RepoFromPath(rebound.Root)
+	if rootErr != nil {
+		t.Fatalf("RepoFromPath(%s): %v", rebound.Root, rootErr)
+	}
+	if rebound.RepoID != rootRepo.ID {
+		t.Fatalf("the rebind committed root %s (repository %s) with identity %s", rebound.Root, rootRepo.ID, rebound.RepoID)
 	}
 }

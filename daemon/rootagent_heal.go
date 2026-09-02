@@ -128,7 +128,7 @@ func (m *Manager) healRootAgentLayers() {
 		// whole-registry read, so it belongs on the clock.
 		if due && len(layers.reconcileOwed) > 0 {
 			rpAttempted = true
-			if retryReconcileOwed(&healed) {
+			if m.retryReconcileOwed(&healed) {
 				changed = true
 				rpChanged = true
 			}
@@ -761,7 +761,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 //
 // Runs on the poll goroutine, on every heal pass, and touches no filesystem
 // unless something is owed.
-func retryReconcileOwed(healed *rootAgentSnapshot) bool {
+func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 	if len(healed.reconcileOwed) == 0 {
 		return false
 	}
@@ -807,8 +807,20 @@ func retryReconcileOwed(healed *rootAgentSnapshot) bool {
 				continue
 			}
 			if proven != owed.repoID {
-				changed = true
-				continue
+				// The proof named a DIFFERENT identity than the boot resolved
+				// — the checkout is this project's, but its repository's
+				// identity root has moved (#3530 review id 3919346220).
+				// Dropping the entry here left the snapshot keyed under the
+				// stale one with nothing to re-derive it: a legacy opt-in
+				// resolving the new identity would start without the project's
+				// personal disable. Carry the work to the identity just
+				// proven, and move the snapshot with it.
+				if !moveResolvedIdentity(m, healed, owed.repoID, proven, project.Root) {
+					remaining[projectID] = owed
+					continue
+				}
+				log.InfoLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the %s its boot resolved; moving its layers and recording the identity it actually has", projectID, proven, owed.repoID)
+				owed.repoID = proven
 			}
 			owed.proven = true
 		}
@@ -836,6 +848,43 @@ func projectByID(projects []config.Project, id string) (config.Project, bool) {
 		}
 	}
 	return config.Project{}, false
+}
+
+// moveResolvedIdentity carries a RESOLVED project's snapshot state from the
+// identity its boot recorded to the one its checkout has just been proven to
+// have (#3530 review id 3919346220).
+//
+// It is promoteRecordedIdentity's counterpart for a project that is IN
+// projectRoots rather than unresolved: the layers, latches and tombstones move
+// the same way, and the published root moves with them. Refuses for the same
+// reasons — a delete holding either identity, or another live project holding
+// the one being left behind, which is #3611's case rather than this one's.
+func moveResolvedIdentity(m *Manager, healed *rootAgentSnapshot, from, to, root string) bool {
+	if from == to {
+		return true
+	}
+	// The published entry must be THIS project's — same root — or it belongs
+	// to another claimant at that identity and is not ours to move (#3611's
+	// case, as in promoteRecordedIdentity's own guard).
+	published, ok := healed.projectRoots[from]
+	if !ok || published != root {
+		return false
+	}
+	// Copy-on-write before touching anything: these maps are shared with the
+	// published snapshot until they are replaced.
+	healed.projectRoots = cloneStringMap(healed.projectRoots)
+	healed.personal = cloneLayerMap(healed.personal)
+	healed.personalUnreadable = cloneStringMap(healed.personalUnreadable)
+	// Removed BEFORE the promotion, because promoteRecordedIdentity refuses
+	// while another live project holds the identity being left behind — and
+	// this project's own entry would look exactly like one.
+	delete(healed.projectRoots, from)
+	if !promoteRecordedIdentity(m, healed, from, to) {
+		healed.projectRoots[from] = published
+		return false
+	}
+	healed.projectRoots[to] = published
+	return true
 }
 
 // promoteRecordedIdentity moves every piece of state the identity a project was

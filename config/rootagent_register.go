@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 
@@ -139,14 +141,32 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 	if matched == "" {
 		return nil, ""
 	}
-	// The probe must ANSWER before its outcome may be acted on (#3530 review id
-	// 3918379034, #3500's rule): a killed or unstartable git establishes
-	// nothing, and a repository occupying this path owns the key — reporting
-	// the stale project's opt-in then promises a root the ensure sweep will
-	// only ever create for the occupant. Uncertainty withholds the fallback.
-	if _, err := RepoFromPath(cleaned); err == nil || RepoProbeUnanswered(err) {
+	// A DETERMINATE verdict is required before the fallback may be returned
+	// (#3530 review ids 3918379034, 3919346216). "git failed" is not one: a
+	// killed probe establishes nothing, and neither does dubious ownership, an
+	// unreadable .git or a permission error — a repository occupying this path
+	// owns the key through any of them, and reporting the stale project's
+	// opt-in would promise a root the ensure sweep creates only for the
+	// occupant. Two outcomes qualify: git answered that the path is not inside
+	// a repository, or the path is provably gone.
+	if _, err := RepoFromPath(cleaned); err == nil || !PathIsDeterminatelyFree(cleaned, err) {
 		return nil, ""
 	}
 	entry := global.RootAgents[matched]
 	return &entry, matched
+}
+
+// PathIsDeterminatelyFree reports that no repository owns path, on evidence
+// rather than on a failure: git answered that it is not inside a repository, or
+// the path itself is provably gone. Every other failure leaves the question
+// open — see LegacyRootAgentForRecordedRoot and normalizeDeleteProjectPath,
+// which both refuse to act on one.
+func PathIsDeterminatelyFree(path string, probeErr error) bool {
+	if errors.Is(probeErr, ErrNotGitRepository) {
+		return true
+	}
+	if _, err := os.Stat(path); err != nil && PathDeterminatelyAbsent(err) {
+		return true
+	}
+	return false
 }
