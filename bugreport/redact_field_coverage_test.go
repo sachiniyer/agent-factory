@@ -2,6 +2,8 @@ package bugreport
 
 import (
 	"bytes"
+	"encoding"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // guardSentinel is planted in every string-bearing field of InstanceData before
@@ -247,6 +250,35 @@ func assertNoStaleEntries(t *testing.T, name string, classified map[string]strin
 // records are failures, not diagnostics: a subtree this walk silently skipped is
 // a subtree the guard cannot speak for, and a guard that stays green over a
 // field it never visited is worse than no guard (#3592 review).
+// jsonMarshalerType and textMarshalerType detect a type that renders itself.
+// Such a type can emit text this reflective walk never sees — including text
+// held in UNEXPORTED fields, which the walk deliberately skips — so its output
+// cannot be reasoned about from Go fields alone (#3592 review).
+var (
+	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+)
+
+// reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
+// read and shown to emit only the exported fields this walk already covers.
+// Anything NOT listed here fails the guard rather than being trusted, because
+// "it probably just marshals its fields" is the assumption that has to be
+// checked once per type, not assumed forever.
+var reviewedMarshalerTypes = map[reflect.Type]string{
+	reflect.TypeOf(time.Time{}):               "timestamp; carries no user text and is skipped by the walk",
+	reflect.TypeOf(git.ArchiveRetainedTree{}): "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
+	reflect.TypeOf(git.ArchiveSkippedEntry{}): "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
+}
+
+// jsonSkipped reports whether encoding/json will omit this field entirely. A
+// field tagged `json:"-"` can never reach a bundle, so planting a sentinel in it
+// would fail the guard and push the author toward an allowlist entry for a field
+// that is not even serialized — a misleading entry in a map whose whole value is
+// that its entries are true (#3592 review).
+func jsonSkipped(f reflect.StructField) bool {
+	return f.Tag.Get("json") == "-"
+}
+
 type sentinelFiller struct {
 	tooDeep     []string
 	unsupported []string
@@ -274,6 +306,13 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		f.tooDeep = append(f.tooDeep, path)
 		return
 	}
+	if ty := v.Type(); ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
+		ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType) {
+		if _, reviewed := reviewedMarshalerTypes[ty]; !reviewed {
+			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
+			return
+		}
+	}
 	switch v.Kind() {
 	case reflect.String:
 		v.SetString(guardSentinel)
@@ -288,7 +327,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
-			if !field.IsExported() {
+			if !field.IsExported() || jsonSkipped(field) {
 				continue
 			}
 			f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -307,12 +346,31 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 			f.fill(v.Index(i), path+"[]", depth+1)
 		}
 	case reflect.Map:
-		key := reflect.New(v.Type().Key()).Elem()
-		f.fill(key, path+"[key]", depth+1)
-		val := reflect.New(v.Type().Elem()).Elem()
-		f.fill(val, path+"[]", depth+1)
+		// guardSliceSeed entries under DISTINCT keys, for the slice reason: a
+		// redaction that processes one arbitrary entry and returns would scrub
+		// every planted sentinel from a single-entry fixture and pass.
 		m := reflect.MakeMap(v.Type())
-		m.SetMapIndex(key, val)
+		for i := 0; i < guardSliceSeed; i++ {
+			key := reflect.New(v.Type().Key()).Elem()
+			f.fill(key, path+"[key]", depth+1)
+			switch key.Kind() {
+			case reflect.String:
+				key.SetString(fmt.Sprintf("%s-%d", guardSentinel, i))
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				key.SetInt(int64(i))
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				key.SetUint(uint64(i))
+			default:
+				// Cannot mint distinct keys of this kind, so the second entry
+				// would overwrite the first and quietly halve the coverage.
+				if i == 0 {
+					f.unsupported = append(f.unsupported, path+" (map key kind "+key.Kind().String()+" cannot be seeded distinctly)")
+				}
+			}
+			val := reflect.New(v.Type().Elem()).Elem()
+			f.fill(val, path+"[]", depth+1)
+			m.SetMapIndex(key, val)
+		}
 		v.Set(m)
 	case reflect.Interface:
 		// encoding/json happily serializes whatever concrete string, map or
@@ -350,7 +408,7 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
-			if !field.IsExported() {
+			if !field.IsExported() || jsonSkipped(field) {
 				continue
 			}
 			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
