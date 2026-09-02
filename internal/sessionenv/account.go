@@ -249,13 +249,32 @@ var accountLateEnvironmentNames = map[string]map[string]struct{}{
 // keep its own copy, so `af accounts add gemini work` could succeed while
 // `--account work` answered "supported: claude, codex" — a statement the roster
 // had just made false. One list, read by every surface, cannot say two things.
-var accountLaunchProvenAgents = nameSet("claude", "codex")
+//
+// gemini joined in #3639, and the check is what earned it rather than the roster
+// entry. af's local launch hands a gemini pane the RESOLVED COMMAND UNCHANGED:
+// planLaunchConversation returns early for anything that is not claude, and
+// injectSystemPrompt's gemini arm writes the af skill and returns `resolved`
+// untouched. So the command reaching ValidateAccountCommand is a bare `gemini`
+// with no af-authored words — codex's shape, not claude's, and provable without
+// any declaration. Verified in a throwaway AF home rather than argued: the pane's
+// real gemini process carried GEMINI_CLI_HOME pointing at the account directory,
+// every identity name present and empty, and none of the ambient sentinels that
+// an unscoped control session beside it still had.
+var accountLaunchProvenAgents = nameSet("claude", "codex", "gemini")
 
-// accountLaunchProofIssueURL is the follow-up that removes the registration-only
-// state for gemini. It is a URL rather than a bare issue number because these
-// messages reach operators outside this repository, for whom "#3639" resolves to
-// nothing.
-const accountLaunchProofIssueURL = "https://github.com/sachiniyer/agent-factory/issues/3639"
+// accountLaunchProofFollowUps records, per registration-only agent, the issue that
+// removes that state.
+//
+// It is EMPTY, and that is the invariant rather than an oversight: it is empty
+// exactly when accountConfigVars and accountLaunchProvenAgents agree, which is the
+// case today. An agent added to the roster without a launch proof puts an entry
+// here, and TestAccountRegistrationOnly_NamesItsFollowUp fails until it does — so
+// the registration-only state cannot be entered silently, which is the whole
+// lesson of #3609.
+//
+// URLs rather than bare issue numbers: these strings reach operators outside this
+// repository, for whom "#3639" resolves to nothing.
+var accountLaunchProofFollowUps = map[string]string{}
 
 // AccountLaunchProven reports whether af has established that the account
 // boundary can verify how this agent launches. An agent that supports accounts
@@ -289,12 +308,19 @@ func AccountRegistrationOnlyReason(agent string) (string, bool) {
 	if !AccountRegistrationOnly(agent) {
 		return "", false
 	}
-	return fmt.Sprintf(
+	reason := fmt.Sprintf(
 		"a session cannot be scoped to a %s account yet — af has not verified that the account boundary can "+
 			"prove how it launches %s, so --account refuses rather than risk starting the session on the "+
-			"ambient identity while reporting the account you asked for. Registering and logging in work "+
-			"today, and the launch proof is tracked at %s",
-		agent, agent, accountLaunchProofIssueURL), true
+			"ambient identity while reporting the account you asked for. Registering and logging in work today",
+		agent, agent)
+	// The follow-up is appended rather than formatted in, so the sentence stays a
+	// true sentence for an agent whose issue has not been filed. The test is what
+	// makes that case not happen; this is what keeps it from printing "tracked at
+	// %!s(MISSING)" if it ever does.
+	if followUp := accountLaunchProofFollowUps[agent]; followUp != "" {
+		reason += ", and the launch proof is tracked at " + followUp
+	}
+	return reason, true
 }
 
 // SupportsAccounts reports whether an agent can be account-scoped, and the
