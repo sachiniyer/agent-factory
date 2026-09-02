@@ -13,18 +13,21 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// The local-only `af config` verbs must REFUSE a remote-daemon target rather
-// than answer about this machine (#3661). --daemon-url and AF_DAEMON_URL are
-// persistent root flags, so cobra advertises them under every subcommand,
-// including the four here that never open a client. Before this, each of them
-// accepted the target and silently dropped it: `af config validate --daemon-url
-// http://box:8443` printed a confident verdict about the caller's own laptop,
-// and `af config migrate` let the caller believe it had rewritten the remote
-// host's file.
+// Every `af config` verb must REFUSE a remote-daemon target rather than answer
+// about this machine (#3661, #3679). --daemon-url and AF_DAEMON_URL are
+// persistent root flags, so cobra advertises them under every subcommand, and
+// none of these six ever opens a client. Before this, each accepted the target
+// and silently dropped it: `af config validate --daemon-url http://box:8443`
+// printed a confident verdict about the caller's own laptop, `af config migrate`
+// let them believe it had rewritten the remote host's file, and `set`/`unset`
+// printed a success line naming a local path for a change they believed they had
+// made remotely.
 //
-// Each case is driven through the real root command so the actual persistent
-// flag is parsed, and each is asserted twice — once for the flag and once for
-// the env var, which is the same misreading arriving by a different route.
+// Every case is driven through the real root command so the actual persistent
+// flag is parsed, and every verb is asserted on both routes — the flag and the
+// env var, the same misreading arriving by a different road. The two write verbs
+// add both scopes on top of that; see their block for which assertion carries
+// the weight in each.
 
 // runConfigCLI executes `af config <args…>` through the real command tree and
 // returns what the user would see. It restores every piece of process-global
@@ -132,7 +135,7 @@ func requireLocalOnlyRefusal(t *testing.T, err error, commandPath string) {
 func TestConfigGetRefusesARemoteDaemonTarget(t *testing.T) {
 	for _, route := range remoteTargetRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			tempAFHome(t)
+			newConfigHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
 			out, _, err := runConfigCLI(t, withRoute(route.prefix, "get", "default_program")...)
 			requireLocalOnlyRefusal(t, err, "af config get")
@@ -146,7 +149,7 @@ func TestConfigGetRefusesARemoteDaemonTarget(t *testing.T) {
 func TestConfigListRefusesARemoteDaemonTarget(t *testing.T) {
 	for _, route := range remoteTargetRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			tempAFHome(t)
+			newConfigHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
 			out, _, err := runConfigCLI(t, withRoute(route.prefix, "list")...)
 			requireLocalOnlyRefusal(t, err, "af config list")
@@ -160,7 +163,7 @@ func TestConfigListRefusesARemoteDaemonTarget(t *testing.T) {
 func TestConfigValidateRefusesARemoteDaemonTarget(t *testing.T) {
 	for _, route := range remoteTargetRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			tempAFHome(t)
+			newConfigHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
 			out, _, err := runConfigCLI(t, withRoute(route.prefix, "validate")...)
 			requireLocalOnlyRefusal(t, err, "af config validate")
@@ -323,7 +326,7 @@ func TestConfigUnsetRefusesARemoteDaemonTarget(t *testing.T) {
 // failure in this group — a --json caller must never have to parse a bare Go
 // error to learn its target was rejected.
 func TestConfigLocalOnlyRefusalHonorsJSON(t *testing.T) {
-	tempAFHome(t)
+	newConfigHome(t)
 	t.Setenv("AF_DAEMON_URL", "")
 
 	_, errOut, err := runConfigCLI(t, "--daemon-url", "http://daemon.example:8443", "validate", "--json")
