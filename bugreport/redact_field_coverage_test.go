@@ -279,6 +279,28 @@ func jsonSkipped(f reflect.StructField) bool {
 	return f.Tag.Get("json") == "-"
 }
 
+// mustVisit reports whether a struct field can carry text into a bundle and so
+// must be walked.
+//
+// The anonymous clause is the subtle half. encoding/json PROMOTES the exported
+// members of an anonymously embedded struct, even when the embedded TYPE is
+// unexported, so `struct{ inner }` with `inner{ Secret string }` serializes as
+// {"secret": …}. A plain IsExported check skips that whole subtree while json
+// happily publishes it (#3592 review).
+//
+// reflect agrees this is reachable: the embedded field itself reports
+// CanSet=false, but its promoted exported members report CanSet=true — measured,
+// not assumed — which is why fill can descend and plant in them.
+func mustVisit(f reflect.StructField) bool {
+	if jsonSkipped(f) {
+		return false
+	}
+	if f.IsExported() {
+		return true
+	}
+	return f.Anonymous && f.Type.Kind() == reflect.Struct
+}
+
 type sentinelFiller struct {
 	tooDeep     []string
 	unsupported []string
@@ -299,9 +321,6 @@ const guardSliceSeed = 2
 // reason — opaque, no user text, and recursing into its unexported internals
 // would panic.
 func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
-	if !v.CanSet() {
-		return
-	}
 	if depth > guardMaxDepth {
 		f.tooDeep = append(f.tooDeep, path)
 		return
@@ -312,6 +331,14 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
 			return
 		}
+	}
+	// Structs are descended into even when the value itself is not settable:
+	// that is exactly an anonymous embedded unexported struct, whose promoted
+	// members ARE settable. Every other kind needs to be written to, so an
+	// unsettable one is a subtree this guard cannot speak for.
+	if !v.CanSet() && v.Kind() != reflect.Struct {
+		f.unsupported = append(f.unsupported, path+" ("+v.Kind().String()+" is not settable)")
+		return
 	}
 	switch v.Kind() {
 	case reflect.String:
@@ -327,7 +354,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
-			if !field.IsExported() || jsonSkipped(field) {
+			if !mustVisit(field) {
 				continue
 			}
 			f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -408,7 +435,7 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 		}
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
-			if !field.IsExported() || jsonSkipped(field) {
+			if !mustVisit(field) {
 				continue
 			}
 			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
