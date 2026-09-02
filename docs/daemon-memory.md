@@ -27,11 +27,12 @@ with the raw tables, is
 
 ## The short answer
 
-- The daemon process holds **30–90 MB** resident, and its high-water mark on
-  that box was **92,600 kB** — identical in all 60 samples over a 20-minute
-  window.
-- Go heap in-use: **2.5 MB at 0 sessions · 4.6 MB at 20 live sessions**. 24 OS
-  threads, constant.
+- The daemon process holds **30–90 MB** resident across the two daemons
+  measured (a live one and a sandbox one — see the tables), and the live
+  daemon's high-water mark was **92,600 kB**, identical in all 60 samples over a
+  20-minute window.
+- Go heap in-use: **2.5 MB at 0 sessions · 4.6 MB at 20 live sessions** (sandbox
+  daemon — the live one cannot be profiled). 24 OS threads, constant.
 - Sessions are close to free *to the daemon*: about **0.1 MB of heap and 0.3
   goroutines each**. There is no per-session goroutine.
 - **Size for ~128 MB.** That is comfortable for the daemon itself at the load
@@ -44,21 +45,28 @@ your behalf — see [what drives the cgroup number](#what-actually-drives-the-cg
 
 ## What the daemon itself uses
 
-Live daemon, 20 live sessions · 720 session records · 20 tasks, sampled 60 times
-over 20 minutes:
+The live daemon carried 20 live sessions · 720 session records · 20 tasks and
+was sampled 60 times over 20 minutes. The sandbox daemon ran the same binary
+under a throwaway home, with its own sessions, and is the only one that could be
+profiled:
 
-| measure | value | note |
+| measure | value | source |
 |---|---|---|
-| `VmRSS` | 30–90 MB | oscillates with the GC cycle |
-| `VmHWM` | 92,600 kB | identical in every one of the 60 samples |
-| Go heap in-use | 2.5 MB (0 sessions) · 4.6 MB (20 sessions) | |
-| OS threads | 24 | constant across the window |
-| goroutines | 14 (0 sessions) · 20 (20 sessions) | no per-session goroutine |
+| `VmRSS` | 45–60 MB | live daemon; oscillates with the GC cycle |
+| `VmHWM` | 92,600 kB | live daemon, identical in every one of the 60 samples |
+| OS threads | 24 | live daemon, constant across the window |
+| Go heap in-use | 2.5 MB (0 sessions) · 4.6 MB (20 sessions) | sandbox daemon |
+| goroutines | 14 (0 sessions) · 20 (20 sessions) | sandbox daemon |
+
+The heap and goroutine rows come from the **sandbox** daemon, because the live
+daemon exposes no profiling endpoint at all — see
+[profiling](#profiling-the-daemon). The `/proc` rows are the live one. Keep the
+two apart when quoting them.
 
 The marginal cost of one live session to the daemon is therefore about **0.1 MB
-of heap and 0.3 of a goroutine**. That is a slope between the two measured
-endpoints (0 and 20 sessions), not a fitted curve — the shape between them was
-not sampled, and past 20 live sessions is untested.
+of heap and 0.3 of a goroutine**. That is a slope between the sandbox daemon's
+two measured endpoints (0 and 20 sessions), not a fitted curve — the shape
+between them was not sampled, and past 20 live sessions is untested.
 
 Record count did not move anything over the range measured: the same daemon held
 720 session records and 20 tasks throughout.
@@ -80,15 +88,20 @@ cumulative allocation, tracked in
 
 ## How memory scales with sessions
 
-| live sessions | daemon RSS | how to read it |
+| live sessions | daemon RSS | which daemon |
 |---|---|---|
-| 0 | ~55 MB | idle daemon; includes the mapped binary text |
-| 20 | ~30–60 MB | live daemon, across a 20-minute sampling window |
+| 0 | ~55 MB | **sandbox** daemon, throwaway `AGENT_FACTORY_HOME`, idle |
+| 20 | ~30 MB | **sandbox** daemon, same binary, 20 sessions |
+| 20 | 45–60 MB | **live** daemon, sampled 60× over 20 minutes |
 
-RSS is not monotonic in session count, and cannot be. It rises and falls with
-the Go GC cycle, and a large share of it is the mapped binary rather than
-anything the session load touched — which is why the idle figure can read
-*higher* than a sample of the busy one.
+Read the rows as two separate daemons, not one curve. The live daemon was never
+observed at 0 sessions, so there is no measured figure for an idle live daemon —
+do not read the first row as one.
+
+RSS is also not monotonic in session count, and cannot be. It rises and falls
+with the Go GC cycle, and a large share of it is the mapped binary rather than
+anything the session load touched — which is why the same sandbox binary reads
+*higher* idle than it does under twenty sessions.
 
 The stable figures are the two that did not move: `VmHWM` (92,600 kB, unchanged
 across the whole window) and Go heap in-use (2.5 → 4.6 MB). Both say the same
@@ -267,8 +280,11 @@ All of it is one investigation on one machine, recorded in
 [#3625](https://github.com/sachiniyer/agent-factory/issues/3625): a 16-core /
 125 GB Linux box on 2026-09-02, fleet of 20 live sessions, 720 session records,
 20 tasks, daemon under a systemd user unit, sampled 60 times across a 20-minute
-window, plus 13 historical unit lifetimes read out of the journal and a sandbox
-daemon for the heap profiles.
+window, plus 13 historical unit lifetimes read out of the journal and a **second,
+sandbox daemon** — same binary, throwaway `AGENT_FACTORY_HOME` and
+`TMUX_TMPDIR` — which supplied every heap, goroutine and 0-session figure,
+because the live daemon exposes no profiling endpoint and was never observed
+idle. Rows say which daemon they came from; the two are not one series.
 
 Nothing here is extrapolated to other hardware, other session counts, or other
 operating systems, and nothing was measured above 20 live sessions. Where a
