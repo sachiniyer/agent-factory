@@ -407,6 +407,20 @@ func PlaceOverlay(
 			left := layout.TruncateToCells(bgLine, placeX)
 			pos = lineWidth(left)
 			b.WriteString(left)
+			// CLOSE what the prefix left open, before anything else is written.
+			//
+			// A cut lands wherever the width budget runs out, which can be after an
+			// SGR that the discarded suffix would have closed: "AAAA\x1b[31mBBBB"
+			// truncated to 4 keeps the escape and drops the text it applied to. The
+			// foreground is written next, so without this it renders in the
+			// BACKGROUND's colour — and after the fade pass that is the faded gray,
+			// on a modal row whose own styling has not started yet.
+			//
+			// truncate.String appended a reset itself, so this was free until #723
+			// moved the cut to TruncateToCells; it is not a new hazard, only a newly
+			// unhandled one. Before the pad rather than after it, which is where the
+			// old reset sat: the blanks stay unstyled.
+			b.WriteString(closeSequences(left))
 			if pos < placeX {
 				b.WriteString(ws.render(placeX - pos))
 				pos = placeX

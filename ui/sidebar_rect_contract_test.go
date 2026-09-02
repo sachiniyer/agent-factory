@@ -73,11 +73,41 @@ func TestSidebarRowCannotOverflowAndKeepsItsStatusDot(t *testing.T) {
 		t.Errorf("the Ready session lost its %q status dot to the width accounting: %q",
 			readyDot, xansi.Strip(titleRow))
 	}
-	// And the glyph is the row's right-hand column, not something that merely
-	// survived somewhere in the middle.
-	stripped := strings.TrimRight(xansi.Strip(titleRow), " ")
-	if !strings.HasSuffix(stripped, readyDot) {
-		t.Errorf("the status dot must be the row's trailing glyph, got %q", stripped)
+	// And the glyph is AT the rectangle's right-hand edge, measured — not merely
+	// the last non-space byte, which a dot sitting anywhere in a sea of trailing
+	// blanks would also satisfy. Codex raised exactly that on #3657: the earlier
+	// assertion trimmed the padding away first, so it could not have caught the
+	// glyph drifting inward.
+	//
+	// "The edge" is in the CONTRACT measure, which is the one the rectangle is
+	// enforced in. On screen this row is deliberately under-filled — its true
+	// width is short of the rectangle by however much the measures disagree — so
+	// the dot is drawn that far left of the terminal column a full row would put
+	// it in. That is #3614's accepted cost, and it is the reason the assertion is
+	// written in the measure that can actually be checked.
+	requireDotAtTheRectangleEdge(t, titleRow, width)
+}
+
+// requireDotAtTheRectangleEdge asserts the ● occupies the row's final glyph slot:
+// the cells after it are exactly the status cell's own trailing pad plus the
+// row's right padding, and nothing else.
+func requireDotAtTheRectangleEdge(t *testing.T, row string, width int) {
+	t.Helper()
+	plain := xansi.Strip(row)
+	at := strings.Index(plain, readyDot)
+	if at < 0 {
+		t.Fatalf("no status dot on the row: %q", plain)
+	}
+	// Measured from the RIGHT, so the assertion does not depend on how much the
+	// elastic title gave up.
+	trailing := layout.CellsUpperBound(plain) - layout.CellsUpperBound(plain[:at+len(readyDot)])
+	if trailing != 2 {
+		t.Errorf("the ● sits %d cells from the rectangle's right edge, want 2 (the status "+
+			"cell's pad space and the row's right padding): %q", trailing, plain)
+	}
+	if got := layout.CellsUpperBound(plain); got != width {
+		t.Errorf("the row measures %d in the contract measure, want exactly %d: %q",
+			got, width, plain)
 	}
 }
 

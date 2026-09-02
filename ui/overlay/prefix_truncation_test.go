@@ -114,3 +114,45 @@ func assertOverlayColumn(t *testing.T, out, fg string, placeX int) {
 			"zones are registered at %d (#3585): %q", got, placeX, placeX, xansi.Strip(line))
 	}
 }
+
+// Codex P2 on #3657. The prefix is cut wherever the width budget runs out, which
+// can be after an SGR whose text the discarded suffix carried: "AAAA\x1b[31mBBBB"
+// truncated to 4 cells keeps the escape and drops the BBBB it applied to. The
+// foreground is written straight after, so an unclosed prefix hands the modal the
+// BACKGROUND's colour — the faded gray, after the fade pass — on a row whose own
+// styling has not started yet.
+//
+// truncate.String appended a reset itself, so this was free until #723 moved the
+// cut to TruncateToCells. Not a new hazard, a newly unhandled one — and the plain-
+// ASCII test above could not see it.
+func TestPlaceOverlayPrefixDoesNotLeakBackgroundStyleIntoTheOverlay(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		bg   string
+		x    int
+	}{
+		{"sgr opened just past the cut", "AAAA\x1b[31mBBBB", 4},
+		{"cut inside a styled run", "\x1b[32mAAAA\x1b[31mBBBB", 2},
+		{"already closed", "AAAA\x1b[31mBBBB\x1b[0m", 4},
+		{"hyperlink past the cut", "AAAA\x1b]8;;https://example.com\x1b\\BBBB\x1b]8;;\x1b\\", 4},
+	} {
+		out := PlaceOverlay(c.x, 0, "XX", c.bg, false)
+		i := strings.Index(out, "XX")
+		if i < 0 {
+			t.Fatalf("%s: the overlay is not in the composed row: %q", c.name, out)
+		}
+		prefix := out[:i]
+		// Whatever the prefix opened, it must be closed before the overlay starts.
+		if sgr := sgrRegex.FindAllString(prefix, -1); len(sgr) > 0 {
+			if last := sgr[len(sgr)-1]; last != "\x1b[0m" && last != "\x1b[m" {
+				t.Errorf("%s: the overlay inherits the background style %q from the prefix: %q",
+					c.name, last, out)
+			}
+		}
+		if n := strings.Count(prefix, "\x1b]8;;"); n%2 != 0 {
+			t.Errorf("%s: the prefix left a hyperlink open across the overlay: %q", c.name, out)
+		}
+		// And the fix must not have moved the overlay.
+		assertOverlayColumn(t, out, "XX", c.x)
+	}
+}

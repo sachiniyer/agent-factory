@@ -161,3 +161,65 @@ func TestJoinsMatchLipglossOverRandomPlainBlocks(t *testing.T) {
 		}
 	}
 }
+
+// Codex P1 on #3657, and the answer is "yes, and that is the recorded trade" —
+// but the test that was supposed to cover it only checked a loose bound, so it
+// could not have told the difference. This pins the offset exactly.
+//
+// What JoinHorizontal guarantees is that column N begins at the sum of the
+// contract widths of the columns before it, ON EVERY ROW. That is the space the
+// Grid solves in, the space panes are clamped in, and the space mouse zones are
+// registered in, so it is the offset that has to be exact.
+//
+// What it does NOT guarantee is the DRAWN offset on a row carrying content whose
+// true width nothing can report. Such a row is deliberately under-filled, so the
+// next column is drawn LEFT of its allocation by the disagreement — up to 4 cells
+// for the family below. That is #3614's accepted cost, stated here rather than
+// implied: an overflow would wrap the row and make every height budget above it a
+// lie (#3430), and this is the other side of that choice. It is not new either —
+// the same row was drawn 2 cells RIGHT of its allocation before, plus a wrap.
+func TestJoinHorizontalPutsEachColumnAtItsAllocatedOffset(t *testing.T) {
+	const railW, paneW = 22, 10
+	railLines := []string{
+		strings.Repeat("a", railW),
+		" " + joinedFamily + strings.Repeat("b", 13), // contract-exact, x/ansi short
+		strings.Repeat("c", railW),
+	}
+	paneLines := []string{
+		strings.Repeat("p", paneW),
+		strings.Repeat("q", paneW),
+		strings.Repeat("r", paneW),
+	}
+	for i, l := range railLines {
+		if got := contractCells(l); got != railW {
+			t.Fatalf("precondition: rail line %d is %d in the contract measure, want %d", i, got, railW)
+		}
+	}
+
+	out := JoinHorizontal(strings.Join(railLines, "\n"), strings.Join(paneLines, "\n"))
+	rows := strings.Split(out, "\n")
+	if len(rows) != len(railLines) {
+		t.Fatalf("want %d rows, got %d", len(railLines), len(rows))
+	}
+	for i, row := range rows {
+		// The exact bytes: rail line, padded to the rail's contract width, then the
+		// pane line. No slack anywhere for an offset to hide in.
+		if want := padToContract(railLines[i], railW) + padToContract(paneLines[i], paneW); row != want {
+			t.Errorf("row %d: got %q, want %q", i, row, want)
+		}
+		// And said as an offset, which is the property the seam depends on.
+		if got := contractCells(row) - contractCells(paneLines[i]); got != railW {
+			t.Errorf("row %d: the second column begins at contract column %d, want %d",
+				i, got, railW)
+		}
+	}
+
+	// The under-fill is real and bounded, and the row that carries it is named.
+	// If this ever reports 0 the deliberate under-fill has stopped happening and
+	// the trade above needs re-reading.
+	drawnShortfall := contractCells(railLines[1]) - Cells(railLines[1])
+	if drawnShortfall != 6 {
+		t.Errorf("the clustered rail row is short by %d cells in x/ansi's measure, was 6 when "+
+			"measured; the second column is drawn that much left of its allocation", drawnShortfall)
+	}
+}
