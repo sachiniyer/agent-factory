@@ -2110,6 +2110,557 @@ test("a body finding blocks the manual-merge decision, not just the auto one", a
   assert.doesNotMatch(decision.output.summary, /reply RESOLVED[^\n]*to clear this/);
 });
 
+test("an issue-comment finding blocks on the head its own links name", async () => {
+  // #3670, reproduced from #3656: the finding shape Codex uses for lines outside
+  // the diff hunks is an ISSUE COMMENT. It carries no `commit_id` — issue
+  // comments have no such field — and no `Reviewed commit:` line, so both
+  // binding branches missed it, `latestBoundArtifact` fell through to an older
+  // clean artifact, and the PR auto-merged with eight live P2s the gate never
+  // read. Every finding in it links `blob/<head>/…`: the head IS stated.
+  const github = fakeGateGithub({
+    issueComments: [
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: "2026-07-09T01:20:00Z" }),
+      // The real ordering: Codex rewrites its table when it posts a finding, so
+      // the summary row is one second NEWER than the finding it accompanies, and
+      // the summary comment is the newest artifact on the PR. That row is what
+      // supplied #3656's passing verdict.
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "eight live P2s for this head must not auto-merge");
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // The verdict still resolved from the row, so the block is attributable to the
+  // finding rather than to the gate having lost the review it already had.
+  assert.ok(
+    result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`),
+    `got: ${result.notes.join("; ")}`,
+  );
+});
+
+test("a finding artifact that names no commit blocks anyway", async () => {
+  // The same body with every SHA stripped. Binding by body SHAs cannot save this
+  // one, which is the point: a finding-bearing artifact the gate cannot place
+  // against any head is unclassified, and unknown is not clean. Without this
+  // half, the next artifact shape nobody anticipated reopens the hole.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  assert.doesNotMatch(stripped.body, /[0-9a-f]{40}/i, "the fixture must name no commit at all");
+  assert.match(stripped.body, /P2/, "…while still carrying findings");
+
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "an unclassifiable finding is not a clean one");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // …and it says WHICH artifact, because the remedy is to go and answer that one
+  // by its link. A count alone sends the reader hunting through the comment list.
+  assert.ok(
+    result.reasons.some((reason) => reason.includes(stripped.html_url)),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // …and it is the second half doing the work, not the first: nothing bound it.
+  assert.ok(
+    !result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a clean head-bound summary row still passes", async () => {
+  // The guard on both halves: neither may turn the ordinary passing shape — an
+  // automatic review that completed cleanly and recorded itself in the table —
+  // into a block. The summary comment names a commit, so it is not
+  // unclassifiable; it carries no finding, so there is nothing to bind.
+  const result = await evaluateGate({
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+  assert.ok(result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`));
+});
+
+test("only an assertion makes a finding stale, never a link", async () => {
+  // An artifact that STATES an older commit is stale evidence, which is the
+  // pre-existing rule for reviews and is untouched: `Reviewed commit:` and
+  // commit_id are assertions about what was reviewed.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const stated = await evaluateGate({
+    issueComments: [summary],
+    reviews: [codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
+  });
+  assert.equal(stated.shouldMerge, true, `blocked on: ${stated.reasons.join("; ")}`);
+
+  // The same finding, said only in permalinks to that older head, is NOT stale:
+  // a link cannot be shown to be the finding's own location, so it places
+  // nothing. The cost is one acknowledgement naming the artifact — the discipline
+  // inline findings already have, where pushing a fix clears nothing by itself.
+  const linked = await evaluateGate({
+    issueComments: [
+      codexIssueCommentFinding(OTHER_SHA, { timestamp: "2026-07-09T01:19:00Z" }),
+      summary,
+    ],
+  });
+  assert.equal(linked.shouldMerge, false, "a link to an older head classifies nothing");
+  assert.ok(
+    linked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${linked.reasons.join("; ")}`,
+  );
+});
+
+test("a supporting commit link does not place a finding", async () => {
+  // Codex P1 on #3676, filed twice: nothing in a body distinguishes the link
+  // that is the finding's own location from one cited as supporting context, so
+  // a link can never make an artifact STALE. Placing by "any commit this PR had"
+  // closed the foreign-commit half and left this one open — a finding whose
+  // location links are branch-based, citing an earlier commit of this same PR,
+  // was placed, bound to no head, and dropped: the shape #3656 merged past.
+  const earlier = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
+  const citing = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+    citing: earlier,
+  });
+  // The premise, asserted rather than assumed: the body names that commit, and
+  // it is not this head's.
+  assert.deepEqual([...__test.parseBodyCommits(citing.body)], [earlier]);
+  assert.equal(__test.codexArtifactBindsToHead(citing, HEAD_SHA), false);
+
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  // …and it blocks whether or not that commit is one this PR had. Neither answer
+  // to "was this commit ever in the PR" makes the LINK the finding's location.
+  for (const label of ["a commit this PR never had", "an earlier commit of this PR"]) {
+    const result = await evaluateGate({ issueComments: [citing, summary] });
+    assert.equal(result.shouldMerge, false, `dropped on ${label}`);
+    assert.ok(
+      result.reasons.some((reason) => reason.includes("name no commit")),
+      `got: ${result.reasons.join("; ")}`,
+    );
+  }
+});
+
+test("a quoted Reviewed-commit footer does not classify the artifact quoting it", async () => {
+  // Codex P1 on #3676: REVIEWED_COMMIT_RE is unanchored, so a finding that
+  // QUOTES another artifact's footer — which reviewing this very parser produces
+  // — claimed that artifact's revision as its own. Naming a commit that is not
+  // the head made it stale by its own quotation: out of headBoundArtifacts, out
+  // of the unbound set, dropped.
+  const quoting = {
+    id: 606060,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-606060",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the footer match is unanchored, so this very comment claims a commit:",
+      "",
+      "```",
+      `**Reviewed commit:** \`${OTHER_SHA.slice(0, 10)}\``,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  // The premise, asserted rather than assumed: the quoted footer really does
+  // parse, and really does name something other than this head.
+  assert.equal(__test.parseReviewedCommit(quoting.body), OTHER_SHA.slice(0, 10));
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false);
+
+  const result = await evaluateGate({
+    issueComments: [
+      quoting,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "a quotation is not a statement about this artifact");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a tie for newest bound artifact is broken toward the finding", async () => {
+  // Codex P1 on #3676: the sort is by timestamp alone and is stable, so two
+  // artifacts stamped in the same whole second keep their API order. With the
+  // clean one first, a finding for this head sitting beside it was never
+  // inspected. Whole-second collisions are ordinary — #3656's finding and its
+  // summary rewrite were one second apart.
+  const tied = "2026-07-09T01:20:00Z";
+  const cleanFirst = await evaluateGate({
+    issueComments: [
+      // Clean, and first in API order.
+      codexVerdict(HEAD_SHA, tied),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(cleanFirst.shouldMerge, false, "a tie is not evidence the clean artifact came later");
+  assert.ok(
+    cleanFirst.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${cleanFirst.reasons.join("; ")}`,
+  );
+
+  // …and a genuinely newer clean verdict still supersedes, so this does not turn
+  // every answered finding into a permanent block.
+  const newerClean = await evaluateGate({
+    issueComments: [
+      codexVerdict(HEAD_SHA, "2026-07-09T01:21:00Z"),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(newerClean.shouldMerge, true, `blocked on: ${newerClean.reasons.join("; ")}`);
+});
+
+test("an unclassifiable finding clears only by an answer that names it", async () => {
+  // The block has to terminate, and nothing mechanical can end this one: no push
+  // changes the fact that the artifact names no commit, and there is no thread to
+  // reply on. So the exit is explicit — an allowed author answers it on the PR —
+  // and the answer must NAME the artifact.
+  //
+  // Maintainer review on #3676: a marker alone is not an answer. Lanes post
+  // top-level round comments like "head moved to <sha>, findings RESOLVED
+  // in-thread", written about that round's INLINE findings, and one of those
+  // would silently clear an unbound artifact nobody read — reopening the hole
+  // through its own exit.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const anchor = `#issuecomment-${stripped.id}`;
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const clears = async (comment) =>
+    (await evaluateGate({ issueComments: [stripped, summary, comment] })).shouldMerge;
+
+  // The lane round comment, verbatim in shape: allowed author, later, carries
+  // RESOLVED, and is about something else entirely.
+  assert.equal(
+    await clears(
+      prComment(
+        "sachiniyer",
+        `head moved to ${OTHER_SHA.slice(0, 7)}, findings RESOLVED in-thread — @codex review`,
+      ),
+    ),
+    false,
+    "a round comment about other findings is not an answer to this artifact",
+  );
+  assert.equal(
+    await clears(prComment("outside-contributor", `ACCEPTED — ignore ${anchor}.`)),
+    false,
+    "only an allowed author's answer counts",
+  );
+  assert.equal(
+    await clears(prComment("sachiniyer", `Looking at ${anchor} now.`)),
+    false,
+    "naming it without a marker is discussion, not an answer",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`, "2026-07-09T01:19:00Z"),
+    ),
+    false,
+    "an answer cannot precede the finding it answers",
+  );
+
+  // …and the two spellings that DO clear it: the anchor, and the full permalink
+  // GitHub's own "Copy link" produces.
+  assert.equal(
+    await clears(prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`)),
+    true,
+    "the anchor names the artifact",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `Read every one of these: ${stripped.html_url} — ACCEPTED.`),
+    ),
+    true,
+    "so does the permalink it ends in",
+  );
+});
+
+test("an answer to a longer id does not clear the artifact whose id it prefixes", async () => {
+  // Both reference forms END in the numeric id, so a plain substring test would
+  // let an answer to `#issuecomment-1234` also clear `#issuecomment-123` — a
+  // fail-open in the exit of a rule that exists to close one.
+  const shortId = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    id: 123,
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  const neighbour = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-1234 — [gate-ack]."),
+    ],
+  });
+  assert.equal(neighbour.shouldMerge, false, "an answer to a different comment is not an answer");
+
+  const itself = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-123 — [gate-ack]."),
+    ],
+  });
+  assert.equal(itself.shouldMerge, true, `blocked on: ${itself.reasons.join("; ")}`);
+
+  const { bodyNamesReference } = __test;
+  assert.equal(bodyNamesReference("see #issuecomment-1234 — ACCEPTED", "#issuecomment-123"), false);
+  assert.equal(bodyNamesReference("see #issuecomment-123 — ACCEPTED", "#issuecomment-123"), true);
+  // A permalink is full of regex metacharacters, so the escape is load-bearing:
+  // an unescaped `.` would make a lookalike host match a real one.
+  assert.equal(
+    bodyNamesReference(
+      "see https://githubxcom/sachiniyer/agent-factory/pull/1465#issuecomment-123 — ACCEPTED",
+      "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-123",
+    ),
+    false,
+  );
+});
+
+test("a RESOLVED answer owes a commit; ACCEPTED and gate-ack do not", async () => {
+  // Codex P1 on #3676: RESOLVED claims a code change was MADE, and a fix for a
+  // finding filed at T cannot exist in a commit made before T (#2878). The
+  // unbound path accepted it on recency alone, so "RESOLVED <link>" posted
+  // before the fix merged the unchanged head — the premature merge
+  // unpushedFixClaims already prevents for inline findings.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const anchor = `#issuecomment-${stripped.id}`;
+  const withHead = (headCommittedDate, comment) => ({
+    headCommittedDate,
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:23:00Z",
+        commentTime: "2026-07-09T01:23:00Z",
+      }),
+      comment,
+    ],
+  });
+  const claim = prComment("sachiniyer", `Fixed — RESOLVED ${anchor}.`, "2026-07-09T01:24:00Z");
+
+  // Head predates the finding: the commit cannot contain the fix it claims.
+  const unpushed = await evaluateGate(withHead("2026-07-09T01:00:00Z", claim));
+  assert.equal(unpushed.shouldMerge, false, "a fix claim the head cannot contain is not an answer");
+
+  // A commit landed after the finding, so the claim is at least possible.
+  const pushed = await evaluateGate(withHead("2026-07-09T01:22:00Z", claim));
+  assert.equal(pushed.shouldMerge, true, `blocked on: ${pushed.reasons.join("; ")}`);
+
+  // …and the claims that owe no commit are unaffected by the head's age.
+  for (const body of [`Not a defect — ACCEPTED ${anchor}.`, `Read it — [gate-ack] ${anchor}.`]) {
+    const noChange = await evaluateGate(
+      withHead("2026-07-09T01:00:00Z", prComment("sachiniyer", body, "2026-07-09T01:24:00Z")),
+    );
+    assert.equal(noChange.shouldMerge, true, `blocked on: ${noChange.reasons.join("; ")}`);
+  }
+});
+
+test("a finding that quotes the summary table is not thereby named to a commit", async () => {
+  // Codex P1 on #3676: parseSummaryRows accepts the marker ANYWHERE in a body, so
+  // reading summary cells here let a finding artifact that merely QUOTES this
+  // script's table — which reviewing this very file produces — count as naming a
+  // commit. It bound to no head and was dropped: the exact fail-open the rule
+  // exists to close. Genuine summaries never reach that test; the caller excludes
+  // them first, on the LEADING marker.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    id: 4242,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-4242",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the marker test has to be anchored, or this body classifies itself:",
+      "",
+      // Fenced, the way a review quotes code — so the table lines start with `|`
+      // and parseSummaryRows really does read them. Blockquoting them instead
+      // would make this test pass without exercising the defect at all.
+      "```",
+      marker,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(__test.isCodexSummaryArtifact(quoting), false, "the marker is quoted, not leading");
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false, "…and it binds to nothing");
+  // The premise of the defect, asserted rather than assumed: the quoted rows DO
+  // parse as summary rows naming a commit. Without this the test would go green
+  // on a body whose table was never read.
+  const rows = __test.parseSummaryRows(quoting.body);
+  assert.equal(rows.length, 1, "the quoted table must actually parse");
+  assert.equal(rows[0].commit, HEAD_SHA.slice(0, 7));
+
+  const result = await evaluateGate({ issueComments: [quoting, summary] });
+
+  assert.equal(result.shouldMerge, false, "an artifact that binds to nothing is not clean");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("an answer in the same second as the finding still answers it", async () => {
+  // Codex P2 on #3676: GitHub serialises two events into one whole second often
+  // enough that a bot answering immediately was rejected, leaving the finding
+  // stuck until someone reposted a second later. Equality is safe here precisely
+  // because an answer must name the artifact's server-generated id, which does
+  // not exist until the artifact does.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+      prComment(
+        "app-detail-app[bot]",
+        `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("an artifact is referenced by its permalink or the anchor it ends in", () => {
+  const { artifactReferences } = __test;
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual(artifactReferences(finding), [finding.html_url, `#issuecomment-${finding.id}`]);
+
+  // A review spells its anchor differently, so the anchor is read OFF the URL
+  // rather than assembled from a guessed kind — assembling `#issuecomment-` for
+  // a review would make a real answer unrecognisable.
+  assert.deepEqual(
+    artifactReferences({
+      id: 77,
+      html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+    }),
+    [
+      "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+      "#pullrequestreview-77",
+    ],
+  );
+
+  // Only with no URL at all does it fall back to both spellings of the id.
+  assert.deepEqual(artifactReferences({ id: 77 }), ["#issuecomment-77", "#pullrequestreview-77"]);
+  assert.deepEqual(artifactReferences({}), []);
+});
+
+test("only a URL-form commit binds an artifact body to a head", () => {
+  const { parseBodyCommits, codexArtifactBindsToHead, isCodexSummaryArtifact } = __test;
+
+  // The summary table names the head in a backticked CELL. Reading that as a
+  // binding would make the summary comment the newest finding-capable artifact
+  // and clear the finding beside it — the #3606 rule, now load-bearing for a
+  // second reason.
+  const summary = codexSummaryTable(HEAD_SHA);
+  assert.equal(parseBodyCommits(summary.body).size, 0, "a backticked short SHA is not a binding");
+  assert.equal(codexArtifactBindsToHead(summary, HEAD_SHA), false);
+  assert.equal(isCodexSummaryArtifact(summary), true);
+
+  // …and a body that merely QUOTES the marker is not the summary comment. This
+  // gate script holds that marker as a string literal, so a Codex review OF this
+  // file quotes it; exempting such a body would drop its findings.
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "Codex Review",
+      "",
+      "P1: the exemption must not key on `includes`:",
+      "",
+      `> ${marker}`,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+    ].join("\n"),
+    commit_id: HEAD_SHA,
+    submitted_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(isCodexSummaryArtifact(quoting), false, "quoting the marker is not carrying it");
+  assert.equal(codexArtifactBindsToHead(quoting, HEAD_SHA), true, "…so its finding is inspected");
+
+  // The permalink form binds, and only to the head it names.
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual([...parseBodyCommits(finding.body)], [HEAD_SHA]);
+  assert.equal(codexArtifactBindsToHead(finding, HEAD_SHA), true);
+  assert.equal(codexArtifactBindsToHead(finding, OTHER_SHA), false);
+  // Nothing read out of a BODY states the reviewed revision (Codex P1, twice):
+  // not a permalink, because prose cites commits for any purpose, and not the
+  // `Reviewed commit:` footer, because REVIEWED_COMMIT_RE is unanchored and an
+  // artifact quoting another's footer would claim that revision as its own.
+  // Only GitHub's commit_id, which a body cannot forge.
+  assert.equal(__test.codexArtifactStatesItsCommit(finding), false, "a link is not a statement");
+  assert.equal(
+    __test.codexArtifactStatesItsCommit(codexVerdict(HEAD_SHA)),
+    false,
+    "an issue comment's own footer is still only prose",
+  );
+  assert.equal(__test.codexArtifactStatesItsCommit({ commit_id: HEAD_SHA, body: "P1" }), true);
+});
+
 test("a row whose cell prefixes a different commit does not match this head", () => {
   // The commit cell is matched as a prefix of the head, with no lookup: the head
   // SHA is already known, so there is nothing to resolve. What keeps a stale row
@@ -5787,6 +6338,71 @@ function codexSummaryTable(
   };
 }
 
+// Codex's OTHER finding artifact: an ISSUE COMMENT, captured from the real one
+// #3656 auto-merged past (comment 5514996957) with the commit substituted and
+// six of its eight P2 findings elided. Issue comments have no `commit_id` field
+// at all — not null, absent — and this shape emits no `Reviewed commit:` line,
+// so the only thing naming a head is the permalink on every finding (#3670).
+//
+// `ref` substitutes what those permalinks point at. A branch name is how the
+// SHA-stripped variant is built: the same body, naming no commit anywhere.
+function codexIssueCommentFinding(
+  sha,
+  { timestamp = "2026-07-09T01:20:00Z", ref = null, id = 5514996957, citing = null } = {},
+) {
+  const target = ref ?? sha;
+  const finding = (anchor, title, prose) =>
+    [
+      `https://github.com/sachiniyer/agent-factory/blob/${target}/docs/daemon-memory.md${anchor}`,
+      `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**`,
+      "",
+      prose,
+    ].join("\n");
+  return {
+    id,
+    html_url: `https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-${id}`,
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "",
+      "### 💡 Codex Review",
+      "",
+      finding(
+        "#L145-L147",
+        "Include unscoped descendant process trees",
+        "When a plain-exec child forks, every descendant inherits the daemon cgroup unless it is explicitly moved.",
+      ),
+      "",
+      "---",
+      "",
+      finding(
+        "#L194",
+        "Stop labeling the file counter as page cache",
+        "The `file` counter also includes tmpfs/shared memory and dirty or writeback pages.",
+      ),
+      // A commit cited as supporting context, not as the finding's location —
+      // the shape that must not place the artifact.
+      ...(citing
+        ? [
+            "",
+            `Introduced in https://github.com/sachiniyer/agent-factory/commit/${citing}.`,
+          ]
+        : []),
+      "    ",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "</details>",
+    ].join("\n"),
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
+function prComment(login, body, timestamp = "2026-07-09T01:25:00Z") {
+  return { user: { login }, body, created_at: timestamp, updated_at: timestamp };
+}
+
 function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
@@ -5800,6 +6416,9 @@ function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: `### Codex Review\n\n${summary}\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
+    // A review always carries commit_id; a fake that omitted it would hide the
+    // difference between what GitHub asserts and what a body merely says.
+    commit_id: sha,
     submitted_at: timestamp,
   };
 }
