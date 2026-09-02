@@ -293,6 +293,12 @@ func TestDockerAccount_AgentServerRunsAsTheAccountOwner(t *testing.T) {
 		if out, err := fakeLocalDockerResponse(args); out != nil || err != nil {
 			return out, err
 		}
+		// The #3598 runtime boundary check runs on every account provision, so a
+		// fixture that cannot answer it refuses before this test reaches what it
+		// asserts. A clean container: af's account mount and nothing else.
+		if out, err := fakeAccountBoundaryDockerResponse(args, f.accountDir); out != nil || err != nil {
+			return out, err
+		}
 		switch args[0] {
 		case "run":
 			return []byte(dockerCreatedID + "\n"), nil
@@ -369,6 +375,12 @@ func TestDockerAccount_ReadBannerLogReadRunsAsTheAccountOwner(t *testing.T) {
 	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if out, err := fakeLocalDockerResponse(args); out != nil || err != nil {
+			return out, err
+		}
+		// The #3598 runtime boundary check runs on every account provision, so a
+		// fixture that cannot answer it refuses before this test reaches what it
+		// asserts. A clean container: af's account mount and nothing else.
+		if out, err := fakeAccountBoundaryDockerResponse(args, f.accountDir); out != nil || err != nil {
 			return out, err
 		}
 		switch args[0] {
