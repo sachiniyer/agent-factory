@@ -968,3 +968,57 @@ func TestDockerAccount_DeviceScanDoesNotSkipALaterMount(t *testing.T) {
 		})
 	}
 }
+
+// TestDockerDeviceMode_MatchesDockersMask pins the predicate that tells a
+// permission mask from a container path. Docker accepts any non-empty
+// combination of r, w and m with no repeats, in any order; anything else is
+// read as a path and must then be absolute (measured on 29.4.0: `rwmm` and `x`
+// both fail with "is not an absolute path").
+func TestDockerDeviceMode_MatchesDockersMask(t *testing.T) {
+	for _, mask := range []string{"r", "w", "m", "rw", "rm", "wm", "rwm", "mrw", "wr"} {
+		require.Truef(t, dockerDeviceMode(mask), "%q is a permission mask to Docker", mask)
+	}
+	for _, notMask := range []string{"", "rwmm", "rr", "x", "rwx", "/dev/zero", "/af-account", "rwm/"} {
+		require.Falsef(t, dockerDeviceMode(notMask), "%q is not a permission mask to Docker", notMask)
+	}
+}
+
+// TestDockerAccount_ChecksTheEffectiveDeviceTarget checks the container path
+// Docker actually creates the node at, rather than every ':' field. The
+// host-side field is a path on the HOST and never where the node lands, so
+// checking it refused valid mappings such as
+// `--device /af-account/devices/fuse:/dev/fuse:rwm`, whose node is created at
+// /dev/fuse — outside the boundary entirely.
+//
+// The target is not simply "field 2": Docker reads a two-field value whose
+// second field is a permission mask as host-only, leaving the container path
+// equal to the host path. Every row's expectation below is what
+// `.HostConfig.Devices[].PathInContainer` reported on Docker 29.4.0.
+func TestDockerAccount_ChecksTheEffectiveDeviceTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		refused bool
+	}{
+		{name: "host side under the boundary, container path outside", value: "/af-account/devices/fuse:/dev/fuse:rwm"},
+		{name: "host side under the runtime home", value: "/af-home/devices/snd:/dev/snd"},
+		{name: "mask keeps the host path as the target", value: "/dev/zero:rwm"},
+		{name: "short mask", value: "/dev/zero:r"},
+		{name: "reordered mask", value: "/dev/zero:mrw"},
+		{name: "container path ending in a mask-like segment", value: "/dev/zero:/af-account/rwm", refused: true},
+		{name: "container path with a mask third field", value: "/dev/zero:/af-account/x:r", refused: true},
+		{name: "container path under the runtime home", value: "/dev/zero:/af-home/x", refused: true},
+		{name: "single field naming the boundary", value: "/af-account/planted", refused: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs([]string{"--device", tt.value}, "codex")
+			if tt.refused {
+				require.Errorf(t, err, "a device node landed inside the account boundary: --device %s", tt.value)
+				require.Contains(t, err.Error(), "--device")
+				return
+			}
+			require.NoErrorf(t, err, "a device Docker creates outside the boundary was refused: --device %s", tt.value)
+		})
+	}
+}
