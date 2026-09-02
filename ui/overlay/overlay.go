@@ -129,35 +129,32 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
-// oscRegex matches any OSC sequence with either terminator, ST (ESC backslash) or
-// BEL, written with regex escapes rather than literal control bytes (see
-// osc8Regex).
-var oscRegex = regexp.MustCompile(`\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)`)
-
 // lineWidth is the compositor's single answer to "how many cells does this row
-// occupy", and every measurement in this file goes through it.
+// occupy", and every line measurement in this file goes through it.
 //
-// It is ansi.PrintableRuneWidth with OSC sequences removed first. That is not a
-// change of measure — for anything without an OSC sequence the two are identical
-// by construction — it is a correction, and the distinction matters:
+// It is ansi.PrintableRuneWidth over xansi.Strip's output. Stripping first is a
+// correction, not a change of measure — PrintableRuneWidth already ignores SGR, so
+// for anything without an OSC sequence the two are identical by construction, and
+// that equivalence is pinned by a test. The distinction matters:
 //
 //   - Grapheme clustering IS a genuine disagreement. A joined-emoji family is 2
 //     cells to lipgloss, 8 to PrintableRuneWidth, and 4 to tmux 3.4 actually
-//     advancing its cursor. Which one is right depends on the emulator, so #3433
-//     defers it and getLines' note carries the measurements.
+//     advancing its cursor. Which is right depends on the emulator, so #3433 defers
+//     it and getLines' note carries the measurements. Stripping does not touch it.
 //   - An OSC sequence is NOT. A hyperlink escape occupies zero cells on every
-//     terminal there is. PrintableRuneWidth reads a 4-cell hyperlink as 21 because
-//     it takes the first letter of the URI for the sequence terminator and counts
-//     the rest as text — a parsing bug, with no emulator on the other side of it.
+//     terminal. PrintableRuneWidth reads a 4-cell hyperlink as 21 because it takes
+//     the first letter of the URI for the sequence terminator and counts the rest as
+//     text — a parsing bug with no emulator on the other side of it.
 //
-// Left uncorrected it fed the placement arithmetic a width the row does not have:
-// pos overshot, remaining width went negative, and such a row rendered with
-// neither padding nor the background beside it.
+// The parser is used rather than a regex of this file's own because it covers the
+// forms a regex keeps missing: 7-bit ST, BEL, and the 8-bit ST terminator are all
+// handled. Measured limitation: the 8-bit OSC INTRODUCER (0x9d) is not, by
+// xansi.Strip either — a row using it still measures as its URI. That form is
+// essentially unreachable from a UTF-8 terminal, and af emits only the 7-bit forms;
+// it is noted rather than hand-rolled around, because a bespoke parser here is what
+// this function exists to stop being.
 func lineWidth(s string) int {
-	if strings.Contains(s, "\x1b]") {
-		s = oscRegex.ReplaceAllString(s, "")
-	}
-	return ansi.PrintableRuneWidth(s)
+	return ansi.PrintableRuneWidth(xansi.Strip(s))
 }
 
 // clipLine truncates one foreground row to width WITHOUT ever cutting through a
@@ -184,10 +181,27 @@ func lineWidth(s string) int {
 // lineWidth, which discounts the OSC sequences either way, so the placement
 // arithmetic sees the cells the row actually occupies.
 func clipLine(line string, width int) string {
-	if strings.Contains(line, "\x1b]") {
-		return xansi.Truncate(line, width, "")
+	if lineWidth(line) == ansi.PrintableRuneWidth(line) {
+		// The two measures agree, so the row carries nothing the reflow truncator
+		// would mis-parse, and its accounting is the one the rest of this function
+		// uses. Derived from the measures rather than sniffed for "\x1b]", so a
+		// sequence form nobody thought of routes itself.
+		return truncate.String(line, uint(width))
 	}
-	return truncate.String(line, uint(width))
+	// The row carries sequences the reflow truncator would cut through, so the
+	// parser does the clipping. Its own width accounting is the cell-accurate one,
+	// which is NOT what the arithmetic below uses, so ask it for progressively less
+	// until the result fits the compositor's measure — a row mixing a hyperlink with
+	// clustered text survives an x/ansi clip at its cell width while still measuring
+	// far wider here, and capping the recorded width would only hide that from the
+	// clamp.
+	for w := width; w >= 0; w-- {
+		out := xansi.Truncate(line, w, "")
+		if lineWidth(out) <= width {
+			return out
+		}
+	}
+	return ""
 }
 
 // widestLine measures the widest of these rows with the same measure getLines

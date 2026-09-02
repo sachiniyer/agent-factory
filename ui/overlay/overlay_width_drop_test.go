@@ -402,3 +402,39 @@ func TestLineWidthMatchesPrintableRuneWidthWithoutOSC(t *testing.T) {
 		}
 	}
 }
+
+// #3433 review. A row carrying BOTH a hyperlink and clustered text survives an
+// x/ansi clip at its cell width while still measuring far wider under the
+// compositor's own measure. Capping the recorded width only hid that from the
+// clamp: pos overshot, and the row went out with neither padding nor background.
+func TestPlaceOverlayClipsARowMixingAHyperlinkAndClusteredText(t *testing.T) {
+	const cols, rows = 10, 3
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	mixed := "\x1b]8;;https://example.com\x1b\\" + strings.Repeat(joinedFamily, 3) + "\x1b]8;;\x1b\\"
+	if lineWidth(mixed) <= cols {
+		t.Fatalf("precondition: the row must still read too wide after discounting the OSC; got %d", lineWidth(mixed))
+	}
+	fg := strings.Join([]string{mixed, mixed}, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+	for i, line := range strings.Split(out, "\n") {
+		if w := lineWidth(line); w != cols {
+			t.Fatalf("line %d is %d cells, want exactly %d: a mixed row must be clipped to the "+
+				"compositor's measure, not merely recorded as if it were", i, w, cols)
+		}
+	}
+	if hasUnterminatedOSC(out) {
+		t.Fatalf("and the clip must still not split the sequence; got %q", out)
+	}
+}
+
+// The 8-bit ST terminator is a valid OSC form, and the parser handles it where a
+// hand-rolled pattern of this file's own kept missing forms.
+func TestLineWidthDiscountsAnEightBitTerminatedHyperlink(t *testing.T) {
+	link := "\x1b]8;;https://example.com\u009cLINK"
+	if got := lineWidth(link); got != 4 {
+		t.Fatalf("lineWidth = %d, want 4: an OSC sequence occupies no cells whichever "+
+			"terminator it uses", got)
+	}
+}
