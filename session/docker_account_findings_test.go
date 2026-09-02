@@ -978,7 +978,17 @@ func TestDockerDeviceMode_MatchesDockersMask(t *testing.T) {
 	for _, mask := range []string{"r", "w", "m", "rw", "rm", "wm", "rwm", "mrw", "wr"} {
 		require.Truef(t, dockerDeviceMode(mask), "%q is a permission mask to Docker", mask)
 	}
-	for _, notMask := range []string{"", "rwmm", "rr", "x", "rwx", "/dev/zero", "/af-account", "rwm/"} {
+	// Repeats are masks HERE by choice, not by Docker's behaviour: 29.4.0
+	// refuses `--device /dev/zero:rr` outright ("rr is not an absolute path")
+	// because its validator deletes each letter as it is seen. Reading them as
+	// a mask keeps the effective target on the HOST field, which is the
+	// fail-closed side if any build honours the `^[rwm]{1,3}$` its regexp
+	// advertises, and it costs nothing: a container target must be absolute, so
+	// a bare `rr` is never a legitimate one.
+	for _, repeat := range []string{"rr", "rww", "mmm", "wrr"} {
+		require.Truef(t, dockerDeviceMode(repeat), "%q must be read as a mask so the host path stays the target", repeat)
+	}
+	for _, notMask := range []string{"", "rwmm", "rrrr", "x", "rwx", "/dev/zero", "/af-account", "rwm/"} {
 		require.Falsef(t, dockerDeviceMode(notMask), "%q is not a permission mask to Docker", notMask)
 	}
 }
@@ -1009,6 +1019,12 @@ func TestDockerAccount_ChecksTheEffectiveDeviceTarget(t *testing.T) {
 		{name: "container path with a mask third field", value: "/dev/zero:/af-account/x:r", refused: true},
 		{name: "container path under the runtime home", value: "/dev/zero:/af-home/x", refused: true},
 		{name: "single field naming the boundary", value: "/af-account/planted", refused: true},
+		// The mask reading keeps the HOST field as the target, so a host device
+		// under the boundary is refused rather than validated as the harmless
+		// relative string "rr". Docker 29.4.0 refuses this value outright, so
+		// nothing is installed either way — af simply does not depend on that.
+		{name: "repeated mask over a host path under the boundary", value: "/af-account/dev/zero:rr", refused: true},
+		{name: "repeated mask over a harmless host path", value: "/dev/zero:rr"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

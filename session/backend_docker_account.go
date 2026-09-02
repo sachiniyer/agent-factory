@@ -138,31 +138,31 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 }
 
 // dockerDeviceMode reports whether a --device field is a permission mask rather
-// than a container path. Docker accepts any non-empty combination of r, w and m
-// with no repeats, in any order; anything else it reads as a path, which must
-// then be absolute (measured on 29.4.0: `rwmm` and `x` both fail with "is not
-// an absolute path").
+// than a container path: one to three characters drawn from r, w and m, which
+// is docker/cli's own `^[rwm]{1,3}$`. Anything else is read as a path, which
+// must then be absolute (measured on 29.4.0: `x` and the four-character `rwmm`
+// both fail with "is not an absolute path").
+//
+// Repeats such as `rr` are DELIBERATELY treated as a mask here even though
+// Docker 29.4.0 refuses them — its effective validator deletes each letter as
+// it is seen, so a repeat falls through to the path branch and the argument
+// dies as "not an absolute path", installing nothing. Reading them as a mask
+// is both free and the fail-closed choice: a container target must be
+// absolute, so a bare `rr` can never legitimately BE one, and calling it a
+// mask makes the effective target the HOST path — the field that could sit
+// under the account boundary. Should any Docker build accept the grammar its
+// regexp advertises, af has already drawn the boundary in the safe place
+// (#3595 review).
 func dockerDeviceMode(field string) bool {
-	if field == "" {
+	if field == "" || len(field) > 3 {
 		return false
 	}
-	var seen [3]bool
 	for index := 0; index < len(field); index++ {
-		var mask int
 		switch field[index] {
-		case 'r':
-			mask = 0
-		case 'w':
-			mask = 1
-		case 'm':
-			mask = 2
+		case 'r', 'w', 'm':
 		default:
 			return false
 		}
-		if seen[mask] {
-			return false
-		}
-		seen[mask] = true
 	}
 	return true
 }
