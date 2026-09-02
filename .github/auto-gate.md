@@ -32,10 +32,20 @@ not require a PAT, custom GitHub App, or ruleset bypass.
 Auto Gate never auto-merges fork heads. For a non-allowlisted author, however,
 the required decision passes as manual-only and lists any unmet automatic-merge
 requirements in its summary, restoring the normal maintainer-review path for
-external contributions. The same manual-only pass applies when the Codex
-reviewer is observed to be usage-limited against the head — no verdict can
-arrive in that case, so the gate degrades to maintainer review rather than
-wait indefinitely. Auto Gate disables any pending GitHub-native auto-merge
+external contributions.
+
+**Live Codex findings are the exception, and they block that pass** (#3558). A
+finding is a claim about the code; it is no less true because of who opened the
+PR, so an unanswered inline finding — or one marked `RESOLVED` with no commit
+pushed after it — makes the decision fail rather than pass, and the summary
+names it above the advisory list. Clear it the way every other PR does: a
+threaded reply carrying `RESOLVED`, `ACCEPTED` or `[gate-ack]`. Nothing else is
+promoted to a blocker on this path, because a finding is the only unmet
+requirement an external PR's reviewer can answer per item.
+
+The same manual-only pass applies when the Codex reviewer is observed to be
+usage-limited against the head — no verdict can arrive in that case, so the
+gate degrades to maintainer review rather than wait indefinitely. Auto Gate disables any pending GitHub-native auto-merge
 request before publishing that pass. Review and review-comment workflows can be
 read-only for fork pull requests; if one cannot update the decision, run Auto
 Gate manually by PR number from the base repository. The `pull_request_target`

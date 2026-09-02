@@ -3643,6 +3643,140 @@ test("draft and closed pull requests cannot merge", async () => {
   assert.match(closed.reasons.join("\n"), /PR is closed, not open/);
 });
 
+// #3558. The manual-merge path passed the required decision check for EVERY
+// blocker, so a maintainer's `gh pr merge` shipped live Codex findings — three
+// times on 2026-09-01 (#3534, #3545, #3546), each one producing a master-health
+// issue. A live finding is a claim about the CODE; it does not become less true
+// because of who opened the PR, and the usage-limit degradation two blocks below
+// already refuses to waive one for the analogous reason.
+test("a live finding blocks the manual-merge decision for a non-allowed author", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  assert.equal(result.manualMergeRequired, true, "the PR is still maintainer-merged");
+  assert.deepEqual(result.manualMergeBlockers, ["1 unresolved live Codex inline finding(s)"]);
+  assert.match(result.summary, /^BLOCKED:/, "the decision must not read as a pass");
+  assert.match(result.summary, /1 unresolved live Codex inline finding/);
+  // The summary is where a maintainer finds out what to do about it, so it names
+  // the clearing mechanism rather than only the count.
+  assert.match(result.summary, /RESOLVED, ACCEPTED or \[gate-ack\]/);
+  assert.doesNotMatch(
+    result.summary,
+    /Unmet automatic-merge requirements/,
+    "a blocker is lifted out of the advisory list, not repeated inside it",
+  );
+});
+
+// A blocker and an advisory note in one decision. They must not be presented as
+// one list: the whole failure was a hard blocker reading like another line the
+// maintainer could weigh up on the way to merging.
+test("a blocked manual decision separates the blocker from the advisory notes", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    files: ["app/termpane.go"],
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  const [blocking, advisory] = result.summary.split("Unmet automatic-merge requirements:");
+  assert.match(blocking, /^BLOCKED:/);
+  assert.match(blocking, /1 unresolved live Codex inline finding/);
+  assert.ok(advisory, "the advisory section must still be rendered");
+  assert.match(advisory, /missing the play-tested label/);
+  assert.doesNotMatch(advisory, /unresolved live Codex inline finding/);
+});
+
+// The required check a hand merge is actually gated on is the fixed-name
+// aggregate, which greens only when every per-PR decision is completed/success.
+// Asserting the per-PR conclusion alone would leave the fix unproven where it
+// has to bite.
+test("a live finding keeps the required aggregate red for a non-allowed author", async () => {
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(github.mergedWith, null, "nothing may merge automatically either");
+  const exactDecision = github.createdChecks.find(
+    (check) => check.name === decisionName(1465, HEAD_SHA),
+  );
+  assert.equal(exactDecision.conclusion, "failure");
+  assert.match(exactDecision.output.title, /^BLOCKED:/);
+  assert.equal(
+    transaction.aggregate.ok,
+    false,
+    "the required aggregate must stay red, or a hand merge is still allowed",
+  );
+});
+
+// A RESOLVED reply with no commit after it is the #2878 defect: the claimed fix
+// cannot be in a head that predates the claim. That is a live finding too, so it
+// blocks the manual path alongside the unanswered kind.
+test("a RESOLVED claim with no pushed commit blocks the manual-merge decision", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32 }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed." }),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.match(result.manualMergeBlockers.join("\n"), /marked RESOLVED with no commit pushed/);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// The block has to be clearable, or it is a permanent stop rather than a gate.
+// The maintainer clears it exactly as on any other PR: a threaded reply carrying
+// RESOLVED / ACCEPTED / [gate-ack].
+test("answering the finding restores the manual-merge pass for a non-allowed author", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32 }),
+      findingReply({ id: 11, inReplyToId: 10, body: "ACCEPTED — deliberate, see the PR body." }),
+    ],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.deepEqual(result.manualMergeBlockers, []);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// Scope: this blocks on FINDINGS, not on everything. A missing play-tested label
+// and an absent verdict are still notes on the manual path, exactly as before —
+// widening the block would have made every external PR unmergeable.
+test("a non-allowed author's other unmet requirements stay notes, not blockers", async () => {
+  const result = await evaluateGate({
+    author: "detail-app",
+    files: ["app/termpane.go"],
+    issueComments: [],
+  });
+
+  assert.equal(result.manualMergeRequired, true);
+  assert.deepEqual(result.manualMergeBlockers, []);
+  assert.match(result.summary, /^PASS:/);
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.match(result.reasons.join("\n"), /Codex has not reviewed head/);
+});
+
 test("fork heads from non-allowed authors pass for manual merge but cannot auto-merge", async () => {
   const github = fakeGateGithub({
     author: "outside-contributor",
