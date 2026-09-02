@@ -205,8 +205,21 @@ jobs:
       # binary itself (integration/base_image_test.go), once, with retry, so
       # every lane and every developer machine gets the same guarantee and no
       # future workflow can forget it.
+
+      # -timeout is explicit rather than Go's default 10m per package (#3580).
+      # That default is a per-package wall the daemon package now sits right on:
+      # 355.666s here, 600.098s on the macOS job in the same run, where it hit
+      # the wall and panicked. A package timeout is not a test failure — Go kills
+      # the binary, names no slow test, and reports every remaining test in the
+      # package as not run — so the budget has to be far enough above the measured
+      # time that only a real wedge reaches it. 20m is ~3.4x the measured daemon
+      # time here, and it is the macOS step's number rather than this job's: the
+      # tighter of the two budgets picks it, and one number on both steps means
+      # they cannot drift onto different walls again. This job carries no
+      # timeout-minutes (GitHub's 360m default), so the Go-side panic and its
+      # goroutine dump always land first here regardless.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout 20m ./...
 
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
@@ -506,8 +519,28 @@ jobs:
           command -v dd sh git
           dd --version 2>&1 | head -1 || echo "dd: BSD (no --version)"
 
+      # Same 20m as the Linux Test job, and this is the step that earned it
+      # (#3580): the daemon package hit Go's default 10m per-package timeout here
+      # and panicked at 600.098s, on a head where the Linux job ran the same
+      # package in 355.666s — macOS is uniformly ~1.4–2x slower per test.
+      #
+      # The number is bounded on both sides. Below, by that measured wall: 20m is
+      # 2x the 600.098s the package reached, so ordinary growth in it does not
+      # reach the budget and only a real wedge does. Above, by this job's
+      # timeout-minutes: 30 — and the quantity that matters there is not the
+      # job's start but the package binary's, because -timeout is per test binary
+      # and its clock starts when that binary starts: after the setup steps, and
+      # after `go test` has built the tree with -race and scheduled its way to
+      # that package. Both were measured on the failing job (100083920043): the
+      # setup steps cost 22s (`brew install tmux` 5s of it), and the panic landed
+      # at 600.098s inside a 765s step, so build and scheduling cost at most
+      # ~165s — an upper bound, since that slice also contains the post-panic
+      # tail. Worst case a wedged package therefore panics near 23m, leaving ~7m
+      # of margin, enough to absorb a build phase three times the measured one.
+      # Go has to win that race with room to spare: its panic names the stuck
+      # goroutines, and the runner kill this would otherwise become names nothing.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout 20m ./...
 
   build:
     name: Build
