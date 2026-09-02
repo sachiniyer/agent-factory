@@ -189,3 +189,87 @@ func TestPlaceOverlayLeavesAFittingModalsStylingAlone(t *testing.T) {
 		t.Fatal("no spurious reset may be appended to a modal that was not clipped")
 	}
 }
+
+// #3433 review. The widest row of a too-tall modal may be one of the rows the
+// height clip discards. fgWidth was measured before that clip, so it stayed at the
+// pre-clip value and the width branch fired on rows that were never too wide —
+// padding every retained row across the whole frame and dragging a centered modal
+// to column zero.
+func TestPlaceOverlayRemeasuresWidthAfterDroppingRows(t *testing.T) {
+	const cols, rows = 40, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	narrow := strings.Repeat("m", 10)
+	fgRows := []string{narrow, narrow, narrow, narrow,
+		strings.Repeat("W", cols+20), // the widest row, and it is clipped away
+	}
+	fg := strings.Join(fgRows, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+	lines := strings.Split(out, "\n")
+
+	if len(lines) != rows {
+		t.Fatalf("got %d lines, want %d", len(lines), rows)
+	}
+	if strings.Contains(out, "W") {
+		t.Fatal("precondition: the over-wide row must have been clipped away by height")
+	}
+	// The retained rows are 10 cells in a 40-cell frame, so the modal must still be
+	// centered with background on both sides — not stretched to the full width.
+	if !strings.HasPrefix(lines[0], "x") {
+		t.Fatalf("the retained rows are narrow, so the modal must stay centered with background "+
+			"to its left; got %q", lines[0])
+	}
+	if !strings.HasSuffix(lines[0], "x") {
+		t.Fatalf("and background to its right; got %q", lines[0])
+	}
+}
+
+// backgroundCharIsStyled walks the composite tracking SGR state and reports
+// whether any background cell ('x' here) is rendered while a non-reset style is
+// still in effect. Checking only the END of the output is not enough: the
+// compositor writes background after the foreground on EVERY row, so a leak shows
+// up mid-frame long before it reaches the last byte.
+func backgroundCharIsStyled(out string) bool {
+	open := ""
+	for i := 0; i < len(out); {
+		if loc := sgrRegex.FindStringIndex(out[i:]); loc != nil && loc[0] == 0 {
+			seq := out[i : i+loc[1]]
+			if seq == "\x1b[0m" || seq == "\x1b[m" {
+				open = ""
+			} else {
+				open = seq
+			}
+			i += loc[1]
+			continue
+		}
+		if out[i] == 'x' && open != "" {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+// #3433 review. Closing the style only on the LAST retained row still lets it
+// color the background tail of every earlier row: the compositor writes background
+// after the foreground on each one. The end-of-output check alone cannot see that.
+func TestPlaceOverlayDoesNotStyleBackgroundOnEarlierRows(t *testing.T) {
+	const cols, rows = 40, 6
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	fgRows := make([]string, rows+4)
+	for i := range fgRows {
+		fgRows[i] = "modal"
+	}
+	fgRows[0] = "\x1b[31mmodal"            // opens on the FIRST retained row
+	fgRows[len(fgRows)-1] = "modal\x1b[0m" // resets on a row the clip discards
+	fg := strings.Join(fgRows, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if backgroundCharIsStyled(out) {
+		t.Fatal("no background cell may be rendered inside the modal's style: the style must be " +
+			"closed before each background segment, not merely by the end of the frame")
+	}
+}

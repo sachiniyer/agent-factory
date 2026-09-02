@@ -129,17 +129,34 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
-// endsWithOpenStyle reports whether these rows leave an SGR in effect — that is,
-// the last styling sequence in them is not a reset. Scanned from the end, since
-// only the final sequence decides what the terminal is still applying.
-func endsWithOpenStyle(lines []string) bool {
-	for i := len(lines) - 1; i >= 0; i-- {
-		if matches := sgrRegex.FindAllString(lines[i], -1); len(matches) > 0 {
-			last := matches[len(matches)-1]
-			return last != "\x1b[0m" && last != "\x1b[m"
+// widestLine measures the widest of these rows with the same measure getLines
+// uses, so a re-measure after clipping cannot disagree with the original.
+func widestLine(lines []string) int {
+	widest := 0
+	for _, l := range lines {
+		if w := ansi.PrintableRuneWidth(l); w > widest {
+			widest = w
 		}
 	}
-	return false
+	return widest
+}
+
+// styleAfter returns the SGR still in effect after line, given prev was in effect
+// when the line began. A line with no sequence of its own leaves the state alone;
+// otherwise its LAST sequence decides, and a reset clears it.
+//
+// Deliberately single-sequence rather than a full attribute accumulator: that is
+// the same resolution the fade pass works at, and it is what the compositor needs
+// to answer one question — is anything still open here?
+func styleAfter(prev, line string) string {
+	matches := sgrRegex.FindAllString(line, -1)
+	if len(matches) == 0 {
+		return prev
+	}
+	if last := matches[len(matches)-1]; last != "\x1b[0m" && last != "\x1b[m" {
+		return last
+	}
+	return ""
 }
 
 // Split a string into lines, additionally returning the size of the widest
@@ -213,11 +230,15 @@ func PlaceOverlay(
 	// modal one cell too wide loses a cell, which is visible and bounded, instead
 	// of costing the user everything behind it. Deliberately NOT a change of
 	// measure — see the note on getLines for why that needs its own decision.
-	heightClipped := false
 	if fgHeight > bgHeight {
 		fgLines = fgLines[:bgHeight]
 		fgHeight = bgHeight
-		heightClipped = true
+		// RE-MEASURE. fgWidth was the widest row of the whole modal, and the widest
+		// row may be one of the ones just discarded. Keeping the stale value makes
+		// the width branch below fire on rows that were never too wide, padding
+		// every retained row across the frame and dragging a centered modal to
+		// column zero.
+		fgWidth = widestLine(fgLines)
 	}
 	if fgWidth > bgWidth {
 		for i, line := range fgLines {
@@ -230,17 +251,6 @@ func PlaceOverlay(
 		}
 		fgWidth = bgWidth
 	}
-	// A style opened on a RETAINED row may have had its reset on a discarded one.
-	// The compositor writes background cells after every foreground row, so leaving
-	// it open bleeds the modal's color across the frame and onward past the end of
-	// the output. Close it at the cut. Done after BOTH clips so the reset cannot
-	// itself be truncated away, and only on the height path — the width truncator
-	// closes what it cuts through on its own, and an unclipped foreground keeps
-	// whatever styling it arrived with.
-	if heightClipped && len(fgLines) > 0 && endsWithOpenStyle(fgLines) {
-		fgLines[len(fgLines)-1] += "\x1b[0m"
-	}
-
 	// An overlay is OPAQUE: every cell inside its rectangle belongs to it,
 	// including the blank tail of a row narrower than the widest one. Only the
 	// row's own width used to be written, so the compositor filled the rest of
@@ -281,7 +291,17 @@ func PlaceOverlay(
 
 	ws := &whitespace{}
 
-	// Build the output string
+	// Build the output string.
+	//
+	// pendingStyle carries the foreground's own SGR state ACROSS rows, because the
+	// compositor writes background cells after the foreground on every row: a style
+	// the modal opens on one row and closes on a later one would otherwise color
+	// each row's background tail in between. So the style is closed before every
+	// background segment and reopened at the start of the next foreground row —
+	// the modal keeps the multi-row styling it asked for, and the frame behind it
+	// keeps none of it. For a modal that closes its own styles per row (everything
+	// lipgloss renders) this is a no-op and emits no extra bytes.
+	pendingStyle := ""
 	var b strings.Builder
 	for i, bgLine := range bgLines {
 		if i > 0 {
@@ -304,8 +324,14 @@ func PlaceOverlay(
 		}
 
 		fgLine := fgLines[i-placeY]
+		if pendingStyle != "" {
+			b.WriteString(pendingStyle)
+		}
 		b.WriteString(fgLine)
 		pos += ansi.PrintableRuneWidth(fgLine)
+		if pendingStyle = styleAfter(pendingStyle, fgLine); pendingStyle != "" {
+			b.WriteString("\x1b[0m")
+		}
 
 		right := xansi.TruncateLeft(bgLine, pos, "")
 		bgLineWidth := ansi.PrintableRuneWidth(bgLine)
