@@ -273,3 +273,38 @@ func TestPlaceOverlayDoesNotStyleBackgroundOnEarlierRows(t *testing.T) {
 			"closed before each background segment, not merely by the end of the frame")
 	}
 }
+
+// #3433 review. A hyperlink is state the terminal holds just like a color, and the
+// height clip can discard the row that closes it. OSC 8 is reachable here — ui/err.go
+// handles it (#565) — so an unterminated one would leave every background cell after
+// the modal clickable, and outlive the frame.
+func TestPlaceOverlayClosesAHyperlinkWhoseCloserWasClipped(t *testing.T) {
+	const cols, rows = 40, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	open := "\x1b]8;;https://example.com\x1b\\"
+	closer := "\x1b]8;;\x1b\\"
+	fgRows := []string{open + "link", "more", "more", "more", "more" + closer}
+	fg := strings.Join(fgRows, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if strings.Count(out, "https://example.com") != strings.Count(out, closer) {
+		t.Fatalf("every opened hyperlink must be closed in the composite; opens=%d closes=%d",
+			strings.Count(out, "https://example.com"), strings.Count(out, closer))
+	}
+}
+
+// The other direction for the hyperlink path, so closing cannot become
+// unconditional: a row that opens AND closes its own link gets nothing appended.
+func TestPlaceOverlayLeavesASelfClosedHyperlinkAlone(t *testing.T) {
+	const cols, rows = 40, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+	fg := "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\nplain"
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if strings.Contains(out, "\x1b]8;;\x1b\\\x1b]8;;\x1b\\") {
+		t.Fatal("no spurious hyperlink closer may be appended to a row that closed its own")
+	}
+}

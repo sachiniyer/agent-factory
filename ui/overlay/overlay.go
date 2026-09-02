@@ -141,22 +141,43 @@ func widestLine(lines []string) int {
 	return widest
 }
 
-// styleAfter returns the SGR still in effect after line, given prev was in effect
-// when the line began. A line with no sequence of its own leaves the state alone;
-// otherwise its LAST sequence decides, and a reset clears it.
+// osc8Regex matches an OSC 8 hyperlink introducer with either terminator, ST
+// (\x1b\\) or BEL. The capture is the URI: a hyperlink is OPENED by a sequence
+// carrying one and CLOSED by the same sequence with it empty.
+var osc8Regex = regexp.MustCompile("\x1b\\]8;[^;]*;([^\x1b\a]*)(?:\x1b\\\\|\a)")
+
+// closeSequences returns what must be emitted after line so that whatever follows
+// it — a background segment, or the end of the frame — starts clean.
 //
-// Deliberately single-sequence rather than a full attribute accumulator: that is
-// the same resolution the fade pass works at, and it is what the compositor needs
-// to answer one question — is anything still open here?
-func styleAfter(prev, line string) string {
-	matches := sgrRegex.FindAllString(line, -1)
-	if len(matches) == 0 {
-		return prev
+// CLOSING only, deliberately, and this is the whole reason the compositor does not
+// carry foreground state across rows. Closing needs one question answered ("did
+// this row leave anything open?"); REOPENING needs the cumulative state
+// reconstructed, which means an ANSI state machine: multi-sequence SGR
+// accumulation, the synthetic reset the truncator inserts at a clip, and OSC 8 on
+// top. Every modal this tree renders goes through lipgloss, which closes its
+// styling on every row — measured, all rows — so nothing af draws depends on
+// continuation, and paying for a state machine to preserve it would buy a
+// hypothetical at the price of three real failure modes.
+//
+// A hand-built foreground that does span a style across rows loses that
+// continuation. It never rendered correctly here anyway: before this change the
+// open style ran straight into the background cells the compositor writes after
+// every row.
+func closeSequences(line string) string {
+	var closers string
+	if matches := sgrRegex.FindAllString(line, -1); len(matches) > 0 {
+		if last := matches[len(matches)-1]; last != "\x1b[0m" && last != "\x1b[m" {
+			closers += "\x1b[0m"
+		}
 	}
-	if last := matches[len(matches)-1]; last != "\x1b[0m" && last != "\x1b[m" {
-		return last
+	if matches := osc8Regex.FindAllStringSubmatch(line, -1); len(matches) > 0 {
+		if last := matches[len(matches)-1]; last[1] != "" {
+			// A hyperlink opened and not closed on this row would otherwise keep
+			// every background cell after it clickable, and outlive the frame.
+			closers += "\x1b]8;;\x1b\\"
+		}
 	}
-	return ""
+	return closers
 }
 
 // Split a string into lines, additionally returning the size of the widest
@@ -293,15 +314,11 @@ func PlaceOverlay(
 
 	// Build the output string.
 	//
-	// pendingStyle carries the foreground's own SGR state ACROSS rows, because the
-	// compositor writes background cells after the foreground on every row: a style
-	// the modal opens on one row and closes on a later one would otherwise color
-	// each row's background tail in between. So the style is closed before every
-	// background segment and reopened at the start of the next foreground row —
-	// the modal keeps the multi-row styling it asked for, and the frame behind it
-	// keeps none of it. For a modal that closes its own styles per row (everything
-	// lipgloss renders) this is a no-op and emits no extra bytes.
-	pendingStyle := ""
+	// The compositor writes background cells after the foreground on every row, so
+	// a foreground row that leaves styling open would colour that row's background
+	// tail — and, at the end of the frame, everything after it. Each row therefore
+	// closes what it opened before the background is written. See closeSequences
+	// for why this closes rather than carries.
 	var b strings.Builder
 	for i, bgLine := range bgLines {
 		if i > 0 {
@@ -324,14 +341,9 @@ func PlaceOverlay(
 		}
 
 		fgLine := fgLines[i-placeY]
-		if pendingStyle != "" {
-			b.WriteString(pendingStyle)
-		}
 		b.WriteString(fgLine)
 		pos += ansi.PrintableRuneWidth(fgLine)
-		if pendingStyle = styleAfter(pendingStyle, fgLine); pendingStyle != "" {
-			b.WriteString("\x1b[0m")
-		}
+		b.WriteString(closeSequences(fgLine))
 
 		right := xansi.TruncateLeft(bgLine, pos, "")
 		bgLineWidth := ansi.PrintableRuneWidth(bgLine)
