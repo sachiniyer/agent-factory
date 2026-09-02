@@ -115,12 +115,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// claimRestoreOperation already made Kill fail: from that line on, a Kill is
 	// rejected at the daemon's ADMISSION gate with "kill already in progress for
 	// session X" — a message about an operation the user never started. canKillFor
-	// is what hides the affordance, and it reads the op axis alone, so a fence
-	// raised only at :RecoverHeldFencedWithLiveBoundary left the row at
-	// {LiveLost, OpNone} through both network phases below: a 5s liveness probe and
-	// a pre-reap push bounded at 3m30s. For up to ~3m35s the TUI and the web UI
-	// advertised a Kill that could only fail (#3533, whose fenced suffix #3534
-	// fixed). The claim's interval and the fence's interval are now the same one.
+	// is what hides the affordance, and it reads the op axis alone, so raising the
+	// fence inside the backend call — where RecoverFencedWithLiveBoundary raised it
+	// before this change — left the row at {LiveLost, OpNone} through both network
+	// phases below: a 5s liveness probe and a pre-reap push bounded at 3m30s. For up
+	// to ~3m35s the TUI and the web UI advertised a Kill that could only fail
+	// (#3533, whose fenced suffix #3534 fixed). The claim's interval and the fence's
+	// interval are now the same one.
 	//
 	// It is raised AFTER the LiveDead -> LiveLost normalization above because the
 	// fence's own precondition is LiveLost: raising it first would refuse every Dead
