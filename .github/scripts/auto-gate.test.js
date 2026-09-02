@@ -2475,6 +2475,11 @@ test("the dispatch contract survives the spellings that hid from the parser", ()
     false,
   );
 
+  // A push-payload predicate never names the event and is true only for a push:
+  // `github.event.head_commit` is absent on a dispatch, so the job is skipped.
+  assert.equal(admitsDispatch("github.event.head_commit != null"), false);
+  assert.equal(admitsDispatch("github.event.head_commit != null || github.event_name == 'workflow_dispatch'"), true);
+
   // A YAML alias resolves to a trigger GitHub honours and this scan cannot read,
   // so it is reported unreadable rather than answering "no push".
   assert.equal(usesUnresolvableYaml(onSection("on: *push_event\njobs:\n")), true);
@@ -2608,23 +2613,26 @@ test("the master-verify list names every workflow that gates master on push", ()
     );
 
     // The dispatched run must reach the same jobs the suppressed push would
-    // have. Keyed on any `if:` condition that consults github.event_name at all,
-    // rather than on one spelling of one comparison: `'push' == github.event_name`
-    // and `github.event_name != 'workflow_dispatch'` exclude the dispatch just as
-    // effectively. Non-conditions that read the event — an env passthrough, a
-    // concurrency `cancel-in-progress` — gate nothing and are not conditions.
+    // have. Keyed on any `if:` condition that consults the EVENT at all — its
+    // name or its payload — rather than on one spelling of one comparison.
+    // `'push' == github.event_name` and `github.event_name != 'workflow_dispatch'`
+    // exclude a dispatch just as effectively as the canonical form, and a payload
+    // predicate like `github.event.head_commit != null` never mentions the name
+    // while being true only for a push. Non-conditions that read the event — an
+    // env passthrough, a concurrency `group:` — gate nothing and are not
+    // conditions.
     const lines = file.split("\n");
     for (const [index, line] of lines.entries()) {
       if (!/^\s*if:/.test(line)) {
         continue;
       }
       const condition = declarationBlock(lines.slice(index).join("\n"), /^\s*if:/);
-      if (!/github\.event_name/.test(condition)) {
+      if (!/github\.event(?:_name|\.)/.test(condition)) {
         continue;
       }
       assert.ok(
         admitsDispatch(condition),
-        `${name} gates a job or step on the event name without admitting workflow_dispatch, so ` +
+        `${name} gates a job or step on the event without admitting workflow_dispatch, so ` +
           `the re-raised run would skip it: ${condition.trim()}`,
       );
     }
