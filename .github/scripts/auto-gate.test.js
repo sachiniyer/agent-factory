@@ -515,6 +515,83 @@ test("a newer generation taken during a write retry stops the PASS", async () =>
   );
 });
 
+test("ownership is re-established alongside the guard, not before it", async () => {
+  // Codex P1 (round 5): confirmNativeAutoMergeDisabled performs its own
+  // retrying read, so an ownership check sequenced BEFORE it is stale by that
+  // read's duration — including its backoff. An invalidation landing in that
+  // window was invisible and the transaction still published PASS to a
+  // superseded check run.
+  //
+  // Concurrency is the claim, so the test records start AND end of each read:
+  // issued together, the second read starts before the first finishes. Sequenced,
+  // it cannot.
+  const order = [];
+  const github = fakeGateGithub({ author: "detail-app" });
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    const ownership = fn === github.rest.checks.listForRef;
+    if (ownership) {
+      order.push("ownership:start");
+    }
+    const result = await realPaginate(fn, options);
+    // Yield twice, so a sequential implementation cannot appear interleaved.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (ownership) {
+      order.push("ownership:end");
+    }
+    return result;
+  };
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    const autoMerge = query.includes("query AutoMergeState");
+    if (autoMerge) {
+      order.push("auto-merge:start");
+    }
+    const result = await realGraphql(query, variables);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (autoMerge) {
+      order.push("auto-merge:end");
+    }
+    return result;
+  };
+  const realUpdate = github.rest.checks.update;
+  github.rest.checks.update = async (options) => {
+    if (options.output?.title?.startsWith("PASS: every open master PR")) {
+      order.push("publish");
+    }
+    return realUpdate(options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  const publish = order.lastIndexOf("publish");
+  assert.ok(publish > 0, "the aggregate PASS must have been published");
+  const guardWindow = order.slice(0, publish);
+  const ownershipStart = guardWindow.lastIndexOf("ownership:start");
+  const ownershipEnd = guardWindow.lastIndexOf("ownership:end");
+  const autoMergeStart = guardWindow.lastIndexOf("auto-merge:start");
+  const autoMergeEnd = guardWindow.lastIndexOf("auto-merge:end");
+  assert.ok(ownershipStart >= 0 && autoMergeStart >= 0, "both preconditions must run");
+  // Interleaved: each starts before the other ends. Neither is stale by the
+  // duration of the other's read — including that read's retry backoff.
+  assert.ok(
+    autoMergeStart < ownershipEnd && ownershipStart < autoMergeEnd,
+    `the preconditions must be issued together, not sequenced; got ${JSON.stringify(order.slice(-8))}`,
+  );
+  // …and both finish immediately before the write.
+  assert.ok(
+    Math.max(ownershipEnd, autoMergeEnd) === publish - 1,
+    `nothing may read between the preconditions and the green; got ${JSON.stringify(order.slice(-8))}`,
+  );
+});
+
 test("a guard read failure blocks cleanly instead of being retried as a write", async () => {
   // Codex P2 (round 4): a failing precondition is not a failing write. Left to
   // the write's retry classifier it was reissued three more times — nine reads —

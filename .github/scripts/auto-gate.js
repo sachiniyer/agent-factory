@@ -770,18 +770,32 @@ async function reportAggregateDecision({
     // runs before them is stale by the time the green is published. Only a PASS
     // carries it — a red publish authorizes nothing.
     beforePublish: aggregate.ok
-      ? async ({ attempt }) => {
-          // The generation check above ran once, before the write. A retry sleeps
-          // and reissues, so a newer event's invalidation — which runs OUTSIDE
-          // this head's serialized lane — can take ownership during the backoff
-          // and the retry would publish PASS over it. Re-established per attempt;
-          // the first attempt is already covered by the check above.
-          if (attempt > 0 && checkRunId) {
-            await assertStillOwnsAggregate({ github, context, headSha: aggregate.headSha, checkRunId });
-          }
-          if (typeof beforePublish === "function") {
-            await beforePublish({ pullNumbers: aggregate.pullNumbers });
-          }
+      ? async () => {
+          // Both preconditions, CONCURRENTLY, on every attempt.
+          //
+          // Concurrent because ordering them makes whichever runs first stale by
+          // the other's duration — and each performs its own retrying read, so
+          // that duration can include a backoff. Sequenced either way, an event
+          // landing inside the second read's window is invisible to the first.
+          // Issued together, neither observation is stale relative to the other,
+          // and the only interval left is the write itself.
+          //
+          // On every attempt because a retried write sleeps and reissues: the
+          // generation check at the top of reportAggregateDecision covers the
+          // moment the decision was built, not the moment each attempt writes.
+          await Promise.all([
+            checkRunId
+              ? assertStillOwnsAggregate({
+                  github,
+                  context,
+                  headSha: aggregate.headSha,
+                  checkRunId,
+                })
+              : Promise.resolve(),
+            typeof beforePublish === "function"
+              ? beforePublish({ pullNumbers: aggregate.pullNumbers })
+              : Promise.resolve(),
+          ]);
         }
       : undefined,
   });
