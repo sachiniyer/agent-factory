@@ -356,6 +356,15 @@ func verifyResolvedAccountBoundary(targets, configured []string) error {
 // none, and walking an account home — which internal/sessionenv defines as the
 // agent's WHOLE home, history included — on every provision would be work with
 // no question behind it (#3602 review).
+//
+// What reading the host side gives up, so it is not discovered later: an aliased
+// --device under dockerAccountRuntimeHome is NOT detected. af creates that
+// directory inside the container, so a node there is written into the
+// container's own filesystem, leaves nothing on the host, and dies with the
+// container — while verifyConfiguredAccountBoundary still refuses a
+// non-aliased one, because Docker recorded the path. What is given up is
+// container-local nuisance, never the credential substitution this file exists
+// to stop.
 func verifyAccountDeviceResidue(accountFS fs.FS, accountSource string, devices []dockerInspectDevice, configured []string) error {
 	if len(devices) == 0 {
 		return nil
