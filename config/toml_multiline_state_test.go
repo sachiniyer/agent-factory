@@ -336,3 +336,85 @@ echo done'''
 	assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
 	assert.Equal(t, "echo start\n[network]\nlisten_addr = \"decoy:1\"\necho done", cfg.OnArchiveCommand)
 }
+
+// TestSetTOMLScalarInsertsAfterAMultilineValue is the other half of the
+// string-content mask, and the one a naive fix breaks. Those lines are skipped
+// as SYNTAX but still count as CONTENT of their section, so a key that has to be
+// inserted lands after the whole value. Treating them as nothing at all would
+// splice the new key into the middle of somebody's shell script — trading one
+// corruption for another.
+func TestSetTOMLScalarInsertsAfterAMultilineValue(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		section string
+		leaf    string
+		want    string
+	}{
+		{
+			name: "root key after a root multiline value",
+			content: `on_archive_command = '''echo start
+echo done'''
+`,
+			leaf: "branch_prefix",
+			want: `on_archive_command = '''echo start
+echo done'''
+branch_prefix = 'new/'
+`,
+		},
+		{
+			name: "sectioned key after a sectioned multiline value",
+			content: `[sandbox]
+ssh = '''echo start
+echo done'''
+`,
+			section: "sandbox",
+			leaf:    "other",
+			want: `[sandbox]
+ssh = '''echo start
+echo done'''
+other = 'new/'
+`,
+		},
+		{
+			name: "a blank line inside the value does not end the section's content",
+			content: `[sandbox]
+ssh = '''echo start
+
+echo done'''
+`,
+			section: "sandbox",
+			leaf:    "other",
+			want: `[sandbox]
+ssh = '''echo start
+
+echo done'''
+other = 'new/'
+`,
+		},
+		{
+			name: "trailing blanks before the next section are still excluded",
+			content: `on_archive_command = '''echo start
+echo done'''
+
+[sandbox]
+ssh = 'x'
+`,
+			leaf: "branch_prefix",
+			want: `on_archive_command = '''echo start
+echo done'''
+branch_prefix = 'new/'
+
+[sandbox]
+ssh = 'x'
+`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := setTOMLScalar(tt.content, tt.section, tt.leaf, "'new/'")
+			assert.Equal(t, tt.want, got)
+			var shape map[string]any
+			require.NoError(t, toml.Unmarshal([]byte(got), &shape), "the result must still parse")
+		})
+	}
+}
