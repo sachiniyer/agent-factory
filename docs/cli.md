@@ -118,11 +118,14 @@ af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "... {{line}} ..."] [--target-session <title>]
 af tasks get <id>
+af tasks show <id>             # human-readable: schedule health and audit trail
 af tasks update <id> [--cron ...|--watch-cmd ...] [--prompt ...] [--target-session ...] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id>          # reload an edited watch script (watch tasks only)
 af tasks trigger <id>          # run a cron task immediately (cron tasks only)
 af tasks remove <id>
 ```
+
+`af tasks show` answers "is this thing actually running?": the trigger, whether the daemon has it armed, when the live scheduler entry fires next, whether it has missed scheduled runs and how many, and the bounded audit trail of who created, updated, enabled, or disabled it. The same facts ride `af tasks list`/`get` as the `overdue`, `missed_occurrences`, `next_run_at`, `arming` and `audit` fields, and `af doctor` raises a WARN row for any task that has stopped firing. See [tasks.md](tasks.md#is-it-actually-firing).
 
 Exactly one of `--cron` / `--watch-cmd` per task. On `update`, setting one trigger clears the other. `--target-session ""` explicitly reverts to create-a-session-per-run; omitting the flag leaves it untouched. `--project-path` moves the task to that repository; `--repo` still names the task's current project for authorization. `--program` accepts the same agent enum as `tasks add`; omitting it keeps the task's current program.
 

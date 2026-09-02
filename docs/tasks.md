@@ -32,6 +32,13 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `program` | Agent to run (`claude`, `codex`, `aider`, `gemini`, `amp`, `opencode`, `devin`). Empty = configured `default_program` |
 | `enabled` | Disabled tasks never fire; their watch script is stopped |
 | `last_run_at` / `last_run_status` | Set by the daemon: `started` (session created), `sent` (prompt delivered into a session), `parked: usage limit` (the session hit a plan usage-limit wall at startup and is parked, not failed — see [usage-limits.md](usage-limits.md#task-runs-park-dont-fail)), and for watch tasks `stopped` / `errored` (see below) |
+| `audit` | Bounded trail (last 20 entries) of mutations to this task: `{at, actor, action, fields}`, where `action` is `created` / `updated` / `enabled` / `disabled` and `actor` is the surface that made it (`cli`, `tui`, `api`, `daemon-upgrade`, `unknown`). Written by the task store inside the same locked write that commits the change; never a client input. See [Is it actually firing?](#is-it-actually-firing) |
+| `overdue` / `missed_occurrences` | **Derived at read time, never stored.** Whether an enabled cron task has gone more than one slack window past its most recent scheduled occurrence, and how many fires the schedule has had since — both measured from the latest of its last run, its last enable or retime, and its creation. Absent (`false` / `0`) on a task that is on schedule |
+| `missed_occurrences_capped` | **Derived at read time, never stored.** The count above hit the derivation's cap (10000) and is a *floor*, not an exact number |
+| `unschedulable` | **Derived at read time, never stored.** The scheduler cannot derive a next run from this task's cron expression — it does not parse, or nothing matches within its search horizon. Such a task is not overdue (nothing was ever due) and is not healthy either |
+| `unassessable` | **Derived at read time, never stored.** No lateness verdict could be reached: there is no instant to measure from, or none the schedule can be evaluated against. Unknown, not healthy |
+| `next_run_at` | **Derived at read time, never stored.** When the daemon's *live* scheduler entry will next fire this task — read off what is armed, not recomputed from `cron_expr`. Absent when the task is not armed, and that absence is itself the signal |
+| `arming` | **Derived at read time, never stored.** `armed`, `not-armed`, or absent when no running daemon answered (nothing observed it — which is not the same as "not armed") |
 
 A task with both triggers set is always invalid. An enabled task must have exactly one; a disabled task with neither is tolerated as a draft. An enabled cron task must carry a non-empty prompt — there is no event line to fall back to. Watch tasks are exempt (empty prompt defaults to the emitted line). Disabled drafts are tolerated regardless of prompt.
 
@@ -175,6 +182,40 @@ The TUI Tasks pane shows each watch task's supervision state, derived from the p
 - **stopped** — script exited 0 (or the task is disabled)
 - **errored** — crash-loop breaker tripped, or arming refused the task because its target relationship is unsafe (e.g. the target session is archived). The full `last_run_status`, shown on the row's detail line, says which; for a crash loop, check `~/.agent-factory/logs/task-<id>.log`
 
+## Is it actually firing?
+
+`enabled: true` is a claim about this instant, not about whether the task is running. Two enabled hourly tasks once went dark for 18 days on a healthy daemon and every surface still reported them healthy: their `last_run_status` said `started`, because the last run really did start — 18 days earlier — and the one place that showed a next-fire time recomputed it from `cron_expr`, so the rail cheerfully rendered `next 04:20 · last Aug 14 14:20` and left the subtraction to the reader (#3623).
+
+Three things answer it now, and none of them adds a field to `tasks.json`.
+
+**Overdue is derived.** Every read compares a cron task's `last_run_at` against its own schedule. The task is overdue when its most recent scheduled occurrence is more than one **slack window** later than that last run, where the slack is one full period of its own schedule (or five minutes, whichever is larger). One period is the only lateness indistinguishable from ordinary operation — an hourly task whose last run was 59 minutes ago simply has not reached its next occurrence — so a daily task is owed a day and a per-minute watchdog is owed five minutes. A task that has never run measures from `created_at`, which is what catches one created and then never armed.
+
+Lateness is measured from the **latest** of the last run, the last time the schedule the task is on *began*, and (for a task that has never run) its creation. The schedule begins when the task is enabled or when its `cron_expr` changes — both are a fresh start, exactly as a first run is. Without that rule a task deliberately paused and switched back on would report every occurrence it missed while intentionally off (#3623's own tasks, disabled 2026-08-14 and re-enabled 2026-09-01, would have read `overdue · missed 432` from the moment they came back until their next fire), and a daily task retimed to run every minute would immediately claim a day of per-minute misses that happened before that schedule existed. An ordinary edit — the prompt, the target session, the program — restarts nothing.
+
+Those times come from the audit trail below, so they are bounded too: a restart old enough to have fallen out of the window leaves the reference at the last run, which can only make the verdict more eager, never hide a task that has genuinely stopped.
+
+A record with **none** of those — no last run, no creation time, no trail — is reported as `unassessable` rather than healthy. Every create is stamped, so only a hand-edited row can get there, but "on schedule" would be a clean bill for a task that may never have fired. The same verdict covers a reference the schedule cannot be evaluated against, which a long-gap expression reaches (see below). `af doctor` treats both as unknowns: named in the row, never an alarm, and the rail marks the row `[?]`.
+
+An expression **the scheduler cannot fire** is reported in its own right, as `unschedulable`. That covers an expression that does not parse (a hand-edited or legacy row the scheduler refuses) and one that parses but matches no date within the scheduler's five-year search horizon — `0 0 31 2 *` is February 31st, which it happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `[!]` (its detail reads `No upcoming run`, or `Invalid cron expression` when it does not parse), and `af tasks show` and the `af doctor` row say so instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
+
+The verdict is deliberately a claim about the **scheduler**, not about the calendar: the scheduler is what will or will not run the task, and it consults the same horizon. `0 0 29 2 *` asked in 2096 finds no match before 2104 — 2100 is not a leap year — so the daemon will not fire it during that window even though the calendar eventually would. "Cannot be scheduled" is true and actionable in both cases; "can never fire" would be false in the second.
+
+Watch tasks are never overdue: they fire when their command emits a line, which may legitimately be never. Neither is a disabled task — whether disabling it was *intended* is what the audit trail answers.
+
+**`next_run_at` comes from the live scheduler entry.** Present when the daemon has the task armed, absent when it does not. An enabled task with `arming: "not-armed"` is **enabled but not armed**: it will not fire at all until that is fixed (check the daemon log for an arming refusal, then `af daemon restart`). When no daemon answers, `arming` is absent — nothing observed it — and no surface reports that as "not armed".
+
+**Every mutation leaves a line.** `audit` records who created, updated, enabled, or disabled the task, when, and which fields moved, bounded to the last 20 entries. The store writes it inside the same locked operation that commits the change, diffed against the record actually replaced, so it cannot describe a change that did not happen.
+
+```bash
+af tasks show <id>              # trigger, arming, next run, overdue verdict, audit trail
+af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error}: use .data[]
+af doctor                       # WARN row naming overdue and unarmed tasks
+```
+
+`af doctor` raises one row under **Automations**: `N enabled tasks have not fired on schedule; oldest missed <time> — <id> "<name>" (missed N)`, plus any task that is enabled but not armed, plus any whose expression the scheduler cannot fire. It exits non-zero on those, so a health probe on a box nobody watches catches a task that quietly stopped. Tasks whose health could not be established are named in the row but never raise an alarm, and only cron tasks are counted as "firing on schedule" — a watch task has no schedule, so an armed watcher proves its process is supervised and nothing more.
+
+In the TUI, an automation that has stopped firing — or whose expression the scheduler cannot fire — carries a static `[!]` in place of its enabled tick, and its expanded row leads with the reason (`overdue · missed N`, or `Invalid cron expression`). One whose health could not be established carries `[?]` and reads `Health unknown`: an unknown is not a failure, so it is marked but never counted as one.
+
 ## Daemon lifecycle
 
 The daemon is the single scheduler host: it evaluates cron expressions and supervises watch scripts.
@@ -204,6 +245,7 @@ af tasks list [--all]
 af tasks add --name <n> --prompt <p> --cron "0 9 * * *" [--target-session <title>] [--on-complete keep|archive|kill] [--program <agent>]
 af tasks add --name <n> --watch-cmd <cmd> [--prompt "… {{line}} …"] [--target-session <title>] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill]
 af tasks get <id>
+af tasks show <id>             # human-readable: schedule health and audit trail
 af tasks update <id> [--cron …|--watch-cmd …] [--prompt …] [--target-session …] [--max-concurrent-runs <n>] [--on-complete keep|archive|kill] [--project-path <repo>] [--program <agent>] [--enabled true|false]
 af tasks restart <id>          # enabled watch tasks only; reloads an edited script
 af tasks trigger <id>          # cron tasks only

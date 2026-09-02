@@ -1276,6 +1276,25 @@
       "notes": "Scripting read-verb; both UIs render the task list continuously."
     },
     {
+      "id": "task.health",
+      "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
+      "tui": {
+        "status": "partial",
+        "pointer": "ui/automations.go titleRow ([!] on an overdue row) and nextRunSummary (\"overdue \u00b7 missed N\")"
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/tasks_show.go tasksShowCmd; the same fields ride af tasks list/get --json, and doctor/tasks.go raises the af doctor row"
+      },
+      "verdict": "real-gap",
+      "issue": "#3626",
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. The TUI cell is partial for a structural reason rather than an oversight \u2014 the Automations rail loads tasks.json directly on its 750ms poll (app/sync.go -> task.LoadTasksForKnownRepo), so it gets the pure overdue derivation for free and can never observe arming, which only the daemon holding the scheduler can see; it shows neither arming nor the trail. The web task list shows none of it, which leaves a web-only user exactly where every user was before #3623. #3626 tracks both."
+    },
+    {
       "id": "task.list",
       "title": "List tasks",
       "tui": {
@@ -1543,6 +1562,7 @@
       "af tasks list": "task.list",
       "af tasks remove": "task.remove",
       "af tasks restart": "task.restart",
+      "af tasks show": "task.health",
       "af tasks trigger": "task.trigger",
       "af tasks update": "task.edit",
       "af token rotate": "daemon.token",
@@ -1844,6 +1864,7 @@
       "af tasks get --help": "meta.discovery",
       "af tasks list --all": "task.list",
       "af tasks list --help": "meta.discovery",
+      "af tasks show --help": "meta.discovery",
       "af tasks remove --help": "meta.discovery",
       "af tasks restart --help": "meta.discovery",
       "af tasks trigger --help": "meta.discovery",
@@ -2014,6 +2035,30 @@
       },
       "AddTaskRequest": {
         "cli": {
+          "task.arming": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.missed_occurrences_capped": {
+            "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+          },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+          },
+          "task.missed_occurrences": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_at": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.overdue": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.audit": {
+            "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+          },
           "task.last_run_at": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
@@ -2025,6 +2070,30 @@
           }
         },
         "tui": {
+          "task.arming": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.missed_occurrences_capped": {
+            "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+          },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+          },
+          "task.missed_occurrences": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.next_run_at": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.overdue": {
+            "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+          },
+          "task.audit": {
+            "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+          },
           "task.last_run_at": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
@@ -2225,6 +2294,9 @@
         }
       },
       "UpdateTask": {
+        "actor": {
+          "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        },
         "update.max_concurrent_runs": {
           "gap": "task.max-concurrent-runs"
         },
@@ -2233,6 +2305,33 @@
         }
       },
       "AddTask": {
+        "actor": {
+          "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        },
+        "task.arming": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.missed_occurrences_capped": {
+          "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+        },
+        "task.unschedulable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+        },
+        "task.unassessable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+        },
+        "task.missed_occurrences": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.next_run_at": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.overdue": {
+          "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
+        },
+        "task.audit": {
+          "ok": "Store-owned append-only history (#3623): task.AddTaskChecked/UpdateTaskChecked write each entry inside the locked mutation, diffed against the record actually replaced. A client-supplied trail could describe a change that never happened, which is the one thing an audit trail must not do."
+        },
         "task.last_run_at": {
           "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
         },

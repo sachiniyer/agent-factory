@@ -16,6 +16,7 @@ const (
 	sectionEnvironment = "Environment"
 	sectionConfig      = "Config & Storage"
 	sectionDaemon      = "Daemon"
+	sectionAutomations = "Automations"
 	sectionRemote      = "Remote Hooks"
 	sectionProcesses   = "Session & Process Health"
 )
@@ -24,6 +25,7 @@ var sectionOrder = []string{
 	sectionEnvironment,
 	sectionConfig,
 	sectionDaemon,
+	sectionAutomations,
 	sectionRemote,
 	sectionProcesses,
 }

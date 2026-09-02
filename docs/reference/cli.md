@@ -72,6 +72,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 - [`af token`](#af-token) — Manage the daemon's bearer token for the direct-TCP API
@@ -2280,6 +2281,7 @@ af tasks
 - [`af tasks list`](#af-tasks-list) — List tasks in the current project
 - [`af tasks remove`](#af-tasks-remove) — Remove a task in the current project
 - [`af tasks restart`](#af-tasks-restart) — Restart an enabled watch task without process overlap
+- [`af tasks show`](#af-tasks-show) — Show one task's schedule health and audit trail
 - [`af tasks trigger`](#af-tasks-trigger) — Trigger a task in the current project to run immediately
 - [`af tasks update`](#af-tasks-update) — Update a task in the current project
 
@@ -2414,6 +2416,33 @@ The task must belong to the resolved project: --repo when given, otherwise the c
 
 ```
 af tasks restart <id>
+```
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af tasks show
+
+Show one task's schedule health and audit trail
+
+Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
+
+Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
+
+"Enabled but not armed" means the task is enabled on disk and the running daemon is not holding it: it will not fire until that is fixed. When nothing has reported on it — no daemon running, or one still starting up — the arming state is reported as unknown rather than guessed.
+
+The task must belong to the resolved project: --repo when given, otherwise the current directory's project. Outside a git repository there is no project context and the id resolves globally.
+
+Pass --json for the same record `af tasks get` returns, in the {data,error} envelope.
+
+```
+af tasks show <id>
 ```
 
 **Global flags**

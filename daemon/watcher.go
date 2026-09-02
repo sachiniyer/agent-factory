@@ -112,6 +112,10 @@ type watcherSupervisor struct {
 	// stays available while Stop joins in-flight deliveries, so a concurrent
 	// ReloadTasks RPC must not repopulate the map after Stop snapshots it.
 	stopped bool
+	// armed latches on the first completed reload, for the same reason the cron
+	// scheduler's does: before arming has run, an empty watcher map means "not
+	// observed yet", never "this watch task is not armed" (#3623).
+	armed bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
@@ -187,6 +191,14 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 			log.WarningLog.Printf("not watching task with invalid id %q: %v", t.ID, err)
 			continue
 		}
+		// Duplicate IDs in a hand-edited store: watch the FIRST occurrence, which
+		// is what the cron scheduler already does (#855). A map assignment quietly
+		// kept the LAST instead, so the two subsystems disagreed about which row a
+		// duplicated ID meant — and nothing anywhere said a row had been skipped.
+		if _, dup := desired[t.ID]; dup {
+			log.WarningLog.Printf("duplicate task ID %q in tasks.json, watching only its first occurrence", t.ID)
+			continue
+		}
 		desired[t.ID] = t
 	}
 
@@ -218,6 +230,7 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 		s.watchers[id] = w
 		go w.run()
 	}
+	s.armed = true
 
 	// Queue files for tasks that no longer exist at all are removed — a
 	// deleted task's backlog must not replay into a recreated namesake. A

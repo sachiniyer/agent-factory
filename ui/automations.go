@@ -30,6 +30,18 @@ var automationsEnabledStyle = lipgloss.NewStyle().
 var automationsDisabledStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.ForegroundMuted)
 
+// automationsOverdueStyle paints the overdue marker and its detail text in the
+// theme's warning color. It is a color and a static glyph and nothing else — no
+// spinner, no blink (#1766): state reads from a glyph in this app.
+var automationsOverdueStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.Warning)
+
+// automationsUnknownStyle paints a row whose health could not be established.
+// Muted rather than warning-colored on purpose: an unknown is not a failure, and
+// coloring it like one trains people to ignore the rows that are.
+var automationsUnknownStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.ForegroundMuted)
+
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
 // color the instances tree uses for instance titles (tree.InstanceTitleColor),
 // so the automations rail and the instance list above it read as one stacked
@@ -200,11 +212,39 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	if tsk.IsWatch() {
 		parts = append(parts, watchTaskStatus(tsk))
 	} else if tsk.Enabled && tsk.CronExpr != "" {
-		if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
-			if next := sched.Next(a.now()); next.IsZero() {
-				parts = append(parts, "No upcoming run")
-			} else {
-				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+		switch {
+		case tsk.NextRunAt != nil:
+			// The LIVE armed entry when the record carries one (#3623): a number
+			// read off the scheduler cannot promise a fire the scheduler is not
+			// holding.
+			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+		case tsk.Arming == task.ArmingNotArmed:
+			parts = append(parts, "not armed")
+		default:
+			// The rail reads tasks.json directly rather than through the daemon, so
+			// it usually has no live entry to read and falls back to evaluating the
+			// expression. That fallback is what used to render a confident "next"
+			// for a task that had been dark for 18 days; the warning fragment below
+			// is what stops it being read as health.
+			// An unschedulable expression says nothing here — neither shape of it.
+			// attentionFragment diagnoses both, and it LEADS the detail line so the
+			// reason survives the rail's clip; repeating it after the trigger would
+			// only push the line further past the width.
+			//
+			// The record's verdict is what decides, not a second local evaluation:
+			// the two must not be able to disagree about the same task. A record
+			// with no verdict on it (a caller that did not annotate) still falls
+			// through to the evaluation below, which is where "No upcoming run"
+			// came from before (#2596).
+			if tsk.Unschedulable {
+				break
+			}
+			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
+				if next := sched.Next(a.now()); next.IsZero() {
+					parts = append(parts, "No upcoming run")
+				} else {
+					parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+				}
 			}
 		}
 	}
@@ -239,6 +279,21 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	if !tsk.Enabled {
 		glyph, glyphStyle = "[✗]", automationsDisabledStyle
 	}
+	// An overdue task takes over the enabled glyph rather than adding a column
+	// (#3623). It can only ever BE enabled — the derivation says nothing about a
+	// disabled task — so the two can never collide, and replacing the mark keeps
+	// the row exactly as wide as it was at the 22-column rail minimum. Collapsed
+	// rows are the point: a warning you have to focus a row to see is one nobody
+	// sees.
+	// An unknown gets its own mark rather than borrowing either neighbour's. A
+	// tick would be the claim this whole change exists to stop making, and "[!]"
+	// would call an unestablished thing a failure (#3623 review).
+	if tsk.Unassessable {
+		glyph, glyphStyle = "[?]", automationsUnknownStyle
+	}
+	if needsAttention(tsk) {
+		glyph, glyphStyle = "[!]", automationsOverdueStyle
+	}
 	marker := " "
 	nameStyle := automationItemTitleStyle
 	if expanded {
@@ -264,6 +319,13 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 // that used to trail every collapsed row (#1126). Empty when a task has neither.
 func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	var parts []string
+	// An overdue task leads with the problem, ahead of its own configuration
+	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
+	// sits last is what gets cut: at the 22-column minimum the cron expression
+	// would survive and the warning would not, which is backwards.
+	if fragment := attentionFragment(tsk); fragment != "" {
+		parts = append(parts, fragment)
+	}
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
 		trigger = "watch: " + tsk.WatchCmd
@@ -277,6 +339,52 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	return strings.Join(parts, " · ")
 }
 
+// needsAttention reports whether the row carries a warning: the task has stopped
+// firing on its schedule, or its expression can never fire at all. Both are read
+// off the record, so the rail's disk-backed poll sees them without a daemon.
+func needsAttention(tsk task.Task) bool {
+	return tsk.Overdue || tsk.Unschedulable
+}
+
+// attentionFragment is the detail line's warning text, or "" when the row is
+// healthy. The missed count is omitted rather than printed as zero when the walk
+// found none — an uncounted "missed 0" beside "overdue" reads as a
+// contradiction — and a count that hit the derivation's cap is marked with a
+// trailing "+" so a floor never renders as an exact number.
+func attentionFragment(tsk task.Task) string {
+	if tsk.Unassessable {
+		// Says what could not be done rather than what is wrong, and leads the line
+		// for the same reason the others do — the rail clips from the right.
+		return "Health unknown"
+	}
+	if tsk.Unschedulable {
+		// Both shapes are diagnosed HERE, at the front, for the same reason the
+		// overdue fragment leads: at the 22-column rail minimum the line is clipped
+		// from the right, and a reason sitting behind the expression leaves the
+		// mark unexplained. Leaving the parsing case to the next/last summary put
+		// its "No upcoming run" after the trigger, which clipped to
+		// "0 0 31 2 * · …" — a [!] row with no explanation, the exact failure the
+		// mark exists to prevent (#3623 review).
+		//
+		// nextRunSummary suppresses its own copy when the record says
+		// unschedulable, so the line says this once.
+		if _, err := task.ParseCron(tsk.CronExpr); err != nil {
+			return "Invalid cron expression"
+		}
+		return "No upcoming run"
+	}
+	if !tsk.Overdue {
+		return ""
+	}
+	if tsk.MissedOccurrences <= 0 {
+		return "overdue"
+	}
+	if tsk.MissedOccurrencesCapped {
+		return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+	}
+	return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
+}
+
 // detailRow renders the expanded row's detail as a dim line indented under the
 // title, ellipsized to the rail width. Returns "" when the task has no detail.
 func (a *AutomationsPane) detailRow(tsk task.Task) string {
@@ -286,6 +394,25 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	}
 	indent := strings.Repeat(" ", itemPrefixWidth)
 	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
+}
+
+// attentionCount returns how many of the projection's tasks carry a WARNING —
+// stopped firing, or an expression the scheduler cannot fire. Only enabled cron
+// tasks can (see task.DeriveScheduleHealth).
+//
+// Tasks whose health could not be established are deliberately absent: the
+// compact summary this feeds answers "is anything wrong?", and an unknown is not
+// an answer of yes. Same line `af doctor` draws — unknowns are named where there
+// is room and never raise an alarm — and the rows carry "[?]" for it at any
+// width that has rows at all.
+func (a *AutomationsPane) attentionCount() int {
+	n := 0
+	for _, tsk := range a.proj.GetTasks() {
+		if needsAttention(tsk) {
+			n++
+		}
+	}
+	return n
 }
 
 // enabledCount returns how many of the projection's tasks are enabled.
@@ -336,6 +463,35 @@ func (a *AutomationsPane) String() string {
 			noun:    "Automations:",
 			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
 			primary: fmt.Sprintf("%d", len(tasks)),
+		}
+		if attention := a.attentionCount(); attention > 0 {
+			// The degraded one-line mode has no rows, so this line IS the section —
+			// and it is the narrowest thing the rail draws. A task that has stopped
+			// firing is easiest to miss exactly here, so the count rides the header
+			// (#3623).
+			//
+			// It becomes the PRIMARY as well as riding the counts, which is what
+			// #3641's ladder is for: when the width sheds everything but one number,
+			// the number that must survive is the one saying something is wrong, not
+			// the total.
+			//
+			// The primary carries the ROW GLYPH rather than the word, and that is a
+			// width decision rather than a style one. #3641's last rung exists to
+			// keep the manage affordance from being clipped at the 22-column rail
+			// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
+			// measured, it fell straight through to the clip and truncated the
+			// affordance, which is the contract that rung was added to protect. A
+			// spelling picked by digit count would be no better: rebinding the
+			// manager key changes the budget. "[!] 100" fits at any count, and it is
+			// the mark the rows above carry at wider widths.
+			//
+			// The label is the GLYPH rather than the word "overdue", because the
+			// count includes every task carrying the mark — one whose expression the
+			// scheduler cannot fire is not late, and compact mode has no rows to
+			// correct the impression with (#3623 review). It is also what the primary
+			// rung below shows, so the two rungs speak the same vocabulary.
+			header.counts = fmt.Sprintf("%d (%d on · [!] %d)", len(tasks), a.enabledCount(), attention)
+			header.primary = fmt.Sprintf("[!] %d", attention)
 		}
 		style := automationsTitleDimStyle
 		if a.focused {

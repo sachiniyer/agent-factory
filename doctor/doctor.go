@@ -43,6 +43,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Finding is one visible diagnostic observation.
@@ -222,6 +223,12 @@ type Options struct {
 	// checkpointed to disk yet, so an inventory that reads only disk would call
 	// a live session's directory an orphan (#3560).
 	sessionInventory func() ([]session.InstanceData, error)
+
+	// taskInventory returns every task on the box, each carrying whether its
+	// arming was actually observed (task.ArmingUnknown when it was not). Defaults
+	// to daemonTaskInventory; see there for why there is deliberately no
+	// run-level "a daemon answered" flag alongside it.
+	taskInventory func() ([]task.Task, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.
@@ -307,6 +314,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.sessionInventory == nil {
 		o.sessionInventory = daemonSessionInventory
+	}
+	if o.taskInventory == nil {
+		o.taskInventory = daemonTaskInventory
 	}
 	if o.daemonHealth == nil {
 		o.daemonHealth = daemon.Health
@@ -400,6 +410,7 @@ func Run(opts Options) (*Report, error) {
 	checkLeakedTmuxSessions(ctx, report)
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
+	checkTaskSchedules(ctx, report)
 	checkRemoteSetup(ctx, report)
 	checkOrphanedHookHosts(ctx, report)
 

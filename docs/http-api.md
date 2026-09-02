@@ -200,8 +200,14 @@ and a FIELD-LEVEL `update` patch carrying only the fields to change (e.g.
 `{ "id": "ab12cd34", "update": { "enabled": false } }`): the daemon merges the
 patch onto the freshly-loaded record under its file lock and leaves every
 unspecified field — and the scheduler-owned fields — as-stored, so a single-field
-edit cannot clobber a concurrent edit another client made (#1700). See
-[tasks.md](tasks.md) for the task shape.
+edit cannot clobber a concurrent edit another client made (#1700). Both mutating
+calls take an optional `actor` naming the calling surface (`cli`, `tui`, `api`,
+`daemon-upgrade`) for the task's audit trail; a client that sends none is
+recorded from the transport, so an HTTP caller is `api` (#3623). Every task the
+daemon returns carries its schedule health — `overdue`, `missed_occurrences`,
+and, from the live scheduler entry, `next_run_at` and `arming` — derived at read
+time and never stored. See [tasks.md](tasks.md) for the task shape and
+[Is it actually firing?](tasks.md#is-it-actually-firing) for what those mean.
 
 `Snapshot` accepts additive list filters in the request body: `live: true`
 excludes archived sessions; `statuses` is an array of lifecycle names

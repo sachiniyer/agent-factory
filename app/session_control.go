@@ -292,11 +292,11 @@ var triggerTaskThroughDaemon = func(taskID string, expect task.ProjectExpectatio
 // the snapshot fetcher / poll-pause seams).
 var (
 	addTaskThroughDaemon = func(t task.Task) error {
-		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t) })
+		return withDaemonHTTP(func(c *apiclient.Client) error { return c.AddTask(t, task.ActorTUI) })
 	}
 	updateTaskThroughDaemon = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) error {
 		return withDaemonHTTP(func(c *apiclient.Client) error {
-			_, err := c.UpdateTask(id, update, expect)
+			_, err := c.UpdateTask(id, update, expect, task.ActorTUI)
 			return err
 		})
 	}
