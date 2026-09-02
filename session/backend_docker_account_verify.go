@@ -40,7 +40,10 @@ import (
 //
 // The verdict is #3402's policy, unchanged: exactly af's own bind covers
 // dockerAccountHome, and nothing else lands at or under it or
-// dockerAccountRuntimeHome. That is why this ships without a config key — it is
+// dockerAccountRuntimeHome. It is drawn with accountProtectedPath, the SAME
+// predicate the lexical guard uses (#3595 hoisted it), applied to the paths
+// Docker reported rather than to run_args strings — a boundary with two
+// definitions is a boundary that can drift. That is why this ships without a config key — it is
 // the same rule the lexical guard already enforces, applied to what Docker did
 // rather than to what the string said, and no legitimate run_args puts anything
 // under the account path for a knob to re-permit.
@@ -67,34 +70,6 @@ import (
 // residue rather than promising it never happened. #3595's lexical --device
 // check is what stops the non-aliased case BEFORE the container exists, which is
 // why this backs it up rather than replacing it.
-
-// accountBoundaryRoots are the container paths #3402 protects: the account's own
-// mount and the writable runtime HOME af creates beside it.
-func accountBoundaryRoots() []string {
-	return []string{dockerAccountHome, dockerAccountRuntimeHome}
-}
-
-// accountBoundaryRoot reports which protected root a container path falls at or
-// under, or "" when it is outside the boundary. The same predicate the lexical
-// guard draws with, applied to paths Docker reported rather than to run_args
-// strings — at or under the path, never as a substring, which is what keeps
-// /af-account-cache and /af-accountant accepted (#3398).
-//
-// #3595 hoists the identical predicate out of validateAccountDockerRunArgs as
-// accountProtectedPath. Whichever of the two lands second folds this into that
-// one: a boundary with two definitions is a boundary that can drift.
-func accountBoundaryRoot(target string) string {
-	if target == "" {
-		return ""
-	}
-	target = path.Clean(target)
-	for _, protected := range accountBoundaryRoots() {
-		if target == protected || strings.HasPrefix(target, protected+"/") {
-			return protected
-		}
-	}
-	return ""
-}
 
 // dockerInspectMount is the subset of an inspected container's .Mounts entry
 // this check reads. Destination is the CONFIGURED container path — Docker
@@ -217,7 +192,7 @@ func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource str
 			own++
 			continue
 		}
-		if root := accountBoundaryRoot(destination); root != "" {
+		if root := accountProtectedPath(destination); root != "" {
 			return configuredBoundaryRefusal("a "+mount.Type+" mount", mount.Destination, root)
 		}
 	}
@@ -227,12 +202,12 @@ func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource str
 	}
 	sort.Strings(tmpfsTargets)
 	for _, target := range tmpfsTargets {
-		if root := accountBoundaryRoot(target); root != "" {
+		if root := accountProtectedPath(target); root != "" {
 			return configuredBoundaryRefusal("a tmpfs", target, root)
 		}
 	}
 	for _, device := range c.HostConfig.Devices {
-		if root := accountBoundaryRoot(device.PathInContainer); root != "" {
+		if root := accountProtectedPath(device.PathInContainer); root != "" {
 			return configuredBoundaryRefusal("a device node", device.PathInContainer, root)
 		}
 	}
@@ -343,7 +318,7 @@ func verifyResolvedAccountBoundary(targets, configured []string) error {
 			atAccountHome++
 			continue
 		}
-		if root := accountBoundaryRoot(target); root != "" {
+		if root := accountProtectedPath(target); root != "" {
 			return boundaryRefusal(fmt.Sprintf(
 				"the kernel mounted %q, inside af's account boundary at %s, which af did not configure",
 				target, root), resolvedMountCauses(configured), "")
