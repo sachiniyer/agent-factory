@@ -97,7 +97,7 @@ func (m *Manager) refuseHeldBranchReuseLocked(repoID, repoPath, title string, na
 	}
 	return fmt.Errorf("cannot create session %q: the archived session %q still has branch %q checked out at %s, and the new session would derive that same branch. Its branch cannot be moved aside automatically (it is published, externally owned, or its state could not be determined), so freeing the name would not free the branch and the create would fail at `git worktree add` — permanently delete the archived session to release both (%s), or create this session under a different name",
 		title, archived.Title, branch, config.ShellQuotePath(holder),
-		shellsuggest.Command("af", "sessions", "kill", archived.Title))
+		shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, archived.Title))
 }
 
 // reclaimArchivedBranchLocked decides the branch name the archived session moves

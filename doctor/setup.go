@@ -109,7 +109,7 @@ func checkConfig(_ *scanContext, report *Report) *config.Config {
 	if _, statErr := os.Stat(path); statErr != nil {
 		report.addActionableFinding(Finding{
 			Check:  "config",
-			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.Command("af", "config", "set", "default_program", cfg.DefaultProgram), statErr),
+			Detail: fmt.Sprintf("config loaded in memory but %s is not materialized on disk — run `%s` or fix AF home permissions: %v", path, shellsuggest.PositionalCommand("af", []string{"config", "set"}, "default_program", cfg.DefaultProgram), statErr),
 		})
 		return cfg
 	}

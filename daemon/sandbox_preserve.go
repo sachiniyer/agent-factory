@@ -30,7 +30,7 @@ import (
 // bounded either way, which is what the poll needs.
 const sandboxPushTimeout = session.AgentArchiveCallTimeout + 30*time.Second
 
-// forceReapCommandFor renders the per-session escape hatch the refusals below
+// The force-reap suggestion renders the per-session escape hatch the refusals below
 // must name. A guard that blocks without naming its own release is #2917, so
 // every refusal in this file ends with this string.
 //
@@ -58,22 +58,23 @@ func sessionRepoScope(instance *session.Instance) []string {
 	return []string{"--repo", root}
 }
 
-func forceReapCommandFor(instance *session.Instance) []string {
-	// `--` before the title, and the flag before it: shellsuggest quotes an argument
-	// but deliberately leaves option termination to the call site, so a title
-	// beginning with "-" would otherwise be parsed as a flag and the advertised
-	// command would exit "unknown flag" instead of releasing the refusal.
+// forceReapArgvFor is everything before the title: the verb, the resolved scope,
+// and the override flag. The title is passed separately to PositionalCommand,
+// which puts the option terminator between them — a title beginning with "-"
+// would otherwise be parsed as a flag and the advertised command would exit
+// "unknown flag" instead of releasing the refusal (#3432).
+func forceReapArgvFor(instance *session.Instance) []string {
 	args := append([]string{"sessions", "restore"}, sessionRepoScope(instance)...)
-	return append(args, "--force-reap", "--", instance.Title)
+	return append(args, "--force-reap")
 }
 
 func forceReapSuggestionFor(instance *session.Instance) string {
-	return shellsuggest.Command("af", forceReapCommandFor(instance)...)
+	return shellsuggest.PositionalCommand("af", forceReapArgvFor(instance), instance.Title)
 }
 
 func killSuggestionFor(instance *session.Instance) string {
 	args := append([]string{"sessions", "kill"}, sessionRepoScope(instance)...)
-	return shellsuggest.Command("af", append(args, "--", instance.Title)...)
+	return shellsuggest.PositionalCommand("af", args, instance.Title)
 }
 
 // preserveSandboxBeforeReap runs the push that makes a reachable sandbox's work
