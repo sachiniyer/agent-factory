@@ -706,7 +706,9 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 			continue
 		}
 		embedded := baseType(field.Type)
-		if !field.Anonymous || embedded.Kind() != reflect.Struct {
+		// `json:"-"` on the embedding removes it from the document entirely, so
+		// the twin must not promote its members either — json does not.
+		if !field.Anonymous || embedded.Kind() != reflect.Struct || field.Tag.Get("json") == "-" {
 			continue
 		}
 		for j := 0; j < embedded.NumField(); j++ {
@@ -841,17 +843,25 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			case field.PkgPath != "":
 				hidden := value.Field(i)
 				settable := reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem()
-				if field.Anonymous && baseType(field.Type).Kind() == reflect.Struct {
+				if field.Anonymous && baseType(field.Type).Kind() == reflect.Struct &&
+					field.Tag.Get("json") != "-" {
 					// NOT unwalked state: json PROMOTES an anonymous unexported
 					// struct's exported members and mustVisit already plants
 					// them, so planting them again here makes the two fixtures
 					// differ in walked text and the independence check blames
 					// the marshaler for it. Only what is hidden DEEPER inside
 					// is unwalked (#3592 review).
+					//
+					// The tag check is the whole condition, not decoration:
+					// mustVisit rejects `json:"-"` BEFORE it ever reaches its
+					// anonymous clause, so an ignored embedding is not walked at
+					// all and its members are as unplanted as any other hidden
+					// field (#3592 review).
 					plantUnwalkedInto(filler, settable, at, depth+1)
 					continue
 				}
 				filler.fill(settable, at, 0, false)
+				populateOpaque(filler, settable, at)
 				plantUnwalkedInto(filler, settable, at, depth+1)
 			case field.Tag.Get("json") == "-":
 				filler.fill(value.Field(i), at, 0, false)
@@ -869,6 +879,44 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 // encoding against the plain twin and agree every time, whatever *T emits
 // (#3592 review). fill already accepts a reviewed type through a pointer, so
 // this is a shape the walk admits.
+// populateOpaque gives a hidden channel or function a non-nil value.
+//
+// encoding/json cannot serialize either, so the main walk rightly ignores them —
+// but a MARSHALER can read them, and `GitWorktree.hooksDone` is exactly that
+// shape: production sets it and HooksDone() exposes it, so a marshaler gated on
+// `HooksDone() != nil` would keep that gate shut in every fixture that left it
+// nil (#3592 review). Nothing is planted IN them; they are made non-nil so the
+// gate opens.
+//
+// A directional channel is made bidirectionally and converted, since MakeChan
+// refuses a receive-only type. Anything that cannot be populated is recorded as
+// a fixture gap rather than left silently zero.
+func populateOpaque(filler *sentinelFiller, value reflect.Value, path string) {
+	switch value.Kind() {
+	case reflect.Chan:
+		if !value.IsNil() {
+			return
+		}
+		made := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, value.Type().Elem()), 0)
+		value.Set(made.Convert(value.Type()))
+	case reflect.Func:
+		if !value.IsNil() {
+			return
+		}
+		typ := value.Type()
+		value.Set(reflect.MakeFunc(typ, func([]reflect.Value) []reflect.Value {
+			out := make([]reflect.Value, typ.NumOut())
+			for i := range out {
+				out[i] = reflect.Zero(typ.Out(i))
+			}
+			return out
+		}))
+	case reflect.UnsafePointer:
+		filler.unsupported = append(filler.unsupported,
+			path+" (hidden unsafe.Pointer cannot be populated)")
+	}
+}
+
 // jsonMemberName is the member name encoding/json gives a field: the tag's name
 // when it has a usable one, the Go field name otherwise. Only the name — the
 // options after the comma decide nothing here.
