@@ -731,6 +731,29 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 			})
 		}
 	}
+	// Promotion is flattened into the twin, which is faithful only while the
+	// promoted names do not collide with anything else. json resolves a
+	// collision by DEPTH — a direct field at depth zero dominates a promoted one,
+	// and two at the same depth cancel — and a flattened twin has no depths left
+	// to resolve by, so it would answer differently and blame the marshaler.
+	// reflect.StructOf would panic on the duplicate Go name before it got the
+	// chance (#3592 review).
+	//
+	// No reviewed type has that shape, and the guard refuses it rather than
+	// guessing: a twin that cannot represent the type is no baseline for it.
+	seen := map[string]string{}
+	for _, field := range fields {
+		for _, name := range []string{"Go name " + field.Name, "json name " + jsonMemberName(field)} {
+			if previous, dup := seen[name]; dup {
+				t.Fatalf("the plain twin of %s cannot represent it: %s and %s share the %s, and "+
+					"json resolves that by embedding DEPTH, which a flattened twin has thrown "+
+					"away.\n\nTeach plainTwinOf to keep the hierarchy, or drop the exemption for "+
+					"this type — a twin that answers differently from encoding/json is no baseline.",
+					typ, previous, field.Name, name)
+			}
+			seen[name] = field.Name
+		}
+	}
 	twin := reflect.New(reflect.StructOf(fields)).Elem()
 	for i, source := range sources {
 		twin.Field(i).Set(source(value))
@@ -771,6 +794,11 @@ func plantUnwalkedState(filler *sentinelFiller, value reflect.Value) []string {
 
 func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string, depth int) {
 	if depth > guardMaxDepth {
+		// Reported, not skipped. A hidden leaf beyond the bound stays empty,
+		// and a silent return keeps it out of unclassifiedFixtureGaps too — so
+		// a marshaler that exposes it only when populated would pass on a
+		// fixture that could never populate it (#3592 review).
+		filler.tooDeep = append(filler.tooDeep, path+" (unwalked state below the depth limit)")
 		return
 	}
 	switch value.Kind() {
@@ -841,6 +869,17 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 // encoding against the plain twin and agree every time, whatever *T emits
 // (#3592 review). fill already accepts a reviewed type through a pointer, so
 // this is a shape the walk admits.
+// jsonMemberName is the member name encoding/json gives a field: the tag's name
+// when it has a usable one, the Go field name otherwise. Only the name — the
+// options after the comma decide nothing here.
+func jsonMemberName(field reflect.StructField) string {
+	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	if name == "" || name == "-" {
+		return field.Name
+	}
+	return name
+}
+
 func marshalReviewed(t *testing.T, typ reflect.Type, value reflect.Value) []byte {
 	t.Helper()
 	target := value
@@ -929,6 +968,23 @@ func seedScalars(value reflect.Value, pattern func(index, state int) int, state 
 		for i := 0; i < value.Len(); i++ {
 			seedScalars(value.Index(i), pattern, state, path+"[]")
 		}
+	case reflect.Map:
+		// Same rebuild as plantUnwalkedInto: a map element is not addressable,
+		// so it is seeded in a copy and written back. Without this a scalar GATE
+		// inside a map element stays at zero in every varied fixture, and a
+		// marshaler that transforms a sibling string only when that gate is set
+		// matches the twin everywhere (#3592 review).
+		if value.IsNil() || !value.CanSet() {
+			return
+		}
+		rebuilt := reflect.MakeMap(value.Type())
+		for _, key := range value.MapKeys() {
+			elem := reflect.New(value.Type().Elem()).Elem()
+			elem.Set(value.MapIndex(key))
+			seedScalars(elem, pattern, state, path+"[]")
+			rebuilt.SetMapIndex(key, elem)
+		}
+		value.Set(rebuilt)
 	case reflect.Bool:
 		value.SetBool(pattern(pathIndex(path), state)%2 == 1)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -1007,6 +1063,25 @@ func TestGuardInstanceDataMarshalerIgnoresHiddenStateWhenArchived(t *testing.T) 
 			withHidden := archivedFixture(t, typ, 7000, true, archived)
 			without := archivedFixture(t, typ, 7000, false, archived)
 			diffFixture(t, report, typ, entry, "archived "+tc.name, withHidden, false)
+
+			// The same text-independence reading the generic states get, which
+			// they cannot be relied on to give this pair: a declared extra
+			// derived from planted text only in the archived state matches
+			// itself in both fixtures above, since those differ in hidden state
+			// alone (#3592 review).
+			other := archivedFixture(t, typ, 7500, true, archived)
+			mine := decodeMembers(t, typ.String()+".MarshalJSON", withHidden.custom)
+			theirs := decodeMembers(t, typ.String()+".MarshalJSON", other.custom)
+			for name := range entry.extra {
+				if string(mine[name]) != string(theirs[name]) {
+					report.changed = append(report.changed, fmt.Sprintf(
+						"archived %s: %s emits %s for one record and %s for another whose only "+
+							"difference is the text planted in it — the entry claims it is derived "+
+							"from the enum beside it, never from user text",
+						tc.name, name, mine[name], theirs[name]))
+				}
+			}
+
 			if !bytes.Equal(withHidden.custom, without.custom) {
 				report.added = append(report.added, fmt.Sprintf(
 					"archived %s: the output depends on state encoding/json cannot reach — "+
