@@ -486,6 +486,124 @@ test("auto-merge armed during a write retry blocks the retried green", async () 
   );
 });
 
+test("a newer generation taken during a write retry stops the PASS", async () => {
+  // Codex P1 (round 4): the generation-ownership check runs once, before the
+  // write. Aggregate invalidation runs OUTSIDE this head's serialized lane, so a
+  // newer event can take ownership during the retry's backoff and the reissued
+  // write would publish PASS over it.
+  const transient = new Error("check update unavailable");
+  transient.status = 500;
+  const github = fakeGateGithub({
+    author: "detail-app",
+    checkUpdateErrors: [transient],
+    newerAggregateOnCheckUpdateFailure: true,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "a superseded transaction must not publish PASS on the retry",
+  );
+});
+
+test("a guard read failure blocks cleanly instead of being retried as a write", async () => {
+  // Codex P2 (round 4): a failing precondition is not a failing write. Left to
+  // the write's retry classifier it was reissued three more times — nine reads —
+  // and relabelled AutoGateCheckWriteError, losing the read-failure marker the
+  // caller needs to publish a clean BLOCKED aggregate.
+  // A transport failure on purpose: its message is what the write's retry
+  // classifier matches on, so without the guard marker the wrapped failure looks
+  // retryable to retryCheckUpdate and the whole three-attempt read is reissued
+  // per write attempt.
+  const unavailable = new Error("fetch failed");
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    autoMergeStateError: unavailable,
+    // The disarm snapshot succeeds; the publish precondition is what fails.
+    autoMergeStateErrorAfterRead: 1,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not read auto-merge state for PR #1465 after 3 attempts: fetch failed/,
+  );
+  // Bounded: one disarm snapshot plus the guard's own three attempts. Not three
+  // of those per write attempt, which is the nine-read behaviour this prevents.
+  assert.equal(github.autoMergeStateReads, 4, "the guard must not be retried by the write");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no green may be published when the guard could not be established",
+  );
+});
+
+test("a PR that joins the head after evaluation stops the PASS", async () => {
+  // Codex P1 (round 4): the guarded set is frozen from this transaction's own
+  // association snapshot, but reportAggregateDecision re-reads associations and
+  // can pass for a LARGER set. A PR reopened or retargeted onto this head,
+  // carrying a passing decision from an earlier transaction, would be inside the
+  // green this write publishes and was never guarded here.
+  const joined = {
+    ...checkRun({
+      id: 4242,
+      name: decisionName(2048, HEAD_SHA),
+      conclusion: "success",
+      externalId: decisionExternalId(2048, HEAD_SHA),
+    }),
+    created_at: "2026-07-09T01:12:00Z",
+    started_at: "2026-07-09T01:12:00Z",
+    completed_at: "2026-07-09T01:12:00Z",
+  };
+  const github = fakeGateGithub({
+    author: "detail-app",
+    checkRuns: [...happyCheckRuns(), joined],
+    // The transaction evaluates 1465 alone; the aggregate's own final read sees
+    // 2048 as well.
+    associatedPullRequestSnapshots: [
+      // The transaction's own snapshot, then the aggregate's final read.
+      [{ number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } }],
+      [
+        { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no green may cover a PR this transaction never evaluated",
+  );
+});
+
 test("the publish precondition runs after the aggregate's own reads", async () => {
   // Codex P1 (round 2): reportAggregateDecision reads associations and check runs
   // BEFORE it writes, so a guard that ran before it was already stale. The
@@ -2263,6 +2381,8 @@ function fakeGateGithub({
   autoMergeStateHeadByNumber = {},
   autoMergeStateHeadAfterRead = {},
   armNativeAutoMergeOnCheckUpdateFailure = false,
+  autoMergeStateErrorAfterRead = 0,
+  newerAggregateOnCheckUpdateFailure = false,
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
@@ -2308,6 +2428,21 @@ function fakeGateGithub({
       if (armNativeAutoMergeOnCheckUpdateFailure) {
         github.nativeAutoMergeArmed = true;
       }
+      // A newer Auto Gate event invalidates the head during the write's backoff.
+      if (newerAggregateOnCheckUpdateFailure) {
+        github.injectedCheckRuns.push({
+          id: 99999,
+          name: "Auto Gate decision",
+          external_id: aggregateExternalId(headSha),
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          status: "completed",
+          conclusion: "failure",
+          created_at: "2026-07-09T09:00:00Z",
+          started_at: "2026-07-09T09:00:00Z",
+          completed_at: "2026-07-09T09:00:00Z",
+          output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+        });
+      }
       throw attemptError;
     }
     github.operations.push("check:update");
@@ -2336,6 +2471,7 @@ function fakeGateGithub({
     autoMergeStateReads: 0,
     autoMergeStateReadsByNumber: {},
     autoMergeStateBatchSizes: [],
+    injectedCheckRuns: [],
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -2373,7 +2509,7 @@ function fakeGateGithub({
       }
       if (_query.includes("query AutoMergeState")) {
         github.autoMergeStateReads += 1;
-        if (autoMergeStateError) {
+        if (autoMergeStateError && github.autoMergeStateReads > autoMergeStateErrorAfterRead) {
           throw autoMergeStateError;
         }
         // Aliased per PR, the way the batched read asks for it.
@@ -2450,6 +2586,7 @@ function fakeGateGithub({
         github.checkListReads += 1;
         return [
           ...checkRuns,
+          ...github.injectedCheckRuns,
           ...github.createdChecks.map((created, index) => ({
             id: 10000 + index,
             app: { id: ACTIONS_APP_ID, slug: "github-actions" },

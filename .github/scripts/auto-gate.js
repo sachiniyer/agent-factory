@@ -165,6 +165,13 @@ function retryFailure(label, attempts, error, failureName, readFailure) {
 }
 
 function isRetryableGitHubError(error) {
+  // A publish precondition that failed is not a failed write. Retrying it under
+  // the write's schedule multiplies its own retries and, worse, relabels it as a
+  // write error — losing the read-failure marker the caller needs to publish a
+  // clean BLOCKED aggregate instead of failing the job.
+  if (error?.autoGateGuardFailure) {
+    return false;
+  }
   const status = Number(error?.status);
   if (Number.isFinite(status)) {
     return status === 408 || status === 429 || status >= 500 || isRateLimitError(error);
@@ -660,6 +667,33 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
   };
 }
 
+// Re-establish that this transaction still owns the aggregate on this head.
+// Aggregate invalidation runs outside the head-keyed serialized lane, so a newer
+// event can take ownership at any moment — including during a write's backoff.
+async function assertStillOwnsAggregate({ github, context, headSha, checkRunId }) {
+  const { owner, repo } = context.repo;
+  const identity = aggregateIdentity(headSha);
+  const checkRuns = await retryRead(`could not re-read aggregate checks at ${headSha}`, () =>
+    github.paginate(github.rest.checks.listForRef, { owner, repo, ref: headSha, per_page: 100 }),
+  );
+  const latestGeneration = newestCheckGeneration(
+    checkRuns.filter(
+      (run) =>
+        run.name === identity.checkName &&
+        run.external_id === identity.externalId &&
+        run.app?.id === GITHUB_ACTIONS_APP_ID,
+    ),
+  );
+  if (latestGeneration?.id !== checkRunId) {
+    const superseded = new Error(
+      `A newer Auto Gate event invalidated ${headSha} during the write; this older ` +
+        "transaction will not publish PASS.",
+    );
+    superseded.autoGateAssociationChanged = true;
+    throw superseded;
+  }
+}
+
 async function reportAggregateDecision({
   github,
   context,
@@ -735,7 +769,21 @@ async function reportAggregateDecision({
     // and check-run reads above: those are round trips too, and a guard that
     // runs before them is stale by the time the green is published. Only a PASS
     // carries it — a red publish authorizes nothing.
-    beforePublish: aggregate.ok ? beforePublish : undefined,
+    beforePublish: aggregate.ok
+      ? async ({ attempt }) => {
+          // The generation check above ran once, before the write. A retry sleeps
+          // and reissues, so a newer event's invalidation — which runs OUTSIDE
+          // this head's serialized lane — can take ownership during the backoff
+          // and the retry would publish PASS over it. Re-established per attempt;
+          // the first attempt is already covered by the check above.
+          if (attempt > 0 && checkRunId) {
+            await assertStillOwnsAggregate({ github, context, headSha: aggregate.headSha, checkRunId });
+          }
+          if (typeof beforePublish === "function") {
+            await beforePublish({ pullNumbers: aggregate.pullNumbers });
+          }
+        }
+      : undefined,
   });
   core.notice(`${aggregate.ok ? "PASS" : "BLOCKED"}: fixed Auto Gate aggregate on ${aggregate.headSha}.`);
   return { ...aggregate, ...write, state: aggregate.ok ? "pass" : "waiting" };
@@ -870,12 +918,24 @@ async function processAggregateHead({
       core,
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
-      beforePublish:
-        manualMergeResults.length > 0
-          ? () => confirmNativeAutoMergeDisabled({ github, context, results: manualMergeResults })
-          : undefined,
+      beforePublish: ({ pullNumbers }) =>
+        confirmNativeAutoMergeDisabled({
+          github,
+          context,
+          results: manualMergeResults,
+          evaluated: pending.pullNumbers.map(Number),
+          pullNumbers,
+        }),
     });
   } catch (error) {
+    // The head changed under this transaction — a newer generation took
+    // ownership, or a PR joined the head after it was evaluated. Neither is a
+    // failure: the aggregate stays non-green and the event that caused the
+    // change owns the next evaluation.
+    if (error?.autoGateAssociationChanged) {
+      core.notice(`Keeping aggregate ${pending.headSha} non-green: ${error.message}`);
+      return { state: "association-changed", pending };
+    }
     if (!isReadFailure(error)) {
       throw error;
     }
@@ -1093,13 +1153,29 @@ async function upsertAggregateCheck({
   try {
     // Inside the retry, not outside it. A retried write sleeps and reissues, and
     // a precondition checked once before the helper is stale for every attempt
-    // after the first — long enough for auto-merge to be armed during the
-    // backoff and consumed by the green the retry then publishes. Each attempt
+    // after the first — long enough for the world to change during the backoff
+    // and be consumed by the green the retry then publishes. Each attempt
     // re-establishes it.
+    let attempt = 0;
     const guard = async () => {
-      if (typeof beforePublish === "function") {
-        await beforePublish();
+      if (typeof beforePublish !== "function") {
+        attempt += 1;
+        return;
       }
+      try {
+        await beforePublish({ attempt });
+      } catch (error) {
+        // Re-thrown as a guard failure so the write's retry classifier lets it
+        // out immediately, with the read-failure marker preserved for the caller.
+        const guardFailure = new Error(error?.message || String(error));
+        guardFailure.name = "AutoGateGuardError";
+        guardFailure.autoGateGuardFailure = true;
+        guardFailure.autoGateReadFailure = isReadFailure(error);
+        guardFailure.autoGateAssociationChanged = error?.autoGateAssociationChanged === true;
+        guardFailure.cause = error;
+        throw guardFailure;
+      }
+      attempt += 1;
     };
     if (prior) {
       await retryCheckUpdate(`could not update aggregate check at ${headSha}`, async () => {
@@ -1574,7 +1650,24 @@ async function ensureNativeAutoMergeDisabled({ github, context, core, results })
 // every read that write depends on. The mutation succeeding is a claim; this is
 // the evidence. Anything still armed — or any state that cannot be read — throws,
 // so no consumable green is published.
-async function confirmNativeAutoMergeDisabled({ github, context, results }) {
+async function confirmNativeAutoMergeDisabled({ github, context, results, evaluated, pullNumbers }) {
+  // The set this transaction guarded was frozen from its own association
+  // snapshot, but the aggregate re-reads associations before publishing and can
+  // pass for a LARGER set — a PR reopened or retargeted onto this head, carrying
+  // a passing decision from an earlier transaction, is in the green this write is
+  // about to publish and was never guarded here. Refuse rather than guess: this
+  // transaction did not evaluate it and cannot speak for its auto-merge state.
+  if (Array.isArray(pullNumbers)) {
+    const unevaluated = pullNumbers.filter((number) => !evaluated.includes(Number(number)));
+    if (unevaluated.length > 0) {
+      const changed = new Error(
+        `Refusing to publish: PR ${joinPullNumbers(unevaluated)} joined this head after it was ` +
+          "evaluated, so this transaction cannot vouch for its auto-merge state",
+      );
+      changed.autoGateAssociationChanged = true;
+      throw changed;
+    }
+  }
   const numbers = results.map((result) => Number(result.prNumber));
   const states = await readNativeAutoMergeStates({ github, context, numbers });
   const armed = [...states.entries()]
