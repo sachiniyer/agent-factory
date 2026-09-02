@@ -1,6 +1,7 @@
 package task
 
 import (
+	"slices"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -75,8 +76,16 @@ type ScheduleHealth struct {
 	// a pending occurrence is not a missed one.
 	MissedOccurrences int
 	// Saturated reports that MissedOccurrences hit MaxMissedOccurrences and is
-	// therefore a floor, not an exact count.
+	// therefore a floor, not an exact count. It rides the task record too
+	// (MissedOccurrencesCapped): a consumer that reads "10000" and cannot tell it
+	// from an exact count has been handed a number that is quietly wrong.
 	Saturated bool
+	// Unschedulable reports an expression that PARSES but matches no date — the
+	// February 31st class. Nothing can be derived about lateness for such a task
+	// because it has no occurrences at all, and reporting the absence of a verdict
+	// as health would be the worst answer available: the task is armed, the
+	// scheduler holds an entry with a zero next-fire time, and it will never run.
+	Unschedulable bool
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
 	OldestMissedAt time.Time
@@ -121,7 +130,9 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	}
 	slack, ok := slackFor(sched, ref)
 	if !ok {
-		return ScheduleHealth{}
+		// The expression parses but has no occurrences within robfig's five-year
+		// horizon: it can never fire, which is a report, not a silence.
+		return ScheduleHealth{Unschedulable: true}
 	}
 	oldest := sched.Next(ref.Add(slack))
 	if oldest.IsZero() || oldest.After(now) {
@@ -176,8 +187,8 @@ func scheduleReference(t Task) (time.Time, bool) {
 	} else if !t.CreatedAt.IsZero() {
 		ref = t.CreatedAt
 	}
-	if enabled, ok := lastEnabledAt(t); ok && enabled.After(ref) {
-		ref = enabled
+	if restarted, ok := lastScheduleRestartAt(t); ok && restarted.After(ref) {
+		ref = restarted
 	}
 	if ref.IsZero() {
 		return time.Time{}, false
@@ -185,18 +196,33 @@ func scheduleReference(t Task) (time.Time, bool) {
 	return ref, true
 }
 
-// lastEnabledAt returns when the task was most recently switched ON, from its
-// audit trail. Only the explicit enable action counts: a create is already
-// covered by CreatedAt, and an ordinary edit does not restart anything.
+// lastScheduleRestartAt returns when the schedule the task is on NOW began,
+// from its audit trail: the most recent moment it was switched on, or its cron
+// expression changed.
 //
-// An entry with no timestamp is SKIPPED rather than answered with — a
-// hand-edited or truncated row must not shadow a real enable behind it, and
+// Both are the same event in the only sense that matters here — the schedule a
+// task is being judged against started then, so occurrences before it are not
+// misses the task owes. The enable case is the deliberate-pause one. The
+// expression case is its twin and just as sharp: retiming a daily task to run
+// every minute at 23:00 would otherwise be measured against this morning's run
+// and report a day's worth of per-minute misses that happened before that
+// schedule existed.
+//
+// An ordinary edit — the prompt, the target session, the program — restarts
+// nothing: the schedule did not move.
+//
+// An entry with no timestamp is SKIPPED rather than answered with. A
+// hand-edited or truncated row must not shadow a real restart behind it, and
 // measuring from the zero time would report the task as millions of occurrences
 // overdue.
-func lastEnabledAt(t Task) (time.Time, bool) {
+func lastScheduleRestartAt(t Task) (time.Time, bool) {
 	for i := len(t.Audit) - 1; i >= 0; i-- {
-		if t.Audit[i].Action == AuditEnabled && !t.Audit[i].At.IsZero() {
-			return t.Audit[i].At, true
+		e := t.Audit[i]
+		if e.At.IsZero() {
+			continue
+		}
+		if e.Action == AuditEnabled || slices.Contains(e.Fields, "cron_expr") {
+			return e.At, true
 		}
 	}
 	return time.Time{}, false
@@ -271,6 +297,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		health := DeriveScheduleHealth(tasks[i], now)
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
+		tasks[i].MissedOccurrencesCapped = health.Saturated
 	}
 	return tasks
 }
@@ -283,6 +310,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 func (t *Task) stripDerived() {
 	t.Overdue = false
 	t.MissedOccurrences = 0
+	t.MissedOccurrencesCapped = false
 	t.NextRunAt = nil
 	t.Arming = ""
 }

@@ -33,7 +33,7 @@ import (
 
 // checkTaskSchedules reports enabled tasks that are not firing.
 func checkTaskSchedules(ctx *scanContext, report *Report) {
-	tasks, live, err := ctx.opts.taskInventory()
+	tasks, err := ctx.opts.taskInventory()
 	if err != nil {
 		// A failed read is not an empty result. Say doctor could not look rather
 		// than reporting the clean bill an empty list would produce — advisory,
@@ -48,20 +48,36 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	var overdue []task.Task
 	var health []task.ScheduleHealth
 	var unarmed []task.Task
+	var unschedulable []task.Task
 	enabled := 0
+	armingUnobserved := 0
 	for _, t := range tasks {
 		if !t.Enabled {
 			continue
 		}
 		enabled++
-		if h := task.DeriveScheduleHealth(t, now); h.Overdue {
+		h := task.DeriveScheduleHealth(t, now)
+		switch {
+		case h.Overdue:
 			overdue = append(overdue, t)
 			health = append(health, h)
+		case h.Unschedulable:
+			unschedulable = append(unschedulable, t)
 		}
-		// Only a daemon's own answer counts here. ArmingUnknown means nobody
-		// looked, and a task that IS overdue is already reported above — listing
-		// it twice would double-count one silence.
-		if live && t.Arming == task.ArmingNotArmed {
+		// Whether this task's arming was OBSERVED is per-task, not per-run: a
+		// daemon answers reads while it is still warming up, and every task it
+		// returns in that window carries ArmingUnknown. Counting only "did a
+		// daemon answer" would print an unqualified clean bill for tasks whose
+		// arming had not happened yet.
+		if t.Arming == task.ArmingUnknown {
+			armingUnobserved++
+			continue
+		}
+		// A task already reported as overdue is not listed again: not-armed is the
+		// CAUSE of that same silence, and naming it twice with two remediations
+		// makes one problem look like two. `af tasks show <id>`, which the
+		// remediation names, reports the arming state.
+		if t.Arming == task.ArmingNotArmed && !h.Overdue {
 			unarmed = append(unarmed, t)
 		}
 	}
@@ -70,12 +86,12 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		report.Pass(sectionAutomations, "task schedules", "no enabled tasks")
 		return
 	}
-	if len(overdue) == 0 && len(unarmed) == 0 {
+	if len(overdue) == 0 && len(unarmed) == 0 && len(unschedulable) == 0 {
 		detail := fmt.Sprintf("%s firing on schedule", countTasksAre(enabled))
-		if !live {
+		if armingUnobserved > 0 {
 			// Whether they are ARMED was not checked, and saying so is the
 			// difference between "healthy" and "healthy as far as I could see".
-			detail += "; arming not checked (no running daemon answered)"
+			detail += fmt.Sprintf("; arming not observed for %d of them (no daemon has reported on those)", armingUnobserved)
 		}
 		report.Pass(sectionAutomations, "task schedules", detail)
 		return
@@ -97,6 +113,15 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		details = append(details, fmt.Sprintf("%s enabled but not armed by the running daemon — %s",
 			countTasksAre(len(unarmed)), describeTaskNames(unarmed)))
 		fixes = append(fixes, "check the daemon log for an arming refusal, then `af daemon restart`")
+	}
+	if len(unschedulable) > 0 {
+		// Armed, enabled, and incapable of ever firing: the cron expression is
+		// legal but matches no date (February 31st and friends). Nothing is late,
+		// because nothing was ever due — which is why this needs its own clause
+		// rather than folding into overdue.
+		details = append(details, fmt.Sprintf("%s a cron expression that matches no date, so it can never fire — %s",
+			countTasksHave(len(unschedulable)), describeTaskNames(unschedulable)))
+		fixes = append(fixes, "correct the expression with `af tasks update <id> --cron <expr>`")
 	}
 	report.Warn(sectionAutomations, "task schedules",
 		strings.Join(details, " · "), strings.Join(fixes, "; "), true)
@@ -167,20 +192,22 @@ func collapseTaskList(parts []string) string {
 }
 
 // daemonTaskInventory reads the task list, preferring the running daemon's
-// answer because it is the only one that carries the LIVE arming state.
+// answer because it is the only one that carries the LIVE arming state. A disk
+// read is a complete and current view of every task and its schedule — overdue
+// is derived from the record — but it knows nothing about arming, and every task
+// it returns says so by carrying task.ArmingUnknown.
 //
-// The second return says whether that live answer is what came back. A disk read
-// is a complete and current view of every task and its schedule — overdue is
-// derived from the record — but it knows nothing about arming, and the caller
-// must not present its silence as an observation. Mirrors `af tasks list`: never
-// spawn a daemon for a read.
-func daemonTaskInventory() ([]task.Task, bool, error) {
+// It deliberately reports NO "was a daemon reachable" flag. Whether one answered
+// is the weaker question: a daemon that answers during warm-up is reachable and
+// has observed nothing, so a run-level flag would let doctor print an unqualified
+// clean bill for tasks whose arming had not happened yet (#3623 review). The
+// per-task field is the precise answer, and leaving no imprecise one available
+// is what stops a later caller from reaching for it.
+//
+// Mirrors `af tasks list`: never spawn a daemon for a read.
+func daemonTaskInventory() ([]task.Task, error) {
 	if tasks, err := daemon.ListTasksNoSpawn(); err == nil {
-		return tasks, true, nil
+		return tasks, nil
 	}
-	tasks, err := task.LoadTasks()
-	if err != nil {
-		return nil, false, err
-	}
-	return tasks, false, nil
+	return task.LoadTasks()
 }

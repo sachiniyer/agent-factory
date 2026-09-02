@@ -209,3 +209,72 @@ func TestAudit_DaemonBackfillIsRecorded(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, auditOf(t, "legacy01"), 2)
 }
+
+// TestAudit_ClientSuppliedTrailIsDiscarded: the audit trail is store-owned
+// history, and AddTaskRequest carries a whole task.Task — so without this a
+// client could persist changes that never happened. Worse, since lateness is
+// measured from the most recent enable in that trail, a forged FUTURE entry
+// would push the reference point forward and switch overdue detection off for
+// that task indefinitely.
+func TestAudit_ClientSuppliedTrailIsDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	forged := time.Now().Add(100 * 24 * time.Hour)
+	_, err := AddTaskChecked(Task{
+		ID: "forged01", Name: "Forged", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+		Audit: []AuditEntry{
+			{At: forged, Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
+			{At: time.Now(), Actor: ActorAPI, Action: AuditUpdated, Fields: []string{"prompt"}},
+		},
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "forged01")
+	require.Len(t, trail, 1, "a create has exactly one entry, and the store writes it")
+	assert.Equal(t, AuditCreated, trail[0].Action)
+	assert.True(t, trail[0].At.Before(forged), "no future timestamp survived into the record")
+}
+
+// TestAddTask_StampsCreatedAt: an HTTP client can omit created_at, and a record
+// with neither a run nor a creation time is exactly the never-fired task the
+// health derivation is meant to catch — it would have reported healthy forever.
+// The store cannot leave that to the caller.
+func TestAddTask_StampsCreatedAt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	before := time.Now()
+	created, err := AddTaskChecked(Task{
+		ID: "nostamp1", Name: "No stamp", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+	assert.False(t, created.CreatedAt.IsZero(), "the returned record carries the stamp")
+	assert.False(t, created.CreatedAt.Before(before))
+
+	stored, err := GetTask("nostamp1")
+	require.NoError(t, err)
+	require.False(t, stored.CreatedAt.IsZero(), "and so does the stored one")
+
+	// And the derivation can therefore measure it: two occurrences after the
+	// stamp with no run is overdue, where before it was silently underivable.
+	future := stored.CreatedAt.Add(3 * time.Hour)
+	assert.True(t, DeriveScheduleHealth(*stored, future).Overdue)
+}
+
+// TestAddTask_KeepsAnExplicitCreatedAt: the stamp is a floor for records that
+// have none, not an override — a caller migrating a task must keep its history.
+func TestAddTask_KeepsAnExplicitCreatedAt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	want := time.Now().Add(-72 * time.Hour)
+	created, err := AddTaskChecked(Task{
+		ID: "hasstamp", Name: "Has stamp", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true, CreatedAt: want,
+	}, ActorCLI, nil)
+	require.NoError(t, err)
+	assert.True(t, want.Equal(created.CreatedAt))
+}

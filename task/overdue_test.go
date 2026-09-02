@@ -371,3 +371,83 @@ func TestOverdue_MalformedEnableEntryDoesNotShadowARealOne(t *testing.T) {
 	assert.Equal(t, 2, health.MissedOccurrences,
 		"the real enable behind the malformed entry is what the clock restarts from")
 }
+
+// TestOverdue_UnschedulableIsReportedNotIgnored: "0 0 31 2 *" is February 31st —
+// legal syntax that matches no date. Parsing succeeds, so the scheduler arms it
+// and holds an entry with a zero next-fire time; nothing is ever late because
+// nothing is ever due. Reporting the absence of a verdict as health would be the
+// worst answer available, since the task is enabled, armed, and incapable of
+// firing.
+func TestOverdue_UnschedulableIsReportedNotIgnored(t *testing.T) {
+	last := at(2026, time.January, 1, 0, 0, 0)
+	tsk := cronTask("0 0 31 2 *", &last)
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 12, 0, 0))
+	assert.False(t, health.Overdue, "nothing was ever due, so nothing is late")
+	assert.True(t, health.Unschedulable,
+		"but the task can never fire, and that is a report rather than a silence")
+}
+
+// TestOverdue_SchedulableTasksAreNotFlaggedUnschedulable guards the other side:
+// the flag means "no occurrences at all", not "cannot derive".
+func TestOverdue_SchedulableTasksAreNotFlaggedUnschedulable(t *testing.T) {
+	last := at(2026, time.September, 1, 14, 20, 0)
+	assert.False(t, DeriveScheduleHealth(cronTask("20 * * * *", &last), at(2026, time.September, 1, 15, 0, 0)).Unschedulable)
+	assert.False(t, DeriveScheduleHealth(cronTask("not a cron", &last), at(2026, time.September, 1, 15, 0, 0)).Unschedulable,
+		"an unparseable expression is a different condition, reported by the arming state")
+
+	watch := Task{ID: "w", WatchCmd: "tail -f x", Enabled: true, LastRunAt: &last}
+	assert.False(t, DeriveScheduleHealth(watch, at(2026, time.September, 1, 15, 0, 0)).Unschedulable)
+}
+
+// TestOverdue_RetimingRestartsTheClock is the enable rule's twin, and just as
+// sharp: retiming a daily task to every minute at 23:00 would otherwise be
+// measured against this morning's run and report a day's worth of per-minute
+// misses that happened before that schedule existed.
+func TestOverdue_RetimingRestartsTheClock(t *testing.T) {
+	last := at(2026, time.September, 1, 3, 0, 0)
+	tsk := cronTask("* * * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 23, 0, 0), Actor: ActorCLI, Action: AuditUpdated, Fields: []string{"cron_expr"}},
+	}
+
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 1, 23, 3, 0)).Overdue,
+		"three minutes on the new schedule is inside its window, whatever the old one did")
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 23, 10, 0))
+	require.True(t, health.Overdue, "ten minutes of a per-minute schedule going unfired is real")
+	assert.Equal(t, 10, health.MissedOccurrences,
+		"counted from the retime, not from a run twenty hours before it")
+}
+
+// TestOverdue_AnOrdinaryEditRestartsNothing: only a change to the SCHEDULE moves
+// the reference. Editing the prompt does not excuse a task from the fires it has
+// been missing.
+func TestOverdue_AnOrdinaryEditRestartsNothing(t *testing.T) {
+	last := at(2026, time.August, 14, 14, 20, 8)
+	tsk := cronTask("20 * * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 14, 0, 0), Actor: ActorTUI, Action: AuditUpdated, Fields: []string{"prompt", "program"}},
+	}
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 14, 20, 12))
+	require.True(t, health.Overdue)
+	assert.Equal(t, 432, health.MissedOccurrences,
+		"the schedule did not move, so neither did the reference")
+}
+
+// TestWithScheduleHealth_CarriesSaturation: the record must not render a capped
+// count as an exact one — "10000" and "at least 10000" call for the same action,
+// but only one of them is true.
+func TestWithScheduleHealth_CarriesSaturation(t *testing.T) {
+	last := at(2025, time.September, 1, 12, 0, 0)
+	got := WithScheduleHealth([]Task{cronTask("* * * * *", &last)}, at(2026, time.September, 1, 12, 0, 0))
+
+	require.True(t, got[0].Overdue)
+	assert.Equal(t, MaxMissedOccurrences, got[0].MissedOccurrences)
+	assert.True(t, got[0].MissedOccurrencesCapped,
+		"a reader of the record alone must be able to tell a floor from an exact count")
+
+	encoded, err := json.Marshal(got[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"missed_occurrences_capped":true`)
+}

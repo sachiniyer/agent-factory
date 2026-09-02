@@ -224,12 +224,11 @@ type Options struct {
 	// a live session's directory an orphan (#3560).
 	sessionInventory func() ([]session.InstanceData, error)
 
-	// taskInventory returns every task on the box plus whether a RUNNING DAEMON
-	// answered. The second value is load-bearing: a disk read carries the whole
-	// schedule but knows nothing about arming, and the automations check must not
-	// report "not armed" on the strength of never having asked. Defaults to
-	// daemonTaskInventory.
-	taskInventory func() ([]task.Task, bool, error)
+	// taskInventory returns every task on the box, each carrying whether its
+	// arming was actually observed (task.ArmingUnknown when it was not). Defaults
+	// to daemonTaskInventory; see there for why there is deliberately no
+	// run-level "a daemon answered" flag alongside it.
+	taskInventory func() ([]task.Task, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.

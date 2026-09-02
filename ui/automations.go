@@ -316,11 +316,16 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 }
 
 // overdueFragment is the detail line's warning text. The missed count is omitted
-// rather than printed as zero when the walk found none — a saturated or
-// uncounted "missed 0" beside "overdue" reads as a contradiction.
+// rather than printed as zero when the walk found none — an uncounted "missed 0"
+// beside "overdue" reads as a contradiction — and a count that hit the
+// derivation's cap is marked with a trailing "+" so a floor never renders as an
+// exact number.
 func overdueFragment(tsk task.Task) string {
 	if tsk.MissedOccurrences <= 0 {
 		return "overdue"
+	}
+	if tsk.MissedOccurrencesCapped {
+		return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
 	}
 	return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
 }

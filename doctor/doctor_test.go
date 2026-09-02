@@ -96,7 +96,7 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// No tasks by default, for the same reason: the automations check (#3623)
 		// would otherwise read whatever task store answers on the box. The tasks
 		// tests inject their own inventory.
-		taskInventory: func() ([]task.Task, bool, error) { return nil, false, nil },
+		taskInventory: func() ([]task.Task, error) { return nil, nil },
 		// Default to "no remote configured" so the non-remote suite stays
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.

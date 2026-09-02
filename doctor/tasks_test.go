@@ -56,12 +56,12 @@ func taskRow(t *testing.T, report *Report) CheckResult {
 // tasks, and say when the silence started.
 func TestDoctor_WarnsAboutOverdueTasks(t *testing.T) {
 	opts := testOptions(t, false)
-	opts.taskInventory = func() ([]task.Task, bool, error) {
+	opts.taskInventory = func() ([]task.Task, error) {
 		return []task.Task{
 			darkTask("4ab7ba4f", "Master Health Watch"),
 			darkTask("b2bfd63e", "Fleet Health Sweep"),
 			healthyTask("9d7a6aa1"),
-		}, true, nil
+		}, nil
 	}
 
 	report, err := Run(opts)
@@ -90,8 +90,8 @@ func TestDoctor_WarnsAboutEnabledButUnarmedTasks(t *testing.T) {
 	unarmed.Arming = task.ArmingNotArmed
 	armed := healthyTask("d0d0cafe")
 	armed.Arming = task.ArmingArmed
-	opts.taskInventory = func() ([]task.Task, bool, error) {
-		return []task.Task{unarmed, armed}, true, nil
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{unarmed, armed}, nil
 	}
 
 	report, err := Run(opts)
@@ -112,10 +112,10 @@ func TestDoctor_WarnsAboutEnabledButUnarmedTasks(t *testing.T) {
 // to ignore the row that matters.
 func TestDoctor_UnobservedArmingIsNotReportedAsUnarmed(t *testing.T) {
 	opts := testOptions(t, false)
-	opts.taskInventory = func() ([]task.Task, bool, error) {
+	opts.taskInventory = func() ([]task.Task, error) {
 		// Arming is the zero value: nobody looked. The disk read that produced
 		// these records cannot know, and says so by leaving the field empty.
-		return []task.Task{healthyTask("c0ffee01"), healthyTask("d0d0cafe")}, false, nil
+		return []task.Task{healthyTask("c0ffee01"), healthyTask("d0d0cafe")}, nil
 	}
 
 	report, err := Run(opts)
@@ -123,7 +123,7 @@ func TestDoctor_UnobservedArmingIsNotReportedAsUnarmed(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusPass, row.Status)
-	assert.Contains(t, row.Detail, "arming not checked",
+	assert.Contains(t, row.Detail, "arming not observed for 2 of them",
 		"the row must say what it could NOT see rather than implying it saw health")
 	assert.Zero(t, report.UnresolvedCount())
 }
@@ -133,8 +133,8 @@ func TestDoctor_UnobservedArmingIsNotReportedAsUnarmed(t *testing.T) {
 // which is precisely the box this check is for.
 func TestDoctor_OverdueIsReportedWithoutADaemon(t *testing.T) {
 	opts := testOptions(t, false)
-	opts.taskInventory = func() ([]task.Task, bool, error) {
-		return []task.Task{darkTask("4ab7ba4f", "Master Health Watch")}, false, nil
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{darkTask("4ab7ba4f", "Master Health Watch")}, nil
 	}
 
 	report, err := Run(opts)
@@ -151,8 +151,8 @@ func TestDoctor_HealthyTasksPass(t *testing.T) {
 	opts := testOptions(t, false)
 	armed := healthyTask("d0d0cafe")
 	armed.Arming = task.ArmingArmed
-	opts.taskInventory = func() ([]task.Task, bool, error) {
-		return []task.Task{armed}, true, nil
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{armed}, nil
 	}
 
 	report, err := Run(opts)
@@ -161,7 +161,7 @@ func TestDoctor_HealthyTasksPass(t *testing.T) {
 	row := taskRow(t, report)
 	assert.Equal(t, StatusPass, row.Status)
 	assert.Contains(t, row.Detail, "1 enabled task is firing on schedule")
-	assert.NotContains(t, row.Detail, "arming not checked")
+	assert.NotContains(t, row.Detail, "arming not observed")
 }
 
 // TestDoctor_UnreadableTaskStoreIsAdvisory: a failed read is not an empty
@@ -170,8 +170,8 @@ func TestDoctor_HealthyTasksPass(t *testing.T) {
 // never made.
 func TestDoctor_UnreadableTaskStoreIsAdvisory(t *testing.T) {
 	opts := testOptions(t, false)
-	opts.taskInventory = func() ([]task.Task, bool, error) {
-		return nil, false, errors.New("tasks.json: permission denied")
+	opts.taskInventory = func() ([]task.Task, error) {
+		return nil, errors.New("tasks.json: permission denied")
 	}
 
 	report, err := Run(opts)
@@ -190,8 +190,8 @@ func TestDoctor_NoEnabledTasksPasses(t *testing.T) {
 	opts := testOptions(t, false)
 	disabled := darkTask("4ab7ba4f", "Master Health Watch")
 	disabled.Enabled = false
-	opts.taskInventory = func() ([]task.Task, bool, error) {
-		return []task.Task{disabled}, true, nil
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{disabled}, nil
 	}
 
 	report, err := Run(opts)
@@ -211,9 +211,72 @@ func TestDoctor_CollapsesLongTaskLists(t *testing.T) {
 	for i := 0; i < maxNamedTasks+3; i++ {
 		tasks = append(tasks, darkTask(strings.Repeat("a", 7)+string(rune('0'+i)), "Dark"))
 	}
-	opts.taskInventory = func() ([]task.Task, bool, error) { return tasks, true, nil }
+	opts.taskInventory = func() ([]task.Task, error) { return tasks, nil }
 
 	report, err := Run(opts)
 	require.NoError(t, err)
 	assert.Contains(t, taskRow(t, report).Detail, "and 3 more")
+}
+
+// TestDoctor_WarmingDaemonDoesNotYieldAnUnqualifiedPass: a daemon answers reads
+// while it is still warming up, and every task it returns in that window carries
+// ArmingUnknown. Keying the qualifier on "did a daemon answer" would print an
+// unconditional clean bill for tasks whose arming has not happened yet.
+func TestDoctor_WarmingDaemonDoesNotYieldAnUnqualifiedPass(t *testing.T) {
+	opts := testOptions(t, false)
+	armed := healthyTask("d0d0cafe")
+	armed.Arming = task.ArmingArmed
+	warming := healthyTask("c0ffee01") // answered by a live daemon, arming not yet observed
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{armed, warming}, nil
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusPass, row.Status)
+	assert.Contains(t, row.Detail, "arming not observed for 1 of them",
+		"the qualifier is per task, not per run:\n%s", row.Detail)
+}
+
+// TestDoctor_OverdueTaskIsNotAlsoListedAsUnarmed: not-armed is the CAUSE of that
+// same silence. Naming the task in both clauses makes one problem look like two
+// and offers two remediation paths for it.
+func TestDoctor_OverdueTaskIsNotAlsoListedAsUnarmed(t *testing.T) {
+	opts := testOptions(t, false)
+	both := darkTask("4ab7ba4f", "Master Health Watch")
+	both.Arming = task.ArmingNotArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{both}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Contains(t, row.Detail, "1 enabled task has not fired on schedule")
+	assert.NotContains(t, row.Detail, "enabled but not armed",
+		"one silence, reported once:\n%s", row.Detail)
+	assert.Equal(t, 1, strings.Count(row.Detail, "4ab7ba4f"), "and the task is named once")
+}
+
+// TestDoctor_ReportsATaskThatCanNeverFire: "0 0 31 2 *" parses, so the scheduler
+// arms it and it reads as armed and on schedule — while being incapable of ever
+// running. Nothing is late because nothing was ever due, which is why it needs
+// its own clause rather than folding into overdue.
+func TestDoctor_ReportsATaskThatCanNeverFire(t *testing.T) {
+	opts := testOptions(t, false)
+	feb31 := healthyTask("feb31111")
+	feb31.Name = "February 31st"
+	feb31.CronExpr = "0 0 31 2 *"
+	feb31.Arming = task.ArmingArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{feb31}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusWarn, row.Status)
+	assert.Contains(t, row.Detail, "matches no date, so it can never fire")
+	assert.Contains(t, row.Detail, `feb31111 "February 31st"`)
+	assert.Positive(t, report.UnresolvedCount())
 }

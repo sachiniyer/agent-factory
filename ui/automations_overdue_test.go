@@ -140,3 +140,19 @@ func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 	assert.Contains(t, out, "1 overdue", "the count outranks the section label here:\n%s", out)
 	assert.Contains(t, out, "manage", "and the manager key is still the last thing cut")
 }
+
+// TestAutomationsMarksACappedMissedCount: the derivation saturates its walk, so
+// a task dark for long enough reports a FLOOR. Rendering it as a bare "10000"
+// would state an exact number the derivation never computed.
+func TestAutomationsMarksACappedMissedCount(t *testing.T) {
+	capped := overdueStripTask()
+	capped.MissedOccurrences, capped.MissedOccurrencesCapped = task.MaxMissedOccurrences, true
+
+	a := newTestAutomations([]task.Task{capped})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "overdue · missed 10000+",
+		"a saturated count is a lower bound and must read as one:\n%s", out)
+}

@@ -136,6 +136,10 @@ type Task struct {
 	// MissedOccurrences counts the fires the schedule has had since that last
 	// run, saturating at MaxMissedOccurrences.
 	MissedOccurrences int `json:"missed_occurrences,omitempty"`
+	// MissedOccurrencesCapped says MissedOccurrences hit that cap and is a FLOOR,
+	// not an exact count. Without it a reader cannot tell "exactly 10000" from
+	// "at least 10000", and every surface would render a capped count as precise.
+	MissedOccurrencesCapped bool `json:"missed_occurrences_capped,omitempty"`
 	// NextRunAt is what the LIVE scheduler will actually fire next, read off its
 	// armed entry rather than recomputed from the expression. Absent when the
 	// task is not armed, and that absence is itself the signal.
@@ -357,6 +361,22 @@ func AddTask(t Task) error {
 func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error) {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return Task{}, err
+	}
+	// The audit trail is STORE-OWNED history, never client input (#3623 review).
+	// AddTaskRequest carries a whole task.Task, so a client could otherwise
+	// persist a trail of changes that never happened — and since the lateness
+	// derivation reads the most recent enable out of that trail, a forged FUTURE
+	// entry would push the reference point forward and suppress overdue detection
+	// on that task indefinitely. A create has exactly one entry, and this function
+	// writes it.
+	t.Audit = nil
+	// Stamp the creation time when the caller did not. It is the reference the
+	// lateness derivation falls back to for a task that has never run, so a
+	// record without one is precisely the never-fired task that would otherwise
+	// report healthy forever — the failure this feature exists to catch. An HTTP
+	// client can omit the field; the store cannot.
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = nowFn()
 	}
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target

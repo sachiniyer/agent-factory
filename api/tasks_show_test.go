@@ -167,3 +167,21 @@ func TestTasksShow_InvalidExpressionIsNotOnSchedule(t *testing.T) {
 	assert.Contains(t, got, "cron expression is invalid, so nothing is scheduled")
 	assert.NotContains(t, got, "on schedule")
 }
+
+// TestTasksShow_UnschedulableExpressionSaysSo: "0 0 31 2 *" parses, so the
+// scheduler arms it and the arming line reads "armed" — while the task can never
+// run. Reporting "on schedule" there would make every line on the page agree on
+// something untrue.
+func TestTasksShow_UnschedulableExpressionSaysSo(t *testing.T) {
+	tsk := showFixture()
+	tsk.CronExpr = "0 0 31 2 *"
+	tsk.Arming = task.ArmingArmed
+	tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	got := out.String()
+
+	assert.Contains(t, got, "matches no date, so the task can never fire")
+	assert.NotContains(t, got, "on schedule")
+}

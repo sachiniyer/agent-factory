@@ -174,3 +174,48 @@ func TestControlUpdateTask_RecordsTheDisableAndItsSurface(t *testing.T) {
 	assert.Equal(t, task.ArmingNotArmed, resp.Task.Arming)
 	assert.Nil(t, resp.Task.NextRunAt)
 }
+
+// TestArmingSnapshot_SurvivesAConcurrentReload reproduces the mechanism rather
+// than hoping for the race: reloadTasks REPLACES every cron entry on each task
+// write, so a snapshot that reads s.entries and then queries the cron without
+// holding the lock across both sees IDs that no longer exist and reports an
+// armed task as not-armed. That false alarm reaches `af doctor` and the task
+// list on nothing worse than a concurrent `af tasks update`.
+//
+// With both halves under one lock the invariant is absolute, so this asserts it
+// absolutely: across a hundred snapshots taken while reloads run continuously,
+// the task is armed in every single one.
+func TestArmingSnapshot_SurvivesAConcurrentReload(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	tasks := []task.Task{enabledCronTask("aaaa1007", "")}
+
+	scheduler := newTaskScheduler()
+	require.NoError(t, scheduler.reloadTasks(tasks))
+	scheduler.Start()
+	t.Cleanup(scheduler.Stop)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if err := scheduler.reloadTasks(tasks); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-done })
+
+	for i := 0; i < 100; i++ {
+		snapshot, observed := scheduler.armingSnapshot()
+		require.True(t, observed)
+		if _, armed := snapshot["aaaa1007"]; !armed {
+			t.Fatalf("snapshot %d reported an armed task as not armed; a reload landed between reading the entry map and the cron", i)
+		}
+	}
+}

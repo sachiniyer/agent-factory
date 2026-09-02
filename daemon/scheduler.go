@@ -156,28 +156,31 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 // socket answers reads during warm-up, and an empty entry map in that window
 // means "arming has not run", never "nothing is armed" — see taskScheduler.armed.
 //
-// The cron is queried OUTSIDE s.mu: cron.Entries round-trips through the run loop
-// while the cron is running, and no daemon lock should be held across another
-// goroutine's turn.
+// Both halves are read under s.mu, and that is load-bearing rather than
+// incidental: reloadTasks replaces EVERY entry on each task write, so reading
+// s.entries and then the cron without the lock lets a reload land between them —
+// the copied IDs are gone from the cron, and a task that is armed under a fresh
+// ID is reported not-armed. That false alarm would reach `af doctor` and the
+// task list on nothing worse than a concurrent `af tasks update`.
+//
+// Holding s.mu across cron.Entries means holding it across a round-trip through
+// the cron's run loop, which is exactly what reloadTasks already does with
+// cron.Remove and cron.Schedule. The run loop never takes s.mu — its job closure
+// calls RunTask, which touches no scheduler state — so there is no cycle.
 func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
 	s.mu.Lock()
-	armed := s.armed
-	registered := make(map[string]cron.EntryID, len(s.entries))
-	for id, entryID := range s.entries {
-		registered[id] = entryID
-	}
-	s.mu.Unlock()
-	if !armed {
+	defer s.mu.Unlock()
+	if !s.armed {
 		return nil, false
 	}
 	// The cron itself is authoritative: it is the thing that would have to fire.
 	// An ID registered here but absent there is reported as not armed.
-	live := make(map[cron.EntryID]time.Time, len(registered))
+	live := make(map[cron.EntryID]time.Time, len(s.entries))
 	for _, entry := range s.cron.Entries() {
 		live[entry.ID] = entry.Next
 	}
-	next := make(map[string]time.Time, len(registered))
-	for id, entryID := range registered {
+	next := make(map[string]time.Time, len(s.entries))
+	for id, entryID := range s.entries {
 		if at, ok := live[entryID]; ok {
 			next[id] = at
 		}

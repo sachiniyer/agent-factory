@@ -184,6 +184,13 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 		}
 	}
 	health := task.DeriveScheduleHealth(t, now)
+	if health.Unschedulable {
+		// Legal syntax, no matching date — February 31st and friends. The task is
+		// enabled and the scheduler holds an entry for it, so every other line on
+		// this page reads as healthy; nothing is late only because nothing was
+		// ever due.
+		return "this expression matches no date, so the task can never fire"
+	}
 	if !health.Overdue {
 		if !t.Enabled || t.CronExpr == "" {
 			return ""
