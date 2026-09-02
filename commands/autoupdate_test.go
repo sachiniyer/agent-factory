@@ -52,6 +52,11 @@ func TestMain(m *testing.M) {
 	// developer's real one. Sandbox AFTER the tripwire snapshots the real
 	// environment, BEFORE logging resolves its file path.
 	restoreHome := testguard.SandboxHome()
+	// #3661: the local-only `af config` guard reads the remote-daemon target, so a
+	// developer with AF_DAEMON_URL exported would otherwise get the refusal in
+	// place of dozens of unrelated config assertions. SandboxHome isolates the AF
+	// home, not this. See forceLocalDaemonTarget in config_local_only_test.go.
+	restoreDaemonTarget := forceLocalDaemonTarget()
 	// Upgrade tests replace binaries in temp dirs and must never inspect or
 	// rewrite the developer's real autostart unit. Individual migration tests
 	// override this seam explicitly.
@@ -61,6 +66,7 @@ func TestMain(m *testing.M) {
 	aflog.Initialize(false)
 	code := m.Run()
 	aflog.Close()
+	restoreDaemonTarget()
 	restoreHome()
 	if err := verifyRealConfig(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

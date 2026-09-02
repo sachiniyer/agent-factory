@@ -29,6 +29,48 @@ import (
 // add both scopes on top of that; see their block for which assertion carries
 // the weight in each.
 
+// forceLocalDaemonTarget scrubs the remote-daemon target for the whole package
+// test binary and returns a restore. TestMain calls it.
+//
+// The local-only guard reads that target, so without this the many existing
+// cases that drive configGetCmd/configSetCmd/... RunE directly would return the
+// refusal instead of exercising their assertions the moment a developer had
+// AF_DAEMON_URL exported in their shell — 63 of them, measured. testguard's
+// SandboxHome does not cover this: it isolates AGENT_FACTORY_HOME, and the
+// daemon target is a separate axis reaching the same commands.
+//
+// Both halves have to go. apiclient resolves flag > env, so clearing only the
+// env leaves a stale apiclient.FlagDaemonURL — which a cobra Execute in an
+// earlier case can have set — deciding the answer. The token is inert without a
+// URL today; it is scrubbed anyway so "the target is local" is true outright
+// rather than true by way of a second fact that could change.
+//
+// A case that WANTS a remote target still sets one: t.Setenv and a direct
+// assignment to the flag var both win over this and are restored per-case.
+func forceLocalDaemonTarget() func() {
+	prevURL, hadURL := os.LookupEnv("AF_DAEMON_URL")
+	prevToken, hadToken := os.LookupEnv("AF_DAEMON_TOKEN")
+	prevFlagURL, prevFlagToken := apiclient.FlagDaemonURL, apiclient.FlagDaemonToken
+
+	os.Unsetenv("AF_DAEMON_URL")
+	os.Unsetenv("AF_DAEMON_TOKEN")
+	apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = "", ""
+
+	return func() {
+		restoreEnv("AF_DAEMON_URL", prevURL, hadURL)
+		restoreEnv("AF_DAEMON_TOKEN", prevToken, hadToken)
+		apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = prevFlagURL, prevFlagToken
+	}
+}
+
+func restoreEnv(key, value string, had bool) {
+	if had {
+		os.Setenv(key, value)
+		return
+	}
+	os.Unsetenv(key)
+}
+
 // runConfigCLI executes `af config <args…>` through the real command tree and
 // returns what the user would see. It restores every piece of process-global
 // state cobra and apiclient keep between Execute calls, so one case cannot leak
