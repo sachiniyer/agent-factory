@@ -581,7 +581,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // on a PR whose author does not iterate, and blocking on those would turn the
   // manual path into a stop with no way out — the failure mode the reviewer
   // degradation was written to avoid.
-  const manualMergeBlockers = manualMergeRequired ? codex.findingReasons ?? [] : [];
+  const manualMergeBlockers = manualMergeRequired ? codex.findingBlockers ?? [] : [];
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
@@ -2652,11 +2652,20 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // The manual-merge path has to block on findings specifically (#3558), and a
   // gate that identifies another gate's blocker by its message drifts the moment
   // someone rewords the message.
-  const findingReasons = [];
+  //
+  // Each carries the REMEDY that clears it, because the two do not clear the same
+  // way and a blanket instruction is wrong for one of them (#3591 review). The
+  // remedy travels with the reason for the same purpose as the reason itself: so
+  // the summary renders what the gate knows rather than inferring it back out of
+  // the message.
+  const findingBlockers = [];
   if (unresolvedFindings.length > 0) {
     const unresolvedReason = `${unresolvedFindings.length} unresolved live Codex inline finding(s)`;
     reasons.push(unresolvedReason);
-    findingReasons.push(unresolvedReason);
+    findingBlockers.push({
+      reason: unresolvedReason,
+      remedy: "reply RESOLVED, ACCEPTED or [gate-ack] on each thread",
+    });
   } else {
     notes.push("No unresolved live Codex inline findings");
   }
@@ -2703,7 +2712,19 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     reasons.push(unpushedReason);
     // A finding whose only answer is a claim the head cannot contain is still a
     // live finding, so it belongs in the same list as the unanswered kind.
-    findingReasons.push(unpushedReason);
+    //
+    // Its remedy is NOT "reply RESOLVED". The predicate above already requires a
+    // RESOLVED reply to exist, and then turns on lastPushTime — which another
+    // reply does not move. Only a commit newer than the finding clears it, or
+    // withdrawing the claim with ACCEPTED / [gate-ack], which short-circuits the
+    // filter. Advertising RESOLVED here would send the maintainer round a loop
+    // that cannot terminate.
+    findingBlockers.push({
+      reason: unpushedReason,
+      remedy:
+        "push the commit that fixes them, or reply ACCEPTED / [gate-ack] to withdraw the fix " +
+        "claim — another RESOLVED reply cannot clear this one",
+    });
   }
 
   return {
@@ -2712,7 +2733,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     notes,
     reviewerUnavailable,
     reviewerUnavailableReason,
-    findingReasons,
+    findingBlockers,
   };
 }
 
@@ -2765,15 +2786,20 @@ function finish(core, setOutputs, result) {
     // and burying a hard blocker inside it is how one gets read as another
     // "maintainer's call" line on the way to a hand merge (#3558).
     const blockers = result.manualMergeBlockers || [];
-    const unmet = result.reasons.filter((reason) => !blockers.includes(reason));
+    const blockerReasons = new Set(blockers.map((blocker) => blocker.reason));
+    const unmet = result.reasons.filter((reason) => !blockerReasons.has(reason));
     const unmetSuffix =
       unmet.length === 0 ? "" : `\n\nUnmet automatic-merge requirements:\n- ${unmet.join("\n- ")}`;
+    // Each blocker is rendered with ITS OWN remedy. One blanket instruction was
+    // wrong for the unpushed-fix-claim blocker, which no further reply can clear.
+    const blocked = blockers
+      .map((blocker) => `${blocker.reason} — ${blocker.remedy}`)
+      .join("\n- ");
     summary =
       blockers.length === 0
         ? `PASS: ${manual}${unmetSuffix}`
         : `BLOCKED: ${manual} A manual merge still requires every live Codex finding to be ` +
-          `answered — reply RESOLVED, ACCEPTED or [gate-ack] on each thread:\n- ` +
-          `${blockers.join("\n- ")}${unmetSuffix}`;
+          `answered:\n- ${blocked}${unmetSuffix}`;
   } else {
     summary =
       result.reasons.length === 0

@@ -3657,7 +3657,13 @@ test("a live finding blocks the manual-merge decision for a non-allowed author",
   });
 
   assert.equal(result.manualMergeRequired, true, "the PR is still maintainer-merged");
-  assert.deepEqual(result.manualMergeBlockers, ["1 unresolved live Codex inline finding(s)"]);
+  assert.deepEqual(
+    result.manualMergeBlockers.map((blocker) => blocker.reason),
+    ["1 unresolved live Codex inline finding(s)"],
+  );
+  // The remedy travels WITH the blocker rather than being inferred from its text
+  // when the summary is rendered.
+  assert.match(result.manualMergeBlockers[0].remedy, /RESOLVED, ACCEPTED or \[gate-ack\]/);
   assert.match(result.summary, /^BLOCKED:/, "the decision must not read as a pass");
   assert.match(result.summary, /1 unresolved live Codex inline finding/);
   // The summary is where a maintainer finds out what to do about it, so it names
@@ -3738,8 +3744,52 @@ test("a RESOLVED claim with no pushed commit blocks the manual-merge decision", 
   });
 
   assert.equal(result.manualMergeRequired, true);
-  assert.match(result.manualMergeBlockers.join("\n"), /marked RESOLVED with no commit pushed/);
+  assert.match(
+    result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"),
+    /marked RESOLVED with no commit pushed/,
+  );
+  assert.match(result.manualMergeBlockers[0].remedy, /push the commit/);
   assert.match(result.summary, /^BLOCKED:/);
+});
+
+// #3591 review. The two finding blockers do NOT clear the same way, and a single
+// blanket instruction is wrong for one of them. `unpushedFixClaims` requires
+// `claimedFixed.has(id)` — the thread ALREADY carries a RESOLVED reply — and then
+// turns on `lastPushTime <= filedAt`, which another RESOLVED reply does not move.
+// Telling the maintainer to reply RESOLVED there is a permanently failing retry
+// loop; only a newer commit, or withdrawing the claim with ACCEPTED / [gate-ack],
+// clears it.
+test("each finding blocker carries the recovery that actually clears it", async () => {
+  const unanswered = await evaluateGate({
+    author: "detail-app",
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [codexFinding({ id: 10, line: 32 })],
+  });
+
+  assert.match(unanswered.summary, /reply RESOLVED, ACCEPTED or \[gate-ack\]/);
+
+  const unpushed = await evaluateGate({
+    author: "detail-app",
+    headCommittedDate: "2026-07-09T01:00:00Z",
+    issueComments: [codexVerdict(HEAD_SHA)],
+    reviewComments: [
+      codexFinding({ id: 10, line: 32 }),
+      findingReply({ id: 11, inReplyToId: 10, body: "RESOLVED — fixed." }),
+    ],
+  });
+
+  assert.match(unpushed.summary, /marked RESOLVED with no commit pushed/);
+  assert.match(
+    unpushed.summary,
+    /push the commit/,
+    "the remedy must name the only thing that moves lastPushTime",
+  );
+  assert.match(unpushed.summary, /ACCEPTED/);
+  assert.doesNotMatch(
+    unpushed.summary,
+    /reply RESOLVED, ACCEPTED or \[gate-ack\]/,
+    "replying RESOLVED again cannot clear this blocker, so it must not be advertised for it",
+  );
 });
 
 // The block has to be clearable, or it is a permanent stop rather than a gate.

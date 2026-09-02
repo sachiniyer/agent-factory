@@ -38,10 +38,13 @@ external contributions.
 finding is a claim about the code; it is no less true because of who opened the
 PR, so an unanswered inline finding — or one marked `RESOLVED` with no commit
 pushed after it — makes the decision fail rather than pass, and the summary
-names it above the advisory list. Clear it the way every other PR does: a
-threaded reply carrying `RESOLVED`, `ACCEPTED` or `[gate-ack]`. Nothing else is
-promoted to a blocker on this path, because a finding is the only unmet
-requirement an external PR's reviewer can answer per item.
+names it above the advisory list, with the recovery that actually clears **that**
+blocker: an unanswered finding takes a threaded `RESOLVED`, `ACCEPTED` or
+`[gate-ack]` reply, while one already marked `RESOLVED` needs a commit pushed
+after it (or `ACCEPTED` / `[gate-ack]` to withdraw the claim) — a second
+`RESOLVED` cannot clear that one. Nothing else is promoted to a blocker on this
+path, because a finding is the only unmet requirement an external PR's reviewer
+can answer per item.
 
 The same manual-only pass applies when the Codex reviewer is observed to be
 usage-limited against the head — no verdict can arrive in that case, so the
