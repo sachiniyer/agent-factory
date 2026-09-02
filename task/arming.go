@@ -17,51 +17,72 @@ package task
 // and only the two live fields cross over.
 
 // ApplyLiveArming copies the live arming observation from observed onto tasks,
-// matched by ID, and returns tasks. Records with no observation are left
-// exactly as WithScheduleHealth left them — arming unknown — which is the
-// honest answer for "no daemon has reported on this one".
+// paired by the ROW each record occupies in tasks.json, and returns tasks.
+// Records with no observation are left exactly as WithScheduleHealth left them —
+// arming unknown — which is the honest answer for "no daemon has reported on
+// this one".
 //
-// The two lists come from two separate reads of the same file, so they can
-// disagree, and an observation adopted across a disagreement is worse than no
-// observation at all: it reports a fire time for a schedule that is no longer
-// the schedule. sameTrigger is the guard, and it is the client-side twin of the
-// checks the daemon already makes internally against its own live state —
-// controlServer.withLiveArming compares the armed entry's expression, and
-// watcherSupervisor.armingFor compares the watcher's signature. All three ask
-// the same question: is this observation ABOUT the definition in front of me?
+// An observation is ABOUT A ROW, so the row is what it is paired on. Both lists
+// come from the same file through the same loader — the rail's from
+// LoadTasksForKnownRepo, the daemon's from ListTasks — and that loader numbers
+// every record with its position (see Task.Ordinal). Repo filtering drops rows
+// but changes no survivor's number, so a repo-scoped list still says exactly
+// which rows of the store it is holding. Duplicate IDs then resolve exactly:
+// there is no first-wins rule to get right, no candidate list to consume, and no
+// binding to compare, because the question those answered — WHICH ROW IS THIS —
+// is no longer being reconstructed from content (#3680).
 //
-// Duplicate IDs resolve first-wins in both directions, which is the rule the
-// scheduler, the watch supervisor and `af tasks list` already agree on (#855):
-// only the first row for an ID can be armed, so a later row must not inherit
-// the observation the first one earned.
+// It replaces a match that had grown to seven fields and a refusal. Every one of
+// those comparisons was added by a real review finding, and every one was right;
+// the shape was the problem. ID is the natural key and a hand-edited store can
+// duplicate it, so a content match is reconstructing an identity the record does
+// not have — and content is not unique, so each fix added a field and the next
+// case found a pair that agreed on all of them. The seventh fix was a refusal,
+// which is the model reporting that it has run out of information rather than
+// that it needs an eighth field.
+//
+// sameTrigger stays, as the ONE guard, for the case the two reads straddle a
+// write that added or removed a row: ordinals then refer to different rows, and
+// an observation adopted across that reports a fire time for a schedule that is
+// no longer the schedule. It is the client-side twin of the checks the daemon
+// already makes internally against its own live state — controlServer's
+// withLiveArming compares the armed entry's expression, watcherSupervisor's
+// armingFor compares the watcher's signature. All three ask the same question:
+// is this observation ABOUT the definition in front of me? Where it cannot tell,
+// the answer is unknown, which is the honest one.
 func ApplyLiveArming(tasks, observed []Task) []Task {
 	if len(tasks) == 0 || len(observed) == 0 {
 		return tasks
 	}
-	// EVERY observation for an id is kept, in order, not just the first. The
-	// daemon answers about all repos while this list is one repo's, so a
-	// duplicated id can hold the other repo's row AND this one's — and it is
-	// precisely this one's, the row the daemon refused to arm, that carries the
-	// answer worth having. Keeping only the first discarded it and reported the
-	// task as merely unobserved, which suppresses the not-armed warning and falls
-	// back to a computed fire time: a task that will never run, rendered as if it
-	// were fine (#3626 review).
-	live := make(map[string][]Task, len(observed))
+	live := make(map[int]Task, len(observed))
+	// An ordinal claimed by two observations means the list is not one read of
+	// one file — the shape a future remote read would produce by merging two
+	// stores, which both have a row 3. Neither claimant is trustworthy then, so
+	// the row is left unknown rather than resolved by arrival order: a fabricated
+	// "armed" is the false clean bill this whole feature exists to remove, and it
+	// would be worse coming from a store on another machine. Documented on
+	// Task.Ordinal; enforced here so the hazard cannot be reintroduced quietly.
+	contested := make(map[int]bool)
 	for _, o := range observed {
-		live[o.ID] = append(live[o.ID], o)
+		// Unnumbered records identify no row. That is the version-skew case — an
+		// older daemon's response carries no ordinal field at all — and skipping
+		// them leaves every record unknown, which is exactly right for an answer
+		// that cannot be attributed.
+		if o.Ordinal == unstampedOrdinal {
+			continue
+		}
+		if _, taken := live[o.Ordinal]; taken {
+			contested[o.Ordinal] = true
+			continue
+		}
+		live[o.Ordinal] = o
 	}
-	// An observation describes ONE row, so it is adopted by at most one — each is
-	// consumed when it is taken. That is what lets a duplicated id be reported
-	// row by row: the daemon returns an observation per row and marks every one
-	// after the first not-armed, so the later rows have an authoritative negative
-	// waiting for them. Skipping them wholesale left them UNKNOWN, which hides the
-	// "[!] not armed" mark behind a computed fire time for a task the scheduler
-	// will never run — the same false clean bill as adopting the wrong row, in the
-	// other direction (#3626 review).
-	used := make(map[string][]bool, len(live))
 	for i := range tasks {
-		o, ok := takeMatching(live, used, tasks[i])
-		if !ok {
+		if tasks[i].Ordinal == unstampedOrdinal || contested[tasks[i].Ordinal] {
+			continue
+		}
+		o, ok := live[tasks[i].Ordinal]
+		if !ok || !sameTrigger(o, tasks[i]) {
 			continue
 		}
 		tasks[i].Arming = o.Arming
@@ -74,73 +95,14 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 	return tasks
 }
 
-// takeMatching claims the earliest unclaimed observation that is about t, and
-// marks it claimed. Reports false when none is.
-//
-// Earliest-first is the daemon's first-wins rule for a duplicated id, resolved
-// where it belongs: among the observations that are CANDIDATES for this record,
-// not among every row that happens to share its id. Keyed on the id alone it
-// threw away the only observation describing the record in hand as soon as
-// another repo held the same id.
-//
-// Claiming is what makes the rule hold for a run of local duplicates. Two rows
-// in one repo with the same trigger are both candidates for the same
-// observation; without consuming it, the second would take the first's "armed"
-// and report a row the scheduler skipped as scheduled. With it, the second falls
-// to the daemon's own observation of that second row — which is not-armed, and
-// is the answer worth having (#855, and #3626 review).
-func takeMatching(live map[string][]Task, used map[string][]bool, t Task) (Task, bool) {
-	observed := live[t.ID]
-	claimed, ok := used[t.ID]
-	if !ok {
-		claimed = make([]bool, len(observed))
-		used[t.ID] = claimed
-	}
-	// An unbound record must not GUESS between candidates that disagree about
-	// which project they belong to. sameBinding lets a missing RepoID match
-	// anything, which is right while the field is being backfilled — but if the
-	// disk read landed before the backfill and ListTasks after it, an older row
-	// retained to a different repo can still share the reused path, the id and the
-	// expression, and "match anything" would take its armed answer over this
-	// record's own not-armed one. Tolerate the missing identity only where it
-	// cannot pick the wrong row (#3626 review).
-	if t.RepoID == "" && ambiguousBinding(observed, claimed, t) {
-		return Task{}, false
-	}
-	for j, o := range observed {
-		if claimed[j] || !sameTrigger(o, t) {
-			continue
-		}
-		claimed[j] = true
-		return o, true
-	}
-	return Task{}, false
-}
-
-// ambiguousBinding reports whether the unclaimed candidates for t disagree about
-// which repo they belong to. Two candidates carrying DIFFERENT non-empty RepoIDs
-// are two different tasks that a record with no id of its own cannot choose
-// between, and choosing wrong reports a row the daemon skipped as armed.
-//
-// A single candidate is never ambiguous however it is bound, and neither is a
-// set that agrees — those are the ordinary cases the backfill fallback exists
-// for, and they keep working.
-func ambiguousBinding(observed []Task, claimed []bool, t Task) bool {
-	seen := ""
-	for j, o := range observed {
-		if claimed[j] || o.RepoID == "" || !sameTrigger(o, t) {
-			continue
-		}
-		if seen != "" && seen != o.RepoID {
-			return true
-		}
-		seen = o.RepoID
-	}
-	return false
-}
-
 // sameTrigger reports whether an observation about o describes the same trigger
 // as t — that is, whether what the daemon armed is what this record configures.
+//
+// This is the staleness guard, and the only comparison left. Row identity says
+// which row an observation is about; this says whether the row still holds the
+// definition it held when the daemon looked. The case it exists for is two reads
+// straddling a write that ADDED or REMOVED a row, since that is what moves the
+// rows below it and makes one list's row N a different task from the other's.
 //
 // The fields are the ones each subsystem itself keys on, and they differ by kind
 // because the subsystems differ. A cron entry holds an expression and fires by
@@ -153,47 +115,18 @@ func ambiguousBinding(observed []Task, claimed []bool, t Task) bool {
 // Mar 04 09:00" for a task the user just switched off is the same lie in the
 // opposite direction.
 //
-// ProjectPath is compared for both kinds too, and for the cron branch it does a
-// job the daemon's own expression check cannot. The daemon skips a duplicated id
-// GLOBALLY, first row wins; the caller here has already been filtered to ONE
-// repo, so a row the daemon skipped can be the only one this list holds, and it
-// is then locally first. Two stores sharing an id and an expression across
-// repos would otherwise hand the globally-first row's "armed" and its next-fire
-// time to a row the daemon explicitly refused to arm — a rail reporting a task
-// as scheduled precisely because it is the duplicate that will never run
-// (#3626 review). Local order cannot see that; the definition can.
+// ProjectPath is compared for both kinds too. For watch tasks it is part of the
+// signature above; for cron it is kept as extra evidence that the row still
+// holds the same task, which costs nothing and catches a straddling write that
+// happened to preserve the expression. What it is NOT any more is a stand-in for
+// row identity — that was its job while the match was made on content, and it is
+// the ordinal's job now.
 func sameTrigger(o, t Task) bool {
 	if o.IsWatch() != t.IsWatch() || o.Enabled != t.Enabled {
-		return false
-	}
-	if !sameBinding(o, t) {
 		return false
 	}
 	if t.IsWatch() {
 		return o.WatchCmd == t.WatchCmd && o.ProjectPath == t.ProjectPath && o.Name == t.Name
 	}
 	return o.CronExpr == t.CronExpr && o.ProjectPath == t.ProjectPath
-}
-
-// sameBinding reports whether two records are bound to the same project, by the
-// identity the display scope itself keys on.
-//
-// ProjectPath alone is not that identity. repoScope.matches treats a RETAINED
-// RepoID as authoritative and only falls back to the path, precisely so a task
-// survives its project being moved — which means two rows can share a path and
-// still belong to different repos, after a path is deleted and reused. The rail
-// then displays the new repo's row while an id-and-path match would hand it the
-// old repo's armed entry and its fire time (#3626 review).
-//
-// Compared only when BOTH sides carry one, which is the fallback legacy rows
-// need and is not merely a concession to them. RepoID is daemon-backfilled, so
-// two reads of the same file can straddle a backfill and disagree about a record
-// nobody changed; demanding equality there would spend real observations on
-// spurious unknowns. An empty id on either side means "not bound yet", and the
-// path comparison the callers already make is then the best available answer.
-func sameBinding(o, t Task) bool {
-	if o.RepoID == "" || t.RepoID == "" {
-		return true
-	}
-	return o.RepoID == t.RepoID
 }

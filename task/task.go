@@ -123,7 +123,7 @@ type Task struct {
 	// locked operation that commits the change; see task/audit.go.
 	Audit []AuditEntry `json:"audit,omitempty"`
 
-	// The four fields below are DERIVED AT READ TIME and never persisted — see
+	// The fields below are DERIVED AT READ TIME and never persisted — see
 	// task/overdue.go for the derivation and saveTasks for the strip that
 	// enforces it. They are ordinary fields on the record rather than a side
 	// channel because every surface that reads a task needs them, and a health
@@ -165,7 +165,45 @@ type Task struct {
 	// Arming is the live arming observation: ArmingArmed, ArmingNotArmed, or
 	// ArmingUnknown (the zero value) when no daemon answered.
 	Arming string `json:"arming,omitempty"`
+
+	// Ordinal is this record's row number in tasks.json — 1-based, derived by
+	// the read that produced it (stampOrdinals) and stripped on the way to disk
+	// like the health fields above.
+	//
+	// It is the row's IDENTITY, which is the one thing the record itself does
+	// not carry. ID is the natural key and a hand-edited store can duplicate
+	// it — the daemon already handles that case explicitly — so a reader pairing
+	// two reads of this file by CONTENT is reconstructing an identity it does
+	// not have, and content is not unique: each mispairing is fixed by comparing
+	// one more field, and the next case finds a pair that agrees on all of them
+	// (#3680, off #3626's review). The ordinal is not stored, so the file cannot
+	// lie about it, and it cannot collide within one read: row N is the Nth row,
+	// once. A stamped per-row id would buy neither — it is exactly as duplicable
+	// as ID, because copying a row in an editor copies its stamp too.
+	//
+	// It identifies a row within ONE tasks.json, and two lists may be paired on
+	// it only when both were read from the same file. Two unrelated stores both
+	// have a row 3, so pairing across them would hand one machine's "armed" to
+	// another machine's task. That is why the observation ApplyLiveArming
+	// consumes is a LOCAL one only — app/session_control.go's
+	// liveTaskArmingFetcher declines to fetch arming for a remote target,
+	// because the definitions beside it are local — and why a future remote read
+	// must carry the store's own identity alongside the ordinal rather than
+	// compare ordinals from two files.
+	//
+	// Zero means NOT STAMPED, and nothing pairs on it. That is what lets the
+	// field say "unknown" rather than fail open: a record built in memory
+	// occupies no row, and an older daemon's response carries no ordinal at all,
+	// which JSON decodes to zero. Numbered from zero, every such record would
+	// claim to be row 0 and collect the first observation going — a fabricated
+	// answer produced by a MISSING field. Numbered from one, that skew degrades
+	// to unknown, which is what the rail already renders honestly.
+	Ordinal int `json:"ordinal,omitempty"`
 }
+
+// unstampedOrdinal is the Ordinal of a record no read has numbered. See
+// Task.Ordinal for why the zero value has to mean "unknown" rather than "row 0".
+const unstampedOrdinal = 0
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
 // time-triggered (CronExpr).
@@ -288,7 +326,22 @@ func LoadTasks() ([]Task, error) {
 	// rather than in each surface is what stops the next surface from being the
 	// one that renders a dark task as healthy. loadTasksLocked — the WRITE path's
 	// loader — deliberately does not, so nothing derived can reach disk.
-	return WithScheduleHealth(tasks, nowFn()), nil
+	return stampOrdinals(WithScheduleHealth(tasks, nowFn())), nil
+}
+
+// stampOrdinals numbers every record with its 1-based position in the file and
+// returns tasks. See Task.Ordinal for what the number is for.
+//
+// It runs LAST on each read path — after WithScheduleHealth here, and after the
+// strip in loadTasksLocked — so a record's ordinal always describes the read
+// that produced it and never a value the file supplied. A hand-typed "ordinal"
+// is therefore overwritten rather than believed, which is the same rule the
+// health fields follow and for the same reason.
+func stampOrdinals(tasks []Task) []Task {
+	for i := range tasks {
+		tasks[i].Ordinal = i + 1
+	}
+	return tasks
 }
 
 // nowFn is the clock the read-time derivation reads. A package variable so tests
@@ -329,7 +382,14 @@ func loadTasksLocked(path string) ([]Task, error) {
 	for i := range tasks {
 		tasks[i].stripDerived()
 	}
-	return tasks, nil
+	// Numbered after the strip, not before it: stripDerived clears the ordinal
+	// along with the rest, and this path's records do not only go back to disk
+	// either. LoadTasksWithStableRepoBindingUpdates returns exactly this slice as
+	// its authoritative list, so leaving it unnumbered would hand a future caller
+	// a set of rows that all claim to be unidentified — the one shape
+	// ApplyLiveArming reads as "no row identity" and refuses to pair. Every read
+	// path returns numbered rows; only the write path carries none (#3680).
+	return stampOrdinals(tasks), nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {
