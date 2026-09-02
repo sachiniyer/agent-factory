@@ -113,12 +113,13 @@ func TestTeardownInProgressOffersNoLifecycleActions(t *testing.T) {
 // the veto and act through the same binding whose identity was never confirmed.
 func TestStartupUnknownVetoesEveryRuntimeAction(t *testing.T) {
 	valid := map[RuntimeAction]LifecycleView{
-		RuntimeActionRestoreArchived:   {Title: "unknown", Liveness: LiveArchived},
-		RuntimeActionRestoreLostOrDead: {Title: "unknown", Liveness: LiveDead, Started: true},
-		RuntimeActionRecoverLost:       {Title: "unknown", Liveness: LiveLost, Started: true},
-		RuntimeActionRecoverFenced:     {Title: "unknown", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
-		RuntimeActionResumeLimit:       {Title: "unknown", Liveness: LiveLimitReached, Started: true},
-		RuntimeActionHandoff:           {Title: "unknown", Liveness: LiveRunning, Started: true},
+		RuntimeActionRestoreArchived:       {Title: "unknown", Liveness: LiveArchived},
+		RuntimeActionRestoreArchivedFenced: {Title: "unknown", Liveness: LiveArchived, InFlightOp: OpRestoring},
+		RuntimeActionRestoreLostOrDead:     {Title: "unknown", Liveness: LiveDead, Started: true},
+		RuntimeActionRecoverLost:           {Title: "unknown", Liveness: LiveLost, Started: true},
+		RuntimeActionRecoverFenced:         {Title: "unknown", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
+		RuntimeActionResumeLimit:           {Title: "unknown", Liveness: LiveLimitReached, Started: true},
+		RuntimeActionHandoff:               {Title: "unknown", Liveness: LiveRunning, Started: true},
 	}
 	for action := RuntimeAction(0); action < numRuntimeActions; action++ {
 		view := valid[action]

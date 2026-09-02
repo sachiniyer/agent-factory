@@ -553,6 +553,28 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 
 	key := daemonInstanceKey(repoID, req.Title)
+
+	// Registered BEFORE the claim so LIFO runs it LAST — after opLock.Unlock and
+	// after releaseRestoreOperation (the #3597 ordering). The claim is what actually
+	// refuses Kill, so lowering the fence while killsInFlight is still set would
+	// publish a row saying can_kill=true that the admission gate would still refuse.
+	// Released last, the busy projection covers exactly the claim's interval.
+	//
+	// fenceRaised is ownership, not bookkeeping: the returns above the raise include
+	// a claim that FAILED because another restore holds it, and that restore may well
+	// have OpRestoring up. Releasing on the bare op value would lower a fence
+	// belonging to someone else's operation. It also keeps this inert on the REMOTE
+	// route, which raises nothing.
+	fenceRaised := false
+	defer func() {
+		if !fenceRaised {
+			return
+		}
+		if instance.EndArchivedRestoreFence() {
+			m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+		}
+	}()
+
 	if err := m.claimRestoreOperation(repoID, key, req.Title); err != nil {
 		return "", err
 	}
@@ -585,8 +607,39 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// (#1592 Phase 4 PR6). Route it to the remote body, which shares this method's
 	// guards + locks.
 	if instance.Capabilities().Workspace == session.WorkspaceRemote {
+		// Deliberately unfenced (#3596): RestoreFromArchive is the FIRST statement
+		// there, so the prefix this fence would cover is a capability read. The local
+		// route below is the one with a worktree relocate in front of its re-spawn.
 		return m.restoreRemoteSession(repoID, instance, req.Title)
 	}
+
+	// Raise the fence HERE, at the top of the LOCAL route, so it is coextensive with
+	// the claim above (#3596 — the archived half of #3586).
+	//
+	// claimRestoreOperation already made Kill fail: from that line a Kill is rejected
+	// at the admission gate with "an operation is already in progress". canKillFor
+	// hides the affordance and reads the op axis alone, and canKillFor never consults
+	// liveness, so an ARCHIVED row advertises Kill — for the relocation claim, the
+	// repo-gone guard, the destination derivation and the worktree relocate, all of
+	// which run before RestoreFromArchive raises anything. A cross-device move of a
+	// large worktree is a copy, so that is not a window with a small bound.
+	//
+	// MarkRestoring, not BeginRestore: the op axis alone, liveness stays LiveArchived.
+	// That is what keeps the #1203 reconcile rebuild keyed on the Archived->live
+	// transition that still happens later, inside RestoreFromArchiveHeldFenced. The
+	// row does re-home into the live Instances section for the whole relocate, which
+	// is #1210's eager feedback starting when the restore starts.
+	if err := instance.BeginArchivedRestoreFence(); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
+	}
+	fenceRaised = true
+	// ANNOUNCE it, the contract #2997 gave the limit resume and #3597 the lost
+	// restore. Clients gate their controls on the projected op and perform no
+	// optimistic update for a CLI- or web-initiated restore, so a fence nobody is
+	// told about leaves an already-open client offering Kill for the whole relocate.
+	// Nothing below lowers the fence early: every snapshot published while the claim
+	// is held reports the row busy, which is what it is.
+	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
 
 	// Resolve relocation ownership before reading repo-derived restore context.
 	relocationClaim, err := m.claimRestoreRelocation(repoID, req.Title, instance)
@@ -627,7 +680,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// archive intact (the git layer guarantees this) and surfaces an actionable
 	// message; the instance stays Archived.
 	claimTransferred = true
-	if err := instance.RestoreArchivedWorktreeWithClaim(dest, relocationClaim); err != nil {
+	if err := instance.RestoreArchivedWorktreeHeldFencedWithClaim(dest, relocationClaim); err != nil {
 		if errors.Is(err, sessiongit.ErrRepoGone) {
 			return "", m.persistRepoGoneAtRestoreUse(repoID, req.Title, repoPath, instance, err)
 		}
@@ -694,7 +747,12 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// Worktree is back in place. Re-spawn the agent and flip Running. On a
 	// re-spawn failure RestoreFromArchive leaves the instance started + Lost, so
 	// the Lost-restore loop keeps retrying against the now-restored worktree.
-	if err := instance.RestoreFromArchive(); err != nil {
+	// The held-fence form: this route raised OpRestoring before the relocate, and
+	// RestoreFromArchive re-validates RuntimeActionRestoreArchived, which requires
+	// OpNone and would now refuse its own operation's fence. Its BeginRestore edge
+	// keeps that strict guard; BeginRestoreUnderHeldFence is the entry for the row
+	// that arrives already fenced.
+	if err := instance.RestoreFromArchiveHeldFenced(); err != nil {
 		if perr := commitRestore(); perr != nil {
 			return failedRestoredArchiveResult(instance, restoredPath, fmt.Errorf("%w; its agent also failed to re-spawn: %v", perr, err))
 		}
