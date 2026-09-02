@@ -37,9 +37,10 @@ func TestArchiveSession_PreflightStallIsPersistedBeforeReturn(t *testing.T) {
 // filesystems), so the manual move lands the bytes at dest — and then
 // `git worktree repair` makes no progress, so the bounded runner SIGKILLs it.
 //
-// Everything else execs the real git, so the repo, the worktree registration and
-// the archive that precede this are genuine. The returned heal() drops the
-// misbehavior so the same test can then drive a healthy retry.
+// Everything but the submodule probe execs the real git, so the repo, the
+// worktree registration and the archive that precede this are genuine. The
+// returned heal() drops the misbehavior so the same test can then drive a
+// healthy retry.
 func partialRelocateGitOnPath(t *testing.T) (heal func()) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
@@ -49,6 +50,15 @@ func partialRelocateGitOnPath(t *testing.T) (heal func()) {
 	shim := filepath.Join(dir, "git")
 	// Args always arrive as: git -C <path> <verb> <subverb> …
 	script := "#!/bin/sh\n" +
+		// The pre-move submodule probe (worktreeContainsSubmodules), answered here
+		// rather than passed through. The fixture repo has no submodules, so this is
+		// the answer real git gives — only without the wall-clock exposure. The
+		// tight localGitTimeout its callers install exists SOLELY to SIGKILL the
+		// repair hang below; a real `git submodule status` running inside that same
+		// window is a second way to trip it, and on a loaded runner it wins, cutting
+		// the relocate off at the INSPECTION before any bytes move (#3569). #3291
+		// fixed the same class for the healed retry.
+		"if [ \"$3\" = \"submodule\" ] && [ \"$4\" = \"status\" ]; then exit 0; fi\n" +
 		"if [ \"$3\" = \"worktree\" ] && [ \"$4\" = \"repair\" ]; then sleep 300 & wait; fi\n" +
 		"if [ \"$3\" = \"worktree\" ] && [ \"$4\" = \"move\" ]; then\n" +
 		"  echo 'simulated: git worktree move refused (cross-device)' >&2; exit 1\n" +
@@ -142,6 +152,14 @@ func TestRestoreArchived_RelocateCutOffPersistsTheNewLocation(t *testing.T) {
 
 	require.Error(t, err, "a restore cut off mid-relocate must not report success")
 	require.ErrorIs(t, err, sessiongit.ErrRelocateStateUnknown)
+	// WHICH step was cut off is this test's premise, not a detail: everything below
+	// requires the bytes to have reached dest, which only happens if the deadline
+	// trips at the shimmed `worktree repair`. Assert it directly so a relocate that
+	// is cut off earlier reports its own cause instead of five premise failures
+	// (#3569).
+	require.Contains(t, err.Error(), "git registration repair did not complete",
+		"the cut-off must come from the shimmed repair hang; an earlier step tripping this "+
+			"test's 300ms bound moves the cut-off before any bytes move")
 	assert.Contains(t, err.Error(), expected,
 		"the error must name where the worktree actually is, so the operator can find it")
 
