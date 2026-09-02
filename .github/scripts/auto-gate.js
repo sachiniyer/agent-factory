@@ -1994,33 +1994,53 @@ async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
     return;
   }
   try {
+    // (c) first, because it is the only condition whose answer cannot change in
+    // a way that makes deleting safe — and because every read placed between the
+    // SHA check and the delete widens the window in which the branch can move.
+    //
+    // Two shapes: a PR based ON this branch, which deleting would close, and a
+    // PR whose HEAD is this branch targeting some other base, which deleting
+    // would leave headless. The merged PR itself is closed by now, so an open
+    // head-PR here is genuinely a different one.
+    const [dependents, siblings] = await Promise.all([
+      github.paginate(github.rest.pulls.list, {
+        owner,
+        repo,
+        base: branch,
+        state: "open",
+        per_page: 100,
+      }),
+      github.paginate(github.rest.pulls.list, {
+        owner,
+        repo,
+        head: `${owner}:${branch}`,
+        state: "open",
+        per_page: 100,
+      }),
+    ]);
+    const blocking = [...dependents, ...siblings].map((pull) => pull.number);
+    if (blocking.length > 0) {
+      core.notice(
+        `Keeping ${branch}: open PR ${joinPullNumbers([...new Set(blocking)])} still uses it.`,
+      );
+      return;
+    }
+
     // (b) The ref must still point at the commit that was merged. A lane that
     // pushed after the merge keeps its branch — that work is not in master, and
-    // deleting it would destroy the only copy that had been pushed anywhere.
+    // the pushed ref may be the only copy of it anywhere.
+    //
+    // This is the LAST read before the delete, deliberately, because the delete
+    // itself cannot carry the condition: neither the REST ref API nor GraphQL's
+    // deleteRef accepts an expected OID (introspected), so the pair cannot be
+    // made atomic from here. Ordering is the only lever this side of pushing a
+    // lease with git, and it is used.
     const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
     const tip = String(ref?.data?.object?.sha || "").toLowerCase();
     if (tip !== String(gate.headSha || "").toLowerCase()) {
       core.notice(
         `Keeping ${branch}: it now points at ${tip || "an unreadable commit"}, not the merged ` +
           `${gate.headSha}, so it carries work this merge did not take.`,
-      );
-      return;
-    }
-
-    // (c) Another open PR may be based on this branch; deleting it closes that
-    // PR and throws away its review.
-    const dependents = await github.paginate(github.rest.pulls.list, {
-      owner,
-      repo,
-      base: branch,
-      state: "open",
-      per_page: 100,
-    });
-    if (dependents.length > 0) {
-      core.notice(
-        `Keeping ${branch}: it is the base of open PR ${joinPullNumbers(
-          dependents.map((pull) => pull.number),
-        )}.`,
       );
       return;
     }

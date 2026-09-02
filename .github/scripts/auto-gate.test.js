@@ -3876,6 +3876,53 @@ test("a head branch that another open PR is based on is kept", async () => {
   assert.deepEqual(github.deletedRefs, []);
 });
 
+test("a head branch another open PR still uses as its head is kept", async () => {
+  // The base query alone misses a PR whose HEAD is this branch and whose base is
+  // some other branch; deleting it would leave that PR headless.
+  const github = fakeGateGithub({ siblingPullRequests: [{ number: 2048 }] });
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(
+    [...new Set(github.pullListQueries)].sort(),
+    ["base", "head"],
+    "both shapes must be asked about",
+  );
+});
+
+test("the merged-SHA check is the last read before the delete", async () => {
+  // The delete cannot carry the condition — neither the REST ref API nor
+  // GraphQL's deleteRef accepts an expected OID — so ordering is the only lever:
+  // any read placed after the SHA check widens the window in which the branch
+  // can move under it.
+  const github = fakeGateGithub();
+  const order = [];
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.pulls.list) {
+      order.push("pulls");
+    }
+    return realPaginate(fn, options);
+  };
+  const realGetRef = github.rest.git.getRef;
+  github.rest.git.getRef = async (options) => {
+    order.push("getRef");
+    return realGetRef(options);
+  };
+  const realDeleteRef = github.rest.git.deleteRef;
+  github.rest.git.deleteRef = async (options) => {
+    order.push("deleteRef");
+    return realDeleteRef(options);
+  };
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+  const deleteAt = order.indexOf("deleteRef");
+  assert.equal(order[deleteAt - 1], "getRef", `got ${JSON.stringify(order)}`);
+});
+
 test("a head branch already gone is a no-op, not a failure", async () => {
   const github = fakeGateGithub({ remoteRefSha: null });
 
@@ -4514,6 +4561,8 @@ function fakeGateGithub({
   deleteRefError = null,
   // Open PRs based on the head branch.
   dependentPullRequests = [],
+  // Open PRs whose HEAD is the merged branch, targeting some other base.
+  siblingPullRequests = [],
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
@@ -4594,7 +4643,6 @@ function fakeGateGithub({
   };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
-    [listOpenPullRequests, dependentPullRequests],
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
@@ -4624,6 +4672,7 @@ function fakeGateGithub({
     operations: [],
     mergedWith: null,
     refReads: [],
+    pullListQueries: [],
     deletedRefs: [],
     reviewCommentReads: 0,
     reviewCommentReadsByNumber: {},
@@ -4832,6 +4881,10 @@ function fakeGateGithub({
       }
       if (fn === listReviews && pullRequestOverride.reviews) {
         return pullRequestOverride.reviews;
+      }
+      if (fn === listOpenPullRequests) {
+        github.pullListQueries.push(options.head ? "head" : "base");
+        return options.head ? siblingPullRequests : dependentPullRequests;
       }
       if (fn === listFiles && pullRequestOverride.files) {
         return pullRequestOverride.files.map((filename) => ({ filename }));
