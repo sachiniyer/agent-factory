@@ -186,21 +186,33 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		}
 		resolved := resolvePath(project.Root)
 		provenID, proven := provenRegistryIDs[project.Root]
+		rootPriority := 2
 		switch {
 		case proven:
 			resolved.id = provenID
-		case resolved.id != config.ReconciledRepoIDForProject(project):
-			// A registry ROW is addressed by the identity it recorded, not by
-			// hashing its path (#3530). Hashing splits the row from sessions
-			// stored under the real id — most visibly once a bare repository's
-			// linked worktree disappears — and for a legacy row with nothing
-			// recorded it recreates the very real/invented collision this
-			// change removes.
+		default:
+			// IDENTITY and ROOT SPELLING are separate decisions here, and an
+			// unproven row answers them differently.
+			//
+			// Its identity is the one it RECORDED, never a hash of its path
+			// (#3530 review id 3914971730): hashing splits the row from
+			// sessions stored under the real id — most visibly once a bare
+			// repository's linked worktree disappears — and for a legacy row
+			// with nothing recorded it recreates the real/invented collision
+			// this change removes.
+			//
+			// Its path, though, is exactly what could not be verified, so it
+			// must not outrank a live workspace for the spelling the user is
+			// shown: a vanished or replaced registry root would otherwise
+			// relabel a project with a directory that is no longer there.
+			// Below session priority, but still above nothing — a registered
+			// project with no sessions is still named by its recorded root.
 			resolved = projectPathResolution{
 				id: config.ReconciledRepoIDForProject(project), root: filepath.Clean(project.Root),
 			}
+			rootPriority = 0
 		}
-		ensure(resolved, 2)
+		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
