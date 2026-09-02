@@ -178,7 +178,12 @@ func mustVisit(f reflect.StructField) bool {
 	// gave up. It must be honoured BEFORE the walk, because an unplantable
 	// shape behind that tag (any, []int, an unreviewed marshaler) would
 	// otherwise be reported as a hole in a field json cannot emit (#3592 review).
-	if f.Tag.Get("json") == "-" {
+	// Compare the PARSED tag name, not the whole tag. encoding/json omits the
+	// field for every "-" spelling — `json:"-"`, `json:"-,"` and
+	// `json:"-,omitempty"` all marshal to nothing (measured) — so an exact-string
+	// match on `-` alone reported a harmless non-serializable field as a hole
+	// (#3592 review).
+	if strings.Split(f.Tag.Get("json"), ",")[0] == "-" {
 		return false
 	}
 	if f.IsExported() {
@@ -218,14 +223,25 @@ var reviewedMarshalerTypes = map[reflect.Type]string{
 // no way to plant readable text in. Refusing is the point: a numeric container
 // holding user text would otherwise sit in a zero-valued fixture no detection
 // pass can see.
-func isUnplantableScalar(k reflect.Kind) bool {
+func isScalarNumeric(k reflect.Kind) bool {
 	switch k {
-	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int64,
-		reflect.Uint, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64,
+		reflect.Complex64, reflect.Complex128:
 		return true
 	}
 	return false
+}
+
+// isUnplantableScalar reports a SEQUENCE element kind that json serializes but
+// fill has no way to plant readable text in. uint8 and int32 are excluded
+// because a sequence of them is a text container this guard does plant —
+// []byte and []rune. Every other numeric kind, Uintptr included, must be
+// refused: `[]uintptr` marshals to plain integers that reconstruct code points
+// or packed bytes just as well (#3592 review).
+func isUnplantableScalar(k reflect.Kind) bool {
+	return isScalarNumeric(k) && k != reflect.Uint8 && k != reflect.Int32
 }
 
 // sentinelFiller plants a unique marker in every plantable field and records the
@@ -353,16 +369,30 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 	elem := v.Type().Elem().Kind()
 	switch {
 	case elem == reflect.Uint8:
+		// Written element by element rather than with SetBytes/reflect.Copy:
+		// both demand EXACTLY uint8, so a named byte type (`type DigestByte
+		// uint8`) — which this kind-based branch admits — panicked and crashed
+		// the suite instead of being classified (#3592 review).
 		marker := f.nextMarker()
 		if isSlice {
-			v.SetBytes([]byte(marker))
+			raw := []byte(marker)
+			sv := reflect.MakeSlice(v.Type(), len(raw), len(raw))
+			for i, b := range raw {
+				sv.Index(i).SetUint(uint64(b))
+			}
+			v.Set(sv)
 		} else {
 			if v.Len() < guardMinContainer {
 				f.unsupported = append(f.unsupported,
 					fmt.Sprintf("%s ([%d]byte is too short to hold a distinctive marker)", path, v.Len()))
 				return
 			}
-			reflect.Copy(v, reflect.ValueOf([]byte(marker)))
+			for i, b := range []byte(marker) {
+				if i >= v.Len() {
+					break
+				}
+				v.Index(i).SetUint(uint64(b))
+			}
 		}
 		f.record(v, path, marker)
 	case elem == reflect.Int32:
@@ -407,6 +437,19 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 // reason: a redaction that processes one arbitrary entry and returns would
 // scrub every marker from a single-entry fixture and pass.
 func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
+	// A SCALAR map value cannot hold a marker — unlike a sequence, there is one
+	// number per key, not a container of them — while json still emits the whole
+	// map, so `map[int]int32` of code points would reconstruct text with nothing
+	// planted anywhere. uint8 and int32 are refused here too, for that reason
+	// (#3592 review).
+	// Note the hole but DO NOT return: the keys of such a map are still
+	// plantable and still reach the bundle, so returning here would trade a
+	// value-shaped blind spot for a key-shaped one.
+	valueScalar := isScalarNumeric(v.Type().Elem().Kind())
+	if valueScalar {
+		f.unsupported = append(f.unsupported,
+			fmt.Sprintf("%s (map value kind %s cannot carry a text marker)", path, v.Type().Elem().Kind()))
+	}
 	m := reflect.MakeMap(v.Type())
 	for i := 0; i < guardSliceSeed; i++ {
 		key := reflect.New(v.Type().Key()).Elem()
@@ -430,7 +473,9 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 			}
 		}
 		val := reflect.New(v.Type().Elem()).Elem()
-		f.fill(val, path+"[]", depth+1)
+		if !valueScalar {
+			f.fill(val, path+"[]", depth+1)
+		}
 		m.SetMapIndex(key, val)
 	}
 	v.Set(m)
