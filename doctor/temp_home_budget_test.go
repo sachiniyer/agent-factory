@@ -267,8 +267,10 @@ func TestStaleTempHomeFindingsCollapse(t *testing.T) {
 	collapsed := renderRows(report, false, false)
 	require.Len(t, collapsed, 1, "the default view collapses them into one row")
 	assert.Equal(t, "stale-temp-homes", collapsed[0].name)
-	assert.Contains(t, collapsed[0].detail, "7 agent-factory homes")
-	assert.Contains(t, collapsed[0].detail, "7 safe to remove")
+	assert.Contains(t, collapsed[0].detail, "7 abandoned agent-factory homes")
+	assert.Contains(t, collapsed[0].detail, "7 proven unused and safe to remove")
+	assert.NotContains(t, collapsed[0].detail, "possibly",
+		"every finding here IS proven, so the hedge would understate what doctor established")
 	assert.Contains(t, collapsed[0].remediation, "--verbose")
 
 	verbose := renderRows(report, false, true)
@@ -542,8 +544,11 @@ func TestUnlistableDirectoryReachesTheReport(t *testing.T) {
 	assert.Equal(t, []string{"stale-temp-home"}, report.Incomplete)
 	notices := findingsFor(report, "temp-home-scan")
 	require.Len(t, notices, 1)
-	assert.Contains(t, notices[0].Detail, "could not be listed at all",
-		"the notice must say WHY it did not see everything, not just that it did not")
+	assert.Contains(t, notices[0].Detail, "belong to another user",
+		"the notice must say WHY it did not see everything, and a directory owned by "+
+			"someone else is not a fault to investigate")
+	assert.Contains(t, notices[0].Remediation, "clear out",
+		"permission-denied directories are other people's clutter, not something to debug")
 }
 
 // TestTruncationNoticeReportsBothProgressQuantities is the third second-round
@@ -841,7 +846,7 @@ func TestPartialRootReadErrorIsNotReportedAsSize(t *testing.T) {
 	assert.NotContains(t, detail, "too large to list in full",
 		"an I/O fault is not a size problem")
 
-	assert.Contains(t, tempHomeSweepTruncationRemediation(root, sweep), "investigate why listing")
+	assert.Contains(t, tempHomeSweepTruncationRemediation(root, sweep), "investigate the listing failure")
 	assert.NotContains(t, tempHomeSweepTruncationRemediation(root, sweep), "clear out",
 		"telling someone with a failing filesystem to clean their temp dir is advice that cannot work")
 }
@@ -859,4 +864,113 @@ func TestBudgetTruncatedRootStillReadsAsSize(t *testing.T) {
 
 	assert.Contains(t, tempHomeSweepTruncationDetail(root, sweep, 50000), "too large to list in full")
 	assert.Contains(t, tempHomeSweepTruncationRemediation(root, sweep), "clear out")
+}
+
+// TestCollapsePreservesTheUncertaintyTheDetectorKept is the sixth-round finding,
+// and it is the one this whole PR is least entitled to get wrong.
+//
+// checkStaleTempHomes deliberately refuses to conclude that a home with an
+// undetermined lock probe is abandoned: it reports that the directory "looks
+// abandoned … but nothing here can PROVE it is unused". The collapse I added
+// rewrote a group of those as a flat "N agent-factory homes abandoned",
+// asserting in the DEFAULT view the exact conclusion the detector had withheld
+// — and on the live box that was 47 of 49 findings.
+//
+// Under-cleaning is cosmetic. Telling an operator a directory is dead when
+// nobody established that is how the rm -rf gets authorised.
+func TestCollapsePreservesTheUncertaintyTheDetectorKept(t *testing.T) {
+	t.Run("all unproven", func(t *testing.T) {
+		report := &Report{}
+		for i := 0; i < 5; i++ {
+			report.addAdvisoryFinding(Finding{
+				Check:    "stale-temp-home",
+				Detail:   fmt.Sprintf("home %d looks abandoned but nothing can prove it is unused", i),
+				Severity: StatusWarn,
+			})
+		}
+
+		rows := renderRows(report, false, false)
+		require.Len(t, rows, 1)
+		assert.Contains(t, rows[0].detail, "possibly abandoned",
+			"not one of these was established as abandoned; the row must not say they were")
+		assert.Contains(t, rows[0].detail, "5 that could not be proven unused")
+		assert.False(t, rows[0].actionable,
+			"a group of pure unknowns establishes nothing and must not drive the exit code")
+	})
+
+	t.Run("mixed proven and unproven", func(t *testing.T) {
+		report := &Report{}
+		report.addActionableFinding(Finding{
+			Check: "stale-temp-home", Detail: "provably free", FixAction: "remove it",
+			fix: func() error { return nil }, Severity: StatusWarn,
+		})
+		for i := 0; i < 3; i++ {
+			report.addAdvisoryFinding(Finding{
+				Check: "stale-temp-home", Detail: "cannot prove it is unused", Severity: StatusWarn,
+			})
+		}
+
+		rows := renderRows(report, false, false)
+		require.Len(t, rows, 1)
+		assert.Contains(t, rows[0].detail, "4 possibly abandoned agent-factory homes")
+		assert.Contains(t, rows[0].detail, "1 proven unused and safe to remove")
+		assert.Contains(t, rows[0].detail, "3 that could not be proven unused",
+			"the split is the whole point: one of these is actionable and three are not")
+	})
+}
+
+// TestListingEndingExactlyOnTheBudgetIsNotCalledTruncated is the sixth-round
+// EOF-boundary finding.
+//
+// File.ReadDir returns its final non-empty batch with a NIL error and reports
+// io.EOF only on the next call. So a directory whose last batch takes the
+// counter to the budget has been read in full, while a pre-read budget check
+// sees exactly what it would see with a million entries still to go. A root of
+// 500,001 entries finished by its last 1,024-entry batch was described as "too
+// large to list in full".
+//
+// Note what this asserts and what it does not: the ROOT listing is complete.
+// The sweep as a whole is still truncated here, because the budget that the
+// root consumed is the same budget child expansion needed — which is correct,
+// and is why this asserts rootPartial rather than truncated().
+func TestListingEndingExactlyOnTheBudgetIsNotCalledTruncated(t *testing.T) {
+	t.Run("the root listing", func(t *testing.T) {
+		root := t.TempDir()
+		fillTempDir(t, root, 8)
+		withExactReadBudget(t, 8, 8)
+
+		sweep := candidateTempHomes(root, 50000)
+
+		require.Equal(t, 8, sweep.offered, "precondition: every entry was actually collected")
+		assert.False(t, sweep.rootPartial,
+			"the final batch consumed the directory, so the root listing is COMPLETE")
+		assert.NotContains(t, tempHomeSweepTruncationDetail(root, sweep, 50000),
+			"too large to list in full",
+			"a directory that was read to the end must never be described as too large to read")
+	})
+
+	t.Run("a child expansion", func(t *testing.T) {
+		root := t.TempDir()
+		parent := filepath.Join(root, "TestFoo")
+		for i := 0; i < 4; i++ {
+			require.NoError(t, os.MkdirAll(filepath.Join(parent, fmt.Sprintf("%03d", i)), 0755))
+		}
+		// 1 root entry + 4 children = 5 reads, so the child listing ends
+		// exactly as the budget is spent.
+		withExactReadBudget(t, 5, 4)
+
+		sweep := candidateTempHomes(root, 50000)
+
+		assert.Equal(t, 1, sweep.visited,
+			"the parent was expanded to its end, so it counts as finished")
+		assert.False(t, sweep.truncated(),
+			"nothing was missed: the root and its one child directory were both read to the end")
+	})
+}
+
+func withExactReadBudget(t *testing.T, budget, batch int) {
+	t.Helper()
+	prevBudget, prevBatch := tempHomeReadBudget, tempHomeChildBatch
+	tempHomeReadBudget, tempHomeChildBatch = budget, batch
+	t.Cleanup(func() { tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch })
 }

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -211,9 +212,9 @@ func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHom
 // returning I/O errors to clear out their temp directory is advice that cannot
 // work, aimed at a cause that is not theirs.
 func tempHomeSweepTruncationRemediation(tempDir string, sweep tempHomeSweep) string {
-	if sweep.rootErr != nil {
-		return "investigate why listing " + tempDir + " failed, then re-run `af doctor`; the temp-home rows " +
-			"below are a lower bound until it can be read to the end"
+	if sweep.rootErr != nil || sweep.failedErr != nil {
+		return "investigate the listing failure under " + tempDir + ", then re-run `af doctor`; the temp-home " +
+			"rows below are a lower bound until it can be read to the end"
 	}
 	return "clear out " + tempDir + " so the sweep can finish, and treat the temp-home rows below as a " +
 		"lower bound until it does"
@@ -261,9 +262,23 @@ func tempHomeSweepTruncationDetail(tempDir string, sweep tempHomeSweep, budget i
 	if len(stops) > 0 {
 		detail += " against " + strings.Join(stops, " and ")
 	}
+	// Split by cause. "Could not be listed at all" is false for a directory
+	// that failed partway, and a permission-denied directory is not a fault
+	// worth naming an error for — it is simply not ours to read.
+	if sweep.denied > 0 {
+		detail += fmt.Sprintf("; %s could not be read (they belong to another user)",
+			plural(sweep.denied, "directory", "directories"))
+	}
+	if sweep.failed > 0 {
+		detail += fmt.Sprintf("; listing %s failed (%v)",
+			plural(sweep.failed, "directory", "directories"), sweep.failedErr)
+	}
 	if sweep.unlistable > 0 {
-		detail += fmt.Sprintf("; %s could not be listed at all, so anything nested inside them was never seen",
-			plural(sweep.unlistable, "directory", "directories"))
+		how := "so anything nested inside them was never seen"
+		if sweep.listedPartly > 0 {
+			how = "so some of what is nested inside them was never seen"
+		}
+		detail += ", " + how
 	}
 	return detail + ". Any stale home it did not reach is missing from the counts below"
 }
@@ -337,6 +352,20 @@ type tempHomeSweep struct {
 	// as fully assessed and report a complete run while nested homes went
 	// unlooked-at.
 	unlistable int
+	// denied and failed split that count by CAUSE, because the two want
+	// opposite advice. A directory another user owns is not a fault and there
+	// is nothing to investigate — it is simply not ours to read. An I/O error
+	// is a fault, and telling its owner to go clear out /tmp is advice that
+	// cannot work. Lumping them together guarantees wrong advice for one of
+	// them.
+	denied int
+	failed int
+	// failedErr is the first non-permission child-listing error, so the notice
+	// can name what actually went wrong rather than that something did.
+	failedErr error
+	// listedPartly counts directories whose listing failed AFTER yielding
+	// entries. "Could not be listed at all" is false for those.
+	listedPartly int
 	// entriesRead counts every directory entry the sweep LOOKED AT, across the
 	// temp root and every directory it expanded.
 	//
@@ -421,13 +450,34 @@ var tempHomeReadBudget = 500000
 // thousand.
 var scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) { return f.ReadDir(n) }
 
+// probeForMoreEntries answers the question a spent read budget cannot: is there
+// anything LEFT in this directory, or did it happen to end exactly here?
+//
+// File.ReadDir returns its final non-empty batch with a nil error and reports
+// io.EOF only on the NEXT call. So a directory whose last batch takes the
+// counter to the budget has been read in FULL, while a pre-read budget check
+// sees the same state as one with a million entries still to go — and reports a
+// complete listing as truncated. A root of exactly 500,001 entries, finished by
+// its final 1,024-entry batch, was described as "too large to list in full".
+//
+// One entry is enough to tell them apart, and whatever it reads is handed back
+// so the caller keeps it rather than dropping it on the floor.
+func probeForMoreEntries(sweep *tempHomeSweep, f *os.File) (entries []os.DirEntry, atEnd bool, err error) {
+	entries, err = scanDirBatch(f, 1)
+	sweep.entriesRead += len(entries)
+	if errors.Is(err, io.EOF) {
+		return entries, true, nil
+	}
+	return entries, false, err
+}
+
 // expandTempHomeChildren appends dir's subdirectories to the sweep, stopping at
 // the budget. It reports whether the directory was expanded in FULL, and any
 // error that ended the listing early.
-func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget int) (expanded bool, err error) {
+func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget int) (expanded, sawEntries bool, err error) {
 	f, openErr := os.Open(dir)
 	if openErr != nil {
-		return false, openErr
+		return false, false, openErr
 	}
 	defer func() { _ = f.Close() }()
 
@@ -446,32 +496,51 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget 
 	for {
 		if limit > 0 && len(sweep.candidates)+len(children) >= limit {
 			sweep.hitCandidateLimit = true
-			return false, nil
+			return false, sawEntries, nil
 		}
 		if readBudget > 0 && sweep.entriesRead >= readBudget {
 			// Charged per ENTRY, not per candidate. Without this a directory of
 			// a million files — which contributes no candidates — is read to
 			// EOF however small the candidate budget is.
+			//
+			// Probe first: a directory that ended exactly on the budget is
+			// COMPLETE, and calling it truncated would report a finished scan
+			// as a partial one. See probeForMoreEntries.
+			probe, atEnd, probeErr := probeForMoreEntries(sweep, f)
+			for _, entry := range probe {
+				if entry.IsDir() {
+					children = append(children, filepath.Join(dir, entry.Name()))
+				}
+			}
+			if atEnd {
+				return true, sawEntries, nil
+			}
+			if probeErr != nil {
+				return false, sawEntries, probeErr
+			}
 			sweep.hitReadBudget = true
-			return false, nil
+			return false, sawEntries, nil
 		}
 		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
 		sweep.entriesRead += len(batch)
+		if len(batch) > 0 {
+			sawEntries = true
+		}
 		for _, entry := range batch {
 			if !entry.IsDir() {
 				continue
 			}
 			if limit > 0 && len(sweep.candidates)+len(children) >= limit {
 				sweep.hitCandidateLimit = true
-				return false, nil
+				return false, sawEntries, nil
 			}
 			children = append(children, filepath.Join(dir, entry.Name()))
 		}
 		if errors.Is(readErr, io.EOF) {
-			return true, nil
+			return true, sawEntries, nil
 		}
 		if readErr != nil {
-			return false, readErr
+			return false, sawEntries, readErr
 		}
 	}
 }
@@ -507,6 +576,23 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string, readBudget int) ([]strin
 	var names []string
 	for {
 		if readBudget > 0 && sweep.entriesRead >= readBudget {
+			// Probe before declaring the root partial: a root that ended
+			// exactly on the budget was read in full. See probeForMoreEntries.
+			probe, atEnd, probeErr := probeForMoreEntries(sweep, f)
+			for _, entry := range probe {
+				if entry.IsDir() {
+					names = append(names, entry.Name())
+					sweep.offered++
+				}
+			}
+			if atEnd {
+				break
+			}
+			if probeErr != nil {
+				sweep.rootPartial = true
+				sweep.rootErr = probeErr
+				break
+			}
 			sweep.rootPartial = true
 			sweep.hitReadBudget = true
 			break
@@ -588,13 +674,24 @@ func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
 			sweep.hitReadBudget = true
 			continue
 		}
-		expanded, listErr := expandTempHomeChildren(&sweep, dir, limit, readBudget)
+		expanded, sawEntries, listErr := expandTempHomeChildren(&sweep, dir, limit, readBudget)
 		if listErr != nil {
 			// A directory we could not list may hold homes we will never see.
 			// NOT counted as visited: that would make it indistinguishable from
 			// one assessed in full, and if every entry failed this way the sweep
 			// would report a complete run having looked at nothing.
 			sweep.unlistable++
+			if sawEntries {
+				sweep.listedPartly++
+			}
+			if errors.Is(listErr, fs.ErrPermission) {
+				sweep.denied++
+			} else {
+				sweep.failed++
+				if sweep.failedErr == nil {
+					sweep.failedErr = listErr
+				}
+			}
 			continue
 		}
 		if !expanded {

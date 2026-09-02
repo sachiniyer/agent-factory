@@ -275,7 +275,7 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 		section:     sectionProcesses,
 		name:        collapsedProcessName(check),
 		status:      status,
-		detail:      collapsedProcessDetail(check, total, fixable, fixed, failed, fixMode),
+		detail:      collapsedProcessDetail(check, total, unproven(findings), fixable, fixed, failed, fixMode),
 		remediation: collapsedProcessRemediation(check, fixable, fixMode),
 		// One row can mix proven and UNKNOWN findings. It is actionable only
 		// while at least one proven condition remains unresolved.
@@ -319,7 +319,21 @@ func collapsedProcessName(check string) string {
 	}
 }
 
-func collapsedProcessDetail(check string, total, fixable, fixed, failed int, fixMode bool) string {
+// unproven counts the findings in a group that doctor did NOT establish as a
+// definite condition — the advisory ones. The collapsed row needs it because a
+// count alone cannot distinguish "doctor found N of these" from "doctor found N
+// things that might be these".
+func unproven(findings []Finding) int {
+	n := 0
+	for _, f := range findings {
+		if !f.Actionable {
+			n++
+		}
+	}
+	return n
+}
+
+func collapsedProcessDetail(check string, total, unproven, fixable, fixed, failed int, fixMode bool) string {
 	switch check {
 	case "orphaned-process":
 		parts := []string{fmt.Sprintf("%s from dead sessions", plural(total, "orphaned process", "orphaned processes"))}
@@ -340,13 +354,29 @@ func collapsedProcessDetail(check string, total, fixable, fixed, failed int, fix
 	case "runaway-cpu":
 		return fmt.Sprintf("%s averaged a pegged CPU core inside live sessions", plural(total, "process", "processes"))
 	case "stale-temp-home":
-		// Mirrors orphaned-process: lead with the count, then how many carry a
-		// proof strong enough for --fix. The rest are the UNKNOWN homes doctor
-		// refuses to remove, and saying "N safe to clean" out of a larger total
-		// is what keeps that distinction visible after collapsing.
-		parts := []string{fmt.Sprintf("%s abandoned under the temp dir", plural(total, "agent-factory home", "agent-factory homes"))}
+		// The word "abandoned" is a CONCLUSION, and for most of these findings
+		// the detector explicitly refused to reach it: a home whose lock probe
+		// is undetermined is reported as "looks abandoned … but nothing here
+		// can PROVE it is unused". Collapsing them under a flat "N agent-factory
+		// homes abandoned" asserted, in the default view, exactly the ownership
+		// conclusion the detector withheld — and on a real box that was 47 of
+		// 49 findings. Under-cleaning is cosmetic; asserting a machine is dead
+		// when nobody checked is how the rm -rf gets authorised.
+		//
+		// So the hedge is in the noun when any of the group is unproven, and
+		// the split is stated outright.
+		noun := "abandoned agent-factory home"
+		nounPlural := "abandoned agent-factory homes"
+		if unproven > 0 {
+			noun = "possibly abandoned agent-factory home"
+			nounPlural = "possibly abandoned agent-factory homes"
+		}
+		parts := []string{fmt.Sprintf("%s under the temp dir", plural(total, noun, nounPlural))}
 		if fixable > 0 {
-			parts = append(parts, fmt.Sprintf("%d safe to remove", fixable))
+			parts = append(parts, fmt.Sprintf("%d proven unused and safe to remove", fixable))
+		}
+		if unproven > 0 {
+			parts = append(parts, fmt.Sprintf("%d that could not be proven unused", unproven))
 		}
 		if fixMode && fixed > 0 {
 			parts = append(parts, fmt.Sprintf("%d removed", fixed))
