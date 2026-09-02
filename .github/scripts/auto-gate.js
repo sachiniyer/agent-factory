@@ -101,9 +101,6 @@ const CODEX_SUMMARY_ROW_TIME_RE = /<relative-time[^>]*\bdatetime="([^"]+)"/i;
 // lookahead keeps a longer hex run from matching its first 40 characters.
 const CODEX_BODY_COMMIT_RE =
   /\/(?:blob|blame|commit|commits|raw|tree)\/([0-9a-f]{40})(?![0-9a-f])/gi;
-// What GitHub will serve from pulls.listCommits, however you paginate it.
-// Reaching it means the list is a prefix of the PR's history, not the history.
-const PR_COMMIT_LIST_CAP = 250;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
@@ -2847,71 +2844,38 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
       ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
   );
   //
-  // "Names a commit" means STATES THE REVISION IT REVIEWED, which a link alone
-  // does not (Codex P1 on #3676). A finding whose prose happens to cite some
-  // other commit — an earlier fix, another repository — would otherwise count as
-  // placed, bind to no head, and fall out of both sets: dropped, exactly the way
-  // #3656's did. Two spellings state it outright (`Reviewed commit:`, and a
-  // review's commit_id); a permalink states it only when the commit is one of
-  // THIS PR's own, because that is a revision this PR actually had and so a
-  // revision that could have been reviewed. A link to anything else says nothing
-  // about which head the finding is about, and unknown is not clean.
+  // An artifact is CLASSIFIED when something says which revision it is about.
+  // Only two things ever say that: Codex's own `Reviewed commit:` line and
+  // GitHub's commit_id on a review — assertions, not prose. Everything else is
+  // unclassifiable, and unclassifiable is not clean.
+  //
+  // A body permalink is deliberately NOT a third. It binds an artifact to the
+  // head under gate — that direction only ever blocks, so a wrong guess is safe
+  // — but it can never make an artifact STALE, because nothing in a body
+  // distinguishes the link that is the finding's own location from a link cited
+  // as supporting context (Codex P1 on #3676, twice). Placing by "any commit
+  // this PR had" closed the foreign-commit half and left the other half open: a
+  // finding with branch-based location links that cites an earlier commit of
+  // this same PR was still placed, still bound to no head, and still dropped —
+  // the very shape #3656 merged past.
+  //
+  // What that costs is one acknowledgement per unbindable finding, once its head
+  // moves on. That is the discipline INLINE findings already have: pushing a fix
+  // does not clear one, someone has to answer it. It is also what deleted three
+  // findings' worth of machinery — a commit-list read, its 250-commit cap, and a
+  // force-push trade-off — all of which existed only to support a placement rule
+  // that could not be made sound.
   const findingCandidates = codexReviewArtifacts.filter(
     (artifact) =>
       CODEX_BODY_FINDING_RE.test(artifact.body || "") &&
       !isCodexSummaryArtifact(artifact) &&
-      !codexArtifactStatesItsCommit(artifact),
+      !codexArtifactStatesItsCommit(artifact) &&
+      // Bound to this head is classified, not unclassifiable: the rule above
+      // already inspected it, and blocking twice for one artifact would report a
+      // finding that "names no commit" about one that names this very head.
+      !codexArtifactBindsToHead(artifact, sha),
   );
-  // Read only when it can change an answer. Nearly every evaluation has no
-  // candidate at all, and this is the one question that needs the PR's history
-  // rather than its head. A failed read throws out of retryRead and blocks, like
-  // every other read here — an unreadable commit list is not an empty one.
-  //
-  // KNOWN and ACCEPTED: a force-push drops the old head from this list, so a
-  // finding linking a rebased-away commit stops reading as stale and starts
-  // blocking, clearable only by an acknowledgement naming it (Codex P2 on
-  // #3676). That is the fail-closed side of an unavoidable trade, and it is the
-  // side this file takes everywhere else: after a rebase nobody can say whether
-  // the finding survived, and "unknown" is what the whole rule treats as
-  // not-clean. The alternative asks GitHub whether the linked commit is
-  // associated with THIS PR (repos.listPullRequestsAssociatedWithCommit, already
-  // used elsewhere here), which would cover a force-pushed-away commit IF that
-  // association outlives the rewrite — unverified, and a guess about someone
-  // else's retention policy is not a thing to gate merges on. Measure it first;
-  // until then one acknowledgement is the cost, on a PR that has both been
-  // rebased and carries a finding no head-bound artifact answers.
-  const prCommits =
-    findingCandidates.length === 0
-      ? []
-      : await retryRead(
-          `could not read commits for PR #${number}`,
-          () =>
-            github.paginate(github.rest.pulls.listCommits, {
-              owner,
-              repo,
-              pull_number: number,
-              per_page: 100,
-            }),
-          subject,
-        );
-  const prCommitShas = new Set(
-    prCommits.map((commit) => String(commit.sha || "").toLowerCase()).filter(Boolean),
-  );
-  // GitHub serves at most 250 commits from this endpoint however you paginate
-  // it, so on a longer PR the list is a prefix of the history rather than the
-  // history (Codex P2 on #3676). The classification is unchanged — a link it
-  // cannot confirm still blocks, which is the fail-closed side — but the reason
-  // has to SAY so, or the maintainer reads "names no commit" about an artifact
-  // that plainly names one and has no way to tell why. A truncated list needs a
-  // PR longer than this repo's conventions allow; if that stops being true, the
-  // fix is range traversal from the merge base, not ancestry, which would let a
-  // link to a pre-branch master commit place the artifact and reopen the hole
-  // closed one commit earlier.
-  const prCommitsTruncated = prCommits.length >= PR_COMMIT_LIST_CAP;
   const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
-    if ([...parseBodyCommits(artifact.body)].some((commit) => prCommitShas.has(commit))) {
-      return false;
-    }
     // Fails closed on an unknown order, like every other timestamp comparison in
     // this file: an artifact whose own time will not parse is never acknowledged.
     // An edit that adds the reference moves the acknowledging comment's own time
@@ -2947,11 +2911,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     const unboundReason =
       `${unboundFindingArtifacts.length} Codex artifact(s) carrying a P0-P3 finding name no ` +
       "commit, so the gate cannot tell which head they are about" +
-      (named.length > 0 ? `: ${named.join(", ")}` : "") +
-      (prCommitsTruncated
-        ? `; this PR has more than ${PR_COMMIT_LIST_CAP} commits, so its commit list is truncated ` +
-          "and a permalink to an earlier commit could not be checked"
-        : "");
+      (named.length > 0 ? `: ${named.join(", ")}` : "");
     reasons.push(unboundReason);
     findingBlockers.push({
       reason: unboundReason,

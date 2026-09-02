@@ -2205,43 +2205,53 @@ test("a clean head-bound summary row still passes", async () => {
   assert.ok(result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`));
 });
 
-test("a finding artifact naming another head is stale, not unclassifiable", async () => {
-  // The blocking half is scoped to artifacts that name NO commit, not to every
-  // artifact unbound to this head. An older head's findings are stale evidence —
-  // the case the head-bound rule already decides — and reading them as
-  // unclassifiable would block every PR Codex ever reviewed twice.
-  const result = await evaluateGate({
-    // OTHER_SHA is an earlier head of this PR, which is what makes the artifact
-    // stale rather than unplaceable: it names a revision this PR actually had.
-    prCommits: [OTHER_SHA, HEAD_SHA],
+test("only an assertion makes a finding stale, never a link", async () => {
+  // An artifact that STATES an older commit is stale evidence, which is the
+  // pre-existing rule for reviews and is untouched: `Reviewed commit:` and
+  // commit_id are assertions about what was reviewed.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const stated = await evaluateGate({
+    issueComments: [summary],
+    reviews: [codexReview(OTHER_SHA, "P1: a finding about the previous head", "2026-07-09T01:19:00Z")],
+  });
+  assert.equal(stated.shouldMerge, true, `blocked on: ${stated.reasons.join("; ")}`);
+
+  // The same finding, said only in permalinks to that older head, is NOT stale:
+  // a link cannot be shown to be the finding's own location, so it places
+  // nothing. The cost is one acknowledgement naming the artifact — the discipline
+  // inline findings already have, where pushing a fix clears nothing by itself.
+  const linked = await evaluateGate({
     issueComments: [
       codexIssueCommentFinding(OTHER_SHA, { timestamp: "2026-07-09T01:19:00Z" }),
-      codexSummaryTable(HEAD_SHA, {
-        rowTime: "2026-07-09T01:20:01Z",
-        commentTime: "2026-07-09T01:20:06Z",
-      }),
+      summary,
     ],
   });
-
-  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+  assert.equal(linked.shouldMerge, false, "a link to an older head classifies nothing");
+  assert.ok(
+    linked.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${linked.reasons.join("; ")}`,
+  );
 });
 
-test("a commit link this PR never had does not place a finding", async () => {
-  // Codex P1 on #3676: "contains a commit link" is not "states the revision it
-  // reviewed". A finding whose prose cites some other commit — an earlier fix,
-  // another repository — counted as placed, bound to no head, and fell out of
-  // BOTH sets: dropped, exactly the way #3656's was. A link places the artifact
-  // only when it names a commit this PR actually had.
-  const foreign = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
-  assert.notEqual(foreign, HEAD_SHA);
+test("a supporting commit link does not place a finding", async () => {
+  // Codex P1 on #3676, filed twice: nothing in a body distinguishes the link
+  // that is the finding's own location from one cited as supporting context, so
+  // a link can never make an artifact STALE. Placing by "any commit this PR had"
+  // closed the foreign-commit half and left this one open — a finding whose
+  // location links are branch-based, citing an earlier commit of this same PR,
+  // was placed, bound to no head, and dropped: the shape #3656 merged past.
+  const earlier = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
   const citing = codexIssueCommentFinding(HEAD_SHA, {
-    ref: foreign,
+    ref: "master",
     timestamp: "2026-07-09T01:20:00Z",
+    citing: earlier,
   });
-  // The premise, asserted rather than assumed: the body DOES carry a permalink,
-  // and it is not this head's. Without this the test could go green on a body
-  // that simply had no link at all.
-  assert.deepEqual([...__test.parseBodyCommits(citing.body)], [foreign]);
+  // The premise, asserted rather than assumed: the body names that commit, and
+  // it is not this head's.
+  assert.deepEqual([...__test.parseBodyCommits(citing.body)], [earlier]);
   assert.equal(__test.codexArtifactBindsToHead(citing, HEAD_SHA), false);
 
   const summary = codexSummaryTable(HEAD_SHA, {
@@ -2249,66 +2259,16 @@ test("a commit link this PR never had does not place a finding", async () => {
     commentTime: "2026-07-09T01:20:06Z",
   });
 
-  const unplaceable = await evaluateGate({
-    prCommits: [HEAD_SHA],
-    issueComments: [citing, summary],
-  });
-  assert.equal(unplaceable.shouldMerge, false, "a link to a foreign commit places nothing");
-  assert.ok(
-    unplaceable.reasons.some((reason) => reason.includes("name no commit")),
-    `got: ${unplaceable.reasons.join("; ")}`,
-  );
-
-  // …and the same body IS placed when that commit is one this PR had, which is
-  // the ordinary case: a finding about an earlier head of this branch.
-  const stale = await evaluateGate({
-    prCommits: [foreign, HEAD_SHA],
-    issueComments: [citing, summary],
-  });
-  assert.equal(stale.shouldMerge, true, `blocked on: ${stale.reasons.join("; ")}`);
-});
-
-test("a truncated commit list says so in the blocker", async () => {
-  // Codex P2 on #3676: GitHub serves at most 250 commits from pulls.listCommits
-  // however you paginate it, so on a longer PR a permalink to an earlier commit
-  // cannot be checked. The classification stays fail-closed — the artifact still
-  // blocks — but the reason has to SAY why, or the maintainer reads "names no
-  // commit" about an artifact that plainly names one.
-  const foreign = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
-  const citing = codexIssueCommentFinding(HEAD_SHA, {
-    ref: foreign,
-    timestamp: "2026-07-09T01:20:00Z",
-  });
-  const summary = codexSummaryTable(HEAD_SHA, {
-    rowTime: "2026-07-09T01:20:01Z",
-    commentTime: "2026-07-09T01:20:06Z",
-  });
-  // 250 distinct commits, none of them the linked one: the cap, exactly.
-  const capped = Array.from({ length: 249 }, (_, index) =>
-    `${index.toString(16).padStart(40, "0")}`,
-  ).concat(HEAD_SHA);
-
-  const truncated = await evaluateGate({
-    prCommits: capped,
-    issueComments: [citing, summary],
-  });
-  assert.equal(truncated.shouldMerge, false, "an unconfirmable link still blocks");
-  assert.ok(
-    truncated.reasons.some((reason) => reason.includes("commit list is truncated")),
-    `got: ${truncated.reasons.join("; ")}`,
-  );
-
-  // One commit shorter, the list is complete and the reason does not claim
-  // otherwise — the message must not cry truncation on every PR.
-  const complete = await evaluateGate({
-    prCommits: capped.slice(1),
-    issueComments: [citing, summary],
-  });
-  assert.equal(complete.shouldMerge, false);
-  assert.ok(
-    !complete.reasons.some((reason) => reason.includes("commit list is truncated")),
-    `got: ${complete.reasons.join("; ")}`,
-  );
+  // …and it blocks whether or not that commit is one this PR had. Neither answer
+  // to "was this commit ever in the PR" makes the LINK the finding's location.
+  for (const label of ["a commit this PR never had", "an earlier commit of this PR"]) {
+    const result = await evaluateGate({ issueComments: [citing, summary] });
+    assert.equal(result.shouldMerge, false, `dropped on ${label}`);
+    assert.ok(
+      result.reasons.some((reason) => reason.includes("name no commit")),
+      `got: ${result.reasons.join("; ")}`,
+    );
+  }
 });
 
 test("an unclassifiable finding clears only by an answer that names it", async () => {
@@ -5261,9 +5221,6 @@ function fakeGateGithub({
   issueComments = [codexVerdict(headSha)],
   reviews = [],
   reviewComments = [],
-  // The commits currently in the PR. A finding artifact's permalink places it
-  // only when it names one of these, so the head alone is the honest default.
-  prCommits = null,
   files = [],
   associatedPullRequests = [
     { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
@@ -5313,7 +5270,6 @@ function fakeGateGithub({
   const listForRef = function listForRef() {};
   const listCommitStatusesForRef = function listCommitStatusesForRef() {};
   const listComments = function listComments() {};
-  const listCommits = function listCommits() {};
   const listReviews = function listReviews() {};
   const listReviewComments = function listReviewComments() {};
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
@@ -5388,7 +5344,6 @@ function fakeGateGithub({
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
-    [listCommits, (prCommits ?? [headSha]).map((sha) => ({ sha }))],
     [listReviews, reviews],
     [listReviewComments, reviewComments],
     [listPullRequestsAssociatedWithCommit, associatedPullRequests],
@@ -5465,7 +5420,6 @@ function fakeGateGithub({
       pulls: {
         list: listOpenPullRequests,
         listFiles,
-        listCommits,
         listReviews,
         listReviewComments,
         merge,
@@ -6311,7 +6265,7 @@ function codexSummaryTable(
 // SHA-stripped variant is built: the same body, naming no commit anywhere.
 function codexIssueCommentFinding(
   sha,
-  { timestamp = "2026-07-09T01:20:00Z", ref = null, id = 5514996957 } = {},
+  { timestamp = "2026-07-09T01:20:00Z", ref = null, id = 5514996957, citing = null } = {},
 ) {
   const target = ref ?? sha;
   const finding = (anchor, title, prose) =>
@@ -6342,6 +6296,14 @@ function codexIssueCommentFinding(
         "Stop labeling the file counter as page cache",
         "The `file` counter also includes tmpfs/shared memory and dirty or writeback pages.",
       ),
+      // A commit cited as supporting context, not as the finding's location —
+      // the shape that must not place the artifact.
+      ...(citing
+        ? [
+            "",
+            `Introduced in https://github.com/sachiniyer/agent-factory/commit/${citing}.`,
+          ]
+        : []),
       "    ",
       "",
       "<details> <summary>ℹ️ About Codex in GitHub</summary>",
