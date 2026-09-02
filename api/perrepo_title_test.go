@@ -216,7 +216,7 @@ func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	got, err := getSessionByTitleInScope(repoID, "foo")
+	got, _, err := getSessionByTitleInScope(repoID, "foo")
 	if err != nil {
 		t.Fatalf("remote bare-title lookup must resolve, got: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestGetSessionByTitle_SnapshotUnionsDiskRows(t *testing.T) {
 	// refresh skipped it and it never reached the snapshot).
 	seedTwoReposSharingTitle(t)
 
-	_, err := getSessionByTitle("foo")
+	_, _, err := getSessionByTitle("foo")
 	if err == nil {
 		t.Fatalf("a lone snapshot match must not resolve while another repo holds the title on disk")
 	}
@@ -275,7 +275,7 @@ func TestGetSessionByTitle_RemoteIgnoresLocalDisk(t *testing.T) {
 	// Local disk also has "foo" in two repos — irrelevant to the remote.
 	seedTwoReposSharingTitle(t)
 
-	got, err := getSessionByTitle("foo")
+	got, _, err := getSessionByTitle("foo")
 	if err != nil {
 		t.Fatalf("local disk must not affect a remote lookup, got: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestGetSessionByTitle_AmbiguousFromSnapshot(t *testing.T) {
 		}, nil
 	})
 
-	_, err := getSessionByTitle("foo")
+	_, _, err := getSessionByTitle("foo")
 	if err == nil || !errors.Is(err, session.ErrAmbiguousTitle) {
 		t.Fatalf("snapshot path must report ambiguity for a duplicated title, got: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestGetSessionByTitle_AmbiguousFromSnapshot(t *testing.T) {
 		}
 	}
 
-	got, err := getSessionByTitle("solo")
+	got, _, err := getSessionByTitle("solo")
 	if err != nil {
 		t.Fatalf("unique title must resolve from the snapshot: %v", err)
 	}

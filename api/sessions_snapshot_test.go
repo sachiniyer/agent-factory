@@ -298,7 +298,7 @@ func TestGetSessionByTitle_DaemonUp(t *testing.T) {
 	live := []session.InstanceData{{Title: "one"}, {Title: "two"}}
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
 
-	got, err := getSessionByTitle("two")
+	got, _, err := getSessionByTitle("two")
 	if err != nil {
 		t.Fatalf("getSessionByTitle(two): %v", err)
 	}
@@ -306,7 +306,7 @@ func TestGetSessionByTitle_DaemonUp(t *testing.T) {
 		t.Fatalf("got %q, want two", got.Title)
 	}
 
-	_, err = getSessionByTitle("ghost")
+	_, _, err = getSessionByTitle("ghost")
 	if err == nil {
 		t.Fatalf("expected not-found for a title absent from the live snapshot")
 	}
@@ -329,7 +329,7 @@ func TestGetSessionByTitle_DiskFallback(t *testing.T) {
 		t.Fatalf("save disk: %v", err)
 	}
 
-	got, err := getSessionByTitle("findme")
+	got, _, err := getSessionByTitle("findme")
 	if err != nil {
 		t.Fatalf("getSessionByTitle disk fallback: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestGetSessionByTitleInScope_RemoteTargetSurfacesError(t *testing.T) {
 		t.Fatalf("save disk: %v", err)
 	}
 
-	got, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	got, _, err := getSessionByTitleInScope("some-repo-id", "test-session")
 	if err == nil {
 		t.Fatalf("expected error from daemon auth failure, got session %+v (disk fallback masked it)", got)
 	}
@@ -488,7 +488,7 @@ func TestGetSessionByTitleInScope_RemoteTargetSurfacesNetworkError(t *testing.T)
 		t.Fatalf("save disk: %v", err)
 	}
 
-	_, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	_, _, err := getSessionByTitleInScope("some-repo-id", "test-session")
 	if !errors.Is(err, netErr) {
 		t.Fatalf("expected network error to surface, got: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestGetSessionByTitleInScope_LocalDiskFallbackUnchanged(t *testing.T) {
 		t.Fatalf("save disk: %v", err)
 	}
 
-	got, err := getSessionByTitleInScope("some-repo-id", "test-session")
+	got, _, err := getSessionByTitleInScope("some-repo-id", "test-session")
 	if err != nil {
 		t.Fatalf("local disk fallback should succeed: %v", err)
 	}

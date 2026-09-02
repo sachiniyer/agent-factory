@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,7 +75,7 @@ func TestGetSessionByTitle_ReportsIncompleteWideningButStillResolves(t *testing.
 	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
 
-	got, err := getSessionByTitle("foo")
+	got, notice, err := getSessionByTitle("foo")
 	if err != nil {
 		t.Fatalf("a read must not break because its ambiguity widening was incomplete: %v", err)
 	}
@@ -86,6 +87,80 @@ func TestGetSessionByTitle_ReportsIncompleteWideningButStillResolves(t *testing.
 	}
 	if !strings.Contains(warn.String(), "--repo") {
 		t.Errorf("the notice should point at the scope that would settle it; stderr was: %q", warn.String())
+	}
+	if notice == "" {
+		t.Errorf("the notice must also be returned, for --json callers to carry (#3511)")
+	}
+	if !strings.Contains(notice, path) {
+		t.Errorf("the returned notice must name the unreadable file too; got: %q", notice)
+	}
+}
+
+// TestGetSessionByTitleInScope_JSONCarriesIncompleteWideningNotice pins the
+// #3511 fix: under --json the ambiguity-widening notice must ride inside the
+// envelope's `data` payload — the resolved session plus an additive
+// `warnings` array — because stderr under --json carries only the
+// {data,error} envelope and drops a free-form line (#3169). Text-output mode
+// is unaffected; TestGetSessionByTitle_ReportsIncompleteWideningButStillResolves
+// above pins that it still gets the same notice on stderr.
+func TestGetSessionByTitleInScope_JSONCarriesIncompleteWideningNotice(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	_ = captureWarnings(t)
+	warn := captureWarnWriter(t)
+	resetIncompleteNotices(t)
+
+	withEnvelope(t, func() {
+		seedRows(t, "blocked-repo", session.InstanceData{Title: "foo", Path: "/repos/blocked"})
+		path := makeRecordsUnreadable(t, "blocked-repo")
+
+		live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
+		stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
+
+		data, notice, err := getSessionByTitleInScope("", "foo")
+		if err != nil {
+			t.Fatalf("a read must not break because its ambiguity widening was incomplete: %v", err)
+		}
+
+		out := captureStdout(t, func() {
+			if err := jsonOut(sessionGetPayload(data, notice)); err != nil {
+				t.Fatalf("jsonOut: %v", err)
+			}
+		})
+
+		var envelope struct {
+			Data struct {
+				Path     string   `json:"path"`
+				Warnings []string `json:"warnings"`
+			} `json:"data"`
+			Error *string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+			t.Fatalf("stdout was not the expected envelope shape: %v\nstdout: %s", err, out)
+		}
+		if envelope.Data.Path != "/repos/live" {
+			t.Fatalf("expected the live match to resolve, got: %+v", envelope.Data)
+		}
+		if len(envelope.Data.Warnings) != 1 {
+			t.Fatalf("expected exactly one warning embedded in data, got: %+v", envelope.Data.Warnings)
+		}
+		if !strings.Contains(envelope.Data.Warnings[0], path) {
+			t.Errorf("the embedded warning must name the unreadable file %s, got: %q", path, envelope.Data.Warnings[0])
+		}
+		if warn.String() != "" {
+			t.Errorf("under --json, stderr must carry nothing — the notice belongs in data, not stderr; stderr was: %q", warn.String())
+		}
+	})
+}
+
+// TestSessionGetPayload_NoNoticeStaysBareData pins the additive half of the
+// contract: a clean widening (no notice) must return the bare *InstanceData,
+// not a wrapper — an existing --json consumer that decodes only the fields it
+// already knows must see byte-identical output to before this fix.
+func TestSessionGetPayload_NoNoticeStaysBareData(t *testing.T) {
+	data := &session.InstanceData{Title: "foo", Path: "/repos/x"}
+	got := sessionGetPayload(data, "")
+	if got != any(data) {
+		t.Fatalf("expected the bare *InstanceData pointer back when there is no notice, got: %#v", got)
 	}
 }
 
@@ -122,7 +197,7 @@ func TestIncompleteWideningNoticeIsSaidOnce(t *testing.T) {
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
 
 	for i := 0; i < 25; i++ {
-		if _, err := getSessionByTitle("foo"); err != nil {
+		if _, _, err := getSessionByTitle("foo"); err != nil {
 			t.Fatalf("poll %d: %v", i, err)
 		}
 	}
@@ -162,7 +237,7 @@ func TestGetSessionByTitle_ReportsEnumerationFailure(t *testing.T) {
 	live := []session.InstanceData{{Title: "foo", Path: "/repos/live"}}
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return live, nil })
 
-	got, err := getSessionByTitle("foo")
+	got, notice, err := getSessionByTitle("foo")
 	if err != nil {
 		t.Fatalf("a read must not break because its widening could not run: %v", err)
 	}
@@ -171,5 +246,8 @@ func TestGetSessionByTitle_ReportsEnumerationFailure(t *testing.T) {
 	}
 	if !strings.Contains(warn.String(), "could not check any project") {
 		t.Errorf("a total enumeration failure must be reported, not silently dropped; stderr was: %q", warn.String())
+	}
+	if !strings.Contains(notice, "could not check any project") {
+		t.Errorf("the returned notice must carry the same enumeration-failure text; got: %q", notice)
 	}
 }
