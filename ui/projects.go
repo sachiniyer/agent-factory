@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
 
@@ -238,7 +239,15 @@ func (p *ProjectsPane) ScrollDown() {
 
 // projectsSwitchHint is the affordance suffix on the section header: the key
 // that switches to the cursor row, kept visible down to the rail minimum.
-func projectsSwitchHint() string { return "enter switch" }
+//
+// It reads KeySwitchProjectRow — "the Projects-section display alias of Enter",
+// which exists for exactly this — off the generated binding table rather than
+// spelling the key out, so a [keys] rebind surfaces here as it does everywhere
+// else (#1026). The literal "enter switch" it used to render disagreed with the
+// bottom menu, which has always drawn the same action from the same binding as
+// "↵ switch" (ui/menu.go projectsMenuOptions) — the header and the footer named
+// one action two ways in one frame, which is the #2580 failure mode.
+func projectsSwitchHint() string { return railActionHint(keys.KeySwitchProjectRow, "switch") }
 
 // titleLine renders the section header through the shared rail ladder
 // (ui/rail_header.go). The switch affordance is hints[0], so it is the last

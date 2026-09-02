@@ -192,7 +192,7 @@ func TestProjectsHeaderSpacingMatchesAutomations(t *testing.T) {
 	p.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
 	header := stripANSI(strings.Split(p.String(), "\n")[0])
 
-	assert.Contains(t, header, "Projects (3) · enter switch",
+	assert.Contains(t, header, "Projects (3) · ↵ switch",
 		"exactly one space before the separator")
 	assert.NotContains(t, header, "  · ", "no double space before the separator")
 

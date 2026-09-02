@@ -299,21 +299,13 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
-func automationHelpKey(name keys.KeyName) string {
-	return keys.GlobalKeyBindings[name].Help().Key
-}
-
-func automationsActionHint(name keys.KeyName, desc string) string {
-	return automationHelpKey(name) + " " + desc
-}
-
 // titleLine renders the section header through the shared rail ladder
 // (ui/rail_header.go). The manage affordance is hints[0], so it is the last
 // thing cut — the shipped contract TestAutomationsTitleWidthAware pins.
 func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
 	return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle,
-		railHintSeparator+automationsActionHint(keys.KeyTaskList, "manage"),
-		railHintSeparator+automationsActionHint(keys.KeyHooks, "hooks"),
+		railHintSeparator+railActionHint(keys.KeyTaskList, "manage"),
+		railHintSeparator+railActionHint(keys.KeyHooks, "hooks"),
 	)
 }
 
@@ -363,7 +355,7 @@ func (a *AutomationsPane) String() string {
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
+			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", railHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace

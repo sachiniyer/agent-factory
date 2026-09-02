@@ -71,7 +71,7 @@ func railHeaderCases() []railHeaderCase {
 				return strings.TrimRight(strings.Split(stripANSI(a.View()), "\n")[0], " ")
 			},
 			noun: "Automations", count: "(2)",
-			hint:          automationHelpKey(keys.KeyTaskList) + " manage",
+			hint:          railHelpKey(keys.KeyTaskList) + " manage",
 			minInfoWidth:  15,
 			minHintWidth:  15,
 			minNounWidth:  20,
@@ -88,11 +88,11 @@ func railHeaderCases() []railHeaderCase {
 				return strings.TrimRight(strings.Split(stripANSI(p.String()), "\n")[0], " ")
 			},
 			noun: "Projects", count: "(1)",
-			hint:          "enter switch",
-			minInfoWidth:  19,
-			minHintWidth:  19,
-			minNounWidth:  23,
-			fullNounWidth: 28,
+			hint:          railActionHint(keys.KeySwitchProjectRow, "switch"),
+			minInfoWidth:  15,
+			minHintWidth:  15,
+			minNounWidth:  19,
+			fullNounWidth: 24,
 		},
 	}
 }
@@ -193,13 +193,12 @@ func TestProjectsHeaderDegradationOrder(t *testing.T) {
 		w    int
 		want string
 	}{
-		{40, " Projects (1) · enter switch"}, // everything
-		{28, " Projects (1) · enter switch"}, // exactly
-		{27, " Projec… (1) · enter switch"},  // the noun shrinks, count intact
-		{25, " Proj… (1) · enter switch"},    // where the count used to vanish
-		{23, " Pr… (1) · enter switch"},      // …and keeps shrinking
-		{22, " (1) · enter switch"},          // the 22-col rail minimum (#1090)
-		{19, " (1) · enter switch"},          // exactly
+		{40, " Projects (1) · ↵ switch"}, // everything
+		{24, " Projects (1) · ↵ switch"}, // exactly
+		{23, " Projec… (1) · ↵ switch"},  // the noun shrinks, count intact
+		{22, " Proje… (1) · ↵ switch"},   // the 22-col rail minimum (#1090), i.e. 80x24
+		{19, " Pr… (1) · ↵ switch"},      // …and keeps shrinking
+		{15, " (1) · ↵ switch"},          // the noun goes, count and hint stay
 	} {
 		require.Equalf(t, tc.want, render(t, tc.w), "rail width %d", tc.w)
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -17,6 +18,18 @@ import (
 // as one mangled token rather than a truncated word beside a hint. Owned by the
 // hint, it cannot be shortened away.
 const railHintSeparator = " · "
+
+// railHelpKey renders a binding's effective glyph from the generated key table,
+// so a [keys] rebind surfaces in a rail header exactly as it does in the bottom
+// menu and in dispatch (#1026 — one source of truth).
+func railHelpKey(name keys.KeyName) string {
+	return keys.GlobalKeyBindings[name].Help().Key
+}
+
+// railActionHint is one "<key> <verb>" hint fragment.
+func railActionHint(name keys.KeyName, desc string) string {
+	return railHelpKey(name) + " " + desc
+}
 
 // railHeader is a rail section's header text, split at the seam the width ladder
 // needs: the noun is decoration and may be shortened or dropped, the counts are

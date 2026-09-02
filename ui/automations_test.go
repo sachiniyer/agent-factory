@@ -213,8 +213,8 @@ func TestAutomationsStripKeyRouting(t *testing.T) {
 // never a bare hard clamp.
 func TestAutomationsTitleWidthAware(t *testing.T) {
 	tasks := stripTasks()
-	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
-	hooksHint := automationHelpKey(keys.KeyHooks) + " hooks"
+	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
+	hooksHint := railHelpKey(keys.KeyHooks) + " hooks"
 
 	wide := newTestAutomations(tasks)
 	wide.SetRect(layout.Rect{W: 60, H: 3})
@@ -421,7 +421,7 @@ func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
 // broke the contract that the affordance is the last thing cut at exactly the
 // width the contract is about.
 func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
-	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
+	manageHint := railHelpKey(keys.KeyTaskList) + " manage"
 	for _, n := range []int{0, 2, 9, 10, 99, 100, 999} {
 		a := newTestAutomations(nSimpleTasks(n))
 		a.SetCompact(true)
