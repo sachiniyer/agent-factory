@@ -2867,9 +2867,17 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     );
   });
   if (unboundFindingArtifacts.length > 0) {
+    // Named, not just counted. The remedy tells the reader to answer the artifact
+    // by its link; a blocker that does not say WHICH artifact sends them hunting
+    // through a comment list that may be dozens long, on the one PR shape where
+    // the whole point is that a human goes and reads the thing.
+    const named = unboundFindingArtifacts
+      .map((artifact) => artifactReferences(artifact)[0])
+      .filter(Boolean);
     const unboundReason =
       `${unboundFindingArtifacts.length} Codex artifact(s) carrying a P0-P3 finding name no ` +
-      "commit, so the gate cannot tell which head they are about";
+      "commit, so the gate cannot tell which head they are about" +
+      (named.length > 0 ? `: ${named.join(", ")}` : "");
     reasons.push(unboundReason);
     findingBlockers.push({
       reason: unboundReason,

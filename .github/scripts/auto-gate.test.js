@@ -2179,6 +2179,12 @@ test("a finding artifact that names no commit blocks anyway", async () => {
     result.reasons.some((reason) => reason.includes("name no commit")),
     `got: ${result.reasons.join("; ")}`,
   );
+  // …and it says WHICH artifact, because the remedy is to go and answer that one
+  // by its link. A count alone sends the reader hunting through the comment list.
+  assert.ok(
+    result.reasons.some((reason) => reason.includes(stripped.html_url)),
+    `got: ${result.reasons.join("; ")}`,
+  );
   // …and it is the second half doing the work, not the first: nothing bound it.
   assert.ok(
     !result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
