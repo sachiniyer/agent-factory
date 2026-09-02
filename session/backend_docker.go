@@ -382,6 +382,15 @@ func (p *dockerProvisioner) provision() (ProvisionResult, error) {
 	if err := p.runContainer(); err != nil {
 		return ProvisionResult{}, err
 	}
+	// The account boundary, verified against the RUNNING container before anything
+	// touches it (#3598). The lexical run_args guard reads strings and cannot see a
+	// symlink in the repository-selected image; this reads what Docker configured
+	// and what the kernel resolved. A refusal returns here, and Provision's
+	// reapProvisionFailure tears the container down on the way out — a shadowed
+	// account never reaches the agent. No-op for a session with no account.
+	if err := p.verifyAccountRuntimeBoundary(); err != nil {
+		return ProvisionResult{}, err
+	}
 	if err := p.prepareAccountUser(); err != nil {
 		return ProvisionResult{}, err
 	}
