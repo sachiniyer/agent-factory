@@ -9,10 +9,10 @@ import (
 // to place a moved key in a config file without reprinting the file.
 const diffContextLines = 2
 
-// diffLineBudget caps the quadratic table below. A config file is tens of
-// lines; anything past this is not a config a human hand-edited, and printing a
-// whole-file replacement beats spending seconds and megabytes on a prettier
-// rendering of it.
+// diffLineBudget caps the quadratic table below, in cells and independently in
+// each dimension. A config file is tens of lines; anything past this is not a
+// config a human hand-edited, and printing a whole-file replacement beats
+// spending seconds and megabytes on a prettier rendering of it.
 const diffLineBudget = 2000
 
 // unifiedLineDiff renders a unified diff of before → after, labelled with path.
@@ -108,9 +108,15 @@ func diffHunks(before, after []string) []string {
 //
 // It trims the common prefix and suffix first — for a key relocation that is
 // almost the whole file — and runs a longest-common-subsequence table over
-// what is left. Past diffLineBudget cells the table is skipped and the
-// remaining middle is rendered as a wholesale replacement, which is still a
-// correct diff, just a coarser one.
+// what is left. Past diffLineBudget the table is skipped and the remaining
+// middle is rendered as a wholesale replacement, which is still a correct
+// diff, just a coarser one.
+//
+// No allocation here is sized from a sum of two lengths. The slices grow by
+// append instead, and the one genuinely sized allocation — the LCS table — is
+// reached only after both of its dimensions have been compared against a
+// constant, so its size cannot be derived from an unbounded input length
+// (CodeQL go/allocation-size-overflow, which fires on exactly that shape).
 func diffEdits(before, after []string) []diffEdit {
 	prefix := 0
 	for prefix < len(before) && prefix < len(after) && before[prefix] == after[prefix] {
@@ -121,56 +127,54 @@ func diffEdits(before, after []string) []diffEdit {
 		before[len(before)-1-suffix] == after[len(after)-1-suffix] {
 		suffix++
 	}
-	midBefore := before[prefix : len(before)-suffix]
-	midAfter := after[prefix : len(after)-suffix]
 
-	edits := make([]diffEdit, 0, len(before)+len(after))
+	var edits []diffEdit
 	for _, line := range before[:prefix] {
 		edits = append(edits, diffEdit{' ', line})
 	}
-	edits = append(edits, middleEdits(midBefore, midAfter)...)
+	edits = append(edits, middleEdits(before[prefix:len(before)-suffix], after[prefix:len(after)-suffix])...)
 	for _, line := range before[len(before)-suffix:] {
 		edits = append(edits, diffEdit{' ', line})
 	}
 	return edits
 }
 
+// middleEdits diffs the changed middle, falling back to a wholesale
+// replacement when the LCS table would exceed diffLineBudget cells.
 func middleEdits(before, after []string) []diffEdit {
-	if len(before) == 0 || len(after) == 0 || len(before)*len(after) > diffLineBudget {
-		edits := make([]diffEdit, 0, len(before)+len(after))
-		for _, line := range before {
-			edits = append(edits, diffEdit{'-', line})
-		}
-		for _, line := range after {
-			edits = append(edits, diffEdit{'+', line})
-		}
-		return edits
+	rows, cols := len(before), len(after)
+	// Each dimension is bounded against the constant on its own, not only via
+	// the product: it is what makes the table's size below provably small
+	// rather than "small because two other numbers multiply to something
+	// small", for a reader and for the analyzer alike.
+	if rows == 0 || cols == 0 || rows > diffLineBudget || cols > diffLineBudget || rows*cols > diffLineBudget {
+		return replaceWholesale(before, after)
 	}
 
-	// lcs[i][j] is the length of the longest common subsequence of before[i:]
-	// and after[j:].
-	lcs := make([][]int, len(before)+1)
-	for i := range lcs {
-		lcs[i] = make([]int, len(after)+1)
-	}
-	for i := len(before) - 1; i >= 0; i-- {
-		for j := len(after) - 1; j >= 0; j-- {
+	// cell(i, j) is the length of the longest common subsequence of before[i:]
+	// and after[j:], in one flat table of (rows+1)×(cols+1) — both factors are
+	// now at most diffLineBudget.
+	stride := cols + 1
+	lcs := make([]int, (rows+1)*stride)
+	cell := func(i, j int) int { return lcs[i*stride+j] }
+	for i := rows - 1; i >= 0; i-- {
+		for j := cols - 1; j >= 0; j-- {
 			if before[i] == after[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
+				lcs[i*stride+j] = cell(i+1, j+1) + 1
 				continue
 			}
-			lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+			lcs[i*stride+j] = max(cell(i+1, j), cell(i, j+1))
 		}
 	}
 
-	edits := make([]diffEdit, 0, len(before)+len(after))
+	var edits []diffEdit
 	i, j := 0, 0
-	for i < len(before) && j < len(after) {
+	for i < rows && j < cols {
 		switch {
 		case before[i] == after[j]:
 			edits = append(edits, diffEdit{' ', before[i]})
 			i, j = i+1, j+1
-		case lcs[i+1][j] >= lcs[i][j+1]:
+		case cell(i+1, j) >= cell(i, j+1):
 			edits = append(edits, diffEdit{'-', before[i]})
 			i++
 		default:
@@ -178,11 +182,24 @@ func middleEdits(before, after []string) []diffEdit {
 			j++
 		}
 	}
-	for ; i < len(before); i++ {
+	for ; i < rows; i++ {
 		edits = append(edits, diffEdit{'-', before[i]})
 	}
-	for ; j < len(after); j++ {
+	for ; j < cols; j++ {
 		edits = append(edits, diffEdit{'+', after[j]})
+	}
+	return edits
+}
+
+// replaceWholesale renders every before line as removed and every after line
+// as added — the coarse but correct rendering used past the budget.
+func replaceWholesale(before, after []string) []diffEdit {
+	var edits []diffEdit
+	for _, line := range before {
+		edits = append(edits, diffEdit{'-', line})
+	}
+	for _, line := range after {
+		edits = append(edits, diffEdit{'+', line})
 	}
 	return edits
 }
