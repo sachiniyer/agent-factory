@@ -37,30 +37,26 @@ const claudeTrustSelectionGlyph = "❯"
 const claudeTrustAffordancePrefix = "Enter to confirm"
 
 const (
-	// claudeTrustMoveProofWindow is how long af treats a movement key it has not
-	// seen land as possibly still in flight. Inside it af sends NOTHING; past
-	// it, af concludes the key never reached the agent and may send another.
+	// claudeTrustSettleDelay is how long the dialog must have been on screen
+	// before af types into it.
 	//
-	// Both directions are real, and the window is what separates them:
+	// It exists because Claude Code DROPS keys sent in the instant after it
+	// paints this dialog, before it is reading input — measured on 2.1.258 at
+	// roughly one create in six, as sixteen consecutive captures showing the
+	// cursor still on the row af had tried to move off. That is the same class
+	// as the load-bearing delay on the prompt-delivery path.
 	//
-	//   - A key that LANDED but has not repainted yet must not be re-sent: the
-	//     cursor has already moved, so a second key would push it back off the
-	//     affirmative row.
-	//   - A key that was DROPPED must be re-sent, or the dialog is never
-	//     answered and the session start fails. Claude Code drops keys sent in
-	//     the instant after it paints this dialog and before it is reading
-	//     input — measured on 2.1.258, roughly one create in six.
-	//
-	// 3s is the margin between them, and it is measured rather than guessed: on
-	// this box, a Down that landed repainted in 31-92ms across every successful
-	// run, while a dropped one showed no change through 16 consecutive captures.
-	// 3s is ~30x the observed repaint, so a pane still showing the old row after
-	// it is evidence about the key, not about the terminal.
-	claudeTrustMoveProofWindow = 3 * time.Second
-	// claudeTrustMaxMoveAttempts bounds re-sends across polls. A dialog that
-	// swallows this many movement keys is not one af can drive, and saying so is
-	// worth more than a session that retries until its budget runs out.
-	claudeTrustMaxMoveAttempts = 4
+	// It has to be prevention rather than recovery, because a dropped key
+	// cannot be distinguished from a key the agent has buffered but not yet
+	// processed, and re-sending the second kind is what quits the agent: this
+	// picker WRAPS (measured — a second Down at the bottom returns to the top),
+	// so a duplicate movement key does not clamp harmlessly, it undoes the
+	// move. af therefore never re-sends one; see the pending-move hold.
+	claudeTrustSettleDelay = 500 * time.Millisecond
+	// claudeTrustHoldReportAfter is when an unproven movement key is REPORTED.
+	// It changes no behavior — af holds either way — it only decides when an
+	// operator is told why the session is stuck.
+	claudeTrustHoldReportAfter = 5 * time.Second
 	// claudeTrustMaxMovementKeys bounds the Down/Up keys af may inject into one
 	// dialog in a single check. Direction is recomputed from a fresh capture
 	// after every key, so a picker that moves the cursor somewhere af did not
@@ -109,28 +105,36 @@ type claudeTrustState struct {
 	// discipline: holding costs a session that stays blocked on a dialog it was
 	// already blocked on, and that failure is loud and bounded; a movement key
 	// af cannot take back is neither.
-	pendingFrom  string
-	pendingSince time.Time
-	pendingPolls int
-	// moveAttempts counts movement keys af has sent for the dialog currently on
-	// screen. It resets whenever the cursor is observed to move, so it counts
-	// keys that achieved nothing, not keys.
-	moveAttempts int
+	pendingFrom   string
+	pendingSince  time.Time
+	pendingPolls  int
+	pendingLogged bool
+	// firstSeen is when af first observed the dialog currently on screen. af
+	// types nothing until claudeTrustSettleDelay has passed, so its first key
+	// does not land in the window where Claude Code is painting the dialog and
+	// not yet reading input.
+	firstSeen time.Time
 }
 
 func (s *claudeTrustState) beginPendingMove(from string) {
-	s.pendingFrom, s.pendingSince, s.pendingPolls = from, claudeTrustNow(), 0
-	s.moveAttempts++
+	s.pendingFrom, s.pendingSince = from, claudeTrustNow()
+	s.pendingPolls, s.pendingLogged = 0, false
 }
 
 func (s *claudeTrustState) clearPendingMove() {
-	s.pendingFrom, s.pendingSince, s.pendingPolls = "", time.Time{}, 0
+	s.pendingFrom, s.pendingSince = "", time.Time{}
+	s.pendingPolls, s.pendingLogged = 0, false
 }
 
-// pendingMoveUnproven reports whether a movement key af sent could still be in
-// flight, so af must send nothing.
-func (s *claudeTrustState) pendingMoveUnproven() bool {
-	return s.pendingFrom != "" && claudeTrustNow().Sub(s.pendingSince) < claudeTrustMoveProofWindow
+// settled reports whether the dialog has been on screen long enough for af to
+// type into it. The first call records when it appeared and answers false.
+func (s *claudeTrustState) settled() bool {
+	now := claudeTrustNow()
+	if s.firstSeen.IsZero() {
+		s.firstSeen = now
+		return false
+	}
+	return now.Sub(s.firstSeen) >= claudeTrustSettleDelay
 }
 
 // claudeTrustRow is one visible pane line reduced to what af navigates by: the
@@ -365,46 +369,44 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 	state := &t.claudeTrust
 	dialog, err := parseClaudeFolderTrustDialog(content)
 	if err != nil {
-		if state.pendingMoveUnproven() {
+		if state.pendingFrom != "" {
 			// A frame af cannot read is not evidence that a movement key it
 			// already sent did nothing either. Keep holding.
-			state.pendingPolls++
+			t.holdPendingClaudeTrustMove()
 			return true
 		}
 		t.refuseClaudeFolderTrust(err)
 		return true
 	}
 
-	// A movement key af sent but never saw land keeps this handler read-only
-	// while it could still be in flight. See claudeTrustMoveProofWindow.
+	// A movement key af sent and never saw land makes this handler READ-ONLY.
+	//
+	// Only an observed change of the selected row releases it. Elapsed time
+	// cannot: a key the agent has buffered but not yet processed looks exactly
+	// like a key it never received, and the two want opposite actions. Getting
+	// that wrong is not a small cost — this picker wraps, so a second movement
+	// key undoes the first, and a repaint landing between af's verification and
+	// confirmation captures would then let Enter reach "No, exit". That is
+	// #3579 again, so af holds instead, and the create fails loudly.
 	if state.pendingFrom != "" {
-		switch {
-		case dialog.selectedLabel() != state.pendingFrom:
-			// The cursor moved: the key landed, and af may act on what it sees.
-			state.clearPendingMove()
-			state.moveAttempts = 0
-		case state.pendingMoveUnproven():
-			state.pendingPolls++
+		if dialog.selectedLabel() == state.pendingFrom {
+			t.holdPendingClaudeTrustMove()
 			return true
-		default:
-			// Far past any repaint and the cursor never moved, so the key never
-			// reached the agent — Claude Code drops keys sent in the instant
-			// after it paints this dialog. Re-sending is now the safe action;
-			// it is the one thing af must NOT do while the key might still be
-			// in flight.
-			log.WarningLog.Printf(
-				"session %q: %s did not act on the %d key(s) af sent in %s (cursor still on %q); re-sending",
-				t.sanitizedName, claudeFolderTrustDialogName, state.moveAttempts,
-				claudeTrustNow().Sub(state.pendingSince).Round(time.Millisecond), state.pendingFrom)
-			state.clearPendingMove()
 		}
+		state.clearPendingMove()
+	}
+
+	// Do not type into a dialog Claude Code has only just painted: it is not
+	// reading input yet, and the key is dropped. See claudeTrustSettleDelay.
+	if !state.settled() {
+		return true
 	}
 
 	for moves := 0; !dialog.onAffirmative(); moves++ {
-		if moves >= claudeTrustMaxMovementKeys || state.moveAttempts >= claudeTrustMaxMoveAttempts {
+		if moves >= claudeTrustMaxMovementKeys {
 			t.refuseClaudeFolderTrust(fmt.Errorf(
 				"the cursor stayed on %q after %d movement keys and never reached %q",
-				dialog.selectedLabel(), state.moveAttempts, claudeTrustAffirmativeLabel))
+				dialog.selectedLabel(), moves, claudeTrustAffirmativeLabel))
 			return true
 		}
 		key := dialog.keyTowardAffirmative()
@@ -423,12 +425,11 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 			// af has no proof of where the cursor is now, so it must not confirm
 			// — and the pending record above is what stops the next poll from
 			// re-sending this key against a cursor that may already have moved.
-			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; sending nothing further for %s, in case the key is still in flight",
-				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key, claudeTrustMoveProofWindow)
+			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; sending nothing further until a frame proves the cursor moved",
+				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key)
 			return true
 		}
 		state.clearPendingMove()
-		state.moveAttempts = 0
 		dialog = moved
 	}
 
@@ -451,6 +452,26 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 	t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Enter")
 	state.refusalLogged = false
 	return true
+}
+
+// holdPendingClaudeTrustMove keeps a sent-but-unproven movement key pending and
+// reports it once, after claudeTrustHoldReportAfter. af holds either way — the
+// report is the operator-visible signal, not a change of behavior. Mirrors
+// recordPendingCodexSafetySelection.
+func (t *TmuxSession) holdPendingClaudeTrustMove() {
+	state := &t.claudeTrust
+	state.pendingPolls++
+	elapsed := claudeTrustNow().Sub(state.pendingSince)
+	if state.pendingLogged || elapsed < claudeTrustHoldReportAfter {
+		return
+	}
+	state.pendingLogged = true
+	log.ErrorLog.Printf(
+		"session %q: %s has not shown the cursor leave %q in %s and %d polls since af sent a movement key; "+
+			"af will not send another, because a key the agent has buffered but not yet processed is indistinguishable "+
+			"from one it never received, and this picker wraps — a second key would move the cursor back off %q",
+		t.sanitizedName, claudeFolderTrustDialogName, state.pendingFrom,
+		elapsed.Round(time.Millisecond), state.pendingPolls, claudeTrustAffirmativeLabel)
 }
 
 // resetClaudeTrustState drops this handler's cross-poll memory at a proven

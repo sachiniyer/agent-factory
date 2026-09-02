@@ -295,6 +295,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// af has already sent. Only an observed change of the selected row, or
 		// a new pane process (Start), releases that.
 		t.claudeTrust.refusalLogged = false
+		// Clearing firstSeen too is safe in the one direction that matters: it
+		// can only make af wait longer before typing into the NEXT dialog, never
+		// sooner. A pending movement key is a different matter and stays.
+		t.claudeTrust.firstSeen = time.Time{}
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
 			return true

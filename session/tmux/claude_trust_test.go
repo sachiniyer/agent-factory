@@ -170,8 +170,14 @@ func (p *claudeFolderTrustPane) committedLabels() []string {
 // issued across the whole run.
 func driveClaudeTrustPane(t *testing.T, pane *claudeFolderTrustPane, polls int) []string {
 	t.Helper()
+	advance := setClaudeTrustClock(t)
 	session, keys := claudeTrustSession(t, pane)
 	for i := 0; i < polls; i++ {
+		// One daemon poll interval between checks. af declines to type into a
+		// dialog it has only just seen (claudeTrustSettleDelay), so a driver
+		// that never let time pass would never get a keystroke at all — which
+		// is the production behavior, not a harness detail.
+		advance(time.Second)
 		if !session.CheckAndHandleTrustPrompt() {
 			break
 		}
@@ -491,18 +497,16 @@ func TestCheckAndHandleTrustPrompt_NonFolderClaudeGatesKeepTheEnterTap(t *testin
 // the movement key either, which is how a stale frame would make it overshoot.
 // The window is driven on a virtual clock so the test does not sleep through it.
 func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverRepaintsSoNothingIsConfirmed(t *testing.T) {
-	now := time.Now()
-	previousNow, previousSleep := claudeTrustNow, claudeTrustSleep
-	t.Cleanup(func() { claudeTrustNow, claudeTrustSleep = previousNow, previousSleep })
-	claudeTrustNow = func() time.Time { return now }
-	claudeTrustSleep = func(d time.Duration) { now = now.Add(d) }
+	setClaudeTrustClock(t)
 
 	_, _, errLog := captureTrustPromptLogs(t)
 	pane := claudeFolderTrustPane{
 		options:     []string{claudeTrustNoLabel, claudeTrustYesLabel},
 		staleFrames: 1 << 20, // the redraw never arrives
 	}
-	keys := driveClaudeTrustPane(t, &pane, 1)
+	// Two polls: the first notes that the dialog appeared, the second is the
+	// one that types into it.
+	keys := driveClaudeTrustPane(t, &pane, 2)
 
 	require.Empty(t, pane.committedLabels(), "af must not confirm a selection it could not verify")
 	require.Equal(t, []string{"Down"}, injectedKeyNames(keys),
@@ -515,13 +519,29 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverRepaintsSoNothingIsConf
 // sleeping through it.
 func setClaudeTrustClock(t *testing.T) func(time.Duration) {
 	t.Helper()
+	if claudeTrustVirtualNow != nil {
+		return claudeTrustVirtualAdvance
+	}
 	now := time.Now()
 	previousNow, previousSleep := claudeTrustNow, claudeTrustSleep
-	t.Cleanup(func() { claudeTrustNow, claudeTrustSleep = previousNow, previousSleep })
+	claudeTrustVirtualNow = &now
+	claudeTrustVirtualAdvance = func(d time.Duration) { now = now.Add(d) }
+	t.Cleanup(func() {
+		claudeTrustNow, claudeTrustSleep = previousNow, previousSleep
+		claudeTrustVirtualNow, claudeTrustVirtualAdvance = nil, nil
+	})
 	claudeTrustNow = func() time.Time { return now }
 	claudeTrustSleep = func(d time.Duration) { now = now.Add(d) }
-	return func(d time.Duration) { now = now.Add(d) }
+	return claudeTrustVirtualAdvance
 }
+
+// claudeTrustVirtualNow/Advance let a test install the virtual clock and then
+// hand the SAME clock to driveClaudeTrustPane, rather than shadowing it with a
+// second one whose time never moves.
+var (
+	claudeTrustVirtualNow     *time.Time
+	claudeTrustVirtualAdvance func(time.Duration)
+)
 
 // #3587 review, P1. `send-keys` returning is not proof the key landed, and a
 // terminal that has not repainted is not proof it did not. If af re-sent the
@@ -534,13 +554,15 @@ func setClaudeTrustClock(t *testing.T) func(time.Duration) {
 // So a movement key af did not see land makes this handler read-only until a
 // frame proves the cursor moved.
 func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustDoesNotResendAnUnverifiedMove(t *testing.T) {
-	setClaudeTrustClock(t)
+	advance := setClaudeTrustClock(t)
 	_, _, errLog := captureTrustPromptLogs(t)
 
 	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
 	session, keys := claudeTrustSession(t, pane)
 
 	// The terminal stops repainting the moment af starts driving the picker.
+	require.True(t, session.CheckAndHandleTrustPrompt()) // notes when the dialog appeared
+	advance(claudeTrustSettleDelay)
 	pane.freeze(true)
 	require.True(t, session.CheckAndHandleTrustPrompt())
 	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
@@ -563,117 +585,74 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustDoesNotResendAnUnverifiedMov
 	require.Empty(t, errLog.String())
 }
 
-// The other half of the same window, and it is not symmetric with the first.
-// Claude Code drops keys sent in the instant after it paints this dialog —
-// measured on 2.1.258 at roughly one create in six — and a movement key that
-// never reached the agent MUST be re-sent, or the dialog is never answered and
-// the session start fails. What separates the two cases is time: a key that
-// landed repaints in tens of milliseconds, so a cursor still sitting on the old
-// row long past that is evidence about the key, not about the terminal.
-func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustResendsAMovementKeyThatNeverLanded(t *testing.T) {
-	advance := setClaudeTrustClock(t)
-	_, warnLog, errLog := captureTrustPromptLogs(t)
-
-	// A pane that swallows the first movement key outright: the picker's own
-	// selection does not move, because the key never reached it.
-	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, deaf: 1}
-	session, keys := claudeTrustSession(t, pane)
-
-	require.True(t, session.CheckAndHandleTrustPrompt())
-	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
-	require.Equal(t, 0, pane.selectedIndex(), "precondition: the key was dropped, so nothing moved")
-
-	// Inside the window af still sends nothing: the key might have landed.
-	require.True(t, session.CheckAndHandleTrustPrompt())
-	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
-		"a key that could still be in flight must not be re-sent; got %v", *keys)
-
-	// Past it, a cursor that never moved is proof the key was lost.
-	advance(claudeTrustMoveProofWindow + time.Second)
-	require.True(t, session.CheckAndHandleTrustPrompt())
-	require.Equal(t, []string{"Down", "Down", "Enter"}, injectedKeyNames(*keys),
-		"the lost key is re-sent — once — and the dialog answered; got %v", *keys)
-	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
-	require.Contains(t, warnLog.String(), "re-sending")
-	require.Empty(t, errLog.String())
-}
-
-// A picker that swallows every movement key is not one af can drive, and af
-// says so rather than retrying until the create's budget runs out.
-func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustGivesUpOnAPickerThatSwallowsEveryKey(t *testing.T) {
+// #3587 review round 2, P1. The earlier version of this fix released the hold
+// on a TIMER — "the cursor never moved in 3s, so the key must have been
+// dropped, re-send it". That inference is not available: a key the agent has
+// BUFFERED but not yet processed looks exactly like a key it never received,
+// and the two want opposite actions.
+//
+// Getting it wrong is not a small cost, because this picker WRAPS. Measured on
+// claude 2.1.258:
+//
+//	start:         ❯ No, exit
+//	after Down #1: ❯ Yes, I trust this folder
+//	after Down #2: ❯ No, exit          <- back to the option that quits
+//
+// So a duplicate movement key does not clamp harmlessly; it undoes the move,
+// and a repaint landing between af's verification and confirmation captures
+// would then let Enter reach "No, exit" — #3579 again. af therefore never
+// re-sends: it holds, reports, and lets the create fail loudly.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverResendsAMovementKey(t *testing.T) {
 	advance := setClaudeTrustClock(t)
 	_, _, errLog := captureTrustPromptLogs(t)
 
+	// A picker that never acts on a movement key, however many arrive.
 	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, deaf: 1 << 20}
 	session, keys := claudeTrustSession(t, pane)
 
-	for i := 0; i < claudeTrustMaxMoveAttempts+3; i++ {
-		require.True(t, session.CheckAndHandleTrustPrompt())
-		advance(claudeTrustMoveProofWindow + time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt()) // records when the dialog appeared
+	advance(claudeTrustSettleDelay)
+	require.True(t, session.CheckAndHandleTrustPrompt()) // settled: af sends its one movement key
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys), "precondition: af sent one movement key")
+
+	// However long af waits, and however many polls run, it sends nothing more.
+	for i := 0; i < 8; i++ {
+		advance(claudeTrustHoldReportAfter)
+		require.True(t, session.CheckAndHandleTrustPrompt(), "the dialog is still in the way")
 	}
-	require.Empty(t, pane.committedLabels(), "nothing may be confirmed on a picker af never moved")
-	require.LessOrEqual(t, len(injectedKeyNames(*keys)), claudeTrustMaxMoveAttempts,
-		"re-sends are bounded; got %v", *keys)
-	require.Contains(t, errLog.String(), "never reached")
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"elapsed time is not evidence the key was dropped, and this picker wraps; got %v", *keys)
+	require.Empty(t, pane.committedLabels(), "nothing may be confirmed while af cannot see the cursor")
+
+	// The operator is told why the session is stuck — once, not every poll.
+	require.Contains(t, errLog.String(), "af will not send another")
+	require.Equal(t, 1, strings.Count(errLog.String(), "af will not send another"),
+		"the hold is reported once per dialog, not on every tick of the daemon poll")
 }
 
-// A frame af cannot parse at all is not evidence that a pending movement key
-// did nothing either, so it holds rather than refusing and starting over.
-func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustHoldsThroughAnUnparseableFrame(t *testing.T) {
-	setClaudeTrustClock(t)
+// Claude Code drops keys sent in the instant after it paints this dialog, before
+// it is reading input — measured on 2.1.258 at roughly one create in six. Since
+// a dropped key can never be safely re-sent (above), the only remedy is not to
+// send it too early: af waits for the dialog to settle before it types.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustWaitsForTheDialogToSettle(t *testing.T) {
+	advance := setClaudeTrustClock(t)
 	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
 	session, keys := claudeTrustSession(t, pane)
 
-	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt(), "a dialog af has only just seen is still in the way")
+	require.Empty(t, injectedKeyNames(*keys),
+		"af must not type into a dialog Claude Code has only just painted; got %v", *keys)
+
+	// Still too soon.
+	advance(claudeTrustSettleDelay / 2)
 	require.True(t, session.CheckAndHandleTrustPrompt())
-	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+	require.Empty(t, injectedKeyNames(*keys))
 
-	// A capture caught mid-repaint: the dialog's text is there, but no row
-	// carries the cursor.
-	pane.mu.Lock()
-	pane.stale = "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
-		"  " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n"
-	pane.mu.Unlock()
+	// Settled: now af drives it.
+	advance(claudeTrustSettleDelay)
 	require.True(t, session.CheckAndHandleTrustPrompt())
-	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
-		"an unreadable frame must not release the pending movement; got %v", *keys)
-}
-
-// #3587 review, P1. This handler runs on the daemon's continuous poll against
-// ARBITRARY agent output, and Down/Up/Enter typed into a working composer
-// cannot be taken back. Output that quotes the dialog — including this repo's
-// own source and issue text, which is how #1952 and #2638 happened — must
-// inject nothing.
-func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
-	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
-		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
-		"Enter to confirm · Esc to cancel\n"
-
-	for _, tt := range []struct{ name, content string }{
-		{
-			// The agent is showing the dialog inside its own transcript, with
-			// its composer painted below — the shape every live pane has.
-			name: "quoted above the agent's composer",
-			content: dialog + "\n╭────────────────────────────────────╮\n" +
-				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
-		},
-		{
-			name:    "quoted with trailing prose",
-			content: dialog + "\nThat is the dialog af answers at startup.\n",
-		},
-		{
-			name: "the label mentioned in a sentence next to the composer cursor",
-			content: "Quick safety check: Is this a project you created or one you trust?\n" +
-				"❯ I will select \"" + claudeTrustYesLabel + "\" for you\n",
-		},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
-			require.True(t, handled, "af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
-			require.Empty(t, sentKeystrokes(cmds),
-				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
-		})
-	}
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(*keys))
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
 }
 
 // #3587 review, P2. RestoreWithResult respawns a missing session through Start
@@ -702,4 +681,103 @@ func TestStart_ResetsClaudeTrustStateAtTheProvenRuntimeBoundary(t *testing.T) {
 
 	require.Equal(t, claudeTrustState{}, session.claudeTrust,
 		"a new pane process inherits no pending movement and no silenced refusal")
+}
+
+// A frame af cannot parse at all is not evidence that a pending movement key
+// did nothing either, so it holds rather than refusing and starting over.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustHoldsThroughAnUnparseableFrame(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	advance(claudeTrustSettleDelay)
+	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+
+	// A capture caught mid-repaint: the dialog's text is there, but no row
+	// carries the cursor.
+	pane.mu.Lock()
+	pane.stale = "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+		"  " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n"
+	pane.mu.Unlock()
+	advance(time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"an unreadable frame must not release the pending movement; got %v", *keys)
+}
+
+// pollStaticPane drives CheckAndHandleTrustPrompt over unchanging content for
+// several daemon poll intervals, so af's settle delay is crossed and the pane
+// is genuinely offered as something af could type into. A single call would
+// prove nothing now that af declines to touch a dialog it has only just seen.
+func pollStaticPane(t *testing.T, content string, polls int) (handled bool, cmds []string) {
+	t.Helper()
+	advance := setClaudeTrustClock(t)
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			cmds = append(cmds, strings.Join(c.Args, " "))
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			if strings.Contains(strings.Join(c.Args, " "), "display-message") {
+				return []byte("0 0 0"), nil
+			}
+			return []byte(content), nil
+		},
+	}
+	session := newTmuxSession(toTmuxName("quoted", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec)
+	for i := 0; i < polls; i++ {
+		advance(time.Second)
+		handled = session.CheckAndHandleTrustPrompt()
+	}
+	return handled, cmds
+}
+
+// #3587 review, P1. This handler runs on the daemon's continuous poll against
+// ARBITRARY agent output, and Down/Up/Enter typed into a working composer
+// cannot be taken back. Output that quotes the dialog — including this repo's
+// own source and issue text, which is how #1952 and #2638 happened — must
+// inject nothing, however long it stays on screen.
+func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
+	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
+		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+		"Enter to confirm · Esc to cancel\n"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The agent is showing the dialog inside its own transcript, with
+			// its composer painted below — the shape every live pane has.
+			name: "quoted above the agent's composer",
+			content: dialog + "\n╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
+		},
+		{
+			name:    "quoted with trailing prose",
+			content: dialog + "\nThat is the dialog af answers at startup.\n",
+		},
+		{
+			name: "the label mentioned in a sentence next to the composer cursor",
+			content: "Quick safety check: Is this a project you created or one you trust?\n" +
+				"❯ I will select \"" + claudeTrustYesLabel + "\" for you\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.True(t, handled, "af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
+		})
+	}
+}
+
+// The same guard from the other side: a pane showing the REAL dialog, polled
+// the same way, is driven. Without this, the test above could pass because af
+// had stopped answering dialogs entirely.
+func TestCheckAndHandleTrustPrompt_RealClaudeFolderTrustDialogIsStillDriven(t *testing.T) {
+	pane := claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	keys := driveClaudeTrustPane(t, &pane, 6)
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(keys))
 }

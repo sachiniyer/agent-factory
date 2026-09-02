@@ -68,9 +68,21 @@ func dyingDialogPane(t *testing.T) (*TmuxSession, *claudeFolderTrustPane) {
 	return newTmuxSession(toTmuxName("dying", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec), pane
 }
 
+// answerDyingDialog drives the pane until af has answered the dialog, letting
+// time pass between checks so af's settle delay is crossed the way the daemon's
+// poll interval crosses it.
+func answerDyingDialog(t *testing.T, session *TmuxSession, pane *claudeFolderTrustPane) {
+	t.Helper()
+	advance := setClaudeTrustClock(t)
+	for i := 0; i < 6 && len(pane.committedLabels()) == 0; i++ {
+		advance(time.Second)
+		require.True(t, session.CheckAndHandleTrustPrompt())
+	}
+}
+
 func TestCapturePaneContent_DeathWhileAnsweringADialogNamesTheDialogAndTheKeys(t *testing.T) {
 	session, pane := dyingDialogPane(t)
-	require.True(t, session.CheckAndHandleTrustPrompt(), "precondition: the dialog must be identified and answered")
+	answerDyingDialog(t, session, pane)
 	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(), "precondition: af answered the dialog")
 
 	_, err := session.CapturePaneContent()
@@ -91,8 +103,8 @@ func TestCapturePaneContent_DeathWhileAnsweringADialogNamesTheDialogAndTheKeys(t
 // task.WaitForReadyAndSendPrompt (ErrAgentReadiness). Both are plain %w wraps,
 // so what is asserted here is what reaches the terminal.
 func TestCapturePaneContent_DeathDiagnosticSurvivesTheCreatePathWrapping(t *testing.T) {
-	session, _ := dyingDialogPane(t)
-	require.True(t, session.CheckAndHandleTrustPrompt())
+	session, pane := dyingDialogPane(t)
+	answerDyingDialog(t, session, pane)
 	_, err := session.CapturePaneContent()
 	require.Error(t, err)
 
