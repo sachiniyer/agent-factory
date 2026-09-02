@@ -43,7 +43,25 @@ import (
 // ABOVE the affirmative row, options then a blank then the footer, nothing after
 // it — so a pass also proves af still steers Down toward the right option.
 func TestClaudeTrustCursorSurvivesRealCaptureUnderNonUTF8Locale(t *testing.T) {
-	for _, locale := range []string{"C.UTF-8", "C"} {
+	// "C" is POSIX-mandated and present everywhere; it is the arm #3605 is
+	// actually about. The UTF-8 arm is the control, and its NAME is not
+	// portable — glibc spells it "C.utf8", macOS ships "en_US.UTF-8" and has no
+	// C.UTF-8 at all — so it is discovered rather than hardcoded.
+	//
+	// Discovering it is not pedantry. tmux does not reject an unknown locale
+	// name (measured: `new-session` exits 0 under LC_ALL=xx_YY.UTF-8), so a
+	// hardcoded C.UTF-8 would not fail on macOS — setlocale would quietly fall
+	// back to C and this arm would run a SECOND non-UTF-8 pass while claiming to
+	// be the UTF-8 control. A test that silently checks something weaker than it
+	// says is worse than one that skips.
+	locales := []string{"C"}
+	if utf8Locale := availableUTF8Locale(); utf8Locale != "" {
+		locales = append(locales, utf8Locale)
+	} else {
+		t.Log("no UTF-8 locale installed; running the C arm only, which is the one #3605 is about")
+	}
+
+	for _, locale := range locales {
 		t.Run(locale, func(t *testing.T) {
 			// Before IsolateTmux's first tmux command, so the private server and
 			// every client it serves inherit the locale under test.
@@ -91,4 +109,31 @@ func TestClaudeTrustCursorSurvivesRealCaptureUnderNonUTF8Locale(t *testing.T) {
 				"the affirmative row is below the cursor, so af must steer Down")
 		})
 	}
+}
+
+// availableUTF8Locale returns a UTF-8 locale name this machine actually has,
+// taken verbatim from `locale -a` so the spelling matches the platform's own
+// (glibc "C.utf8" vs macOS "en_US.UTF-8"), or "" when there is none.
+func availableUTF8Locale() string {
+	out, err := exec.Command("locale", "-a").Output()
+	if err != nil {
+		return ""
+	}
+	var fallback string
+	for _, name := range strings.Split(string(out), "\n") {
+		name = strings.TrimSpace(name)
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".utf-8") && !strings.HasSuffix(lower, ".utf8") {
+			continue
+		}
+		// Prefer a C-based UTF-8 locale: it differs from the "C" arm in exactly
+		// the character encoding, which is the variable under test.
+		if strings.HasPrefix(lower, "c.") {
+			return name
+		}
+		if fallback == "" {
+			fallback = name
+		}
+	}
+	return fallback
 }
