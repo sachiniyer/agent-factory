@@ -8611,7 +8611,13 @@ async function readIconGeometry(p: Page): Promise<IconReading> {
 /** The reading the assertions consume: the one taken since the watch was armed, and —
  *  if the shell rebuilt itself anywhere inside that window — one fresh reading in its
  *  place. Exactly one retry: a second dirty window is itself worth reporting, and a
- *  retry loop would only bury it. */
+ *  retry loop would only bury it.
+ *
+ *  Reporting it is the CALLER's job, and not optional. The returned reading can still
+ *  be dirty (both attempts straddled a rebuild) or unquiesced, and its geometry is
+ *  then void — so a caller that consumes it without checking `rebuilds` and
+ *  `quiesced` silently accepts exactly the sustained race this exists to surface
+ *  (#3683 Codex). */
 async function settledIconAudit(p: Page): Promise<{ reading: IconReading; attempts: IconReading[] }> {
   const first = await readIconGeometry(p);
   if (first.rebuilds === 0) {
@@ -8714,6 +8720,14 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           accentByTheme.set(theme, projectPaint.color);
 
           const { reading, attempts } = await settledIconAudit(p);
+          // A SUSTAINED race is the one condition this instrumentation exists to name,
+          // and it has to be asserted rather than merely described: a second dirty
+          // reading that happens to look healthy would otherwise pass silently, and the
+          // "void, not evidence" verdict in the message would never be read by anyone
+          // (#3683 Codex). Checked before the geometry so a void reading fails as a
+          // void reading, never as an icon defect.
+          expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+          expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
           const visible = reading.icons.filter(iconIsVisible);
           // The assertion stays. With the rebuild count beside it, a zero box over a
           // quiet window is a product defect — the shell would be painting icons the
@@ -8779,6 +8793,7 @@ test("#3681 a rebuild scheduled mid-audit voids the reading and buys another, ra
     expect(attempts.length, "a rebuild inside the window must void the reading and buy exactly one more").toBe(2);
     expect(attempts[0]?.rebuilds ?? 0, "the watch must see the rebuild the DOM snapshots cannot").toBeGreaterThan(0);
     expect(reading, "the replacement reading is the one the assertions consume").toBe(attempts[1]);
+    expect(reading.rebuilds, "and it is taken over a window of its own, which must be clean").toBe(0);
     expect(reading.quiesced, "the shell must go quiet for two consecutive frames before it is measured").toBe(true);
     // And the recovered reading is a real one: the icons were never the problem here,
     // so the audit must not report them as collapsed.
