@@ -249,6 +249,97 @@ func (m *Manager) pendingReattributionRealID(derivedID string) string {
 	return ""
 }
 
+// probeProvedItsCheckout reports what a probe has ESTABLISHED about whether the
+// checkout at the recorded path is the record's own, without blocking:
+// verified when the marker matched, disproven when the marker read succeeded
+// and differed. Neither, when it has not finished or finished without a verdict
+// — that is the UNKNOWN state, and it is a state, not a "no".
+//
+// matches and mismatch are written by the probe goroutine before it closes
+// done, so observing done closed is what makes reading them safe.
+func probeProvedItsCheckout(p *rootReattributionProbe) (verified, disproven bool) {
+	select {
+	case <-p.done:
+	default:
+		return false, false
+	}
+	return p.matches, p.mismatch
+}
+
+// pendingAttributionFor answers which identity a delete aimed at the
+// PROVISIONAL id derivedID may act under (#3530 review ids 3915722493,
+// 3916379586).
+//
+// The candidate a probe publishes is NOT evidence that the checkout at the
+// recorded path is this project's: it is stored the moment git resolves the
+// path, before the marker is read, so a stranger occupying that path publishes
+// its own real identity there. Acting on it would let a delete archive and
+// suppress the occupant while deregistering the original project's record —
+// mutations no later mismatch can undo.
+//
+// So only a PROVEN match moves a delete between identities. A candidate with no
+// verdict yet makes the target unknown, which the caller refuses rather than
+// guesses; that is the same rule normalizeDeleteProjectPath applies to a git
+// probe that never answered. A proven mismatch establishes that the candidate
+// is not this record's, so the recorded identity simply stands.
+func (m *Manager) pendingAttributionFor(derivedID string) (realID string, unknown bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	probe := m.rootHealProbes[derivedID]
+	if probe == nil {
+		return "", false
+	}
+	// A settled verdict has already released this identity — a proven mismatch
+	// says the checkout there is a different clone, an unreadable marker is
+	// held closed through the snapshot bridge instead — so it moves nothing.
+	// An INCONCLUSIVE settle established nothing and keeps its inherited
+	// candidate, which is exactly the unknown this refuses on.
+	if probe.settled && !probe.inconclusive() {
+		return "", false
+	}
+	candidate := probe.candidate.Load()
+	if candidate == nil || candidate.ID == derivedID {
+		return "", false
+	}
+	verified, disproven := probeProvedItsCheckout(probe)
+	switch {
+	case verified:
+		return candidate.ID, false
+	case disproven:
+		return "", false
+	}
+	return "", true
+}
+
+// verifiedPendingDerivedID is pendingAttributionFor's other direction, for a
+// delete that arrives with the REAL identity while the record is still keyed by
+// its provisional one (#3530 review id 3916379577): without it
+// registeredProjectRootForRepoID finds no row, so the delete archives and
+// suppresses the real id's sessions, skips DeregisterProject, and reports
+// success while the durable record survives to reappear on the next start.
+//
+// Same rule as the forward direction, for the same reason: only a PROVEN marker
+// match may bind the two identities together. An unverified candidate here
+// would let a delete aimed at an occupant deregister the absent project whose
+// path it happens to occupy.
+func (m *Manager) verifiedPendingDerivedID(realID string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for derivedID, probe := range m.rootHealProbes {
+		if probe == nil || (probe.settled && !probe.inconclusive()) {
+			continue
+		}
+		candidate := probe.candidate.Load()
+		if candidate == nil || candidate.ID != realID || derivedID == realID {
+			continue
+		}
+		if verified, _ := probeProvedItsCheckout(probe); verified {
+			return derivedID
+		}
+	}
+	return ""
+}
+
 // pendingReattributionDerivedID returns the DERIVED recorded-path ID of an
 // unconsumed re-attribution probe that has already resolved repoID as its
 // candidate identity, or "" when none has. It is the same question

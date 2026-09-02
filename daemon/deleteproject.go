@@ -148,34 +148,38 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
 }
 
-// attributedDeleteRepoID redirects a PROVISIONAL delete target onto the real
-// identity the daemon has already resolved for it but not yet promoted (#3530
-// review id 3915722493).
+// attributedDeleteTarget answers which identity a delete must act under when
+// the path it named resolves to a PROVISIONAL one (#3530 review ids
+// 3915722493, 3916379586).
 //
 // A record written before Project.RepoID is addressed by an invented id while
 // its path does not resolve. But "does not resolve" is a question asked at one
 // instant: a returning checkout publishes its real-ID candidate into
 // rootHealProbes as soon as git answers, and the marker verification that
-// promotes it takes longer still — so a path that comes back and goes away
-// again leaves the delete normalizing to the invented id while the daemon is
-// already holding the real one. The delete would then archive nothing under
-// the identity this project's live sessions are keyed by, deregister the
-// project, and report success, leaving those sessions as orphans.
+// promotes it takes longer still. So a path that comes back and goes away again
+// leaves this normalizing to the invented id while the daemon is already
+// holding the real one — the delete then archives nothing under the identity
+// the project's live sessions are keyed by, deregisters the project, and
+// reports success.
 //
-// It is not a guess. The pending probe was spawned FOR this record's root, so
-// the identity it resolved is this project's own; and a path that resolves at
-// normalization time never reaches here, so this can never redirect a delete
-// aimed at an occupant. Real ids pass through untouched.
-func (m *Manager) attributedDeleteRepoID(repoID string) string {
+// Only a PROVEN match moves it, because the candidate alone is not evidence
+// that the checkout at the recorded path is this project's — see
+// pendingAttributionFor. Until that proof exists, which project the request
+// names is unknown, and an unknown target refuses instead of picking one; a
+// delete cannot be un-done by a verdict that arrives afterwards.
+func (m *Manager) attributedDeleteTarget(repoID string) (string, error) {
 	if !config.IsDerivedRepoID(repoID) {
-		return repoID
+		return repoID, nil
 	}
-	realID := m.pendingReattributionRealID(repoID)
+	realID, unknown := m.pendingAttributionFor(repoID)
+	if unknown {
+		return repoID, fmt.Errorf("delete project: %s is a provisional identity and af is still checking whether the checkout at its recorded path is that project's own, so which project this names is unknown; nothing was changed — delete again once that check settles", repoID)
+	}
 	if realID == "" {
-		return repoID
+		return repoID, nil
 	}
-	log.InfoLog.Printf("delete project: %s is a provisional identity, and a re-attribution probe has already resolved this project's real identity %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
-	return realID
+	log.InfoLog.Printf("delete project: %s is a provisional identity, and a re-attribution probe has VERIFIED this project's real identity %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
+	return realID, nil
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -253,8 +257,15 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 }
 
 type deleteProjectTarget struct {
-	repoID   string
-	repoPath string
+	repoID string
+	// recordedRepoID is the identity the registry RECORD is keyed by when it
+	// differs from the identity this delete acts under — a legacy record whose
+	// provisional id a verified probe has just bound to a real one (#3530).
+	// The two are needed separately: sessions, policy and tombstones live under
+	// the real id, while the durable root_agents key is a PATH whose stale
+	// spelling only ever resolves to the recorded one (review id 3916379565).
+	recordedRepoID string
+	repoPath       string
 	// claimantProjectID names the registry record whose root is repoPath, so a
 	// suppression tombstone records WHOSE delete it was and a later proven
 	// mismatch releases it only for that claimant (#3299 review round 15). It
@@ -324,6 +335,7 @@ func claimantForRecord(p config.Project) string {
 func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
+	recordedRepoID := ""
 	if repoID == "" {
 		if repoPath == "" {
 			return deleteProjectTarget{}, fmt.Errorf("delete project: repo_id or repo_path is required")
@@ -350,6 +362,24 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		repoPath, err = registeredProjectRootForRepoID(repoID)
 		if err != nil {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
+		}
+		if repoPath == "" {
+			// The record may still be keyed by its PROVISIONAL identity: a
+			// legacy row whose checkout a probe has verified but whose
+			// promotion has not been written yet answers to the derived id,
+			// not to the real one this request names. Without this the delete
+			// archives and suppresses the real id's sessions, skips
+			// DeregisterProject, and reports success while the record survives
+			// to reappear on the next daemon start (#3530 review id
+			// 3916379577). Only a VERIFIED probe binds the two, so this can
+			// never deregister an absent project on an occupant's behalf.
+			if derived := m.verifiedPendingDerivedID(repoID); derived != "" {
+				recordedRepoID = derived
+				repoPath, err = registeredProjectRootForRepoID(derived)
+				if err != nil {
+					return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine the registered root of the project its provisional identity %s names; nothing was changed: %w", repoID, derived, err)
+				}
+			}
 		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
@@ -384,7 +414,12 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// holds yet, and would turn a TUI delete that supplies both selectors —
 	// the provisional id it is displaying, plus the recorded path — into a
 	// mismatch refusal.
-	repoID = m.attributedDeleteRepoID(repoID)
+	if attributed, err := m.attributedDeleteTarget(repoID); err != nil {
+		return deleteProjectTarget{repoID: repoID}, err
+	} else if attributed != repoID {
+		recordedRepoID = repoID
+		repoID = attributed
+	}
 	claimantProjectID := ""
 	if repoPath != "" {
 		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
@@ -412,6 +447,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	}
 	return deleteProjectTarget{
 		repoID:            repoID,
+		recordedRepoID:    recordedRepoID,
 		repoPath:          repoPath,
 		claimantProjectID: claimantProjectID,
 	}, nil
@@ -488,8 +524,19 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// leave the durable opt-in to start the root again on the next daemon run
 	// (#3530 review id 3914971851). Supply the recorded path's canonical id
 	// alongside it; both name this one project, and neither can name another.
+	// The RECORDED identity decides this, not the one being acted under (#3530
+	// review id 3916379565). A root_agents key is a PATH, and a stale key for
+	// an unavailable recorded root falls back to hashing that path — which is
+	// the project's provisional identity, never the real id a verified probe
+	// just redirected this delete to. Keying the sweep on the target alone left
+	// the durable opt-in in place, to recreate the root when the checkout
+	// returned or the daemon restarted.
+	recordedID := repoID
+	if resolved.recordedRepoID != "" {
+		recordedID = resolved.recordedRepoID
+	}
 	optInIDs := []string{repoID}
-	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+	if config.IsDerivedRepoID(recordedID) && repoPath != "" {
 		optInIDs = append(optInIDs, config.RepoIDFromRoot(filepath.Clean(repoPath)))
 	}
 	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
