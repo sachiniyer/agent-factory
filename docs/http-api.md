@@ -249,6 +249,14 @@ legacy `status` int for a record written before `liveness` existed. So the round
 trip holds: every row a `statuses` value selects reports that value as its
 `liveness_name`, and vice versa.
 
+That derivation refuses to guess. A record whose liveness cannot be resolved —
+one from a daemon predating `liveness` that was caught mid-create or mid-kill, so
+its only state is a transient `status`, or one carrying a `status` this `af` does
+not know — reports `liveness_name: ""` and is selected by **no** `statuses`
+value. It is still listed; it simply does not claim a state it is not in. Such a
+row still names its own legacy axis (`status_name: "deleting"`), so the pair
+says exactly what is known.
+
 `status_name` names the LEGACY composed axis, which is not always the same
 answer, and the difference is the reason both fields exist:
 
@@ -266,7 +274,7 @@ straight back to a create call; `agent` and `process` are named but are not
 creatable (see `tab_kinds` for what a session will accept).
 
 An integer this binary does not recognize — a record from a newer `af` — names
-itself `""` rather than guessing a word.
+itself `""` rather than guessing a word, in every one of the three twins.
 
 ### Session idle diagnosis
 

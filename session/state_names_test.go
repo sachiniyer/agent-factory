@@ -130,8 +130,9 @@ func requireCoversRange(t *testing.T, typeName string, declared []string, first 
 }
 
 // TestRecordedLivenessNamesEveryRecord pins the property the round-trip rests
-// on: a record always resolves to a NAMED liveness, including one written before
-// the `liveness` field existed and one caught mid-operation.
+// on: a record with a liveness to report resolves to a NAMED one, including a
+// record written before the `liveness` field existed — and a record with none
+// reports nothing rather than a guess.
 func TestRecordedLivenessNamesEveryRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -142,13 +143,40 @@ func TestRecordedLivenessNamesEveryRecord(t *testing.T) {
 		{"legacy record falls back to status", InstanceData{Status: Archived}, "archived"},
 		{"legacy dead is NOT renamed to lost", InstanceData{Status: Dead}, "dead"},
 		{"explicit dead is NOT renamed to lost", InstanceData{Liveness: LiveDead}, "dead"},
-		{"legacy transient resolves to a real state", InstanceData{Status: Deleting}, "ready"},
+		// The fallback has nothing to work with in these two, and
+		// LivenessForStatus's default would answer "ready" for both — labelling a
+		// row mid-kill, and a row from a newer af, with a state neither is in, and
+		// sweeping both into `--status ready`.
+		{"legacy transient records no liveness", InstanceData{Status: Deleting}, ""},
+		{"unknown legacy status records no liveness", InstanceData{Status: Status(99)}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, LivenessName(RecordedLiveness(tc.data)))
-			require.NotEmpty(t, LivenessName(RecordedLiveness(tc.data)))
 		})
 	}
+}
+
+// TestUnnamedRecordStillLoadsAsAState is the other half of that refusal, and the
+// reason it is safe: livenessFromData — the LOAD path, which must produce some
+// state for an Instance to be rebuilt in — keeps the historical `ready` default
+// RecordedLiveness declines. Nothing on the load path changes behavior; only
+// naming and filtering gained the ability to say "unknown".
+func TestUnnamedRecordStillLoadsAsAState(t *testing.T) {
+	for _, data := range []InstanceData{
+		{Status: Loading},
+		{Status: Deleting},
+		{Status: Status(99)},
+	} {
+		require.Equal(t, LivenessUnset, RecordedLiveness(data), "nothing recorded")
+		require.Equal(t, LiveReady, livenessFromData(data), "but it still loads as Ready")
+		require.False(t, IsArchivedData(data))
+	}
+
+	// And a record that DOES carry one is unaffected in both.
+	require.Equal(t, LiveArchived, RecordedLiveness(InstanceData{Status: Archived}))
+	require.Equal(t, LiveArchived, livenessFromData(InstanceData{Status: Archived}))
+	// Dead still loads as recovery-eligible Lost while naming itself "dead".
+	require.Equal(t, LiveLost, livenessFromData(InstanceData{Status: Dead}))
 }
 
 // TestInstanceDataJSONAlwaysCarriesItsNames is the payload contract: the twins
@@ -231,6 +259,18 @@ func TestUnknownEnumValueNamesNothing(t *testing.T) {
 	require.Equal(t, "", got["status_name"])
 	require.Equal(t, "", got["liveness_name"])
 	require.Contains(t, got, "status_name", "present even when it cannot be spelled")
+
+	// The legacy shape of the same case: no `liveness` key at all, and a `status`
+	// this binary does not know. The fallback must not launder it into "ready".
+	got = marshalToMap(t, InstanceData{Status: Status(99)})
+	require.Equal(t, "", got["status_name"])
+	require.Equal(t, "", got["liveness_name"], "an unknown legacy status names no liveness")
+
+	// A transient caught by a pre-#1195 daemon names its own axis honestly and
+	// leaves the other blank, which together say exactly what is known.
+	got = marshalToMap(t, InstanceData{Status: Deleting})
+	require.Equal(t, "deleting", got["status_name"])
+	require.Equal(t, "", got["liveness_name"])
 }
 
 // TestStateNamesSurviveADecodeEncodeRoundTrip proves the names cannot go stale:

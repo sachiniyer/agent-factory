@@ -120,10 +120,32 @@ func StatusName(s Status) string {
 		return "loading"
 	case Deleting:
 		return "deleting"
-	case Running, Ready, Dead, Lost, Archived:
-		return LivenessName(LivenessForStatus(s))
+	}
+	if liveness, ok := statusLiveness(s); ok {
+		return LivenessName(liveness)
 	}
 	return ""
+}
+
+// statusLiveness resolves the liveness a legacy Status carries, and reports
+// ok=false for one that carries NONE — the transient overlays (Loading/Deleting,
+// which composeStatus produces from the op axis, not from a state) and any value
+// this binary does not know.
+//
+// LivenessForStatus cannot answer this on its own, and that is the point: its
+// default is LiveReady, so it turns both of those into a confident "ready". For
+// a caller that must produce SOME state to load an instance into, a default is
+// necessary and that one is historical. For a caller NAMING a record, or
+// deciding whether a filter word selects it, it is a fabricated answer — a
+// record caught mid-kill by a pre-#1195 daemon would report itself, and be
+// selected, as `ready`. This is the seam between those two needs; the settled
+// set is listed once, here.
+func statusLiveness(s Status) (Liveness, bool) {
+	switch s {
+	case Running, Ready, Dead, Lost, Archived:
+		return LivenessForStatus(s), true
+	}
+	return LivenessUnset, false
 }
 
 // RecordedLiveness resolves the liveness a serialized record CARRIES: the
@@ -136,17 +158,26 @@ func StatusName(s Status) string {
 // so the two agree by construction: a row the filter selects for a word is a row
 // whose `liveness_name` is that word, legacy records included.
 //
-// Deliberately NOT EffectiveLiveness/livenessFromData, which additionally
-// rewrite a persisted Dead to Lost. That rewrite is a LOAD decision — a dead
-// record is recovery-eligible when an Instance is rebuilt from it (#1108) — and
-// naming through it would print "lost" beside a `liveness` integer that reads 4,
-// contradicting the very field the name exists to explain, and would make
-// `--status dead` select rows this function had already renamed.
+// It returns LivenessUnset — "this record records no liveness" — when the
+// fallback has nothing to work with: a pre-#1195 snapshot caught mid-create or
+// mid-kill, or a `status` integer from a newer af. Both then name themselves ""
+// and are selected by no filter word, matching what an unrecognized `status` or
+// `liveness` integer already does, instead of being labelled `ready` by
+// LivenessForStatus's default and swept into `--status ready`.
+//
+// Deliberately NOT EffectiveLiveness/livenessFromData, which differ twice over.
+// They rewrite a persisted Dead to Lost — a LOAD decision, since a dead record
+// is recovery-eligible when an Instance is rebuilt from it (#1108) — and naming
+// through that would print "lost" beside a `liveness` integer that reads 4 and
+// would make `--status dead` select rows it had already renamed. They also must
+// answer with a real state for every input, because an Instance has to load as
+// something, so they keep the historical `ready` default this one refuses.
 func RecordedLiveness(d InstanceData) Liveness {
 	if d.Liveness != LivenessUnset {
 		return d.Liveness
 	}
-	return LivenessForStatus(d.Status)
+	liveness, _ := statusLiveness(d.Status)
+	return liveness
 }
 
 // MarshalJSON emits the stored record plus its derived state names.

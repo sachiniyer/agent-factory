@@ -228,9 +228,9 @@ var sessionsListCmd = &cobra.Command{
 		"project context and every project's sessions are listed. Lifecycle, age, " +
 		"and limit filters compose and are applied by the daemon before transfer. " +
 		"With no filter flags, the complete list and its existing order are unchanged.\n\n" +
-		"Every row names its own integers, so a listed session can be filtered on " +
-		"without hardcoding enum values: status_name and liveness_name use the " +
-		"--status vocabulary, and tabs[].kind_name uses the tab_kinds[].kind words.",
+		"Every row names its own integers. liveness_name is the one --status matches, " +
+		"and it round-trips exactly; status_name only names the legacy status integer " +
+		"and is not a filter value. tabs[].kind_name uses the tab_kinds[].kind words.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()

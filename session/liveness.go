@@ -642,6 +642,15 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 // snapshot reconcile mirrors liveness identically to a cold-start restore.
 func livenessFromData(data InstanceData) Liveness {
 	lv := RecordedLiveness(data)
+	if lv == LivenessUnset {
+		// A record that records no liveness at all — a pre-#1195 snapshot caught
+		// mid-operation, or a status integer from a newer af — still has to load
+		// as SOME state, so this keeps LivenessForStatus's historical default
+		// rather than leaving an Instance in the zero value. RecordedLiveness
+		// refuses that guess because naming and filtering can say "unknown"; a
+		// loader cannot.
+		lv = LiveReady
+	}
 	if lv == LiveDead {
 		lv = LiveLost
 	}

@@ -124,6 +124,53 @@ func TestSessionsList_EveryRowNamesItsOwnIntegers(t *testing.T) {
 	require.Equal(t, "archived", legacy["liveness_name"])
 }
 
+// TestSessionsList_UnnamedRowIsSelectedByNoStatusWord is the other half of the
+// round-trip claim, and the reason `liveness_name` refuses to guess.
+//
+// A record whose liveness cannot be resolved — a pre-#1195 snapshot caught
+// mid-kill, or a `status` integer from a newer af — used to be labelled `ready`
+// by LivenessForStatus's default, so `--status ready` returned rows that were
+// neither ready nor reporting themselves as such. Now both the name and the
+// filter say the same thing: nothing.
+func TestSessionsList_UnnamedRowIsSelectedByNoStatusWord(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	t.Chdir(mkRepo(t, "unnamed"))
+
+	rows := []session.InstanceData{
+		{Title: "genuinely-ready", Status: session.Ready, Liveness: session.LiveReady},
+		{Title: "mid-kill-legacy", Status: session.Deleting},
+		{Title: "from-a-newer-af", Status: session.Status(99)},
+	}
+
+	for _, word := range session.LivenessNameList() {
+		t.Run(word, func(t *testing.T) {
+			stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+				return rows, nil
+			})
+			setSessionsListFlag(t, "status", word)
+			for _, row := range listSessionsAsMaps(t) {
+				require.NotContains(t, []string{"mid-kill-legacy", "from-a-newer-af"}, row["title"],
+					"--status %s must not select a row that reports no liveness_name", word)
+			}
+		})
+	}
+
+	// Unfiltered they are still listed, and each says exactly what is known: its
+	// own axis named, the one it cannot resolve left blank.
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) { return rows, nil })
+	byTitle := map[string]map[string]any{}
+	for _, row := range listSessionsAsMaps(t) {
+		byTitle[row["title"].(string)] = row
+	}
+	require.Len(t, byTitle, 3, "no row is hidden from an unfiltered list")
+	require.Equal(t, "ready", byTitle["genuinely-ready"]["liveness_name"])
+	require.Equal(t, "deleting", byTitle["mid-kill-legacy"]["status_name"])
+	require.Equal(t, "", byTitle["mid-kill-legacy"]["liveness_name"])
+	require.Equal(t, "", byTitle["from-a-newer-af"]["status_name"])
+	require.Equal(t, "", byTitle["from-a-newer-af"]["liveness_name"])
+}
+
 // TestSessionsList_TabKindNamesMatchTheTabKindsArray closes the in-document
 // inconsistency: `kind` meant an integer in `tabs` and a word in `tab_kinds`,
 // eleven lines apart in one payload.
