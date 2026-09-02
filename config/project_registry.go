@@ -757,6 +757,17 @@ func projectPathExists(path string) bool {
 // time: the first version of this handled only ENOENT and was corrected twice —
 // ENOTDIR, then ELOOP — because each was argued case by case. The rule decides
 // the next one.
+// PathDeterminatelyAbsent reports whether a stat error PROVES nothing is at the
+// path, as opposed to leaving the question open. Exported so callers outside
+// this package classify absence the same way the registry does — the daemon's
+// root-agent delete and heal paths decide a tombstone claimant and a
+// vanished-vs-unreadable remedy on exactly this distinction, and an incomplete
+// copy of the rule silently answers "unknown" for a path that is provably gone
+// (#3299 review id 3910107324).
+func PathDeterminatelyAbsent(err error) bool {
+	return determinatelyAbsent(err)
+}
+
 func determinatelyAbsent(err error) bool {
 	return errors.Is(err, os.ErrNotExist) ||
 		errors.Is(err, syscall.ENOTDIR) ||

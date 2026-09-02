@@ -44,3 +44,26 @@ func TestDeregisterRootAgentsForRepoUnknownIsNoOp(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, cfg.RootAgents, "/repos/keep")
 }
+
+// TestDeregisterRootAgentsForRepoSweepsAllIdentitiesInOneWrite pins the #3299
+// round-7 review: a re-attributed project carries two identities (real and
+// derived recorded-path), and the delete's nothing-was-changed guarantee only
+// holds if both are swept in ONE read-modify-write — two writes could remove
+// one opt-in and then fail.
+func TestDeregisterRootAgentsForRepoSweepsAllIdentitiesInOneWrite(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	seed := DefaultConfig()
+	seed.RootAgents = map[string]RootAgentConfig{"/repos/real": {}, "/repos/derived": {}, "/repos/keep": {}}
+	require.NoError(t, SaveConfig(seed))
+
+	removed, err := DeregisterRootAgentsForRepo(RepoIDFromRoot("/repos/real"), RepoIDFromRoot("/repos/derived"))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"/repos/real", "/repos/derived"}, removed)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.NotContains(t, cfg.RootAgents, "/repos/real")
+	assert.NotContains(t, cfg.RootAgents, "/repos/derived")
+	assert.Contains(t, cfg.RootAgents, "/repos/keep")
+}
