@@ -102,13 +102,46 @@ func TestDeferredPromotionKeepsItsProbe(t *testing.T) {
 // real one — so the delete archives nothing under the identity this project's
 // sessions are keyed by, deregisters the project, and reports success.
 func TestProvisionalDeleteFollowsPendingAttribution(t *testing.T) {
+	manager, repoPath, _, realID := pendingAttributionFixture(t)
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	if err != nil {
+		t.Fatalf("DeleteProject by the recorded path: %v", err)
+	}
+	assertDeletedUnderRealIdentity(t, manager, result, realID)
+}
+
+// TestProvisionalDeleteWithBothSelectorsFollowsPendingAttribution is the same
+// finding through the shape the TUI actually sends: RepoPath plus the RepoID it
+// is displaying, which for an unresolved legacy project IS the provisional one.
+//
+// It also pins where the redirect may happen. Applied to either selector before
+// they are checked against each other, this delete becomes a mismatch refusal —
+// the caller's provisional id against a path redirected to the real one —
+// which would turn a working delete into an error for the whole pending window.
+func TestProvisionalDeleteWithBothSelectorsFollowsPendingAttribution(t *testing.T) {
+	manager, repoPath, derivedID, realID := pendingAttributionFixture(t)
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath, RepoID: derivedID})
+	if err != nil {
+		t.Fatalf("DeleteProject by the recorded path and the identity the TUI is displaying: %v", err)
+	}
+	assertDeletedUnderRealIdentity(t, manager, result, realID)
+}
+
+// pendingAttributionFixture builds the state finding 3915722493 describes: a
+// legacy record with no identity, a probe that has already resolved the real
+// one but not yet delivered its marker verdict, and a recorded path that is
+// unresolvable again by the time the delete arrives.
+func pendingAttributionFixture(t *testing.T) (manager *Manager, repoPath, derivedID, realID string) {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
-	repoPath := setupControlRepo(t)
+	repoPath = setupControlRepo(t)
 	project := registerTestProject(t, repoPath)
 	clearRecordedRepoID(t, project.ID)
-	realID := repoID(t, repoPath)
-	derivedID := config.DerivedRepoIDForUnresolvedRoot(repoPath)
+	realID = repoID(t, repoPath)
+	derivedID = config.DerivedRepoIDForUnresolvedRoot(repoPath)
 	if derivedID == realID {
 		t.Fatalf("fixture must produce disjoint identities, both %s", realID)
 	}
@@ -145,11 +178,11 @@ func TestProvisionalDeleteFollowsPendingAttribution(t *testing.T) {
 	if err := os.Rename(repoPath, hidden); err != nil {
 		t.Fatalf("hide repo dir again: %v", err)
 	}
+	return manager, repoPath, derivedID, realID
+}
 
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
-	if err != nil {
-		t.Fatalf("DeleteProject by the recorded path: %v", err)
-	}
+func assertDeletedUnderRealIdentity(t *testing.T, manager *Manager, result DeleteProjectResult, realID string) {
+	t.Helper()
 	if result.RepoID != realID {
 		t.Fatalf("the delete stayed on the provisional identity %s while the daemon had already resolved %s for this record — it archives nothing under the identity the project's sessions are keyed by and still deregisters the project", result.RepoID, realID)
 	}

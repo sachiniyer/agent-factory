@@ -345,7 +345,6 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if normErr != nil {
 			return deleteProjectTarget{}, normErr
 		}
-		repoID = m.attributedDeleteRepoID(repoID)
 	} else if repoPath == "" {
 		var err error
 		repoPath, err = registeredProjectRootForRepoID(repoID)
@@ -362,7 +361,6 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if normErr != nil {
 			return deleteProjectTarget{repoID: repoID}, normErr
 		}
-		pathRepoID = m.attributedDeleteRepoID(pathRepoID)
 		if pathRepoID != repoID {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
@@ -378,6 +376,15 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			repoPath = registeredRoot
 		}
 	}
+	// LAST, after every registry lookup above and after the two selectors have
+	// been checked against each other, because those all key on the identity
+	// the RECORD carries while this names the identity the delete must act
+	// under (#3530 review id 3915722493). Redirecting earlier would make a
+	// repo-ID-only delete look up its registered root under an id no record
+	// holds yet, and would turn a TUI delete that supplies both selectors —
+	// the provisional id it is displaying, plus the recorded path — into a
+	// mismatch refusal.
+	repoID = m.attributedDeleteRepoID(repoID)
 	claimantProjectID := ""
 	if repoPath != "" {
 		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
