@@ -8412,6 +8412,267 @@ test("#2224/#2354: desktop keeps title + tabs; mobile keeps only hamburger + tab
   }
 });
 
+// --- the icon audit's measurement (#3681) -----------------------------------
+//
+// The audit reads geometry off a LIVE shell. On the master re-run at 11f91a24 it
+// measured 4 of 40 icons as having a box, 28 ms after a screencast frame in which
+// every one of them is painted, with the rail's 8 rows reporting innerText
+// byte-identical to the passing run one step earlier.
+//
+// The four survivors are exactly the icons built once at shell construction (the
+// appbar project glyph and caret, the rail head funnel and New plus, ui.ts:1040-1076).
+// The 36 that measured zero are exactly the ones inside the two containers the shell
+// replaces wholesale on every render — the filter menu items (ui.ts:1600) and the rail
+// rows (ui.ts:1444).
+//
+// The trace cannot say which of those two readings is right, and that is the defect
+// fixed here. It holds no record of whether a render happened: the DOM snapshots
+// around the audit are back-references, but a replaceChildren rebuild that produces
+// identical markup is invisible to a snapshot differ, and snapshot SIZE carries no
+// signal either — the passing run's own screenshot snapshot is 29081 bytes against the
+// failing audit's 29084. What the trace does show is a busier main thread in exactly
+// that window: the identical in-page callback took 11.65 ms against 5.71 ms in the
+// passing run, and the click before it 48.7 ms against 27.7 ms.
+//
+// So the measurement records the answer instead of leaving it to be excavated. This
+// file already states the rule, three thousand lines down in
+// settledMobileDrawerGeometry: "Live session events rebuild the rail with
+// replaceChildren(); resolving action locators and later measuring a row in separate
+// browser calls can otherwise inspect different row generations." The icon audit is
+// the one measurement that never applied it.
+
+/** One `.af-icon` as the audit measured it, with everything needed to say WHY it was
+ *  rejected. The old audit collapsed display, visibility and the box into a single
+ *  boolean, so a zero count cost a trace excavation and still could not name the
+ *  clause that dropped it (#3681). */
+interface MeasuredIcon {
+  icon: string;
+  className: string;
+  display: string;
+  visibility: string;
+  fontSize: string;
+  width: number;
+  height: number;
+  ariaHidden: string | null;
+  focusable: string | null;
+  stroke: string;
+  color: string;
+}
+
+/** One reading of every icon, taken inside a single animation frame, plus how many
+ *  times the shell rebuilt itself between arming the watch and that frame. */
+interface IconReading {
+  icons: MeasuredIcon[];
+  rebuilds: number;
+  quiesced: boolean;
+  rows: { className: string; text: string }[];
+  unnamedIconControls: string[];
+  fontFaces: number;
+  fontRequests: string[];
+}
+
+/** The containers the shell replaces wholesale on every render — the two the #3681
+ *  survivor pattern implicates, and the only ones whose rebuild can swap the nodes a
+ *  reading is about. */
+const REBUILT_ICON_CONTAINERS = [".af-rail-list", ".af-filter-menu"];
+
+/** Starts counting rebuilds of those containers, so a later reading can say whether
+ *  one moved underneath it.
+ *
+ *  Armed before the audit's PRECONDITIONS, not merely before the measurement. The
+ *  reading itself is one page task and nothing can interleave inside it; the window
+ *  that needs watching is the one made of several round trips — in the failing trace,
+ *  43 ms between the `toHaveCount(4)` gate and the geometry, which is ample for a
+ *  session.updated to rebuild both containers. */
+async function armIconRebuildWatch(p: Page): Promise<void> {
+  await p.evaluate((selectors) => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    w.__afIconWatch?.observer.disconnect();
+    const state: { observer: MutationObserver; rebuilds: number } = {
+      observer: null as unknown as MutationObserver,
+      rebuilds: 0,
+    };
+    state.observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          state.rebuilds += 1;
+        }
+      }
+    });
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el) {
+        state.observer.observe(el, { childList: true, subtree: true });
+      }
+    }
+    w.__afIconWatch = state;
+  }, REBUILT_ICON_CONTAINERS);
+}
+
+/** Reads every icon's geometry in ONE animation frame, after that frame's layout.
+ *
+ *  Three properties the old audit lacked:
+ *
+ *   - it waits for the watched containers to go quiet for two consecutive frames, so
+ *     the reading is not taken mid-rebuild;
+ *   - every icon is measured inside a single page task, so the first and the last
+ *     describe the same DOM generation;
+ *   - it returns the rebuild count and each rejected icon's display, visibility,
+ *     font-size and rect, so a zero box can be attributed rather than guessed at.
+ *
+ *  A rail that never goes quiet is reported through `quiesced` rather than waited on
+ *  forever: silence about it would be the same unfalsifiable reading again. */
+async function readIconGeometry(p: Page): Promise<IconReading> {
+  return p.evaluate(async () => {
+    const w = window as unknown as { __afIconWatch?: { observer: MutationObserver; rebuilds: number } };
+    const watch = w.__afIconWatch;
+    const drain = (): void => {
+      if (!watch) return;
+      for (const record of watch.observer.takeRecords()) {
+        if (record.addedNodes.length > 0 || record.removedNodes.length > 0) {
+          watch.rebuilds += 1;
+        }
+      }
+    };
+    const frame = (): Promise<void> => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+    let quiesced = false;
+    let quiet = 0;
+    for (let i = 0; i < 60 && !quiesced; i += 1) {
+      const before = watch?.rebuilds ?? 0;
+      await frame();
+      drain();
+      quiet = (watch?.rebuilds ?? 0) === before ? quiet + 1 : 0;
+      quiesced = quiet >= 2;
+    }
+
+    // Everything below is one task. No render can interleave between the first icon
+    // measured and the last, so the reading describes a single DOM generation.
+    drain();
+    const measure = (node: Element): MeasuredIcon => {
+      const style = getComputedStyle(node);
+      const box = node.getBoundingClientRect();
+      return {
+        icon: node.getAttribute("data-icon") ?? "?",
+        className: node.getAttribute("class") ?? "",
+        display: style.display,
+        visibility: style.visibility,
+        fontSize: style.fontSize,
+        width: box.width,
+        height: box.height,
+        ariaHidden: node.getAttribute("aria-hidden"),
+        focusable: node.getAttribute("focusable"),
+        stroke: style.stroke,
+        color: style.color,
+      };
+    };
+    const icons = Array.from(document.querySelectorAll(".af-icon")).map(measure);
+    const unnamedIconControls = Array.from(
+      document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"),
+    )
+      .filter((control) => {
+        const style = getComputedStyle(control);
+        const box = control.getBoundingClientRect();
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0 &&
+          (control.innerText ?? "").trim() === ""
+        );
+      })
+      .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
+      .map((control) => control.className);
+    const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
+      try {
+        return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
+      } catch {
+        return [];
+      }
+    }).length;
+    return {
+      icons,
+      rebuilds: watch?.rebuilds ?? -1,
+      quiesced,
+      rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
+        className: row.className,
+        text: (row.innerText ?? "").trim(),
+      })),
+      unnamedIconControls,
+      fontFaces,
+      fontRequests: performance
+        .getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
+    };
+  });
+}
+
+/** The reading the assertions consume: the one taken since the watch was armed, and —
+ *  if the shell rebuilt itself anywhere inside that window — one fresh reading in its
+ *  place. Exactly one retry: a second dirty window is itself worth reporting, and a
+ *  retry loop would only bury it.
+ *
+ *  Reporting it is the CALLER's job, and not optional. The returned reading can still
+ *  be dirty (both attempts straddled a rebuild) or unquiesced, and its geometry is
+ *  then void — so a caller that consumes it without checking `rebuilds` and
+ *  `quiesced` silently accepts exactly the sustained race this exists to surface
+ *  (#3683 Codex). */
+async function settledIconAudit(p: Page): Promise<{ reading: IconReading; attempts: IconReading[] }> {
+  const first = await readIconGeometry(p);
+  if (first.rebuilds === 0) {
+    return { reading: first, attempts: [first] };
+  }
+  await armIconRebuildWatch(p);
+  const second = await readIconGeometry(p);
+  return { reading: second, attempts: [first, second] };
+}
+
+/** Whether an icon presented a real box to the user. */
+function iconIsVisible(icon: MeasuredIcon): boolean {
+  return icon.display !== "none" && icon.visibility !== "hidden" && icon.width > 0 && icon.height > 0;
+}
+
+/** Why one icon was rejected, in the terms the audit filters on — the three clauses the
+ *  old boolean collapsed into one. */
+function iconRejection(icon: MeasuredIcon): string {
+  if (icon.display === "none") return "display:none";
+  if (icon.visibility === "hidden") return "visibility:hidden";
+  return `zero box ${icon.width}x${icon.height} (font-size ${icon.fontSize}, display ${icon.display})`;
+}
+
+/** The rejected icons, named and grouped, so 36 identical rejections read as four
+ *  lines rather than a wall. */
+function describeRejectedIcons(icons: MeasuredIcon[]): string {
+  const groups = new Map<string, number>();
+  for (const icon of icons.filter((candidate) => !iconIsVisible(candidate))) {
+    const key = `${icon.icon}:${icon.className} — ${iconRejection(icon)}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return groups.size === 0 ? "none" : Array.from(groups, ([key, n]) => `${key} x${n}`).join("; ");
+}
+
+/** The one-line diagnosis a failing audit leaves behind: whether the shell moved under
+ *  the reading, what each attempt saw, and — named — the icons that had no box. */
+function iconAuditMessage(reading: IconReading, attempts: IconReading[]): string {
+  const verdict =
+    reading.rebuilds === 0
+      ? "no rebuild in the window, so a zero box is a real collapse and these icons are the defect"
+      : `the shell rebuilt ${reading.rebuilds}x inside the window, so this reading is void, not evidence`;
+  const seen = attempts
+    .map(
+      (attempt) =>
+        `${attempt.icons.filter(iconIsVisible).length}/${attempt.icons.length}@${attempt.rebuilds}rebuilds` +
+        `${attempt.quiesced ? "" : ",never quiesced"}`,
+    )
+    .join(" then ");
+  return (
+    `the live shell must exercise several real icon placements — ${verdict}` +
+    `; attempts=${seen}; zero-box=${describeRejectedIcons(reading.icons)}` +
+    `; rows=${JSON.stringify(reading.rows)}`
+  );
+}
+
 test("icons: the Lucide subset is inline, accessible, and currentColor-themed at desktop and 375px", REAL_FIXTURE, async ({
   browser,
 }, testInfo) => {
@@ -8435,6 +8696,10 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           // floor. The default filter always exposes four checked semantic groups.
           await p.getByRole("button", { name: "Filter sessions" }).click();
           await expect(p.locator(".af-filter-menu")).toBeVisible();
+          // Armed here, before the gate below rather than just before the geometry: the
+          // window that went wrong in the #3681 trace is the 43 ms of round trips
+          // BETWEEN this gate and the measurement, not the measurement itself.
+          await armIconRebuildWatch(p);
           await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
 
           const projectIcon = p.locator(".af-project-glyph");
@@ -8454,64 +8719,33 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
           expect(projectPaint.height).toBe(projectPaint.width);
           accentByTheme.set(theme, projectPaint.color);
 
-          const audit = await p.locator(".af-icon").evaluateAll((nodes) => {
-            const visible = nodes.filter((node) => {
-              const style = getComputedStyle(node);
-              const box = node.getBoundingClientRect();
-              return style.display !== "none" && style.visibility !== "hidden" && box.width > 0 && box.height > 0;
-            });
-            const unnamedIconControls = Array.from(document.querySelectorAll<HTMLElement>("button:has(.af-icon), a:has(.af-icon)"))
-              .filter((control) => {
-                const style = getComputedStyle(control);
-                const box = control.getBoundingClientRect();
-                return (
-                  style.display !== "none" &&
-                  style.visibility !== "hidden" &&
-                  box.width > 0 &&
-                  box.height > 0 &&
-                  (control.innerText ?? "").trim() === ""
-                );
-              })
-              .filter((control) => (control.getAttribute("aria-label") ?? "").trim() === "")
-              .map((control) => control.className);
-            const fontFaces = Array.from(document.styleSheets).flatMap((sheet) => {
-              try {
-                return Array.from(sheet.cssRules).filter((rule) => rule instanceof CSSFontFaceRule);
-              } catch {
-                return [];
-              }
-            }).length;
-            return {
-              count: visible.length,
-              placements: visible.map(
-                (node) => `${node.getAttribute("data-icon") ?? "?"}:${node.getAttribute("class") ?? ""}`,
-              ),
-              rows: Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row")).map((row) => ({
-                className: row.className,
-                text: (row.innerText ?? "").trim(),
-              })),
-              allHiddenFromAT: visible.every(
-                (node) => node.getAttribute("aria-hidden") === "true" && node.getAttribute("focusable") === "false",
-              ),
-              allCurrentColor: visible.every((node) => getComputedStyle(node).stroke === getComputedStyle(node).color),
-              unnamedIconControls,
-              fontFaces,
-              fontRequests: performance
-                .getEntriesByType("resource")
-                .map((entry) => entry.name)
-                .filter((name) => /\.(?:woff2?|ttf|otf)(?:[?#]|$)/i.test(name)),
-            };
-          });
+          const { reading, attempts } = await settledIconAudit(p);
+          // A SUSTAINED race is the one condition this instrumentation exists to name,
+          // and it has to be asserted rather than merely described: a second dirty
+          // reading that happens to look healthy would otherwise pass silently, and the
+          // "void, not evidence" verdict in the message would never be read by anyone
+          // (#3683 Codex). Checked before the geometry so a void reading fails as a
+          // void reading, never as an icon defect.
+          expect(reading.rebuilds, iconAuditMessage(reading, attempts)).toBe(0);
+          expect(reading.quiesced, iconAuditMessage(reading, attempts)).toBe(true);
+          const visible = reading.icons.filter(iconIsVisible);
+          // The assertion stays. With the rebuild count beside it, a zero box over a
+          // quiet window is a product defect — the shell would be painting icons the
+          // user cannot see, and this audit is the only thing in the suite that would
+          // ever notice — while a reading straddling a rebuild says so in its own
+          // message instead of being read as one.
+          expect(visible.length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
           expect(
-            audit.count,
-            `the live shell must exercise several real icon placements; ` +
-              `placements=${JSON.stringify(audit.placements)} rows=${JSON.stringify(audit.rows)}`,
-          ).toBeGreaterThan(5);
-          expect(audit.allHiddenFromAT, "decorative SVGs stay out of the accessibility tree").toBe(true);
-          expect(audit.allCurrentColor, "every visible icon inherits the active theme color").toBe(true);
-          expect(audit.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
-          expect(audit.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
-          expect(audit.fontRequests, "the icon surface must make no font/network request").toEqual([]);
+            visible.every((icon) => icon.ariaHidden === "true" && icon.focusable === "false"),
+            "decorative SVGs stay out of the accessibility tree",
+          ).toBe(true);
+          expect(
+            visible.every((icon) => icon.stroke === icon.color),
+            "every visible icon inherits the active theme color",
+          ).toBe(true);
+          expect(reading.unnamedIconControls, "icon-only controls need an explicit accessible name").toEqual([]);
+          expect(reading.fontFaces, "the SVG subset must not smuggle in an icon font").toBe(0);
+          expect(reading.fontRequests, "the icon surface must make no font/network request").toEqual([]);
           expect(await horizontalOverflow(p), "icons must not widen the desktop or phone layout").toBeLessThanOrEqual(1);
 
           await testInfo.attach(`icons-${width}-${theme}`, {
@@ -8527,6 +8761,124 @@ test("icons: the Lucide subset is inline, accessible, and currentColor-themed at
   expect(accentByTheme.get("light"), "light and dark tokens must paint distinct icon colors").not.toBe(
     accentByTheme.get("dark"),
   );
+});
+
+// Both of these FORCE the condition rather than wait for it. The reading that took
+// master red is 1 in 100+ runs, and `retries: 0` means waiting for it is not a test —
+// it is a lottery whose losing ticket is a red nobody can diagnose (#3681).
+
+test("#3681 a rebuild scheduled mid-audit voids the reading and buys another, rather than reading as collapsed icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The rebuild the survivor pattern implicates, scheduled inside the audit's own
+  // window. It replaces the rail's children with the SAME nodes, so the markup is
+  // byte-identical afterwards — which is exactly why the trace could not settle the
+  // question from its DOM snapshots, and why the watch has to live in the page.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+
+    await armIconRebuildWatch(p);
+    await p.evaluate(() => {
+      const list = document.querySelector(".af-rail-list");
+      if (list) {
+        setTimeout(() => list.replaceChildren(...Array.from(list.childNodes)), 0);
+      }
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(attempts.length, "a rebuild inside the window must void the reading and buy exactly one more").toBe(2);
+    expect(attempts[0]?.rebuilds ?? 0, "the watch must see the rebuild the DOM snapshots cannot").toBeGreaterThan(0);
+    expect(reading, "the replacement reading is the one the assertions consume").toBe(attempts[1]);
+    expect(reading.rebuilds, "and it is taken over a window of its own, which must be clean").toBe(0);
+    expect(reading.quiesced, "the shell must go quiet for two consecutive frames before it is measured").toBe(true);
+    // And the recovered reading is a real one: the icons were never the problem here,
+    // so the audit must not report them as collapsed.
+    expect(reading.icons.filter(iconIsVisible).length, iconAuditMessage(reading, attempts)).toBeGreaterThan(5);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("#3681 a zero box over a QUIET window is reported as a product defect, naming the icons", REAL_FIXTURE, async ({
+  browser,
+}) => {
+  // The other half: with the measurement sound, a real collapse must still be caught
+  // and must say WHICH icons and WHY. The box is zeroed directly, and the two routes
+  // that did NOT work are worth recording, because both narrow #3681's product
+  // reading — the one the issue framed as "every .af-icon is width: 1em, so the box is
+  // font-relative and inherited, and if that resolves to zero the user sees the rail
+  // flicker its icons out":
+  //
+  //   - `font-size: 0` on `.af-rail-list` / `.af-filter-menu` leaves all 40 icons
+  //     measuring a full box. Intermediate elements re-declare their own size
+  //     (`.af-row-title` in rem; the action `<button>`s take the UA default rather
+  //     than inheriting), so an inherited zero never reaches the icons.
+  //   - `font-size: 0` on the icons themselves collapses 32 of the 36 — but not the 8
+  //     `git-branch` glyphs, because `.af-branch-icon` is sized in REM
+  //     (styles.css:1271-1274) and no font-size anywhere can touch it.
+  //
+  // In the failing master reading those 8 measured zero along with the rest. So the
+  // observed collapse cannot have been a font-size collapse at all: it would have had
+  // to leave the rem-sized glyphs standing, and it did not. Measured here rather than
+  // reasoned about, which is the whole point of the exercise.
+  //
+  // No rebuild is involved: a stylesheet mutates no childList, so the window stays
+  // quiet and the reading is evidence rather than void.
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  try {
+    const p = await ctx.newPage();
+    await openTokenless(p);
+    await p.getByRole("button", { name: "Filter sessions" }).click();
+    await expect(p.locator(".af-filter-menu")).toBeVisible();
+    await expect(p.locator(".af-filter-check .af-icon")).toHaveCount(4);
+
+    await armIconRebuildWatch(p);
+    await p.addStyleTag({
+      content: ".af-rail-list .af-icon, .af-filter-menu .af-icon { width: 0; height: 0 }",
+    });
+
+    const { reading, attempts } = await settledIconAudit(p);
+    expect(reading.rebuilds, "a stylesheet mutates no childList, so the window stays quiet").toBe(0);
+    const survivors = reading.icons.filter(iconIsVisible).map((icon) => icon.icon);
+    expect(survivors, "only the icons built outside the replaced containers keep a box").toEqual([
+      "folder-git",
+      "chevron-down",
+      "funnel",
+      "plus",
+    ]);
+    // 4 is the count master reported. The audit must still refuse it…
+    expect(survivors.length).toBeLessThanOrEqual(5);
+    // …and the message must name the icons and the clause, so the next occurrence
+    // costs a glance rather than a trace excavation.
+    const message = iconAuditMessage(reading, attempts);
+    expect(message, "a quiet window makes a zero box the product's defect, not the reading's").toContain(
+      "no rebuild in the window",
+    );
+    for (const named of ["check:af-icon", "circle:af-icon", "git-branch:af-icon", "archive:af-icon", "octagon-x:af-icon"]) {
+      expect(message, `the failure must name ${named}`).toContain(named);
+    }
+    expect(message, "and say which of the three clauses rejected it").toContain("zero box 0x0");
+    // Not merely "no box": every rejected icon carries the resolved font-size and
+    // display behind it, which is the reading the old single boolean threw away and
+    // the trace therefore could not reconstruct.
+    const collapsed = reading.icons.filter((icon) => !iconIsVisible(icon));
+    // Not a fixed count: this file is serial, and by here earlier flows have added
+    // tabs and rows, so the rail carries more icons than the 40 the master reading
+    // saw. What must hold is that the injection emptied enough of the replaced
+    // containers to take the audit below its own floor, which the survivors assertion
+    // above already pins from the other side.
+    expect(collapsed.length, "the injection must actually empty the replaced containers").toBeGreaterThan(5);
+    expect(
+      collapsed.every((icon) => icon.fontSize !== "" && icon.display !== ""),
+      "each rejected icon carries the computed values that name its cause",
+    ).toBe(true);
+  } finally {
+    await ctx.close();
+  }
 });
 
 test("vscode tab (#2743): one session's editor state is readable in another's on the shared origin, and is NOT once each session has its own", REAL_FIXTURE, async () => {
