@@ -72,10 +72,19 @@ describe an instrumented build, not a release daemon; what survives that is the
 Lean on the delta, not on either absolute value. The `/proc` rows are the live,
 uninstrumented daemon. Keep the two apart when quoting them.
 
-The marginal cost of one live session to the daemon is therefore about **0.1 MB
-of heap and 0.3 of a goroutine**. That is a slope between the sandbox daemon's
-two measured endpoints (0 and 20 sessions), not a fitted curve — the shape
-between them was not sampled, and past 20 live sessions is untested.
+The marginal cost of one **local, tmux-backed** session to the daemon is
+therefore about **0.1 MB of heap and 0.3 of a goroutine**. That is a slope
+between the sandbox daemon's two measured endpoints (0 and 20 sessions), not a
+fitted curve — the shape between them was not sampled, and past 20 live sessions
+is untested.
+
+The backend matters, and only one was measured. Every session in both
+measurements ran locally under tmux. A session on a remote-agent backend
+(docker, ssh, sandbox) is polled through a different path and keeps a
+daemon-side `remoteAgentClient` of its own — an HTTP transport, plus a
+WebSocket when its stream is open (`session/agentserver_remote.go`) — which a
+local session does not have. None were in the fleet measured, so **do not carry
+this slope onto a remote fleet**; re-measure with the commands below instead.
 
 The footprint above was observed while the daemon held **720 session records and
 20 tasks**. Both counts were constant for the whole window, so that is the
@@ -171,8 +180,8 @@ ten have no daemon-level measurement at all — which is the reason to run the
 commands below on your own box rather than reason backwards from a peak.
 
 The clearest demonstration is that the cgroup number moves on its own. Over one
-20-minute window — no restart, no config change, and no change at all in the
-daemon's own memory:
+20-minute window — no restart, no config change, and no trend in the daemon's
+own memory (`VmHWM` flat, `VmRSS` oscillating inside its usual band):
 
 | cgroup measure | start | after 20 min |
 |---|---|---|
@@ -186,8 +195,10 @@ that fell: `file` by 890 MB and `slab` by 64 MB. That is the kernel reclaiming,
 not the daemon shrinking — and the page makes no claim that process memory held
 still, because it did not: `VmRSS` oscillated 45–60 MB across the same window as
 the GC returned and re-took pages. `VmHWM` not moving says only that the
-process's historical maximum was never exceeded. An oscillation of that size
-cannot account for a fall three orders of magnitude larger.
+process's historical maximum was never exceeded. What the oscillation cannot do
+is explain the cgroup drop: a ~15 MB swing is about 60 times too small for a
+~960 MB fall, and even the daemon's *entire* resident set of 45–60 MB is 16–21
+times smaller than it.
 
 That makes a mostly-`file` peak **weak evidence of a leak**. It does not, on its
 own, establish that there was no memory pressure. `file` also counts tmpfs and
@@ -209,7 +220,7 @@ grep -E 'VmRSS|VmHWM' \
 # actually holds, file is file-backed memory — page cache, but also tmpfs/shmem
 # and dirty or writeback pages — and slab is kernel structures. Read shmem,
 # file_dirty and file_writeback too before calling any of file reclaimable.
-grep -E '^(anon|file|slab) ' \
+grep -E '^(anon|file|shmem|file_dirty|file_writeback|slab) ' \
   "/sys/fs/cgroup$(systemctl --user show agent-factory-daemon.service -p ControlGroup --value)/memory.stat"
 
 # For contrast — the high-water of all of the above, over every process that has
@@ -307,6 +318,13 @@ only the hook correlation above connects anything to the peak.
   replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
 - **Plus whatever `post_worktree_commands` builds**, per worktree — charged to
   the daemon's cgroup until #3650 moves it out.
+- **Plus everything else a session can start.** A session may hold any number of
+  extra process-bearing tabs — shell, process, editor — and there is no cap on
+  how many (#3021). Watch tasks run their command, editors and watchers run
+  theirs in sibling scopes, and a remote-agent backend adds its transport at
+  both ends. None of that was measured here, and the scoped trees are outside
+  the daemon unit's figure as well, so a busy host is under-sized if you count
+  only the daemon, the agents and the hooks.
 
 If a box is under memory pressure, do not start from the unit's `MemoryPeak`.
 Read `VmHWM` for the daemon process, read `memory.stat` to see how much of the
