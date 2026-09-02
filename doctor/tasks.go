@@ -175,9 +175,16 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		// rather than folding into overdue. It is derived from the record, so a box
 		// whose daemon is down or still warming up gets it too; leaning on a live
 		// not-armed observation instead is what let doctor call such a task healthy.
-		details = append(details, fmt.Sprintf("%s a cron expression the scheduler cannot fire — %s",
-			countTasksHave(len(unschedulable)), describeTaskNames(unschedulable)))
-		fixes = append(fixes, "correct the expression with `af tasks update <id> --cron <expr>`")
+		// Worded for every shape the classifier reports, not just the one this
+		// clause was written for: a record with NO trigger reaches it too, and
+		// "a cron expression the scheduler cannot fire" describes an expression it
+		// does not have — as did the fix telling the operator to correct one
+		// (#3623 review). `af tasks show <id>`, which the overdue remediation
+		// already names, gives the specific reason.
+		details = append(details, fmt.Sprintf("%s cannot be scheduled — %s",
+			countEnabledTasks(len(unschedulable)), describeTaskNames(unschedulable)))
+		fixes = append(fixes, "give each a valid trigger with `af tasks update <id> --cron <expr>` "+
+			"(`af tasks show <id>` says which of them is wrong)")
 	}
 	report.Warn(sectionAutomations, "task schedules",
 		withQualifiers(strings.Join(details, " · ")), strings.Join(fixes, "; "), true)
@@ -199,6 +206,14 @@ func countTasksAre(n int) string {
 		return "1 enabled task is"
 	}
 	return fmt.Sprintf("%d enabled tasks are", n)
+}
+
+// countEnabledTasks carries no verb, for a clause that supplies its own.
+func countEnabledTasks(n int) string {
+	if n == 1 {
+		return "1 enabled task"
+	}
+	return fmt.Sprintf("%d enabled tasks", n)
 }
 
 // countCronTasksAre names the kind, because the sentence it builds is about a

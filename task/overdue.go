@@ -2,6 +2,7 @@ package task
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	cron "github.com/robfig/cron/v3"
@@ -75,6 +76,53 @@ const (
 	ArmingArmed    = "armed"
 	ArmingNotArmed = "not-armed"
 )
+
+// Why the scheduler cannot fire a task. One classification, named here, because
+// three surfaces render it and each of them was re-deriving it from ParseCron —
+// and each got a different subset wrong: `af tasks show` reported "cron
+// expression is invalid" for a record with no expression at all, the rail said
+// the same, and the doctor row told the operator to correct an expression that
+// did not exist. Renderers differ; the classification must not (#3623 review).
+const (
+	// ReasonNoTrigger: enabled with neither a cron expression nor a watch
+	// command. ValidateTrigger refuses to write one, so it is a hand edit or a
+	// legacy row — and it is the emptiest kind of broken, since nothing schedules
+	// it and nothing watches it.
+	ReasonNoTrigger = "no-trigger"
+	// ReasonInvalidExpression: the expression does not parse, so the scheduler
+	// skips it with a warning and it is armed by nothing.
+	ReasonInvalidExpression = "invalid-expression"
+	// ReasonNoOccurrence: it parses and matches no date inside robfig's five-year
+	// search horizon — February 31st, or a long-gap expression in the run-up to a
+	// skipped leap year. The scheduler consults the same horizon, so it will not
+	// fire it either.
+	ReasonNoOccurrence = "no-occurrence"
+)
+
+// UnschedulableReason names why the scheduler cannot fire this cron task, or ""
+// when it can. It is THE classifier: DeriveScheduleHealth sets Unschedulable
+// from it, and every surface that words the condition switches on it rather than
+// re-deriving, so a renderer cannot disagree with the verdict it is rendering.
+//
+// Only meaningful for an enabled cron task — a watch task has no schedule and a
+// disabled one is not expected to fire — and it answers "" for both, matching
+// the derivation's own exclusions.
+func UnschedulableReason(t Task, now time.Time) string {
+	if !t.Enabled || t.IsWatch() {
+		return ""
+	}
+	if strings.TrimSpace(t.CronExpr) == "" {
+		return ReasonNoTrigger
+	}
+	sched, err := ParseCron(t.CronExpr)
+	if err != nil {
+		return ReasonInvalidExpression
+	}
+	if sched.Next(now).IsZero() {
+		return ReasonNoOccurrence
+	}
+	return ""
+}
 
 // ScheduleHealth is the derived answer for one task at one instant. It is
 // computed at read time and never stored; Task carries the two fields every
@@ -177,10 +225,6 @@ func deriveScheduleHealth(t Task, now time.Time, budget *int) ScheduleHealth {
 	if !t.Enabled || t.IsWatch() {
 		return ScheduleHealth{}
 	}
-	sched, err := ParseCron(t.CronExpr)
-	if err != nil {
-		return ScheduleHealth{Unschedulable: true}
-	}
 	// "Can the scheduler fire this?" is answered BEFORE "how late is it?", because
 	// the two need different things and only the second needs a reference point.
 	// Asking them the other way round meant a record with no timestamps at all — a
@@ -188,9 +232,14 @@ func deriveScheduleHealth(t Task, now time.Time, budget *int) ScheduleHealth {
 	// unschedulable expression as healthy, which is the one case where every input
 	// needed for the verdict was in hand (#3623 review).
 	//
-	// Probed from NOW rather than from the reference point, deliberately: the
-	// question is what the scheduler will do next, and that is what it asks too.
-	if sched.Next(now).IsZero() {
+	// Through the shared classifier, which probes from NOW rather than from the
+	// reference point: the question is what the scheduler will do next, and that
+	// is what it asks too.
+	if UnschedulableReason(t, now) != "" {
+		return ScheduleHealth{Unschedulable: true}
+	}
+	sched, err := ParseCron(t.CronExpr)
+	if err != nil {
 		return ScheduleHealth{Unschedulable: true}
 	}
 	ref, ok := scheduleReference(t)

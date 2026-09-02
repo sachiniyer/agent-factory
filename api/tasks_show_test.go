@@ -285,3 +285,23 @@ func TestTasksShow_DisabledWithNoTriggerIsSilent(t *testing.T) {
 	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
 	assert.NotContains(t, out.String(), "Schedule")
 }
+
+// TestTasksShow_WordsEveryUnschedulableShape is show's half of the
+// consolidation: one classification, three renderings, no local re-derivation.
+func TestTasksShow_WordsEveryUnschedulableShape(t *testing.T) {
+	for _, tc := range []struct{ expr, want string }{
+		{"", "no trigger, so nothing will ever run it"},
+		{"99 * * * *", "cron expression is invalid"},
+		{"0 0 31 2 *", "the scheduler cannot derive a next run"},
+	} {
+		tsk := showFixture()
+		tsk.CronExpr, tsk.WatchCmd = tc.expr, ""
+		tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+		var out bytes.Buffer
+		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+		got := out.String()
+		assert.Contains(t, got, tc.want, "%q:\n%s", tc.expr, got)
+		assert.NotContains(t, got, "on schedule", "%q is not healthy", tc.expr)
+	}
+}

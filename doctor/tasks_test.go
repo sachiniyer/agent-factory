@@ -277,7 +277,7 @@ func TestDoctor_ReportsATaskThatCanNeverFire(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusWarn, row.Status)
-	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
+	assert.Contains(t, row.Detail, "cannot be scheduled")
 	assert.Contains(t, row.Detail, `feb31111 "February 31st"`)
 	assert.Positive(t, report.UnresolvedCount())
 }
@@ -301,7 +301,7 @@ func TestDoctor_ReportsAnInvalidExpressionWithNoDaemon(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusWarn, row.Status)
-	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
+	assert.Contains(t, row.Detail, "cannot be scheduled")
 	assert.Contains(t, row.Detail, `badcr0n1 "Hand-edited watchdog"`)
 	assert.NotContains(t, row.Detail, "firing on schedule")
 	assert.Positive(t, report.UnresolvedCount())
@@ -324,7 +324,7 @@ func TestDoctor_UnschedulableTaskIsNotAlsoListedAsUnarmed(t *testing.T) {
 	require.NoError(t, err)
 
 	row := taskRow(t, report)
-	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
+	assert.Contains(t, row.Detail, "cannot be scheduled")
 	assert.NotContains(t, row.Detail, "enabled but not armed",
 		"one condition, reported once:\n%s", row.Detail)
 	assert.Equal(t, 1, strings.Count(row.Detail, "badcr0n2"))
@@ -510,4 +510,38 @@ func TestDoctor_NoCountWhenTheBudgetWasSpent(t *testing.T) {
 		"a count nobody took is not a lower bound of zero:\n%s", row.Detail)
 	assert.Contains(t, row.Detail, "40 enabled tasks have not fired on schedule",
 		"and every one is still reported")
+}
+
+// TestDoctor_WordsEveryUnschedulableShape is doctor's half of the
+// consolidation. Its clause was written for a bad expression and an enabled
+// record with NO trigger reaches it too — "a cron expression the scheduler
+// cannot fire" described one it does not have, and the fix told the operator to
+// correct it. The wording covers every shape now, and points at the command that
+// gives the specific reason.
+func TestDoctor_WordsEveryUnschedulableShape(t *testing.T) {
+	for _, tc := range []struct{ name, expr string }{
+		{"no trigger", ""},
+		{"invalid expression", "99 * * * *"},
+		{"no occurrence", "0 0 31 2 *"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t, false)
+			broken := healthyTask("broken01")
+			broken.Name = "Hand-edited row"
+			broken.CronExpr = tc.expr
+			opts.taskInventory = func() ([]task.Task, error) { return []task.Task{broken}, nil }
+
+			report, err := Run(opts)
+			require.NoError(t, err)
+
+			row := taskRow(t, report)
+			assert.Equal(t, StatusWarn, row.Status)
+			assert.Contains(t, row.Detail, "cannot be scheduled")
+			assert.Contains(t, row.Detail, `broken01 "Hand-edited row"`)
+			assert.NotContains(t, row.Detail, "a cron expression the scheduler cannot fire",
+				"the clause must not describe an expression a record may not have")
+			assert.Contains(t, row.Remediation, "af tasks show")
+			assert.Positive(t, report.UnresolvedCount())
+		})
+	}
 }

@@ -726,3 +726,66 @@ func TestWithScheduleHealth_ClearsDiskSourcedLiveFields(t *testing.T) {
 		"a read has observed nothing live, whatever the file said")
 	assert.Nil(t, got[0].NextRunAt, "and promises no fire time it did not read off a scheduler")
 }
+
+// TestUnschedulableReason_IsTheOneClassification: three surfaces word this
+// condition and each was re-deriving it from ParseCron, so each got a different
+// subset wrong — an absent expression reported as an invalid one, twice, and a
+// doctor row telling the operator to correct an expression that did not exist.
+// Renderers may differ; the classification must not.
+func TestUnschedulableReason_IsTheOneClassification(t *testing.T) {
+	now := at(2026, time.September, 1, 12, 0, 0)
+	last := at(2026, time.September, 1, 11, 0, 0)
+
+	for _, tc := range []struct {
+		name string
+		mut  func(*Task)
+		want string
+	}{
+		{"no trigger", func(t *Task) { t.CronExpr = "" }, ReasonNoTrigger},
+		{"whitespace trigger", func(t *Task) { t.CronExpr = "   " }, ReasonNoTrigger},
+		{"invalid expression", func(t *Task) { t.CronExpr = "99 * * * *" }, ReasonInvalidExpression},
+		{"no occurrence", func(t *Task) { t.CronExpr = "0 0 31 2 *" }, ReasonNoOccurrence},
+		{"schedulable", func(t *Task) { t.CronExpr = "20 * * * *" }, ""},
+		{"disabled", func(t *Task) { t.CronExpr, t.Enabled = "", false }, ""},
+		{"watch", func(t *Task) { t.CronExpr, t.WatchCmd = "", "tail -f x" }, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tsk := cronTask("20 * * * *", &last)
+			tc.mut(&tsk)
+			assert.Equal(t, tc.want, UnschedulableReason(tsk, now))
+			// And the verdict agrees with its own classifier, in both directions.
+			assert.Equal(t, tc.want != "", DeriveScheduleHealth(tsk, now).Unschedulable,
+				"the derivation and the classification cannot disagree")
+		})
+	}
+}
+
+// TestLoadTasksLocked_CarriesNoDerivedState: records loaded on the WRITE path do
+// not only go back to disk — they ride EventTaskUpdated to every connected
+// client, from the legacy RepoID backfill and from an update whose post-commit
+// reload failed. A hand-edited tasks.json carrying live fields would otherwise
+// have them decoded and broadcast as though a daemon had observed them.
+func TestLoadTasksLocked_CarriesNoDerivedState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+	path := filepath.Join(dir, tasksFileName)
+
+	// Hand-edited: current schema, with live and derived fields set by hand.
+	require.NoError(t, os.WriteFile(path, []byte(`{"schema_version":1,"tasks":[{
+      "id":"handedit","name":"Hand edited","prompt":"p","cron_expr":"20 * * * *",
+      "project_path":"/tmp","program":"claude","enabled":true,
+      "created_at":"2026-07-01T09:00:00Z",
+      "arming":"armed","next_run_at":"2030-01-01T00:00:00Z",
+      "overdue":true,"missed_occurrences":99,"unschedulable":true,"unassessable":true}]}`), 0o644))
+
+	loaded, err := loadTasksLocked(path)
+	require.NoError(t, err)
+	require.Len(t, loaded, 1)
+	assert.Empty(t, loaded[0].Arming, "no observation the write path never made")
+	assert.Nil(t, loaded[0].NextRunAt)
+	assert.False(t, loaded[0].Overdue)
+	assert.Zero(t, loaded[0].MissedOccurrences)
+	assert.False(t, loaded[0].Unschedulable)
+	assert.False(t, loaded[0].Unassessable)
+	assert.Equal(t, "20 * * * *", loaded[0].CronExpr, "and the task itself is untouched")
+}

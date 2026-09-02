@@ -188,27 +188,20 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	if !t.Enabled {
 		return ""
 	}
-	// ENABLED with no trigger at all. ValidateTrigger refuses to write one, so
-	// only a hand-edited or legacy row gets here — and it is the emptiest kind of
-	// broken: nothing schedules it, nothing watches it, and with no daemon to
-	// report arming the page would otherwise show "Enabled yes" and nothing else
-	// wrong. Named as the absence it is rather than routed through the
-	// invalid-expression wording, which would be about an expression it does not
-	// have (#3623 review).
-	if t.CronExpr == "" {
+	// Every shape of "the scheduler cannot fire this" comes from the SHARED
+	// classifier, so this page cannot disagree with the verdict it is rendering —
+	// re-deriving it here is what had it reporting an invalid expression for a
+	// record that has none (#3623 review). The wording is the only thing that
+	// differs per shape, and wording is this function's job.
+	switch task.UnschedulableReason(t, now) {
+	case task.ReasonNoTrigger:
 		return "this task has no trigger, so nothing will ever run it"
-	}
-	if t.CronExpr != "" {
-		if _, err := task.ParseCron(t.CronExpr); err != nil {
-			// Say so rather than falling through to "on schedule". Nothing can be
-			// derived from an expression with no occurrences, and a task the
-			// scheduler refuses to parse is the opposite of healthy — it is also
-			// exactly why the arming line above reads "not armed".
-			return "cron expression is invalid, so nothing is scheduled: " + err.Error()
-		}
-	}
-	health := task.DeriveScheduleHealth(t, now)
-	if health.Unschedulable {
+	case task.ReasonInvalidExpression:
+		// Name the parse error itself: this page has the expression in hand, and
+		// the message is the whole repair instruction.
+		_, err := task.ParseCron(t.CronExpr)
+		return "cron expression is invalid, so nothing is scheduled: " + err.Error()
+	case task.ReasonNoOccurrence:
 		// The task is enabled and the scheduler may well hold an entry for it, so
 		// every other line on this page reads as healthy; nothing is late only
 		// because nothing was ever due. The claim is about the SCHEDULER rather
@@ -219,6 +212,7 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 		return "the scheduler cannot derive a next run from this expression " +
 			"(it matches no date within its five-year horizon), so the task will not fire"
 	}
+	health := task.DeriveScheduleHealth(t, now)
 	if health.Unassessable {
 		// Never a clean bill for a record nothing could be measured from. It may
 		// have been firing perfectly and it may never have fired at all; saying

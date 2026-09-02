@@ -323,7 +323,7 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
 	// sits last is what gets cut: at the 22-column minimum the cron expression
 	// would survive and the warning would not, which is backwards.
-	if fragment := attentionFragment(tsk); fragment != "" {
+	if fragment := attentionFragment(tsk, a.now()); fragment != "" {
 		parts = append(parts, fragment)
 	}
 	trigger := tsk.CronExpr
@@ -351,14 +351,14 @@ func needsAttention(tsk task.Task) bool {
 // found none — an uncounted "missed 0" beside "overdue" reads as a
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
-func attentionFragment(tsk task.Task) string {
+func attentionFragment(tsk task.Task, now time.Time) string {
 	if tsk.Unassessable {
 		// Says what could not be done rather than what is wrong, and leads the line
 		// for the same reason the others do — the rail clips from the right.
 		return "Health unknown"
 	}
 	if tsk.Unschedulable {
-		// Both shapes are diagnosed HERE, at the front, for the same reason the
+		// EVERY shape is diagnosed here, at the front, for the same reason the
 		// overdue fragment leads: at the 22-column rail minimum the line is clipped
 		// from the right, and a reason sitting behind the expression leaves the
 		// mark unexplained. Leaving the parsing case to the next/last summary put
@@ -366,12 +366,17 @@ func attentionFragment(tsk task.Task) string {
 		// "0 0 31 2 * · …" — a [!] row with no explanation, the exact failure the
 		// mark exists to prevent (#3623 review).
 		//
-		// nextRunSummary suppresses its own copy when the record says
-		// unschedulable, so the line says this once.
-		if _, err := task.ParseCron(tsk.CronExpr); err != nil {
+		// Which shape comes from the SHARED classifier rather than a local
+		// ParseCron, which is what had this row calling an ABSENT expression
+		// invalid. nextRunSummary suppresses its own copy, so the line says it once.
+		switch task.UnschedulableReason(tsk, now) {
+		case task.ReasonNoTrigger:
+			return "No trigger"
+		case task.ReasonInvalidExpression:
 			return "Invalid cron expression"
+		default:
+			return "No upcoming run"
 		}
-		return "No upcoming run"
 	}
 	if !tsk.Overdue {
 		return ""
