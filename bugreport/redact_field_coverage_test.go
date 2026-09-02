@@ -170,6 +170,31 @@ var knownUnredactedFields = map[string]string{
 	"ArchiveWarning": "#3588 — the bounded warning projection embeds the user-chosen skipped file names. #3554 (74e3b06f) closed the LOG path for exactly this text, but scrubArchiveWarningPaths is called only from scrubLog; redactInstancesJSON applies plain scrub, so the FIELD still carries them into the JSON section",
 }
 
+// unplantableInstanceFields are scalar leaves inside a REPEATED aggregate. The
+// walk can plant no marker in a number or a bool, so it cannot say whether
+// redaction touched them — and repetition removes the bounded capacity that
+// exempts a scalar everywhere else: enough elements of `[]struct{ Code int32 }`
+// reconstruct any text, exactly as `[]int32` does (#3592 review).
+//
+// So each one is a written decision, like the two maps above. The bar is the
+// same: a machine-minted number, a bounded enum, or a bool. A repeated leaf that
+// could hold user text does NOT belong here — it belongs in the walk, planted.
+//
+// Assessed per LEAF, not per element: a sibling string in the same struct is
+// evidence about the string, never about the number beside it.
+var unplantableInstanceFields = map[string]string{
+	"ArchiveReport.RetainedTrees[].Device":        "st_dev from Lstat; a filesystem device number",
+	"ArchiveReport.RetainedTrees[].Inode":         "st_ino from Lstat; a filesystem inode number",
+	"ArchiveReport.RetainedTrees[].FileType":      "os.FileMode type bits, machine-derived",
+	"ArchiveReport.RetainedTrees[].IdentityKnown": "bool — whether the Lstat identity was captured at all",
+
+	"Tabs[].Kind":                        "bounded TabKind enum integer; its word is emitted beside it as kind_name (#3631)",
+	"PendingTabs[].Kind":                 "same bounded TabKind enum under the staging roster",
+	"Tabs[].Handoffs[].Automatic":        "bool — whether the handoff was automatic rather than user-initiated",
+	"PendingTabs[].Handoffs[].Automatic": "same handoff bool under the staging roster",
+	"TabKinds[].Allowed":                 "bool — whether this backend admits the kind (#3060)",
+}
+
 // ---------------------------------------------------------------------------
 // Which fields reach a bundle is decided by encoding/json, not by this file.
 //
@@ -304,19 +329,48 @@ func rendersItself(t reflect.Type) bool {
 		t.Implements(textMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
 }
 
+// reviewedMarshaler records what a self-rendering type's MarshalJSON was read to
+// do: why it is trusted, and the member names it adds BEYOND the fields this
+// walk plants into.
+//
+// Both halves are executed rather than believed — see
+// TestGuardReviewedMarshalersMatchTheirFieldSet, which diffs the type's own
+// output against what encoding/json emits for the same fields with no method set
+// to intercept. A prose reason cannot notice that the code changed under it
+// (#3592 review): the entry must name every extra member, so a marshaler that
+// starts emitting text out of an UNEXPORTED field — which this walk can never
+// plant into — fails as an undeclared member rather than passing because all the
+// exported ones are still there.
+type reviewedMarshaler struct {
+	why string
+	// extra are the JSON member names the marshaler adds at the TOP level of its
+	// own output. Empty means "exactly the fields, nothing added".
+	extra []string
+}
+
 // reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
-// read and shown to emit only the exported fields this walk already covers.
-// Anything NOT listed here fails the guard rather than being trusted, because
-// "it probably just marshals its fields" is a claim to check once per type, not
-// to assume forever.
-var reviewedMarshalerTypes = map[reflect.Type]string{
-	reflect.TypeOf(time.Time{}):               "timestamp; carries no user text and is skipped by the walk",
-	reflect.TypeOf(git.ArchiveRetainedTree{}): "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
-	reflect.TypeOf(git.ArchiveSkippedEntry{}): "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
-	reflect.TypeOf(session.InstanceData{}): "MarshalJSON (#3631) marshals a `type alias InstanceData` of the same exported fields, " +
-		"plus status_name/liveness_name — enum words derived from the Status/Liveness integers beside them, never from user text",
-	reflect.TypeOf(session.TabData{}): "MarshalJSON (#3631) marshals a `type alias TabData` of the same exported fields, " +
-		"plus kind_name — the TabKind enum word, never user text",
+// read and shown to emit only the exported fields this walk already covers, plus
+// the extras declared beside them. Anything NOT listed here fails the guard
+// rather than being trusted, because "it probably just marshals its fields" is a
+// claim to check once per type, not to assume forever.
+var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
+	reflect.TypeOf(time.Time{}): {why: "timestamp; carries no user text and is skipped by the walk"},
+	reflect.TypeOf(git.ArchiveRetainedTree{}): {
+		why: "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
+	},
+	reflect.TypeOf(git.ArchiveSkippedEntry{}): {
+		why: "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
+	},
+	reflect.TypeOf(session.InstanceData{}): {
+		why: "MarshalJSON (#3631) marshals a `type alias InstanceData` of the same exported fields, " +
+			"plus status_name/liveness_name — enum words derived from the Status/Liveness integers beside them, never from user text",
+		extra: []string{"status_name", "liveness_name"},
+	},
+	reflect.TypeOf(session.TabData{}): {
+		why: "MarshalJSON (#3631) marshals a `type alias TabData` of the same exported fields, " +
+			"plus kind_name — the TabKind enum word, never user text",
+		extra: []string{"kind_name"},
+	},
 }
 
 // isUnplantableScalar reports an element kind that json serializes but fill has
@@ -353,26 +407,11 @@ type sentinelFiller struct {
 	unsupported []string
 	planted     []plantedField
 	seq         int
-	// textFree counts the values the walk deliberately decided carry no text —
-	// a reviewed timestamp, a kind json cannot serialize. Those are statements,
-	// not silences, which is what separates them from the scalar exemption.
-	textFree int
-}
-
-// observations is how many definite statements the walk has made about the
-// values it met: markers planted, holes reported, and values decided to be
-// text-free. The scalar exemption deliberately raises NONE of them.
-//
-// That is what makes it a usable test for a REPEATED aggregate. A scalar leaf is
-// exempt because its capacity is bounded — but repeat it and it is not:
-// `[]struct{ Code int32 }` emits [{"Code":83},{"Code":69}] for as many elements
-// as there are, reconstructing arbitrary text exactly as `[]int32` does.
-// Reproduced with planted=[] and unsupported=[] (#3592 review). An element whose
-// leaves are ENTIRELY unmarked is one this guard says nothing about, so it is
-// reported; an element carrying any string, container, or hole is covered
-// already, which is why every repeated aggregate in InstanceData passes.
-func (f *sentinelFiller) observations() int {
-	return len(f.planted) + len(f.unsupported) + len(f.tooDeep) + f.textFree
+	// unplantable are scalar leaves inside a REPEATED aggregate. The walk can
+	// plant no marker in them, so it cannot say whether redaction touched them
+	// — see the scalar arm of fill for why repetition, and only repetition,
+	// makes that worth reporting.
+	unplantable []string
 }
 
 // nextMarker puts the unique sequence FIRST, so a marker that is truncated or
@@ -530,7 +569,7 @@ func encodedWindows(form string) []string {
 // Unexported non-anonymous fields are skipped: reflect cannot set them, and they
 // reach a bundle only through a custom marshaler, which is refused above.
 // time.Time is skipped as opaque and text-free.
-func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
+func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated bool) {
 	if depth > guardMaxDepth {
 		f.tooDeep = append(f.tooDeep, path)
 		return
@@ -546,7 +585,6 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 			return
 		}
 		if base == reflect.TypeOf(time.Time{}) {
-			f.textFree++
 			return
 		}
 	}
@@ -567,10 +605,9 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
-		f.fill(v.Elem(), path, depth+1)
+		f.fill(v.Elem(), path, depth+1, repeated)
 	case reflect.Struct:
 		if v.Type() == reflect.TypeOf(time.Time{}) {
-			f.textFree++
 			return
 		}
 		for i := 0; i < v.NumField(); i++ {
@@ -592,7 +629,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 						join(path, field.Name), field.Type.String()))
 				continue
 			}
-			f.fill(v.Field(i), join(path, field.Name), depth+1)
+			f.fill(v.Field(i), join(path, field.Name), depth+1, repeated)
 		}
 	case reflect.Slice:
 		f.fillSequence(v, path, depth, true)
@@ -609,28 +646,30 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		// Not serializable by encoding/json — it errors rather than emitting
 		// them — so they cannot reach a bundle and need no marker.
-		f.textFree++
 	default:
 		// Every kind left is a SCALAR leaf: bool, an integer, a float, a
 		// complex. json emits them and this walk plants nothing in them, which
-		// looks like the shape the sequence and map paths refuse — and it is
-		// deliberately NOT treated the same way. The line between them is
-		// CAPACITY, not kind.
+		// looks like the shape the sequence and map paths refuse. The line
+		// between them is CAPACITY, not kind.
 		//
-		// A numeric CONTAINER is unbounded: `[]int32` holds a session title, a
-		// path, a filename — the leak class this guard exists for (#2419,
-		// #3541) — so a container the walk cannot plant in is a hole it must
-		// refuse. A scalar leaf holds one bounded value: a bool has two states,
-		// and no integer width holds a filename. InstanceData has 54 such
-		// leaves today, 40 of them bool, and a bool cannot carry a distinctive
-		// marker at all — so refusing them would fail the suite over 54 fields
-		// that cannot hold the thing being guarded against.
+		// A scalar leaf at a FIXED position appears once in the document and
+		// holds one bounded value: a bool has two states, and no integer width
+		// holds a filename. InstanceData has 54 such leaves, 40 of them bool,
+		// and a bool cannot carry a distinctive marker at all — so refusing them
+		// would fail the suite over 54 fields that cannot hold the thing being
+		// guarded against.
 		//
-		// The scalar shape that CAN carry arbitrary text is a named type with
-		// its own MarshalJSON/MarshalText, and that one is refused before this
-		// switch by the rendersItself check — see
-		// TestGuardRefusesSelfRenderingScalarLeaves. What is left uncovered is
-		// text packed into a plain integer's bytes, which nothing in af writes.
+		// REPEAT one and the bound is gone. `[]struct{ Code int32 }` emits an
+		// element per entry, and enough entries reconstruct any text, exactly as
+		// `[]int32` does — which this file already refuses. So a scalar leaf
+		// inside a repeated aggregate is reported and must be CLASSIFIED, by
+		// path, in unplantableInstanceFields. Assessing it per leaf rather than
+		// per element is deliberate: a sibling string in the same element proves
+		// nothing about the number beside it (#3592 review).
+		//
+		// The scalar shape that can carry arbitrary text ANYWHERE is a named
+		// type with its own MarshalJSON/MarshalText, refused before this switch
+		// by rendersItself — see TestGuardRefusesSelfRenderingScalarLeaves.
 		//
 		// The arm is a `default` rather than a list of kinds so that a kind
 		// neither cased above nor scalar — there is none today — is reported
@@ -638,6 +677,10 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		if !isScalarNumeric(v.Kind()) {
 			f.unsupported = append(f.unsupported,
 				fmt.Sprintf("%s (unhandled kind %s)", path, v.Kind()))
+			return
+		}
+		if repeated {
+			f.unplantable = append(f.unplantable, path)
 		}
 	}
 }
@@ -747,22 +790,9 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
 		}
 		for i := 0; i < v.Len(); i++ {
-			before := f.observations()
-			f.fill(v.Index(i), path+"[]", depth+1)
-			f.noteUnmarkedElement(path+"[]", before)
+			f.fill(v.Index(i), path+"[]", depth+1, true)
 		}
 	}
-}
-
-// noteUnmarkedElement reports a repeated element the walk made no statement
-// about at all — see observations. The report is identical for every element, so
-// dedupeSorted collapses it to one line naming the path.
-func (f *sentinelFiller) noteUnmarkedElement(path string, before int) {
-	if f.observations() != before {
-		return
-	}
-	f.unsupported = append(f.unsupported,
-		path+" (no leaf of this repeated element can carry a text marker)")
 }
 
 // fillMap seeds guardSliceSeed entries under distinct keys, for the slice
@@ -838,11 +868,7 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 		}
 		val := reflect.New(v.Type().Elem()).Elem()
 		if !valueScalar {
-			before := f.observations()
-			f.fill(val, path+"[]", depth+1)
-			// A planted KEY does not cover the VALUE beside it: a redaction
-			// that clears keys and leaves values would read as complete.
-			f.noteUnmarkedElement(path+"[]", before)
+			f.fill(val, path+"[]", depth+1, true)
 		}
 		m.SetMapIndex(key, val)
 	}
@@ -989,7 +1015,7 @@ func join(path, field string) string {
 func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	var data session.InstanceData
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&data).Elem(), "", 0)
+	filler.fill(reflect.ValueOf(&data).Elem(), "", 0, false)
 
 	// A subtree the walk could not reach is a subtree this guard cannot speak
 	// for. Fail rather than quietly cover less than the name promises.
@@ -1017,6 +1043,28 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 			"widen guardUnitDigits, or container fragments stop naming one field",
 			filler.seq, guardMaxSeq, guardUnitDigits)
 	}
+	// A scalar leaf inside a repeated aggregate carries no marker, so no later
+	// step can speak for it. Each one is classified by path or the guard says so.
+	unplantable := dedupeSorted(filler.unplantable)
+	unplantableSet := make(map[string]struct{}, len(unplantable))
+	var unclassified []string
+	for _, path := range unplantable {
+		unplantableSet[path] = struct{}{}
+		if _, ok := unplantableInstanceFields[path]; !ok {
+			unclassified = append(unclassified, path)
+		}
+	}
+	if len(unclassified) > 0 {
+		t.Errorf("%d repeated scalar leaf(s) carry no marker and are not classified:\n  %s\n\n"+
+			"A number or a bool cannot hold a planted marker, so this guard cannot tell whether "+
+			"redaction touched it — and repeating it removes the bounded capacity that exempts a "+
+			"scalar elsewhere: enough elements reconstruct any text.\n\n"+
+			"Add each to unplantableInstanceFields with the reason it is machine-minted, a bounded "+
+			"enum, or a bool. If it can hold text a USER chose, do not classify it — make the walk "+
+			"plant into it.",
+			len(unclassified), strings.Join(unclassified, "\n  "))
+	}
+
 	if ambiguous := dedupeSorted(filler.ambiguousEvidence()); len(ambiguous) > 0 {
 		t.Errorf("%d planted fragment(s) cannot be attributed to one field:\n  %s\n\n"+
 			"A fragment that occurs in another field's value marks that field leaked whenever "+
@@ -1041,12 +1089,23 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	// The two maps must stay DISJOINT. "Safe to publish" and "a tracked leak"
 	// are opposite verdicts, and a path holding both is accepted by the test
 	// below purely because it holds one.
-	if overlap := classificationOverlap(verbatimInstanceFields, knownUnredactedFields); len(overlap) > 0 {
-		t.Errorf("%d path(s) are classified BOTH safe and leaking:\n  %s\n\n"+
-			"verbatimInstanceFields says the value is safe to publish; knownUnredactedFields "+
-			"says it leaks and is still owed a fix. Delete whichever entry no longer holds — "+
-			"a path in both is accepted by this guard without either verdict being true.",
-			len(overlap), strings.Join(overlap, "\n  "))
+	for _, pair := range []struct {
+		aName, bName string
+		a, b         map[string]string
+	}{
+		{"verbatimInstanceFields", "knownUnredactedFields", verbatimInstanceFields, knownUnredactedFields},
+		{"verbatimInstanceFields", "unplantableInstanceFields", verbatimInstanceFields, unplantableInstanceFields},
+		{"knownUnredactedFields", "unplantableInstanceFields", knownUnredactedFields, unplantableInstanceFields},
+	} {
+		overlap := classificationOverlap(pair.a, pair.b)
+		if len(overlap) == 0 {
+			continue
+		}
+		t.Errorf("%d path(s) are classified in BOTH %s and %s:\n  %s\n\n"+
+			"The three maps record different verdicts — safe to publish, a tracked leak, and "+
+			"carrying no marker at all — and a path holding two of them is accepted by this "+
+			"guard without either being true. Delete whichever entry no longer holds.",
+			len(overlap), pair.aName, pair.bName, strings.Join(overlap, "\n  "))
 	}
 
 	// An entry with an empty reason is not a classification. Both maps exist to
@@ -1057,6 +1116,8 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 		"every entry needs the reason the value is safe to publish")
 	assertJustified(t, "knownUnredactedFields", knownUnredactedFields,
 		"every entry needs a tracking issue for the leak it records")
+	assertJustified(t, "unplantableInstanceFields", unplantableInstanceFields,
+		"every entry needs the reason the value cannot hold user text")
 
 	var unjustified []string
 	for _, path := range leaked {
@@ -1091,6 +1152,9 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 		"They are now redacted or gone. Remove them so the allowlist keeps describing the code that actually runs.")
 	assertNoStaleEntries(t, "knownUnredactedFields", knownUnredactedFields, leakedSet,
 		"That leak is fixed — remove the entry (and close out its tracking issue).")
+	assertNoStaleEntries(t, "unplantableInstanceFields", unplantableInstanceFields, unplantableSet,
+		"The walk no longer meets them as unplantable repeated scalars — the field is gone, or "+
+			"it now carries a marker. Remove the entry.")
 }
 
 // assertJustified fails on a classification entry with no written reason.

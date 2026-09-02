@@ -55,7 +55,7 @@ func TestGuardFragmentsNameExactlyOneField(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			record := reflect.ValueOf(tc.probe).Elem()
 			filler := &sentinelFiller{}
-			filler.fill(record, "", 0)
+			filler.fill(record, "", 0, false)
 			if len(filler.unsupported) > 0 || len(filler.tooDeep) > 0 {
 				t.Fatalf("the walk could not plant the fixture: unsupported=%v tooDeep=%v",
 					filler.unsupported, filler.tooDeep)
@@ -95,7 +95,7 @@ func TestGuardSeesAPartiallyRedactedContainer(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0)
+	filler.fill(record, "", 0, false)
 	if len(filler.planted) != 1 {
 		t.Fatalf("planted %d field(s), want 1", len(filler.planted))
 	}
@@ -124,7 +124,7 @@ func TestGuardRefusesAnArrayWithoutIndependentEvidence(t *testing.T) {
 		Digest [guardMinContainer - 1]byte
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
 	if len(filler.planted) != 0 {
 		t.Errorf("planted %d marker(s) in an array too short to survive a partial edit",
 			len(filler.planted))
@@ -143,7 +143,7 @@ func TestGuardSeesAPartialEditOfTheSmallestArray(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0)
+	filler.fill(record, "", 0, false)
 	if len(filler.planted) != 1 {
 		t.Fatalf("planted %d field(s), want 1: unsupported=%v", len(filler.planted), filler.unsupported)
 	}
@@ -173,7 +173,7 @@ func TestGuardRefusesSelfRenderingSequenceElements(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			filler := &sentinelFiller{}
-			filler.fill(reflect.ValueOf(tc.probe).Elem(), "", 0)
+			filler.fill(reflect.ValueOf(tc.probe).Elem(), "", 0, false)
 			if len(filler.planted) != 0 {
 				t.Errorf("planted %d marker(s) in a container whose element renders itself",
 					len(filler.planted))
@@ -257,30 +257,42 @@ func TestGuardRejectsContradictoryClassification(t *testing.T) {
 // plants no marker in a scalar leaf — so it has to be refused before it gets
 // there, or the guard would stay green over a field emitting whatever this
 // method returns.
-// TestGuardRefusesARepeatedAggregateWithNoTextLeaf is where the scalar
-// exemption stops. A scalar leaf is exempt because its capacity is bounded —
-// repeat it and it is not, so a slice or map of a struct whose leaves are
-// ENTIRELY unmarked is a hole, not an exemption: json emits one object per
-// element, and enough of them reconstruct any text.
-func TestGuardRefusesARepeatedAggregateWithNoTextLeaf(t *testing.T) {
-	type code struct{ Code int32 }
+// TestGuardReportsEveryRepeatedScalarLeaf is where the scalar exemption stops.
+//
+// A scalar leaf is exempt because its capacity is BOUNDED, and repeating it
+// removes exactly that. Assessed per LEAF, not per element: a sibling string in
+// the same struct is evidence about the string and says nothing about the number
+// beside it. Reproduced with []struct{ Code int32; Name string } — a redactor
+// that cleared only Name left Code's 83 and 84 in the document while the guard
+// reported nothing at all (#3592 review).
+func TestGuardReportsEveryRepeatedScalarLeaf(t *testing.T) {
+	type mixed struct {
+		Code int32
+		Name string
+		When time.Time
+	}
 	var probe struct {
-		Codes  []code
-		ByName map[string]code
+		Entries []mixed
+		ByName  map[string]mixed
+		Codes   []struct{ Code int32 }
+		// NOT repeated: one bounded value at a fixed position, still exempt.
+		Once mixed
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
 
-	got := dedupeSorted(filler.unsupported)
-	want := []string{
-		"ByName[] (no leaf of this repeated element can carry a text marker)",
-		"Codes[] (no leaf of this repeated element can carry a text marker)",
+	if len(filler.unsupported) > 0 {
+		t.Errorf("unsupported = %v, want none: a repeated scalar is classified, not a hole, "+
+			"and a timestamp is text-free", filler.unsupported)
 	}
+	got := dedupeSorted(filler.unplantable)
+	want := []string{"ByName[].Code", "Codes[].Code", "Entries[].Code"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("unsupported = %v,\nwant %v", got, want)
+		t.Errorf("unplantable = %v,\nwant %v\n\n"+
+			"Once.Code must NOT appear — it sits at a fixed position, where the bounded-capacity "+
+			"exemption still holds.", got, want)
 	}
-	// The map's own KEYS are still planted: reporting the value subtree must not
-	// cost the coverage the keys already had.
+	// Reporting the value leaves must not cost the coverage the map keys had.
 	var keys int
 	for _, p := range filler.planted {
 		if strings.HasSuffix(p.path, "[key]") {
@@ -288,30 +300,7 @@ func TestGuardRefusesARepeatedAggregateWithNoTextLeaf(t *testing.T) {
 		}
 	}
 	if keys != guardSliceSeed {
-		t.Errorf("planted %d map key(s), want %d — the value report should not "+
-			"suppress key coverage", keys, guardSliceSeed)
-	}
-}
-
-// TestGuardCoversARepeatedAggregateWithOneTextLeaf is the other side: an element
-// carrying any text-bearing leaf is covered already, and must NOT be reported.
-// Every repeated aggregate in InstanceData is this shape.
-func TestGuardCoversARepeatedAggregateWithOneTextLeaf(t *testing.T) {
-	type entry struct {
-		Code int32
-		Name string
-		When time.Time
-	}
-	var probe struct {
-		Entries []entry
-		Stamps  []time.Time
-	}
-	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
-	if len(filler.unsupported) > 0 {
-		t.Errorf("unsupported = %v, want none: the element has a string leaf, and a "+
-			"timestamp is a decision the walk made rather than a silence",
-			filler.unsupported)
+		t.Errorf("planted %d map key(s), want %d", keys, guardSliceSeed)
 	}
 }
 
@@ -325,7 +314,7 @@ func TestGuardRefusesSelfRenderingScalarLeaves(t *testing.T) {
 		KeyPtr *guardTextScalar
 	}
 	filler := &sentinelFiller{}
-	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0, false)
 	if len(filler.planted) != 0 {
 		t.Errorf("planted %d marker(s) in a self-rendering scalar", len(filler.planted))
 	}
@@ -355,7 +344,7 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 	}
 	record := reflect.ValueOf(&probe).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(record, "", 0)
+	filler.fill(record, "", 0, false)
 	if len(filler.unsupported) > 0 {
 		t.Fatalf("the walk could not plant the fixture: %v", filler.unsupported)
 	}
@@ -383,31 +372,34 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 	}
 }
 
-// TestGuardReviewedMarshalersStillEmitTheirFields turns every entry of
+// TestGuardReviewedMarshalersMatchTheirFieldSet turns every entry of
 // reviewedMarshalerTypes from a point-in-time reading into a checked contract.
 //
-// Each entry claims the type's MarshalJSON emits the same exported fields this
-// walk plants into, and nothing tied that claim to the code. A marshaler that
-// later base64-encodes a field, or renders text out of an unexported one, keeps
-// its exemption: the walk then records evidence the document does not show, and
-// a field that still ships verbatim reads as redacted (#3592 review).
+// An entry claims the type's MarshalJSON emits the same exported fields this
+// walk plants into, plus the extras it declares. Nothing tied that claim to the
+// code. A marshaler that later base64-encodes a field keeps its exemption while
+// the walk records evidence the document no longer shows; one that starts
+// emitting text out of an UNEXPORTED field — which the walk can never plant into
+// — keeps it while shipping something the guard has never seen (#3592 review).
 //
-// So the claim is executed. Plant into a fresh value, marshal it through the
-// type's OWN MarshalJSON with nothing redacted, and require every planted marker
-// to survive. A marshaler that stops emitting a field verbatim fails here by
-// name, which is the prompt to re-read it and update or delete the entry.
-func TestGuardReviewedMarshalersStillEmitTheirFields(t *testing.T) {
-	for typ, reason := range reviewedMarshalerTypes {
+// So the claim is executed, by DIFF. A plain twin of the type is built with
+// reflect.StructOf: the same exported fields, same tags, no method set to
+// intercept — so encoding/json itself produces the baseline the custom output is
+// compared against. Every member must match value for value, and any member the
+// marshaler adds must be declared in the entry.
+func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
+	for typ, entry := range reviewedMarshalerTypes {
 		t.Run(typ.String(), func(t *testing.T) {
 			if typ == reflect.TypeOf(time.Time{}) {
-				// The one entry that is exempt as TEXT-FREE rather than as
-				// field-faithful: the walk plants nothing in a timestamp, so
-				// there is no emitted-fields claim to execute.
+				// The one entry exempt as TEXT-FREE rather than field-faithful:
+				// it renders as a quoted timestamp, not an object of its fields,
+				// and the walk plants nothing in it. There is no field-set claim
+				// to diff.
 				return
 			}
 			value := reflect.New(typ).Elem()
 			filler := &sentinelFiller{}
-			filler.fill(value, "", 0)
+			filler.fill(value, "", 0, false)
 			if len(filler.unsupported) > 0 || len(filler.tooDeep) > 0 {
 				t.Fatalf("the walk could not plant %s: unsupported=%v tooDeep=%v",
 					typ, filler.unsupported, filler.tooDeep)
@@ -416,25 +408,98 @@ func TestGuardReviewedMarshalersStillEmitTheirFields(t *testing.T) {
 				t.Fatalf("planted nothing in %s, so this contract check would pass vacuously", typ)
 			}
 
-			doc, err := json.Marshal(value.Interface())
-			if err != nil {
-				t.Fatalf("%s.MarshalJSON failed: %v", typ, err)
+			custom := marshalOrFail(t, typ.String()+".MarshalJSON", value)
+			baseline := marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value))
+
+			var customMembers, baselineMembers map[string]json.RawMessage
+			if err := json.Unmarshal(custom, &customMembers); err != nil {
+				t.Fatalf("%s did not render a JSON object: %v\n%s", typ, err, custom)
 			}
-			survived, _ := filler.leakedPaths(string(doc))
-			var missing []string
-			for _, p := range filler.planted {
-				if _, ok := survived[p.path]; !ok {
-					missing = append(missing, p.path)
+			if err := json.Unmarshal(baseline, &baselineMembers); err != nil {
+				t.Fatalf("the plain twin of %s did not render a JSON object: %v", typ, err)
+			}
+
+			declared := make(map[string]struct{}, len(entry.extra))
+			for _, name := range entry.extra {
+				declared[name] = struct{}{}
+			}
+			var added, changed, dropped []string
+			for name, got := range customMembers {
+				want, isField := baselineMembers[name]
+				switch {
+				case !isField:
+					if _, ok := declared[name]; !ok {
+						added = append(added, fmt.Sprintf("%s = %s", name, got))
+					}
+				case string(got) != string(want):
+					changed = append(changed, fmt.Sprintf("%s: emits %s, the field holds %s", name, got, want))
 				}
 			}
-			if missing = dedupeSorted(missing); len(missing) > 0 {
-				t.Errorf("%s is exempted as %q, but its MarshalJSON did not emit %d planted "+
-					"field(s) verbatim:\n  %s\n\ndocument: %s\n\n"+
-					"The exemption describes code that no longer runs. Re-read the marshaler, "+
-					"then update the reason or remove the entry — an entry that overstates what "+
-					"a marshaler emits lets the walk record evidence the bundle never shows.",
-					typ, reason, len(missing), strings.Join(missing, "\n  "), doc)
+			for name := range baselineMembers {
+				if _, ok := customMembers[name]; !ok {
+					dropped = append(dropped, name)
+				}
+			}
+			for _, name := range entry.extra {
+				if _, ok := customMembers[name]; !ok {
+					dropped = append(dropped, name+" (declared as an extra, not emitted)")
+				}
+			}
+
+			for label, found := range map[string][]string{
+				"emits member(s) the entry does not declare":            added,
+				"renders field(s) differently from the value they hold": changed,
+				"no longer emits member(s)":                             dropped,
+			} {
+				if len(found) == 0 {
+					continue
+				}
+				t.Errorf("%s is exempted as %q, but its MarshalJSON %s:\n  %s\n\n"+
+					"The exemption describes code that no longer runs. Re-read the marshaler, then "+
+					"update the entry or delete it — an entry that overstates what a marshaler emits "+
+					"lets the walk record evidence the bundle never shows, and understates what it "+
+					"adds beside it.",
+					typ, entry.why, label, strings.Join(dedupeSorted(found), "\n  "))
 			}
 		})
 	}
+}
+
+// plainTwinOf returns the same value in a generated struct type with the same
+// exported fields and tags and NO methods, so encoding/json renders it by its
+// own field rules instead of through the type's MarshalJSON.
+//
+// Unexported fields are left out: json never emits them, so their absence cannot
+// change the baseline — which is exactly what makes an unexported field's text
+// show up as an undeclared member above rather than as a matching one.
+func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
+	t.Helper()
+	typ := value.Type()
+	var fields []reflect.StructField
+	var sources []int
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.PkgPath != "" {
+			continue
+		}
+		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag, Anonymous: f.Anonymous})
+		sources = append(sources, i)
+	}
+	twin := reflect.New(reflect.StructOf(fields)).Elem()
+	for i, src := range sources {
+		twin.Field(i).Set(value.Field(src))
+	}
+	if rendersItself(twin.Type()) {
+		t.Fatalf("the plain twin of %s still renders itself, so it is no baseline", typ)
+	}
+	return twin
+}
+
+func marshalOrFail(t *testing.T, what string, value reflect.Value) []byte {
+	t.Helper()
+	out, err := json.Marshal(value.Interface())
+	if err != nil {
+		t.Fatalf("%s failed: %v", what, err)
+	}
+	return out
 }
