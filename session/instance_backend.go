@@ -586,8 +586,21 @@ func (i *Instance) RestoreArchivedWorktree(dest string) error {
 // restore admission through to the relocation boundary, avoiding a second
 // reader between source resolution and use.
 func (i *Instance) RestoreArchivedWorktreeWithClaim(dest string, claim git.RelocationClaim) error {
+	return i.restoreArchivedWorktree(dest, claim, RuntimeActionRestoreArchived)
+}
+
+// RestoreArchivedWorktreeHeldFencedWithClaim is the move for a caller that already
+// holds the restore fence (BeginArchivedRestoreFence). The daemon's local archived
+// route raises it before this, so the fence covers the relocate rather than
+// starting after it (#3596), and re-validating RuntimeActionRestoreArchived here
+// would refuse the operation's own fence.
+func (i *Instance) RestoreArchivedWorktreeHeldFencedWithClaim(dest string, claim git.RelocationClaim) error {
+	return i.restoreArchivedWorktree(dest, claim, RuntimeActionRestoreArchivedFenced)
+}
+
+func (i *Instance) restoreArchivedWorktree(dest string, claim git.RelocationClaim, action RuntimeAction) error {
 	i.mu.RLock()
-	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(action); err != nil {
 		i.mu.RUnlock()
 		i.PreserveWorktreeRelocationClaimForRetry(claim)
 		return err
@@ -750,14 +763,36 @@ func (i *Instance) RenameArchived(newTitle, dest, newBranch string) error {
 // out from under the restore. This replaces the old "park it in Lost purely to
 // trigger the re-spawn loop" overload (#1195).
 func (i *Instance) RestoreFromArchive() error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
-		return err
-	}
 	// Enter the restore fence through the chokepoint (#1195 Phase 2d): BeginRestore
 	// is legal only from Archived and sets started=true + Lost + OpRestoring — the
 	// exact head this used to write by hand, now enforcing I3 (a restore may begin
 	// only from an archived session; no double-restore).
-	if err := i.Transition(BeginRestore()); err != nil {
+	return i.restoreFromArchive(RuntimeActionRestoreArchived, BeginRestore())
+}
+
+// RestoreFromArchiveHeldFenced is RestoreFromArchive for a caller that already
+// holds the restore fence over the worktree relocate in front of it (#3596).
+//
+// It differs in the two places the held fence shows: the precondition is
+// RuntimeActionRestoreArchivedFenced (OpRestoring rather than OpNone) and the edge
+// is BeginRestoreUnderHeldFence rather than BeginRestore, whose `op == OpNone`
+// guard is deliberately left strict — that guard is what makes a double-restore
+// impossible, and widening it would admit any restore in flight rather than this
+// operation's own fence.
+//
+// Everything after is identical, including the failure edge: AbortRestoreToLost
+// drops {LiveLost, OpRestoring} to a plain Lost, so a re-spawn that fails still
+// hands the row to the #1108 loop against the now-restored worktree, and the
+// caller's own deferred release then finds no fence to lower.
+func (i *Instance) RestoreFromArchiveHeldFenced() error {
+	return i.restoreFromArchive(RuntimeActionRestoreArchivedFenced, BeginRestoreUnderHeldFence())
+}
+
+func (i *Instance) restoreFromArchive(action RuntimeAction, enter TransitionEvent) error {
+	if err := i.ValidateRuntimeAction(action); err != nil {
+		return err
+	}
+	if err := i.Transition(enter); err != nil {
 		return err
 	}
 	if err := i.currentBackend().Recover(i); err != nil {
@@ -767,6 +802,41 @@ func (i *Instance) RestoreFromArchive() error {
 		return err
 	}
 	return nil
+}
+
+// BeginArchivedRestoreFence validates the archived-restore precondition and raises
+// the restore fence in ONE critical section, for a caller that owns it across more
+// than the re-spawn — the daemon's local archived route, whose worktree relocate
+// runs in front of RestoreFromArchive (#3596). It is the sibling of
+// BeginRecoverFence (#3555/#3586), and welded together for the same reason: a
+// validation that released the lock before the raise could fence a liveness an
+// observation had just moved.
+//
+// The fence is MarkRestoring — the op axis alone. Leaving liveness at LiveArchived
+// is the whole design (#3596 triage): the snapshot reconcile keys its Archived->live
+// REBUILD on seeing that exact transition, so flipping liveness early would make it
+// see live->live and skip the rebuild, stranding the row live-but-not-started
+// (#1203). The visible effect is ShownArchived, which yields the row to the live
+// Instances section the moment a restore starts — the eager feedback #1210 asked
+// for, now beginning when the restore actually begins.
+func (i *Instance) BeginArchivedRestoreFence() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRestoreArchived); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
+	if err := i.transitionLocked(MarkRestoring()); err != nil {
+		return fmt.Errorf("restore: raise restore fence: %w", err)
+	}
+	return nil
+}
+
+// EndArchivedRestoreFence lowers the fence BeginArchivedRestoreFence raised, and
+// reports whether it actually lowered one. Safe to defer unconditionally: it is a
+// no-op once the re-spawn has moved the row off OpRestoring, and it never disturbs
+// an op some other owner raised (see clearOpIfHeld).
+func (i *Instance) EndArchivedRestoreFence() bool {
+	return i.clearOpIfHeld(OpRestoring, "archive restore")
 }
 
 // CloseAttachOnly releases resources this instance opened to view or drive its

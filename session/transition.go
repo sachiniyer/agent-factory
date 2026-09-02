@@ -54,6 +54,7 @@ const (
 	tkBeginRestore
 	tkAbortRestoreToLost
 	tkMarkRestoring
+	tkBeginRestoreFenced
 	tkBeginHandoff
 	tkCommitHandoff
 	tkParkHandoff
@@ -89,6 +90,8 @@ func (k transitionKind) String() string {
 		return "AbortRestoreToLost"
 	case tkMarkRestoring:
 		return "MarkRestoring"
+	case tkBeginRestoreFenced:
+		return "BeginRestoreUnderHeldFence"
 	case tkBeginHandoff:
 		return "BeginHandoff"
 	case tkCommitHandoff:
@@ -181,6 +184,25 @@ func AbortArchiveToLost() TransitionEvent { return TransitionEvent{kind: tkAbort
 // BeginRestore enters the restore fence for a restorable session (I3): Lost +
 // OpRestoring (replaces RestoreFromArchive's "park in Lost" head).
 func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestore} }
+
+// BeginRestoreUnderHeldFence is BeginRestore for a caller that ALREADY holds the
+// restore fence over a longer interval than the re-spawn — the daemon's local
+// archived-restore route, which raises MarkRestoring at the top so the fence
+// covers the worktree relocate in front of it (#3596).
+//
+// It is a separate edge rather than a relaxed allowedFrom on tkBeginRestore
+// because that guard is doing real work: `op == OpNone` is what makes a
+// double-restore impossible (I3), and widening it to admit OpRestoring would
+// admit any restore already in flight, not merely this operation's own fence.
+// Naming the two entries separately keeps the strict edge strict.
+//
+// The target is identical — {LiveLost, OpRestoring} with started set — because
+// this IS BeginRestore; only the op it is entered from differs. The liveness edge
+// is still Archived -> Lost and still happens here, after the worktree is home,
+// so the #1203 reconcile rebuild keys on the same transition it always did.
+func BeginRestoreUnderHeldFence() TransitionEvent {
+	return TransitionEvent{kind: tkBeginRestoreFenced}
+}
 
 // AbortRestoreToLost drops a failed restore's fence to a plain Lost so the
 // #1108 loop retries against the now-restored worktree.
@@ -443,6 +465,15 @@ var transitionTable = map[transitionKind]edgeSpec{
 		// a session gives the user their workspace back; it does not re-open the task's
 		// run, and must not re-take the task's slot.
 		run: runKeep,
+	},
+	tkBeginRestoreFenced: {
+		// The held-fence entry (#3596). Same edge as tkBeginRestore in every respect
+		// but the op it is legal from: the caller raised OpRestoring before the
+		// worktree relocate, so the row arrives here already fenced.
+		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveArchived },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpRestoring} },
+		started:     startedSet,
+		run:         runKeep,
 	},
 	tkAbortRestoreToLost: {
 		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveLost },
