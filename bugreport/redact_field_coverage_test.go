@@ -185,11 +185,11 @@ var knownUnredactedFields = map[string]string{
 // be planted at all. Those cases are failures, never silent skips.
 // ---------------------------------------------------------------------------
 
-// plantedField records one planted marker and the exact JSON fragment it
-// produces, captured at plant time by marshalling the value itself. Searching
-// the finished document for that fragment is what makes []byte (base64),
-// [N]byte and []rune (integer lists) detectable without this file knowing how
-// json encodes any of them.
+// plantedField records one planted marker and the exact JSON fragments it
+// produces, captured at plant time by marshalling a COPY of the value — see
+// marshalPlanted. Searching the finished document for those fragments is what
+// makes []byte (base64), [N]byte and []rune (integer lists) detectable without
+// this file knowing how json encodes any of them.
 type plantedField struct {
 	path  string
 	forms []string
@@ -377,8 +377,11 @@ func (f *sentinelFiller) nextContainerMarker(n int) string {
 // so the marshalled form ("marker", with its own quotes) is NOT a substring of
 // the document while the bare marker still is (#3592 review). The marshalled
 // form is what catches the containers whose encoding hides the text entirely —
-// []byte as base64, [N]byte and []rune as integer lists. Markers are
-// alphanumeric-and-dash, so json never escapes them and the raw form is exact.
+// []byte as base64, [N]byte and []rune as integer lists. Every character a
+// marker can contain — letters, digits, "-", and the container delimiter "|" —
+// is one json emits verbatim, so the raw form is exact. (json HTML-escapes "<",
+// ">" and "&" by default, which is why the marker alphabet has to stay away
+// from them.)
 func (f *sentinelFiller) record(v reflect.Value, path, marker string) {
 	forms, encoded := f.formsFor(v, marker, false)
 	f.planted = append(f.planted, plantedField{path: path, forms: forms, encoded: encoded})
@@ -651,6 +654,15 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 		}
 		marker := f.nextContainerMarker(n)
 		runes := []rune(marker)
+		if !isSlice && len(runes) != v.Len() {
+			// Cannot fire while the unit stays ASCII, and it must not: a
+			// partly filled array keeps a zero tail whose encoding is identical
+			// in every field, which is the shared-fragment problem again.
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s (the marker unit is not one rune per byte, so a [%d]rune cannot be filled exactly)",
+					path, v.Len()))
+			return
+		}
 		if isSlice {
 			rv := reflect.MakeSlice(v.Type(), len(runes), len(runes))
 			for i, r := range runes {
