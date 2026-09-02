@@ -66,9 +66,8 @@ func BranchesHeldByWorktrees(repoRoot string) (map[string]string, error) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("git worktree list in %s timed out after %s: %w", repoRoot, worktreeListTimeout, ctx.Err())
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("git worktree list in %s failed: %s (%w)", repoRoot, strings.TrimSpace(string(exitErr.Stderr)), err)
+		if detail := commandFailureDetail(err); detail != "" {
+			return nil, fmt.Errorf("git worktree list in %s failed: %s (%w)", repoRoot, detail, err)
 		}
 		return nil, fmt.Errorf("git worktree list in %s failed: %w", repoRoot, err)
 	}

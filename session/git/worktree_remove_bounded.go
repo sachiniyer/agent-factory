@@ -117,6 +117,14 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 			"holding a file in the tree; git was killed rather than waited on: %w",
 			ErrWorktreeRemovalTimedOut, strings.Join(args, " "), localGitTimeout, ctx.Err())
 	}
+	// A non-zero git exit reached callers as a bare *exec.ExitError, whose
+	// Error() is only "exit status N" while the reason git gave sat unread in
+	// its Stderr (#3392). Not for the `combined` form: CombinedOutput routes
+	// stderr into out instead of Stderr, so there is nothing to add and
+	// commandFailureDetail correctly returns "".
+	if detail := commandFailureDetail(err); detail != "" {
+		return out, fmt.Errorf("git %s failed: %s (%w)", strings.Join(args, " "), detail, err)
+	}
 	return out, err
 }
 

@@ -72,9 +72,40 @@ func (d Discovery) latestPreviewTag(timeout time.Duration) (string, error) {
 	}
 	tag := PickLatestReleaseTag(config.UpdateChannelPreview, releases)
 	if tag == "" {
-		return "", fmt.Errorf("no published release with a parseable version tag found on the preview channel")
+		return "", unusablePreviewReleases(releases)
 	}
 	return tag, nil
+}
+
+// unusablePreviewReleases says WHICH of the three distinct conditions left the
+// preview channel with no usable tag, and how many releases were actually
+// observed.
+//
+// The single sentence this replaces named none of them (#3392 sibling audit),
+// and they call for opposite responses: an empty list is a transient API blip
+// worth retrying, whereas an unparseable tag means the release tagging itself
+// is broken and no amount of retrying will help. Reporting the count matters
+// for the same reason — "0 releases" and "12 releases, none parseable" are the
+// two ends of that range and read identically today.
+func unusablePreviewReleases(releases []Release) error {
+	if len(releases) == 0 {
+		return fmt.Errorf("the preview channel returned an empty release list (0 releases); " +
+			"no candidate could be compared at all, which is usually a transient API blip or a " +
+			"rate-limit shape rather than a missing release — retry before treating it as a real absence")
+	}
+	published := 0
+	for _, release := range releases {
+		if !release.Draft {
+			published++
+		}
+	}
+	if published == 0 {
+		return fmt.Errorf("all %d release(s) on the preview channel are drafts; a draft is never an "+
+			"update candidate, so one has to be published before af can move to it", len(releases))
+	}
+	return fmt.Errorf("none of the %d published release(s) on the preview channel (%d returned in total) "+
+		"carries a parseable version tag; the tagging is malformed rather than the release missing, so "+
+		"retrying will not help — fix the tag", published, len(releases))
 }
 
 func getJSON(url string, timeout time.Duration, out any) error {
