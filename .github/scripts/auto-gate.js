@@ -2,7 +2,31 @@ const { randomUUID } = require("node:crypto");
 
 const ALLOWED_AUTHORS = new Set(["sachiniyer", "app-detail-app", "app-detail-app[bot]"]);
 const TUI_PATH_PREFIXES = ["app/", "ui/", "session/tmux/"];
-const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
+// Every workflow whose master-side run is triggered by `push: branches:
+// [master]`. A push made with GITHUB_TOKEN does not trigger further workflow
+// runs — documented Actions behavior that exists to prevent recursion — so an
+// auto-gate merge lands a commit none of these ever see, while the identical
+// merge performed by a maintainer runs all four (#3435). A squash lands a tree
+// neither the PR head nor the previous master ever had, so "the PR was green"
+// is not the same claim.
+//
+// workflow_dispatch is the documented exception to that suppression: an event
+// the gate raises with GITHUB_TOKEN *does* start a run. So the gate re-raises
+// each of these by hand after it merges.
+//
+// This list is a literal copy of a trigger that cannot be computed, exactly
+// like SELFTEST_PATHS in web-selftest-scope.js. auto-gate.test.js reads
+// .github/workflows and fails if any workflow carries that push trigger without
+// appearing here, or appears here without declaring workflow_dispatch — so the
+// copy cannot rot silently.
+const MASTER_PUSH_WORKFLOWS = ["build.yml", "docs.yml", "lint.yml", "web-selftest.yml"];
+// docs.yml is the one entry that also *publishes*, and it decides WHETHER to
+// publish for itself: the dispatch names the commit, never the paths. A copy of
+// its deploy-path list here would be a second source of truth, and the kind that
+// rots silently — it already omitted README.md, commands/docs_gen.go,
+// requirements-docs.txt and scripts/gen-docs.sh, so an auto-gate merge touching
+// any of those left Pages stale.
+const DOCS_WORKFLOW = "docs.yml";
 // GitHub check runs live on commits, but the underlying gate evidence is
 // PR-scoped. The full (PR, head) pair is therefore part of every composite
 // decision identifier. AUTO_GATE_DECISION_CHECK is the fixed-name aggregate
@@ -408,7 +432,6 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
       prNumber: prNumber ? String(prNumber) : "",
       shouldMerge: false,
       isOpen: false,
-      docsChanged: false,
       readFailure: isReadFailure(error),
       reasons: [`auto-gate evaluation error: ${message}`],
       notes: [],
@@ -424,7 +447,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       prNumber: "",
       shouldMerge: false,
       isOpen: false,
-      docsChanged: false,
       reasons: ["No open pull request found for this event."],
       notes: [],
     });
@@ -478,10 +500,12 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // real one (#3396).
   const subject = resolvedPullRequest({ github, context, pr });
   const files = await listPullRequestFiles({ github, context, number: pr.number, subject });
+  // The dispatch set this run will use comes from master's copy of this file, so
+  // a merge that CHANGES workflow definitions may be re-raising a stale set —
+  // most sharply when it adds a push-gated workflow, which cannot be in the list
+  // the running copy holds.
+  const workflowsChanged = files.some((path) => path.startsWith(".github/workflows/"));
   const touchesTui = files.some((path) => TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)));
-  const docsChanged = files.some((path) =>
-    DOCS_DEPLOY_PATHS.some((docsPath) => path === docsPath || path.startsWith(docsPath)),
-  );
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   if (touchesTui && !labels.has("play-tested")) {
@@ -490,10 +514,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     notes.push("TUI path gate passed with play-tested label");
   } else {
     notes.push("TUI path gate not required");
-  }
-
-  if (docsChanged) {
-    notes.push("Docs deploy dispatch required after merge");
   }
 
   const requiredChecks = await evaluateRequiredChecks({
@@ -556,7 +576,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
-    docsChanged,
+    workflowsChanged,
     reasons,
     notes,
   });
@@ -1669,22 +1689,62 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
     postMergeErrors.push(error);
   }
 
-  if (gate.docsChanged) {
+  // Re-raise every gate the merge suppressed. This runs unconditionally rather
+  // than replicating each workflow's `paths:` filter: a dispatch ignores those
+  // filters anyway, and a second copy of four path lists is precisely the thing
+  // that rots. The cost is a few runner-minutes on a merge that could not have
+  // broken them; the alternative cost is master carrying an unverified commit.
+  for (const workflowId of MASTER_PUSH_WORKFLOWS) {
     try {
+      // Single-shot, deliberately: a dispatch is a write, and retrying one that
+      // may already have been accepted starts a duplicate run — for docs.yml, a
+      // duplicate Pages deploy. A failure is recorded and fails the job instead.
       await github.rest.actions.createWorkflowDispatch({
         owner,
         repo,
-        workflow_id: "docs.yml",
+        workflow_id: workflowId,
+        // A branch ref, because workflow_dispatch takes no SHA. master is the
+        // commit this merge just created; if a later merge has already advanced
+        // it, that newer commit is the one worth verifying — verification is
+        // monotonic, since the newer tree contains this one.
         ref: "master",
-        inputs: {
-          deploy_docs: "true",
-        },
+        // Publishing is NOT monotonic, and docs.yml publishes. A run raised for
+        // this merge but started after a later one would diff that later
+        // commit's paths, find no docs change, and never publish these docs —
+        // while the later merge's own run does the same. So the deploy decision
+        // is pinned to the commit that raised the run. The gate names the
+        // commit; docs.yml still owns which paths mean "deploy".
+        ...(workflowId === DOCS_WORKFLOW
+          ? { inputs: { verify_sha: response.data.sha } }
+          : {}),
       });
-      core.notice(`Dispatched Docs workflow for PR #${prNumber} docs-path merge.`);
+      // Name the commit this merge produced. A dispatch takes a branch ref and
+      // master can in principle advance first, so the notice is what lets a
+      // human correlate the run with the merge it was raised for.
+      core.notice(
+        `Dispatched ${workflowId} on master to verify the PR #${prNumber} merge ` +
+          `${response.data.sha}.`,
+      );
     } catch (error) {
+      // Keep going: one unavailable workflow must not cost master the other three.
       postMergeErrors.push(error);
     }
   }
+  // auto-gate.yml pins every checkout to the default branch, so the loop above
+  // ran from master's PRE-merge copy of MASTER_PUSH_WORKFLOWS. A merge that adds
+  // a push-gated workflow therefore cannot re-raise it for its own landing
+  // commit; every later merge picks it up. Nothing here can close that — deriving
+  // the set from the merged tree means re-parsing workflow triggers at merge
+  // time, where a misparse either skips a dispatch silently or reds a merge that
+  // has already landed. What it can do is stop the gap being invisible.
+  if (gate.workflowsChanged) {
+    core.warning(
+      `PR #${prNumber} changed workflow definitions, and this run re-raised the set known to ` +
+        "master's pre-merge copy of the gate. If it added or renamed a workflow gated on a " +
+        "master push, that one did not run for this commit; dispatch it by hand.",
+    );
+  }
+
   if (postMergeErrors.length > 0) {
     const detail = postMergeErrors.map((error) => error.message || String(error)).join("; ");
     throw new AggregateError(
@@ -2686,7 +2746,6 @@ function finish(core, setOutputs, result) {
     core.setOutput("pr_number", result.prNumber);
     core.setOutput("should_merge", result.shouldMerge ? "true" : "false");
     core.setOutput("head_sha", result.headSha || "");
-    core.setOutput("docs_changed", result.docsChanged ? "true" : "false");
     core.setOutput("summary", summary);
   }
 
@@ -2713,6 +2772,7 @@ module.exports = {
   resolveTargets,
   __test: {
     CONCEDED_MERGE_REFUSALS,
+    MASTER_PUSH_WORKFLOWS,
     isSelfContradictoryNotFound,
     evaluateCodex,
     evaluateRequiredChecks,
