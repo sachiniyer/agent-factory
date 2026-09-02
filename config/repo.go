@@ -157,10 +157,28 @@ const minRepoProbeWaitDelay = 50 * time.Millisecond
 //     extra wait in the rare inherited-pipe case; being stingy costs a spurious
 //     failure on every loaded box, which is what #3503 reported.
 //   - A deadline (ResolveRegisteredProjectRepoID gives these probes 250ms
-//     inside a 1s registry scan): a drain that outlives the caller's budget
-//     turns that budget into a lie, so the allowance is capped by the time the
-//     caller has left. It tracks the caller's value instead of hardcoding a
-//     copy of it here.
+//     inside a 1s registry scan; app's project-path scan gives them 150ms):
+//     the allowance is the time the caller has left, so it tracks each
+//     caller's own value instead of hardcoding copies of them here.
+//
+// BE PRECISE ABOUT WHAT THE DEADLINE CASE BUYS, because the obvious phrasing —
+// "the drain fits inside the caller's budget" — is FALSE and an earlier draft
+// of this comment said it (#3594 review). WaitDelay's timer starts when the
+// context is done, so an allowance granted there is ADDED to the deadline, not
+// carved out of it: a 250ms probe whose git is still alive at the deadline and
+// whose pipe is held by a descendant can take ~500ms.
+//
+// What it actually guarantees is that the overrun is PROPORTIONAL TO WHAT THE
+// CALLER ASKED FOR and never the global default: a caller that promised 150ms
+// can be late by another 150ms, but nothing can drag it to 2.15s. That is the
+// property worth having, and it is the one the tests assert.
+//
+// Nor can a bounded caller have both. The measured drain tail is ~184ms, so any
+// budget below that cannot simultaneously clear the drain and honour itself.
+// The tie breaks toward the budget, and only for these callers, because a
+// caller that set a deadline has ALREADY accepted it may not get an answer in
+// time and has a fallback for that. An unbounded caller has made no such
+// peace, which is exactly why it never trades an answer for time.
 func repoProbeWaitDelay(ctx context.Context) time.Duration {
 	deadline, ok := ctx.Deadline()
 	if !ok {

@@ -2,10 +2,14 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -67,6 +71,8 @@ func installGitWithLingeringHelper(t *testing.T, hold time.Duration) {
 	require.NoError(t, err)
 	binDir := t.TempDir()
 	marker := filepath.Join(binDir, "held.once")
+	pidFile := filepath.Join(binDir, "helper.pids")
+	reapShimChildren(t, pidFile)
 	script := fmt.Sprintf(`#!/bin/sh
 for a in "$@"; do
   if [ "$a" = "--show-toplevel" ] && [ ! -e '%s' ]; then
@@ -75,14 +81,37 @@ for a in "$@"; do
     # The helper inherits this shell's stdout and outlives it, so the parent's
     # read cannot see EOF until it exits.
     sleep %.2f &
+    echo $! >> '%s'
     printf '%%s\n' "$out"
     exit 0
   fi
 done
 exec '%s' "$@"
-`, marker, marker, realGit, hold.Seconds(), realGit)
+`, marker, marker, realGit, hold.Seconds(), pidFile, realGit)
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// reapShimChildren kills every pid a git shim recorded in pidFile.
+//
+// The shims here deliberately outlive the git process that spawned them — that
+// is the condition under test — and exec kills only the shim shell it started,
+// never the shell's own children. Without this, each invocation leaks a sleep
+// onto a shared machine and `-count=N` multiplies it (#3594 review). Best
+// effort: a pid that has already exited is the normal case.
+func reapShimChildren(t *testing.T, pidFile string) {
+	t.Helper()
+	t.Cleanup(func() {
+		raw, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		for _, field := range strings.Fields(string(raw)) {
+			if pid, convErr := strconv.Atoi(field); convErr == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
 }
 
 // TestRepoProbeKeepsAnAnswerAHelperOnlyBrieflyDelayed is the #3503 regression.
@@ -127,14 +156,23 @@ func TestRepoProbeWaitDelayFitsTheCallersDeadline(t *testing.T) {
 				"bought by being stingy here")
 	})
 
-	t.Run("a deadline caps the allowance", func(t *testing.T) {
+	t.Run("a deadline bounds the overrun by the caller's own budget", func(t *testing.T) {
 		// The shape ResolveRegisteredProjectRepoID uses: 250ms per probe inside
 		// a 1s registry scan.
 		ctx, cancel := context.WithTimeout(context.Background(), registeredProjectProbeTimeout)
 		defer cancel()
 		got := repoProbeWaitDelay(ctx)
-		assert.LessOrEqual(t, got, registeredProjectProbeTimeout,
-			"a drain that outlives the caller's own budget makes that budget a lie")
+
+		// State the guarantee exactly. WaitDelay's timer starts when the context
+		// is done, so this allowance is ADDED to the deadline rather than carved
+		// out of it — the worst case is deadline + allowance. An earlier draft of
+		// this test claimed the drain "fits inside" the caller's budget, which is
+		// false (#3594 review).
+		assert.LessOrEqual(t, registeredProjectProbeTimeout+got, 2*registeredProjectProbeTimeout,
+			"the overrun must be proportional to what the caller asked for")
+		assert.Less(t, got, repoGitWaitDelay,
+			"and nothing may drag a 250ms caller toward the 2s default: that is the "+
+				"whole point of deriving the allowance from the caller")
 		assert.Greater(t, got, time.Duration(0))
 	})
 
@@ -177,7 +215,12 @@ func TestRepoGitWaitDelayClearsMeasuredDrainLatency(t *testing.T) {
 // neither, so no value here bounds that hang; only a caller deadline does.
 func TestRepoProbeWaitDelayDoesNotRescueAWedgedGit(t *testing.T) {
 	withRepoGitWaitDelay(t, 100*time.Millisecond)
-	installFakeGit(t, "#!/bin/sh\nsleep 30\n")
+	// The sleep runs in the BACKGROUND and its pid is recorded, because
+	// CommandContext kills the shim shell and not the shell's foreground child —
+	// a bare `sleep 30` here would outlive the test (#3594 review).
+	pidFile := filepath.Join(t.TempDir(), "wedged.pids")
+	reapShimChildren(t, pidFile)
+	installFakeGit(t, fmt.Sprintf("#!/bin/sh\nsleep 30 &\necho $! >> '%s'\nwait\n", pidFile))
 
 	// A caller deadline is what actually bounds it — the same shim with no
 	// deadline would block far past this.
@@ -194,5 +237,38 @@ func TestRepoProbeWaitDelayDoesNotRescueAWedgedGit(t *testing.T) {
 			"the caller's deadline is the thing that ended it, and the chain must say so")
 	case <-time.After(15 * time.Second):
 		t.Fatal("a caller deadline must bound a wedged git even though WaitDelay cannot")
+	}
+}
+
+// TestReapShimChildrenActuallyKillsThem verifies the cleanup these tests rely
+// on, rather than assuming it. Counting stray processes after a run cannot
+// attribute them on a shared machine — other work spawns sleeps too — so the
+// reaper is exercised directly: the subtest's cleanup must have killed the
+// recorded child by the time t.Run returns.
+func TestReapShimChildrenActuallyKillsThem(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "probe.pids")
+	var pid int
+
+	t.Run("child recorded and reaped", func(t *testing.T) {
+		reapShimChildren(t, pidFile)
+		cmd := exec.Command("sleep", "300")
+		require.NoError(t, cmd.Start())
+		pid = cmd.Process.Pid
+		require.NoError(t, os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600))
+		require.NoError(t, syscall.Kill(pid, 0), "fixture: the child must be alive here")
+		go func() { _ = cmd.Wait() }() // reap the zombie; the kill is what is under test
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reapShimChildren left pid %d alive: every shim child these tests "+
+				"record must be gone when the test that spawned it ends, or a shared "+
+				"machine accumulates them across runs (#3594 review)", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
