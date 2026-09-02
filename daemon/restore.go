@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -108,6 +109,59 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		return "", fmt.Errorf("session %q changed state before restore could start", title)
 	}
 
+	// Raise the restore fence HERE, not around the backend call at the bottom, so
+	// it is COEXTENSIVE with the claim above (#3586).
+	//
+	// claimRestoreOperation already made Kill fail: from that line on, a Kill is
+	// rejected at the daemon's ADMISSION gate with "kill already in progress for
+	// session X" — a message about an operation the user never started. canKillFor
+	// is what hides the affordance, and it reads the op axis alone, so a fence
+	// raised only at :RecoverHeldFencedWithLiveBoundary left the row at
+	// {LiveLost, OpNone} through both network phases below: a 5s liveness probe and
+	// a pre-reap push bounded at 3m30s. For up to ~3m35s the TUI and the web UI
+	// advertised a Kill that could only fail (#3533, whose fenced suffix #3534
+	// fixed). The claim's interval and the fence's interval are now the same one.
+	//
+	// It is raised AFTER the LiveDead -> LiveLost normalization above because the
+	// fence's own precondition is LiveLost: raising it first would refuse every Dead
+	// row. And it is the recover fence itself, validated and raised under one lock
+	// (#3555) — not a second, weaker overlay that the backend call would then have
+	// to re-validate around.
+	if err := instance.BeginRecoverFence(); err != nil {
+		return "", fmt.Errorf("cannot restore: %w", err)
+	}
+	// ANNOUNCE the raise, the same contract #2997 gave the limit resume next door.
+	// Clients gate their controls on the projected op and perform no optimistic
+	// update for a CLI- or web-initiated restore, so a fence nobody is told about
+	// leaves an already-connected client offering Kill for the whole operation —
+	// which is the bug, seen from the client rather than from the row. The TUI's
+	// snapshot tick would repair it eventually; the events plane is what makes it
+	// immediate, and it is the only repair a web client gets.
+	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+	// A DEFER rather than a statement on each arm, because every exit below has to
+	// lower this and a missed one is worse than the bug: the poll skips any session
+	// with an op in flight and every runtime action and lifecycle control refuses
+	// it, so the row would be permanently busy. The arms are the probe-alive heal
+	// (settled and settle-failed), the indeterminate refusal, the two
+	// durable-branch refusals, the failed pre-reap push, the two failed-Recover
+	// exits, and the successful restore — and the defer covers whatever is added
+	// next to that list, which an enumeration would not.
+	//
+	// A no-op on the success path, where ConfirmLive has already cleared the op, and
+	// it never disturbs an op another owner raised.
+	//
+	// It ANNOUNCES an effective release, which is what EndRecoverFence's bool return
+	// is for. Having told clients the row is busy, this call owes them the release:
+	// they learn of state changes only from the events plane, and the status poll
+	// cannot repair the gap because it too skips a session with an op in flight.
+	// The heal arm lowers the fence BEFORE its own settlement publishes, so this
+	// stays a no-op there rather than a duplicate.
+	defer func() {
+		if instance.EndRecoverFence() {
+			m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+		}
+	}()
+
 	// The same live recheck the automatic loop runs before re-provisioning
 	// (lostrestore.go), for the same reason: a remote Recover is not a reconnect
 	// but a fresh sandbox cloned from origin, and this row's Lost mark may be
@@ -125,6 +179,14 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
+		// Lower the fence HERE rather than leaving it to the deferred release: the
+		// settlement below is this arm's terminal announcement, and an event that
+		// carried {LiveRunning, OpRestoring} would tell every other client the row is
+		// still being restored — with Kill still hidden — until something else
+		// happened to republish it. Ordering only, not a second release: the heal
+		// transition above is already applied, and ObserveLiveness preserves the op
+		// axis, so clearing it after cannot clobber the liveness this arm just set.
+		_ = instance.EndRecoverFence()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
@@ -192,15 +254,24 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
-	// RecoverFencedWithLiveBoundary raises OpRestoring before the backend runs so
-	// clients (TUI and web) see the fence and hide Kill, mirroring the
-	// archived-restore path (BeginRestore). ConfirmLive clears it on success;
-	// the method lowers it with ClearOp on failure.
-	if err := instance.RecoverFencedWithLiveBoundary(func() {
+	// The fence this runs under was raised at the top of the operation, so it has
+	// been hiding Kill since before the probe (#3586). The held variant re-checks
+	// that precondition through the shared ledger (RuntimeActionRecoverFenced)
+	// instead of re-entering RuntimeActionRecoverLost, which still requires OpNone
+	// and would now refuse its own operation's fence. ConfirmLive clears the fence
+	// on success; the deferred EndRecoverFence above lowers it on failure.
+	if err := instance.RecoverHeldFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, instance); perr != nil {
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", title, perr)
 		}
 	}); err != nil {
+		// The fence stays up through the bookkeeping below and comes down in the
+		// deferred release, which is what announces it. Nothing here is distorted by
+		// that ordering — persistInstanceData scrubs the in-flight op before it
+		// writes, and recordLostRestoreFailure touches only the retry state — while
+		// lowering it early would silence the release for the one outcome a watching
+		// client most needs to see: the restore failed and the row is free again.
+		//
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the
 		// outcome of this persist is part of the message. The plain arm keeps the
