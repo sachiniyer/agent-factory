@@ -129,6 +129,19 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
+// endsWithOpenStyle reports whether these rows leave an SGR in effect — that is,
+// the last styling sequence in them is not a reset. Scanned from the end, since
+// only the final sequence decides what the terminal is still applying.
+func endsWithOpenStyle(lines []string) bool {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matches := sgrRegex.FindAllString(lines[i], -1); len(matches) > 0 {
+			last := matches[len(matches)-1]
+			return last != "\x1b[0m" && last != "\x1b[m"
+		}
+	}
+	return false
+}
+
 // Split a string into lines, additionally returning the size of the widest
 // line.
 //
@@ -200,9 +213,11 @@ func PlaceOverlay(
 	// modal one cell too wide loses a cell, which is visible and bounded, instead
 	// of costing the user everything behind it. Deliberately NOT a change of
 	// measure — see the note on getLines for why that needs its own decision.
+	heightClipped := false
 	if fgHeight > bgHeight {
 		fgLines = fgLines[:bgHeight]
 		fgHeight = bgHeight
+		heightClipped = true
 	}
 	if fgWidth > bgWidth {
 		for i, line := range fgLines {
@@ -214,6 +229,16 @@ func PlaceOverlay(
 			fgLines[i] = truncate.String(line, uint(bgWidth))
 		}
 		fgWidth = bgWidth
+	}
+	// A style opened on a RETAINED row may have had its reset on a discarded one.
+	// The compositor writes background cells after every foreground row, so leaving
+	// it open bleeds the modal's color across the frame and onward past the end of
+	// the output. Close it at the cut. Done after BOTH clips so the reset cannot
+	// itself be truncated away, and only on the height path — the width truncator
+	// closes what it cuts through on its own, and an unclipped foreground keeps
+	// whatever styling it arrived with.
+	if heightClipped && len(fgLines) > 0 && endsWithOpenStyle(fgLines) {
+		fgLines[len(fgLines)-1] += "\x1b[0m"
 	}
 
 	// An overlay is OPAQUE: every cell inside its rectangle belongs to it,

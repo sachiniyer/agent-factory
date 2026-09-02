@@ -118,3 +118,74 @@ func TestPlaceOverlayClipsBeforeClamping(t *testing.T) {
 		}
 	}
 }
+
+// openSGR reports whether s ends with a styling sequence still in effect.
+func openSGR(s string) bool {
+	m := sgrRegex.FindAllString(s, -1)
+	if len(m) == 0 {
+		return false
+	}
+	last := m[len(m)-1]
+	return last != "\x1b[0m" && last != "\x1b[m"
+}
+
+// #3433 review. Clipping rows off an over-tall modal can discard the row that
+// CLOSES a style opened on a retained row. The compositor writes background cells
+// after every foreground row, so an unterminated SGR bleeds the modal's color
+// across the frame and onward past the end of the output.
+func TestPlaceOverlayClosesAStyleWhoseResetWasClipped(t *testing.T) {
+	const cols, rows = 40, 6
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	fgRows := make([]string, rows+4)
+	for i := range fgRows {
+		fgRows[i] = "modal"
+	}
+	fgRows[0] = "\x1b[31mmodal"            // opened on a RETAINED row
+	fgRows[len(fgRows)-1] = "modal\x1b[0m" // closed on a row the clip discards
+	fg := strings.Join(fgRows, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if openSGR(out) {
+		t.Fatal("the composite must not end with an open SGR: the clipped modal's style would " +
+			"bleed across the background and past the end of the frame")
+	}
+}
+
+// The width half of the same concern, verifying rather than assuming: the reflow
+// truncator calls ResetAnsi() when it cuts through an SGR, so a clipped-wide row
+// closes its own styling. If that ever stopped being true, the width clip would
+// need the same treatment the height clip gets.
+func TestPlaceOverlayClippedWideRowClosesItsOwnStyle(t *testing.T) {
+	const cols, rows = 20, 4
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	// Opens a color, and its reset sits past the clip point.
+	wide := "\x1b[31m" + strings.Repeat("m", cols*2) + "\x1b[0m"
+	fg := strings.Join([]string{wide, wide}, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if openSGR(out) {
+		t.Fatal("a row clipped for width must not leave its style open")
+	}
+}
+
+// And the other direction, so closing-at-the-cut cannot become "always append a
+// reset": a modal that fits is composited byte-for-byte as it arrived, keeping
+// whatever styling it brought.
+func TestPlaceOverlayLeavesAFittingModalsStylingAlone(t *testing.T) {
+	const cols, rows = 40, 6
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+	fg := "\x1b[31mmodal\x1b[0m\nplain"
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if !strings.Contains(out, "\x1b[31mmodal\x1b[0m") {
+		t.Fatalf("a fitting modal's styling must pass through untouched; got %q", out)
+	}
+	if strings.Contains(out, "\x1b[0m\x1b[0m") {
+		t.Fatal("no spurious reset may be appended to a modal that was not clipped")
+	}
+}
