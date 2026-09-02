@@ -509,6 +509,21 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 			"the listener stays up on a downgrade — that is what makes the fallback unsafe")
 	})
 
+	t.Run("silent when enforcement was already grouped", func(t *testing.T) {
+		// [network] require_token = true is invisible to a pre-#3354 af BEFORE
+		// this run too, so the migration costs that binary nothing — and the
+		// backup holds the same grouped spelling, so "restore it before
+		// downgrading" would be a recovery instruction that still leaves the
+		// control plane tokenless. Worse than silence (#3624 review).
+		migrateHome(t, "schema_version = 1\nrequire_loopback_token = true\n\n[network]\nrequire_token = true\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1, "only the flat loopback flag moves")
+		assert.Equal(t, "network.require_loopback_token", result.Migrated[0].To)
+		assert.Empty(t, result.Cautions)
+	})
+
 	t.Run("silent when the loopback flag is inert", func(t *testing.T) {
 		// require_loopback_token only tightens a token that require_token must
 		// first turn on. With enforcement off, nothing is authenticated even

@@ -273,13 +273,32 @@ var tokenKeysLostOnDowngrade = map[string]bool{
 // security decision off it would mean matching TOML source text. Asking the
 // loader what the setting actually decoded to cannot drift with a spelling.
 func downgradeCautions(migrated []MigratedKey, cfg *Config, backup string) []string {
+	// Two conditions, and both are about whether this migration is what costs the
+	// reader their authentication.
+	//
 	// network.require_loopback_token is INERT while network.require_token is
-	// false — it tightens a token that require_token must first turn on, so a
+	// false — it tightens a token that require_token must first turn on — so a
 	// config with the loopback flag alone authenticates nothing even before the
-	// migration, and there is no authentication for a downgrade to lose. Saying
-	// otherwise would be a security warning that is simply untrue for that
-	// config, which is worse than silence (#3624 review).
+	// migration, and a downgrade takes nothing away.
+	//
+	// And enforcement must have been readable by a pre-#3354 af to begin with,
+	// which means THIS RUN is what moved require_token out of the flat spelling.
+	// If it was already grouped, an older binary never saw it, this migration
+	// changed nothing for that binary — and the backup cannot restore what it
+	// does not contain in a readable form. Telling someone to restore it would
+	// be a recovery instruction that leaves the control plane tokenless anyway,
+	// which is worse than the silence it replaces (#3624 review).
 	if enforced, ok := CurrentValue(cfg, "network.require_token"); !ok || enforced != "true" {
+		return nil
+	}
+	movedEnforcement := false
+	for _, key := range migrated {
+		if key.To == "network.require_token" {
+			movedEnforcement = true
+			break
+		}
+	}
+	if !movedEnforcement {
 		return nil
 	}
 	var affected []string
