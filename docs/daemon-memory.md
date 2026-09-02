@@ -321,15 +321,24 @@ That is a description of one box over 13 lifetimes, not a formula for yours. The
 transferable part is the mechanism: a heavy post-worktree hook lands on the
 daemon unit.
 
-**And only for a session whose worktree the daemon creates locally.** The other
-four backends provision off-box: `docker`, `ssh`, `sandbox` and `hook` all send
-the provision request to a remote `af agent-server`
+**And only for a worktree the daemon creates on its own box.** The other four
+backends provision through an `af agent-server`: `docker`, `ssh`, `sandbox` and
+`hook` send the provision request to that server
 (`session/backend_remote_agent.go`), and it is *that* server's in-workspace local
-backend which creates the worktree and runs the post-worktree commands. Those
-hook processes are descendants of the remote agent-server, on the remote machine,
-so they never touch your daemon's unit — and neither this correlation nor the
-#3650 guidance below applies to them. On a remote fleet, look for the build on
-the machine hosting the workspace.
+backend which creates the worktree and runs the post-worktree commands. Where the
+server runs on another machine, its hook processes are its descendants there and
+never reach your daemon's unit — so on a remote fleet, look for the build on the
+machine hosting the workspace.
+
+**Qualify that by where the agent-server runs, not by the backend's name.** A
+`hook` backend only has to hand back an agent-server endpoint; its `launch_cmd`
+may perfectly well start that server **on the daemon host**, which
+`session/runtime.go` calls out explicitly, and af moves nothing out of the
+cgroup it lands in. Such a tree is a descendant of the daemon unit after all, and
+its post-worktree builds do count toward the unit's peak. So if a peak is
+unexplained, check where that session's agent-server actually runs and read its
+`/proc/<pid>/cgroup` — do not rule a session out merely because its backend is
+not `local`.
 
 #3650 moves those spawns into their own transient scope — a sibling under
 `app.slice` rather than a child of the daemon unit, so the build is off the
@@ -339,30 +348,33 @@ archive hook do not yet. Read `/proc/<hook pid>/cgroup` while a hook runs rather
 than inferring which side of #3650 your build is on. Until it lands, size the
 **box** for what your local hooks build — not the daemon.
 
-### A high child-process rate, which is not a measured driver
+### High child-process churn, which is not a measured driver
 
-Sampling the unit's `cgroup.procs` at full speed for 75 seconds observed **1,243
-distinct child processes — at least 16.6 per second**. By name, most were
-`tmux capture-pane` and the rest largely `git rev-parse`.
+Sampling the unit's `cgroup.procs` at full speed for 75 seconds saw **1,243
+distinct pids pass through the cgroup**. By name, most were `tmux capture-pane`
+and the rest largely `git rev-parse` — the calls af's own poll loop makes.
 
-**That is a floor under the exec rate, not the rate.** Polling `cgroup.procs`
-sees only a process that is alive at the instant of a read, so every `tmux` or
-`git` that started and exited between two reads is missing from every sample —
-and 396 of the 1,243 had already exited by the time `/proc` could be read for a
-name, which is the same effect one step later. Nothing here measured process
-*creation*; that wants an event-based mechanism (fork/exec tracepoints,
-`bpftrace`, audit), and none was run. So read it as **≥16.6 observed execs per
-second**, and the ~1.4M a day it implies as that floor extended around the clock
-— a bound with a direction, not an estimate of the true rate.
+**That is a count over a window, and it does not convert into an exec rate in
+either direction.** `cgroup.procs` reports which processes are in the cgroup at
+the instant it is read, not exec events, and the two errors point opposite ways.
+A process already alive at the first read is counted even though it started
+before the window opened, which biases `1,243 / 75 s` **upward**; anything that
+starts and exits between two reads appears in no sample at all, which biases it
+**downward**. Neither was quantified — no baseline population was subtracted, and
+396 of the 1,243 had already exited before `/proc` could be read for a name.
+Nothing here measured process *creation*; that wants an event-based mechanism
+(fork/exec tracepoints, `bpftrace`, audit), and none was run. So the count stands
+as a count over its window, and this page derives no per-second or per-day rate
+from it.
 
-It is a rate, not a cost. No CPU time was measured here — sampling `cgroup.procs`
+It is churn, not a cost. No CPU time was measured here — sampling `cgroup.procs`
 counts processes, and the heap profile counts allocations — and what these
-children burn is child CPU rather than daemon CPU in any case. Nor does the rate
+children burn is child CPU rather than daemon CPU in any case. Nor does the count
 decompose into one capture per session per poll: on the local path a single poll
 captures the pane **twice** (`CheckAndHandleTrustPrompt` in
 `session/tmux/start.go`, then `HasUpdatedWithBaseline` in `session/tmux/io.go`),
-and other contexts skip polling altogether. Take the ≥16.6/s as measured and
-leave it there.
+and other contexts skip polling altogether. Take the count over its window as
+measured and leave it there.
 
 It is **not** an established cause of the cgroup's `file` figure, and this page
 will not claim it is. Page cache is charged on first touch and shared
