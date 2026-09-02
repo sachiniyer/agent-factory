@@ -95,9 +95,11 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 		}
 		tasks[i].Arming = task.ArmingArmed
 		if !next.IsZero() {
-			// Zero only before the cron has started, which computes every entry's
-			// first fire; the task is armed either way, and inventing a time here
-			// would be the recomputation this feature exists to remove.
+			// Zero reaches here only before the cron has started, which computes
+			// every entry's first fire; the task is armed either way, and inventing
+			// a time would be the recomputation this feature exists to remove. A
+			// RUNNING cron's zero entry never reaches here at all — armingSnapshot
+			// reports it as not armed, because that is what it is.
 			at := next
 			tasks[i].NextRunAt = &at
 		}

@@ -303,3 +303,63 @@ func TestFirstOccurrencePerID_LeavesDistinctIDsAlone(t *testing.T) {
 	tasks := []task.Task{enabledCronTask("aaaa2001", ""), enabledCronTask("aaaa2002", "")}
 	assert.Equal(t, tasks, firstOccurrencePerID(tasks))
 }
+
+// TestArmingSnapshot_ZeroNextEntryIsNotArmed: robfig sorts zero-Next entries
+// last and breaks on the first one it reaches, so an entry it holds with no
+// next-fire time is never recomputed for the life of the process (cron.go
+// byTime/run). That happens when Next() found no match inside its five-year
+// horizon when the entry was created — a long-gap expression such as a leap day
+// before a skipped leap year — and it PERSISTS after the horizon moves on, so
+// this daemon will not run that task until something reloads it.
+//
+// Reporting it as armed would be the fabricated positive: the record-derived
+// verdict clears once the horizon moves, and doctor would then call a task
+// healthy that this scheduler is never going to fire.
+func TestArmingSnapshot_ZeroNextEntryIsNotArmed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	// February 31st: parses, matches no date, so Next() hands back the zero time
+	// exactly as a long-gap expression does inside the blind window.
+	never := enabledCronTask("nofire01", "")
+	never.CronExpr = "0 0 31 2 *"
+	fires := enabledCronTask("fires001", "")
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.reloadTasks([]task.Task{never, fires}))
+	srv.scheduler.Start()
+	t.Cleanup(srv.scheduler.Stop)
+
+	snapshot, observed := srv.scheduler.armingSnapshot()
+	require.True(t, observed)
+	assert.NotContains(t, snapshot, "nofire01",
+		"an entry the running cron will not fire is not one it is holding for us")
+	assert.Contains(t, snapshot, "fires001", "and its neighbour is unaffected")
+
+	got := srv.withLiveArming([]task.Task{never, fires})
+	assert.Equal(t, task.ArmingNotArmed, got[0].Arming)
+	assert.Nil(t, got[0].NextRunAt)
+	assert.Equal(t, task.ArmingArmed, got[1].Arming)
+	assert.NotNil(t, got[1].NextRunAt)
+}
+
+// TestArmingSnapshot_BeforeStartAZeroNextIsNotAVerdict: every entry's Next is
+// zero until the run loop computes one, so the rule above must not fire in that
+// window — it would report every cron task on a starting daemon as unarmed,
+// which is the fabricated negative the whole arming tri-state exists to avoid.
+func TestArmingSnapshot_BeforeStartAZeroNextIsNotAVerdict(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	fires := enabledCronTask("fires002", "")
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.reloadTasks([]task.Task{fires}))
+	// Deliberately NOT started.
+
+	snapshot, observed := srv.scheduler.armingSnapshot()
+	require.True(t, observed, "arming has run, so the state is observed")
+	require.Contains(t, snapshot, "fires002")
+	assert.True(t, snapshot["fires002"].IsZero(), "precondition: nothing has computed a fire time yet")
+
+	got := srv.withLiveArming([]task.Task{fires})
+	assert.Equal(t, task.ArmingArmed, got[0].Arming,
+		"the scheduler holds it; only a RUNNING cron's zero is a verdict")
+	assert.Nil(t, got[0].NextRunAt, "and no time is invented for it")
+}

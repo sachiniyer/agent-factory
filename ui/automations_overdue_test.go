@@ -205,7 +205,24 @@ func TestAutomationsDiagnosesAMalformedExpression(t *testing.T) {
 
 	out := a.View()
 	assert.Contains(t, out, "▾[!]  nightly-sweep")
-	assert.Contains(t, out, "Invalid cron expression",
-		"the mark needs a reason on the line beneath it:\n%s", out)
+	assert.Contains(t, out, "Invalid cron expression · 99 * * * *",
+		"the reason LEADS the line, ahead of the expression it is about:\n%s", out)
 	assert.NotContains(t, out, "next ", "and no fire time is promised")
+}
+
+// TestAutomationsDiagnosisSurvivesTheRailMinimum: at 22 columns the detail line
+// keeps 16 cells and is clipped from the right, so a reason placed behind the
+// expression leaves the mark unexplained — which is the whole failure the mark
+// exists to prevent, one level down.
+func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
+	broken := stripTasks()[0]
+	broken.CronExpr, broken.Unschedulable = "99 * * * *", true
+
+	a := newTestAutomations([]task.Task{broken})
+	a.SetRect(layout.Rect{W: 22, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "Invalid cron",
+		"enough of the reason has to survive the clip to read as one:\n%s", out)
 }

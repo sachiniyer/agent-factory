@@ -31,6 +31,11 @@ type taskScheduler struct {
 	// unarmed in that window would be the fabricated negative this whole feature
 	// exists to remove (#3623).
 	armed bool
+	// started latches when the cron's run loop is going. Before it, every entry
+	// carries a zero next-fire time simply because nothing has computed one yet —
+	// which must not be read as the very different "this entry will never fire"
+	// (see armingSnapshot).
+	started bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// parse allows a seconds-granularity parser so firing tests don't wait a
@@ -63,6 +68,9 @@ func newTaskScheduler() *taskScheduler {
 // schedules; overlapping fires of the same task are serialized by RunTask's
 // per-task lock file.
 func (s *taskScheduler) Start() {
+	s.mu.Lock()
+	s.started = true
+	s.mu.Unlock()
 	s.cron.Start()
 }
 
@@ -181,9 +189,29 @@ func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
 	}
 	next := make(map[string]time.Time, len(s.entries))
 	for id, entryID := range s.entries {
-		if at, ok := live[entryID]; ok {
-			next[id] = at
+		at, ok := live[entryID]
+		if !ok {
+			continue
 		}
+		// An entry the running cron holds with a ZERO next-fire time is one it will
+		// not fire, and robfig never revisits it: its run loop sorts zero entries
+		// last and breaks on the first one it reaches, so that entry is not
+		// recomputed for the life of the process (cron.go byTime/run). It gets there
+		// when Next() found no match inside its five-year horizon at the moment the
+		// entry was created — a long-gap expression such as a leap day in the run-up
+		// to a skipped leap year — and it STAYS there even once the horizon has
+		// moved on, so this daemon will not run that task until something reloads
+		// it. Omitting it from the map reports it as not armed, which is what it
+		// functionally is, and points at the daemon restart that actually fixes it
+		// (#3623 review).
+		//
+		// Only once the cron is RUNNING. Before Start every entry's Next is zero
+		// because nothing has computed one yet, and reading that as "will not fire"
+		// would report every cron task on a starting daemon as broken.
+		if s.started && at.IsZero() {
+			continue
+		}
+		next[id] = at
 	}
 	return next, true
 }
