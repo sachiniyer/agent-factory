@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -235,7 +236,7 @@ func TestArchiveWorktree_DoesNotKillTmuxServer(t *testing.T) {
 	root := normalizeWorktreePath(srcPath)
 	requireEventually(t, 5*time.Second, func() bool {
 		cwd, ok := proctree.WorkingDir(process.PID)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}, "the tmux-server fixture cwd never became observable inside the worktree")
 
 	require.NoError(t, gw.ArchiveWorktree(dest))

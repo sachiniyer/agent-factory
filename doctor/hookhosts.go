@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -250,7 +251,7 @@ func hookHostPinShape(dir string) (fs.FileInfo, error) {
 func hookHostRemoveFix(ctx *scanContext, root string, pin hookHostPin) func() error {
 	return func() error {
 		dir := filepath.Join(root, pin.slug)
-		if !pathInside(root, dir) {
+		if !pathutil.IsStrictlyInside(dir, root) {
 			return fmt.Errorf("refusing to remove %s: it is not inside the pinned host-key store %s", dir, root)
 		}
 		key, err := hookHostPinShape(dir)
