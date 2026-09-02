@@ -326,7 +326,11 @@ func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 		// A probe that never answered says nothing about what the user typed
 		// (#3504): tell them it is worth retrying instead of rejecting the path.
 		if config.RepoProbeUnanswered(err) {
-			m.projectPickerOverlay.SetAddError(fmt.Sprintf("could not check %s — git did not answer; try again", path))
+			// The path the user typed is rendered on the line directly above
+			// this one, and the overlay is narrow: repeating it here pushes the
+			// actionable half off the end (play-tested — "try again" was the
+			// part that truncated).
+			m.projectPickerOverlay.SetAddError("could not check — git did not answer; try again")
 			return m, nil
 		}
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
