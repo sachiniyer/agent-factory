@@ -92,13 +92,22 @@ var (
 	// whole clause is always on that one line, and collectLog drops the partial
 	// first line of a truncated tail, so a bundled clause is never half a line.
 	archiveWarningRetainedAt = regexp.MustCompile(`complete original tree\(s\) were retained at ([^\r\n]*)`)
-	// archiveWarningTail is the renderer's grammar for that remainder: the
-	// retained-root list, the label, and the skipped-path list (empty when a tree
-	// was retained with nothing recorded under it).
+	// archiveWarningTail is the renderer's grammar for that remainder, in four
+	// groups: the retained-root list, the label between them, the skipped-path
+	// list (empty when a tree was retained with nothing recorded under it), and
+	// whatever a caller appended to the same line.
+	//
+	// That last group is why the invariant holds: it admits no `"` at all, so
+	// EVERY quoted token in a parsed remainder sits in group 1 or group 3 and is
+	// rewritten. A wrapper that adds quote-free text — `failedArchiveWithHook`
+	// appends "(its on-archive hook also failed: …)" to a joined error whose last
+	// line is this warning — keeps its diagnostics; one that adds a quoted token
+	// fails the grammar and takes the fail-safe path in redactArchiveWarningTail.
 	archiveWarningTail = regexp.MustCompile(
 		`\A(` + archiveWarningRetainedItem + `(?:, ` + archiveWarningRetainedItem + `)*)` +
-			`; skipped paths(?: \(showing first \d+ of \d+\))?: ` +
-			`((?:` + archiveWarningSkippedItem + `(?:, ` + archiveWarningSkippedItem + `)*)?)\z`)
+			`(; skipped paths(?: \(showing first \d+ of \d+\))?: )` +
+			`((?:` + archiveWarningSkippedItem + `(?:, ` + archiveWarningSkippedItem + `)*)?)` +
+			`([^"\r\n]*)\z`)
 	archiveWarningQuoted = regexp.MustCompile(archiveWarningQuotedPattern)
 )
 
@@ -334,10 +343,12 @@ func scrubArchiveWarningPaths(s string) string {
 //     it can match — and for a root that is already valid UTF-8, which is every
 //     ordinary one, that rewrite is the identity.
 //
-// A remainder that does not parse as the renderer's grammar is dropped whole.
-// Something appended to the line or the format moved; either way the quoted runs
-// can no longer be told apart, and a bundle that loses a skip reason is a
-// nuisance where one that ships a user's file names is the bug being fixed.
+// A remainder that does not parse as the renderer's grammar is dropped WHOLE.
+// The format moved, or something appended a quoted token of its own; either way
+// the quoted runs can no longer be told apart, and a bundle that loses a skip
+// reason is a nuisance where one that ships a user's file names is the bug being
+// fixed. Between the grammar and that fallback, no quoted token in a matched
+// clause can reach the bundle unrewritten.
 func redactArchiveWarningTail(tail string) string {
 	parsed := archiveWarningTail.FindStringSubmatchIndex(tail)
 	if parsed == nil {
@@ -346,12 +357,13 @@ func redactArchiveWarningTail(tail string) string {
 	var out strings.Builder
 	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
 		tail[parsed[2]:parsed[3]], archiveWarningDisplayRoot))
-	// The label between the two lists, kept verbatim: it carries the
-	// "(showing first X of Y)" count triage reads.
-	out.WriteString(tail[parsed[3]:parsed[4]])
+	// The label, kept verbatim: it carries the "(showing first X of Y)" count
+	// triage reads. Like the trailing group, it holds no quoted token.
+	out.WriteString(tail[parsed[4]:parsed[5]])
 	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
-		tail[parsed[4]:parsed[5]],
+		tail[parsed[6]:parsed[7]],
 		func(string) string { return strconv.Quote(redactedMarker) }))
+	out.WriteString(tail[parsed[8]:parsed[9]])
 	return out.String()
 }
 

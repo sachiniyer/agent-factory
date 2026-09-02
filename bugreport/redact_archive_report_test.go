@@ -571,18 +571,47 @@ func TestScrubLogRedactsQuoteBearingArchiveWarningNames(t *testing.T) {
 	}
 }
 
+// TestScrubLogRedactsArchiveWarningWithAppendedText covers a line a CALLER
+// extended. failedArchiveWithHook wraps its cause as "%w (its on-archive hook
+// also failed: %v)", and that cause can be an errors.Join whose last line is
+// this warning — so the renderer's last field is not always the end of the line
+// in production. Quote-free trailing text is admitted by the grammar and kept:
+// it cannot hide a file name, and dropping it would cost the reader the second
+// half of a two-failure diagnostic.
+func TestScrubLogRedactsArchiveWarningWithAppendedText(t *testing.T) {
+	leaks := []string{"credential", "private-work.txt"}
+	report := archiveReportWithSkipped("/worktrees/.af-source-abc123", leaks...)
+	const appended = " (its on-archive hook also failed: exit status 1)"
+
+	r := &redactor{}
+	got := r.scrubLog(archiveWarningLog(report, "archive") + appended)
+
+	for _, name := range leaks {
+		if strings.Contains(got, name) {
+			t.Errorf("skipped file name %q survived on an extended line:\n%s", name, got)
+		}
+	}
+	if !strings.Contains(got, appended) {
+		t.Errorf("quote-free trailing text should survive:\n%s", got)
+	}
+	if !strings.Contains(got, "permission denied") {
+		t.Errorf("the skip reason should survive on an extended line:\n%s", got)
+	}
+}
+
 // TestScrubLogRedactsUnrecognizedArchiveWarningTail pins the direction this
 // scrub fails in. It reads the renderer's grammar, so anything that breaks that
-// grammar before the bundle is built — a caller appending to the line, a future
-// field added to the warning — makes the list unparseable. When that happens the
-// whole list goes, diagnostics and all: a bundle that loses a reason is a
-// nuisance, and one that ships a user's file names is the bug being fixed.
+// grammar before the bundle is built — a wrapper appending a QUOTED token of its
+// own, a future field added to the warning — makes the list unparseable. When
+// that happens the whole remainder goes, diagnostics and all: a bundle that
+// loses a reason is a nuisance, and one that ships a user's file names is the
+// bug being fixed.
 func TestScrubLogRedactsUnrecognizedArchiveWarningTail(t *testing.T) {
 	leaks := []string{"credential", "private-work.txt"}
 	report := archiveReportWithSkipped("/worktrees/.af-source-abc123", leaks...)
 
 	r := &redactor{}
-	got := r.scrubLog(archiveWarningLog(report, "restore") + " (attempt 2 of 3)")
+	got := r.scrubLog(archiveWarningLog(report, "restore") + ` (retrying "af archive")`)
 
 	for _, name := range leaks {
 		if strings.Contains(got, name) {
