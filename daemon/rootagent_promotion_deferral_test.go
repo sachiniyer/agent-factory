@@ -10,6 +10,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The ways a provisional identity can be left half-transitioned (#3530 review
@@ -662,8 +663,8 @@ func TestStartupReconciliationRetriesUntilItSucceeds(t *testing.T) {
 		t.Fatalf("fixture must start with the backfill having FAILED, got %q", recorded)
 	}
 	owed := manager.rootAgentLayers.Load().reconcileOwed
-	if owed[project.ID] != realID {
-		t.Fatalf("a proven-but-unwritten identity must be retained as work; owed=%v", owed)
+	if entry := owed[project.ID]; entry.repoID != realID || !entry.proven {
+		t.Fatalf("a proven-but-unwritten identity must be retained as work, and retained as PROVEN so the retry does not re-derive it; owed=%v", owed)
 	}
 
 	// The registry is repaired, and the ensure cadence completes what the boot
@@ -1084,5 +1085,243 @@ func TestUnansweredProbeWithholdsTheRecordedPathSweep(t *testing.T) {
 		if id == pathID {
 			t.Fatalf("the sweep supplied %s on an UNANSWERED probe: a repository occupying that path owns the id, so this deletes a live occupant's opt-in", pathID)
 		}
+	}
+}
+
+// TestUnprovenLegacyRowIsRetried pins #3530 review id 3918535472.
+//
+// A legacy row whose path RESOLVES never joins unresolvedRoots, so when its
+// checkout-marker proof fails — a read that times out or cannot be read — there
+// was nothing left for the heal pass to do and the row stayed without repo_id
+// for the daemon's life. The proof failing is as unfinished as the write
+// failing; it is latched UNPROVEN, so the retry re-establishes it rather than
+// inheriting a claim about a checkout it never verified.
+func TestUnprovenLegacyRowIsRetried(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	// The marker cannot be read at startup, so the proof fails while the path
+	// itself resolves perfectly well.
+	marker := checkoutMarkerPathForTest(t, repoPath)
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatalf("chmod marker: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must start with the proof having FAILED, got %q", recorded)
+	}
+	owed := manager.rootAgentLayers.Load().reconcileOwed
+	entry, ok := owed[project.ID]
+	if !ok || entry.proven {
+		t.Fatalf("an unproven row must be retained as work, and retained as UNPROVEN so the retry re-derives the proof; owed=%v", owed)
+	}
+
+	// The marker becomes readable, and the ensure cadence finishes what the
+	// boot could not.
+	if err := os.Chmod(marker, 0o644); err != nil {
+		t.Fatalf("restore marker: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
+		t.Fatalf("the identity must be recorded once its checkout can be verified: recorded %q, want %s", recorded, realID)
+	}
+	if left := manager.rootAgentLayers.Load().reconcileOwed; len(left) != 0 {
+		t.Fatalf("a completed reconciliation must drop its latch, got %v", left)
+	}
+}
+
+// checkoutMarkerPathForTest finds the one checkout marker under a repo's git
+// directory. The registry writes it there; tests that need to make identity
+// UNPROVABLE break exactly that file.
+func checkoutMarkerPathForTest(t *testing.T, repoPath string) string {
+	t.Helper()
+	candidates, err := filepath.Glob(filepath.Join(repoPath, ".git", "agent-factory", "checkout-id-*"))
+	if err != nil {
+		t.Fatalf("glob markers: %v", err)
+	}
+	var markers []string
+	for _, candidate := range candidates {
+		if !strings.HasSuffix(candidate, ".lock") {
+			markers = append(markers, candidate)
+		}
+	}
+	if len(markers) != 1 {
+		t.Fatalf("expected exactly one checkout marker, got %v", candidates)
+	}
+	return markers[0]
+}
+
+// TestProvisionalDeleteRefusesWhileSessionsRemainUnderTheOldHash pins #3530
+// review id 3918535480.
+//
+// A provisional identity reaches nothing, which is the design — but the row it
+// would still deregister may have live sessions filed under the historical hash
+// of its recorded path. Deregistering while archiving nothing leaves them
+// orphaned behind a success, and which project that hash names cannot be
+// established from here.
+func TestProvisionalDeleteRefusesWhileSessionsRemainUnderTheOldHash(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	// A repository with no enclosing one, so a removed checkout resolves to
+	// nothing rather than upward into a parent.
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
+
+	// The checkout disappears BEFORE the daemon starts, which is what leaves
+	// the row unreconciled: a path that resolves at startup is backfilled
+	// there and then, and the state this finding is about never arises.
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must keep the row unreconciled, got %q", recorded)
+	}
+	// A live session filed under the identity the recorded path used to have,
+	// which is how every session created before the upgrade is keyed.
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "left-behind", Path: repoPath, Program: "claude"})
+	if err != nil {
+		t.Fatalf("NewInstance: %v", err)
+	}
+	inst.SetBackend(session.NewFakeBackend())
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(historical, "left-behind")] = inst
+	manager.mu.Unlock()
+
+	_, delErr := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	err = delErr
+	if err == nil {
+		t.Fatalf("a delete that can archive nothing must not deregister the row out from under live sessions")
+	}
+	if !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("the refusal must state that nothing was mutated: %v", err)
+	}
+	dir, dirErr := config.ProjectRegistryDir()
+	if dirErr != nil {
+		t.Fatalf("ProjectRegistryDir: %v", dirErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("and the record must survive it: %v", statErr)
+	}
+}
+
+// TestReappearingCheckoutRefusesTheTransitioningDelete pins #3530 review id
+// 3917929613.
+//
+// The transition gate opens when the recorded root is provably gone, because
+// no verdict about a checkout there can then arrive. But the claimant scan runs
+// after it and READS that path: a checkout reappearing in between would be
+// authorized by a marker match while the gate had already opened on the earlier
+// absence, so a real-to-real transition archives only the recorded id's
+// sessions and removes the row while the candidate id's remain.
+func TestReappearingCheckoutRefusesTheTransitioningDelete(t *testing.T) {
+	manager, repoPath, derivedID, realID := attributionFixture(t, verifiedProbe, rootGone)
+
+	// A checkout comes back at the recorded path while the claimant scan is
+	// reading it.
+	restored := false
+	deleteProjectPostClaimantHookForTest = func() {
+		if restored {
+			return
+		}
+		restored = true
+		if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+			t.Fatalf("restore a checkout mid-delete: %v", err)
+		}
+	}
+	t.Cleanup(func() { deleteProjectPostClaimantHookForTest = nil })
+
+	_, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	if !restored {
+		t.Fatalf("fixture never reached the claimant scan, so it pins nothing")
+	}
+	if err == nil {
+		t.Fatalf("a checkout that reappeared during the claimant scan makes the identity ambiguous again: the delete must refuse rather than act on the absence it observed earlier")
+	}
+	manager.mu.Lock()
+	_, suppressedReal := manager.deletedRootRepos[realID]
+	_, suppressedProvisional := manager.deletedRootRepos[derivedID]
+	manager.mu.Unlock()
+	if suppressedReal || suppressedProvisional {
+		t.Fatalf("nothing may be suppressed by a refused delete")
+	}
+}
+
+// TestContestedIdentityDefersThePromotion pins #3530 review id 3918535470.
+//
+// Real-to-real promotion moves the state filed under the identity being left
+// behind — but the snapshot's maps are keyed by repo id, so if ANOTHER live
+// project legitimately holds that id, the entry being moved may be its policy
+// rather than this project's. Two real identities at one id is the case this
+// change does not address (#3611), so the promotion defers rather than guess.
+func TestContestedIdentityDefersThePromotion(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+
+	// An ordinary registered project, live and resolving: it owns its id.
+	occupantPath := setupControlRepo(t)
+	occupant := registerTestProject(t, occupantPath)
+	writePersonalRootAgent(t, occupant.ID, "enabled = false")
+	contestedID := repoID(t, occupantPath)
+
+	// And a second project whose record is filed under that SAME id while its
+	// own checkout resolves to a different one.
+	worktree, project, realID := worktreeRecordedProject(t)
+	if realID == contestedID {
+		t.Fatalf("fixture must use two distinct identities")
+	}
+	setRecordedRepoID(t, project.ID, contestedID)
+	aside := worktree + ".aside"
+	if err := os.Rename(worktree, aside); err != nil {
+		t.Fatalf("hide the workspace: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	layers := manager.rootAgentLayers.Load()
+	if _, ok := layers.unresolvedRoots[contestedID]; !ok {
+		t.Fatalf("fixture must file the second record under %s", contestedID)
+	}
+	if _, ok := layers.projectRoots[contestedID]; !ok {
+		t.Fatalf("fixture must have the occupant holding %s in projectRoots", contestedID)
+	}
+
+	// The second project's workspace returns and verifies.
+	if err := os.Rename(aside, worktree); err != nil {
+		t.Fatalf("restore the workspace: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	after := manager.rootAgentLayers.Load()
+	if _, still := after.unresolvedRoots[contestedID]; !still {
+		t.Fatalf("a contested identity must leave the record unresolved rather than move state that may not be its own")
+	}
+	if root, published := after.projectRoots[realID]; published {
+		t.Fatalf("and nothing may be published under %s (root %q) on the strength of that move", realID, root)
+	}
+	if _, moved := after.personal[realID]; moved {
+		t.Fatalf("the occupant's personal layer must not be handed to %s", realID)
+	}
+	if _, kept := after.personal[contestedID]; !kept {
+		t.Fatalf("and it must stay where the occupant's own resolution finds it")
 	}
 }

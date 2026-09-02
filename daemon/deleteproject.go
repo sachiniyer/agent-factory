@@ -83,6 +83,13 @@ var deregisterRootAgents = config.DeregisterRootAgentsForRepo
 // can hold it open: in a real daemon the two are microseconds apart.
 var deleteProjectPreSweepHookForTest func()
 
+// deleteProjectPostClaimantHookForTest, when non-nil, runs after the claimant
+// scan and before the identity-transition check that follows it. That ordering
+// is #3530 review id 3917929613's subject — a checkout REAPPEARING while the
+// claimant scan reads it — and the two are microseconds apart in a real
+// daemon.
+var deleteProjectPostClaimantHookForTest func()
+
 // DeleteProjectResult reports what DeleteProject did so the control server can
 // publish one archived/killed event per affected session (plus a
 // projects-changed signal), and the CLI/TUI can report the counts.
@@ -411,14 +418,6 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			repoPath = registeredRoot
 		}
 	}
-	// LAST, after every registry lookup above and after the two selectors have
-	// been checked against each other: those establish whether this request
-	// selected a project at all, which is what decides whether the identity is
-	// ambiguous (#3530 review id 3915722493). Nothing has been mutated yet, so
-	// a refusal here is literally "nothing was changed".
-	if err := m.refuseIfIdentityInTransition(repoID, repoPath != ""); err != nil {
-		return deleteProjectTarget{repoID: repoID}, err
-	}
 	claimantProjectID := ""
 	if repoPath != "" {
 		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
@@ -448,6 +447,26 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 			}
 		}
 	}
+	if deleteProjectPostClaimantHookForTest != nil {
+		deleteProjectPostClaimantHookForTest()
+	}
+	// LAST — after every registry lookup, after the two selectors have been
+	// checked against each other, and after the claimant scan, because all of
+	// those establish whether this request selected a project at all, which is
+	// what decides whether the identity is ambiguous (#3530 review id
+	// 3915722493). Nothing has been mutated yet, so a refusal here is literally
+	// "nothing was changed".
+	//
+	// After the claimant scan specifically (#3530 review id 3917929613): that
+	// scan reads the recorded checkout, so a checkout REAPPEARING during it
+	// would otherwise be authorized by a marker match while the transition gate
+	// had already opened on the absence observed before it. Checking last makes
+	// the reappearance visible. It narrows the window rather than closing it —
+	// check-then-act is not atomic — and what remains is bounded by the
+	// delete's own fence.
+	if err := m.refuseIfIdentityInTransition(repoID, repoPath != ""); err != nil {
+		return deleteProjectTarget{repoID: repoID}, err
+	}
 	return deleteProjectTarget{
 		repoID:            repoID,
 		repoPath:          repoPath,
@@ -471,6 +490,28 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// could afford), refuse immediately and name the session: the create settles on its
 	// own and a retry then removes the project cleanly. Because this runs before the
 	// durable removals below, "nothing was changed" is literally true.
+	// A provisional target reaches nothing by construction, which is the point
+	// — but the row it would still deregister may have LIVE sessions filed
+	// under the historical hash of its recorded path, created while that path
+	// resolved (#3530 review id 3918535480). Deregistering while archiving
+	// nothing leaves them orphaned behind a success. Which project that hash
+	// names cannot be established from here — a stranger may have reused the
+	// path, which is the collision this change removes — so the honest answer
+	// is to refuse and name the remedy. The overwhelmingly common upgrade case,
+	// a legacy row with no sessions left, is untouched.
+	stranded := []string(nil)
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		if historical := config.RepoIDFromRoot(filepath.Clean(repoPath)); historical != repoID {
+			m.mu.Lock()
+			stranded = m.repoSessionTitlesLocked(historical, false)
+			m.mu.Unlock()
+		}
+	}
+	if len(stranded) > 0 {
+		sort.Strings(stranded)
+		return result, fmt.Errorf("delete project %s: this project was registered before af recorded repository identities, and session(s) %v are still live under the identity its recorded path used to have; deleting now would deregister the project and leave them behind — nothing was changed. Bring the checkout at %s back once so af can record the project's identity, then delete; or archive those sessions first", repoID, stranded, repoPath)
+	}
+
 	m.mu.Lock()
 	starting := m.repoSessionTitlesLocked(repoID, true)
 	if len(starting) == 0 {

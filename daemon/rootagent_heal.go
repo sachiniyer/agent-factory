@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -730,7 +731,7 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// of that delete. Deferring the promotion has to defer its retirement
 		// too; both retry on the next pass, together.
 		if !promoteRecordedIdentity(m, healed, derivedID, repo.ID) {
-			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified, but a delete holds the identity it is filed under; leaving the promotion to the next pass", record.root)
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified as repo %s, but the identity it is filed under (%s) is held by a delete or by another live project; leaving it unresolved for now", record.root, repo.ID, derivedID)
 			continue
 		}
 		retiredID := derivedID
@@ -764,17 +765,51 @@ func retryReconcileOwed(healed *rootAgentSnapshot) bool {
 	if len(healed.reconcileOwed) == 0 {
 		return false
 	}
-	remaining := make(map[string]string, len(healed.reconcileOwed))
+	// The registry is read ONCE for the whole pass, and only when an unproven
+	// entry needs it: a proven entry's retry is the write alone.
+	var projects []config.Project
+	for _, owed := range healed.reconcileOwed {
+		if owed.proven {
+			continue
+		}
+		if listed, err := config.ListProjects(); err == nil {
+			projects = listed
+		}
+		break
+	}
+	remaining := make(map[string]reconcileOwedEntry, len(healed.reconcileOwed))
 	changed := false
-	for projectID, repoID := range healed.reconcileOwed {
-		wrote, err := config.ReconcileProjectRepoID(projectID, repoID)
+	for projectID, owed := range healed.reconcileOwed {
+		if !owed.proven {
+			// Re-establish the proof before writing anything. Absence of a
+			// record, or a proof that now names a DIFFERENT identity, drops the
+			// entry: the first has nothing to write to, and the second means
+			// the checkout at that path is not what the boot resolved, which a
+			// later pass or a restart re-derives from scratch.
+			project, found := projectByID(projects, projectID)
+			if !found {
+				changed = true
+				continue
+			}
+			proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project)
+			if !ok {
+				remaining[projectID] = owed
+				continue
+			}
+			if proven != owed.repoID {
+				changed = true
+				continue
+			}
+			owed.proven = true
+		}
+		wrote, err := config.ReconcileProjectRepoID(projectID, owed.repoID)
 		if err != nil {
-			remaining[projectID] = repoID
+			remaining[projectID] = owed
 			continue
 		}
 		changed = true
 		if wrote {
-			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is recorded after all; an absent path now addresses this project as itself", projectID, repoID)
+			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is recorded after all; an absent path now addresses this project as itself", projectID, owed.repoID)
 		}
 	}
 	if !changed {
@@ -782,6 +817,15 @@ func retryReconcileOwed(healed *rootAgentSnapshot) bool {
 	}
 	healed.reconcileOwed = remaining
 	return true
+}
+
+func projectByID(projects []config.Project, id string) (config.Project, bool) {
+	for _, project := range projects {
+		if project.ID == id {
+			return project, true
+		}
+	}
+	return config.Project{}, false
 }
 
 // promoteRecordedIdentity moves every piece of state the identity a project was
@@ -822,6 +866,19 @@ func promoteRecordedIdentity(m *Manager, healed *rootAgentSnapshot, recordedID, 
 	_, fenced := m.projectDeletes[recordedID]
 	m.mu.Unlock()
 	if fenced {
+		return false
+	}
+	// And refuse when the identity being left behind is one ANOTHER live
+	// project legitimately holds (#3530 review id 3918535470). The snapshot's
+	// maps are keyed by repo id, so two projects at one identity collapse into
+	// one entry — which is exactly the two-real-identities-at-one-path case
+	// this change does not address (#3611). Moving that entry would hand the
+	// occupant's personal policy to the promoted identity, or discard it. A
+	// provisional id can never be contested this way (nothing resolves to one),
+	// so this only ever fires for a real→real transition; the record stays
+	// unresolved, which is the fail-closed direction, until one of the two
+	// projects is rebound or removed.
+	if _, contested := healed.projectRoots[recordedID]; contested {
 		return false
 	}
 	if layer, ok := healed.personal[recordedID]; ok {
