@@ -244,11 +244,12 @@ health, and remote-hook setup for the current repo when configured.
 
 `af doctor` is read-only by default: it reports orphaned processes left behind
 by dead sessions, processes pegging a CPU core inside live sessions, `af_` tmux
-sessions with no backing record, abandoned temp agent-factory homes, and daemon
-problems (stale socket, stale pid file, a daemon still running a replaced
-binary). With `--fix` it kills orphans whose ancestry markers prove they came
-from a dead Agent Factory session and removes stale temp homes, logging each
-action; anything it cannot verify is reported, never touched, and stays
+sessions with no backing record, abandoned temp agent-factory homes, pinned
+remote host-key directories no session owns, and daemon problems (stale socket,
+stale pid file, a daemon still running a replaced binary). With `--fix` it kills
+orphans whose ancestry markers prove they came from a dead Agent Factory
+session, removes stale temp homes, and removes orphaned host-key pins, logging
+each action; anything it cannot verify is reported, never touched, and stays
 advisory rather than failing the run. Exits 1 only when an actionable
 condition remains — advisory warnings do not.
 
@@ -270,11 +271,26 @@ no read-only verb (`launch_cmd` provisions real infrastructure and starts an
 `af agent-server`; `delete_cmd` tears it down), so the live wire round-trip is
 exercised by actually creating a session, not by a doctor dry-run.
 
-These checks run only for a repo that configures `remote_hooks`. Run outside a
-git repo, or in a repo with no remote backend — the common local-only case —
+Those two checks run only for a repo that configures `remote_hooks`. Run outside
+a git repo, or in a repo with no remote backend — the common local-only case —
 they collapse to a single `n/a — no remote backend configured` line and add no
-findings, so local users see no new noise. The remote checks are validated
-against the current working directory's repository; run `af doctor` from inside
-the repo whose remote setup you want to check.
+findings, so local users see no new noise. They are validated against the
+current working directory's repository; run `af doctor` from inside the repo
+whose remote setup you want to check.
+
+One check in this section is deliberately **not** repo-scoped:
+
+- **orphaned-hook-host** — a `provision_cmd` session pins one host key under
+  `$AGENT_FACTORY_HOME/hook-hosts/<name>` and owns that directory until its
+  `delete_cmd` succeeds; a few paths (notably a `delete_cmd` that answers with
+  an error) leave one behind with no owner. Hook names are one namespace for the
+  whole machine, so this check asks the running daemon for **every** project's
+  sessions and reads every project's records from disk, rather than scoping
+  itself to the current repo. It also runs whether or not this repo configures a
+  remote backend, because an orphan outlives the config that created it. `--fix`
+  removes a directory only on proof that no session — live, archived, mid-kill,
+  or killed and awaiting its teardown — owns it; if any part of that inventory
+  cannot be read, the directories are reported as undetermined and nothing is
+  removed. It is silent on a machine with no `hook-hosts` directory.
 
 `af reset` stops every af daemon running for this AF home (the managed one plus any orphan left behind by an upgrade or a source-built `agent-factory --daemon`), removes the daemon sockets so a stale daemon or socket cannot serve the next `af`, kills **all** Agent Factory tmux sessions, removes **every linked git worktree (and its branch)** from each repo that has stored sessions — including worktrees you created by hand — wipes the durable project registry (registered bindings and their reachable checkout identity markers for this AF home), and deletes all stored session records. Only daemons owned by you AND using this AGENT_FACTORY_HOME are touched; a daemon or autostart unit for a different AF home is left alone. Use it to recover from a corrupted state, not for day-to-day cleanup — `af sessions archive <title>` (or `a` in the TUI) finishes with one session while keeping it restorable.
