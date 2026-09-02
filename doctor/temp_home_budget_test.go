@@ -804,3 +804,59 @@ func TestRootTruncationStillAssessesTheNamesAlreadyRead(t *testing.T) {
 	assert.Zero(t, sweep.visited,
 		"none of them was expanded, so none counts as finished")
 }
+
+// TestPartialRootReadErrorIsNotReportedAsSize is the fifth-round finding: a
+// root listing interrupted by an I/O fault after yielding some entries was
+// recorded as rootPartial with the cause discarded, so the notice called a
+// failing filesystem a large one and the remediation told its owner to go
+// clear their temp directory. Neither budget had fired.
+func TestPartialRootReadErrorIsNotReportedAsSize(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 8)
+
+	// Yield the first batch, then fail — a transient listing error, staged
+	// through the seam because no temp dir can be made to do this on demand.
+	calls := 0
+	prev := scanDirBatch
+	scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) {
+		calls++
+		if calls == 1 {
+			entries, _ := prev(f, 2)
+			return entries, nil
+		}
+		return nil, fmt.Errorf("input/output error")
+	}
+	t.Cleanup(func() { scanDirBatch = prev })
+
+	sweep := candidateTempHomes(root, 50000)
+
+	require.True(t, sweep.rootPartial)
+	require.Error(t, sweep.rootErr, "the cause must survive to the report")
+	assert.False(t, sweep.hitReadBudget, "precondition: no budget fired here")
+	assert.False(t, sweep.hitCandidateLimit)
+
+	detail := tempHomeSweepTruncationDetail(root, sweep, 50000)
+	assert.Contains(t, detail, "failed partway through")
+	assert.Contains(t, detail, "input/output error", "name the actual failure")
+	assert.NotContains(t, detail, "too large to list in full",
+		"an I/O fault is not a size problem")
+
+	assert.Contains(t, tempHomeSweepTruncationRemediation(root, sweep), "investigate why listing")
+	assert.NotContains(t, tempHomeSweepTruncationRemediation(root, sweep), "clear out",
+		"telling someone with a failing filesystem to clean their temp dir is advice that cannot work")
+}
+
+// TestBudgetTruncatedRootStillReadsAsSize is the twin: with no error, the
+// size wording and the clear-out remediation are the right ones.
+func TestBudgetTruncatedRootStillReadsAsSize(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 300)
+	withSmallReadBudget(t, 32)
+
+	sweep := candidateTempHomes(root, 50000)
+	require.True(t, sweep.rootPartial)
+	require.NoError(t, sweep.rootErr)
+
+	assert.Contains(t, tempHomeSweepTruncationDetail(root, sweep, 50000), "too large to list in full")
+	assert.Contains(t, tempHomeSweepTruncationRemediation(root, sweep), "clear out")
+}

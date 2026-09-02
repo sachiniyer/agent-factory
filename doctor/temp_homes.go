@@ -199,12 +199,24 @@ func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHom
 		return
 	}
 	report.addAdvisoryFinding(Finding{
-		Check:    "temp-home-scan",
-		Detail:   tempHomeSweepTruncationDetail(tempDir, sweep, budget),
-		Severity: StatusWarn,
-		Remediation: "clear out " + tempDir + " so the sweep can finish, and treat the temp-home rows below as a " +
-			"lower bound until it does",
+		Check:       "temp-home-scan",
+		Detail:      tempHomeSweepTruncationDetail(tempDir, sweep, budget),
+		Severity:    StatusWarn,
+		Remediation: tempHomeSweepTruncationRemediation(tempDir, sweep),
 	})
+}
+
+// tempHomeSweepTruncationRemediation says what to DO about an incomplete sweep,
+// which depends on why it was incomplete. Telling someone whose filesystem is
+// returning I/O errors to clear out their temp directory is advice that cannot
+// work, aimed at a cause that is not theirs.
+func tempHomeSweepTruncationRemediation(tempDir string, sweep tempHomeSweep) string {
+	if sweep.rootErr != nil {
+		return "investigate why listing " + tempDir + " failed, then re-run `af doctor`; the temp-home rows " +
+			"below are a lower bound until it can be read to the end"
+	}
+	return "clear out " + tempDir + " so the sweep can finish, and treat the temp-home rows below as a " +
+		"lower bound until it does"
 }
 
 // tempHomeSweepTruncationDetail renders what the sweep did and did not get to.
@@ -222,7 +234,11 @@ func tempHomeSweepTruncationDetail(tempDir string, sweep tempHomeSweep, budget i
 	// naming. Printing that count as a total would be a fabricated denominator
 	// — the same error as a fabricated finding, one level up.
 	total := fmt.Sprintf("the %d directories", sweep.offered)
-	if sweep.rootPartial {
+	switch {
+	case sweep.rootPartial && sweep.rootErr != nil:
+		total = fmt.Sprintf("at least %d directories (listing %s failed partway through: %v)",
+			sweep.offered, tempDir, sweep.rootErr)
+	case sweep.rootPartial:
 		total = fmt.Sprintf("at least %d directories (%s is too large to list in full)",
 			sweep.offered, tempDir)
 	}
@@ -335,6 +351,11 @@ type tempHomeSweep struct {
 	// makes offered a LOWER BOUND rather than a total — there may be more
 	// first-level directories we never saw the names of.
 	rootPartial bool
+	// rootErr holds the error that ended the root listing early, when one did.
+	// A listing interrupted by an I/O fault is NOT a listing stopped by a
+	// budget, and without the cause the notice describes a failing filesystem
+	// as a large one and tells its owner to go clean their temp dir.
+	rootErr error
 	// hitCandidateLimit and hitReadBudget record WHICH bound stopped the sweep.
 	// Both exist because they stop it for different reasons and the notice has
 	// to name the right one: a first-level directory holding 500,000 plain
@@ -514,8 +535,11 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string, readBudget int) ([]strin
 			}
 			// Some of the root was read. That is a partial listing, not an
 			// absent one: offered becomes a lower bound and the run is reported
-			// incomplete rather than unreadable.
+			// incomplete rather than unreadable. The CAUSE is kept, because
+			// "the listing failed partway" and "the listing hit its budget"
+			// call for different things from the reader.
 			sweep.rootPartial = true
+			sweep.rootErr = readErr
 			break
 		}
 	}
