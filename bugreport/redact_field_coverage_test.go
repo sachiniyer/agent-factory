@@ -350,6 +350,16 @@ func rendersItself(t reflect.Type) bool {
 // exported ones are still there.
 type reviewedMarshaler struct {
 	why string
+	// normalizesEmpty are members the marshaler renders as an EMPTY collection
+	// where the default encoder renders the absent one as null. Nothing else is
+	// permitted to differ: the diff still requires the member to be present, and
+	// still requires every other value to match the field exactly.
+	//
+	// Declared rather than tolerated in general, because "normalized via
+	// clone()" is a claim about a specific member, and the sparse reading is
+	// what turned it from prose into something the contract checks
+	// (#3592 review).
+	normalizesEmpty []string
 	// extra are the members the marshaler adds at the TOP level of its own
 	// output, each mapped to the EXACT JSON value it must produce for a record
 	// whose fields the walk has planted into. Empty means "exactly the fields,
@@ -373,7 +383,9 @@ type reviewedMarshaler struct {
 var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	reflect.TypeOf(time.Time{}): {why: "timestamp; carries no user text and is skipped by the walk"},
 	reflect.TypeOf(git.ArchiveRetainedTree{}): {
-		why: "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
+		why: "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, " +
+			"normalized via clone() — which renders an absent Skipped as [] rather than null",
+		normalizesEmpty: []string{"skipped"},
 	},
 	reflect.TypeOf(git.ArchiveSkippedEntry{}): {
 		why: "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",

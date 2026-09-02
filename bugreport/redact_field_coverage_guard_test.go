@@ -499,6 +499,9 @@ func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry 
 				note(&report.changed, "%s: %s emits %s, the entry declares %s", where, name, got, declared)
 			}
 		case string(got) != string(want):
+			if normalizedEmpty(entry, name, got, want) {
+				continue
+			}
 			note(&report.changed, "%s: %s emits %s, the field holds %s", where, name, got, want)
 		}
 	}
@@ -555,6 +558,9 @@ type fixtureSpec struct {
 	// pointer, so without this no fixture ever reads the branch a marshaler
 	// takes when an optional field is ABSENT (#3592 review).
 	nilPointers bool
+	// sparse empties the walked strings and collections, which fill otherwise
+	// always populates — the other ordinary production state no fixture read.
+	sparse bool
 }
 
 // newMarshalerFixture builds a FRESH record and marshals it.
@@ -591,6 +597,9 @@ func newMarshalerFixture(t *testing.T, typ reflect.Type, spec fixtureSpec) marsh
 	}
 	if spec.nilPointers {
 		nilOptionalPointers(value, 0)
+	}
+	if spec.sparse {
+		sparseWalkedState(value, 0)
 	}
 	// The baseline is captured FIRST. The twin shares the planted slices and
 	// maps, so a value-receiver marshaler that rewrites what it renders would
@@ -634,6 +643,60 @@ func nilOptionalPointers(value reflect.Value, depth int) {
 		}
 		for i := 0; i < value.Len(); i++ {
 			nilOptionalPointers(value.Index(i), depth+1)
+		}
+	case reflect.Map:
+		// fillMap allocates the pointers inside its elements too, and a map
+		// element is not addressable — so without this arm every "nil pointers"
+		// fixture still carried non-nil pointers inside its maps, and a
+		// marshaler gated on one being absent stayed unread (#3592 review).
+		if value.IsNil() || !value.CanSet() {
+			return
+		}
+		rebuilt := reflect.MakeMap(value.Type())
+		for _, key := range value.MapKeys() {
+			elem := reflect.New(value.Type().Elem()).Elem()
+			elem.Set(value.MapIndex(key))
+			nilOptionalPointers(elem, depth+1)
+			rebuilt.SetMapIndex(key, elem)
+		}
+		value.Set(rebuilt)
+	}
+}
+
+// sparseWalkedState empties the walked side of a record: exported strings
+// cleared, exported slices and maps set nil.
+//
+// fill plants a marker in every string and seeds two entries into every
+// collection, so a marshaler that acts only when a field is EMPTY — an ordinary
+// production state — had its branch shut in every fixture (#3592 review). The
+// hidden side is deliberately left populated: that is what the independence
+// comparison is reading.
+func sparseWalkedState(value reflect.Value, depth int) {
+	if depth > guardMaxDepth {
+		return
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if !value.IsNil() {
+			sparseWalkedState(value.Elem(), depth+1)
+		}
+	case reflect.String, reflect.Slice, reflect.Map:
+		if value.CanSet() {
+			value.Set(reflect.Zero(value.Type()))
+		}
+	case reflect.Struct:
+		if value.Type() == reflect.TypeOf(time.Time{}) {
+			return
+		}
+		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			sparseWalkedState(value.Field(i), depth+1)
+		}
+	case reflect.Array:
+		for i := 0; i < value.Len(); i++ {
+			sparseWalkedState(value.Index(i), depth+1)
 		}
 	}
 }
@@ -701,27 +764,40 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					first := newMarshalerFixture(t, typ, base)
 					diff(where, first, false)
 
-					// The absent-optional reading. Same state, same markers, but
-					// the pointers the walk allocated are cleared, so the branch
-					// a marshaler takes when an optional field is missing is read
-					// too.
-					bareSpec := base
-					bareSpec.nilPointers = true
-					diff(where+" (nil pointers)", newMarshalerFixture(t, typ, bareSpec), false)
+					// The other ordinary production shapes, each read in full:
+					// the optionals absent, and the strings and collections
+					// empty. fill populates both, so neither branch was ever
+					// taken (#3592 review).
+					modes := map[string]fixtureSpec{"": base}
+					for label, adjust := range map[string]func(*fixtureSpec){
+						" (nil pointers)": func(spec *fixtureSpec) { spec.nilPointers = true },
+						" (sparse)":       func(spec *fixtureSpec) { spec.sparse = true },
+					} {
+						mode := base
+						adjust(&mode)
+						modes[label] = mode
+						diff(where+label, newMarshalerFixture(t, typ, mode), false)
+					}
 
 					// Same state, DIFFERENT planted text: an extra derived from
 					// any of it differs, however it was encoded on the way out.
-					secondSpec := base
-					secondSpec.seq = seq + 500
-					second := newMarshalerFixture(t, typ, secondSpec)
-					firstMembers := decodeMembers(t, typ.String()+".MarshalJSON", first.custom)
-					secondMembers := decodeMembers(t, typ.String()+".MarshalJSON", second.custom)
-					for name := range entry.extra {
-						if string(firstMembers[name]) != string(secondMembers[name]) {
-							note(&report.changed, "%s: %s emits %s for one record and %s for another whose "+
-								"only difference is the text planted in it — the entry claims it is "+
-								"derived from the enum beside it, never from user text",
-								where, name, firstMembers[name], secondMembers[name])
+					// Read in EVERY mode — an extra that reaches for user text
+					// only while an optional is absent is invisible to a
+					// comparison run on the populated shape alone.
+					for label, mode := range modes {
+						mine := decodeMembers(t, typ.String()+".MarshalJSON",
+							newMarshalerFixture(t, typ, mode).custom)
+						other := mode
+						other.seq = mode.seq + 500
+						theirs := decodeMembers(t, typ.String()+".MarshalJSON",
+							newMarshalerFixture(t, typ, other).custom)
+						for name := range entry.extra {
+							if string(mine[name]) != string(theirs[name]) {
+								note(&report.changed, "%s%s: %s emits %s for one record and %s for another "+
+									"whose only difference is the text planted in it — the entry claims it "+
+									"is derived from the enum beside it, never from user text",
+									where, label, name, mine[name], theirs[name])
+							}
 						}
 					}
 
@@ -730,6 +806,15 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					emptySpec := base
 					emptySpec.withUnwalked = false
 					empty := newMarshalerFixture(t, typ, emptySpec)
+					sparseEmpty := emptySpec
+					sparseEmpty.sparse = true
+					sparsePopulated := base
+					sparsePopulated.sparse = true
+					if a, b := newMarshalerFixture(t, typ, sparsePopulated), newMarshalerFixture(t, typ, sparseEmpty); !bytes.Equal(a.custom, b.custom) {
+						note(&report.added, "%s (sparse): the output depends on state encoding/json cannot "+
+							"reach — with the unexported and json:\"-\" fields populated it emits %s, with "+
+							"them empty %s", where, a.custom, b.custom)
+					}
 					// Both meaningful channel states, against the same empty
 					// reading: an OPEN channel opens a `!= nil` gate, a CLOSED
 					// one opens a completed-work gate, and neither is the other.
@@ -795,7 +880,7 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 		// them makes a faithful marshaler look like it added the member and
 		// dropped the children (#3592 review). The twin cannot express the
 		// nesting, so it refuses, as it does for a colliding name.
-		if name := jsonMemberName(field); name != field.Name {
+		if name, _, _ := strings.Cut(field.Tag.Get("json"), ","); name != "" {
 			t.Fatalf("the plain twin of %s cannot represent it: %s is an anonymous unexported "+
 				"embedding tagged %q, which json NESTS under that member rather than promoting "+
 				"its children.\n\nTeach plainTwinOf to keep the nesting, or drop the exemption "+
@@ -1044,6 +1129,21 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 		filler.unsupported = append(filler.unsupported,
 			path+" (hidden unsafe.Pointer cannot be populated)")
 	}
+}
+
+// normalizedEmpty reports the one difference an entry may declare: a member the
+// marshaler renders as an empty collection where the default encoder renders the
+// absent one as null. Anything else — including the reverse — still fails.
+func normalizedEmpty(entry reviewedMarshaler, name string, got, want json.RawMessage) bool {
+	if string(want) != "null" || (string(got) != "[]" && string(got) != "{}") {
+		return false
+	}
+	for _, declared := range entry.normalizesEmpty {
+		if declared == name {
+			return true
+		}
+	}
+	return false
 }
 
 // jsonMemberName is the member name encoding/json gives a field: the tag's name
