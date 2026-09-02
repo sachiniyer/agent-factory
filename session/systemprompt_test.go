@@ -32,7 +32,7 @@ func TestInjectSystemPrompt_Claude(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("claude")
+	result := injectSystemPrompt("claude", skillTarget{})
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir flag, got %q", result)
@@ -51,7 +51,7 @@ func TestInjectSystemPrompt_ClaudeWithResolvedFlags(t *testing.T) {
 
 	// The resolved form (from program_overrides) carries the path-and-flags;
 	// injectSystemPrompt appends --plugin-dir to it.
-	result := injectSystemPrompt("/usr/local/bin/claude --model opus")
+	result := injectSystemPrompt("/usr/local/bin/claude --model opus", skillTarget{})
 
 	if !strings.HasPrefix(result, "/usr/local/bin/claude --model opus") {
 		t.Errorf("expected resolved form preserved, got %q", result)
@@ -73,7 +73,7 @@ func TestInjectSystemPrompt_Codex(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "") // force the ~/.codex fallback under the temp HOME
 
-	result := injectSystemPrompt("codex")
+	result := injectSystemPrompt("codex", skillTarget{})
 
 	if result != "codex" {
 		t.Errorf("expected codex command unchanged (file seam, no flag), got %q", result)
@@ -99,7 +99,7 @@ func TestInjectSystemPrompt_CodexWithResolvedFlags(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("codex --full-auto")
+	result := injectSystemPrompt("codex --full-auto", skillTarget{})
 
 	if result != "codex --full-auto" {
 		t.Errorf("expected resolved form unchanged (file seam), got %q", result)
@@ -112,7 +112,7 @@ func TestInjectSystemPrompt_Aider(t *testing.T) {
 	dir := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
-	result := injectSystemPrompt("aider")
+	result := injectSystemPrompt("aider", skillTarget{})
 
 	if !strings.HasPrefix(result, "aider --read ") {
 		t.Errorf("expected aider to gain a --read flag, got %q", result)
@@ -144,7 +144,7 @@ func TestInjectSystemPrompt_Gemini(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "") // force the ~/.gemini fallback under the temp HOME
 
-	result := injectSystemPrompt("gemini")
+	result := injectSystemPrompt("gemini", skillTarget{})
 
 	if result != "gemini" {
 		t.Errorf("expected gemini command unchanged (file seam, no flag), got %q", result)
@@ -174,7 +174,7 @@ func TestInjectSystemPrompt_Amp(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("amp")
+	result := injectSystemPrompt("amp", skillTarget{})
 
 	// The launch command must come back byte-identical — that is what keeps the
 	// amp spawn safe (#1582), since amp dies on unknown flags (#1116/#1131).
@@ -206,7 +206,7 @@ func TestInjectSystemPrompt_DevinSkill(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("devin")
+	result := injectSystemPrompt("devin", skillTarget{})
 	if result != "devin --respect-workspace-trust false" {
 		t.Errorf("expected devin trust flag, got %q", result)
 	}
@@ -237,7 +237,7 @@ func TestInjectSystemPrompt_Opencode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	result := injectSystemPrompt("opencode")
+	result := injectSystemPrompt("opencode", skillTarget{})
 
 	// The command word must survive verbatim; only an env assignment leads it.
 	if !strings.HasSuffix(result, " opencode") {
@@ -296,7 +296,7 @@ func TestInjectSystemPrompt_OpencodeWritesNothingOutsideAf(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	injectSystemPrompt("opencode")
+	injectSystemPrompt("opencode", skillTarget{})
 
 	// Nothing may appear in the user's opencode config dir — under either the
 	// XDG path or the $HOME/.config fallback.
@@ -332,7 +332,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 		// OPENCODE_CONFIG can arrive behind an env wrapper too.
 		"env OPENCODE_CONFIG=/home/me/mine.jsonc opencode",
 	} {
-		if got := injectSystemPrompt(resolved); got != resolved {
+		if got := injectSystemPrompt(resolved, skillTarget{}); got != resolved {
 			t.Errorf("expected a user-set OPENCODE_CONFIG left untouched, got %q", got)
 		}
 	}
@@ -342,7 +342,7 @@ func TestInjectSystemPrompt_OpencodeRespectsUserConfigEnv(t *testing.T) {
 	// case above with a bare strings.Contains, which would silently drop af
 	// guidance for anyone whose prompt mentions the variable.
 	arg := "opencode --prompt 'set OPENCODE_CONFIG=x'"
-	if got := injectSystemPrompt(arg); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
+	if got := injectSystemPrompt(arg, skillTarget{}); !strings.HasPrefix(got, "OPENCODE_CONFIG=") {
 		t.Errorf("OPENCODE_CONFIG as an argument is not an assignment; af should still inject, got %q", got)
 	}
 }
@@ -364,7 +364,7 @@ func TestInjectSystemPrompt_OpencodeDoesNotClobberAfOwnedFiles(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if got := injectSystemPrompt("opencode"); got != "opencode" {
+	if got := injectSystemPrompt("opencode", skillTarget{}); got != "opencode" {
 		t.Errorf("expected no injection when our path holds a non-af file, got %q", got)
 	}
 	back, err := os.ReadFile(instructionsPath)
@@ -416,7 +416,7 @@ func TestInjectSystemPrompt_Devin(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved)
+			got := injectSystemPrompt(tt.resolved, skillTarget{})
 			if got != tt.want {
 				t.Errorf("injectSystemPrompt(%q) = %q, want %q", tt.resolved, got, tt.want)
 			}
@@ -497,7 +497,7 @@ func TestInjectSystemPrompt_ResolvedCommandMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := injectSystemPrompt(tt.resolved)
+			got := injectSystemPrompt(tt.resolved, skillTarget{})
 			if tt.want == "" {
 				if got != tt.resolved {
 					t.Errorf("expected %q unchanged, got %q", tt.resolved, got)
@@ -729,7 +729,7 @@ func TestEnsureCodexSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
 
-	skillDir, err := ensureCodexSkillDir()
+	skillDir, err := ensureCodexSkillDir(skillTarget{})
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -757,7 +757,7 @@ func TestEnsureCodexSkillDir_HonorsCodexHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", codexHome)
 
-	skillDir, err := ensureCodexSkillDir()
+	skillDir, err := ensureCodexSkillDir(skillTarget{})
 	if err != nil {
 		t.Fatalf("ensureCodexSkillDir() failed: %v", err)
 	}
@@ -778,7 +778,7 @@ func TestEnsureGeminiSkillDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("GEMINI_CLI_HOME", "")
 
-	skillDir, err := ensureGeminiSkillDir()
+	skillDir, err := ensureGeminiSkillDir(skillTarget{})
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestEnsureGeminiSkillDir_HonorsGeminiCliHome(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GEMINI_CLI_HOME", geminiHome)
 
-	skillDir, err := ensureGeminiSkillDir()
+	skillDir, err := ensureGeminiSkillDir(skillTarget{})
 	if err != nil {
 		t.Fatalf("ensureGeminiSkillDir() failed: %v", err)
 	}
@@ -837,7 +837,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 		t.Fatalf("seed user skill: %v", err)
 	}
 
-	if _, err := ensureCodexSkillDir(); err != nil {
+	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
 		t.Fatalf("ensureCodexSkillDir() must not error on a foreign skill: %v", err)
 	}
 	got, err := os.ReadFile(path)
@@ -852,7 +852,7 @@ func TestWriteAfMarkedFile_NonDestructive(t *testing.T) {
 	if err := os.WriteFile(path, []byte("stale\n<!-- "+afSkillMarker+" -->\n"), 0644); err != nil {
 		t.Fatalf("seed af-owned skill: %v", err)
 	}
-	if _, err := ensureCodexSkillDir(); err != nil {
+	if _, err := ensureCodexSkillDir(skillTarget{}); err != nil {
 		t.Fatalf("ensureCodexSkillDir() on af-owned file: %v", err)
 	}
 	got, err = os.ReadFile(path)

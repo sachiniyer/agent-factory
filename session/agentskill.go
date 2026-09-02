@@ -2,11 +2,16 @@ package session
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // afSkillDirName is the directory- and skill-name every agent that auto-discovers
@@ -214,7 +219,17 @@ func removeAfSkillDir(skillDir, path string) {
 // automatically". This retires the #1043 wall: codex 0.144.1 auto-discovers user
 // skills dropped here (its own built-ins live under a sibling .system/ dir), so af
 // no longer needs to stuff afUsageReference into -c developer_instructions.
-func codexSkillsBaseDir() (string, error) {
+func codexSkillsBaseDir(target skillTarget) (string, error) {
+	if target.unresolved {
+		return "", errUnresolvedAccountSkillRoot
+	}
+	// The account root SUBSTITUTES for the variable, because the account boundary
+	// sets that variable to exactly this directory. One rule serves both agents:
+	// the skills base is a function of the agent's config-root VALUE, and scoping a
+	// session changes that value (#3645).
+	if codexHome := target.root; codexHome != "" {
+		return filepath.Join(codexHome, "skills"), nil
+	}
 	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
 		return filepath.Join(codexHome, "skills"), nil
 	}
@@ -227,8 +242,8 @@ func codexSkillsBaseDir() (string, error) {
 
 // ensureCodexSkillDir writes the af skill into codex's skills base. See
 // ensureAfSkillDir and codexSkillsBaseDir.
-func ensureCodexSkillDir() (string, error) {
-	base, err := codexSkillsBaseDir()
+func ensureCodexSkillDir(target skillTarget) (string, error) {
+	base, err := codexSkillsBaseDir(target)
 	if err != nil {
 		return "", err
 	}
@@ -242,7 +257,17 @@ func ensureCodexSkillDir() (string, error) {
 // .gemini folder inside the given path — enterprise docs). Gemini scans this dir at
 // session start and ENABLES a dropped skill automatically (verified: `gemini skills
 // list --all` reports agent-factory [Enabled]).
-func geminiSkillsBaseDir() (string, error) {
+func geminiSkillsBaseDir(target skillTarget) (string, error) {
+	if target.unresolved {
+		return "", errUnresolvedAccountSkillRoot
+	}
+	// GEMINI_CLI_HOME is a HOME-like root — the CLI appends `.gemini/` itself — so
+	// the account directory takes the variable's place and the skills land at
+	// <account dir>/.gemini/skills. Same substitution as codex, different shape,
+	// which is exactly the distinction #3387 measured and #3609 wrote down.
+	if geminiHome := target.root; geminiHome != "" {
+		return filepath.Join(geminiHome, ".gemini", "skills"), nil
+	}
 	if geminiHome := os.Getenv("GEMINI_CLI_HOME"); geminiHome != "" {
 		return filepath.Join(geminiHome, ".gemini", "skills"), nil
 	}
@@ -255,8 +280,8 @@ func geminiSkillsBaseDir() (string, error) {
 
 // ensureGeminiSkillDir writes the af skill into gemini's user-scope skills base.
 // See ensureAfSkillDir and geminiSkillsBaseDir.
-func ensureGeminiSkillDir() (string, error) {
-	base, err := geminiSkillsBaseDir()
+func ensureGeminiSkillDir(target skillTarget) (string, error) {
+	base, err := geminiSkillsBaseDir(target)
 	if err != nil {
 		return "", err
 	}
@@ -313,4 +338,96 @@ func ensureAiderReadFile() (string, error) {
 		return "", nil
 	}
 	return path, nil
+}
+
+// skillTarget says WHERE af's guidance skill belongs for one launch.
+//
+// The two agents that discover af's guidance from a config root — codex, from
+// $CODEX_HOME/skills, and gemini, from <GEMINI_CLI_HOME>/.gemini/skills — read
+// that root from an environment variable the ACCOUNT BOUNDARY sets per session.
+// af writes the skill from the daemon, before that variable exists, so reading it
+// out of the daemon's own environment described the daemon and not the session:
+// an account-scoped session searched its account directory while af had written
+// into the operator's ambient home, and the opted-in guidance was simply absent
+// (#3645).
+//
+// claude is the contrast that names the defect. af hands claude its guidance with
+// an explicit `--plugin-dir <af-owned path>` on the command line, so it does not
+// depend on where CLAUDE_CONFIG_DIR points and account scoping cannot lose it.
+// aider (--read) and opencode (an env seam at an af-owned path) are handed theirs
+// the same way. Guidance passed BY PATH survives; guidance DISCOVERED from a
+// config root does not. Preferring the explicit form was the first choice here and
+// neither CLI offers one — gemini's `skills` subcommand only manages skills inside
+// the already-discovered scope, and codex 0.152.1 has no skills subcommand at all
+// (both checked against the installed binaries) — so the remaining option is to
+// write into the account's own root.
+//
+// THREE states, not a bool. "unscoped" and "scoped but af cannot say where" are
+// different answers, and collapsing them fails OPEN: the unresolved case would
+// take the daemon's root, which is the exact defect this type exists to close.
+type skillTarget struct {
+	// root is the agent config root the account boundary will install for this
+	// launch, or "" for an unscoped session, which reads the daemon's own.
+	root string
+	// unresolved is true when the session IS account-scoped and af could not
+	// resolve which directory that is. Writing nothing is the honest answer — a
+	// skill in the wrong root is invisible to the session AND edits a directory
+	// the operator did not select — and the launch itself refuses moments later
+	// for the same reason the resolution failed.
+	unresolved bool
+}
+
+// errUnresolvedAccountSkillRoot reports that af declined to place the skill
+// because it could not name the account's config root. It is not a launch
+// failure: injectSystemPrompt logs it and returns the command unchanged, exactly
+// as it does for a skills directory it cannot write.
+var errUnresolvedAccountSkillRoot = errors.New(
+	"cannot place the af skill: the session is account-scoped but af could not resolve the account's directory")
+
+// resolveSkillTarget answers skillTarget for one launch.
+//
+// It resolves the account HERE rather than taking a directory from the caller
+// because the daemon is where injectSystemPrompt runs, and the local launch defers
+// account resolution to the exec shim — so no caller on that path has the
+// directory to hand. agentaccount.Selected is the same resolver the boundary uses,
+// so the skill cannot land somewhere the session will not read.
+//
+// The agent is derived from the RESOLVED command, never from i.Program: an account
+// validated in one agent's namespace with program_overrides pointing at another is
+// refused later (#3082/#3108), and until then af must not write into the account
+// directory of an agent this session is not running.
+func resolveSkillTarget(i *Instance, program string) skillTarget {
+	if i == nil {
+		return skillTarget{}
+	}
+	name := strings.TrimSpace(i.Account)
+	if name == "" {
+		return skillTarget{}
+	}
+	agent := tmux.DetectAgentFromCommand(program)
+	if agent == "" {
+		// An opaque command names no agent, so there is no per-agent skills base to
+		// choose and injectSystemPrompt will not write one either.
+		return skillTarget{}
+	}
+	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
+		// The session names an account for an agent that cannot be scoped. The
+		// launch refuses this; until it does, af must write nothing rather than
+		// guess a directory.
+		return skillTarget{unresolved: true}
+	}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		log.WarningLog.Printf("af skill: cannot locate the agent-factory home to resolve account %q for %s: %v", name, agent, err)
+		return skillTarget{unresolved: true}
+	}
+	account, err := agentaccount.Selected(home, agent, name, "")
+	if err != nil {
+		log.WarningLog.Printf("af skill: cannot resolve account %q for %s: %v", name, agent, err)
+		return skillTarget{unresolved: true}
+	}
+	if account.Dir == "" {
+		return skillTarget{unresolved: true}
+	}
+	return skillTarget{root: account.Dir}
 }

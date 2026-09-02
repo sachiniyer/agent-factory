@@ -39,7 +39,7 @@ func TestGeminiLaunch_ProducesACommandTheAccountBoundaryAccepts(t *testing.T) {
 			"af-authored argument the account boundary has to be told about")
 	require.Empty(t, conversation.ID, "gemini has no af-managed conversation id")
 
-	program = injectSystemPrompt(program)
+	program = injectSystemPrompt(program, skillTarget{})
 	require.Equal(t, resolved, program,
 		"injectSystemPrompt's gemini arm writes the af skill through the filesystem and returns the command "+
 			"untouched; a flag added here would have to be declared as a generated argument too")
