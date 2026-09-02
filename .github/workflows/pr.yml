@@ -205,8 +205,20 @@ jobs:
       # binary itself (integration/base_image_test.go), once, with retry, so
       # every lane and every developer machine gets the same guarantee and no
       # future workflow can forget it.
+
+      # -timeout is explicit rather than Go's default 10m per package (#3580).
+      # That default is a per-package wall the daemon package now sits right on:
+      # 355.666s here, 600.098s on the macOS job in the same run, where it hit
+      # the wall and panicked. A package timeout is not a test failure — Go kills
+      # the binary, names no slow test, and reports every remaining test in the
+      # package as not run — so the budget has to be far enough above the measured
+      # time that only a real wedge reaches it. 25m is ~4x the measured daemon
+      # time here and identical to the macOS step, which is the tighter of the
+      # two; keeping one number means the two jobs cannot drift onto different
+      # walls again. This job carries no timeout-minutes (GitHub's 360m default),
+      # so the Go-side panic and its goroutine dump always land first.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout 25m ./...
 
   # The round-trip image builds must resolve NOTHING against a registry (#2521).
   #
@@ -506,8 +518,18 @@ jobs:
           command -v dd sh git
           dd --version 2>&1 | head -1 || echo "dd: BSD (no --version)"
 
+      # Same 25m as the Linux Test job, and this is the step that earned it
+      # (#3580): the daemon package hit Go's default 10m per-package timeout here
+      # and panicked at 600.098s, on a head where the Linux job ran the same
+      # package in 355.666s — macOS is uniformly ~1.4–2x slower per test. 25m is
+      # ~2.5x that measured worst case, and it stays inside this job's
+      # timeout-minutes: 30 with room for the pre-test steps: the whole job
+      # measures ~11m30s end to end, of which checkout, setup-go, `brew install
+      # tmux` and the toolchain record are ~1–3m, so a wedged package panics at
+      # ~26–28m and fails inside the budget with Go's goroutine dump instead of
+      # being killed by the runner, which names nothing at all.
       - name: Run tests
-        run: go test -v -race -count=1 ./...
+        run: go test -v -race -count=1 -timeout 25m ./...
 
   build:
     name: Build
