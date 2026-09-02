@@ -131,6 +131,25 @@ func fadeSGR(match string) string {
 
 // Split a string into lines, additionally returning the size of the widest
 // line.
+//
+// The measure here is ansi.PrintableRuneWidth, and it is deliberately left alone
+// (#3433). Three width functions are in use in this tree and they disagree; for
+// one joined-emoji family ("\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466",
+// four emoji and three ZWJs) they were measured at:
+//
+//	lipgloss.Width / xansi.StringWidth / runewidth.StringWidth   2 cells
+//	ansi.PrintableRuneWidth (this function)                      8 cells
+//	tmux 3.4, actually advancing the cursor                      4 cells
+//
+// The obvious repair — give the compositor the same measure the panes size
+// themselves with — is NOT obviously right, and the tmux number is why. The
+// compositor's job is to count the cells the terminal will advance, and af renders
+// into tmux; swapping 8 for 2 would trade an overestimate of 4 for an
+// underestimate of 2, still wrong and now wrong in the direction that writes past
+// the frame instead of stopping short of it. Picking correctly needs the same
+// measurement across the emulators af supports, which is its own change.
+//
+// What PlaceOverlay no longer does is turn that disagreement into a blank screen.
 func getLines(s string) (lines []string, widest int) {
 	lines = strings.Split(s, "\n")
 
@@ -166,6 +185,37 @@ func PlaceOverlay(
 	bgHeight := len(bgLines)
 	fgHeight := len(fgLines)
 
+	// A modal bigger than the frame is CLIPPED, never dropped (#3433).
+	//
+	// This used to `return fg`, discarding the entire background — so a modal that
+	// merely MEASURED too wide blanked the whole TUI, silently, and only on the
+	// frames where the offending text was on screen. It is reachable without any
+	// modal actually being oversized, because the measures disagree: panes size and
+	// truncate themselves with lipgloss.Width, this compositor counts with
+	// ansi.PrintableRuneWidth, and for one joined-emoji family those read 2 cells
+	// and 8. A pane can therefore be certain it fits while the compositor is
+	// certain it does not.
+	//
+	// Clipping is the right failure whichever measure is eventually agreed on: a
+	// modal one cell too wide loses a cell, which is visible and bounded, instead
+	// of costing the user everything behind it. Deliberately NOT a change of
+	// measure — see the note on getLines for why that needs its own decision.
+	if fgHeight > bgHeight {
+		fgLines = fgLines[:bgHeight]
+		fgHeight = bgHeight
+	}
+	if fgWidth > bgWidth {
+		for i, line := range fgLines {
+			// truncate accumulates runewidth per printable rune and skips escape
+			// sequences — the same accounting getLines and the placement arithmetic
+			// below use — so the clipped rows really are within bgWidth by THIS
+			// compositor's measure, and it closes any SGR it cuts through rather
+			// than leaking the style onto the frame.
+			fgLines[i] = truncate.String(line, uint(bgWidth))
+		}
+		fgWidth = bgWidth
+	}
+
 	// An overlay is OPAQUE: every cell inside its rectangle belongs to it,
 	// including the blank tail of a row narrower than the widest one. Only the
 	// row's own width used to be written, so the compositor filled the rest of
@@ -198,11 +248,6 @@ func PlaceOverlay(
 	placeX, placeY := x, y
 	if center {
 		placeX, placeY = CalculateCenterCoordinates(fgLines, bgLines, fgWidth, bgWidth)
-	}
-
-	// Check if foreground exceeds background size
-	if fgWidth > bgWidth || fgHeight > bgHeight {
-		return fg // Return foreground if it's larger than background
 	}
 
 	// Clamp coordinates to ensure foreground fits within background
