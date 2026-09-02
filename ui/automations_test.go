@@ -67,7 +67,7 @@ func TestAutomationsExpandedRowOmitsUnsatisfiableNextRun(t *testing.T) {
 	require.Contains(t, out, "feb-31", "precondition: the row renders at all")
 	assert.NotContains(t, out, "next Jan 01 00:00",
 		"the zero time must never be formatted as a real next run:\n%s", out)
-	assert.Contains(t, out, "no upcoming run",
+	assert.Contains(t, out, "No upcoming run",
 		"say so plainly rather than dropping the fragment:\n%s", out)
 }
 
@@ -271,7 +271,7 @@ func TestAutomationsEmptyStateEllipsized(t *testing.T) {
 	a.SetRect(layout.Rect{W: 22, H: 3})
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 3}, "empty section")
-	assert.Contains(t, out, "no tasks")
+	assert.Contains(t, out, "No tasks")
 	assert.Contains(t, out, "…", "the truncated hint marks its cut")
 }
 
@@ -310,4 +310,17 @@ func TestAutomationsStripExactRectWithOverflow(t *testing.T) {
 	r := layout.Rect{W: 90, H: 3}
 	a.SetRect(r)
 	requireExactRect(t, a.View(), r, "overflowing strip")
+}
+
+// TestAutomationsEmptyStateUsesSentenceCase is #3632, pinning the rail's
+// no-tasks line positively at a width that does not ellipsize it.
+func TestAutomationsEmptyStateUsesSentenceCase(t *testing.T) {
+	a := newTestAutomations(nil)
+	a.SetRect(layout.Rect{W: 60, H: 3})
+
+	out := stripANSI(a.View())
+	assert.Contains(t, out, "No tasks — press",
+		"the empty automations section renders in sentence case:\n%s", out)
+	assert.NotContains(t, out, "no tasks — press",
+		"the lowercase form must be gone:\n%s", out)
 }

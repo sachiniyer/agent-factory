@@ -203,7 +203,7 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	} else if tsk.Enabled && tsk.CronExpr != "" {
 		if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
 			if next := sched.Next(a.now()); next.IsZero() {
-				parts = append(parts, "no upcoming run")
+				parts = append(parts, "No upcoming run")
 			} else {
 				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
 			}
@@ -377,7 +377,7 @@ func (a *AutomationsPane) String() string {
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine(fmt.Sprintf("  no tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
+			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace

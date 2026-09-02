@@ -172,8 +172,8 @@ func (m *home) View() string {
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
 		switch {
-		// Session count FIRST, and the order is load-bearing. "no panes open" and
-		// "no project selected" answer different questions — why is this area
+		// Session count FIRST, and the order is load-bearing. "No panes open" and
+		// "No project selected" answer different questions — why is this area
 		// blank, versus what af is scoped to — and they are not alternatives: a
 		// user who closed their panes has panes to reopen whatever the project
 		// state is, so sending them off to pick a project would be a worse answer

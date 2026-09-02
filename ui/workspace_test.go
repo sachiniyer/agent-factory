@@ -75,3 +75,28 @@ func TestNoActiveProjectWorkspacePreservesFrameAtTinySize(t *testing.T) {
 	assert.True(t, strings.HasSuffix(lines[0], "╮"), "top right corner must stay visible")
 	assert.True(t, strings.HasSuffix(lines[len(lines)-1], "╯"), "bottom right corner must stay visible")
 }
+
+// TestWorkspaceEmptyStatesUseSentenceCase is #3632. This one file renders three
+// empty states and used to render them in two cases: "No sessions yet …",
+// "No project selected …" and "no panes open …". CLAUDE.md's copy convention
+// puts empty states in sentence case, so the odd one out was drift, not style.
+func TestWorkspaceEmptyStatesUseSentenceCase(t *testing.T) {
+	lay := layout.Grid{}.Solve(120, 30)
+	for _, tc := range []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"panes empty", EmptyWorkspace(lay.Workspace), "No panes open — s opens the selected tab"},
+		{"first run", FirstRunWorkspace(lay.Workspace), "No sessions yet — press n to create one."},
+		{"no project", NoActiveProjectWorkspace(lay.Workspace, "press ctrl+p to pick one"), "No project selected — press ctrl+p to pick one."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := stripANSI(tc.out)
+			assert.Contains(t, out, tc.want,
+				"every workspace empty state renders in sentence case:\n%s", out)
+			assert.NotContains(t, out, strings.ToLower(tc.want[:1])+tc.want[1:],
+				"the lowercase form must be gone, not merely joined by a capitalized one")
+		})
+	}
+}
