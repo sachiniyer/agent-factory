@@ -239,12 +239,21 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 			// pre-seeded from the identity opening the home already
 			// established, so it carries no probe timestamp and would
 			// otherwise look like a fallback.
+			priority := 2
 			if resolved.resolvedAt.IsZero() && expanded != m.repoRoot {
 				if recorded, ok := recordedIdentities[filepath.Clean(expanded)]; ok && recorded != "" {
 					resolved.id = recorded
+					// Identity and root SPELLING are separate decisions, the
+					// same split an unproven registry row makes above (#3530
+					// review id 3917445677). This key's path is the one that
+					// could not be resolved, so it must not outrank a live
+					// session's workspace for what the user is shown and
+					// switched to — the row would collapse correctly and then
+					// name a directory that is not there.
+					priority = 0
 				}
 			}
-			ensure(resolved, 2)
+			ensure(resolved, priority)
 		}
 	}
 	// The active workspace is the best selectable spelling and wins over a

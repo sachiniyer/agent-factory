@@ -74,6 +74,14 @@ func (m *Manager) repoSessionTitlesLocked(repoID string, inFlightOnly bool) []st
 // #1740-review fatal-on-config-failure path) without disturbing the real config.
 var deregisterRootAgents = config.DeregisterRootAgentsForRepo
 
+// deleteProjectPreSweepHookForTest, when non-nil, runs immediately before the
+// durable root_agents sweep decides which identities to remove. That window —
+// after the selectors and the claimant were resolved, before the locked config
+// mutation — is where a checkout appearing at an absent recorded root makes the
+// path's hash somebody else's (#3530 review id 3917445672), and nothing else
+// can hold it open: in a real daemon the two are microseconds apart.
+var deleteProjectPreSweepHookForTest func()
+
 // DeleteProjectResult reports what DeleteProject did so the control server can
 // publish one archived/killed event per affected session (plus a
 // projects-changed signal), and the CLI/TUI can report the counts.
@@ -148,45 +156,42 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
 }
 
-// attributedDeleteTarget answers which identity a delete must act under when
-// the one it named is the identity a record is FILED under rather than the one
-// its checkout has been proven to have (#3530 review ids 3915722493,
-// 3916379586, 3917294314).
+// refuseIfIdentityInTransition stops a delete whose target identity the daemon
+// is in the middle of deciding (#3530 review ids 3915722493, 3916379586,
+// 3917445659).
 //
-// Usually that is a record written before Project.RepoID, addressed by an
-// invented id while its path does not resolve. But "does not resolve" is a
-// question asked at one instant: a returning checkout publishes its real-ID
-// candidate into rootHealProbes as soon as git answers, and the marker
-// verification that promotes it takes longer still. So a path that comes back
-// leaves this on the id the record carries while the daemon is already holding
-// the identity that checkout actually has — the delete then archives nothing
-// under the identity the project's live sessions are keyed by, deregisters the
-// project, and reports success.
+// A record written before Project.RepoID is addressed by an invented id while
+// its path does not resolve, and a reconciled record whose recorded root is a
+// linked workspace can be filed under a REAL id its checkout no longer resolves
+// to. Either way, "which project does this id name" has two answers for as long
+// as a probe holds an unconsumed candidate — and a delete that picks one
+// archives sessions, tears down worktrees and deregisters a record, none of
+// which a verdict arriving a moment later can undo.
 //
-// It is deliberately NOT limited to a provisional id. A reconciled record whose
-// recorded root is a linked workspace keeps that path while its repository's
-// identity root moves, so the id left behind is a REAL one and the same split
-// follows; an ordinary repo id that no probe is keyed by is returned untouched,
-// which is every other delete.
+// So it refuses, and says when to retry. An earlier round redirected instead,
+// following the probe to the identity it had resolved; that keyed on an id,
+// which a repository at a reused path can legitimately own too, so deleting
+// such an occupant could aim at a stale record's project instead (3917445659).
+// Refusing needs no cross-identity action at all, which is what makes it safe:
+// the ambiguity is reported rather than resolved by guess, and the next ensure
+// pass — which has the registry record in hand — completes the transition and
+// makes the ordinary path correct.
 //
-// Only a PROVEN match moves it, because the candidate alone is not evidence
-// that the checkout at the recorded path is this project's — see
-// pendingAttributionFor. Until that proof exists, which project the request
-// names is unknown, and an unknown target refuses instead of picking one; a
-// delete cannot be un-done by a verdict that arrives afterwards.
-func (m *Manager) attributedDeleteTarget(repoID string) (string, error) {
-	realID, unknown := m.pendingAttributionFor(repoID)
-	if unknown {
-		return repoID, fmt.Errorf("delete project: af is still checking whether the checkout at the recorded root of %s is that project's own, so which project this names is unknown; nothing was changed — delete again once that check settles", repoID)
+// rowFound says the request already selected a registry row. With one in hand
+// nothing is ambiguous: the row IS the project being deleted, whatever else may
+// share its identity.
+func (m *Manager) refuseIfIdentityInTransition(repoID string, rowFound bool) error {
+	pending := m.identityTransitionPendingFor(repoID)
+	if !pending && !rowFound {
+		pending = m.identityTransitionPendingOn(repoID)
 	}
-	if realID == "" {
-		return repoID, nil
+	if !pending {
+		return nil
 	}
-	log.InfoLog.Printf("delete project: %s is the identity this project's record is filed under, and a re-attribution probe has VERIFIED its checkout as %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
-	return realID, nil
+	return fmt.Errorf("delete project: af is still establishing which project %s names — a registered project's recorded checkout is mid-identity-check — so nothing was changed; delete again once that check settles", repoID)
 }
 
-// registeredProjectRootForRepoID resolves the path needed by
+// registeredProjectRootForRepoID resolves the path needed by// registeredProjectRootForRepoID resolves the path needed by
 // config.DeregisterProject when a direct client supplies only the daemon's
 // repo identity. Registry read failure is an unknown outcome, not evidence that
 // no matching registration exists, so callers must treat an error as fatal
@@ -261,15 +266,8 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 }
 
 type deleteProjectTarget struct {
-	repoID string
-	// recordedRepoID is the identity the registry RECORD is keyed by when it
-	// differs from the identity this delete acts under — a legacy record whose
-	// provisional id a verified probe has just bound to a real one (#3530).
-	// The two are needed separately: sessions, policy and tombstones live under
-	// the real id, while the durable root_agents key is a PATH whose stale
-	// spelling only ever resolves to the recorded one (review id 3916379565).
-	recordedRepoID string
-	repoPath       string
+	repoID   string
+	repoPath string
 	// claimantProjectID names the registry record whose root is repoPath, so a
 	// suppression tombstone records WHOSE delete it was and a later proven
 	// mismatch releases it only for that claimant (#3299 review round 15). It
@@ -339,7 +337,6 @@ func claimantForRecord(p config.Project) string {
 func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
-	recordedRepoID := ""
 	if repoID == "" {
 		if repoPath == "" {
 			return deleteProjectTarget{}, fmt.Errorf("delete project: repo_id or repo_path is required")
@@ -367,24 +364,6 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if err != nil {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
-		if repoPath == "" {
-			// The record may still be keyed by its PROVISIONAL identity: a
-			// legacy row whose checkout a probe has verified but whose
-			// promotion has not been written yet answers to the derived id,
-			// not to the real one this request names. Without this the delete
-			// archives and suppresses the real id's sessions, skips
-			// DeregisterProject, and reports success while the record survives
-			// to reappear on the next daemon start (#3530 review id
-			// 3916379577). Only a VERIFIED probe binds the two, so this can
-			// never deregister an absent project on an occupant's behalf.
-			if derived := m.verifiedPendingDerivedID(repoID); derived != "" {
-				recordedRepoID = derived
-				repoPath, err = registeredProjectRootForRepoID(derived)
-				if err != nil {
-					return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine the registered root of the project its provisional identity %s names; nothing was changed: %w", repoID, derived, err)
-				}
-			}
-		}
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
 		// sessions/root-agent state while RepoPath chooses a potentially different
@@ -411,33 +390,12 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		}
 	}
 	// LAST, after every registry lookup above and after the two selectors have
-	// been checked against each other, because those all key on the identity
-	// the RECORD carries while this names the identity the delete must act
-	// under (#3530 review id 3915722493). Redirecting earlier would make a
-	// repo-ID-only delete look up its registered root under an id no record
-	// holds yet, and would turn a TUI delete that supplies both selectors —
-	// the provisional id it is displaying, plus the recorded path — into a
-	// mismatch refusal.
-	if attributed, err := m.attributedDeleteTarget(repoID); err != nil {
+	// been checked against each other: those establish whether this request
+	// selected a project at all, which is what decides whether the identity is
+	// ambiguous (#3530 review id 3915722493). Nothing has been mutated yet, so
+	// a refusal here is literally "nothing was changed".
+	if err := m.refuseIfIdentityInTransition(repoID, repoPath != ""); err != nil {
 		return deleteProjectTarget{repoID: repoID}, err
-	} else if attributed != repoID {
-		recordedRepoID = repoID
-		repoID = attributed
-		if repoPath == "" {
-			// The row can already have been reconciled to the real id while
-			// its probe was still unconsumed, so a lookup under the
-			// provisional id the caller supplied found nothing (#3530 review
-			// id 3916912942). Without a second look the delete archives the
-			// real id's sessions and reports success while skipping both the
-			// recorded-path opt-in sweep and DeregisterProject, leaving the
-			// durable row to reappear. The provisional id is kept for the
-			// fence; only the lookup follows the identity we now act under.
-			registeredRoot, err := registeredProjectRootForRepoID(repoID)
-			if err != nil {
-				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root after re-attributing %s; nothing was changed: %w", repoID, recordedRepoID, err)
-			}
-			repoPath = registeredRoot
-		}
 	}
 	claimantProjectID := ""
 	if repoPath != "" {
@@ -466,7 +424,6 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	}
 	return deleteProjectTarget{
 		repoID:            repoID,
-		recordedRepoID:    recordedRepoID,
 		repoPath:          repoPath,
 		claimantProjectID: claimantProjectID,
 	}, nil
@@ -488,30 +445,14 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// could afford), refuse immediately and name the session: the create settles on its
 	// own and a retry then removes the project cleanly. Because this runs before the
 	// durable removals below, "nothing was changed" is literally true.
-	// BOTH identities are fenced while this delete runs (#3530). The heal
-	// pass asks whether the RECORDED id is mid-delete — that is the id its
-	// unresolved entry, its probe and its tombstone are keyed by — so a delete
-	// that fenced only the identity it acts under would let the same pass
-	// promote the project out from under it and let the singleton sweep
-	// recreate the root it is tearing down. Nothing is ever created or
-	// restored under a provisional id, so the extra fence refuses nothing that
-	// could otherwise have proceeded; the defer below removes exactly the ids
-	// this delete installed, which is what keeps a fence from outliving its
-	// owner (#3530 review id 3915518792).
-	fenced := []string{repoID}
-	if resolved.recordedRepoID != "" && resolved.recordedRepoID != repoID {
-		fenced = append(fenced, resolved.recordedRepoID)
-	}
 	m.mu.Lock()
 	starting := m.repoSessionTitlesLocked(repoID, true)
 	if len(starting) == 0 {
 		if m.projectDeletes == nil {
 			m.projectDeletes = make(map[string]struct{})
 		}
-		for _, id := range fenced {
-			m.projectDeletes[id] = struct{}{}
-			m.stampProjectDeleteLocked(id)
-		}
+		m.projectDeletes[repoID] = struct{}{}
+		m.stampProjectDeleteLocked(repoID)
 	}
 	m.mu.Unlock()
 	if len(starting) > 0 {
@@ -520,9 +461,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	}
 	defer func() {
 		m.mu.Lock()
-		for _, id := range fenced {
-			delete(m.projectDeletes, id)
-		}
+		delete(m.projectDeletes, repoID)
 		// Stamp the REMOVE too, not only the install above. A create that began
 		// before this delete did samples a counter value below the install's stamp,
 		// so the install alone already covers it — but a create that began while
@@ -530,9 +469,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// nothing move. Stamping here puts the transition after that sample, which
 		// is what makes an in-progress delete visible to a create that could not
 		// have seen its start (#2947).
-		for _, id := range fenced {
-			m.stampProjectDeleteLocked(id)
-		}
+		m.stampProjectDeleteLocked(repoID)
 		m.mu.Unlock()
 	}()
 
@@ -561,26 +498,34 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// root_agents keys are PATHS, and the matcher resolves them to a canonical
 	// identity — so a delete targeting a provisional id would sweep nothing and
 	// leave the durable opt-in to start the root again on the next daemon run
-	// (#3530 review id 3914971851). Supply the recorded path's canonical id
-	// alongside it; both name this one project, and neither can name another.
-	// The PATH decides this, not either identity (#3530 review ids 3916379565,
-	// 3916757161). A root_agents key is a path, and rootAgentKeyMatchesRepo
-	// falls back to hashing an unresolvable one — so a stale key spelled as
-	// this project's recorded root answers to that path's hash and to nothing
-	// else: not to the identity a verified probe redirected this delete to,
-	// and not to the identity a reconciled record has written down either,
-	// whenever the recorded root is not its repository's identity root.
-	// Master swept it by accident, because it addressed such a project BY that
-	// hash; addressing the project as itself is what made the sweep have to
-	// say so.
+	// (#3530 review id 3914971851).
 	//
-	// Adding it costs nothing when the recorded root does resolve: a key
-	// spelled that way then resolves through git to repoID, which is already
-	// in the list, and the hash matches no key at all.
+	// The PATH decides this, not the identity (#3530 review ids 3916379565,
+	// 3916757161). A root_agents key is a path, and rootAgentKeyMatchesRepo
+	// falls back to hashing one it cannot resolve — so a stale key spelled as
+	// this project's recorded root answers to that path's hash and to nothing
+	// else, whenever the recorded root is not its repository's identity root.
+	// Master swept it by accident, because it addressed such a project BY that
+	// hash; addressing the project as itself is what made the sweep have to say
+	// so out loud.
+	//
+	// And the hash is supplied ONLY while the recorded root does not resolve
+	// (review id 3917445672). That is not an optimisation: a repository
+	// appearing there legitimately OWNS that id, so supplying it once a
+	// checkout is present would sweep the occupant's own opt-in on behalf of a
+	// delete that targeted this project. The check runs here, immediately
+	// before the locked write, rather than at selector time — as late as it can
+	// be, though check-then-act cannot be made atomic and a checkout appearing
+	// inside that window is the residue this states rather than hides.
+	if deleteProjectPreSweepHookForTest != nil {
+		deleteProjectPreSweepHookForTest()
+	}
 	optInIDs := []string{repoID}
 	if repoPath != "" {
 		if pathID := config.RepoIDFromRoot(filepath.Clean(repoPath)); pathID != repoID {
-			optInIDs = append(optInIDs, pathID)
+			if _, err := config.RepoFromPath(repoPath); err != nil {
+				optInIDs = append(optInIDs, pathID)
+			}
 		}
 	}
 	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {

@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -206,20 +207,35 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 // this record's root.
 func (m *Manager) legacyRootAgentForRecordedRoot(root string) *config.RootAgentConfig {
 	cleaned := filepath.Clean(root)
-	found := false
+	// Keys in sorted order for the same reason LegacyRootAgentForRepo sorts
+	// them: inspection, daemon lookup and the ensure pass must agree on one
+	// winner when two spellings name the same root.
+	keys := make([]string, 0, len(m.cfg.RootAgents))
 	for key := range m.cfg.RootAgents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	matched := ""
+	for _, key := range keys {
 		if filepath.Clean(config.ExpandTilde(key)) == cleaned {
-			found = true
+			matched = key
 			break
 		}
 	}
-	if !found {
+	if matched == "" {
 		return nil
 	}
+	// ONE probe, and the matched entry is carried through it rather than
+	// re-derived (#3530 review id 3917445668). Asking LegacyRootAgentForRepo
+	// again would re-resolve every key in the map — the caller has already paid
+	// for one such scan — turning "one extra probe" into N+1 synchronous git
+	// resolutions per verdict, on a path a delivery or delete preflight waits
+	// behind.
 	if _, err := config.RepoFromPath(cleaned); err == nil {
 		return nil
 	}
-	return m.legacyRootAgentForRepo(config.RepoIDFromRoot(cleaned))
+	entry := m.cfg.RootAgents[matched]
+	return &entry
 }
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a

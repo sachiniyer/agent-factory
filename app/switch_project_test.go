@@ -1039,3 +1039,33 @@ func TestBuildProjectListMergesAStaleOptInIntoItsRecordedProject(t *testing.T) {
 	assert.Equal(t, config.RepoIDFromRoot(bare), projects[0].RepoID,
 		"the surviving row is the one the record vouches for")
 }
+
+// TestBuildProjectListKeepsALiveWorkspaceOverAStaleOptIn pins #3530 review id
+// 3917445677 — the limit of the merge above.
+//
+// Identity and root SPELLING are separate decisions. Remapping the stale
+// root_agents key onto the record's identity collapses the duplicate row
+// correctly, but the key's path is the one that could not be resolved: at
+// priority 2 it overrode the live workspace a session had already contributed,
+// so the switcher displayed — and switched to — a directory that is not there.
+func TestBuildProjectListKeepsALiveWorkspaceOverAStaleOptIn(t *testing.T) {
+	_, bare, registeredRoot, liveRoot := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	_, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(registeredRoot))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
+		Title: "live", Path: liveRoot,
+		Worktree: session.GitWorktreeData{RepoPath: bare, WorktreePath: liveRoot},
+	}})
+	require.False(t, degraded)
+	require.Len(t, projects, 1, "one project, whatever spelling wins: %+v", projects)
+	assert.Equal(t, liveRoot, projects[0].Root,
+		"an unresolved opt-in path must not outrank the workspace this project's live session is using")
+	assert.Equal(t, 1, projects[0].SessionCount)
+}

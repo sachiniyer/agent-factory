@@ -97,68 +97,141 @@ func TestDeferredPromotionKeepsItsProbe(t *testing.T) {
 	}
 }
 
-// TestProvisionalDeleteFollowsPendingAttribution pins review id 3915722493
-// (P1).
+// TestDeleteRefusesWhileIdentityIsInTransition pins the answer this lane
+// converged on for review ids 3915722493, 3916379586, 3916379577, 3916912942,
+// 3917445659 and 3917445684 — one rule instead of six redirects.
 //
-// A legacy record's returning checkout is verified before the heal pass has
-// written the promotion down. A path that goes away again in that window leaves
-// the delete normalizing to the invented id while the daemon already holds the
-// real one — so the delete archives nothing under the identity this project's
-// sessions are keyed by, deregisters the project, and reports success.
-func TestProvisionalDeleteFollowsPendingAttribution(t *testing.T) {
-	manager, repoPath, _, realID := pendingAttributionFixture(t, verifiedProbe)
-
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
-	if err != nil {
-		t.Fatalf("DeleteProject by the recorded path: %v", err)
+// While a probe holds an unconsumed candidate, "which project does this id
+// name" has two answers, and a delete that picks one archives sessions, tears
+// down worktrees and deregisters a record — none of which the verdict arriving
+// a moment later can undo. Worse, following the probe keys on an ID, and a
+// repository at a reused path can legitimately own the same id: deleting such
+// an occupant found a stale record's probe and aimed at a different project
+// (3917445659). So the delete refuses and says when to retry; nothing acts
+// across identities at all.
+func TestDeleteRefusesWhileIdentityIsInTransition(t *testing.T) {
+	refused := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("a delete whose target identity is mid-transition must refuse rather than pick one of the two projects it could name")
+		}
+		if !strings.Contains(err.Error(), "nothing was changed") {
+			t.Fatalf("the refusal must state that nothing was mutated: %v", err)
+		}
 	}
-	assertDeletedUnderRealIdentity(t, manager, result, realID)
-}
-
-// TestProvisionalDeleteWithBothSelectorsFollowsPendingAttribution is the same
-// finding through the shape the TUI actually sends: RepoPath plus the RepoID it
-// is displaying, which for an unresolved legacy project IS the provisional one.
-//
-// It also pins where the redirect may happen. Applied to either selector before
-// they are checked against each other, this delete becomes a mismatch refusal —
-// the caller's provisional id against a path redirected to the real one —
-// which would turn a working delete into an error for the whole pending window.
-func TestProvisionalDeleteWithBothSelectorsFollowsPendingAttribution(t *testing.T) {
-	manager, repoPath, derivedID, realID := pendingAttributionFixture(t, verifiedProbe)
-
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath, RepoID: derivedID})
-	if err != nil {
-		t.Fatalf("DeleteProject by the recorded path and the identity the TUI is displaying: %v", err)
+	unchanged := func(t *testing.T, manager *Manager, ids ...string) {
+		t.Helper()
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		for _, id := range ids {
+			if _, suppressed := manager.deletedRootRepos[id]; suppressed {
+				t.Fatalf("a refused delete must suppress nothing, but %s is tombstoned", id)
+			}
+		}
+		if len(manager.projectDeletes) != 0 {
+			t.Fatalf("a refused delete must leave no fence behind, got %v", manager.projectDeletes)
+		}
 	}
-	assertDeletedUnderRealIdentity(t, manager, result, realID)
-}
 
-// TestProvisionalDeleteRefusesAnUnverifiedCandidate pins review id 3916379586
-// (P1) — the limit of the redirect above.
-//
-// A probe publishes its candidate the moment git resolves the recorded path,
-// BEFORE reading the checkout marker, so a stranger occupying that path
-// publishes its own real identity there. Following it would archive and
-// suppress the occupant while deregistering the original project's record, and
-// a mismatch arriving afterwards cannot undo either. Unknown is a state, not a
-// "no": the delete refuses and changes nothing.
-func TestProvisionalDeleteRefusesAnUnverifiedCandidate(t *testing.T) {
-	manager, repoPath, derivedID, realID := pendingAttributionFixture(t, inFlightProbe)
+	// The verified candidate is refused exactly like the unverified one. It is
+	// the same question — which identity is this project's — and the answer is
+	// one ensure pass away, at which point the record itself carries it.
+	for _, tc := range []struct {
+		name   string
+		finish probeFinisher
+	}{
+		{"verified but not yet promoted", verifiedProbe},
+		{"still reading the marker", inFlightProbe},
+	} {
+		t.Run("by path, "+tc.name, func(t *testing.T) {
+			manager, repoPath, derivedID, realID := pendingAttributionFixture(t, tc.finish)
+			_, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+			refused(t, err)
+			unchanged(t, manager, derivedID, realID)
+		})
+		t.Run("by both selectors, "+tc.name, func(t *testing.T) {
+			// The TUI's own shape: the recorded path plus the identity it is
+			// displaying, which for an unresolved project is the one the record
+			// is filed under.
+			manager, repoPath, derivedID, realID := pendingAttributionFixture(t, tc.finish)
+			_, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath, RepoID: derivedID})
+			refused(t, err)
+			unchanged(t, manager, derivedID, realID)
+		})
+		t.Run("by the identity the probe resolved, "+tc.name, func(t *testing.T) {
+			// The other direction: a client naming the identity a probe has
+			// published, for which no registry row answers yet. Acting would
+			// archive that id's sessions and skip DeregisterProject, leaving
+			// the record to reappear on the next daemon start.
+			manager, _, derivedID, realID := pendingAttributionFixture(t, tc.finish)
+			_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID})
+			refused(t, err)
+			unchanged(t, manager, derivedID, realID)
+		})
+	}
 
-	_, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
-	if err == nil {
-		t.Fatalf("a delete whose provisional target has an UNVERIFIED candidate must refuse: the candidate may be a stranger at the recorded path, and archiving its sessions cannot be undone by the verdict that follows")
-	}
-	if !strings.Contains(err.Error(), "nothing was changed") {
-		t.Fatalf("the refusal must state that nothing was mutated: %v", err)
-	}
-	manager.mu.Lock()
-	_, suppressedReal := manager.deletedRootRepos[realID]
-	_, suppressedProvisional := manager.deletedRootRepos[derivedID]
-	manager.mu.Unlock()
-	if suppressedReal || suppressedProvisional {
-		t.Fatalf("nothing may be suppressed by a refused delete (real=%v provisional=%v)", suppressedReal, suppressedProvisional)
-	}
+	t.Run("a stale REAL recorded identity is not special", func(t *testing.T) {
+		// A reconciled record whose recorded root is a linked workspace can be
+		// filed under a real id its checkout no longer resolves to, so the
+		// ambiguity is not limited to provisional ids (3917445684, 3917445659).
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		installOptionsRecordingBackend(t)
+		repoPath := setupControlRepo(t)
+		project := registerTestProject(t, repoPath)
+		realID := repoID(t, repoPath)
+		staleID := config.RepoIDFromRoot(filepath.Join(testguard.CanonicalTempDir(t), "former-identity-root"))
+		if staleID == realID || config.IsDerivedRepoID(staleID) {
+			t.Fatalf("fixture needs two distinct REAL identities, got %s and %s", staleID, realID)
+		}
+		setRecordedRepoID(t, project.ID, staleID)
+		hidden := repoPath + ".hidden"
+		if err := os.Rename(repoPath, hidden); err != nil {
+			t.Fatalf("hide repo dir: %v", err)
+		}
+		manager, err := NewManager(config.DefaultConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		if err := os.Rename(hidden, repoPath); err != nil {
+			t.Fatalf("restore repo dir: %v", err)
+		}
+		repo, err := config.RepoFromPath(repoPath)
+		if err != nil {
+			t.Fatalf("RepoFromPath: %v", err)
+		}
+		installVerifiedProbe(t, manager, staleID, repo)
+
+		_, err = manager.DeleteProject(DeleteProjectRequest{RepoID: staleID})
+		refused(t, err)
+		unchanged(t, manager, staleID, realID)
+		dir, dirErr := config.ProjectRegistryDir()
+		if dirErr != nil {
+			t.Fatalf("ProjectRegistryDir: %v", dirErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+			t.Fatalf("nor may a refused delete deregister the record: %v", statErr)
+		}
+	})
+
+	t.Run("an ordinary delete is untouched", func(t *testing.T) {
+		// The predicate must not widen: an identity no probe is mid-transition
+		// on deletes exactly as it always did.
+		t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+		installOptionsRecordingBackend(t)
+		repoPath := setupControlRepo(t)
+		registerTestProject(t, repoPath)
+		manager, err := NewManager(config.DefaultConfig())
+		if err != nil {
+			t.Fatalf("NewManager: %v", err)
+		}
+		result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+		if err != nil {
+			t.Fatalf("a live project with no probe must delete: %v", err)
+		}
+		if result.RepoID != repoID(t, repoPath) {
+			t.Fatalf("and under its own identity, got %s", result.RepoID)
+		}
+	})
 }
 
 // TestProvisionalDeleteKeepsItsIdentityOnAProvenMismatch is the other side of
@@ -175,113 +248,6 @@ func TestProvisionalDeleteKeepsItsIdentityOnAProvenMismatch(t *testing.T) {
 	}
 	if result.RepoID != derivedID {
 		t.Fatalf("a disproven candidate must not move the delete: got %s, want the recorded identity %s (real %s)", result.RepoID, derivedID, realID)
-	}
-}
-
-// TestVerifiedPendingAttributionDeregistersByRealID pins review id 3916379577
-// (P1), the reverse direction. A client deleting by the REAL identity found no
-// registry row — the record still answers to its provisional id — so the delete
-// archived and suppressed the real id's sessions, skipped DeregisterProject,
-// and reported success while the durable record survived to reappear on the
-// next daemon start.
-func TestVerifiedPendingAttributionDeregistersByRealID(t *testing.T) {
-	manager, _, _, realID := pendingAttributionFixture(t, verifiedProbe)
-	project := onlyRegisteredProject(t)
-
-	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID}); err != nil {
-		t.Fatalf("DeleteProject by the real identity: %v", err)
-	}
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
-		t.Fatalf("the durable record survived a delete that reported success — it reappears on the next daemon start; the row is still keyed by its provisional identity and only a verified probe binds the two")
-	}
-}
-
-// TestRedirectedDeleteSweepsTheRecordedPathOptIn pins review id 3916379565
-// (P1). A root_agents key is a PATH, and a stale key for an unavailable
-// recorded root falls back to hashing that path — the project's provisional
-// identity, never the real id a verified probe redirects the delete to. Keying
-// the durable sweep on the target alone left the opt-in in place to recreate
-// the root when the checkout returned.
-//
-// The recorded root is a linked worktree, which is where the two genuinely
-// differ: the repository's identity hashes the main root while the stale key
-// hashes the worktree path.
-func TestRedirectedDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
-	worktree, project, realID := worktreeRecordedProject(t)
-	clearRecordedRepoID(t, project.ID)
-	derivedID := config.DerivedRepoIDForUnresolvedRoot(worktree)
-	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
-	if pathID == realID {
-		t.Fatalf("fixture must use a recorded root that is not the repository's identity root, both %s", realID)
-	}
-	worktreeRepo, err := config.RepoFromPath(worktree)
-	if err != nil {
-		t.Fatalf("RepoFromPath(%s): %v", worktree, err)
-	}
-
-	aside := worktree + ".aside"
-	if err := os.Rename(worktree, aside); err != nil {
-		t.Fatalf("hide worktree: %v", err)
-	}
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[derivedID]; !ok {
-		t.Fatalf("fixture must start with the record unresolved under its provisional identity %s", derivedID)
-	}
-	installVerifiedProbe(t, manager, derivedID, worktreeRepo)
-
-	// The durable sweep runs while the delete's fences are installed, which
-	// makes it the one place a test can observe them.
-	var swept []string
-	fencedMidDelete := map[string]bool{}
-	original := deregisterRootAgents
-	deregisterRootAgents = func(ids ...string) ([]string, error) {
-		swept = append(swept, ids...)
-		manager.mu.Lock()
-		for id := range manager.projectDeletes {
-			fencedMidDelete[id] = true
-		}
-		manager.mu.Unlock()
-		return nil, nil
-	}
-	t.Cleanup(func() { deregisterRootAgents = original })
-
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
-	if err != nil {
-		t.Fatalf("DeleteProject by the recorded worktree path: %v", err)
-	}
-	if result.RepoID != realID {
-		t.Fatalf("the verified probe must move the delete onto %s, got %s", realID, result.RepoID)
-	}
-	found := false
-	for _, id := range swept {
-		if id == pathID {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("the durable root_agents sweep got %v, without the recorded path's own identity %s — a stale key spelled %q resolves to nothing else, so the opt-in survives to recreate the root when the checkout returns", swept, pathID, worktree)
-	}
-	// And the same split applies to the admission fence: the heal pass asks
-	// about the RECORDED identity, so a delete that fenced only the identity it
-	// acts under lets that pass promote the project mid-delete and the
-	// singleton sweep recreate the root this is tearing down.
-	if !fencedMidDelete[derivedID] || !fencedMidDelete[realID] {
-		t.Fatalf("a redirected delete must fence BOTH identities while it runs; fenced %v (recorded %s, acting %s)", fencedMidDelete, derivedID, realID)
-	}
-	manager.mu.Lock()
-	stillFenced := len(manager.projectDeletes)
-	manager.mu.Unlock()
-	if stillFenced != 0 {
-		t.Fatalf("and it must remove exactly the fences it installed; %d left behind", stillFenced)
 	}
 }
 
@@ -333,12 +299,71 @@ func TestReconciledDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 	if result.RepoID != realID {
 		t.Fatalf("a recorded identity addresses the project as itself: got %s, want %s", result.RepoID, realID)
 	}
+	found := false
 	for _, id := range swept {
 		if id == pathID {
-			return
+			found = true
 		}
 	}
-	t.Fatalf("the durable root_agents sweep got %v, without the recorded path's own hash %s — a stale key spelled %q is unresolvable, so it answers to that hash and to nothing else, and the opt-in survives to recreate the root", swept, pathID, worktree)
+	if !found {
+		t.Fatalf("the durable root_agents sweep got %v, without the recorded path's own hash %s — a stale key spelled %q is unresolvable, so it answers to that hash and to nothing else, and the opt-in survives to recreate the root", swept, pathID, worktree)
+	}
+}
+
+// TestOccupiedRecordedRootIsNotSweptByItsHash is the limit of the sweep above
+// (#3530 review id 3917445672). A repository appearing at the recorded root
+// legitimately OWNS that path's hash, so supplying it would delete the
+// occupant's own opt-in on behalf of a delete that targeted this project.
+func TestOccupiedRecordedRootIsNotSweptByItsHash(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded workspace: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// The repository appears in the window the finding describes: after the
+	// selectors and the claimant resolved against an ABSENT root, before the
+	// locked config mutation reads it.
+	deleteProjectPreSweepHookForTest = func() {
+		if _, err := os.Stat(worktree); err == nil {
+			return
+		}
+		if err := exec.Command("git", "init", worktree).Run(); err != nil {
+			t.Fatalf("git init occupant: %v", err)
+		}
+		if occupant := repoID(t, worktree); occupant != pathID {
+			t.Fatalf("fixture must main-root the occupant at the recorded path, got %s want %s", occupant, pathID)
+		}
+	}
+	t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
+
+	var swept []string
+	original := deregisterRootAgents
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
+		swept = append(swept, ids...)
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = original })
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+		t.Fatalf("DeleteProject by the recorded path: %v", err)
+	}
+	if len(swept) == 0 {
+		t.Fatalf("fixture must reach the durable sweep, or it pins nothing")
+	}
+	for _, id := range swept {
+		if id == pathID {
+			t.Fatalf("the sweep supplied %s, which the occupant now owns: deleting this project would remove a live repository's own root_agents opt-in", pathID)
+		}
+	}
 }
 
 // worktreeRecordedProject registers a project whose recorded root is a linked
@@ -471,19 +496,6 @@ func onlyRegisteredProject(t *testing.T) config.Project {
 	return projects[0]
 }
 
-func assertDeletedUnderRealIdentity(t *testing.T, manager *Manager, result DeleteProjectResult, realID string) {
-	t.Helper()
-	if result.RepoID != realID {
-		t.Fatalf("the delete stayed on the provisional identity %s while the daemon had already verified %s for this record — it archives nothing under the identity the project's sessions are keyed by and still deregisters the project", result.RepoID, realID)
-	}
-	manager.mu.Lock()
-	_, suppressedReal := manager.deletedRootRepos[realID]
-	manager.mu.Unlock()
-	if !suppressedReal {
-		t.Fatalf("the delete must suppress the identity it is actually deleting (%s)", realID)
-	}
-}
-
 // TestRealToRealReattributionCarriesItsState pins review id 3916912953 (P1).
 //
 // The identity a project is FILED under is not always provisional. A
@@ -540,31 +552,6 @@ func TestRealToRealReattributionCarriesItsState(t *testing.T) {
 	}
 	if _, moved := layers.personal[realID]; !moved {
 		t.Fatalf("the personal layer must arrive under the identity the project was published as (%s)", realID)
-	}
-}
-
-// TestRedirectedRepoIDDeleteRecoversTheRegistryRow pins review id 3916912942
-// (P2). The reconciliation write lands durably before the verified probe is
-// consumed, so a delete arriving with the provisional id finds no row under it,
-// gets redirected to the real id, and used to keep the empty path — archiving
-// the real sessions and reporting success while skipping both the recorded-path
-// opt-in sweep and DeregisterProject.
-func TestRedirectedRepoIDDeleteRecoversTheRegistryRow(t *testing.T) {
-	manager, _, derivedID, realID := pendingAttributionFixture(t, verifiedProbe)
-	project := onlyRegisteredProject(t)
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
-		t.Fatalf("record the resolved identity: %v", err)
-	}
-
-	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: derivedID}); err != nil {
-		t.Fatalf("DeleteProject by the provisional identity: %v", err)
-	}
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
-		t.Fatalf("the durable record survived a delete that reported success: the row had already been reconciled to %s, so the lookup under %s found nothing and the redirect never went back for it", realID, derivedID)
 	}
 }
 
@@ -754,62 +741,5 @@ func TestOccupiedRecordedRootDoesNotBorrowItsOptIn(t *testing.T) {
 
 	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentWillMaterialize {
 		t.Fatalf("the occupant's opt-in was borrowed for %s: the verdict promises a root the legacy sweep will only ever create for %s, which admits root-targeted tasks and delivery waits for a root that never appears", realID, occupantID)
-	}
-}
-
-// TestVerifiedRealToRealDeleteFollowsTheProbe pins review id 3917294314 (P2).
-//
-// A record can carry a STALE real identity — its checkout returns under a
-// different real id after the repository's identity root moved — and a verified
-// probe proves the two are one project before the promotion is consumed. A
-// delete arriving with the old id found no registry row (the live checkout
-// resolves to the new one), and the provisional-only redirect returned early,
-// so it archived the old id's sessions and reported success while the durable
-// row survived.
-func TestVerifiedRealToRealDeleteFollowsTheProbe(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
-	repoPath := setupControlRepo(t)
-	project := registerTestProject(t, repoPath)
-	realID := repoID(t, repoPath)
-	staleID := config.RepoIDFromRoot(filepath.Join(testguard.CanonicalTempDir(t), "former-identity-root"))
-	if staleID == realID || config.IsDerivedRepoID(staleID) {
-		t.Fatalf("fixture needs two distinct REAL identities, got %s and %s", staleID, realID)
-	}
-	setRecordedRepoID(t, project.ID, staleID)
-
-	hidden := repoPath + ".hidden"
-	if err := os.Rename(repoPath, hidden); err != nil {
-		t.Fatalf("hide repo dir: %v", err)
-	}
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[staleID]; !ok {
-		t.Fatalf("fixture must file the record under its written identity %s", staleID)
-	}
-	if err := os.Rename(hidden, repoPath); err != nil {
-		t.Fatalf("restore repo dir: %v", err)
-	}
-	repo, err := config.RepoFromPath(repoPath)
-	if err != nil {
-		t.Fatalf("RepoFromPath: %v", err)
-	}
-	installVerifiedProbe(t, manager, staleID, repo)
-
-	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: staleID})
-	if err != nil {
-		t.Fatalf("DeleteProject by the stale recorded identity: %v", err)
-	}
-	if result.RepoID != realID {
-		t.Fatalf("a verified probe proves this checkout is %s; the delete stayed on the record's stale %s, so it archives the wrong identity's sessions", realID, result.RepoID)
-	}
-	dir, err := config.ProjectRegistryDir()
-	if err != nil {
-		t.Fatalf("ProjectRegistryDir: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
-		t.Fatalf("the durable record survived a delete that reported success")
 	}
 }

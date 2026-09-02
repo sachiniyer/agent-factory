@@ -266,78 +266,71 @@ func probeProvedItsCheckout(p *rootReattributionProbe) (verified, disproven bool
 	return p.matches, p.mismatch
 }
 
-// pendingAttributionFor answers which identity a delete aimed at the
-// PROVISIONAL id derivedID may act under (#3530 review ids 3915722493,
-// 3916379586).
+// identityTransitionPendingFor reports that the daemon is mid-transition on the
+// identity a request named: a probe keyed by it holds an unconsumed candidate
+// that is some OTHER identity, so which project the id names is being decided
+// right now (#3530 review ids 3915722493, 3916379586, 3917445659).
 //
-// The candidate a probe publishes is NOT evidence that the checkout at the
-// recorded path is this project's: it is stored the moment git resolves the
-// path, before the marker is read, so a stranger occupying that path publishes
-// its own real identity there. Acting on it would let a delete archive and
-// suppress the occupant while deregistering the original project's record —
-// mutations no later mismatch can undo.
+// It is a REFUSAL predicate, not a redirect. An earlier round tried to follow
+// the probe — delete under the identity it had resolved — and that keys on an
+// id, which is exactly what a repository at a reused path can also legitimately
+// own: deleting an occupant whose real id equals a stale record's recorded one
+// found that record's probe and aimed the delete at a different project's
+// sessions. The collision this whole change removes, re-entered through the
+// probe map. Nothing here acts across identities any more; the caller refuses
+// and the next pass, which has the record in hand, completes the transition.
 //
-// So only a PROVEN match moves a delete between identities. A candidate with no
-// verdict yet makes the target unknown, which the caller refuses rather than
-// guesses; that is the same rule normalizeDeleteProjectPath applies to a git
-// probe that never answered. A proven mismatch establishes that the candidate
-// is not this record's, so the recorded identity simply stands.
-func (m *Manager) pendingAttributionFor(derivedID string) (realID string, unknown bool) {
+// A settled DISPROOF is not pending: the marker read succeeded and differed, so
+// the candidate is established NOT to be this record's and the recorded
+// identity simply stands. Everything else — in flight, completed without a
+// verdict, verified but not yet promoted — is the unknown.
+func (m *Manager) identityTransitionPendingFor(repoID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	probe := m.rootHealProbes[derivedID]
+	probe := m.rootHealProbes[repoID]
 	if probe == nil {
-		return "", false
+		return false
 	}
-	// A settled verdict has already released this identity — a proven mismatch
-	// says the checkout there is a different clone, an unreadable marker is
-	// held closed through the snapshot bridge instead — so it moves nothing.
-	// An INCONCLUSIVE settle established nothing and keeps its inherited
-	// candidate, which is exactly the unknown this refuses on.
 	if probe.settled && !probe.inconclusive() {
-		return "", false
+		return false
 	}
 	candidate := probe.candidate.Load()
-	if candidate == nil || candidate.ID == derivedID {
-		return "", false
+	if candidate == nil || candidate.ID == repoID {
+		return false
 	}
-	verified, disproven := probeProvedItsCheckout(probe)
-	switch {
-	case verified:
-		return candidate.ID, false
-	case disproven:
-		return "", false
+	if _, disproven := probeProvedItsCheckout(probe); disproven {
+		return false
 	}
-	return "", true
+	return true
 }
 
-// verifiedPendingDerivedID is pendingAttributionFor's other direction, for a
-// delete that arrives with the REAL identity while the record is still keyed by
-// its provisional one (#3530 review id 3916379577): without it
-// registeredProjectRootForRepoID finds no row, so the delete archives and
-// suppresses the real id's sessions, skips DeregisterProject, and reports
-// success while the durable record survives to reappear on the next start.
+// identityTransitionPendingOn is the same question from the other side: some
+// record's probe has resolved repoID as ITS candidate, so a request naming
+// repoID may be naming that record rather than the repository whose id it is
+// (#3530 review ids 3916379577, 3916912942, 3917445684).
 //
-// Same rule as the forward direction, for the same reason: only a PROVEN marker
-// match may bind the two identities together. An unverified candidate here
-// would let a delete aimed at an occupant deregister the absent project whose
-// path it happens to occupy.
-func (m *Manager) verifiedPendingDerivedID(realID string) string {
+// Callers ask it only when they could find no registry row for repoID, which is
+// precisely the state a mid-transition record produces — its row still answers
+// to the identity it is filed under. With a row in hand the request has already
+// selected its project and nothing is ambiguous.
+func (m *Manager) identityTransitionPendingOn(repoID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for derivedID, probe := range m.rootHealProbes {
-		if probe == nil || (probe.settled && !probe.inconclusive()) {
+	for recordedID, probe := range m.rootHealProbes {
+		if probe == nil || recordedID == repoID {
 			continue
 		}
-		candidate := probe.candidate.Load()
-		if candidate == nil || candidate.ID != realID || derivedID == realID {
+		if probe.settled && !probe.inconclusive() {
 			continue
 		}
-		if verified, _ := probeProvedItsCheckout(probe); verified {
-			return derivedID
+		if candidate := probe.candidate.Load(); candidate != nil && candidate.ID == repoID {
+			if _, disproven := probeProvedItsCheckout(probe); disproven {
+				continue
+			}
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // pendingReattributionDerivedID returns the DERIVED recorded-path ID of an
