@@ -600,3 +600,27 @@ func TestMigratedValueIsTheEffectiveValue(t *testing.T) {
 	assert.False(t, moved.Redundant)
 	assert.True(t, redundant.Redundant)
 }
+
+// TestMigrateRelocatesAValueContainingItsOwnDestinationHeader pins the
+// remove-before-insert ordering. Neither surgical helper tracks TOML
+// multiline-string state, so a deprecated value that legitimately CONTAINS a
+// line reading like its destination table header — a free-form ssh command,
+// say — made the insert believe that section was already open and place the
+// leaf inside the string. Deleting the source first takes that text out of the
+// document before anything scans it.
+//
+// Before the fix this refused a valid config with an internal error (the
+// re-parse gate caught it, so nothing was ever corrupted) (#3624 review).
+func TestMigrateRelocatesAValueContainingItsOwnDestinationHeader(t *testing.T) {
+	path := migrateHome(t, "schema_version = 1\nsandbox_ssh = '''ssh host\n[sandbox]\nrest'''\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err, "a config TOML accepts must not fail to migrate")
+	require.Len(t, result.Migrated, 1)
+	assert.Equal(t, "sandbox.ssh", result.Migrated[0].To)
+
+	cfg, err := parseConfigTOML([]byte(readFile(t, path)), path)
+	require.NoError(t, err)
+	assert.Equal(t, "ssh host\n[sandbox]\nrest", cfg.SandboxSSH,
+		"the value survives the move byte for byte, header-looking line included")
+}

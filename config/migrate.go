@@ -178,6 +178,20 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 				return nil, err
 			}
 		}
+		// REMOVE BEFORE INSERT, and the order is the fix rather than a preference.
+		// Both surgical helpers find a section by scanning for [header] lines, and
+		// neither tracks TOML multiline-string state — so a deprecated value that
+		// happens to CONTAIN its own destination header, as a free-form
+		// `sandbox_ssh = '''…\n[sandbox]\n…'''` command legitimately can, makes
+		// the insert believe that section is already open and place the leaf inside
+		// the string. Deleting the source first takes that text out of the document
+		// before anything scans it. The value was lifted above, so nothing is lost
+		// by removing the line early (#3624 review).
+		updated, removed := deleteTOMLScalar(content, "", alias.legacy)
+		if !removed {
+			return nil, unremovableKeyError(alias.legacy, prettyPath)
+		}
+		content = updated
 		if tomlRootDottedTable(content, alias.section) {
 			// The destination table is already open as a dotted key, and TOML will
 			// not let a [header] re-open it. Join it in the same form.
@@ -185,11 +199,6 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 		} else {
 			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
 		}
-		updated, removed := deleteTOMLScalar(content, "", alias.legacy)
-		if !removed {
-			return nil, unremovableKeyError(alias.legacy, prettyPath)
-		}
-		content = updated
 		// Value is the EFFECTIVE value, never the raw TOML token: a --json caller
 		// comparing two migrations of the same setting must not get "0.0.0.0:8443"
 		// from one and "'0.0.0.0:8443'" from the other purely because one file
