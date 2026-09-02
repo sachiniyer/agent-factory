@@ -200,8 +200,8 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 		err = nil
 	}
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return string(output), fmt.Errorf("git command failed: %s (%w)", string(exitErr.Stderr), err)
+		if detail := commandFailureDetail(err); detail != "" {
+			return string(output), fmt.Errorf("git command failed: %s (%w)", detail, err)
 		}
 		return string(output), fmt.Errorf("git command failed: %w", err)
 	}

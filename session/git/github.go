@@ -90,6 +90,15 @@ func FetchPRInfoContext(parent context.Context, repoPath, branchName string) (*P
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("gh pr list timed out after %s (GitHub unreachable or stalled): %w", ghNetworkTimeout, ctx.Err())
 		}
+		// Render gh's OWN explanation, not just "exit status 1" (#3392):
+		// cmd.Output captured it into (*exec.ExitError).Stderr, and an auth
+		// failure, a rate limit, an unreachable network and a repo with no
+		// GitHub remote are indistinguishable without it — while this log
+		// line is the only account a user gets of why the PR badge vanished
+		// (#3351 made this sweep the sole PR-info producer).
+		if detail := commandFailureDetail(err); detail != "" {
+			return nil, fmt.Errorf("failed to fetch PR info: %s (%w)", detail, err)
+		}
 		return nil, fmt.Errorf("failed to fetch PR info: %w", err)
 	}
 
