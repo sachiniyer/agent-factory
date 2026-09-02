@@ -298,7 +298,45 @@ func mustVisit(f reflect.StructField) bool {
 	if f.IsExported() {
 		return true
 	}
-	return f.Anonymous && f.Type.Kind() == reflect.Struct
+	if !f.Anonymous {
+		return false
+	}
+	// A pointer embed promotes too: json serializes *hidden's exported fields
+	// whenever the pointer is non-nil. Admitting it here does not make it
+	// fillable — an unexported field cannot be allocated through reflect — but
+	// it routes the shape to fill, which reports an unsettable non-struct as
+	// unsupported instead of passing over it in silence (#3592 review).
+	t := f.Type
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
+}
+
+// guardMinByteArray is the shortest fixed byte array that can hold a marker
+// distinctive enough to trust. Below it, a truncated sentinel prefix is too
+// short to tell a planted value from incidental data, so the field is reported
+// rather than silently probed with something meaningless.
+const guardMinByteArray = 8
+
+// byteArrayContents reads a [N]byte without requiring addressability, which
+// Value.Bytes does require for arrays.
+func byteArrayContents(v reflect.Value) []byte {
+	out := make([]byte, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		out[i] = byte(v.Index(i).Uint())
+	}
+	return out
+}
+
+// plantedByteArray is the marker expected in a [N]byte of this length: the
+// sentinel, truncated to fit.
+func plantedByteArray(n int) []byte {
+	b := []byte(guardSentinel)
+	if n < len(b) {
+		return b[:n]
+	}
+	return b
 }
 
 type sentinelFiller struct {
@@ -369,6 +407,20 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 			f.fill(v.Index(i), path+"[]", depth+1)
 		}
 	case reflect.Array:
+		// A FIXED byte array is not the slice case. encoding/json emits []byte
+		// as base64 but [N]byte as a list of integers, which reconstructs the
+		// bytes exactly — and the element walk below never planted anything,
+		// because fill has no numeric case, so the array stayed zero and the
+		// collect pass could not see it (#3592 review).
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			if v.Len() < guardMinByteArray {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]byte is too short to hold a distinctive sentinel)", path, v.Len()))
+				return
+			}
+			reflect.Copy(v, reflect.ValueOf([]byte(guardSentinel)))
+			return
+		}
 		for i := 0; i < v.Len(); i++ {
 			f.fill(v.Index(i), path+"[]", depth+1)
 		}
@@ -451,6 +503,12 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 			found = append(found, collectSentinelPaths(v.Index(i), path+"[]", depth+1)...)
 		}
 	case reflect.Array:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			if v.Len() >= guardMinByteArray && bytes.Contains(byteArrayContents(v), plantedByteArray(v.Len())) {
+				found = append(found, path)
+			}
+			return found
+		}
 		for i := 0; i < v.Len(); i++ {
 			found = append(found, collectSentinelPaths(v.Index(i), path+"[]", depth+1)...)
 		}
