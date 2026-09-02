@@ -353,6 +353,26 @@ type sentinelFiller struct {
 	unsupported []string
 	planted     []plantedField
 	seq         int
+	// textFree counts the values the walk deliberately decided carry no text —
+	// a reviewed timestamp, a kind json cannot serialize. Those are statements,
+	// not silences, which is what separates them from the scalar exemption.
+	textFree int
+}
+
+// observations is how many definite statements the walk has made about the
+// values it met: markers planted, holes reported, and values decided to be
+// text-free. The scalar exemption deliberately raises NONE of them.
+//
+// That is what makes it a usable test for a REPEATED aggregate. A scalar leaf is
+// exempt because its capacity is bounded — but repeat it and it is not:
+// `[]struct{ Code int32 }` emits [{"Code":83},{"Code":69}] for as many elements
+// as there are, reconstructing arbitrary text exactly as `[]int32` does.
+// Reproduced with planted=[] and unsupported=[] (#3592 review). An element whose
+// leaves are ENTIRELY unmarked is one this guard says nothing about, so it is
+// reported; an element carrying any string, container, or hole is covered
+// already, which is why every repeated aggregate in InstanceData passes.
+func (f *sentinelFiller) observations() int {
+	return len(f.planted) + len(f.unsupported) + len(f.tooDeep) + f.textFree
 }
 
 // nextMarker puts the unique sequence FIRST, so a marker that is truncated or
@@ -526,6 +546,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 			return
 		}
 		if base == reflect.TypeOf(time.Time{}) {
+			f.textFree++
 			return
 		}
 	}
@@ -549,6 +570,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		f.fill(v.Elem(), path, depth+1)
 	case reflect.Struct:
 		if v.Type() == reflect.TypeOf(time.Time{}) {
+			f.textFree++
 			return
 		}
 		for i := 0; i < v.NumField(); i++ {
@@ -587,6 +609,7 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		// Not serializable by encoding/json — it errors rather than emitting
 		// them — so they cannot reach a bundle and need no marker.
+		f.textFree++
 	default:
 		// Every kind left is a SCALAR leaf: bool, an integer, a float, a
 		// complex. json emits them and this walk plants nothing in them, which
@@ -724,9 +747,22 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
 		}
 		for i := 0; i < v.Len(); i++ {
+			before := f.observations()
 			f.fill(v.Index(i), path+"[]", depth+1)
+			f.noteUnmarkedElement(path+"[]", before)
 		}
 	}
+}
+
+// noteUnmarkedElement reports a repeated element the walk made no statement
+// about at all — see observations. The report is identical for every element, so
+// dedupeSorted collapses it to one line naming the path.
+func (f *sentinelFiller) noteUnmarkedElement(path string, before int) {
+	if f.observations() != before {
+		return
+	}
+	f.unsupported = append(f.unsupported,
+		path+" (no leaf of this repeated element can carry a text marker)")
 }
 
 // fillMap seeds guardSliceSeed entries under distinct keys, for the slice
@@ -802,7 +838,11 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 		}
 		val := reflect.New(v.Type().Elem()).Elem()
 		if !valueScalar {
+			before := f.observations()
 			f.fill(val, path+"[]", depth+1)
+			// A planted KEY does not cover the VALUE beside it: a redaction
+			// that clears keys and leaves values would read as complete.
+			f.noteUnmarkedElement(path+"[]", before)
 		}
 		m.SetMapIndex(key, val)
 	}

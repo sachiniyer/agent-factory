@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Tests of the #3548 guard's own machinery, on shapes InstanceData does not have
@@ -256,6 +257,64 @@ func TestGuardRejectsContradictoryClassification(t *testing.T) {
 // plants no marker in a scalar leaf — so it has to be refused before it gets
 // there, or the guard would stay green over a field emitting whatever this
 // method returns.
+// TestGuardRefusesARepeatedAggregateWithNoTextLeaf is where the scalar
+// exemption stops. A scalar leaf is exempt because its capacity is bounded —
+// repeat it and it is not, so a slice or map of a struct whose leaves are
+// ENTIRELY unmarked is a hole, not an exemption: json emits one object per
+// element, and enough of them reconstruct any text.
+func TestGuardRefusesARepeatedAggregateWithNoTextLeaf(t *testing.T) {
+	type code struct{ Code int32 }
+	var probe struct {
+		Codes  []code
+		ByName map[string]code
+	}
+	filler := &sentinelFiller{}
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+
+	got := dedupeSorted(filler.unsupported)
+	want := []string{
+		"ByName[] (no leaf of this repeated element can carry a text marker)",
+		"Codes[] (no leaf of this repeated element can carry a text marker)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("unsupported = %v,\nwant %v", got, want)
+	}
+	// The map's own KEYS are still planted: reporting the value subtree must not
+	// cost the coverage the keys already had.
+	var keys int
+	for _, p := range filler.planted {
+		if strings.HasSuffix(p.path, "[key]") {
+			keys++
+		}
+	}
+	if keys != guardSliceSeed {
+		t.Errorf("planted %d map key(s), want %d — the value report should not "+
+			"suppress key coverage", keys, guardSliceSeed)
+	}
+}
+
+// TestGuardCoversARepeatedAggregateWithOneTextLeaf is the other side: an element
+// carrying any text-bearing leaf is covered already, and must NOT be reported.
+// Every repeated aggregate in InstanceData is this shape.
+func TestGuardCoversARepeatedAggregateWithOneTextLeaf(t *testing.T) {
+	type entry struct {
+		Code int32
+		Name string
+		When time.Time
+	}
+	var probe struct {
+		Entries []entry
+		Stamps  []time.Time
+	}
+	filler := &sentinelFiller{}
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+	if len(filler.unsupported) > 0 {
+		t.Errorf("unsupported = %v, want none: the element has a string leaf, and a "+
+			"timestamp is a decision the walk made rather than a silence",
+			filler.unsupported)
+	}
+}
+
 type guardTextScalar int32
 
 func (guardTextScalar) MarshalText() ([]byte, error) { return []byte("secret-text"), nil }
@@ -321,5 +380,61 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 			t.Errorf("%s recorded the encoding %s, which the document does not contain: %s",
 				p.path, p.encoded, doc)
 		}
+	}
+}
+
+// TestGuardReviewedMarshalersStillEmitTheirFields turns every entry of
+// reviewedMarshalerTypes from a point-in-time reading into a checked contract.
+//
+// Each entry claims the type's MarshalJSON emits the same exported fields this
+// walk plants into, and nothing tied that claim to the code. A marshaler that
+// later base64-encodes a field, or renders text out of an unexported one, keeps
+// its exemption: the walk then records evidence the document does not show, and
+// a field that still ships verbatim reads as redacted (#3592 review).
+//
+// So the claim is executed. Plant into a fresh value, marshal it through the
+// type's OWN MarshalJSON with nothing redacted, and require every planted marker
+// to survive. A marshaler that stops emitting a field verbatim fails here by
+// name, which is the prompt to re-read it and update or delete the entry.
+func TestGuardReviewedMarshalersStillEmitTheirFields(t *testing.T) {
+	for typ, reason := range reviewedMarshalerTypes {
+		t.Run(typ.String(), func(t *testing.T) {
+			if typ == reflect.TypeOf(time.Time{}) {
+				// The one entry that is exempt as TEXT-FREE rather than as
+				// field-faithful: the walk plants nothing in a timestamp, so
+				// there is no emitted-fields claim to execute.
+				return
+			}
+			value := reflect.New(typ).Elem()
+			filler := &sentinelFiller{}
+			filler.fill(value, "", 0)
+			if len(filler.unsupported) > 0 || len(filler.tooDeep) > 0 {
+				t.Fatalf("the walk could not plant %s: unsupported=%v tooDeep=%v",
+					typ, filler.unsupported, filler.tooDeep)
+			}
+			if len(filler.planted) == 0 {
+				t.Fatalf("planted nothing in %s, so this contract check would pass vacuously", typ)
+			}
+
+			doc, err := json.Marshal(value.Interface())
+			if err != nil {
+				t.Fatalf("%s.MarshalJSON failed: %v", typ, err)
+			}
+			survived, _ := filler.leakedPaths(string(doc))
+			var missing []string
+			for _, p := range filler.planted {
+				if _, ok := survived[p.path]; !ok {
+					missing = append(missing, p.path)
+				}
+			}
+			if missing = dedupeSorted(missing); len(missing) > 0 {
+				t.Errorf("%s is exempted as %q, but its MarshalJSON did not emit %d planted "+
+					"field(s) verbatim:\n  %s\n\ndocument: %s\n\n"+
+					"The exemption describes code that no longer runs. Re-read the marshaler, "+
+					"then update the reason or remove the entry — an entry that overstates what "+
+					"a marshaler emits lets the walk record evidence the bundle never shows.",
+					typ, reason, len(missing), strings.Join(missing, "\n  "), doc)
+			}
+		})
 	}
 }
