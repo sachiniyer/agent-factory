@@ -2424,7 +2424,7 @@ Show one task's schedule health and audit trail
 
 Show one task in the current project: its trigger, whether the running daemon has it armed, when it will next fire, whether it has missed scheduled runs, and the bounded audit trail of who created, updated, enabled, or disabled it.
 
-Overdue is derived, never stored: a cron task is overdue when its last run precedes its most recent scheduled occurrence by more than one period (or five minutes, whichever is larger). Watch tasks have no schedule and are never overdue — their arming state is the signal.
+Overdue is derived, never stored: a cron task is overdue when it has gone more than one period (or five minutes, whichever is larger) past its most recent scheduled occurrence, measured from the latest of its last run, its last enable, and its creation — so a task paused and switched back on does not report the occurrences it missed while it was off. Watch tasks have no schedule and are never overdue — their arming state is the signal.
 
 "Enabled but not armed" means the task is enabled on disk and the running daemon is not holding it: it will not fire until that is fixed. When no daemon is reachable the arming state is reported as unknown rather than guessed.
 

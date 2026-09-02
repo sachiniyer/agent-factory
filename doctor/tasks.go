@@ -71,7 +71,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		return
 	}
 	if len(overdue) == 0 && len(unarmed) == 0 {
-		detail := fmt.Sprintf("%s firing on schedule", countTasks(enabled))
+		detail := fmt.Sprintf("%s firing on schedule", countTasksAre(enabled))
 		if !live {
 			// Whether they are ARMED was not checked, and saying so is the
 			// difference between "healthy" and "healthy as far as I could see".
@@ -111,7 +111,9 @@ const taskTimeFormat = "2006-01-02 15:04"
 // count, and naming a few makes it possible to act without `--verbose`.
 const maxNamedTasks = 5
 
-func countTasks(n int) string {
+// countTasksAre / countTasksHave carry the verb because the row reads as a
+// sentence and English does not let the count and the verb disagree.
+func countTasksAre(n int) string {
 	if n == 1 {
 		return "1 enabled task is"
 	}
@@ -123,13 +125,6 @@ func countTasksHave(n int) string {
 		return "1 enabled task has"
 	}
 	return fmt.Sprintf("%d enabled tasks have", n)
-}
-
-func countTasksAre(n int) string {
-	if n == 1 {
-		return "1 enabled task is"
-	}
-	return fmt.Sprintf("%d enabled tasks are", n)
 }
 
 // describeOverdue names the overdue tasks with their missed counts, so the row

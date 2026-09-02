@@ -272,3 +272,84 @@ func TestLoadTasksDerivationSurvivesTheJSONShape(t *testing.T) {
 	assert.NotContains(t, string(encoded), "overdue")
 	assert.NotContains(t, string(encoded), "missed_occurrences")
 }
+
+// TestOverdue_ReEnableRestartsTheClock is #3623's own episode, from the
+// operator's side: the tasks were disabled on 2026-08-14 when the fleet was
+// paused and re-enabled on 2026-09-01. Measuring from the last RUN would report
+// all 432 occurrences they missed while intentionally off, from the moment they
+// came back until their next fire — a true statement about the past and a
+// useless one about the present. A re-enable is a fresh start, exactly as a
+// first run is.
+func TestOverdue_ReEnableRestartsTheClock(t *testing.T) {
+	last := at(2026, time.August, 14, 14, 20, 8)
+	tsk := cronTask("20 * * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.August, 14, 14, 30, 0), Actor: ActorCLI, Action: AuditDisabled, Fields: []string{"enabled"}},
+		{At: at(2026, time.September, 1, 14, 5, 0), Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
+	}
+
+	// Back on at 14:05, its first occurrence since is 14:20. Nothing is late yet.
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 1, 14, 10, 0)).Overdue,
+		"the pause it was deliberately in is not a backlog it now owes")
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 1, 15, 0, 0)).Overdue,
+		"nor is the fire it has not reached yet")
+
+	// Once the first post-enable occurrence has gone unfired past the window, it
+	// is late again — and about the right number of fires.
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 15, 20, 0))
+	require.True(t, health.Overdue, "a task that stops firing AFTER being re-enabled is still overdue")
+	assert.Equal(t, 2, health.MissedOccurrences,
+		"counted from the re-enable, not from a run 18 days before it")
+	assert.True(t, at(2026, time.September, 1, 14, 20, 0).Equal(health.OldestMissedAt),
+		"the silence starts at the first occurrence after it came back")
+}
+
+// TestOverdue_ReEnableOnADailySchedule is the shape that made this worth fixing:
+// a nightly task switched back on mid-morning would otherwise claim a month of
+// misses for most of a day, every time anyone paused it.
+func TestOverdue_ReEnableOnADailySchedule(t *testing.T) {
+	last := at(2026, time.August, 2, 4, 53, 0)
+	tsk := cronTask("53 4 * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 10, 0, 0), Actor: ActorTUI, Action: AuditEnabled, Fields: []string{"enabled"}},
+	}
+
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 1, 10, 30, 0)).Overdue,
+		"re-enabled half an hour ago, and its next fire is tonight")
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 2, 5, 0, 0)).Overdue,
+		"its first post-enable fire is due, not missed")
+	assert.True(t, DeriveScheduleHealth(tsk, at(2026, time.September, 3, 5, 0, 0)).Overdue,
+		"two nights unfired since it came back is a real silence")
+}
+
+// TestOverdue_OlderEnableDoesNotOutrankANewerRun: the reference is the LATEST of
+// the two, so a task that has actually run since being re-enabled measures from
+// the run.
+func TestOverdue_OlderEnableDoesNotOutrankANewerRun(t *testing.T) {
+	last := at(2026, time.September, 1, 14, 20, 0)
+	tsk := cronTask("20 * * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.August, 20, 9, 0, 0), Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
+	}
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 16, 20, 0))
+	require.True(t, health.Overdue)
+	assert.Equal(t, 2, health.MissedOccurrences, "measured from the run, not the older enable")
+}
+
+// TestOverdue_EnableWithNoRunAtAllIsStillMeasurable: a task enabled but never
+// fired has nothing but the enable to measure from, and that is exactly the task
+// most worth catching.
+func TestOverdue_EnableWithNoRunAtAllIsStillMeasurable(t *testing.T) {
+	tsk := cronTask("20 * * * *", nil)
+	tsk.CreatedAt = at(2026, time.June, 1, 9, 0, 0)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 9, 0, 0), Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
+	}
+
+	assert.False(t, DeriveScheduleHealth(tsk, at(2026, time.September, 1, 9, 30, 0)).Overdue,
+		"three months of pre-enable silence is not this task's backlog")
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 11, 0, 0))
+	require.True(t, health.Overdue, "but two unfired occurrences since it came on are")
+	assert.Equal(t, 2, health.MissedOccurrences)
+}

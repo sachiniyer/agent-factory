@@ -29,7 +29,7 @@ func showFixture() task.Task {
 		LastRunAt:         &last,
 		LastRunStatus:     "started",
 		Overdue:           true,
-		MissedOccurrences: 432,
+		MissedOccurrences: 3,
 		Arming:            task.ArmingNotArmed,
 		Audit: []task.AuditEntry{
 			{At: time.Date(2026, time.August, 14, 14, 30, 0, 0, time.Local), Actor: task.ActorCLI, Action: task.AuditDisabled, Fields: []string{"enabled"}},
@@ -43,14 +43,18 @@ func showFixture() task.Task {
 // doing the subtraction, and the record of who last touched the switch.
 func TestTasksShow_ReportsTheSilenceAndWhoCausedIt(t *testing.T) {
 	var out bytes.Buffer
-	renderTaskShow(&out, showFixture(), time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	// Two and a half hours after the re-enable, so the task is late again on its
+	// own terms rather than on the strength of the pause it was deliberately in.
+	renderTaskShow(&out, showFixture(), time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
 	got := out.String()
 
 	assert.Contains(t, got, "Master Health Watch · 4ab7ba4f")
 	assert.Contains(t, got, "cron · 20 * * * *")
 	assert.Contains(t, got, "2026-08-14 14:20 · started")
-	assert.Contains(t, got, "overdue · missed 432 · oldest missed 2026-08-14 15:20",
-		"the row does the subtraction the reader used to be left with:\n%s", got)
+	assert.Contains(t, got, "overdue · missed 3 · oldest missed 2026-09-01 14:20",
+		"the silence is counted from the re-enable in the trail below, not from a run "+
+			"18 days before it — otherwise the row would claim 432 misses the operator "+
+			"caused on purpose:\n%s", got)
 	assert.Contains(t, got, "enabled but not armed",
 		"an enabled task the daemon is not holding will not fire, and must say so:\n%s", got)
 	assert.Contains(t, got, "2026-08-14 14:30  cli            disabled · enabled")
@@ -64,7 +68,7 @@ func TestTasksShow_UnknownArmingIsNotReportedAsUnarmed(t *testing.T) {
 	tsk.Arming = task.ArmingUnknown
 
 	var out bytes.Buffer
-	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
 
 	assert.Contains(t, out.String(), "unknown — no running daemon answered")
 	assert.NotContains(t, out.String(), "not armed")

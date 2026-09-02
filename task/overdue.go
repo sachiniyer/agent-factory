@@ -142,21 +142,57 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	}
 }
 
-// scheduleReference is the instant lateness is measured from: the last run, or
-// creation for a task that has never run. A never-run task is the case worth
-// getting right — a task created and then never armed has no LastRunAt at all,
-// and treating that as "nothing to compare against" would make the most broken
-// task the one that reports healthiest.
+// scheduleReference is the instant lateness is measured from: the LATEST of the
+// last run, the last time the task was enabled, and — for a task that has never
+// run — its creation.
 //
-// A record with neither timestamp (hand-edited, or written before CreatedAt was
+// The never-run case is worth getting right on its own: a task created and then
+// never armed has no LastRunAt at all, and treating that as "nothing to compare
+// against" would make the most broken task the one that reports healthiest.
+//
+// A RE-ENABLE is a fresh start, exactly as a first run is, and this is where the
+// audit trail earns its keep beyond being something a person reads. Without it,
+// a task deliberately paused and later switched back on reports every occurrence
+// it missed WHILE INTENTIONALLY OFF: #3623's own tasks, disabled 2026-08-14 and
+// re-enabled 2026-09-01, would have read "overdue · missed 432" from the moment
+// they came back until their next fire. That is a true statement about the past
+// and a useless one about the present — the operator knows why it was off, and
+// burying the signal under misses they caused on purpose is how a warning gets
+// trained into noise.
+//
+// The trail is BOUNDED (AuditLimit), so an enable old enough to have fallen off
+// the window leaves the reference where it was before. That direction is the
+// safe one: it can only make the verdict more eager, never hide a task that has
+// genuinely stopped. Tasks written before the trail existed carry none, and
+// behave exactly as they did.
+//
+// A record with no timestamp at all (hand-edited, or written before CreatedAt was
 // populated) derives nothing rather than measuring from the zero time, which
 // would report every such task as millions of occurrences overdue.
 func scheduleReference(t Task) (time.Time, bool) {
+	var ref time.Time
 	if t.LastRunAt != nil && !t.LastRunAt.IsZero() {
-		return *t.LastRunAt, true
+		ref = *t.LastRunAt
+	} else if !t.CreatedAt.IsZero() {
+		ref = t.CreatedAt
 	}
-	if !t.CreatedAt.IsZero() {
-		return t.CreatedAt, true
+	if enabled, ok := lastEnabledAt(t); ok && enabled.After(ref) {
+		ref = enabled
+	}
+	if ref.IsZero() {
+		return time.Time{}, false
+	}
+	return ref, true
+}
+
+// lastEnabledAt returns when the task was most recently switched ON, from its
+// audit trail. Only the explicit enable action counts: a create is already
+// covered by CreatedAt, and an ordinary edit does not restart anything.
+func lastEnabledAt(t Task) (time.Time, bool) {
+	for i := len(t.Audit) - 1; i >= 0; i-- {
+		if t.Audit[i].Action == AuditEnabled {
+			return t.Audit[i].At, !t.Audit[i].At.IsZero()
+		}
 	}
 	return time.Time{}, false
 }
