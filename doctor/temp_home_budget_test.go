@@ -45,12 +45,11 @@ func TestCandidateTempHomesStopsAtTheBudget(t *testing.T) {
 	assert.True(t, sweep.truncated(), "a sweep that stopped partway through 10 directories is truncated")
 	assert.Equal(t, 10, sweep.offered, "offered counts every first-level directory, including the unvisited ones")
 	assert.Len(t, sweep.candidates, 4, "each empty first-level directory contributes exactly one candidate")
-	// 3, not 4. The fourth directory was recorded as a candidate and then the
-	// budget stopped the sweep before its own children were read — so whether
-	// it holds nested homes is unknown, and an entry we did not finish is not
-	// one we visited. Counting it would overstate coverage by exactly the
-	// entry the sweep gave up on.
-	assert.Equal(t, 3, sweep.visited)
+	// 4: the fourth directory is empty, and hitting the candidate limit exactly
+	// as its listing ends is a complete expansion, established by the EOF probe
+	// rather than assumed. An entry whose children we genuinely never read
+	// still does not count — see TestCandidateTempHomesBoundsAHugeSingleDirectory.
+	assert.Equal(t, 4, sweep.visited)
 }
 
 // TestCandidateTempHomesCompleteSweepIsNotTruncated is the twin: the bound must
@@ -188,10 +187,11 @@ func TestTruncatedSweepReportsThatItDidNotFinish(t *testing.T) {
 	assert.False(t, notices[0].Actionable,
 		"not finishing is an UNKNOWN, not a proven unhealthy condition; it must not flip the exit code")
 	assert.Contains(t, notices[0].Detail, "did NOT assess every temp home")
-	// 3, not 4: the fourth directory was appended as a candidate and then the
-	// budget stopped the sweep before its children were read, so it is not one
-	// the run FINISHED — only entries expanded in full count.
-	assert.Contains(t, notices[0].Detail, "3 of the 13 directories",
+	// 4, not 3. The fourth directory is empty: reaching the candidate limit
+	// exactly as its listing ends is a COMPLETE expansion, which the EOF probe
+	// now establishes, so it counts as finished. This number went UP when the
+	// boundary was fixed — the earlier 3 was undercounting real work.
+	assert.Contains(t, notices[0].Detail, "4 of the 13 directories",
 		"the notice must name how far it got, so the reader can calibrate the counts below it")
 	assert.Contains(t, notices[0].Detail, "a 4-candidate budget",
 		"the notice must name the CONFIGURED budget, not the count it happened to stop on")
@@ -660,11 +660,23 @@ func TestCompleteSweepStillReportsAnExactDenominator(t *testing.T) {
 	assert.Contains(t, detail, "of the 12 directories")
 }
 
+// withSmallReadBudget shrinks the budget AND the probe slack together.
+//
+// The slack has to come down with it: the probe deliberately reads past a spent
+// budget to find EOF, so a production slack of 1024 against a test budget of 32
+// would swallow the whole fixture and the bound would look broken when it is
+// not. In production the slack is a rounding error beside the budget; in a test
+// it is the fixture.
 func withSmallReadBudget(t *testing.T, n int) {
 	t.Helper()
 	prevBudget, prevBatch := tempHomeReadBudget, tempHomeChildBatch
+	prevSlack, prevProbe := tempHomeProbeSlack, tempHomeProbeBatch
 	tempHomeReadBudget, tempHomeChildBatch = n, 16
-	t.Cleanup(func() { tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch })
+	tempHomeProbeSlack, tempHomeProbeBatch = 8, 4
+	t.Cleanup(func() {
+		tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch
+		tempHomeProbeSlack, tempHomeProbeBatch = prevSlack, prevProbe
+	})
 }
 
 // countDirReads returns a counter of every directory entry the sweep actually
@@ -971,6 +983,70 @@ func TestListingEndingExactlyOnTheBudgetIsNotCalledTruncated(t *testing.T) {
 func withExactReadBudget(t *testing.T, budget, batch int) {
 	t.Helper()
 	prevBudget, prevBatch := tempHomeReadBudget, tempHomeChildBatch
+	prevSlack, prevProbe := tempHomeProbeSlack, tempHomeProbeBatch
 	tempHomeReadBudget, tempHomeChildBatch = budget, batch
-	t.Cleanup(func() { tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch })
+	tempHomeProbeSlack, tempHomeProbeBatch = 8, 4
+	t.Cleanup(func() {
+		tempHomeReadBudget, tempHomeChildBatch = prevBudget, prevBatch
+		tempHomeProbeSlack, tempHomeProbeBatch = prevSlack, prevProbe
+	})
+}
+
+// TestBudgetPlusOneEntryIsStillACompleteListing is the seventh-round finding.
+//
+// A single-entry probe was not enough, and it failed the same way as the bug it
+// was added for: ReadDir(1) that RETURNS an entry reports io.EOF only on the
+// next call, so a directory holding exactly budget+1 entries handed back its
+// last one and still looked unfinished. A root of nine entries under an
+// eight-entry budget reported rootPartial having collected all nine.
+func TestBudgetPlusOneEntryIsStillACompleteListing(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 9)
+	withExactReadBudget(t, 8, 8)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	assert.Equal(t, 9, sweep.offered, "every entry was collected, the ninth included")
+	assert.False(t, sweep.rootPartial,
+		"budget+1 is a directory that ENDED one entry over, not one with more to give")
+	assert.NotContains(t, tempHomeSweepTruncationDetail(root, sweep, 50000), "too large to list in full")
+}
+
+// TestCandidateLimitReachedExactlyAtEndIsComplete is the other seventh-round
+// finding: the candidate limit had the same boundary bug the read budget did.
+// One parent with four children and a limit of five records all five candidates
+// and is then reported as unfinished, so the summary and summary.incomplete say
+// the check did not finish when it did.
+func TestCandidateLimitReachedExactlyAtEndIsComplete(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "TestFoo")
+	for i := 0; i < 4; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, fmt.Sprintf("%03d", i)), 0755))
+	}
+
+	sweep := candidateTempHomes(root, 5)
+
+	require.Len(t, sweep.candidates, 5, "precondition: the parent plus its four children exactly fill the limit")
+	assert.Equal(t, 1, sweep.visited, "the parent was expanded to its end")
+	assert.False(t, sweep.hitCandidateLimit,
+		"the limit was reached exactly as the directory ended, which is not truncation")
+	assert.False(t, sweep.truncated())
+}
+
+// TestCandidateLimitWithMoreToRecordIsStillTruncated is the twin, and it is what
+// stops the probe turning every limit into a false completion: a child the sweep
+// has seen and cannot record IS a truncated expansion.
+func TestCandidateLimitWithMoreToRecordIsStillTruncated(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "TestFoo")
+	for i := 0; i < 8; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, fmt.Sprintf("%03d", i)), 0755))
+	}
+
+	sweep := candidateTempHomes(root, 5)
+
+	assert.Len(t, sweep.candidates, 5)
+	assert.True(t, sweep.hitCandidateLimit)
+	assert.Zero(t, sweep.visited, "three children were never recorded, so the parent was not finished")
+	assert.True(t, sweep.truncated())
 }

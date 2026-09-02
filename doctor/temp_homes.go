@@ -423,6 +423,28 @@ func (s tempHomeSweep) truncated() bool {
 // truncated sweep is explicitly a partial view either way, and it says so.
 var tempHomeChildBatch = 1024
 
+// tempHomeProbeSlack is how far past a spent budget the sweep will read purely
+// to find out whether the directory had already ended.
+//
+// A single-entry probe is not enough, and the reason is the same shape as the
+// bug it was added for. ReadDir(1) that returns an entry reports io.EOF only on
+// the NEXT call, so a directory holding exactly budget+1 entries hands back its
+// last one and still looks unfinished — a root of nine entries under an
+// eight-entry budget was reported partial having collected all nine. Chasing
+// that with one more probe just moves the boundary to budget+2.
+//
+// So the probe reads up to a bounded slack. Within it the answer is EXACT: EOF
+// arrives and the listing is complete. Beyond it the sweep says truncated,
+// which is true — a directory more than a full slack past the budget really was
+// not read to the end — and the extra work stays bounded, which is the whole
+// point of having a budget.
+var tempHomeProbeSlack = 1024
+
+// tempHomeProbeBatch is the read size used while probing. Smaller than the main
+// batch so the common case (the directory ended one or two entries ago) costs
+// one small read rather than one large one.
+var tempHomeProbeBatch = 64
+
 // tempHomeReadBudget bounds how many directory entries ONE sweep will read, across
 // the temp root and every directory it expands.
 //
@@ -463,12 +485,24 @@ var scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) { return f.Rea
 // One entry is enough to tell them apart, and whatever it reads is handed back
 // so the caller keeps it rather than dropping it on the floor.
 func probeForMoreEntries(sweep *tempHomeSweep, f *os.File) (entries []os.DirEntry, atEnd bool, err error) {
-	entries, err = scanDirBatch(f, 1)
-	sweep.entriesRead += len(entries)
-	if errors.Is(err, io.EOF) {
-		return entries, true, nil
+	for read := 0; read < tempHomeProbeSlack; {
+		batch, readErr := scanDirBatch(f, tempHomeProbeBatch)
+		sweep.entriesRead += len(batch)
+		entries = append(entries, batch...)
+		read += len(batch)
+		if errors.Is(readErr, io.EOF) {
+			return entries, true, nil
+		}
+		if readErr != nil {
+			return entries, false, readErr
+		}
+		if len(batch) == 0 {
+			// No entries and no error. Another call can only tell us the same
+			// thing, so stop rather than spin.
+			return entries, false, nil
+		}
 	}
-	return entries, false, err
+	return entries, false, nil
 }
 
 // expandTempHomeChildren appends dir's subdirectories to the sweep, stopping at
@@ -495,6 +529,28 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget 
 
 	for {
 		if limit > 0 && len(sweep.candidates)+len(children) >= limit {
+			// Same boundary as the read budget, and it was missed there first:
+			// reaching the limit exactly as the directory ends is a COMPLETE
+			// expansion, not a truncated one. One parent with four children and
+			// a limit of five recorded all five candidates and still reported
+			// visited == 0, so the summary and summary.incomplete said the check
+			// had not finished when it had.
+			probe, atEnd, probeErr := probeForMoreEntries(sweep, f)
+			unrecordable := 0
+			for _, entry := range probe {
+				if entry.IsDir() {
+					unrecordable++
+				}
+			}
+			if probeErr != nil {
+				return false, sawEntries, probeErr
+			}
+			// atEnd alone is not enough: the probe may have turned up
+			// directories there is no budget left to record, and an expansion
+			// missing children is not a complete one.
+			if atEnd && unrecordable == 0 {
+				return true, sawEntries, nil
+			}
 			sweep.hitCandidateLimit = true
 			return false, sawEntries, nil
 		}
@@ -531,6 +587,9 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget 
 				continue
 			}
 			if limit > 0 && len(sweep.candidates)+len(children) >= limit {
+				// Mid-batch, so a directory we cannot record is in our hand
+				// already. No probe needed and none would help: this is a
+				// genuinely truncated expansion.
 				sweep.hitCandidateLimit = true
 				return false, sawEntries, nil
 			}
