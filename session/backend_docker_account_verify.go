@@ -130,12 +130,31 @@ type dockerInspectContainer struct {
 func parseDockerInspectContainer(raw []byte) (dockerInspectContainer, error) {
 	var containers []dockerInspectContainer
 	if err := json.Unmarshal(raw, &containers); err != nil {
-		return dockerInspectContainer{}, fmt.Errorf("`docker inspect` output could not be read as JSON: %w", err)
+		// With the output, bounded. A JSON error alone ("invalid character 'W'")
+		// leaves the operator guessing at a stream they cannot see, and the
+		// likely causes — a CLI warning ahead of the document, a docker that
+		// answered something else entirely — are obvious the moment it is shown.
+		return dockerInspectContainer{}, fmt.Errorf("`docker inspect` output could not be read as JSON (%s): %w",
+			boundedOutputExcerpt(raw), err)
 	}
 	if len(containers) != 1 {
 		return dockerInspectContainer{}, fmt.Errorf("`docker inspect` described %d containers, want exactly 1", len(containers))
 	}
 	return containers[0], nil
+}
+
+// boundedOutputExcerpt renders command output for an error message without
+// letting an unexpected megabyte of it become the message.
+func boundedOutputExcerpt(raw []byte) string {
+	const limit = 200
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" {
+		return "no output"
+	}
+	if len(trimmed) > limit {
+		return fmt.Sprintf("%q…", trimmed[:limit])
+	}
+	return fmt.Sprintf("%q", trimmed)
 }
 
 // configuredContainerPaths lists every container path Docker recorded, other

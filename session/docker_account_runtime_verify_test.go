@@ -294,6 +294,14 @@ func TestAccountRuntimeVerify_UnreadableSourceRefuses(t *testing.T) {
 			_, err := parseDockerInspectContainer([]byte(raw))
 			require.Errorf(t, err, "unreadable `docker inspect` output %q must not read as a clean container", raw)
 		}
+		// And the refusal shows what it got, bounded. A bare JSON error leaves
+		// the operator guessing at a stream they cannot see.
+		_, err := parseDockerInspectContainer([]byte("WARNING: something\n[{}]"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "WARNING: something")
+		_, err = parseDockerInspectContainer([]byte(strings.Repeat("x", 5000)))
+		require.Error(t, err)
+		assert.Less(t, len(err.Error()), 500, "an unexpected megabyte of output must not become the message")
 	})
 	t.Run("mountinfo", func(t *testing.T) {
 		for _, raw := range []string{
