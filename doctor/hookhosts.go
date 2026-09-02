@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,11 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -158,12 +160,6 @@ func checkOrphanedHookHosts(ctx *scanContext, report *Report) {
 		return
 	}
 
-	// One fresh enumeration per --fix run, shared by every removal in it: the
-	// findings are applied after ALL detection, so the detection-time answer is
-	// the stale one that matters. Re-reading it once at the first removal closes
-	// that window; what remains is the irreducible gap between the recheck and
-	// the RemoveAll, which no number of re-reads can close.
-	recheck := &hookHostRecheck{}
 	for _, slug := range candidates {
 		dir := filepath.Join(root, slug)
 		if title, owned := owners[slug]; owned {
@@ -176,8 +172,8 @@ func checkOrphanedHookHosts(ctx *scanContext, report *Report) {
 			Severity:    StatusWarn,
 			Detail:      fmt.Sprintf("%s pins a host key for a session that no longer exists in any project, so nothing will ever need it again", dir),
 			FixAction:   "remove " + dir,
-			fix:         hookHostRemoveFix(ctx, root, slug, recheck),
-			Remediation: "run `af doctor --fix` to remove it, or `rm -rf " + dir + "`",
+			fix:         hookHostRemoveFix(ctx, root, slug),
+			Remediation: "run `af doctor --fix` to remove it, or `" + shellsuggest.Command("rm", "-rf", dir) + "`",
 		})
 	}
 }
@@ -200,18 +196,6 @@ func hookHostPinShape(dir string) error {
 	return nil
 }
 
-// hookHostRecheck memoizes the fix-time owner enumeration for one --fix run.
-type hookHostRecheck struct {
-	once   sync.Once
-	owners map[string]string
-	err    error
-}
-
-func (r *hookHostRecheck) load(ctx *scanContext) (map[string]string, error) {
-	r.once.Do(func() { r.owners, r.err = hookHostOwnerSlugs(ctx) })
-	return r.owners, r.err
-}
-
 // hookHostRemoveFix removes one orphaned pin, re-establishing every precondition
 // at fix time.
 //
@@ -220,7 +204,16 @@ func (r *hookHostRecheck) load(ctx *scanContext) (map[string]string, error) {
 // the slug we are about to delete. So the owner set is read again here, and a
 // re-read that FAILS refuses the removal: a guard that could not run has not
 // passed. The shape gate is re-run for the same reason.
-func hookHostRemoveFix(ctx *scanContext, root, slug string, recheck *hookHostRecheck) func() error {
+//
+// Once per REMOVAL, deliberately, rather than once per run. A single memoized
+// re-read looked like the cheap version of this, and it is wrong for a batch: the
+// removals run in sequence, so a session created after the first RemoveAll but
+// before the fifth would be invisible to the fifth, and its pin would go. That is
+// the same defect as trusting detection, one step later, and it grows with the
+// number of orphans. An enumeration is one in-memory RPC plus one walk of the
+// records, and orphans are counted in ones — the wrong thing to economise on when
+// the cost of being wrong is a stranded machine.
+func hookHostRemoveFix(ctx *scanContext, root, slug string) func() error {
 	return func() error {
 		dir := filepath.Join(root, slug)
 		if !pathInside(root, dir) {
@@ -229,7 +222,7 @@ func hookHostRemoveFix(ctx *scanContext, root, slug string, recheck *hookHostRec
 		if err := hookHostPinShape(dir); err != nil {
 			return fmt.Errorf("refusing to remove %s: %w", dir, err)
 		}
-		owners, err := recheck.load(ctx)
+		owners, err := hookHostOwnerSlugs(ctx)
 		if err != nil {
 			return fmt.Errorf("refusing to remove %s: the session inventory is incomplete: %w", dir, err)
 		}
@@ -387,8 +380,23 @@ func daemonSessionInventory() ([]session.InstanceData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return client.Snapshot(daemon.SnapshotRequest{})
+	// BOUNDED, because the local socket is not. apiclient leaves the local
+	// request timeout at zero on purpose, so a daemon that accepts the connection
+	// and never answers would hang `af doctor` outright — the 250ms dial timeout
+	// is long satisfied by then, and a read-only diagnostic that never returns is
+	// worse than one that says it could not tell. The deadline lands in the same
+	// place every other failure does: the inventory is incomplete, so nothing is
+	// removed.
+	ctx, cancel := context.WithTimeout(context.Background(), hookHostInventoryTimeout)
+	defer cancel()
+	return client.SnapshotCtx(ctx, daemon.SnapshotRequest{})
 }
+
+// hookHostInventoryTimeout bounds the daemon read above. Generous: the answer is
+// an in-memory snapshot that returns at once on any healthy daemon, so this is a
+// wedged-daemon ceiling rather than a latency budget. A var so a test can drive
+// the deadline without waiting on it.
+var hookHostInventoryTimeout = 10 * time.Second
 
 // itThem keeps the plural-sensitive clause above readable.
 func itThem(n int) string {

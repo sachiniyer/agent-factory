@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -593,7 +594,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 				FixAction:   "remove " + dir,
 				fix:         staleTempHomeRemoveFix(ctx, dir, tempDir, activeHome),
 				Severity:    StatusWarn,
-				Remediation: "run `af doctor --fix` to remove it, or `rm -rf " + dir + "`",
+				Remediation: "run `af doctor --fix` to remove it, or `" + shellsuggest.Command("rm", "-rf", dir) + "`",
 			})
 			continue
 		}
@@ -608,7 +609,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 				"PROVE it is unused (%s) — inspect it and remove it yourself if it is dead",
 				dir, formatAge(age.Seconds()), lockUnknownReason(lockCause)),
 			Severity:    StatusWarn,
-			Remediation: "verify nothing is using it, then `rm -rf " + dir + "`",
+			Remediation: "verify nothing is using it, then `" + shellsuggest.Command("rm", "-rf", dir) + "`",
 		})
 	}
 }

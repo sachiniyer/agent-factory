@@ -15,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -504,10 +505,10 @@ func TestHookHostsFixRefusesWhenTheInventoryBreaksAfterDetection(t *testing.T) {
 	requireIntactPin(t, dir)
 }
 
-// TestHookHostsFixReadsTheInventoryOncePerRun pins the cost of the recheck: one
-// re-read shared by every removal, not one per orphan. Three orphans, two reads
-// total — detection and the first fix.
-func TestHookHostsFixReadsTheInventoryOncePerRun(t *testing.T) {
+// TestHookHostsFixRechecksBeforeEveryRemoval pins the recheck's granularity: one
+// per REMOVAL, not one memoized answer shared by the batch. Three orphans, four
+// reads — detection plus one per fix.
+func TestHookHostsFixRechecksBeforeEveryRemoval(t *testing.T) {
 	f := newHookHostFixture(t, "")
 	for _, slug := range []string{"orphan-a", "orphan-b", "orphan-c"} {
 		f.writePin(t, slug)
@@ -524,7 +525,39 @@ func TestHookHostsFixReadsTheInventoryOncePerRun(t *testing.T) {
 	for _, finding := range hookHostFindings(report) {
 		require.True(t, finding.Fixed, "each proven orphan should have been removed")
 	}
-	require.Equal(t, 2, reads, "the inventory should be read once at detection and once at fix time")
+	require.Equal(t, 4, reads, "the inventory must be re-read before each removal, not once for the batch")
+}
+
+// TestHookHostsFixSparesALaterOrphanClaimedMidRun is why that granularity
+// matters, and it is the scenario a single memoized recheck gets wrong: the
+// removals run in sequence, and a session is created after the FIRST one has
+// already happened. A batch-wide snapshot taken at the first removal cannot see
+// it, and the second pin — now a live session's — is deleted.
+//
+// The inventory answers empty for detection and for orphan-a's fix, then names
+// orphan-b's owner from the third read on.
+func TestHookHostsFixSparesALaterOrphanClaimedMidRun(t *testing.T) {
+	f := newHookHostFixture(t, "")
+	firstDir := f.writePin(t, "orphan-a")
+	secondDir := f.writePin(t, "orphan-b")
+	reads := 0
+	f.opts.sessionInventory = func() ([]session.InstanceData, error) {
+		reads++
+		if reads < 3 {
+			return nil, nil
+		}
+		return instancesTitled("orphan b"), nil
+	}
+
+	report := f.run(t)
+
+	findings := hookHostFindings(report)
+	require.Len(t, findings, 2)
+	require.True(t, findings[0].Fixed, "orphan-a was unowned at its own removal and should be gone")
+	require.NoDirExists(t, firstDir)
+	require.False(t, findings[1].Fixed, "orphan-b was claimed before its removal and must survive")
+	require.ErrorContains(t, findings[1].FixErr, "now owns it")
+	requireIntactPin(t, secondDir)
 }
 
 // --- The shape gate. ------------------------------------------------------
@@ -614,17 +647,24 @@ func TestHookHostsDaemonInventoryIsGlobalAndLocal(t *testing.T) {
 // daemon/httpserver.go writes with.
 func serveHookHostSnapshot(t *testing.T, home string, handle func(daemon.SnapshotRequest) apiproto.Envelope) {
 	t.Helper()
-	sockPath := filepath.Join(home, "daemon-http.sock")
-	ln, err := net.Listen("unix", sockPath)
-	require.NoError(t, err)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/Snapshot", func(w http.ResponseWriter, r *http.Request) {
+	serveHookHostSnapshotHandler(t, home, func(w http.ResponseWriter, r *http.Request) {
 		var req daemon.SnapshotRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
 		_ = apiproto.WriteEnvelope(w, handle(req))
 	})
+}
+
+// serveHookHostSnapshotHandler is the same bind with an arbitrary handler, for
+// the test that needs a daemon which answers nothing at all.
+func serveHookHostSnapshotHandler(t *testing.T, home string, handler http.HandlerFunc) {
+	t.Helper()
+	sockPath := filepath.Join(home, "daemon-http.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/Snapshot", handler)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -679,4 +719,75 @@ func TestHookHostOwnersSlugifyTitles(t *testing.T) {
 
 	require.Empty(t, hookHostFindings(report))
 	requireIntactPin(t, dir)
+}
+
+// --- A diagnostic must not hang. ------------------------------------------
+
+// TestHookHostsWedgedDaemonIsUnknownRatherThanAHang covers the daemon that
+// ACCEPTS the connection and never answers. The local apiclient carries no
+// overall request timeout by design, and the 250ms dial timeout is satisfied the
+// moment the listener accepts — so without a deadline on this read, `af doctor`
+// blocks forever rather than reporting what it could not determine.
+func TestHookHostsWedgedDaemonIsUnknownRatherThanAHang(t *testing.T) {
+	f := newHookHostFixture(t, hookHostOwnerSlug)
+	dir := f.pinDir(hookHostOwnerSlug)
+
+	// A handler that accepts and then never responds, released only on cleanup so
+	// the goroutine cannot outlive the test.
+	wedged := make(chan struct{})
+	t.Cleanup(func() { close(wedged) })
+	serveHookHostSnapshotHandler(t, f.home, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-wedged:
+		case <-r.Context().Done():
+		}
+	})
+
+	restore := hookHostInventoryTimeout
+	hookHostInventoryTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { hookHostInventoryTimeout = restore })
+	f.opts.sessionInventory = nil // resolve the production default
+
+	done := make(chan *Report, 1)
+	go func() {
+		report, err := Run(f.opts)
+		if err == nil {
+			done <- report
+		}
+		close(done)
+	}()
+	var report *Report
+	select {
+	case report = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("af doctor hung on a daemon that accepted the connection and never answered")
+	}
+	require.NotNil(t, report)
+
+	requireUnknown(t, report, "the running daemon's session list could not be read")
+	requireIntactPin(t, dir)
+}
+
+// --- Pasteable commands are code. -----------------------------------------
+
+// TestHookHostsManualRemovalIsSafeToPaste — the remediation offers `rm -rf <dir>`
+// as the manual alternative to `--fix`, and an AGENT_FACTORY_HOME with a space in
+// it turns an unquoted one into two targets. A suggestion that destroys the wrong
+// path is worse than no suggestion.
+func TestHookHostsManualRemovalIsSafeToPaste(t *testing.T) {
+	home := filepath.Join(testguard.SocketTempDir(t), "my home")
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	opts := testOptionsWithHome(t, home, false)
+	opts.sessionInventory = func() ([]session.InstanceData, error) { return nil, nil }
+	dir := filepath.Join(home, session.HookHostsRoot, hookHostOwnerSlug)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, session.HookHostsPinFileName), []byte("k\n"), 0o600))
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	findings := hookHostFindings(report)
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Remediation, "`rm -rf '"+dir+"'`",
+		"the path must be quoted, or the suggestion removes two unrelated paths")
 }
