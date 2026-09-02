@@ -2211,6 +2211,9 @@ test("a finding artifact naming another head is stale, not unclassifiable", asyn
   // the case the head-bound rule already decides — and reading them as
   // unclassifiable would block every PR Codex ever reviewed twice.
   const result = await evaluateGate({
+    // OTHER_SHA is an earlier head of this PR, which is what makes the artifact
+    // stale rather than unplaceable: it names a revision this PR actually had.
+    prCommits: [OTHER_SHA, HEAD_SHA],
     issueComments: [
       codexIssueCommentFinding(OTHER_SHA, { timestamp: "2026-07-09T01:19:00Z" }),
       codexSummaryTable(HEAD_SHA, {
@@ -2221,6 +2224,48 @@ test("a finding artifact naming another head is stale, not unclassifiable", asyn
   });
 
   assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("a commit link this PR never had does not place a finding", async () => {
+  // Codex P1 on #3676: "contains a commit link" is not "states the revision it
+  // reviewed". A finding whose prose cites some other commit — an earlier fix,
+  // another repository — counted as placed, bound to no head, and fell out of
+  // BOTH sets: dropped, exactly the way #3656's was. A link places the artifact
+  // only when it names a commit this PR actually had.
+  const foreign = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
+  assert.notEqual(foreign, HEAD_SHA);
+  const citing = codexIssueCommentFinding(HEAD_SHA, {
+    ref: foreign,
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  // The premise, asserted rather than assumed: the body DOES carry a permalink,
+  // and it is not this head's. Without this the test could go green on a body
+  // that simply had no link at all.
+  assert.deepEqual([...__test.parseBodyCommits(citing.body)], [foreign]);
+  assert.equal(__test.codexArtifactBindsToHead(citing, HEAD_SHA), false);
+
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  const unplaceable = await evaluateGate({
+    prCommits: [HEAD_SHA],
+    issueComments: [citing, summary],
+  });
+  assert.equal(unplaceable.shouldMerge, false, "a link to a foreign commit places nothing");
+  assert.ok(
+    unplaceable.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${unplaceable.reasons.join("; ")}`,
+  );
+
+  // …and the same body IS placed when that commit is one this PR had, which is
+  // the ordinary case: a finding about an earlier head of this branch.
+  const stale = await evaluateGate({
+    prCommits: [foreign, HEAD_SHA],
+    issueComments: [citing, summary],
+  });
+  assert.equal(stale.shouldMerge, true, `blocked on: ${stale.reasons.join("; ")}`);
 });
 
 test("an unclassifiable finding clears only by an answer that names it", async () => {
@@ -2522,11 +2567,12 @@ test("only a URL-form commit binds an artifact body to a head", () => {
   assert.deepEqual([...parseBodyCommits(finding.body)], [HEAD_SHA]);
   assert.equal(codexArtifactBindsToHead(finding, HEAD_SHA), true);
   assert.equal(codexArtifactBindsToHead(finding, OTHER_SHA), false);
-  assert.equal(__test.codexArtifactNamesAnyCommit(finding), true);
-  assert.equal(
-    __test.codexArtifactNamesAnyCommit(codexIssueCommentFinding(HEAD_SHA, { ref: "master" })),
-    false,
-  );
+  // A permalink is prose, so it does NOT state the reviewed revision on its own
+  // (Codex P1): whether it places the artifact is the caller's question, asked
+  // against this PR's own commits. Only the two assertions do.
+  assert.equal(__test.codexArtifactStatesItsCommit(finding), false, "a link is not a statement");
+  assert.equal(__test.codexArtifactStatesItsCommit(codexVerdict(HEAD_SHA)), true);
+  assert.equal(__test.codexArtifactStatesItsCommit({ commit_id: HEAD_SHA, body: "P1" }), true);
 });
 
 test("a row whose cell prefixes a different commit does not match this head", () => {
@@ -5172,6 +5218,9 @@ function fakeGateGithub({
   issueComments = [codexVerdict(headSha)],
   reviews = [],
   reviewComments = [],
+  // The commits currently in the PR. A finding artifact's permalink places it
+  // only when it names one of these, so the head alone is the honest default.
+  prCommits = null,
   files = [],
   associatedPullRequests = [
     { number: 1465, state: "open", base: { ref: "master" }, head: { sha: headSha } },
@@ -5221,6 +5270,7 @@ function fakeGateGithub({
   const listForRef = function listForRef() {};
   const listCommitStatusesForRef = function listCommitStatusesForRef() {};
   const listComments = function listComments() {};
+  const listCommits = function listCommits() {};
   const listReviews = function listReviews() {};
   const listReviewComments = function listReviewComments() {};
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
@@ -5295,6 +5345,7 @@ function fakeGateGithub({
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
+    [listCommits, (prCommits ?? [headSha]).map((sha) => ({ sha }))],
     [listReviews, reviews],
     [listReviewComments, reviewComments],
     [listPullRequestsAssociatedWithCommit, associatedPullRequests],
@@ -5371,6 +5422,7 @@ function fakeGateGithub({
       pulls: {
         list: listOpenPullRequests,
         listFiles,
+        listCommits,
         listReviews,
         listReviewComments,
         merge,

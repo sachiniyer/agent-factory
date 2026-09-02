@@ -2843,11 +2843,48 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     (artifact) =>
       ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
   );
-  const unboundFindingArtifacts = codexReviewArtifacts.filter((artifact) => {
-    if (!CODEX_BODY_FINDING_RE.test(artifact.body || "") || isCodexSummaryArtifact(artifact)) {
-      return false;
-    }
-    if (codexArtifactNamesAnyCommit(artifact)) {
+  //
+  // "Names a commit" means STATES THE REVISION IT REVIEWED, which a link alone
+  // does not (Codex P1 on #3676). A finding whose prose happens to cite some
+  // other commit — an earlier fix, another repository — would otherwise count as
+  // placed, bind to no head, and fall out of both sets: dropped, exactly the way
+  // #3656's did. Two spellings state it outright (`Reviewed commit:`, and a
+  // review's commit_id); a permalink states it only when the commit is one of
+  // THIS PR's own, because that is a revision this PR actually had and so a
+  // revision that could have been reviewed. A link to anything else says nothing
+  // about which head the finding is about, and unknown is not clean.
+  const findingCandidates = codexReviewArtifacts.filter(
+    (artifact) =>
+      CODEX_BODY_FINDING_RE.test(artifact.body || "") &&
+      !isCodexSummaryArtifact(artifact) &&
+      !codexArtifactStatesItsCommit(artifact),
+  );
+  // Read only when it can change an answer. Nearly every evaluation has no
+  // candidate at all, and this is the one question that needs the PR's history
+  // rather than its head. A failed read throws out of retryRead and blocks, like
+  // every other read here — an unreadable commit list is not an empty one.
+  const prCommitShas =
+    findingCandidates.length === 0
+      ? new Set()
+      : new Set(
+          (
+            await retryRead(
+              `could not read commits for PR #${number}`,
+              () =>
+                github.paginate(github.rest.pulls.listCommits, {
+                  owner,
+                  repo,
+                  pull_number: number,
+                  per_page: 100,
+                }),
+              subject,
+            )
+          )
+            .map((commit) => String(commit.sha || "").toLowerCase())
+            .filter(Boolean),
+        );
+  const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
+    if ([...parseBodyCommits(artifact.body)].some((commit) => prCommitShas.has(commit))) {
       return false;
     }
     // Fails closed on an unknown order, like every other timestamp comparison in
@@ -3204,23 +3241,22 @@ function bodyNamesReference(body, reference) {
   return new RegExp(`${escaped}(?![0-9])`).test(String(body || ""));
 }
 
-// Whether the artifact names any commit at all, by any of the spellings above
-// plus the summary table's own cells. The question the blocking rule asks is not
-// "is this about the head" but "can this be placed against a head at all" — an
-// artifact that answers no is unclassifiable rather than stale.
-function codexArtifactNamesAnyCommit(artifact) {
-  const body = artifact?.body || "";
-  if (parseReviewedCommit(body) != null || String(artifact?.commit_id || "") !== "") {
-    return true;
-  }
-  // Body permalinks only. A summary table's cells are deliberately NOT read here
-  // (Codex P1 on #3676): parseSummaryRows accepts a marker anywhere in the body,
-  // so a finding artifact that QUOTES this script's table — which reviewing this
-  // very file produces — would count as naming a commit, bind to no head, and be
-  // dropped: the exact fail-open this rule exists to close. Genuine summary
-  // comments never reach here; the caller excludes them first, on the leading
-  // marker, which is the check that can tell the two apart.
-  return parseBodyCommits(body).size > 0;
+// Whether the artifact STATES the revision it reviewed, in one of the two
+// spellings that are GitHub's or Codex's own assertion rather than prose: the
+// `Reviewed commit:` line, and a review's commit_id.
+//
+// Body permalinks are deliberately not read here. They are prose, and prose can
+// cite a commit for any reason (Codex P1 on #3676) — the caller decides whether
+// a linked commit places the artifact, by asking whether it is one this PR
+// actually had. Nor are a summary table's cells read, by either caller: a body
+// that merely QUOTES this script's table, which reviewing this very file
+// produces, would otherwise classify itself. Genuine summary comments never
+// reach here — they are excluded first, on the LEADING marker, which is the
+// check that can tell a real summary from a quoted one.
+function codexArtifactStatesItsCommit(artifact) {
+  return (
+    parseReviewedCommit(artifact?.body || "") != null || String(artifact?.commit_id || "") !== ""
+  );
 }
 
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {
@@ -3344,7 +3380,7 @@ module.exports = {
     acknowledgementIsAnswerable,
     bodyNamesReference,
     codexArtifactBindsToHead,
-    codexArtifactNamesAnyCommit,
+    codexArtifactStatesItsCommit,
     isCodexSummaryArtifact,
     reviewedCommitMatchesHead,
   },
