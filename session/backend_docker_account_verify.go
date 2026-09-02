@@ -62,7 +62,13 @@ func accountBoundaryRoots() []string {
 
 // accountBoundaryRoot reports which protected root a container path falls at or
 // under, or "" when it is outside the boundary. The same predicate the lexical
-// guard draws with, applied to paths Docker reported.
+// guard draws with, applied to paths Docker reported rather than to run_args
+// strings — at or under the path, never as a substring, which is what keeps
+// /af-account-cache and /af-accountant accepted (#3398).
+//
+// #3595 hoists the identical predicate out of validateAccountDockerRunArgs as
+// accountProtectedPath. Whichever of the two lands second folds this into that
+// one: a boundary with two definitions is a boundary that can drift.
 func accountBoundaryRoot(target string) string {
 	if target == "" {
 		return ""
