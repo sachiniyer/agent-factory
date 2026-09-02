@@ -1085,8 +1085,18 @@ that the run is unhealthy. A CI step or health probe should fail on the command
 exit code (equivalently, JSON summary.unresolved > 0), which includes only
 actionable rows.
 
-High-volume process findings are summarized by default so the actionable
-problem is visible first. Use --verbose to show each process behind those
+A clean run and a run that did not finish looking are NOT the same thing, and
+the exit code cannot tell them apart. A check that stops early — the temp-home
+sweep hits a candidate budget on a machine with a very large temp dir — reports
+no unhealthy condition for what it never looked at, so it exits 0 while having
+assessed only part of the machine. Such a run says so: the summary line ends
+with "INCOMPLETE" naming the checks that gave up, and summary.incomplete lists
+them in --json. A probe that treats unresolved == 0 as healthy must require
+summary.incomplete to be empty as well.
+
+High-volume findings are summarized by default so the actionable problem is
+visible first — process findings, and abandoned temp homes, both of which run
+to hundreds on a busy machine. Use --verbose to show each item behind those
 summaries.
 
 Read-only by default. With --fix, applies the safe remediations — killing
@@ -1096,7 +1106,8 @@ reported rather than acted on, and remain advisory unless another check
 establishes a specific unhealthy condition.
 
 Exits 1 when unresolved actionable issues remain, 0 when doctor established no
-unhealthy condition (advisory warnings may still be present).
+unhealthy condition (advisory warnings may still be present, and a check may
+have stopped early — see summary.incomplete above).
 
 ```
 af doctor [flags]

@@ -43,6 +43,15 @@ type JSONSummary struct {
 	Fail       int `json:"fail"`
 	Fixed      int `json:"fixed"`
 	Unresolved int `json:"unresolved"`
+	// Incomplete names the checks that stopped before seeing everything, and is
+	// the field a probe needs to tell "doctor found nothing" from "doctor did
+	// not finish looking" (#3466). Unresolved cannot carry that: a truncated
+	// sweep legitimately establishes no unhealthy condition, so it reports 0
+	// and the run exits clean while having assessed only part of the machine.
+	//
+	// Empty on a complete run. A script that treats unresolved==0 as healthy
+	// should require this to be empty too.
+	Incomplete []string `json:"incomplete,omitempty"`
 }
 
 // JSONReport is the `af doctor --json` payload carried in the envelope's data
@@ -84,6 +93,7 @@ func BuildJSONReport(r *Report, fixMode, verbose bool) JSONReport {
 		}
 	}
 	out.Summary.Unresolved = r.UnresolvedCount()
+	out.Summary.Incomplete = append([]string(nil), r.Incomplete...)
 	return out
 }
 
