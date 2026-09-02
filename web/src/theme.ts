@@ -5,6 +5,9 @@
 // the xterm ANSI palette, and installs the active mode as CSS custom properties.
 
 import type { ITheme } from "@xterm/xterm";
+// The latest-request fence lives in refetch.ts, with the other consumers of the same
+// rule; only connectionAttemptMayCommit below needs its ticket type.
+import type { LatestRequest } from "./refetch.js";
 import type { DaemonTheme } from "./types.js";
 
 export type ThemeChoice = "auto" | "light" | "dark";
@@ -184,15 +187,6 @@ export interface DerivedTheme {
   xterm: ITheme;
 }
 
-export interface LatestRequestGate {
-  begin(): LatestRequest;
-  invalidate(): void;
-}
-
-export interface LatestRequest {
-  isCurrent(): boolean;
-}
-
 /** Empty string is the authorized tokenless sentinel; only null is disconnected. */
 export function hasConnectedToken(token: string | null): token is string {
   return token !== null;
@@ -221,20 +215,6 @@ export function paletteFetchFailurePlan(status: number, hasLoadedPalette: boolea
     reset: unsupported || !hasLoadedPalette,
     retry: !unsupported && !rejectedCredential,
     reauthenticate: rejectedCredential,
-  };
-}
-
-/** Fences asynchronous palette reads that share the same login token. */
-export function createLatestRequestGate(): LatestRequestGate {
-  let generation = 0;
-  return {
-    begin() {
-      const requestGeneration = ++generation;
-      return { isCurrent: () => requestGeneration === generation };
-    },
-    invalidate() {
-      generation += 1;
-    },
   };
 }
 

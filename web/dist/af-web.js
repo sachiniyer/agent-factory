@@ -7482,18 +7482,6 @@ function paletteFetchFailurePlan(status, hasLoadedPalette) {
     reauthenticate: rejectedCredential
   };
 }
-function createLatestRequestGate() {
-  let generation = 0;
-  return {
-    begin() {
-      const requestGeneration = ++generation;
-      return { isCurrent: () => requestGeneration === generation };
-    },
-    invalidate() {
-      generation += 1;
-    }
-  };
-}
 function semantic(candidate, fallback, surfaces, minimum, toward) {
   return readable(candidate, surfaces, minimum, fallback, toward);
 }
@@ -12312,6 +12300,45 @@ function registerServiceWorker() {
   });
 }
 
+// src/refetch.ts
+function createLatestRequestGate() {
+  let generation = 0;
+  return {
+    begin() {
+      const requestGeneration = ++generation;
+      return { isCurrent: () => requestGeneration === generation };
+    },
+    invalidate() {
+      generation += 1;
+    }
+  };
+}
+function createFencedRefetcher(spec) {
+  const gate = createLatestRequestGate();
+  return {
+    refresh() {
+      const tok = spec.readToken();
+      if (tok === null) {
+        return;
+      }
+      const request = gate.begin();
+      const isNewest = () => request.isCurrent() && spec.readToken() === tok;
+      void spec.fetch(tok).then((value) => {
+        if (isNewest()) {
+          spec.commit(value);
+        }
+      }).catch((error) => {
+        if (isNewest()) {
+          spec.onError?.(error);
+        }
+      });
+    },
+    invalidate() {
+      gate.invalidate();
+    }
+  };
+}
+
 // src/schedule.ts
 var SCHEDULE_TYPE_OPTIONS = [
   { type: "everyNMinutes", label: "Every N minutes" },
@@ -15618,16 +15645,22 @@ function clearTabError() {
     store.set({ tabError: null });
   }
 }
-function refreshConfig() {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  void getConfig(tok).then((resp) => {
+var configRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: getConfig,
+  commit: (resp) => {
     store.set({ config: resp.entries, configPath: resp.path });
-  }).catch((err) => {
+  },
+  // Surfaced, not swallowed: an empty config screen would read as "you have no
+  // settings" rather than "the read failed". Under the fence like the commit — an
+  // older request's transport blip must not paint an error over the fresher answer
+  // already on screen, which is the same "the older one commits nothing" rule.
+  onError: (err) => {
     surfaceTabError(err);
-  });
+  }
+});
+function refreshConfig() {
+  configRefetcher.refresh();
 }
 var queueConfigSave = createKeyedQueue();
 function applyConfigValue(key, value) {
@@ -15660,17 +15693,10 @@ window.setInterval(() => {
     refreshTasks();
   }
 }, TASK_HEALTH_POLL_MS);
-var taskRefreshGeneration = 0;
-function refreshTasks() {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  const generation = ++taskRefreshGeneration;
-  void listTasks(tok).then((tasks) => {
-    if (generation !== taskRefreshGeneration || token !== tok) {
-      return;
-    }
+var tasksRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listTasks,
+  commit: (tasks) => {
     const selectedProject = reconcileProject(
       store.get().sessions,
       tasks,
@@ -15679,8 +15705,12 @@ function refreshTasks() {
       store.get().registeredProjects
     );
     store.set({ tasks, selectedProject });
-  }).catch(() => {
-  });
+  }
+  // No onError: a transport/auth failure leaves the last-known list up; a task.*
+  // event or the next mutation refetches. Nothing to surface here.
+});
+function refreshTasks() {
+  tasksRefetcher.refresh();
 }
 function requestTaskResync() {
   if (taskResyncTimer !== null) {
@@ -15691,12 +15721,10 @@ function requestTaskResync() {
     refreshTasks();
   }, 150);
 }
-function refreshRegisteredProjects() {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  void listProjects(tok).then((projects) => {
+var projectsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listProjects,
+  commit: (projects) => {
     const registeredProjects = projects.map((p) => p.root);
     const selectedProject = reconcileProject(
       store.get().sessions,
@@ -15706,8 +15734,12 @@ function refreshRegisteredProjects() {
       registeredProjects
     );
     store.set({ registeredProjects, selectedProject });
-  }).catch(() => {
-  });
+  }
+  // No onError: a transport/auth failure keeps the last-known registry up; the next
+  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+});
+function refreshRegisteredProjects() {
+  projectsRefetcher.refresh();
 }
 function requestProjectsResync() {
   if (projectsResyncTimer !== null) {
@@ -15994,7 +16026,9 @@ async function refreshDaemonPalette(tok) {
 }
 function stopStream() {
   resyncRequestGeneration += 1;
-  taskRefreshGeneration += 1;
+  tasksRefetcher.invalidate();
+  projectsRefetcher.invalidate();
+  configRefetcher.invalidate();
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");

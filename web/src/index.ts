@@ -83,7 +83,6 @@ import {
   applyDaemonTheme,
   bootStampTheme,
   connectionAttemptMayCommit,
-  createLatestRequestGate,
   hasConnectedToken,
   paletteFetchFailurePlan,
   persistThemeChoice,
@@ -92,6 +91,7 @@ import {
   stampTheme,
   type ThemeChoice,
 } from "./theme.js";
+import { createFencedRefetcher, createLatestRequestGate } from "./refetch.js";
 import { addTaskModal, type AddTaskInput, buildTask, editTaskModal } from "./tasks.js";
 import type { ProgramCatalog } from "./programs.js";
 import type { TerminalStatus } from "./terminal.js";
@@ -1215,9 +1215,6 @@ function clearTabError(): void {
 
 // --- task actions (#1592 Phase 5 PR8) --------------------------------------
 
-/** Refetches the authoritative task list and commits it to the store. Failures are
- *  swallowed: the events plane / a later action retries, exactly like the Snapshot
- *  resync. `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696). */
 /** Re-reads the config manifest and the user's live values.
  *
  *  Always from the daemon, never from a cached copy: config.toml is hand-editable
@@ -1227,21 +1224,29 @@ function clearTabError(): void {
  *
  *  A failure leaves the last-known list up and is surfaced in the tab-error line
  *  rather than swallowed — an empty config screen would read as "you have no
- *  settings". */
+ *  settings".
+ *
+ *  Fenced (#3659) because two triggers overlap by design: entering the view fetches,
+ *  and setting a value refetches. Set a key soon after arriving and the view-entry
+ *  response can land afterwards, redisplaying the value the write just replaced as
+ *  though it had not taken. */
+const configRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: getConfig,
+  commit: (resp) => {
+    store.set({ config: resp.entries, configPath: resp.path });
+  },
+  // Surfaced, not swallowed: an empty config screen would read as "you have no
+  // settings" rather than "the read failed". Under the fence like the commit — an
+  // older request's transport blip must not paint an error over the fresher answer
+  // already on screen, which is the same "the older one commits nothing" rule.
+  onError: (err: unknown) => {
+    surfaceTabError(err);
+  },
+});
+
 function refreshConfig(): void {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  void getConfig(tok)
-    .then((resp) => {
-      store.set({ config: resp.entries, configPath: resp.path });
-    })
-    .catch((err: unknown) => {
-      // Surfaced, not swallowed: an empty config screen would read as "you have
-      // no settings" rather than "the read failed".
-      surfaceTabError(err);
-    });
+  configRefetcher.refresh();
 }
 
 /** Writes one config key and reports the outcome.
@@ -1314,50 +1319,39 @@ window.setInterval(() => {
   }
 }, TASK_HEALTH_POLL_MS);
 
-// Fences overlapping ListTasks refetches so a slow one cannot overwrite a newer
-// one — the rule #2330 already applies to the session snapshot, one projection
-// over (sessionEventGeneration / resyncRequestGeneration).
-//
-// refreshTasks commits whatever it receives, and it is called from a mutation, a
-// debounced event resync, a view switch, and now a poll. A request issued just
-// before an edit can resolve just after the edit's own refetch, restoring the
-// pre-mutation list — an old health verdict, or a row that was removed — until
-// something else happens to refresh. The poll is what made these genuinely
-// concurrent rather than merely capable of it (#3626 review).
-let taskRefreshGeneration = 0;
+/** Refetches the authoritative task list and commits it to the store. Failures are
+ *  swallowed: the events plane / a later action retries, exactly like the Snapshot
+ *  resync.
+ *
+ *  Fenced (#3654) because this is called from a mutation, a debounced event resync,
+ *  a view switch, and the poll above: a request issued just before an edit can
+ *  resolve just after the edit's own refetch, restoring the pre-mutation list — an
+ *  old health verdict, or a row that was removed — until something else happens to
+ *  refresh. The poll is what made these genuinely concurrent rather than merely
+ *  capable of it (#3626 review). */
+const tasksRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listTasks,
+  commit: (tasks) => {
+    // Reconcile the project scope against the new task set (redesign PR2): a
+    // task-only project appears once its tasks load, and drops when its last task
+    // is removed (if it also has no live sessions). This is what makes a task-only
+    // repo reachable in the switcher and its tasks scoped to it.
+    const selectedProject = reconcileProject(
+      store.get().sessions,
+      tasks,
+      loadProjectChoice(),
+      store.get().selectedProject,
+      store.get().registeredProjects,
+    );
+    store.set({ tasks, selectedProject });
+  },
+  // No onError: a transport/auth failure leaves the last-known list up; a task.*
+  // event or the next mutation refetches. Nothing to surface here.
+});
 
 function refreshTasks(): void {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  const generation = ++taskRefreshGeneration;
-  void listTasks(tok)
-    .then((tasks) => {
-      // A newer refetch has been issued since this one left, so this answer is
-      // stale by construction whatever it contains. The token is checked too: a
-      // rotation means this response describes a session that is no longer the
-      // one on screen, and the generation alone would not catch it.
-      if (generation !== taskRefreshGeneration || token !== tok) {
-        return;
-      }
-      // Reconcile the project scope against the new task set (redesign PR2): a
-      // task-only project appears once its tasks load, and drops when its last task
-      // is removed (if it also has no live sessions). This is what makes a task-only
-      // repo reachable in the switcher and its tasks scoped to it.
-      const selectedProject = reconcileProject(
-        store.get().sessions,
-        tasks,
-        loadProjectChoice(),
-        store.get().selectedProject,
-        store.get().registeredProjects,
-      );
-      store.set({ tasks, selectedProject });
-    })
-    .catch(() => {
-      // Transport/auth failure: leave the last-known list up; a task.* event or the
-      // next mutation refetches. Nothing to surface here.
-    });
+  tasksRefetcher.refresh();
 }
 
 /** Debounced task refetch for a burst of task.* events, mirroring requestResync. */
@@ -1376,32 +1370,39 @@ function requestTaskResync(): void {
  *  what makes the "+ Add project" affordance observable: openAddProject writes via
  *  RegisterProject and closes the modal, and the resulting projects.changed event
  *  lands here to surface the new project in the switcher — no reload, no session
- *  required. Mirrors refreshTasks; a transport failure leaves the last-known list up. */
+ *  required. Mirrors refreshTasks; a transport failure leaves the last-known list up.
+ *
+ *  Fenced (#3659) because registering a project fires BOTH triggers by design: the
+ *  modal calls this directly, and the projects.changed it causes schedules the
+ *  debounced resync. Both are in flight at once, so an unfenced direct response
+ *  resolving last commits the PRE-registration list — the just-registered project
+ *  drops back out of the switcher, and selectedProject is recomputed from that stale
+ *  list. That is the one interaction the affordance exists for.
+ *
+ *  fetch is listProjects, NOT fetchRegisteredProjects (which degrades to [] for the
+ *  initial connect): on a resync a transport blip must LEAVE the last-known list up,
+ *  exactly as refreshTasks does — blanking it to [] would drop a registered project
+ *  out of the switcher on a transient failure. */
+const projectsRefetcher = createFencedRefetcher({
+  readToken: () => token,
+  fetch: listProjects,
+  commit: (projects) => {
+    const registeredProjects = projects.map((p) => p.root);
+    const selectedProject = reconcileProject(
+      store.get().sessions,
+      store.get().tasks,
+      loadProjectChoice(),
+      store.get().selectedProject,
+      registeredProjects,
+    );
+    store.set({ registeredProjects, selectedProject });
+  },
+  // No onError: a transport/auth failure keeps the last-known registry up; the next
+  // projects.changed event or reconnect refetches. Never blank the union on a blip.
+});
+
 function refreshRegisteredProjects(): void {
-  const tok = token;
-  if (tok === null) {
-    return;
-  }
-  // Call listProjects directly (NOT fetchRegisteredProjects, which degrades to [] for
-  // the initial connect): on a resync a transport blip must LEAVE the last-known list
-  // up, exactly as refreshTasks does — blanking it to [] would drop a registered
-  // project out of the switcher on a transient failure.
-  void listProjects(tok)
-    .then((projects) => {
-      const registeredProjects = projects.map((p) => p.root);
-      const selectedProject = reconcileProject(
-        store.get().sessions,
-        store.get().tasks,
-        loadProjectChoice(),
-        store.get().selectedProject,
-        registeredProjects,
-      );
-      store.set({ registeredProjects, selectedProject });
-    })
-    .catch(() => {
-      // Transport/auth failure: keep the last-known registry up; the next
-      // projects.changed event or reconnect refetches. Never blank the union on a blip.
-    });
+  projectsRefetcher.refresh();
 }
 
 /** Debounced registry refetch for a burst of projects.changed events, mirroring
@@ -1836,15 +1837,19 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
-  // And the task list, for the same reason and through one door the
-  // generation+token fence in refreshTasks cannot close by itself: reconnecting
-  // with the SAME credential moves neither of them, and the tokenless loopback
-  // (#1696) makes "the same credential" the ordinary path rather than an edge
-  // case. connect() loads tasks directly rather than through refreshTasks, so
+  // And every fenced projection, for the same reason and through one door the
+  // generation+token fence cannot close by itself: reconnecting with the SAME
+  // credential moves neither of them, and the tokenless loopback (#1696) makes
+  // "the same credential" the ordinary path rather than an edge case. connect()
+  // loads tasks and projects directly rather than through their refetchers, so
   // without this a request still in flight from the previous stream outlives the
-  // disconnect and overwrites the freshly-connected list, restoring rows that
-  // were removed while it was away (#3626 review).
-  taskRefreshGeneration += 1;
+  // disconnect and overwrites the freshly-connected list, restoring rows that were
+  // removed while it was away (#3626 review). Config joins them in #3659: its view
+  // is reachable straight after a reconnect, and the file the stale answer describes
+  // may be a different daemon's.
+  tasksRefetcher.invalidate();
+  projectsRefetcher.invalidate();
+  configRefetcher.invalidate();
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");

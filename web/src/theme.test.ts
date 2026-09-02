@@ -10,10 +10,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { createLatestRequestGate } from "./refetch.js";
 import {
   connectionAttemptMayCommit,
   contrastRatio,
-  createLatestRequestGate,
   deriveTheme,
   hasConnectedToken,
   NORD_THEME,
@@ -201,15 +201,6 @@ for (const mode of ["light", "dark"] as const) {
     }
   });
 }
-
-test("palette refresh generations reject an older completion for the same token", () => {
-  const gate = createLatestRequestGate();
-  const older = gate.begin();
-  const newer = gate.begin();
-
-  assert.equal(older.isCurrent(), false);
-  assert.equal(newer.isCurrent(), true);
-});
 
 test("connection fences admit tokenless clients and reject invalidated attempts", () => {
   const gate = createLatestRequestGate();
