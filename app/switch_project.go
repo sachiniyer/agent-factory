@@ -245,7 +245,14 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 			// established, so it carries no probe timestamp and would
 			// otherwise look like a fallback.
 			priority := 2
-			if resolved.resolvedAt.IsZero() && expanded != m.repoRoot {
+			// Only a probe that ANSWERED "not a repository" may hand this key
+			// to a registry row (#3530 review id 3918120760). A timed-out probe
+			// leaves resolvedAt zero exactly as a genuinely absent path does,
+			// and the daemon will apply this key to whatever repository is
+			// actually there — so deferring on an unanswered probe hides a live
+			// occupant behind a stale row and sends delete-project an
+			// inconsistent id/path pair.
+			if resolved.answeredNotARepo && expanded != m.repoRoot {
 				if recorded, ok := recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(expanded))]; ok && recorded != "" {
 					resolved.id = recorded
 					// Identity and root SPELLING are separate decisions, the

@@ -73,7 +73,19 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	// repository", so an unresolvable key is compared by hashing the path the
 	// same way a real identity is derived. Inventing a namespaced id here would
 	// make a stale entry for a gone repo unsweepable.
-	return RepoIDFromRoot(filepath.Clean(expanded)) == repoID
+	cleaned := filepath.Clean(expanded)
+	if RepoIDFromRoot(cleaned) == repoID {
+		return true
+	}
+	// …and again through the key's CANONICAL spelling (#3530 review id
+	// 3918120733). The caller derives its id from a path the registry
+	// resolved, while this key was written by a human through whatever symlink
+	// they had — `/private/var/...` against `/var/...` on macOS — so the
+	// lexical hashes differ and a stale opt-in survives a delete that reported
+	// success. Additive: a key that matched before still matches, and identity
+	// DERIVATION is untouched, because an id is defined by the exact recorded
+	// string and canonicalizing there would re-key durable state.
+	return RepoIDFromRoot(pathutil.ResolveForCompare(cleaned)) == repoID
 }
 
 // LegacyRootAgentForRecordedRoot returns the root_agents entry spelled as a

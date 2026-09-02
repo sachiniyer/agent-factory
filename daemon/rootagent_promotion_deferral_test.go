@@ -816,3 +816,111 @@ func TestOccupiedRecordedRootDoesNotBorrowItsOptIn(t *testing.T) {
 		t.Fatalf("the occupant's opt-in was borrowed for %s: the verdict promises a root the legacy sweep will only ever create for %s, which admits root-targeted tasks and delivery waits for a root that never appears", realID, occupantID)
 	}
 }
+
+// TestDeleteBySymlinkSpelledPathFindsTheRecord pins #3530 review id 3918120745.
+//
+// A delete request may spell an unavailable checkout through a symlinked
+// ancestor while the record stores what registration resolved. Comparing those
+// lexically misses the record, so the delete invents an identity, reports
+// success, and leaves the real id's sessions and the durable registration
+// untouched.
+func TestDeleteBySymlinkSpelledPathFindsTheRecord(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	base := testguard.CanonicalTempDir(t)
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	repoPath := filepath.Join(real, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	if project.RepoID != realID {
+		t.Fatalf("fixture must record the resolved identity, got %q", project.RepoID)
+	}
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	spelled := filepath.Join(link, "repo")
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: spelled})
+	if err != nil {
+		t.Fatalf("DeleteProject by a symlink-spelled recorded path: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("the delete invented %s for a path that names the record at %s: it reports success while the project's sessions and registration are untouched", result.RepoID, project.Root)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("and the durable record must be removed")
+	}
+}
+
+// TestUnreadableMarkerKeepsTheCandidateRepoClosed pins #3530 review id
+// 3918120753.
+//
+// The root-agent attribution gate released on any settled non-inconclusive
+// probe, which includes an unreadable marker — a state that establishes nothing
+// about whether the checkout at the recorded path is this project's. On master
+// the invented-to-real bridge held the candidate repository closed through it;
+// this change removes that bridge, so the gate itself has to carry the rule, or
+// the candidate resolves from the global and legacy layers without ever seeing
+// the project's personal disable.
+func TestUnreadableMarkerKeepsTheCandidateRepoClosed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	// A record written before Project.RepoID: filed under an invented id while
+	// its path does not resolve, which is an identity other than the one that
+	// path resolves to.
+	clearRecordedRepoID(t, project.ID)
+	recordedID := config.DerivedRepoIDForUnresolvedRoot(worktree)
+	if recordedID == realID {
+		t.Fatalf("fixture must file the record under an identity other than the one its path resolves to")
+	}
+	aside := worktree + ".aside"
+	if err := os.Rename(worktree, aside); err != nil {
+		t.Fatalf("hide the workspace: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[recordedID]; !ok {
+		t.Fatalf("fixture must file the record under %s", recordedID)
+	}
+	// The workspace is back and its marker could not be read: the probe
+	// resolved the repository (the candidate) and established nothing else.
+	if err := os.Rename(aside, worktree); err != nil {
+		t.Fatalf("restore the workspace: %v", err)
+	}
+	repo, err := config.RepoFromPath(worktree)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	probe := &rootReattributionProbe{done: make(chan struct{})}
+	probe.candidate.Store(repo)
+	unreadableMarkerProbe(probe, repo)
+	manager.mu.Lock()
+	manager.rootHealProbes[recordedID] = probe
+	manager.mu.Unlock()
+
+	if !manager.rootAttributionPendingFor(realID) {
+		t.Fatalf("an unreadable marker establishes nothing, so repository %s must stay attribution-pending: its project's personal disable sits under %s where resolution cannot see it", realID, recordedID)
+	}
+}

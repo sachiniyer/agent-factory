@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -148,9 +149,20 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 		// untouched.
 		return "", "", fmt.Errorf("delete project: could not read the durable project registry to identify %q; nothing was changed: %w", root, listErr)
 	}
+	// Canonically, not lexically (#3530 review id 3918120745). The request may
+	// spell the path through a symlinked ancestor while the record stores what
+	// registration resolved, and a lexical miss here hands the delete an
+	// invented id: success reported, the real id's sessions and the durable
+	// registration untouched. The matched record's OWN root is returned, so
+	// every downstream comparison — the claimant scan, the opt-in sweep —
+	// works from the spelling the registry uses.
+	target := pathutil.ResolveForCompare(root)
 	for _, project := range projects {
-		if filepath.Clean(project.Root) == root && project.RepoID != "" {
-			return root, project.RepoID, nil
+		if project.RepoID == "" {
+			continue
+		}
+		if pathutil.ResolveForCompare(filepath.Clean(project.Root)) == target {
+			return filepath.Clean(project.Root), project.RepoID, nil
 		}
 	}
 	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
@@ -401,7 +413,11 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	if repoPath != "" {
 		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
 			for _, p := range projects {
-				if filepath.Clean(p.Root) != filepath.Clean(repoPath) {
+				// Canonical for the same reason normalizeDeleteProjectPath is
+				// (#3530 review id 3918120745): a record whose root is spelled
+				// through a symlink must still be recognised as the row this
+				// delete selected, or its tombstone goes unclaimed.
+				if pathutil.ResolveForCompare(filepath.Clean(p.Root)) != pathutil.ResolveForCompare(filepath.Clean(repoPath)) {
 					continue
 				}
 				claimantProjectID = claimantForRecord(p)

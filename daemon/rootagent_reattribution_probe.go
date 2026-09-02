@@ -378,30 +378,66 @@ func (m *Manager) identityTransitionPendingOn(repoID string) bool {
 // probe resolved this repo".
 func (m *Manager) pendingReattributionDerivedID(repoID string) string {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for derivedID, probe := range m.rootHealProbes {
-		// A settled probe normally releases the gate: a proven mismatch says
-		// a different project's layers do not govern this repo, and an
-		// unreadable marker holds it closed through the snapshot bridge
-		// instead. An INCONCLUSIVE settle does neither — it established
-		// nothing — and settling it anyway dropped a gate its inherited
-		// candidate was the last thing holding (#3299 review id 3908517185).
+	deciding := make([]string, 0, len(m.rootHealProbes))
+	for recordedID, probe := range m.rootHealProbes {
+		// The SAME disproof-only release the delete gate uses (#3530 review id
+		// 3918120753). Only a proven mismatch says a different project's layers
+		// do not govern this repo; an unreadable marker or a vanished path
+		// established nothing, and on master they were held closed by the
+		// invented-to-real bridge that this change removes. Without the bridge,
+		// releasing on them leaves the unreadable verdict published under the
+		// recorded id alone while the candidate repo resolves from the global
+		// or legacy layers — starting a root the project's personal disable
+		// forbids, and adopt-first keeps it running when the gate returns.
 		//
-		// The sequence: a verified probe held behind a derived-ID delete
-		// fence past the TTL, the fence clears, the replacement inherits the
-		// real repo ID, and the path is gone by the time it runs. That
-		// replacement writes no bridge and no verdict, and the alias was
-		// never published because the verified result was never consumed —
-		// so the tombstone stays reachable only through an alias that does
-		// not exist, and a legacy entry through another path in the real
-		// repository recreates the deleted root. The inherited candidate
-		// stays pending until a concrete verdict supersedes it or the alias
-		// is published.
-		if probe.settled && !probe.inconclusive() {
+		// An INCONCLUSIVE settle never released it either (#3299 review id
+		// 3908517185): a verified probe held behind a delete fence past the
+		// TTL, whose replacement inherits the real repo ID and finds the path
+		// gone, writes no verdict at all — and the inherited candidate is then
+		// the only thing holding the gate.
+		if probe == nil {
 			continue
 		}
-		if c := probe.candidate.Load(); c != nil && c.ID == repoID {
-			return derivedID
+		if _, disproven := probeProvedItsCheckout(probe); disproven {
+			continue
+		}
+		candidate := probe.candidate.Load()
+		if candidate == nil || candidate.ID != repoID {
+			continue
+		}
+		// A CONCRETE settled negative — an unreadable marker, a path that
+		// vanished mid-verification — is published in the snapshot under the
+		// identity the RECORD is filed under. When that is the same id being
+		// asked about, the record's own flags carry the fail-closed verdict and
+		// name the actual remedy ("repair the marker"), so holding the gate
+		// here would only replace that with a vaguer "pending" one.
+		//
+		// When they DIFFER, nothing else carries it (#3530 review id
+		// 3918120753): the unreadable state sits under the recorded id while
+		// the candidate repository resolves from the global and legacy layers,
+		// never seeing the project's personal disable. On master the
+		// invented-to-real bridge held it; this change removed the bridge, so
+		// the gate carries the rule instead.
+		//
+		// An INCONCLUSIVE settle establishes nothing either way and never
+		// releases (#3299 review id 3908517185): a verified probe held behind a
+		// delete fence past the TTL, whose replacement inherits the real repo
+		// ID and finds the path gone, writes no verdict at all — and the
+		// inherited candidate is then the only thing holding the gate.
+		if probe.settled && !probe.inconclusive() && recordedID == repoID {
+			continue
+		}
+		deciding = append(deciding, recordedID)
+	}
+	m.mu.Unlock()
+	// The absence escape, for the same reason the delete has one (#3530 review
+	// id 3917756769): an unanswered re-resolution keeps its candidate forever
+	// through inheriting replacements, so without this a provably-gone recorded
+	// root would fail its candidate repository closed for the daemon's life.
+	// Stats the filesystem, so it runs outside the lock.
+	for _, recordedID := range deciding {
+		if !m.recordedRootIsGone(recordedID) {
+			return recordedID
 		}
 	}
 	return ""

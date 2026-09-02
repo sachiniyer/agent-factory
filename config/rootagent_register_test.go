@@ -1,10 +1,14 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
 
 func TestDeregisterRootAgentsForRepoRemovesMatchAndPreservesOthers(t *testing.T) {
@@ -66,4 +70,48 @@ func TestDeregisterRootAgentsForRepoSweepsAllIdentitiesInOneWrite(t *testing.T) 
 	assert.NotContains(t, cfg.RootAgents, "/repos/real")
 	assert.NotContains(t, cfg.RootAgents, "/repos/derived")
 	assert.Contains(t, cfg.RootAgents, "/repos/keep")
+}
+
+// TestDeregisterRootAgentsMatchesASymlinkSpelledKey pins #3530 review id
+// 3918120733.
+//
+// A root_agents key is written by a human, through whatever symlink they had,
+// while the id a delete supplies is derived from the path the registry
+// RESOLVED. Comparing the two lexically makes them unequal wherever an ancestor
+// is a symlink — macOS `/var` -> `/private/var` every time — so the durable
+// opt-in survives a delete that reported success and recreates the root when
+// the checkout returns.
+func TestDeregisterRootAgentsMatchesASymlinkSpelledKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	base := testguard.CanonicalTempDir(t)
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	recorded := filepath.Join(real, "checkout")
+	spelled := filepath.Join(link, "checkout")
+	// The checkout is GONE — which is the only state in which the matcher's
+	// hash fallback runs at all.
+	if RepoIDFromRoot(spelled) == RepoIDFromRoot(recorded) {
+		t.Fatalf("fixture must produce two spellings that hash differently")
+	}
+
+	cfg := DefaultConfig()
+	cfg.RootAgents = map[string]RootAgentConfig{spelled: {}}
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	removed, err := DeregisterRootAgentsForRepo(RepoIDFromRoot(recorded))
+	if err != nil {
+		t.Fatalf("DeregisterRootAgentsForRepo: %v", err)
+	}
+	if len(removed) != 1 || removed[0] != spelled {
+		t.Fatalf("a key spelled through a symlink must still be swept for the identity its resolved path derives: removed %v", removed)
+	}
 }

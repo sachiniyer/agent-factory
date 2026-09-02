@@ -1069,3 +1069,52 @@ func TestBuildProjectListKeepsALiveWorkspaceOverAStaleOptIn(t *testing.T) {
 		"an unresolved opt-in path must not outrank the workspace this project's live session is using")
 	assert.Equal(t, 1, projects[0].SessionCount)
 }
+
+// TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut pins #3530 review id
+// 3918120760 — the limit of the recorded-identity remap.
+//
+// A timed-out probe leaves the resolution looking exactly like a genuinely
+// absent path. Deferring to a stale registry row on that basis hands a key the
+// daemon will apply to whatever is actually at that path to the old project's
+// identity instead, so the picker can hide a live repository behind the old row
+// and send delete-project an id and a path that name different things.
+//
+// The registered root here is a bare clone's linked workspace, so the record's
+// identity and its path's hash differ by construction — without that the two
+// candidate answers are the same value and the assertion cannot discriminate.
+func TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID)
+	pathID := config.RepoIDFromRoot(filepath.Clean(registeredRoot))
+	require.NotEqual(t, project.RepoID, pathID,
+		"fixture must use a recorded root that is not the repository's identity root")
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	// The path still holds a live workspace, and every probe for it stalls past
+	// the budget — indistinguishable from absence by resolvedAt alone.
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_STALLED_PROJECT\"*) /bin/sleep 2; exit 1 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_STALLED_PROJECT", registeredRoot)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	found := false
+	for _, project := range projects {
+		if project.RepoID == pathID {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"an unanswered probe is not evidence that the path is gone, so its root_agents key must keep the identity the daemon will resolve for it rather than borrowing the registry row's: got %+v", projects)
+}

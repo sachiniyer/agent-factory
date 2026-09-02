@@ -26,12 +26,21 @@ type projectPathResolution struct {
 	id         string
 	root       string
 	resolvedAt time.Time
+	// answeredNotARepo records that Git ANSWERED about this path and the
+	// answer was "not a repository" — as against a probe that timed out or
+	// could not run, which leaves this false (#3530 review id 3918120760).
+	// resolvedAt alone cannot tell those apart, and a caller that treats an
+	// unanswered probe as "nothing is there" hands a live repository's
+	// root_agents key to a stale registry row.
+	answeredNotARepo bool
 }
 
 type projectPathProbeResult struct {
 	path       string
 	resolution projectPathResolution
 	resolved   bool
+	// answered marks a failed probe that Git nevertheless answered.
+	answered bool
 }
 
 // resolveProjectPaths gives every uncached path the same bounded wall-clock
@@ -78,7 +87,14 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 		go func(path string) {
 			repo, err := config.RepoFromPathContext(ctx, path)
 			if err != nil {
-				results <- projectPathProbeResult{path: path}
+				// An ANSWER is what a caller may act on; a killed or
+				// abandoned probe is not one. config owns that rule.
+				results <- projectPathProbeResult{
+					path:       path,
+					answered:   !config.RepoProbeUnanswered(err),
+					resolved:   false,
+					resolution: projectPathResolution{},
+				}
 				return
 			}
 			results <- projectPathProbeResult{
@@ -99,6 +115,16 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 			if result.resolved {
 				resolvedPaths[result.path] = result.resolution
 				m.projectPathResolutions[result.path] = result.resolution
+				continue
+			}
+			if result.answered {
+				// Keep the fallback identity, and record that the negative is
+				// a VERDICT: the caller may act on "nothing is there" only
+				// when Git said so. Deliberately not cached — an absent path
+				// is exactly what comes back.
+				fallback := resolvedPaths[result.path]
+				fallback.answeredNotARepo = true
+				resolvedPaths[result.path] = fallback
 			}
 		case <-ctx.Done():
 			return resolvedPaths
