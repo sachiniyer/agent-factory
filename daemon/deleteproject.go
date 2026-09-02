@@ -188,7 +188,7 @@ func (m *Manager) refuseIfIdentityInTransition(repoID string, rowFound bool) err
 	if !pending {
 		return nil
 	}
-	return fmt.Errorf("delete project: af is still establishing which project %s names — a registered project's recorded checkout is mid-identity-check — so nothing was changed; delete again once that check settles", repoID)
+	return fmt.Errorf("delete project: af is still establishing which project %s names — a registered project's recorded checkout is present but its identity is not yet verified — so nothing was changed; delete again once that check settles, or, if that checkout is not the project's and is not coming back, remove the path and delete again", repoID)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by// registeredProjectRootForRepoID resolves the path needed by

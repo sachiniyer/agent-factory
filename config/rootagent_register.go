@@ -1,6 +1,9 @@
 package config
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"sort"
+)
 
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
 // ANY of repoIDs and persists the result, returning the config keys it removed.
@@ -69,4 +72,53 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	// same way a real identity is derived. Inventing a namespaced id here would
 	// make a stale entry for a gone repo unsweepable.
 	return RepoIDFromRoot(filepath.Clean(expanded)) == repoID
+}
+
+// LegacyRootAgentForRecordedRoot returns the root_agents entry spelled as a
+// registered project's RECORDED root (and the matched key), while that root
+// does not resolve (#3530 review ids 3916912933, 3917294309, 3917756780).
+//
+// A root_agents key is a path, and rootAgentKeyMatchesRepo falls back to
+// hashing one it cannot resolve — which is nobody's identity once a registered
+// project is addressed by the identity it RECORDED rather than by its path.
+// Master matched such an entry by accident, because it addressed that project
+// BY the path hash; both the daemon's verdict and `af config get --explain`
+// have to ask for it deliberately now, and they share this so the running
+// daemon and the explanation of the next start cannot disagree.
+//
+// Two steps, and neither may be collapsed into the other. The key is found by
+// its SPELLING, with no resolver involved: hashing the path and asking a
+// resolver matches a repository main-rooted there, whose identity IS that hash,
+// so the occupant's opt-in would be returned for this project. Then the
+// recorded root is resolved ONCE: if it resolves, the entry belongs to whatever
+// is there now — the ensure sweep will create under that identity, not this
+// one — so it is not this project's answer.
+func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootAgentConfig, string) {
+	if global == nil || recordedRoot == "" {
+		return nil, ""
+	}
+	cleaned := filepath.Clean(recordedRoot)
+	// Sorted for the same reason LegacyRootAgentForRepo sorts: inspection, the
+	// daemon lookup and the ensure pass must agree on one winner when two
+	// spellings name the same root.
+	keys := make([]string, 0, len(global.RootAgents))
+	for key := range global.RootAgents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	matched := ""
+	for _, key := range keys {
+		if filepath.Clean(ExpandTilde(key)) == cleaned {
+			matched = key
+			break
+		}
+	}
+	if matched == "" {
+		return nil, ""
+	}
+	if _, err := RepoFromPath(cleaned); err == nil {
+		return nil, ""
+	}
+	entry := global.RootAgents[matched]
+	return &entry, matched
 }

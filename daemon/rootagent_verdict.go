@@ -2,8 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -185,57 +183,12 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
 }
 
-// legacyRootAgentForRecordedRoot returns the root_agents entry spelled as an
-// unresolved record's own recorded root — and only while that root would still
-// produce THIS project's identity (#3530 review id 3917294309).
-//
-// Matching by hashing the path and asking the generic resolver was wrong in one
-// direction: a different repository main-rooted at the recorded path resolves
-// to that very hash, so the lookup returned the OCCUPANT's opt-in for the
-// original project's identity, and the verdict promised a root the legacy sweep
-// will only ever create for the occupant.
-//
-// So the key is found by its spelling — no resolver involved — and then the
-// recorded root is resolved ONCE. If it resolves, the entry belongs to whatever
-// is there now and the sweep will create under that identity rather than this
-// one, so it is not this project's answer. If it does not, the entry is this
-// project's opt-in and its per-tick retry creates the root when the recorded
-// checkout returns, which is exactly what the verdict should say.
-//
-// The single probe costs no more than the per-key resolution
-// LegacyRootAgentForRepo already performs, and it runs only when a key names
-// this record's root.
+// legacyRootAgentForRecordedRoot is config's shared recorded-root lookup, which
+// states the rule and its two limits; the daemon reads it from its start-of-day
+// config exactly as every other legacy lookup here does.
 func (m *Manager) legacyRootAgentForRecordedRoot(root string) *config.RootAgentConfig {
-	cleaned := filepath.Clean(root)
-	// Keys in sorted order for the same reason LegacyRootAgentForRepo sorts
-	// them: inspection, daemon lookup and the ensure pass must agree on one
-	// winner when two spellings name the same root.
-	keys := make([]string, 0, len(m.cfg.RootAgents))
-	for key := range m.cfg.RootAgents {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	matched := ""
-	for _, key := range keys {
-		if filepath.Clean(config.ExpandTilde(key)) == cleaned {
-			matched = key
-			break
-		}
-	}
-	if matched == "" {
-		return nil
-	}
-	// ONE probe, and the matched entry is carried through it rather than
-	// re-derived (#3530 review id 3917445668). Asking LegacyRootAgentForRepo
-	// again would re-resolve every key in the map — the caller has already paid
-	// for one such scan — turning "one extra probe" into N+1 synchronous git
-	// resolutions per verdict, on a path a delivery or delete preflight waits
-	// behind.
-	if _, err := config.RepoFromPath(cleaned); err == nil {
-		return nil
-	}
-	entry := m.cfg.RootAgents[matched]
-	return &entry
+	entry, _ := config.LegacyRootAgentForRecordedRoot(m.cfg, root)
+	return entry
 }
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a

@@ -165,6 +165,20 @@ func assembleRootAgentInspectionInputs(projectSelector string, strictProjectLook
 			out.failClosed = fmt.Sprintf("the project registry %s could not be listed, so the daemon fails every root agent closed at its next start (a personal config it cannot enumerate may hold enabled=false); repair the registry", registry)
 			return out, nil
 		}
+		if found && legacy == nil {
+			// The daemon asks this too (its verdict's recorded-root lookup),
+			// and --explain describes the SAME next start, so it must not
+			// report a profile disabled because it could not see an opt-in the
+			// daemon will apply (#3530 review id 3917756780). Reached only for
+			// a registered project whose recorded root is not the workspace
+			// that resolved here — a removed linked worktree of a still-present
+			// bare repository, most visibly — because otherwise the entry was
+			// already matched by identity above.
+			if entry, key := LegacyRootAgentForRecordedRoot(global, project.Root); entry != nil {
+				out.inputs.Legacy = entry
+				out.locs.legacyKey = key
+			}
+		}
 		if found {
 			pc, err := LoadProjectConfig(project.ID)
 			if err != nil {

@@ -213,6 +213,34 @@ func TestDeleteRefusesWhileIdentityIsInTransition(t *testing.T) {
 		}
 	})
 
+	t.Run("a gone checkout clears the ambiguity", func(t *testing.T) {
+		// An unanswered re-resolution settles INCONCLUSIVE while keeping its
+		// candidate, and every replacement probe inherits it — so with the path
+		// absent nothing ever verifies, disproves or retires the transition.
+		// Determinate absence is what says no verdict is coming, and without it
+		// this refusal stood for the daemon's life while telling the user to
+		// retry (#3530 review id 3917756769).
+		manager, repoPath, _, _ := attributionFixture(t, inFlightProbe, rootGone)
+		result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+		if err != nil {
+			t.Fatalf("a provably absent recorded root leaves nothing to establish, so the delete must proceed under the identity the record is filed under: %v", err)
+		}
+		if result.RepoID == "" {
+			t.Fatalf("and it must name the identity it acted under")
+		}
+	})
+
+	t.Run("an unreadable marker is not a release", func(t *testing.T) {
+		// A settled markerUnreadable (or vanished) outcome establishes nothing
+		// about whether the candidate is this record's checkout, so it may not
+		// release the gate the way a proven mismatch does (#3530 review id
+		// 3917756777).
+		manager, repoPath, derivedID, realID := pendingAttributionFixture(t, unreadableMarkerProbe)
+		_, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+		refused(t, err)
+		unchanged(t, manager, derivedID, realID)
+	})
+
 	t.Run("an ordinary delete is untouched", func(t *testing.T) {
 		// The predicate must not widen: an identity no probe is mid-transition
 		// on deletes exactly as it always did.
@@ -413,6 +441,16 @@ func inFlightProbe(p *rootReattributionProbe, repo *config.RepoContext) {
 	p.repo = repo
 }
 
+// unreadableMarkerProbe: the marker could not be READ, so the probe settles
+// with a concrete negative that establishes nothing about the candidate.
+func unreadableMarkerProbe(p *rootReattributionProbe, repo *config.RepoContext) {
+	p.repo = repo
+	p.markerUnreadable = true
+	p.settled = true
+	p.completedAt = nowFunc()
+	close(p.done)
+}
+
 // mismatchedProbe: the marker read succeeded and differed — a proven different
 // clone at the recorded path.
 func mismatchedProbe(p *rootReattributionProbe, repo *config.RepoContext) {
@@ -426,7 +464,29 @@ func mismatchedProbe(p *rootReattributionProbe, repo *config.RepoContext) {
 // legacy record with no identity, a probe holding a resolved candidate in the
 // state `finish` leaves it in, and a recorded path that is unresolvable again
 // by the time the delete arrives.
+// recordedRootState is what the delete finds at the recorded path, which is
+// what decides whether the identity is ambiguous at all.
+type recordedRootState int
+
+const (
+	// rootUnresolvable: the directory is there and git will not call it a
+	// repository — broken metadata, a half-removed checkout. Normalization
+	// falls back to the identity the record is filed under while a probe still
+	// holds a candidate, which is the ambiguous state the refusal is for.
+	rootUnresolvable recordedRootState = iota
+	// rootGone: provably nothing there, so no verdict about a checkout at that
+	// path can arrive and the recorded identity is the answer (#3530 review id
+	// 3917756769).
+	rootGone
+)
+
 func pendingAttributionFixture(t *testing.T, finish probeFinisher) (manager *Manager, repoPath, derivedID, realID string) {
+	return attributionFixture(t, finish, rootUnresolvable)
+}
+
+// attributionFixture builds the mid-transition state in the recorded root state
+// the caller wants.
+func attributionFixture(t *testing.T, finish probeFinisher, state recordedRootState) (manager *Manager, repoPath, derivedID, realID string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
@@ -466,10 +526,23 @@ func pendingAttributionFixture(t *testing.T, finish probeFinisher) (manager *Man
 	manager.rootHealProbes[derivedID] = pending
 	manager.mu.Unlock()
 
-	// …and the path goes away again before the delete arrives, so
-	// normalization sees an unresolvable path and a record with no identity.
-	if err := os.Rename(repoPath, hidden); err != nil {
-		t.Fatalf("hide repo dir again: %v", err)
+	switch state {
+	case rootGone:
+		// os.Stat proves nothing is there, which is the evidence that no
+		// verdict about this path can arrive.
+		if err := os.RemoveAll(repoPath); err != nil {
+			t.Fatalf("remove repo dir: %v", err)
+		}
+	case rootUnresolvable:
+		// Present, and not a repository: git ANSWERS that it is not one, so the
+		// delete falls back to the recorded identity — with the probe's
+		// candidate still unconsumed, which is the ambiguity.
+		if err := os.Rename(filepath.Join(repoPath, ".git"), repoPath+".git-aside"); err != nil {
+			t.Fatalf("break the checkout metadata: %v", err)
+		}
+		if _, err := config.RepoFromPath(repoPath); err == nil {
+			t.Fatalf("fixture must leave %s present but unresolvable", repoPath)
+		}
 	}
 	return manager, repoPath, derivedID, realID
 }

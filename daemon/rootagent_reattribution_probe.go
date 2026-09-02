@@ -266,6 +266,50 @@ func probeProvedItsCheckout(p *rootReattributionProbe) (verified, disproven bool
 	return p.matches, p.mismatch
 }
 
+// probeStillDeciding reports that a probe holds an unconsumed candidate other
+// than the identity its record is filed under — the state in which "which
+// project does this id name" has two answers.
+//
+// ONLY a proven mismatch releases it (#3530 review id 3917756777). A settled
+// markerUnreadable or vanished outcome is not a release: those establish
+// nothing about whether the candidate is this record's checkout, and treating
+// them as one let a delete by either identity act on half the project — the
+// record deregistered without its sessions, or the sessions archived without
+// the record.
+func probeStillDeciding(probe *rootReattributionProbe, recordedID string) bool {
+	if probe == nil {
+		return false
+	}
+	if _, disproven := probeProvedItsCheckout(probe); disproven {
+		return false
+	}
+	candidate := probe.candidate.Load()
+	return candidate != nil && candidate.ID != recordedID
+}
+
+// recordedRootIsGone reports that the recorded root of the project filed under
+// recordedID is PROVABLY absent, so no verdict about a checkout there is
+// coming (#3530 review id 3917756769).
+//
+// It is the escape hatch on the refusal below, and it is load-bearing rather
+// than an optimisation. A probe whose re-resolution went unanswered settles
+// INCONCLUSIVE while keeping its candidate, every replacement inherits that
+// candidate, and an absent path makes each replacement inconclusive in turn —
+// so nothing ever verifies, disproves or retires it, and without this the
+// refusal would stand for the daemon's life while telling the user to retry.
+//
+// Determinate absence is the same positive evidence claimantForRecord requires:
+// a stat that fails in a way that proves nothing is there. A stalled mount says
+// nothing and keeps the gate closed.
+func (m *Manager) recordedRootIsGone(recordedID string) bool {
+	record, ok := m.rootAgentLayers.Load().unresolvedRoots[recordedID]
+	if !ok || record.root == "" {
+		return false
+	}
+	absent, err := recordRootAbsent(record.root)
+	return err == nil && absent
+}
+
 // identityTransitionPendingFor reports that the daemon is mid-transition on the
 // identity a request named: a probe keyed by it holds an unconsumed candidate
 // that is some OTHER identity, so which project the id names is being decided
@@ -279,29 +323,14 @@ func probeProvedItsCheckout(p *rootReattributionProbe) (verified, disproven bool
 // sessions. The collision this whole change removes, re-entered through the
 // probe map. Nothing here acts across identities any more; the caller refuses
 // and the next pass, which has the record in hand, completes the transition.
-//
-// A settled DISPROOF is not pending: the marker read succeeded and differed, so
-// the candidate is established NOT to be this record's and the recorded
-// identity simply stands. Everything else — in flight, completed without a
-// verdict, verified but not yet promoted — is the unknown.
 func (m *Manager) identityTransitionPendingFor(repoID string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	probe := m.rootHealProbes[repoID]
-	if probe == nil {
+	m.mu.Unlock()
+	if !probeStillDeciding(probe, repoID) {
 		return false
 	}
-	if probe.settled && !probe.inconclusive() {
-		return false
-	}
-	candidate := probe.candidate.Load()
-	if candidate == nil || candidate.ID == repoID {
-		return false
-	}
-	if _, disproven := probeProvedItsCheckout(probe); disproven {
-		return false
-	}
-	return true
+	return !m.recordedRootIsGone(repoID)
 }
 
 // identityTransitionPendingOn is the same question from the other side: some
@@ -315,18 +344,19 @@ func (m *Manager) identityTransitionPendingFor(repoID string) bool {
 // selected its project and nothing is ambiguous.
 func (m *Manager) identityTransitionPendingOn(repoID string) bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	deciding := make([]string, 0, len(m.rootHealProbes))
 	for recordedID, probe := range m.rootHealProbes {
-		if probe == nil || recordedID == repoID {
-			continue
-		}
-		if probe.settled && !probe.inconclusive() {
+		if recordedID == repoID || !probeStillDeciding(probe, recordedID) {
 			continue
 		}
 		if candidate := probe.candidate.Load(); candidate != nil && candidate.ID == repoID {
-			if _, disproven := probeProvedItsCheckout(probe); disproven {
-				continue
-			}
+			deciding = append(deciding, recordedID)
+		}
+	}
+	m.mu.Unlock()
+	// The absence check stats the filesystem, so it runs outside the lock.
+	for _, recordedID := range deciding {
+		if !m.recordedRootIsGone(recordedID) {
 			return true
 		}
 	}
