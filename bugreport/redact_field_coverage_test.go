@@ -351,43 +351,71 @@ func (f *sentinelFiller) formsFor(v reflect.Value, marker string, withTail bool)
 	// other marker shares, matching any field at all — measured, as 38 spurious
 	// leaks (#3592 review).
 	if withTail {
-		if tail := encodedTail(string(form)); tail != "" {
-			forms = append(forms, tail)
-		}
+		forms = append(forms, encodedWindows(string(form))...)
 	}
 	return forms
 }
 
-// encodedTail derives a fragment matching the LATTER PART of an encoded
-// container, so a redaction that rewrites only its first element is still seen.
+// guardWindowMin is the shortest encoded fragment trusted as evidence. Shorter
+// runs of base64 or digits could plausibly coincide between two fields.
+const guardWindowMin = 12
+
+// encodedWindows splits a container's encoding into DISJOINT fragments, each a
+// literal substring of it, so an edit anywhere in the container leaves at least
+// one fragment intact and the survivor is still found.
 //
-// Ordinary slices are protected from an index-zero-only redaction by seeding two
-// elements, but a byte or rune container is ONE planted value whose whole
-// encoding is recorded — change one element and that encoding no longer matches,
-// so the guard reads "redacted" while nearly every byte survives verbatim
+// A single tail is not enough. An earlier revision kept only "everything after
+// the first element", which catches a redactor that rewrites element zero and
+// nothing else: an edit at element three changes the whole form AND that tail,
+// and the guard then reads a barely-touched container as fully redacted
 // (#3592 review).
 //
-// The tail is taken from the encoding itself rather than re-marshalled:
-//
-//   - An integer list "[a,b,c]" contains ",b,c]" — everything after the first
-//     comma is a literal substring of the whole.
-//   - A base64 string encodes in 3-byte groups, so dropping the first 4
-//     characters yields the encoding of everything from byte three onward,
-//     which is likewise a substring.
-func encodedTail(form string) string {
+//   - An integer list "[a,b,c,d]" is split on commas into contiguous runs; each
+//     run appears verbatim inside the whole.
+//   - A base64 string encodes in 3-byte groups, so windows aligned to 4
+//     characters are likewise substrings.
+func encodedWindows(form string) []string {
 	if len(form) > 2 && form[0] == '[' && form[len(form)-1] == ']' {
-		if comma := strings.Index(form, ","); comma >= 0 && comma+1 < len(form)-1 {
-			return form[comma+1 : len(form)-1]
-		}
-		return ""
+		return chunkJoin(strings.Split(form[1:len(form)-1], ","), ",")
 	}
 	if len(form) > 2 && form[0] == '"' && form[len(form)-1] == '"' {
 		body := form[1 : len(form)-1]
-		if len(body) > 8 {
-			return body[4:]
+		var out []string
+		for i := 0; i < len(body); i += guardWindowMin {
+			end := i + guardWindowMin
+			if end > len(body) {
+				end = len(body)
+			}
+			end -= (end - i) % 4 // keep the window on a quartet boundary
+			if end-i >= 8 {
+				out = append(out, body[i:end])
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// chunkJoin groups consecutive elements into fragments that are long enough to
+// be distinctive once joined.
+func chunkJoin(parts []string, sep string) []string {
+	var out []string
+	cur := ""
+	for _, p := range parts {
+		if cur == "" {
+			cur = p
+		} else {
+			cur += sep + p
+		}
+		if len(cur) >= guardWindowMin {
+			out = append(out, cur)
+			cur = ""
 		}
 	}
-	return ""
+	if len(cur) >= guardWindowMin {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // fill plants markers throughout v, allocating pointers, slices and maps on the
@@ -598,10 +626,14 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 		f.unsupported = append(f.unsupported,
 			fmt.Sprintf("%s (map key kind %s cannot carry a text marker)", path, kk))
 	}
-	valueScalar := isScalarNumeric(v.Type().Elem().Kind())
+	// Read through pointers, exactly as fillSequence does: `map[string]*int32`
+	// presents as Ptr, so a direct-kind check sent each value through fill to an
+	// unmarked numeric leaf while json still emitted reconstructible code points
+	// (#3592 review).
+	valueScalar := isScalarNumeric(baseType(v.Type().Elem()).Kind())
 	if valueScalar {
 		f.unsupported = append(f.unsupported,
-			fmt.Sprintf("%s (map value kind %s cannot carry a text marker)", path, v.Type().Elem().Kind()))
+			fmt.Sprintf("%s (map value %s cannot carry a text marker)", path, v.Type().Elem()))
 	}
 	m := reflect.MakeMap(v.Type())
 	for i := 0; i < guardSliceSeed; i++ {
@@ -732,6 +764,15 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 		leaked = append(leaked, p.path)
 	}
 
+	// An entry with an empty reason is not a classification. Both maps exist to
+	// force a written justification, so a placeholder like `"Field": ""` would
+	// satisfy the lookup while supplying exactly nothing — bypassing the
+	// deliberate redact-or-justify decision this guard is for (#3592 review).
+	assertJustified(t, "verbatimInstanceFields", verbatimInstanceFields,
+		"every entry needs the reason the value is safe to publish")
+	assertJustified(t, "knownUnredactedFields", knownUnredactedFields,
+		"every entry needs a tracking issue for the leak it records")
+
 	var unjustified []string
 	for _, path := range leaked {
 		_, safe := verbatimInstanceFields[path]
@@ -765,6 +806,23 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 		"They are now redacted or gone. Remove them so the allowlist keeps describing the code that actually runs.")
 	assertNoStaleEntries(t, "knownUnredactedFields", knownUnredactedFields, leakedSet,
 		"That leak is fixed — remove the entry (and close out its tracking issue).")
+}
+
+// assertJustified fails on a classification entry with no written reason.
+func assertJustified(t *testing.T, name string, classified map[string]string, want string) {
+	t.Helper()
+	var blank []string
+	for path, reason := range classified {
+		if strings.TrimSpace(reason) == "" {
+			blank = append(blank, path)
+		}
+	}
+	if len(blank) == 0 {
+		return
+	}
+	sort.Strings(blank)
+	t.Errorf("%d entr(y/ies) in %s carry no justification:\n  %s\n\n%s.",
+		len(blank), name, strings.Join(blank, "\n  "), want)
 }
 
 // assertNoStaleEntries reports classified paths that no longer leak.
