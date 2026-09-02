@@ -77,7 +77,8 @@ What can actually run offline:
 | target | offline | why |
 | --- | --- | --- |
 | `test-container`, including focused `GOTESTARGS` runs | yes, verified | the warm host module cache is mounted as a `file://` GOPROXY, and the suite binds only to loopback inside the container |
-| `playtest-container`, `web-selftest-container` | expected, not verified | same GOPROXY, and daemon/tmux/browser all live on 127.0.0.1 — but a play-test agent that fetches its own release will not |
+| `playtest-container` | yes, verified | same GOPROXY; the sandbox builds `af` from source and reaches `playtest-ready` with no network. `AF_PLAYTEST_AGENT=codex` does not — it downloads a release — but the default standin agent needs nothing |
+| `web-selftest-container` | **no** | its entry script runs `npm ci`, and its run flags do not mount the host `file://` GOPROXY either (that mount lives in `RUN_FLAGS`, which this target does not use) |
 | `lifecycle-container` | **no** | it downloads published releases |
 | image builds (`testbox-image`, and the first run of any target) | **no** | apt and Go module fetches — `--network` is deliberately never applied to `build` |
 

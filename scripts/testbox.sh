@@ -134,8 +134,9 @@ fi
 #
 # `run` only, never `build`: an image build fetches packages and modules, so
 # forcing it offline would fail for an unrelated reason. Same for the targets
-# that genuinely reach the network from inside the container — `lifecycle`
-# downloads releases. See docs/container-testing.md.
+# that genuinely reach the network from INSIDE the container — `lifecycle`
+# downloads releases, and `web-selftest` runs `npm ci`. See
+# docs/container-testing.md for which targets survive being cut off.
 engine_run() {
     if [ -n "${AF_TESTBOX_NETWORK:-}" ]; then
         "$ENGINE" run --network "$AF_TESTBOX_NETWORK" "$@"
