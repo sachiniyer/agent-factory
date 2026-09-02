@@ -24,6 +24,10 @@ const (
 	codexSafetySelectionVerificationWindow = 5 * time.Second
 )
 
+// codexSafetyDialogName names this modal in the "af answered a dialog and the
+// pane died" diagnostic (dialog_keystroke.go).
+const codexSafetyDialogName = "Codex safety-check"
+
 const (
 	codexSafetyRetryLabel       = "Retry with a faster model"
 	codexSafetyWaitLabel        = "Keep waiting"
@@ -206,6 +210,7 @@ func (t *TmuxSession) handleCodexSafetyBuffering(content string) bool {
 		log.ErrorLog.Printf("could not accept Codex additional safety checks for session %q: %v", t.sanitizedName, err)
 		return true
 	}
+	t.noteDialogKeystroke(codexSafetyDialogName, dialog.targetLabel, "Enter")
 	state.expectedModel = state.lastModel
 	state.verificationPolls = 0
 	state.awaitingModelCheck = true

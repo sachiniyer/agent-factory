@@ -247,7 +247,7 @@ func (t *TmuxSession) CapturePaneContentContext(ctx context.Context) (string, er
 			return "", fmt.Errorf("%w: capture-pane after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
 		if !t.ExistsOrUnknown() {
-			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("error capturing pane content: %v", err)
 	}
@@ -279,7 +279,7 @@ func (t *TmuxSession) CaptureVisiblePaneGrid() (string, error) {
 			return "", fmt.Errorf("%w: capture-pane grid after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
 		if !t.ExistsOrUnknown() {
-			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("error capturing pane grid: %v", err)
 	}
@@ -362,7 +362,7 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 			return "", fmt.Errorf("%w: capture-pane options after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
 		if !t.ExistsOrUnknown() {
-			return "", fmt.Errorf("%w: capture-pane: %v", ErrSessionGone, err)
+			return "", t.sessionGoneError("capture-pane", err)
 		}
 		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
 	}
@@ -411,7 +411,7 @@ func (t *TmuxSession) CaptureVisibleWithScrollback() (string, int, error) {
 			return "", 0, fmt.Errorf("%w: capture-pane with scrollback after %s", ErrTmuxTimeout, tmuxCommandTimeout)
 		}
 		if !t.ExistsOrUnknown() {
-			return "", 0, fmt.Errorf("%w: capture-pane with scrollback: %v", ErrSessionGone, err)
+			return "", 0, t.sessionGoneError("capture-pane with scrollback", err)
 		}
 		return "", 0, fmt.Errorf("failed to capture tmux pane with scrollback: %v", err)
 	}

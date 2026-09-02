@@ -187,6 +187,19 @@ type TmuxSession struct {
 	// safety-buffering intervention can prove it did not select the downgrade.
 	// Access only while inputMu is held.
 	codexSafety codexSafetyBufferingState
+	// claudeTrust remembers whether the folder-trust handler has already
+	// reported a dialog it refuses to answer, so the daemon's per-second poll
+	// logs that once rather than every tick. Access only while inputMu is held.
+	claudeTrust claudeTrustState
+	// dialogInput is the last key af injected into a modal on this pane, used to
+	// report a pane that dies while af is answering a dialog as its own outcome
+	// rather than as a bare "capture-pane: exit status 1" (#3579).
+	//
+	// It has its OWN mutex on purpose: it is read from the capture paths, and
+	// CheckAndHandleTrustPrompt captures while holding inputMu, so guarding it
+	// with inputMu would deadlock the dismissal it exists to describe.
+	dialogInputMu sync.Mutex
+	dialogInput   dialogKeystroke
 	// lastPastedTail is the normalized distinctive tail of the most recent
 	// payload paste that tmux accepted. The next submit may use it only as
 	// provenance for the cleared-composer diagnostic: matching arbitrary pane
