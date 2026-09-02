@@ -175,7 +175,11 @@ func quotedPathList(paths []string) string {
 //
 // accountSource is the host directory af mounted, so this also proves the mount
 // sitting at dockerAccountHome is af's own rather than something that arrived
-// with the same destination.
+// with the same destination. A string comparison is the right one: Docker
+// records a bind source verbatim rather than canonicalising it (measured on
+// 29.4.0, including a source reached through a symlinked ancestor), and af hands
+// it filepath.Abs of the account directory, which does not resolve symlinks
+// either — so the two spellings are the same spelling.
 func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource string) error {
 	own := 0
 	for _, mount := range c.Mounts {
@@ -286,6 +290,13 @@ func unescapeMountinfoField(field string) (string, error) {
 				return "", fmt.Errorf("invalid octal escape in %q", field)
 			}
 			value = value*8 + int(digit-'0')
+		}
+		// Three octal digits reach 0777, which does not fit a byte. The kernel
+		// emits only \040, \011, \012 and \134, so anything above 0377 is not
+		// something it wrote — and silently truncating it would invent a path
+		// character the source never had.
+		if value > 0xff {
+			return "", fmt.Errorf("octal escape out of range in %q", field)
 		}
 		out.WriteByte(byte(value))
 		index += 3

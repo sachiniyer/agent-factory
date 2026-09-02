@@ -355,6 +355,16 @@ func TestParseMountinfoTargets_ReadsTheMountPointField(t *testing.T) {
 		"field 5 is the mount point, and its octal escapes must be undone — field 4 is the source's own root")
 }
 
+// An escape the kernel never writes must not be silently truncated into a path
+// character the source did not have. Three octal digits reach 0777, which does
+// not fit a byte.
+func TestParseMountinfoTargets_RefusesAnOutOfRangeEscape(t *testing.T) {
+	_, err := parseMountinfoTargets([]byte(
+		"2440 2421 8:1 /host/src /af-account\\777x rw,relatime - ext4 /dev/root rw\n"))
+	require.Error(t, err, "byte(0777) truncates to 0xff and would invent a character; refuse instead")
+	assert.Contains(t, err.Error(), "out of range")
+}
+
 // Nothing about this runs for a session with no account: the whole boundary
 // exists only when one is mounted, and a non-account session must not pay for a
 // docker inspect or two execs, let alone be refused by them.
