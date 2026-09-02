@@ -1840,6 +1840,169 @@ test("transient CodeQL neutral waits for Analyze jobs and later passes", async (
   assert.equal(settled.shouldMerge, true);
 });
 
+test("an automatic review clears the gate from its summary row alone", async () => {
+  // #3606: Codex emits the `Reviewed commit:` prose line when a review is
+  // REQUESTED, and only edits its summary table when it reviews automatically on
+  // a push. The head was reviewed, passed, and blocked forever on "has not
+  // reviewed head … yet" until someone posted `@codex review`.
+  const github = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+  assert.ok(result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`));
+});
+
+test("a Running summary row is progress, not a verdict", async () => {
+  const github = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA, { status: "⏳ **Running**" })],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  // …and the message says a review exists rather than sending the reader to look
+  // for one that never ran: the row names this head, it just is not a verdict.
+  assert.ok(
+    result.reasons.some((reason) =>
+      reason.includes(`a Codex review exists for head ${HEAD_SHA} but carried no parseable verdict`),
+    ),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a summary row naming an older head satisfies nothing", async () => {
+  // Freshness is untouched by the second pattern: the row must name THIS head.
+  const github = fakeGateGithub({ issueComments: [codexSummaryTable(OTHER_SHA)] });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  // No artifact names this head at all, so this is the genuinely-missing message.
+  assert.ok(
+    result.reasons.some((reason) => reason.includes(`Codex has not reviewed head ${HEAD_SHA} yet`)),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a summary row older than the head is stale evidence", async () => {
+  // The ROW's time is the artifact time, held to the same rule the prose line's
+  // comment time is: a verdict that predates the head proves nothing about it.
+  const github = fakeGateGithub({
+    headCommittedDate: "2026-07-09T02:00:00Z",
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:00:00Z" })],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.ok(
+    result.reasons.some((reason) =>
+      reason.includes("Codex verdict for the head commit is older than the head commit timestamp"),
+    ),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("the row's own time is used, not the summary comment's", async () => {
+  // The summary comment is edited on every review activity, so its updated_at
+  // says when Codex last touched anything. Reading that as the verdict time
+  // would make a stale row look fresh the moment Codex did something else.
+  const github = fakeGateGithub({
+    headCommittedDate: "2026-07-09T02:00:00Z",
+    issueComments: [
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:00:00Z",
+        commentTime: "2026-07-09T03:00:00Z",
+      }),
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "a comment touched later must not refresh an old row");
+});
+
+test("a summary row never clears a finding in a review body for the same head", async () => {
+  // The row records that a review COMPLETED; it is not evidence that the review
+  // was clean, and Codex edits the table when it posts a finding. Letting the
+  // row supersede the finding-carrying body would clear the finding by the very
+  // act of recording it.
+  const github = fakeGateGithub({
+    issueComments: [
+      codexReview(HEAD_SHA, "P1: this is wrong.", "2026-07-09T01:20:00Z"),
+      codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:30:00Z" }),
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("summary rows are read positionally, and only when complete", () => {
+  const { parseSummaryRows, parseVerdictArtifact } = __test;
+  const rows = parseSummaryRows(codexSummaryTable(HEAD_SHA).body);
+  assert.equal(rows.length, 1, "the header and separator rows are not Code Review rows");
+  assert.equal(rows[0].completed, true);
+  assert.equal(rows[0].commit, HEAD_SHA.slice(0, 7));
+  assert.equal(typeof rows[0].time, "number");
+
+  // Each missing piece makes it a non-verdict rather than a malformed one.
+  const running = codexSummaryTable(HEAD_SHA, { status: "⏳ **Running**" });
+  assert.equal(parseVerdictArtifact(running, HEAD_SHA), null);
+  const noTime = codexSummaryTable(HEAD_SHA, { rowTime: "" });
+  assert.equal(parseVerdictArtifact(noTime, HEAD_SHA), null);
+  const noCommit = codexSummaryTable(HEAD_SHA, { commitCell: "—" });
+  assert.equal(parseVerdictArtifact(noCommit, HEAD_SHA), null);
+
+  // The prose form is untouched and still reports its own kind.
+  assert.equal(parseVerdictArtifact(codexVerdict(HEAD_SHA), HEAD_SHA).kind, "prose");
+  assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA).kind, "summary-row");
+});
+
 test("a Codex rate-limit message never becomes a verdict", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
@@ -4754,6 +4917,54 @@ function codexVerdict(sha, timestamp = "2026-07-09T01:20:00Z") {
     body: `Codex Review: Didn't find any major issues.\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
     created_at: timestamp,
     updated_at: timestamp,
+  };
+}
+
+// Codex's automatic-review artifact, captured verbatim from a real summary
+// comment (PR #3550, comment 5500591835) with only the commit, row timestamp and
+// trigger substituted. An automatic review edits this table and emits no
+// "Reviewed commit:" prose line at all, which is the whole of #3606.
+function codexSummaryTable(
+  sha,
+  {
+    status = "✅ **Completed**",
+    rowTime = "2026-07-09T01:20:00Z",
+    trigger = "New commits",
+    commentTime = "2026-07-09T01:20:00Z",
+    commitCell = null,
+  } = {},
+) {
+  const cell = commitCell ?? `\`${sha.slice(0, 7)}\``;
+  const time = rowTime
+    ? ` <relative-time datetime="${rowTime}">${rowTime}</relative-time>`
+    : "";
+  return {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "<!-- codex-pull-request-review-summary -->",
+      "",
+      "## Codex Review Summary",
+      "",
+      "This comment shows the latest Codex review activity on this pull request.",
+      "",
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ${status}${time} | ${cell} | ${trigger} |`,
+      "",
+      "",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+      "- Open a pull request for review",
+      "- Mark a draft as ready",
+      '- Comment "@codex review" or "@codex security review".',
+      "",
+      "</details>",
+    ].join("\n"),
+    created_at: commentTime,
+    updated_at: commentTime,
   };
 }
 

@@ -67,6 +67,20 @@ const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
+// The second artifact shape. Codex emits the prose line above when a review is
+// REQUESTED; when it reviews automatically on a push it only edits its summary
+// comment, whose table names the commit in a cell (#3606). Both are the same
+// reviewer saying the same thing about the same head, so both count — a PR whose
+// final head was reviewed automatically otherwise blocks forever on a review
+// that already ran, which is how every final head came to need a manual
+// `@codex review`.
+//
+// A row is a verdict only when it is Completed AND names a commit AND carries a
+// parseable time. `Running` is progress, not a verdict.
+const CODEX_SUMMARY_ROW_LABEL_RE = /\bCode Review\b/i;
+const CODEX_SUMMARY_ROW_COMPLETED_RE = /\bCompleted\b/i;
+const CODEX_SUMMARY_ROW_COMMIT_RE = /`([0-9a-f]{7,40})`/i;
+const CODEX_SUMMARY_ROW_TIME_RE = /<relative-time[^>]*\bdatetime="([^"]+)"/i;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
@@ -2558,10 +2572,14 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
-  const matchingReviewArtifacts = codexReviewArtifacts.filter((comment) => {
-    const reviewedCommit = parseReviewedCommit(comment.body || "");
-    return reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha);
-  });
+  // Both artifact shapes, each carrying its OWN time: the prose line's is its
+  // comment's, the summary row's is the row's. Sorted by that rather than by
+  // comment order, because the summary comment is edited on every review
+  // activity and its comment time says nothing about when this review completed.
+  const matchingReviewArtifacts = codexReviewArtifacts
+    .map((artifact) => parseVerdictArtifact(artifact, sha))
+    .filter(Boolean)
+    .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
@@ -2602,13 +2620,20 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
         ? "; the latest Codex response was usage-limited"
         : "; the latest Codex response was usage-limited but predates this head, so it is not " +
           "evidence about this head";
-    const missingVerdictReason = `Codex has not reviewed head ${sha} yet${suffix}`;
+    // Split, because the two states need different actions from a reader: one
+    // says wait for or request a review, the other says a review ran and this
+    // gate could not read it — go look at the artifact, not at Codex.
+    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha)
+      ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+      : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
     }
     reasons.push(missingVerdictReason);
   } else {
-    const verdictTime = reviewArtifactTime(verdict);
+    // The artifact's own time: the comment's for a prose line, the row's for a
+    // summary row.
+    const verdictTime = verdict.time;
     if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
       reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
@@ -2616,7 +2641,14 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     }
   }
 
-  if (verdict && CODEX_BODY_FINDING_RE.test(verdict.body || "")) {
+  // Checked against the newest PROSE artifact for this head, not the newest
+  // artifact of any kind. A summary row records that a review completed; it is
+  // not evidence that the review was clean, and its body never carries findings.
+  // Letting a row supersede a finding-carrying review body would clear a finding
+  // by the mere fact that Codex touched the table afterwards — which it does on
+  // every review activity, including posting that very finding.
+  const latestProseVerdict = matchingReviewArtifacts.find((artifact) => artifact.kind === "prose");
+  if (latestProseVerdict && CODEX_BODY_FINDING_RE.test(latestProseVerdict.body || "")) {
     reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
   }
 
@@ -2744,6 +2776,63 @@ function parseReviewedCommit(body) {
   return body.match(REVIEWED_COMMIT_RE)?.[1]?.toLowerCase() || null;
 }
 
+// The Code Review rows of a Codex summary table. Split on cells rather than
+// matched as one regex so a row is read positionally — status in its own cell,
+// commit in its own cell — and the header and separator rows fall out for free
+// because neither names a Code Review.
+function parseSummaryRows(body) {
+  const rows = [];
+  for (const line of String(body || "").split("\n")) {
+    if (!line.trim().startsWith("|")) {
+      continue;
+    }
+    const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+    if (cells.length < 3 || !CODEX_SUMMARY_ROW_LABEL_RE.test(cells[0])) {
+      continue;
+    }
+    rows.push({
+      completed: CODEX_SUMMARY_ROW_COMPLETED_RE.test(cells[1]),
+      commit: CODEX_SUMMARY_ROW_COMMIT_RE.exec(cells[2])?.[1]?.toLowerCase() || null,
+      // The ROW's timestamp, not the comment's. The summary comment is edited on
+      // every review activity, so its own updated_at says when Codex last
+      // touched anything — not when this review completed, which is what the
+      // freshness rule is comparing against the head.
+      time: parseTimestamp(CODEX_SUMMARY_ROW_TIME_RE.exec(cells[1])?.[1]),
+    });
+  }
+  return rows;
+}
+
+// A Codex artifact's verdict for this head, or null. Prose first: it is the
+// explicit form and carries the artifact's own timestamp, exactly as before.
+function parseVerdictArtifact(artifact, headSha) {
+  const body = artifact.body || "";
+  const reviewedCommit = parseReviewedCommit(body);
+  if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
+    return { kind: "prose", time: reviewArtifactTime(artifact), body };
+  }
+  const row = parseSummaryRows(body).find(
+    (candidate) =>
+      candidate.completed &&
+      candidate.commit != null &&
+      candidate.time != null &&
+      reviewedCommitMatchesHead(candidate.commit, headSha),
+  );
+  return row ? { kind: "summary-row", time: row.time, body } : null;
+}
+
+// Whether any artifact's summary table names this head at all, whatever its
+// status. This is what separates "no review has run" from "a review ran and this
+// gate could not read its verdict" — the distinction that cost an hour of
+// looking for a missing review that had already completed.
+function summaryNamesHead(artifacts, headSha) {
+  return artifacts.some((artifact) =>
+    parseSummaryRows(artifact.body || "").some(
+      (row) => row.commit != null && reviewedCommitMatchesHead(row.commit, headSha),
+    ),
+  );
+}
+
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {
   const normalizedHead = String(headSha || "").toLowerCase();
   return /^[0-9a-f]{40}$/.test(normalizedHead) && normalizedHead.startsWith(reviewedCommit);
@@ -2850,6 +2939,8 @@ module.exports = {
   resolveTargets,
   __test: {
     CONCEDED_MERGE_REFUSALS,
+    parseSummaryRows,
+    parseVerdictArtifact,
     MASTER_PUSH_WORKFLOWS,
     isSelfContradictoryNotFound,
     evaluateCodex,
