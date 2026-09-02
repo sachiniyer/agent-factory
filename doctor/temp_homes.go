@@ -433,11 +433,20 @@ var tempHomeChildBatch = 1024
 // eight-entry budget was reported partial having collected all nine. Chasing
 // that with one more probe just moves the boundary to budget+2.
 //
-// So the probe reads up to a bounded slack. Within it the answer is EXACT: EOF
-// arrives and the listing is complete. Beyond it the sweep says truncated,
-// which is true — a directory more than a full slack past the budget really was
-// not read to the end — and the extra work stays bounded, which is the whole
-// point of having a budget.
+// So the probe reads up to a bounded slack, and then ONE more entry. Within the
+// slack the answer is exact, and the trailing single-entry read is what makes
+// that literal rather than nearly true: a directory holding exactly slack
+// entries past the budget is consumed by the last batch of the slack, which
+// again reports io.EOF only on the following call, so without it the false
+// truncation simply moved from budget to budget+slack.
+//
+// One boundary remains, and it is the one no bounded probe can remove: a
+// directory with exactly slack+1 entries left is read to its end and still
+// reported truncated, because the read that consumed its final entry is the
+// read that proves there was more than a slack to read. Chasing that costs
+// another read and hands the same case back one entry further out. It errs
+// toward "this run may have missed something", which is the safe direction for
+// a report whose counts are already documented as a lower bound.
 var tempHomeProbeSlack = 1024
 
 // tempHomeProbeBatch is the read size used while probing. Smaller than the main
@@ -472,6 +481,26 @@ var tempHomeReadBudget = 500000
 // thousand.
 var scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) { return f.ReadDir(n) }
 
+// boundedBatch is how many entries the next ordinary read may ask for: a full
+// batch, or whatever is left of the read budget if that is smaller.
+//
+// The budget is checked BEFORE each read, so without this the last read of a
+// scan asks for a full batch however little budget remains and overshoots by up
+// to batch-1 entries — on top of which the probe then reads a whole slack. The
+// slack is the one overrun that is deliberate, and it is the only one the doc
+// comments promise; this keeps that promise literal.
+func boundedBatch(sweep *tempHomeSweep, readBudget int) int {
+	if readBudget <= 0 {
+		return tempHomeChildBatch
+	}
+	if left := readBudget - sweep.entriesRead; left < tempHomeChildBatch {
+		// Never zero: every caller checks the budget first and only reaches
+		// here with entries still to spend, and ReadDir(0) means "all of it".
+		return left
+	}
+	return tempHomeChildBatch
+}
+
 // probeForMoreEntries answers the question a spent read budget cannot: is there
 // anything LEFT in this directory, or did it happen to end exactly here?
 //
@@ -485,8 +514,15 @@ var scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) { return f.Rea
 // One entry is enough to tell them apart, and whatever it reads is handed back
 // so the caller keeps it rather than dropping it on the floor.
 func probeForMoreEntries(sweep *tempHomeSweep, f *os.File) (entries []os.DirEntry, atEnd bool, err error) {
-	for read := 0; read < tempHomeProbeSlack; {
-		batch, readErr := scanDirBatch(f, tempHomeProbeBatch)
+	read := 0
+	for read < tempHomeProbeSlack {
+		n := tempHomeProbeBatch
+		// Sized to what is left of the slack, so a slack that is not a whole
+		// number of batches is still the bound it says it is.
+		if left := tempHomeProbeSlack - read; left < n {
+			n = left
+		}
+		batch, readErr := scanDirBatch(f, n)
 		sweep.entriesRead += len(batch)
 		entries = append(entries, batch...)
 		read += len(batch)
@@ -501,6 +537,26 @@ func probeForMoreEntries(sweep *tempHomeSweep, f *os.File) (entries []os.DirEntr
 			// thing, so stop rather than spin.
 			return entries, false, nil
 		}
+	}
+
+	// The slack is spent and EOF has not been reported. That is precisely the
+	// state this function exists to disambiguate, one level up: a directory
+	// holding exactly slack entries past the budget was just consumed by the
+	// final batch, which returns them with a nil error and reports io.EOF only
+	// on the NEXT call. Without this read it would be called truncated having
+	// been read in full, which is the same bug at a larger radius.
+	//
+	// One entry, because it is the ANSWER that is wanted and not the entries:
+	// an empty return means the directory ended inside the slack, and a
+	// non-empty one means there was genuinely more than the slack to read.
+	batch, readErr := scanDirBatch(f, 1)
+	sweep.entriesRead += len(batch)
+	entries = append(entries, batch...)
+	if errors.Is(readErr, io.EOF) {
+		return entries, true, nil
+	}
+	if readErr != nil {
+		return entries, false, readErr
 	}
 	return entries, false, nil
 }
@@ -563,21 +619,40 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget 
 			// COMPLETE, and calling it truncated would report a finished scan
 			// as a partial one. See probeForMoreEntries.
 			probe, atEnd, probeErr := probeForMoreEntries(sweep, f)
+			recordedAll := true
 			for _, entry := range probe {
-				if entry.IsDir() {
-					children = append(children, filepath.Join(dir, entry.Name()))
+				if !entry.IsDir() {
+					continue
 				}
-			}
-			if atEnd {
-				return true, sawEntries, nil
+				if limit > 0 && len(sweep.candidates)+len(children) >= limit {
+					// The probe reads PAST the budget on purpose, to learn
+					// whether the directory had already ended. What it hands
+					// back is still subject to the candidate limit: appending
+					// it unchecked let one probe put a whole slack's worth of
+					// extra candidates over the bound, and every one of them
+					// then costs seven isAFHome stats — the work the bound
+					// exists to cap.
+					recordedAll = false
+					sweep.hitCandidateLimit = true
+					break
+				}
+				children = append(children, filepath.Join(dir, entry.Name()))
 			}
 			if probeErr != nil {
 				return false, sawEntries, probeErr
 			}
+			// A directory whose children we saw and could not record is not a
+			// finished expansion, whatever the probe found after them.
+			if !recordedAll {
+				return false, sawEntries, nil
+			}
+			if atEnd {
+				return true, sawEntries, nil
+			}
 			sweep.hitReadBudget = true
 			return false, sawEntries, nil
 		}
-		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
+		batch, readErr := scanDirBatch(f, boundedBatch(sweep, readBudget))
 		sweep.entriesRead += len(batch)
 		if len(batch) > 0 {
 			sawEntries = true
@@ -656,7 +731,7 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string, readBudget int) ([]strin
 			sweep.hitReadBudget = true
 			break
 		}
-		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
+		batch, readErr := scanDirBatch(f, boundedBatch(sweep, readBudget))
 		sweep.entriesRead += len(batch)
 		for _, entry := range batch {
 			if entry.IsDir() {

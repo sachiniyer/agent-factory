@@ -1050,3 +1050,114 @@ func TestCandidateLimitWithMoreToRecordIsStillTruncated(t *testing.T) {
 	assert.Zero(t, sweep.visited, "three children were never recorded, so the parent was not finished")
 	assert.True(t, sweep.truncated())
 }
+
+// ---- eighth review round on #3568 ----
+
+// TestProbeResultsAreCappedByTheCandidateLimit is the eighth-round P2.
+//
+// The probe deliberately reads PAST a spent read budget to find out whether the
+// directory had already ended, and it hands back whatever it read so nothing is
+// dropped. Handing it back is right; recording all of it is not. The read-budget
+// branch appended every probed subdirectory without rechecking the candidate
+// limit, so a sweep with one slot left could record a whole slack's worth of
+// extra candidates — and then pay seven isAFHome stats for each of them, which is
+// the cost the candidate budget exists to bound.
+func TestProbeResultsAreCappedByTheCandidateLimit(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "TestFoo")
+	for i := 0; i < 10; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, fmt.Sprintf("%03d", i)), 0755))
+	}
+	// Budget 2 = the one root entry plus one child, so the expansion hits the
+	// READ budget with candidate slots still free and the probe fires there.
+	withExactReadBudget(t, 2, 1)
+
+	sweep := candidateTempHomes(root, 3)
+
+	assert.LessOrEqual(t, len(sweep.candidates), 3,
+		"the probe reads past the read budget to find EOF; what it records is still bound by the candidate limit")
+	assert.True(t, sweep.hitCandidateLimit,
+		"children the probe found and the budget could not record are truncation, and must be named as such")
+	assert.True(t, sweep.truncated())
+}
+
+// TestListingEndingExactlyOnTheProbeSlackIsNotCalledTruncated is the eighth-round
+// P3 on the slack boundary.
+//
+// The slack's documented promise is that WITHIN it the answer is exact. It was
+// not exact at the edge: a directory holding exactly slack entries past the
+// budget is consumed by the final probe batch, which returns those entries with a
+// nil error and reports io.EOF only on the NEXT call — the same boundary this
+// whole mechanism exists to fix, one level up. So the probe moved the false
+// truncation to exactly budget+slack instead of removing it.
+func TestListingEndingExactlyOnTheProbeSlackIsNotCalledTruncated(t *testing.T) {
+	root := t.TempDir()
+	// budget 8 + slack 8: the probe consumes the last entry and never gets the
+	// call that would report EOF.
+	fillTempDir(t, root, 16)
+	withExactReadBudget(t, 8, 8)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	require.Equal(t, 16, sweep.offered, "precondition: every entry was actually collected")
+	assert.False(t, sweep.rootPartial,
+		"a directory ending exactly at the end of the slack was read in FULL")
+	assert.NotContains(t, tempHomeSweepTruncationDetail(root, sweep, 50000),
+		"too large to list in full")
+}
+
+// TestNormalReadsAreSizedToTheRemainingBudget is the eighth-round P3 on overshoot.
+//
+// The budget was checked before each read and the read then asked for a full
+// batch regardless, so a scan could overshoot by batch-1 entries before the probe
+// read a further slack on top. The bound the doc comment advertises — and the
+// only overrun that is deliberate — is the probe slack.
+func TestNormalReadsAreSizedToTheRemainingBudget(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 200)
+	withExactReadBudget(t, 5, 8)
+	reads := countDirReads(t)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	require.True(t, sweep.truncated(), "precondition: 200 entries under a 5-entry budget is a truncated sweep")
+	assert.LessOrEqual(t, *reads, tempHomeReadBudget+tempHomeProbeSlack+1,
+		"the probe slack is the only overrun the budget permits; a full-batch read past it is not")
+}
+
+// TestProbeResultsUnderTheLimitAreStillRecorded is the twin to
+// TestProbeResultsAreCappedByTheCandidateLimit, on identical staging with the
+// limit lifted. A cap that fires whenever the probe returns anything would pass
+// its own test while silently dropping children there was room for, so the cap
+// has to be shown NOT firing when the budget can take what the probe found.
+func TestProbeResultsUnderTheLimitAreStillRecorded(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "TestFoo")
+	for i := 0; i < 10; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, fmt.Sprintf("%03d", i)), 0755))
+	}
+	withExactReadBudget(t, 2, 1)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	assert.Len(t, sweep.candidates, 11, "the parent plus all ten children the probe reached, none dropped")
+	assert.False(t, sweep.hitCandidateLimit, "nothing went unrecorded, so the candidate limit did not fire")
+	assert.True(t, sweep.hitReadBudget, "the READ budget is what stopped this one, and the notice must name it")
+}
+
+// TestListingBeyondTheProbeSlackIsStillTruncated is the twin to
+// TestListingEndingExactlyOnTheProbeSlackIsNotCalledTruncated: the trailing
+// decision read must not turn every truncated listing into a false completion.
+// A directory with more than a slack still to give was genuinely not read to the
+// end, and has to say so.
+func TestListingBeyondTheProbeSlackIsStillTruncated(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 18)
+	withExactReadBudget(t, 8, 8)
+
+	sweep := candidateTempHomes(root, 50000)
+
+	assert.True(t, sweep.rootPartial, "more than a slack past the budget really was not read to the end")
+	assert.True(t, sweep.truncated())
+	assert.Less(t, sweep.offered, 18, "offered is a lower bound here, not a total")
+}
