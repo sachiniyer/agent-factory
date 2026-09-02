@@ -14,7 +14,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 var automationsTitleStyle = lipgloss.NewStyle().
@@ -300,122 +299,14 @@ func (a *AutomationsPane) enabledCount() int {
 	return n
 }
 
-func automationHelpKey(name keys.KeyName) string {
-	return keys.GlobalKeyBindings[name].Help().Key
-}
-
-func automationsActionHint(name keys.KeyName, desc string) string {
-	return automationHelpKey(name) + " " + desc
-}
-
-// automationsHeader is the section header's text, split at the seam the width
-// ladder needs: the noun is decoration and may be shortened or dropped, the
-// counts are the only information the header carries and never may be (#3630).
-type automationsHeader struct {
-	noun   string // "Automations" — or "Automations:" in the compact summary
-	counts string // "(2)", or "2 (1 on)" in the compact summary
-	// primary is counts reduced to the one number that must survive, and it is a
-	// rung of its own before the affordance is touched. The compact summary
-	// carries two numbers ("100 (100 on)" is 12 cells), which at the 22-column
-	// rail minimum left nothing for the hint and truncated it — regressing the
-	// contract that the manage affordance is cut last, at a SUPPORTED width
-	// rather than below one (#3641 review). Empty means counts is already
-	// minimal, as it is in full mode.
-	primary string
-}
-
-// text is the header at full width: " Automations (2)".
-func (h automationsHeader) text() string { return " " + h.noun + " " + h.counts }
-
-// countsOnly sheds the noun but keeps the numbers: " (2)".
-func (h automationsHeader) countsOnly() string { return " " + h.counts }
-
-// primaryOnly sheds the secondary number too: " 100" from " 100 (100 on)". It
-// is the last rung that still says anything true before clipping.
-func (h automationsHeader) primaryOnly() string {
-	if h.primary == "" {
-		return ""
-	}
-	return " " + h.primary
-}
-
-// shrunk ellipsizes the NOUN inside w cells while keeping the counts whole, or
-// returns "" when there is no room for a noun worth rendering.
-func (h automationsHeader) shrunk(w int) string {
-	room := w - runewidth.StringWidth(h.countsOnly()) - 1 // 1 for the leading pad
-	// Below three cells a "noun" is an ellipsis and a letter or two; drop it and
-	// let countsOnly have the width instead.
-	if room < 3 {
-		return ""
-	}
-	return " " + fitLine(h.noun, room) + " " + h.counts
-}
-
-// automationsHintSeparator is the repo's fragment separator (CLAUDE.md), and it
-// belongs to the HINT rather than to the title's trailing space. That is the
-// whole of #3630: while the leading space lived on the end of the title, every
-// shrink of the title ate it, and the header rendered "Automation…· m manage" —
-// an ellipsis welded to a separator, reading as one mangled token.
-const automationsHintSeparator = " · "
-
-// titleLine renders the section header width-aware. Segments shed in order of
-// what they cost the reader:
-//
-//	Automations (2) · m manage · e hooks    full
-//	Automations (2) · m manage              hooks drops first
-//	Automatio… (2) · m manage               then the noun shrinks, counts intact
-//	(2) · m manage                          then the noun goes, counts intact
-//	100 · m manage                          then the secondary count goes
-//
-// Three rules hold at every step, and #3630 was the first two failing at once.
-//
-// The " · " separator is never ellipsized into. Its leading space used to live
-// on the END of the title, so every shrink of the title ate it and the header
-// rendered "Automation…· m manage" — an ellipsis welded to a separator, reading
-// as one mangled token rather than a truncated word beside a hint. The
-// separator now belongs to the hint, where it cannot be shortened away.
-//
-// The counts survive every form. The old fallback replaced the whole title with
-// an ellipsized constant, so below 110 columns a section with two tasks was
-// byte-identical to one with none — the header stopped carrying the only
-// information it has.
-//
-// And the manage affordance is the last thing cut, which is the shipped contract
-// (TestAutomationsTitleWidthAware: "22-col rail still shows the manage
-// affordance", "the shrunk name marks its cut with an ellipsis"): the key to the
-// manager stays reachable at the 22-column rail minimum (#1090 width).
-func (a *AutomationsPane) titleLine(header automationsHeader, nameStyle lipgloss.Style) string {
-	w := a.rect.W
-	manage := automationsHintSeparator + automationsActionHint(keys.KeyTaskList, "manage")
-	hooks := automationsHintSeparator + automationsActionHint(keys.KeyHooks, "hooks")
-
-	render := func(title, hint string) string {
-		return nameStyle.Render(title) + automationsHintStyle.Render(hint)
-	}
-	fits := func(title, hint string) bool {
-		return runewidth.StringWidth(title+hint) <= w
-	}
-
-	full := header.text()
-	if fits(full, manage+hooks) {
-		return render(full, manage+hooks)
-	}
-	if fits(full, manage) {
-		return render(full, manage)
-	}
-	if shrunk := header.shrunk(w - runewidth.StringWidth(manage)); shrunk != "" && fits(shrunk, manage) {
-		return render(shrunk, manage)
-	}
-	counts := header.countsOnly()
-	if fits(counts, manage) {
-		return render(counts, manage)
-	}
-	if primary := header.primaryOnly(); primary != "" && fits(primary, manage) {
-		return render(primary, manage)
-	}
-	// Narrower than the rail minimum: nothing composes, so clip the whole line
-	// rather than pretend one of the pieces still fits.
-	return nameStyle.Render(fitLine(counts+manage, w))
+// titleLine renders the section header through the shared rail ladder
+// (ui/rail_header.go). The manage affordance is hints[0], so it is the last
+// thing cut — the shipped contract TestAutomationsTitleWidthAware pins.
+func (a *AutomationsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
+	return railTitleLine(header, a.rect.W, nameStyle, automationsHintStyle,
+		railHintSeparator+railActionHint(keys.KeyTaskList, "manage"),
+		railHintSeparator+railActionHint(keys.KeyHooks, "hooks"),
+	)
 }
 
 // View implements layout.Pane: exactly rect-sized.
@@ -441,7 +332,7 @@ func (a *AutomationsPane) String() string {
 
 	// 1-line degraded summary (RFC §2.6, <80 cols).
 	if a.compact || a.rect.H <= 1 {
-		header := automationsHeader{
+		header := railHeader{
 			noun:    "Automations:",
 			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
 			primary: fmt.Sprintf("%d", len(tasks)),
@@ -457,14 +348,14 @@ func (a *AutomationsPane) String() string {
 	if a.focused {
 		nameStyle = automationsTitleStyle
 	}
-	title := a.titleLine(automationsHeader{
+	title := a.titleLine(railHeader{
 		noun:   "Automations",
 		counts: fmt.Sprintf("(%d)", len(tasks)),
 	}, nameStyle)
 	lines := []string{title}
 	if len(tasks) == 0 {
 		lines = append(lines, automationsDisabledStyle.Render(
-			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", automationHelpKey(keys.KeyTaskList)), a.rect.W)))
+			fitLine(fmt.Sprintf("  No tasks — press %s, then n to create one", railHelpKey(keys.KeyTaskList)), a.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace

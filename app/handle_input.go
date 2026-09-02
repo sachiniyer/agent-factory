@@ -445,8 +445,14 @@ func switchProjectPickHint(enterPicks, projectsFocused bool) string {
 	switch {
 	case enterPicks:
 		// A fixed binding with no configKey: Enter cannot be rebound away from
-		// this, so the word is literal — and it matches the Projects header's own
-		// "· enter switch" rather than the ↵ glyph the help column renders.
+		// this, so the word is literal.
+		//
+		// It used to be justified by matching the Projects header's own
+		// "· enter switch"; since #3642 that header reads its glyph off the
+		// binding table like every other chip and renders "· ↵ switch". The word
+		// stays here anyway, because this is PROSE and that is a key chip:
+		// "press ↵ to pick one" is worse English, and the footer has always
+		// rendered the chip form for the same action (ui/menu.go).
 		return "press enter to pick one"
 	case projectsFocused:
 		// Focused on a captive section with no rows: Enter is a no-op
