@@ -40,6 +40,10 @@ const (
 // the agent in production, so a test that reaches that state has reproduced the
 // defect regardless of how many keys af sent to get there.
 type claudeFolderTrustPane struct {
+	// mu guards every field below, so the pane is only ever held and passed by
+	// POINTER. A copy takes its own zero-value mutex and guards nothing —
+	// which is what `go vet`'s copylocks reports, and what made the release
+	// job's vet step red while --fast lint stayed green (#3613).
 	mu       sync.Mutex
 	options  []string
 	selected int
@@ -221,12 +225,12 @@ func claudeTrustSession(t *testing.T, pane *claudeFolderTrustPane) (*TmuxSession
 func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(t *testing.T) {
 	tests := []struct {
 		name     string
-		pane     claudeFolderTrustPane
+		pane     *claudeFolderTrustPane
 		wantKeys []string
 	}{
 		{
 			name: "No first, preselected — Claude Code 2.1.257/2.1.258 (#3579)",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
 				selected: 0,
 			},
@@ -234,7 +238,7 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 		},
 		{
 			name: "Yes first, preselected — the historical order",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustYesLabel, claudeTrustNoLabel},
 				selected: 0,
 			},
@@ -242,7 +246,7 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 		},
 		{
 			name: "Yes first, cursor parked on No",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustYesLabel, claudeTrustNoLabel},
 				selected: 1,
 			},
@@ -250,7 +254,7 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 		},
 		{
 			name: "No first, numbered rows",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
 				selected: 0,
 				ordinals: true,
@@ -259,7 +263,7 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 		},
 		{
 			name: "No first, drawn inside the modal frame",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustNoLabel, claudeTrustYesLabel},
 				selected: 0,
 				boxed:    true,
@@ -268,7 +272,7 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 		},
 		{
 			name: "three options, affirmative last",
-			pane: claudeFolderTrustPane{
+			pane: &claudeFolderTrustPane{
 				options:  []string{claudeTrustNoLabel, "No, and don't ask again", claudeTrustYesLabel},
 				selected: 0,
 				ordinals: true,
@@ -279,9 +283,8 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustCommitsTheAffirmativeOption(
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pane := tt.pane
-			keys := driveClaudeTrustPane(t, &pane, 6)
-			require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(),
+			keys := driveClaudeTrustPane(t, tt.pane, 6)
+			require.Equal(t, []string{claudeTrustYesLabel}, tt.pane.committedLabels(),
 				"af must confirm the affirmative option, exactly once; keystrokes were %v", keys)
 			require.Equal(t, tt.wantKeys, injectedKeyNames(keys),
 				"af must reach the affirmative row by reading the pane, not by a fixed key sequence")
@@ -325,18 +328,18 @@ func injectedKeyNames(cmds []string) []string {
 
 // dialogFixture renders a folder-trust modal without driving it, for the
 // parser's own table.
-func dialogFixture(pane claudeFolderTrustPane) string { return pane.render() }
+func dialogFixture(pane *claudeFolderTrustPane) string { return pane.render() }
 
 // The parser is what decides which key af presses, so it is tested on its own
 // against both orders the dialog has shipped with — and against the shapes it
 // must REFUSE rather than guess at. A refusal costs a retry and a loud log; a
 // guess costs the user's agent (#3579).
 func TestParseClaudeFolderTrustDialog(t *testing.T) {
-	noFirst := dialogFixture(claudeFolderTrustPane{
+	noFirst := dialogFixture(&claudeFolderTrustPane{
 		options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, selected: 0})
-	yesFirst := dialogFixture(claudeFolderTrustPane{
+	yesFirst := dialogFixture(&claudeFolderTrustPane{
 		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 0})
-	yesFirstOnNo := dialogFixture(claudeFolderTrustPane{
+	yesFirstOnNo := dialogFixture(&claudeFolderTrustPane{
 		options: []string{claudeTrustYesLabel, claudeTrustNoLabel}, selected: 1})
 
 	t.Run("No first: the affirmative row is below the cursor", func(t *testing.T) {
@@ -362,7 +365,7 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 	})
 
 	t.Run("ordinals and box borders are chrome, not identity", func(t *testing.T) {
-		for _, pane := range []claudeFolderTrustPane{
+		for _, pane := range []*claudeFolderTrustPane{
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, ordinals: true},
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true},
 			{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, boxed: true, ordinals: true},
