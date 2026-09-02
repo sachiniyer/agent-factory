@@ -102,15 +102,17 @@ func TestDockerMountAgentCredentials_OperatorGrantIsAgentSelective(t *testing.T)
 	cfg.DockerMountAgentCredentials = true // operator opt-in, global-only
 	require.NoError(t, config.SaveConfig(cfg))
 
+	// The MODE is asserted here, not just the paths: these are the only tests
+	// that read the argv docker run actually receives, so they are what prove the
+	// mode chosen for this host survives argv assembly rather than merely
+	// existing in the helper (#3451). The probe is pinned to "enforcing" so the
+	// assertion is the RELABELED mode on any linux runner.
+	wantMode := forceCredentialMountMode(t)
 	runArgs := provisionDockerCapturingRun(t, tmux.ProgramCodex)
 
-	// The MODE is asserted here, not just the paths: this is the only test that
-	// reads the argv docker run actually receives, so it is what proves the
-	// SELinux relabel survives argv assembly rather than merely existing in the
-	// helper (#3451).
-	wantCodex := filepath.Join(home, ".codex/auth.json") + ":" + dockerContainerHome + "/.codex/auth.json:" + dockerCredentialMountMode
+	wantCodex := filepath.Join(home, ".codex/auth.json") + ":" + dockerContainerHome + "/.codex/auth.json:" + wantMode
 	if !argsHave(runArgs, wantCodex) {
-		t.Fatalf("operator grant on, codex session: codex credential must be mounted read-only and SELinux-relabeled (%q); args=%v", wantCodex, runArgs)
+		t.Fatalf("operator grant on, codex session: the codex credential must be mounted %q; args=%v", wantCodex, runArgs)
 	}
 	if argsHave(runArgs, ".claude/.credentials.json") {
 		t.Fatalf("codex session must NOT receive the Claude credential; args=%v", runArgs)
@@ -142,11 +144,12 @@ func TestDockerMountAgentCredentials_DevinMountsItsOwnCredential(t *testing.T) {
 	cfg.DockerMountAgentCredentials = true
 	require.NoError(t, config.SaveConfig(cfg))
 
+	wantMode := forceCredentialMountMode(t)
 	runArgs := provisionDockerCapturingRun(t, tmux.ProgramDevin)
 
-	wantDevin := filepath.Join(home, ".config/devin/config.json") + ":" + dockerContainerHome + "/.config/devin/config.json:" + dockerCredentialMountMode
+	wantDevin := filepath.Join(home, ".config/devin/config.json") + ":" + dockerContainerHome + "/.config/devin/config.json:" + wantMode
 	if !argsHave(runArgs, wantDevin) {
-		t.Fatalf("operator grant on, devin session: the devin config must be mounted read-only and SELinux-relabeled (%q); args=%v", wantDevin, runArgs)
+		t.Fatalf("operator grant on, devin session: the devin config must be mounted %q; args=%v", wantDevin, runArgs)
 	}
 	if argsHave(runArgs, ".claude/.credentials.json") {
 		t.Fatalf("devin session must NOT receive the Claude credential; args=%v", runArgs)

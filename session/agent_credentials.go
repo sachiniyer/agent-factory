@@ -57,36 +57,69 @@ var agentCredentialFiles = map[string][]string{
 	tmux.ProgramDevin: {".config/devin/config.json"},
 }
 
-// dockerCredentialMountMode is the volume mode every agent-credential bind mount
-// carries: read-only, plus the SHARED SELinux relabel.
+// The two volume modes an agent-credential bind mount can carry. Both are
+// read-only: the container authenticates with the credential, it never rewrites
+// it. They differ only in the SHARED SELinux relabel, which is applied on a host
+// where SELinux is ENFORCING and omitted everywhere else (credentialMountRelabel
+// decides).
 //
-// The relabel is not cosmetic. Without it the mount is not a broken mount but a
-// DENIED read: on an SELinux-enforcing host — the Fedora/RHEL/CentOS default —
-// the host file keeps its user_home_t label, container policy refuses the open,
-// and because this whole path is deliberately fail-open (an unauthenticated
-// session beats aborting provisioning) the session starts UNAUTHENTICATED with
-// nothing logged as wrong (#3451).
+// The relabel is not cosmetic. Without it, on an enforcing host — the
+// Fedora/RHEL/CentOS default — the mount is not a broken mount but a DENIED
+// read: the host file keeps its user_home_t label, container policy refuses the
+// open, and because this whole path is deliberately fail-open (an
+// unauthenticated session beats aborting provisioning) the session starts
+// UNAUTHENTICATED with nothing logged as wrong (#3451).
 //
 // z (shared), never Z (private), for a reason specific to what is being mounted:
 // this is ONE host file that every concurrent session running that agent mounts.
 // Z assigns an SVirt category pair unique to a single container, so the second
 // session to start would relabel the credential out from under the first. z is
 // the same label dockerAccountMount picks, for the same sharing reason.
-//
-// Unconditional rather than gated on hostSELinuxEnforcing(): Docker ignores z
-// where SELinux is disabled, so there is no probe to run and no way for a failed
-// probe to silently drop the relabel on a host that needed it.
-const dockerCredentialMountMode = "ro,z"
+const (
+	dockerCredentialMountMode          = "ro"
+	dockerCredentialMountModeRelabeled = "ro,z"
+)
 
-// agentCredentialMounts returns the `-v host:container:ro,z` docker run arguments
-// that bind-mount the credential file(s) for the single agent `agent` that exist
-// under homeDir. exists is injected for testability (os.Stat in production). The
-// container target is dockerContainerHome + "/" + rel — matching where the
-// container's agent, running with a clean env, reads it. Host paths are absolute
-// (homeDir is), so the config never has to carry a per-box path.
-func agentCredentialMounts(agent, homeDir string, exists func(string) bool) []string {
+// credentialMountRelabel reports whether agent-credential mounts should carry
+// the SELinux relabel on this host.
+//
+// A PROBE FAILURE RELABELS ANYWAY, and that direction is the whole reason this
+// function exists rather than an inline call. Applying z where SELinux is off is
+// a verified no-op — Docker ignores the flag, and a `-v …:ro,z` mount reads back
+// identically to `:ro` on a host with no SELinux at all — while omitting it on an
+// enforcing host reinstates #3451 exactly: a silently unauthenticated session.
+// The two failure directions are not symmetric, so an unreadable /sys must not
+// resolve to "no relabel".
+//
+// Permissive (enforce=0) deliberately does NOT relabel: SELinux logs the denial
+// there rather than acting on it, so the read succeeds unlabeled and the host
+// file is left untouched. The residual case is a host switched to enforcing
+// mid-session, which needs the session restarted to pick the label up; that is
+// inherent to deciding a mount mode at `docker run` time.
+func credentialMountRelabel() bool {
+	enforcing, err := hostSELinuxEnforcing()
+	if err != nil {
+		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is disabled", err)
+		return true
+	}
+	return enforcing
+}
+
+// agentCredentialMounts returns the `-v host:container:<mode>` docker run
+// arguments that bind-mount the credential file(s) for the single agent `agent`
+// that exist under homeDir. relabel selects the volume mode (see
+// credentialMountRelabel); exists is injected for testability (os.Stat in
+// production). The container target is dockerContainerHome + "/" + rel —
+// matching where the container's agent, running with a clean env, reads it. Host
+// paths are absolute (homeDir is), so the config never has to carry a per-box
+// path.
+func agentCredentialMounts(agent, homeDir string, relabel bool, exists func(string) bool) []string {
 	if homeDir == "" {
 		return nil
+	}
+	mode := dockerCredentialMountMode
+	if relabel {
+		mode = dockerCredentialMountModeRelabeled
 	}
 	var args []string
 	for _, rel := range agentCredentialFiles[agent] {
@@ -96,7 +129,7 @@ func agentCredentialMounts(agent, homeDir string, exists func(string) bool) []st
 		}
 		// rel uses '/' and the container is linux, so the target is well-formed.
 		target := dockerContainerHome + "/" + rel
-		args = append(args, "-v", host+":"+target+":"+dockerCredentialMountMode)
+		args = append(args, "-v", host+":"+target+":"+mode)
 	}
 	return args
 }
@@ -113,7 +146,7 @@ func resolveAgentCredentialMounts(agent string) []string {
 		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials: cannot resolve the home dir; mounting no credential for %q: %v", agent, err)
 		return nil
 	}
-	mounts := agentCredentialMounts(agent, home, func(p string) bool {
+	mounts := agentCredentialMounts(agent, home, credentialMountRelabel(), func(p string) bool {
 		_, statErr := os.Stat(p)
 		return statErr == nil
 	})
@@ -131,11 +164,16 @@ func resolveAgentCredentialMounts(agent string) []string {
 // operator's filesystem layout crosses the boundary.
 const dockerAccountHome = "/af-account"
 
+// selinuxEnforcePaths are the kernel files that report the SELinux mode, newest
+// location first. A var, not a const slice, only so a test can point the probe
+// at a fixture; production never reassigns it.
+var selinuxEnforcePaths = []string{"/sys/fs/selinux/enforce", "/selinux/enforce"}
+
 func hostSELinuxEnforcing() (bool, error) {
 	if runtime.GOOS != "linux" {
 		return false, nil
 	}
-	for _, enforcePath := range []string{"/sys/fs/selinux/enforce", "/selinux/enforce"} {
+	for _, enforcePath := range selinuxEnforcePaths {
 		value, err := os.ReadFile(enforcePath)
 		if err == nil {
 			switch strings.TrimSpace(string(value)) {

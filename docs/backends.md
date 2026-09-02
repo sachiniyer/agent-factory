@@ -149,15 +149,24 @@ user's real home and mounts it only if it exists, so:
 - **Read-only.** The agent authenticates but cannot refresh or rewrite the host
   credential (a session-lifetime token still works; the disposable container
   discards its own writes on kill regardless).
-- **SELinux-relabeled.** The mount is `:ro,z`, so the credential is readable
-  inside the container on an SELinux-enforcing host — the Fedora, RHEL and CentOS
-  default. Without the relabel the container still starts and only the *read* is
-  denied, which surfaces as a session that is silently unauthenticated. `z` is the
-  **shared** label rather than `Z`: every concurrent session running that agent
-  mounts the same host file, and the private label would relabel it out from under
-  the others. Docker ignores the flag where SELinux is disabled, so it costs
-  nothing on other hosts; where SELinux is on, note that it does relabel the host
-  file itself to `container_file_t`.
+- **SELinux-relabeled, on hosts that need it.** On a host running SELinux in
+  **enforcing** mode — the Fedora, RHEL and CentOS default — the mount is
+  `:ro,z` instead of plain `:ro`. Without the relabel the container still starts
+  and only the *read* is denied, which surfaces as a session that is silently
+  unauthenticated rather than as an error. `z` is the **shared** label rather
+  than `Z`: every concurrent session running that agent mounts the same host
+  file, and the private label would relabel it out from under the others. Note
+  that on such a host this does relabel the credential file itself to
+  `container_file_t`.
+
+    af reads `/sys/fs/selinux/enforce` to decide. **Permissive** mode is treated
+    as not needing it — SELinux logs the denial there rather than acting on it,
+    so the read succeeds and your file is left untouched. If af cannot read the
+    SELinux mode at all it **applies the relabel anyway**: `z` is a no-op where
+    SELinux is disabled, while skipping it on an enforcing host costs you a
+    silently unauthenticated session, so the two directions are not worth
+    treating alike. A host switched to enforcing *while* sessions are running
+    needs those sessions restarted to pick the label up.
 
 !!! warning "A global, operator-owned grant — and a deliberate partial hole"
     `docker.mount_agent_credentials` is **global-only**: a repository selects the
