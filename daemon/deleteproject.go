@@ -544,20 +544,25 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// leave the durable opt-in to start the root again on the next daemon run
 	// (#3530 review id 3914971851). Supply the recorded path's canonical id
 	// alongside it; both name this one project, and neither can name another.
-	// The RECORDED identity decides this, not the one being acted under (#3530
-	// review id 3916379565). A root_agents key is a PATH, and a stale key for
-	// an unavailable recorded root falls back to hashing that path — which is
-	// the project's provisional identity, never the real id a verified probe
-	// just redirected this delete to. Keying the sweep on the target alone left
-	// the durable opt-in in place, to recreate the root when the checkout
-	// returned or the daemon restarted.
-	recordedID := repoID
-	if resolved.recordedRepoID != "" {
-		recordedID = resolved.recordedRepoID
-	}
+	// The PATH decides this, not either identity (#3530 review ids 3916379565,
+	// 3916757161). A root_agents key is a path, and rootAgentKeyMatchesRepo
+	// falls back to hashing an unresolvable one — so a stale key spelled as
+	// this project's recorded root answers to that path's hash and to nothing
+	// else: not to the identity a verified probe redirected this delete to,
+	// and not to the identity a reconciled record has written down either,
+	// whenever the recorded root is not its repository's identity root.
+	// Master swept it by accident, because it addressed such a project BY that
+	// hash; addressing the project as itself is what made the sweep have to
+	// say so.
+	//
+	// Adding it costs nothing when the recorded root does resolve: a key
+	// spelled that way then resolves through git to repoID, which is already
+	// in the list, and the hash matches no key at all.
 	optInIDs := []string{repoID}
-	if config.IsDerivedRepoID(recordedID) && repoPath != "" {
-		optInIDs = append(optInIDs, config.RepoIDFromRoot(filepath.Clean(repoPath)))
+	if repoPath != "" {
+		if pathID := config.RepoIDFromRoot(filepath.Clean(repoPath)); pathID != repoID {
+			optInIDs = append(optInIDs, pathID)
+		}
 	}
 	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)

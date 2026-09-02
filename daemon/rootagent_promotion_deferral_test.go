@@ -212,29 +212,8 @@ func TestVerifiedPendingAttributionDeregistersByRealID(t *testing.T) {
 func TestRedirectedDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	installOptionsRecordingBackend(t)
-	parent := testguard.CanonicalTempDir(t)
-	repoPath := filepath.Join(parent, "repo")
-	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	for _, args := range [][]string{
-		{"-C", repoPath, "config", "user.email", "t@t"},
-		{"-C", repoPath, "config", "user.name", "t"},
-		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
-	} {
-		if err := exec.Command("git", args...).Run(); err != nil {
-			t.Fatalf("git %v: %v", args, err)
-		}
-	}
-	worktree := filepath.Join(parent, "wt")
-	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
-		t.Fatalf("git worktree add: %v", err)
-	}
-	project := registerTestProject(t, repoPath)
-	rewriteRecordRootForDeferral(t, project.ID, worktree)
+	worktree, project, realID := worktreeRecordedProject(t)
 	clearRecordedRepoID(t, project.ID)
-
-	realID := repoID(t, worktree)
 	derivedID := config.DerivedRepoIDForUnresolvedRoot(worktree)
 	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
 	if pathID == realID {
@@ -303,6 +282,91 @@ func TestRedirectedDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 	if stillFenced != 0 {
 		t.Fatalf("and it must remove exactly the fences it installed; %d left behind", stillFenced)
 	}
+}
+
+// TestReconciledDeleteSweepsTheRecordedPathOptIn pins review id 3916757161
+// (P1), and it is the mirror of the redirect case above with no probe and no
+// redirect in it at all.
+//
+// A project that has RECORDED its identity is addressed by that identity when
+// its path stops resolving — which is the whole point of #3530 — but a
+// root_agents key is still a PATH, and rootAgentKeyMatchesRepo falls back to
+// hashing an unresolvable one. For a recorded root that is not its
+// repository's identity root, that hash is not the recorded identity, so the
+// durable opt-in survived a delete that reported success. Addressing the
+// project by its own id is what made this possible: hashing the path, which is
+// what master did, happened to sweep it.
+func TestReconciledDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
+	if pathID == realID {
+		t.Fatalf("fixture must use a recorded root that is not the repository's identity root, both %s", realID)
+	}
+	// The identity is RECORDED — this record has nothing provisional about it.
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+
+	if err := os.Rename(worktree, worktree+".aside"); err != nil {
+		t.Fatalf("hide worktree: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	var swept []string
+	original := deregisterRootAgents
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
+		swept = append(swept, ids...)
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = original })
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree})
+	if err != nil {
+		t.Fatalf("DeleteProject by the recorded worktree path: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("a recorded identity addresses the project as itself: got %s, want %s", result.RepoID, realID)
+	}
+	for _, id := range swept {
+		if id == pathID {
+			return
+		}
+	}
+	t.Fatalf("the durable root_agents sweep got %v, without the recorded path's own hash %s — a stale key spelled %q is unresolvable, so it answers to that hash and to nothing else, and the opt-in survives to recreate the root", swept, pathID, worktree)
+}
+
+// worktreeRecordedProject registers a project whose recorded root is a linked
+// worktree, so the repository's identity root and the recorded root differ by
+// construction — the shape where "which id does a stale root_agents key answer
+// to" has an observable answer.
+func worktreeRecordedProject(t *testing.T) (worktree string, project config.Project, realID string) {
+	t.Helper()
+	parent := testguard.CanonicalTempDir(t)
+	repoPath := filepath.Join(parent, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", repoPath, "config", "user.email", "t@t"},
+		{"-C", repoPath, "config", "user.name", "t"},
+		{"-C", repoPath, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	worktree = filepath.Join(parent, "wt")
+	if err := exec.Command("git", "-C", repoPath, "worktree", "add", worktree).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project = registerTestProject(t, repoPath)
+	rewriteRecordRootForDeferral(t, project.ID, worktree)
+	return worktree, project, repoID(t, worktree)
 }
 
 // probeFinisher puts a fixture's probe into the state the delete will see.
