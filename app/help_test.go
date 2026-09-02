@@ -681,3 +681,47 @@ func TestGeneralHelpClosesOnEnterAndQuitKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestGeneralHelpHidesAliasShadowedByAQuitRebind answers the Codex review on
+// #3634. Adding q to the dismiss set means a user who configures
+// `[keys] quit = "pgdown"` has made pgdn a dismiss key — so the help must stop
+// advertising it as a paging control, exactly as it already does for a rebound
+// help key (TestGeneralHelpHidesPagingAliasShadowedByRebind). Dismissal keeps
+// precedence over paging; the copy is what has to follow.
+func TestGeneralHelpHidesAliasShadowedByAQuitRebind(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		prefix   string
+		hidden   string
+		msg      tea.KeyMsg
+	}{
+		{"paging alias", "pgdown", "Page:", "pgdn", tea.KeyMsg{Type: tea.KeyPgDown}},
+		{"jump alias", "home", "Line:", "home", tea.KeyMsg{Type: tea.KeyHome}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {tc.override}}))
+			t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+			var line string
+			for _, l := range strings.Split(xansi.Strip(helpTypeGeneral{}.toContent()), "\n") {
+				if strings.HasPrefix(l, tc.prefix) {
+					line = l
+					break
+				}
+			}
+			require.NotEmpty(t, line, "the help must still render its %s controls", tc.prefix)
+			require.NotContainsf(t, line, tc.hidden,
+				"a quit rebind made %q a dismiss key; the help must not advertise it as navigation", tc.hidden)
+
+			// …and the key really does dismiss, so the copy is telling the truth.
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+			require.Equal(t, stateHelp, h.state)
+			_, _ = h.handleHelpState(tc.msg)
+			require.Equal(t, stateDefault, h.state,
+				"the configured quit key must close the help, matching what the copy no longer promises")
+		})
+	}
+}

@@ -234,14 +234,25 @@ type helpAlias struct {
 	msg   tea.KeyMsg
 }
 
+// helpDismissBindings are the rebindable bindings that close a text overlay.
+// isHelpDismissKey dispatches on this list and visibleHelpAliases hides any
+// advertised paging/jump alias a rebind has turned into one of them, so the
+// copy and the dispatch cannot disagree: with `[keys] quit = "pgdown"` the
+// help must not print "pgdn" beside "Page:" when pgdn now closes the screen.
+var helpDismissBindings = []keys.KeyName{
+	keys.KeyHelp,
+	keys.KeyEnter,
+	keys.KeyQuit,
+}
+
 func visibleHelpAliases(aliases []helpAlias) string {
-	bindings := []keys.KeyName{
-		keys.KeyHelp,
+	// The dismiss keys, plus the scroll bindings an alias can be shadowed by.
+	bindings := append([]keys.KeyName{
 		keys.KeyUp,
 		keys.KeyDown,
 		keys.KeyShiftUp,
 		keys.KeyShiftDown,
-	}
+	}, helpDismissBindings...)
 
 	var visible []string
 	for _, alias := range aliases {
@@ -707,14 +718,19 @@ func isHelpLineDownKey(msg tea.KeyMsg) bool {
 // isHelpDismissKey is the explicit close set for every text overlay that is not
 // a press-any-key gate. enter and q join esc here because a scrolling overlay
 // no longer closes on just anything (#3628), and the first-run screens advertise
-// "enter continue · esc close" in their own copy. The bindings are read from the
-// generated table so a [keys] rebind moves them (#1026).
+// "enter continue · esc close" in their own copy. The rebindable half is read
+// from helpDismissBindings — the same list visibleHelpAliases hides shadowed
+// aliases from — off the generated table, so a [keys] rebind moves them (#1026).
 func isHelpDismissKey(msg tea.KeyMsg) bool {
-	return msg.Type == tea.KeyEsc ||
-		msg.Type == tea.KeyCtrlC ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyHelp]) ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyEnter]) ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit])
+	if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlC {
+		return true
+	}
+	for _, name := range helpDismissBindings {
+		if key.Matches(msg, keys.GlobalKeyBindings[name]) {
+			return true
+		}
+	}
+	return false
 }
 
 func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {
