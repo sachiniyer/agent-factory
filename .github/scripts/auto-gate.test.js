@@ -2292,6 +2292,52 @@ test("an unclassifiable finding clears only by an answer that names it", async (
   );
 });
 
+test("an answer to a longer id does not clear the artifact whose id it prefixes", async () => {
+  // Both reference forms END in the numeric id, so a plain substring test would
+  // let an answer to `#issuecomment-1234` also clear `#issuecomment-123` — a
+  // fail-open in the exit of a rule that exists to close one.
+  const shortId = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    id: 123,
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  const neighbour = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-1234 — [gate-ack]."),
+    ],
+  });
+  assert.equal(neighbour.shouldMerge, false, "an answer to a different comment is not an answer");
+
+  const itself = await evaluateGate({
+    issueComments: [
+      shortId,
+      summary,
+      prComment("sachiniyer", "Read #issuecomment-123 — [gate-ack]."),
+    ],
+  });
+  assert.equal(itself.shouldMerge, true, `blocked on: ${itself.reasons.join("; ")}`);
+
+  const { bodyNamesReference } = __test;
+  assert.equal(bodyNamesReference("see #issuecomment-1234 — ACCEPTED", "#issuecomment-123"), false);
+  assert.equal(bodyNamesReference("see #issuecomment-123 — ACCEPTED", "#issuecomment-123"), true);
+  // A permalink is full of regex metacharacters, so the escape is load-bearing:
+  // an unescaped `.` would make a lookalike host match a real one.
+  assert.equal(
+    bodyNamesReference(
+      "see https://githubxcom/sachiniyer/agent-factory/pull/1465#issuecomment-123 — ACCEPTED",
+      "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-123",
+    ),
+    false,
+  );
+});
+
 test("an artifact is referenced by its permalink or the anchor it ends in", () => {
   const { artifactReferences } = __test;
   const finding = codexIssueCommentFinding(HEAD_SHA);

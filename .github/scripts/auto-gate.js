@@ -2863,7 +2863,7 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     return !acknowledgements.some(
       (ack) =>
         reviewArtifactTime(ack) > artifactTime &&
-        references.some((reference) => (ack.body || "").includes(reference)),
+        references.some((reference) => bodyNamesReference(ack.body || "", reference)),
     );
   });
   if (unboundFindingArtifacts.length > 0) {
@@ -3165,6 +3165,16 @@ function artifactReferences(artifact) {
   return references;
 }
 
+// Whether an acknowledgement's body names this reference. Both reference forms
+// END in the artifact's numeric id, so a plain substring test would let an
+// answer to `#issuecomment-1234` also clear `#issuecomment-123` — a fail-open in
+// the exit of a rule that exists to close one. The digit boundary is the whole
+// difference; the escape is because a permalink is full of regex metacharacters.
+function bodyNamesReference(body, reference) {
+  const escaped = reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escaped}(?![0-9])`).test(String(body || ""));
+}
+
 // Whether the artifact names any commit at all, by any of the spellings above
 // plus the summary table's own cells. The question the blocking rule asks is not
 // "is this about the head" but "can this be placed against a head at all" — an
@@ -3298,6 +3308,7 @@ module.exports = {
     parseReviewedCommit,
     parseBodyCommits,
     artifactReferences,
+    bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactNamesAnyCommit,
     isCodexSummaryArtifact,
