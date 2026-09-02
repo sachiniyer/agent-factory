@@ -392,29 +392,55 @@ func unescapeMountinfoField(field string) (string, error) {
 // mounted. This is the half a symlink cannot survive: whatever the run_args or
 // the image spelled, mountinfo names the path the mount actually landed on.
 //
-// configured is the container paths Docker recorded other than af's own account
-// mount. They reach the refusal as CANDIDATES — one of them may be what the
-// image aliased onto the account, and af cannot say which, or whether it was any
-// of them; see resolvedMountCauses.
+// It reports EVERY protected target, not the first. An image can alias two
+// configured destinations onto two different paths under the account, and Docker
+// may have created BOTH mountpoints through the account bind before any check
+// ran — so an operator handed only the first can remove exactly what the refusal
+// named and still be left with a root-created file or directory in their
+// credential directory (#3602 review). The same reason the three checks stopped
+// returning on the first finding, one level down.
+//
+// configured is the container paths Docker recorded a FILESYSTEM at, other than
+// af's own account mount. They reach the refusal as CANDIDATES — one of them may
+// be what the image aliased onto the account, and af cannot say which, or
+// whether it was any of them; see resolvedMountCauses.
 func verifyResolvedAccountBoundary(targets, configured []string, accountSource string) error {
 	atAccountHome := 0
+	var inside, roots []string
+	seenRoot := map[string]bool{}
 	for _, target := range targets {
 		if target == dockerAccountHome {
 			atAccountHome++
 			continue
 		}
-		if root := accountProtectedPath(target); root != "" {
-			return boundaryRefusal(fmt.Sprintf(
-				"the kernel mounted %q, inside af's account boundary at %s, which af did not configure",
-				target, root), resolvedMountCauses(configured), mountpointResidueNote(target, accountSource))
+		root := accountProtectedPath(target)
+		if root == "" {
+			continue
+		}
+		inside = append(inside, target)
+		if !seenRoot[root] {
+			seenRoot[root] = true
+			roots = append(roots, root)
 		}
 	}
-	if atAccountHome != 1 {
-		return boundaryRefusal(fmt.Sprintf(
-			"the kernel mounted %d filesystems at %s where af configured exactly one — its own account bind",
-			atAccountHome, dockerAccountHome), resolvedMountCauses(configured), "")
+	sort.Strings(inside)
+	sort.Strings(roots)
+	var observed []string
+	if len(inside) > 0 {
+		observed = append(observed, fmt.Sprintf(
+			"the kernel mounted %s, inside af's account boundary at %s, which af did not configure",
+			quotedPathList(inside), strings.Join(roots, " and ")))
 	}
-	return nil
+	if atAccountHome != 1 {
+		observed = append(observed, fmt.Sprintf(
+			"the kernel mounted %d filesystems at %s where af configured exactly one — its own account bind",
+			atAccountHome, dockerAccountHome))
+	}
+	if len(observed) == 0 {
+		return nil
+	}
+	return boundaryRefusal(strings.Join(observed, "; and "),
+		resolvedMountCauses(configured), mountpointResidueNote(inside, accountSource))
 }
 
 // resolvedMountCauses lists what could put a filesystem inside the boundary that
@@ -446,8 +472,8 @@ func resolvedMountCauses(configured []string) []string {
 	return causes
 }
 
-// mountpointResidueNote names the HOST path a foreign mount landed on, when that
-// is inside the account bind.
+// mountpointResidueNote names the HOST paths foreign mounts landed on, for those
+// inside the account bind.
 //
 // Docker creates a destination that does not exist yet, and it does so as root,
 // through the account bind, before any runtime check can run — so the directory
@@ -456,23 +482,36 @@ func resolvedMountCauses(configured []string) []string {
 // the residue; for a mount it was naming only the container-side path, which is
 // no help on a host where that path does not exist (#3602 review).
 //
-// It says "if it was not already yours" rather than "delete it", and that
-// hedge is the honest part: Docker leaves an EXISTING destination alone, so a
-// mount landing on a path the account already had — /af-account/.config, say —
-// left nothing behind, and af cannot tell the two apart after the fact. Telling
-// an operator to remove a path that holds their own credentials would be worse
-// than saying nothing.
+// It says "if it was not already yours" rather than "delete it", and that hedge
+// is the honest part: Docker leaves an EXISTING destination alone, so a mount
+// landing on a path the account already had — /af-account/.config, say — left
+// nothing behind, and af cannot tell the two apart after the fact. Telling an
+// operator to remove a path that holds their own credentials would be worse than
+// saying nothing.
 //
-// A mount under dockerAccountRuntimeHome earns no note: af creates that
-// directory inside the container, so nothing there reaches the host.
-func mountpointResidueNote(target, accountSource string) string {
-	if accountSource == "" || !strings.HasPrefix(target, dockerAccountHome+"/") {
+// Mounts under dockerAccountRuntimeHome earn no note: af creates that directory
+// inside the container, so nothing there reaches the host.
+func mountpointResidueNote(targets []string, accountSource string) string {
+	if accountSource == "" {
 		return ""
 	}
-	host := path.Join(accountSource, strings.TrimPrefix(target, dockerAccountHome+"/"))
+	hosts := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if !strings.HasPrefix(target, dockerAccountHome+"/") {
+			continue
+		}
+		hosts = append(hosts, path.Join(accountSource, strings.TrimPrefix(target, dockerAccountHome+"/")))
+	}
+	if len(hosts) == 0 {
+		return ""
+	}
+	noun := "Its mountpoint on this host is"
+	if len(hosts) > 1 {
+		noun = "Their mountpoints on this host are"
+	}
 	return fmt.Sprintf(
-		"Its mountpoint on this host is %q. Docker creates a destination that does not exist yet, as ROOT and through the account bind, before any check can run — so if that path was not already yours, it is residue this refusal cannot undo; remove it by hand",
-		host)
+		"%s %s. Docker creates a destination that does not exist yet, as ROOT and through the account bind, before any check can run — so if a path there was not already yours, it is residue this refusal cannot undo; remove it by hand",
+		noun, quotedPathList(hosts))
 }
 
 // verifyAccountDeviceResidue looks for device nodes af never put in the account

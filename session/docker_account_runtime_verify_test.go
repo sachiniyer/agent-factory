@@ -524,7 +524,7 @@ func TestAccountRuntimeVerify_NamesTheHostMountpointResidue(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), verifyAccountSource+"/planted-dir",
 		"the container-side path is no help on a host where it does not exist")
-	assert.Contains(t, err.Error(), "if that path was not already yours",
+	assert.Contains(t, err.Error(), "if a path there was not already yours",
 		"and af must not tell an operator to delete a path that may hold their own credentials")
 
 	// Nothing under the runtime home reaches the host, so nothing is claimed.
@@ -678,6 +678,51 @@ func TestAccountRuntimeVerify_ReadsBothSources(t *testing.T) {
 		"and the kernel's resolved view second — the half a symlink cannot survive")
 	assert.NotContains(t, strings.Join(calls[1], " "), "/proc/1/mountinfo",
 		"SELF, never PID 1: --pid=host makes PID 1 the host's init, whose mount table has no /af-account at all")
+}
+
+// EVERY protected mount is reported, not the first (#3602 review).
+//
+// An image can alias two configured destinations onto two different paths under
+// the account, and Docker may have created BOTH mountpoints through the account
+// bind before any check ran. An operator handed only the first can remove
+// exactly what the refusal named and still be left with a root-created directory
+// in their credential directory.
+func TestAccountRuntimeVerify_ReportsEveryProtectedMount(t *testing.T) {
+	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+		"2442 2440 8:1 /repo/evil /af-account/first rw,relatime - ext4 /dev/root rw\n" +
+		"2443 2440 8:1 /repo/evil2 /af-account/second rw,relatime - ext4 /dev/root rw\n" +
+		"2444 2421 0:90 / /af-home/third rw,relatime - tmpfs tmpfs rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets,
+		[]string{"/device-target/first", "/device-target/second"}, verifyAccountSource)
+	require.Error(t, err)
+
+	message := err.Error()
+	for _, want := range []string{"/af-account/first", "/af-account/second", "/af-home/third"} {
+		assert.Containsf(t, message, want, "every protected target must be named, not only the first")
+	}
+	for _, want := range []string{verifyAccountSource + "/first", verifyAccountSource + "/second"} {
+		assert.Containsf(t, message, want,
+			"and every host path they may have left behind, or the operator removes one and keeps the other")
+	}
+	assert.NotContains(t, message, verifyAccountSource+"/third",
+		"/af-home is created inside the container, so nothing there reaches the host")
+	assert.Contains(t, message, "Their mountpoints on this host are",
+		"plural, because reading 'its mountpoint' next to two paths reads as one of them")
+}
+
+// Two independent observations about the same boundary are both reported: a
+// foreign mount under the account, and a count at the account root that is not
+// one.
+func TestAccountRuntimeVerify_ReportsBothResolvedObservations(t *testing.T) {
+	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+		"2442 2440 8:1 /repo/evil /af-account rw,relatime - ext4 /dev/root rw\n" +
+		"2443 2440 8:1 /repo/evil2 /af-account/under rw,relatime - ext4 /dev/root rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets, []string{"/device-target"}, verifyAccountSource)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/af-account/under")
+	assert.Contains(t, err.Error(), "2 filesystems at /af-account")
 }
 
 // A --device destination is not a candidate for an aliased MOUNT, and an
