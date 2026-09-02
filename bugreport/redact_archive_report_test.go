@@ -1,8 +1,10 @@
 package bugreport
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -260,5 +262,171 @@ func TestBugReportBuildRedactsArchiveReportSkippedPath(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "permission_denied") {
 		t.Errorf("skip reason should survive in the bundle for triage")
+	}
+}
+
+// TestNoteSessionRecordsArchiveReportSkippedPathsForTheLog is the log half of
+// the #3541 leak, and the half that shipped unclosed. redactInstanceData blanks
+// RetainedTrees[].Skipped[].Path in the JSON section, but the daemon PRINTS the
+// same names: a Lost session restored with an incomplete archive logs
+// report.Warning("restore") (daemon/lostrestore.go), whose renderer embeds every
+// skipped entry's filesystem path as %q. collectLog bundles that log tail, and
+// scrubLog only knew about titles, tmux names, $HOME and usernames — none of
+// which match a name relative to the retained worktree root. So the structured
+// section said "[redacted]" while the log beneath it printed "private/old"
+// verbatim, in the same publicly shared bundle.
+//
+// The log line is built from the REAL renderer rather than a hand-written
+// string: what has to come out of the log is exactly what the daemon puts into
+// it, and a fixture that drifts from the renderer would pass while the bundle
+// still leaked.
+func TestNoteSessionRecordsArchiveReportSkippedPathsForTheLog(t *testing.T) {
+	leaks := []string{"credential", "private-work.txt", "private/old", "generated/private-019"}
+	skipped := make([]sessiongit.ArchiveSkippedEntry, 0, len(leaks))
+	for _, name := range leaks {
+		skipped = append(skipped, sessiongit.ArchiveSkippedEntry{
+			Path: name, Reason: sessiongit.ArchiveSkipPermissionDenied,
+		})
+	}
+	report := &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path:          "/worktrees/.af-source-0123456789abcdef0123456789abcdef",
+		IdentityKnown: true,
+		Skipped:       skipped,
+	}}}
+	d := session.InstanceData{ID: "abc123", Program: "claude", ArchiveReport: report}
+
+	r := &redactor{}
+	r.noteSession(&d)
+
+	// The exact shape daemon/lostrestore.go writes to the production log.
+	line := "restored lost session \"kingfisher\": " + report.Warning("restore")
+	got := r.scrubLog(line)
+
+	for _, name := range leaks {
+		if strings.Contains(got, name) {
+			t.Errorf("skipped file name %q survived the log scrub:\n%s", name, got)
+		}
+	}
+	// The diagnostic must survive: triage still needs to know the archive was
+	// incomplete and why, exactly as the JSON section keeps the skip reason.
+	if !strings.Contains(got, "incomplete archive") {
+		t.Errorf("log scrub dropped the incomplete-archive diagnostic:\n%s", got)
+	}
+	if !strings.Contains(got, "permission denied") {
+		t.Errorf("log scrub dropped the skip reason:\n%s", got)
+	}
+}
+
+// TestNoteSessionRecordsInvalidUTF8SkippedPathForTheLog is the same guard for a
+// name that is not valid UTF-8. The renderer prints entry.FilesystemPath(),
+// which is the RAW bytes when PathBytes is populated — not the
+// replacement-character display form — so recording the display string alone
+// would leave the real name in the log.
+func TestNoteSessionRecordsInvalidUTF8SkippedPathForTheLog(t *testing.T) {
+	const invalidName = "private/credential-\xff"
+	report := &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-fedcba9876543210fedcba9876543210",
+		Skipped: []sessiongit.ArchiveSkippedEntry{{
+			Path:      strings.ToValidUTF8(invalidName, "�"),
+			PathBytes: []byte(invalidName),
+			Reason:    sessiongit.ArchiveSkipPermissionDenied,
+		}},
+	}}}
+	d := session.InstanceData{ID: "badutf8", ArchiveReport: report}
+
+	r := &redactor{}
+	r.noteSession(&d)
+
+	got := r.scrubLog("restored lost session \"kingfisher\": " + report.Warning("restore"))
+
+	// Assert on strconv.Quote(invalidName), not the raw string: the renderer
+	// prints the path with %q, so the invalid byte reaches the log as the ASCII
+	// escape `\xff` and a raw-byte assertion could never match — it would pass
+	// while the escaped name sat in the bundle.
+	if strings.Contains(got, strconv.Quote(invalidName)) {
+		t.Errorf("invalid-UTF8 skipped file name survived the log scrub:\n%s", got)
+	}
+	if !strings.Contains(got, "incomplete archive") {
+		t.Errorf("log scrub dropped the incomplete-archive diagnostic:\n%s", got)
+	}
+}
+
+// TestRedactInstanceDataClearsRetainedTreePathBytes covers the retained tree's
+// OWN path. The structured policy deliberately keeps tree.Path so the text scrub
+// can collapse $HOME to "~" — but when the root is not valid UTF-8, PathBytes
+// holds the complete raw absolute path and encoding/json emits it as BASE64. The
+// text scrub cannot see a home directory or a username through base64, so the
+// raw root path shipped in a bundle that had otherwise been redacted.
+func TestRedactInstanceDataClearsRetainedTreePathBytes(t *testing.T) {
+	const invalidRoot = "/worktrees/.af-source-\xff-kingfisher"
+	d := session.InstanceData{
+		ID: "badroot",
+		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+			Path:          strings.ToValidUTF8(invalidRoot, "�"),
+			PathBytes:     []byte(invalidRoot),
+			IdentityKnown: true,
+			Skipped: []sessiongit.ArchiveSkippedEntry{{
+				Path: "private-work.txt", Reason: sessiongit.ArchiveSkipPermissionDenied,
+			}},
+		}}},
+	}
+
+	redactInstanceData(&d)
+
+	tree := d.ArchiveReport.RetainedTrees[0]
+	if tree.PathBytes != nil {
+		t.Errorf("retained_trees[0].path_bytes not cleared: %x — the raw root path survives base64-encoded, where the text scrub cannot reach it", tree.PathBytes)
+	}
+	// Re-marshaling is what actually ships. ArchiveRetainedTree.MarshalJSON
+	// re-derives PathBytes from Path when it is empty, so the assertion above is
+	// only half the claim: prove the wire form carries no raw bytes either.
+	out, err := json.Marshal(d.ArchiveReport)
+	if err != nil {
+		t.Fatalf("marshal redacted report: %v", err)
+	}
+	if strings.Contains(string(out), "path_bytes") {
+		t.Errorf("redacted report still emits path_bytes on the wire:\n%s", out)
+	}
+	// The display path still survives for triage — it is the system worktree path
+	// the text scrub collapses, not a user file name.
+	if tree.Path == "" || tree.Path == redactedMarker {
+		t.Errorf("retained_trees[0].path should survive for the text scrub, got %q", tree.Path)
+	}
+}
+
+// TestRedactUnknownJSONRedactsPathBytes is the generic-fallback half. When any
+// legacy or corrupt sibling field makes the typed []InstanceData decode fail,
+// redactInstanceData never runs and redactInstancesJSON switches to the
+// key-driven walk. That walk knew "path" but not "path_bytes", so an
+// invalid-UTF8 skipped file name still shipped as its base64-encoded raw bytes —
+// which the closing text scrub cannot recognize as anything at all.
+func TestRedactUnknownJSONRedactsPathBytes(t *testing.T) {
+	const invalidName = "private/credential-\xff"
+	raw := []byte(`{"archive_report":{"retained_trees":[{"path":"/worktrees/.af-source-0","path_bytes":"` +
+		base64.StdEncoding.EncodeToString([]byte(invalidName)) +
+		`","skipped":[{"path":"private/old","path_bytes":"` +
+		base64.StdEncoding.EncodeToString([]byte(invalidName)) +
+		`","reason":"permission_denied"}]}]}}`)
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("fixture is not valid JSON: %v", err)
+	}
+
+	out, err := json.Marshal(redactUnknownJSON(generic))
+	if err != nil {
+		t.Fatalf("marshal generic redaction: %v", err)
+	}
+
+	// The base64 payload is the leak: it is the raw name, and no text scrub can
+	// see through it. Assert on the encoded form the walk actually emits.
+	if strings.Contains(string(out), base64.StdEncoding.EncodeToString([]byte(invalidName))) {
+		t.Errorf("generic fallback kept path_bytes, shipping the raw file name base64-encoded:\n%s", out)
+	}
+	if strings.Contains(string(out), "private/old") {
+		t.Errorf("generic fallback kept the display path:\n%s", out)
+	}
+	// The skip reason is structural and must survive, as it does on the typed path.
+	if !strings.Contains(string(out), "permission_denied") {
+		t.Errorf("generic fallback dropped the structural skip reason:\n%s", out)
 	}
 }

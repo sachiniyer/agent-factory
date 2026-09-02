@@ -69,6 +69,13 @@ type redactor struct {
 	// structured sections don't reach.
 	tmuxNames map[string]struct{}
 	titles    map[string]struct{}
+	// archivePaths are the incomplete-archive skipped file names gathered while
+	// redacting instances. They are RELATIVE to the retained worktree root, so
+	// they contain neither $HOME nor a username and scrub() cannot collapse them;
+	// scrubLog removes them from the log tail by their exact rendered form. Same
+	// job as titles above, for the names the daemon prints when it restores a
+	// session whose archive was incomplete (#3541).
+	archivePaths map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -173,6 +180,9 @@ func (r *redactor) scrubLog(s string) string {
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
 	s = r.scrubSessionTitles(s)
+	// Same rule, same reason, for the skipped file names an incomplete archive
+	// prints: full exact form first, before any shape-based pass runs.
+	s = r.scrubArchivePaths(s)
 	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
 	// so it catches current AND historical (archived/killed) sessions the live
 	// instance set no longer references.
@@ -369,6 +379,55 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	for _, cleanup := range d.PendingTabCleanup {
 		r.noteTmuxName(cleanup.TmuxName)
 	}
+	// The names of files af could not read. redactInstanceData blanks them in the
+	// JSON section; recording them here is what also takes them out of the
+	// bundled log, where the daemon prints the same list verbatim on every
+	// restore of an incomplete archive (daemon/lostrestore.go).
+	if d.ArchiveReport != nil {
+		for _, tree := range d.ArchiveReport.RetainedTrees {
+			for _, entry := range tree.Skipped {
+				r.noteArchivePath(entry.FilesystemPath())
+			}
+		}
+	}
+}
+
+// noteArchivePath records one skipped file name for scrubLog, skipping blanks.
+func (r *redactor) noteArchivePath(path string) {
+	if path == "" {
+		return
+	}
+	if r.archivePaths == nil {
+		r.archivePaths = make(map[string]struct{})
+	}
+	r.archivePaths[path] = struct{}{}
+}
+
+// scrubArchivePaths removes every recorded skipped file name from a log tail.
+//
+// It matches the Go-quoted form and ONLY that form, for the reason
+// scrubSessionTitles gives: the sole emitter is the incomplete-archive warning,
+// which prints each path with %q, and strconv.Quote reproduces that byte for
+// byte — including the \xNN escapes a name that is not valid UTF-8 reaches the
+// log as. A bare-substring pass would be the unsafe half of the trade here:
+// these are file names, and one legitimately called "id" or "log" would rewrite
+// unrelated log text. The quoted form is self-delimiting, so it stays exact.
+func (r *redactor) scrubArchivePaths(s string) string {
+	if len(r.archivePaths) == 0 {
+		return s
+	}
+	paths := make([]string, 0, len(r.archivePaths))
+	for path := range r.archivePaths {
+		paths = append(paths, path)
+	}
+	// Longest-first for the same determinism scrubSessionTitles wants: the map
+	// has no order, and a bundle that redacts identically on every run is easier
+	// to trust than one whose output moves.
+	sortLongestFirst(paths)
+	for _, path := range paths {
+		s = strings.ReplaceAll(s, strconv.Quote(path), strconv.Quote(redactedMarker))
+	}
+	return s
 }
 
 // noteTitle records one raw session title for structured-string and log
@@ -499,6 +558,13 @@ var sensitiveJSONKeys = map[string]bool{
 	"auth": true, "authorization": true, "bearer": true,
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
+	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
+	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
+	// bundle in a form the closing text scrub cannot recognize as a path, a home
+	// directory, or a username — strictly worse than the plain field it stands
+	// in for. It is the fallback's copy of the typed clearing in
+	// redactInstanceData (#3541).
+	"path_bytes":  true,
 	"remote_meta": true,
 	// A typed record drops this storage-only teardown union in
 	// redactInstanceData. Drop the whole object on the generic fallback too: a
@@ -645,6 +711,14 @@ func redactInstanceData(d *session.InstanceData) {
 	// diagnostic ("permission denied on N files").
 	if d.ArchiveReport != nil {
 		for i := range d.ArchiveReport.RetainedTrees {
+			// The tree's display Path is kept on purpose (see above), but its
+			// PathBytes is not the same field twice: json emits it base64-encoded,
+			// and the $HOME/username scrub the display form relies on cannot see
+			// through base64. A root whose own name is not valid UTF-8 therefore
+			// shipped raw. Clearing it is lossless for triage — MarshalJSON
+			// re-derives PathBytes from Path, which is valid UTF-8 by construction,
+			// so the wire form simply omits it.
+			d.ArchiveReport.RetainedTrees[i].PathBytes = nil
 			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].PathBytes = nil

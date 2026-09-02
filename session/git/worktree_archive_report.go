@@ -36,7 +36,12 @@ func newArchiveSkippedEntry(path string, reason ArchiveSkipReason) ArchiveSkippe
 	return ArchiveSkippedEntry{Path: display, PathBytes: raw, Reason: reason}
 }
 
-func (entry ArchiveSkippedEntry) filesystemPath() string {
+// FilesystemPath is the on-disk name this entry stands for: the raw bytes when
+// the name is not valid UTF-8, otherwise the display path. It is exported
+// because it is what the incomplete-archive warning PRINTS, and the bug-report
+// redactor has to remove exactly that string from the bundled daemon log — a
+// second, independently derived copy of this rule is how the two drift (#3541).
+func (entry ArchiveSkippedEntry) FilesystemPath() string {
 	return archiveFilesystemPath(entry.Path, entry.PathBytes)
 }
 
@@ -258,7 +263,7 @@ func (report ArchiveReport) warningSuffix() string {
 				totalEntries++
 			}
 			entries = insertBoundedArchiveWarningEntry(entries, archiveWarningEntry{
-				path: entry.filesystemPath(), reason: entry.Reason,
+				path: entry.FilesystemPath(), reason: entry.Reason,
 			}, maxArchiveWarningEntries)
 		}
 	}
