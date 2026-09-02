@@ -107,6 +107,43 @@ else
     exit 1
 fi
 
+# engine_run — `$ENGINE run`, with this harness's network mode applied.
+#
+# AF_TESTBOX_NETWORK is UNSET by default, and unset passes no --network at all,
+# so every existing run stays byte-identical. Deliberately not defaulted to
+# `bridge`: that is docker's default network name but not podman's, and this
+# script supports both — a default here would change behaviour for one engine
+# while claiming to change nothing.
+#
+# The lever exists because a box can lose its bridge. `docker0` is a device the
+# daemon creates, and a daemon restart can come back without it; when that
+# happens EVERY default-network run dies before a single test compiles —
+#
+#   failed to set up container networking: … adding interface veth… to bridge
+#   docker0 failed: Device does not exist
+#
+# — which takes out the only sanctioned way to run the daemon/ and app/ suites,
+# since those never run on the host. `AF_TESTBOX_NETWORK=none` runs them anyway:
+# these containers do not need the network, and the warm host module cache is
+# already mounted as a file:// GOPROXY below precisely so a run does not need it.
+#
+# Every `run` in this file goes through here, rather than through RUN_FLAGS
+# alone: fix_cache_perms and the web-selftest build their own flag lists, so a
+# RUN_FLAGS-only override would silently miss them — and missing ONE run is the
+# same as having no override at all, because that one dies first.
+#
+# `run` only, never `build`: an image build fetches packages and modules, so
+# forcing it offline would fail for an unrelated reason. Same for the targets
+# that genuinely reach the network from inside the container — `lifecycle`
+# downloads releases. See docs/container-testing.md.
+engine_run() {
+    if [ -n "${AF_TESTBOX_NETWORK:-}" ]; then
+        "$ENGINE" run --network "$AF_TESTBOX_NETWORK" "$@"
+        return
+    fi
+    "$ENGINE" run "$@"
+}
+
 # ---------------------------------------------------------------- image lease
 #
 # IMAGE and WEB_IMAGE are stable, daemon-global tags shared by every checkout on
@@ -411,7 +448,7 @@ fi
 # or being current.
 fix_cache_perms() {
     ensure_cache_volumes af-testbox-gomod af-testbox-gobuild
-    "$ENGINE" run --rm --label "$LABEL" --user 0 \
+    engine_run --rm --label "$LABEL" --user 0 \
         -v af-testbox-gomod:/cache/gomod \
         -v af-testbox-gobuild:/cache/gobuild \
         "${1:-$IMAGE}" chown -R dev:dev /cache >/dev/null
@@ -434,7 +471,7 @@ fix_cache_perms() {
 start_playtest_detached() {
     local rc=0
     watch_image_start "$PLAYTEST_NAME"
-    "$ENGINE" run -d \
+    engine_run -d \
         "${RUN_FLAGS[@]}" \
         --name "$PLAYTEST_NAME" \
         -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
@@ -490,7 +527,7 @@ test)
     rc=0
     TESTBOX_NAME="af-testbox-test-$RUN_TOKEN"
     watch_image_start "$TESTBOX_NAME"
-    "$ENGINE" run "${RUN_FLAGS[@]}" --name "$TESTBOX_NAME" "$IMAGE" \
+    engine_run "${RUN_FLAGS[@]}" --name "$TESTBOX_NAME" "$IMAGE" \
         bash /src/scripts/container/run-tests.sh "$@" || rc=$?
     finish_image_start
     exit "$rc"
@@ -509,7 +546,7 @@ playtest)
     else
         rc=0
         watch_image_start "$PLAYTEST_NAME"
-        "$ENGINE" run -it \
+        engine_run -it \
             "${RUN_FLAGS[@]}" \
             --name "$PLAYTEST_NAME" \
             -e AGENT_FACTORY_HOME=/home/dev/sandbox/home \
@@ -614,7 +651,7 @@ lifecycle)
     fix_cache_perms "$LIFECYCLE_IMAGE"
     rc=0
     watch_image_start "$LIFECYCLE_NAME"
-    "$ENGINE" run --rm \
+    engine_run --rm \
         "${RUN_FLAGS[@]}" \
         --name "$LIFECYCLE_NAME" \
         -e "GITHUB_TOKEN=${GITHUB_TOKEN:-}" \
@@ -674,7 +711,7 @@ web-selftest)
     rc=0
     WEB_SELFTEST_NAME="af-web-selftest-$RUN_TOKEN"
     watch_image_start "$WEB_SELFTEST_NAME"
-    "$ENGINE" run --rm --label "$LABEL" --init \
+    engine_run --rm --label "$LABEL" --init \
         --name "$WEB_SELFTEST_NAME" \
         -v "$REPO_ROOT":/src:ro \
         -v "$WEB_RESULTS":/work/web/test-results \

@@ -43,6 +43,53 @@ What the harness does:
 - cleans up after itself on the way out, pass or fail, so repeated runs don't
   grow `/var/lib/docker` — see [disk footprint](#disk-footprint).
 
+If a container refuses to start at all, the box's bridge may be gone — see
+[running offline](#running-offline-with-af_testbox_network).
+
+## Running offline with `AF_TESTBOX_NETWORK`
+
+`docker0` is a device the docker daemon creates, and a daemon restart can come
+back without it. Every default-network container then dies before running
+anything:
+
+```
+failed to set up container networking: … adding interface veth… to bridge
+docker0 failed: Device does not exist
+```
+
+That takes out this whole harness, and with it the only sanctioned way to run
+the `daemon` and `app` suites — they never run on the host. Confirm with
+`ip link show docker0`, then run off the network entirely:
+
+```bash
+AF_TESTBOX_NETWORK=none make test-container
+AF_TESTBOX_NETWORK=none make test-container GOTESTARGS="./daemon -run TestFoo -v"
+```
+
+The value is passed verbatim to `--network` on every container the harness
+runs, so `host` or a named network work the same way. Unset — the default —
+passes no `--network` at all and leaves the engine's own default in place;
+notably it does **not** default to `bridge`, which is docker's default network
+name but not podman's, and this harness supports either engine.
+
+What can actually run offline:
+
+| target | offline | why |
+| --- | --- | --- |
+| `test-container`, including focused `GOTESTARGS` runs | yes, verified | the warm host module cache is mounted as a `file://` GOPROXY, and the suite binds only to loopback inside the container |
+| `playtest-container`, `web-selftest-container` | expected, not verified | same GOPROXY, and daemon/tmux/browser all live on 127.0.0.1 — but a play-test agent that fetches its own release will not |
+| `lifecycle-container` | **no** | it downloads published releases |
+| image builds (`testbox-image`, and the first run of any target) | **no** | apt and Go module fetches — `--network` is deliberately never applied to `build` |
+
+So on a bridge-less box you need an image that already exists. Compare
+`docker inspect -f '{{.Created}}' agent-factory-testbox` against
+`git log -1 --format=%ci -- scripts/container/Dockerfile.test` to see whether
+yours is current.
+
+Repairing the bridge is the real fix, but it means restarting the docker
+daemon — on a shared box that is an outage for everyone else's containers, so
+this option exists to keep working without calling one.
+
 ## Disk footprint
 
 This harness once filled a 2TB dev box (#2133). `/` hit 100%, and the first
