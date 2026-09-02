@@ -143,9 +143,19 @@ Not everything the daemon starts lands there. af deliberately puts two classes
 of child in their own transient systemd scopes — tmux servers
 (`session/tmux/server_scope_linux.go`) and long-lived watchers and editors
 (`newDaemonChildCommand`, `daemon/child_scope_linux.go`) — and those scopes are
-siblings of the daemon unit, not children of it. **Agent processes therefore sit
-outside the unit's figure**, which is why the sizing section below counts them
-separately.
+siblings of the daemon unit, not children of it. Agent processes are descendants
+of a tmux server, so once that server is a scoped one they sit outside the
+unit's figure, which is why the sizing section below counts them separately.
+
+**One case where they do not: a legacy tmux server after an upgrade.**
+`ensureDedicatedServer` deliberately leaves a foreign or legacy server alone
+rather than moving it, and the unit's `KillMode=process` exists partly to
+preserve servers an older daemon had already placed in the service cgroup
+(`daemon/autostart.go`). Every agent under such a server is its descendant and
+**does** count toward the unit's `MemoryPeak` — until a dedicated scoped server
+replaces it. If your unit has been upgraded in place and its figure looks far
+too large for a daemon, check whether a pre-upgrade tmux server is still living
+in its cgroup before reading anything else into the number.
 
 On the measured box, `MemoryPeak` ran **5.9–38.3 GB per unit lifetime**. One of
 those thirteen lifetimes had the daemon process sampled through `/proc`: it
@@ -171,8 +181,13 @@ daemon's own memory:
 | `file` (page cache) | 1,832 MB | 942 MB |
 | `slab` | 431 MB | 367 MB |
 
-The daemon freed nothing. The kernel reclaimed page cache, which is why
-`MemoryCurrent` fell 44% while every process figure held still.
+The ~960 MB that `MemoryCurrent` shed is accounted for by the two cgroup lines
+that fell: `file` by 890 MB and `slab` by 64 MB. That is the kernel reclaiming,
+not the daemon shrinking — and the page makes no claim that process memory held
+still, because it did not: `VmRSS` oscillated 45–60 MB across the same window as
+the GC returned and re-took pages. `VmHWM` not moving says only that the
+process's historical maximum was never exceeded. An oscillation of that size
+cannot account for a fall three orders of magnitude larger.
 
 That makes a mostly-`file` peak **weak evidence of a leak**. It does not, on its
 own, establish that there was no memory pressure. `file` also counts tmpfs and
@@ -190,8 +205,10 @@ signals that measure it, not with this table: `memory.events` (the `high`,
 grep -E 'VmRSS|VmHWM' \
   /proc/$(systemctl --user show agent-factory-daemon.service -p MainPID --value)/status
 
-# Split the cgroup number into its parts. anon is memory actually held, file is
-# reclaimable page cache, slab is kernel structures.
+# Split the cgroup number into its parts. anon is anonymous memory the cgroup
+# actually holds, file is file-backed memory — page cache, but also tmpfs/shmem
+# and dirty or writeback pages — and slab is kernel structures. Read shmem,
+# file_dirty and file_writeback too before calling any of file reclaimable.
 grep -E '^(anon|file|slab) ' \
   "/sys/fs/cgroup$(systemctl --user show agent-factory-daemon.service -p ControlGroup --value)/memory.stat"
 
@@ -259,9 +276,17 @@ build — not the daemon.
 
 Sampling the unit's `cgroup.procs` at full speed for 75 seconds found **1,243
 distinct child processes — about 16.6 per second, on the order of 1.4M per
-day** — mostly `tmux capture-pane`, one per session per poll, plus
-`git rev-parse`. That rate is a measured fact, and it is worth knowing: it is
-where the daemon's CPU goes.
+day**. By name, most were `tmux capture-pane` and the rest largely
+`git rev-parse`. That rate is a measured fact and worth knowing on its own.
+
+It is a rate, not a cost. No CPU time was measured here — sampling `cgroup.procs`
+counts processes, and the heap profile counts allocations — and what these
+children burn is child CPU rather than daemon CPU in any case. Nor does the rate
+decompose into one capture per session per poll: on the local path a single poll
+captures the pane **twice** (`CheckAndHandleTrustPrompt` in
+`session/tmux/start.go`, then `HasUpdatedWithBaseline` in `session/tmux/io.go`),
+and other contexts skip polling altogether. Take the 16.6/s as measured and
+leave it there.
 
 It is **not** an established cause of the cgroup's `file` figure, and this page
 will not claim it is. Page cache is charged on first touch and shared
@@ -278,6 +303,8 @@ only the hook correlation above connects anything to the peak.
 - **Plus the agents.** Every session runs a real agent process under a real tmux
   server, and that is where session memory actually goes. It is outside the
   daemon's footprint and outside this page; no figure for it was measured here.
+  It is outside the *unit's* figure too — but only once a scoped tmux server has
+  replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
 - **Plus whatever `post_worktree_commands` builds**, per worktree — charged to
   the daemon's cgroup until #3650 moves it out.
 
