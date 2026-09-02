@@ -56,7 +56,16 @@ var (
 //
 // The bar is the same as the classification maps: a reason saying why the
 // contract still holds without it.
-var unpopulatedMarshalerState = map[string]string{}
+var unpopulatedMarshalerState = map[string]string{
+	// atomic.Pointer[string]'s payload lives behind an unsafe.Pointer the filler
+	// cannot plant. What it holds — the session's hook scope prefix (#3650) — is
+	// not invisible to the report as a result: ForStorage copies it onto the
+	// exported Worktree.HookScopeUnitPrefix, where the field-coverage guard reaches
+	// it and classifies it. archiveReportSource itself is a process-local handle
+	// retained only so the projection can read the archive report, and it is
+	// unexported, so no marshaler can emit anything under it either way.
+	"session.InstanceData: archiveReportSource.hookScopeUnitPrefix.v (hidden unsafe.Pointer cannot be populated)": "atomic payload behind an unsafe.Pointer; the value it holds is emitted and classified via the exported Worktree.HookScopeUnitPrefix, and archiveReportSource is an unexported process-local handle no marshaler can reach (#3650)",
+}
 
 // unclassifiedFixtureGaps returns the unplantable unwalked state that is not
 // recorded in unpopulatedMarshalerState.

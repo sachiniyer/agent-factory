@@ -68,6 +68,11 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	if worktree == nil {
 		return nil
 	}
+	// The session's stable id, not its title: it names the transient scope a
+	// daemon-spawned hook enters, and that name has to survive a rename and be
+	// re-derivable by a later daemon generation (#3650). It changes nothing for a
+	// TUI- or CLI-created worktree, where no scope is derived at all.
+	worktree.SetHookScopeSessionID(i.ID)
 	if err := worktree.SetHookEnvironment(sessionEnvPassthroughForInstance(i)); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}

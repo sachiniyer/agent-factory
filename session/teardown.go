@@ -793,6 +793,13 @@ func (m teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (
 	return archiveCloseTab(ts, title, tabName)
 }
 
+// ErrHookTeardownUnconfirmed marks a pre-move hook callback failure that is a
+// SAFETY fact rather than an operator-command failure: af could not establish
+// that the hook's processes are gone. Archive treats it as a refusal to relocate
+// (see handleWorktree), because every other beforeMove error is deliberately
+// best-effort and moves the tree anyway.
+var ErrHookTeardownUnconfirmed = errors.New("post-worktree hook teardown could not be confirmed")
+
 func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (teardownState, error) {
 	if gw == nil {
 		return stateKnown, fmt.Errorf("cannot archive %q: instance has no worktree to relocate", title)
@@ -815,10 +822,19 @@ func (m teardownArchive) handleWorktree(gw *git.GitWorktree, title string) (tear
 		// Cleanup policy is deliberately best-effort. Record its failure for the
 		// daemon to surface after the archive commits, then always relocate the
 		// worktree so a broken operator hook cannot strand or lose the session.
+		beforeMoveErr := m.beforeMove()
+		// With ONE exception, and it is the same distinction the claim
+		// revalidation above makes: "the operator's command failed" is best-effort,
+		// but "a process from that command may still be running in this tree" is a
+		// safety fact, and nothing downstream re-checks it. Relocating underneath
+		// such a process lets it keep writing through its old cwd into the archived
+		// tree (#3650 review). stateUnknown keeps the record recoverable, so this
+		// refuses the move without stranding the session.
+		if errors.Is(beforeMoveErr, ErrHookTeardownUnconfirmed) {
+			return stateUnknown, fmt.Errorf("archive %q: %w", title, beforeMoveErr)
+		}
 		if m.hookErr != nil {
-			*m.hookErr = m.beforeMove()
-		} else {
-			_ = m.beforeMove()
+			*m.hookErr = beforeMoveErr
 		}
 	}
 	// The move is now BOUNDED, which is the case this comment used to reserve:

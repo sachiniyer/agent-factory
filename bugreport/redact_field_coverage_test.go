@@ -92,6 +92,12 @@ var verbatimInstanceFields = map[string]string{
 	"Branch":                 "the username segment collapses via scrub; the branch SUFFIX is deliberately retained — see TestScrubRedactsUsernameEndingInNonWordChar, which asserts \"[user]/fix-login-bug\"",
 	"Worktree.BranchName":    "same branch-name policy as Branch above",
 	"Worktree.BaseCommitSHA": "git SHA, machine-minted",
+	// Two shapes, both machine-minted: "af-hook-<instance id>", built from the
+	// same minted ID classified above, or "af-hook-wt<16 hex>", the leading half
+	// of a SHA-256 of the worktree path. Never the path itself and never a title.
+	// It is kept for triage precisely because this is the field that correlates a
+	// report with `systemctl --user list-units 'af-hook-*'` (#3650).
+	"Worktree.HookScopeUnitPrefix": "systemd unit prefix derived from the minted instance id, or a SHA-256 digest of the worktree path — never the path or any user text (#3650)",
 
 	"IdleReason":               "bounded IdleReason enum (#3168)",
 	"LastPromptDeliveryStatus": "bounded PromptDeliveryStatus enum (#3162)",

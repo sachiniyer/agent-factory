@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -49,7 +50,7 @@ func (g *GitWorktree) Setup() error {
 	}
 
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.hooksDone = g.runHooks()
 	return nil
 }
 
@@ -141,11 +142,17 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 }
 
 // hookStopTimeout bounds how long cleanup or rebuild waits for the previous hook
-// run to actually be gone after cancelling it. Cancellation SIGKILLs the hook's
-// process group, but cmd.Wait can still take up to hookWaitDelay to return when a
-// backgrounded grandchild holds the capture pipe — so this has to exceed that
-// bound to mean anything. A timeout fails closed before worktree mutation.
-var hookStopTimeout = 10 * time.Second
+// run to actually be gone after cancelling it. A timeout fails closed before
+// worktree mutation, so it has to exceed everything a NORMALLY PROGRESSING
+// teardown can spend, or it refuses rebuilds that were about to succeed.
+//
+// Two serial costs sit under it, and they add: cmd.Wait can take up to
+// hookWaitDelay (2s) when a backgrounded grandchild holds the capture pipe, and
+// the scope stop that follows it can take up to systemdunit.HookScopeStopTimeout
+// (10s) when a setsid'd descendant ignores SIGTERM and systemd has to escalate.
+// The previous 10s was below their sum, which made the worst case a refusal
+// rather than a slow success (#3650 review).
+var hookStopTimeout = 30 * time.Second
 
 // cancelAndWaitHooks retires the current post-worktree hook run. A closed
 // hooksDone means the runner has returned from cmd.Wait, so the hook process has
@@ -156,20 +163,97 @@ func (g *GitWorktree) cancelAndWaitHooks() error {
 	if g.hooksCancel != nil {
 		g.hooksCancel()
 	}
-	if g.hooksDone == nil {
-		return nil
+	if g.hooksDone != nil {
+		timer := time.NewTimer(hookStopTimeout)
+		defer timer.Stop()
+		select {
+		case <-g.hooksDone:
+		case <-timer.C:
+			return fmt.Errorf(
+				"post-worktree hooks for %s did not exit within %s of cancellation; refusing to modify the worktree while the hook process may still be using it",
+				g.worktreePath, hookStopTimeout)
+		}
 	}
+	return g.stopSurvivingHookScopes()
+}
 
-	timer := time.NewTimer(hookStopTimeout)
-	defer timer.Stop()
-	select {
-	case <-g.hooksDone:
-		return nil
-	case <-timer.C:
-		return fmt.Errorf(
-			"post-worktree hooks for %s did not exit within %s of cancellation; refusing to modify the worktree while the hook process may still be using it",
-			g.worktreePath, hookStopTimeout)
+// hookScopePrefixes names every transient scope this worktree's hooks could
+// still be running in.
+//
+// The persisted handle alone is not enough, and that is not a hypothetical. The
+// hook goroutine records the prefix in memory the moment a scope exists, but the
+// instance reaches disk on some later checkpoint; a daemon that died in that
+// window left a live survivor behind a record that says no scope ever existed.
+// So when we ARE the systemd daemon, also derive the names the runner would have
+// used — from the session id and from the worktree-path fallback identity — which
+// needs no write-ahead and cannot be lost.
+//
+// The derivation is gated on being the daemon for a reason beyond tidiness: it
+// is the only process that creates these scopes, and the only one guaranteed a
+// reachable user manager. Deriving unconditionally would make every cleanup on
+// a machine without systemd consult a manager that is not there, and the sweep
+// below fails closed — which would wedge cleanup for users who never had a scope.
+func (g *GitWorktree) hookScopePrefixes() []string {
+	var prefixes []string
+	add := func(prefix string) {
+		if prefix == "" {
+			return
+		}
+		for _, existing := range prefixes {
+			if existing == prefix {
+				return
+			}
+		}
+		prefixes = append(prefixes, prefix)
 	}
+	add(g.HookScopeUnitPrefix())
+	if systemdunit.RunningDaemonProcess() {
+		add(systemdunit.HookScopeUnitPrefix(g.hookScopeSessionID))
+		add(systemdunit.HookScopeUnitPrefix(worktreePathScopeIdentity(g.worktreePath)))
+	}
+	return prefixes
+}
+
+// stopSurvivingHookScopes closes the gap the in-process join above cannot reach:
+// hooksCancel, cmd.Wait and the process-group SIGKILL all died with the daemon
+// that started the run, so a hook that outlived that daemon — which is exactly
+// what the unbound scope now guarantees it can — has no in-process handle left.
+// A named scope is that handle, and it survives the restart.
+//
+// It is deliberately reachable ONLY from cancelAndWaitHooks, which is to say only
+// from the paths that are about to rebuild or remove the tree (#2770 ordering).
+// A survivor over an INTACT tree is left alone to finish: nothing on the restore
+// path calls this, and nothing re-runs the hook over a tree it did not rebuild.
+//
+// It fails closed on EVERY failure, including an unreachable user manager. An
+// earlier draft treated that one as "no survivors" on the theory that a scope
+// lives only inside the manager — but unreachable-from-here is not gone: a client
+// that lost the bus, or never had XDG_RUNTIME_DIR, gets exactly that error while
+// the manager and the hook inside it keep running. Proceeding there would hand
+// the rebuild a tree a live hook is still writing to, which is the one outcome
+// this ordering exists to prevent.
+func (g *GitWorktree) stopSurvivingHookScopes() error {
+	prefixes := g.hookScopePrefixes()
+	if len(prefixes) == 0 {
+		return nil
+	}
+	if err := systemdunit.StopHookScopes(prefixes...); err != nil {
+		return fmt.Errorf(
+			"post-worktree hook scopes (%s) for %s could not be stopped; refusing to modify the worktree while a hook may still be using it: %w",
+			strings.Join(prefixes, ", "), g.worktreePath, err)
+	}
+	return nil
+}
+
+// CancelAndJoinHooks is cancelAndWaitHooks for a caller outside this package
+// that is about to move the tree. Archive is that caller: relocating a checkout
+// a hook is still writing into is the same hazard rebuild and cleanup already
+// order against (#2770), and only cancelling the RUNNER stops it — stopping its
+// current scope alone makes the runner treat the dead command as an ordinary
+// failure and start the next configured command in a fresh scope, into a tree
+// that is about to move (#3650 review).
+func (g *GitWorktree) CancelAndJoinHooks() error {
+	return g.cancelAndWaitHooks()
 }
 
 // stopHooks retires the previous post-worktree hook run and installs a fresh
@@ -211,7 +295,20 @@ func (g *GitWorktree) stopHooks() error {
 // a failed one leaves the previous run's closed channel in place, which readers
 // correctly see as "nothing in flight".
 func (g *GitWorktree) startHooks() {
-	g.hooksDone = RunPostWorktreeHooksAsyncWithEnvironment(g.hooksCtx, g.repoPath, g.worktreePath, g.hookEnvPassthrough)
+	g.hooksDone = g.runHooks()
+}
+
+// runHooks is the single place the hook runner is handed this worktree's scope
+// identity. A worktree with no session id derives no scope name, so the runner
+// takes exactly the path it took before #3650.
+func (g *GitWorktree) runHooks() <-chan struct{} {
+	return runPostWorktreeHooks(g.hooksCtx, hookRun{
+		repoPath:        g.repoPath,
+		worktreePath:    g.worktreePath,
+		passthrough:     g.hookEnvPassthrough,
+		scopeSessionID:  g.hookScopeSessionID,
+		onScopeLaunched: g.SetHookScopeUnitPrefix,
+	})
 }
 
 func (g *GitWorktree) rebuildBaseCommit() (string, error) {

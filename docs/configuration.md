@@ -486,6 +486,25 @@ delete_cmd = "./infra/delete.sh"
 
 `post_worktree_commands` are shell commands run after each new worktree is created (e.g. `npm install`, `make build`) — they can also be edited from the TUI via the `e` (worktree hooks) key. `remote_hooks` configures a remote-machine backend; see [remote-hooks.md](remote-hooks.md) for the script protocol.
 
+On Linux, when the **daemon** creates the worktree — `af sessions create`, a
+task-started session, or a restore — each `post_worktree_commands` entry and
+`on_archive_command` run in their own transient systemd scope named
+`af-hook-<session id>-<run>-<n>.scope`, rather than inside
+`agent-factory-daemon.service`. Two consequences an operator can rely on:
+
+- **The daemon's resource accounting is the daemon's.** `systemctl --user status
+  agent-factory-daemon.service` no longer charges your build's memory and CPU to
+  the daemon, so a `MemoryMax=`/`CPUQuota=` you set on the unit constrains the
+  daemon rather than your `npm install`. Each hook's own cost is visible on its
+  scope (`systemctl --user status 'af-hook-*'`).
+- **A running hook survives a daemon restart.** The scope has no dependency edge
+  to the daemon unit, so restarting or auto-upgrading the daemon does not kill an
+  in-flight build. It is stopped when af is about to rebuild or delete that
+  worktree, and left alone otherwise.
+
+Sessions created from the TUI or the CLI in-process are unaffected — those hooks
+run exactly as before — and on macOS the behaviour is unchanged everywhere.
+
 ### Backend runtime (`backend`, `docker`, `ssh`)
 
 `backend` selects the runtime a repo's sessions run on, and `--backend` overrides
