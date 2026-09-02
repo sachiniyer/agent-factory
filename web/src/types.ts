@@ -335,6 +335,11 @@ export interface TaskData {
    *  scheduler's search horizon. Not overdue (nothing was ever due) and not
    *  healthy either. */
   unschedulable?: boolean;
+  /** WHICH shape of unschedulable, straight from the daemon's own classifier
+   *  (task.UnschedulableReason). Present only when `unschedulable` is set.
+   *  Re-deriving this from `cron_expr` here is what had other surfaces calling an
+   *  ABSENT expression invalid, so read it rather than reclassify. */
+  unschedulable_reason?: "no-trigger" | "invalid-expression" | "no-occurrence";
   /** No lateness verdict could be reached — nothing to measure from, or nothing
    *  the schedule can be evaluated against. UNKNOWN, not healthy. */
   unassessable?: boolean;

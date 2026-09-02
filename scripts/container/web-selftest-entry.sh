@@ -385,14 +385,25 @@ echo ">>> seeding task $SEEDED_TASK ..."
 # add`, because the CLI has no way to say "created a month ago" — and the store
 # deliberately KEEPS an earlier created_at while clamping a future one, exactly so
 # a migration can import real history (task.resetStoreOwnedFields). With no
-# last_run_at, the derivation measures lateness from that creation time, so an
-# hourly task created 30 days ago is overdue the moment the daemon reads it. No
-# clock manipulation, no hand-edited tasks.json, and no waiting.
+# last_run_at, the derivation measures lateness from that creation time, so a
+# daily task created 30 days ago is overdue the moment the daemon reads it — about
+# thirty missed occurrences. No clock manipulation, no hand-edited tasks.json, and
+# no waiting.
+#
+# The HOUR is computed, not fixed, and that is load-bearing. This fixture is armed
+# on a real daemon for the whole suite, so a schedule whose next occurrence falls
+# inside the run would actually FIRE: the daemon would stamp last_run_at, the task
+# would stop being overdue, and the assertion would fail depending on what time CI
+# happened to start — while also launching an agent run nobody asked for. Half a
+# day out puts the next fire ~12 hours past the far end of a ~35-minute suite from
+# whenever it starts. Local hour, not UTC: a schedule with no zone is evaluated in
+# the location of the clock handed to it, and that is the daemon's (#3626 review).
 echo ">>> seeding overdue task $OVERDUE_TASK ..."
 OVERDUE_CREATED="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+OVERDUE_HOUR="$(( ( $(date +%-H) + 12 ) % 24 ))"
 curl -sS -X POST "$BASE_URL/v1/AddTask" \
   -H 'Content-Type: application/json' \
-  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"20 * * * *\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
+  -d "{\"task\":{\"id\":\"3626dead\",\"name\":\"$OVERDUE_TASK\",\"prompt\":\"echo overdue\",\"cron_expr\":\"0 $OVERDUE_HOUR * * *\",\"project_path\":\"$MOCK\",\"program\":\"claude\",\"enabled\":true,\"created_at\":\"$OVERDUE_CREATED\"},\"actor\":\"api\"}" \
   >/dev/null
 
 # A task in the THIRD repo, which has NO session (redesign PR2, Greptile Fix 1): this

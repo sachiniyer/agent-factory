@@ -3132,8 +3132,11 @@ test("#3626: the tasks list marks a task that has stopped firing, and says how f
   await expect(mark).toHaveAttribute("aria-label", /overdue/);
 
   // The DETAIL, in the row, in the rail's own words. The count is whatever the
-  // daemon derived from a month of an hourly schedule, so the assertion is on the
-  // shape rather than on a number the harness would have to keep in step.
+  // daemon derived from a month of a daily schedule, so the assertion is on the
+  // shape rather than on a number the harness would have to keep in step. (Daily,
+  // and at an hour computed half a day out from setup: a fixture armed on a real
+  // daemon for the whole suite would otherwise FIRE mid-run, clear its own overdue
+  // verdict, and fail this by wall-clock luck — see the seeding script.)
   await expect(overdue.locator(".af-task-health")).toHaveText(/^overdue · missed \d+\+?$/);
 
   // A static glyph and nothing else: no animation anywhere on the marked row

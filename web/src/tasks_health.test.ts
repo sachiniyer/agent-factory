@@ -49,12 +49,28 @@ test("a count nobody took is not a count of zero", () => {
 });
 
 test("a task the scheduler cannot fire is marked, and says which shape", () => {
-  const noTrigger = task({ cron_expr: "", unschedulable: true });
-  assert.equal(taskNeedsAttention(noTrigger), true);
-  assert.equal(taskHealthSummary(noTrigger), "No trigger");
+  // The shape comes from the DAEMON's classifier, not from a second look at
+  // cron_expr here — re-deriving it is what had other surfaces calling an absent
+  // expression invalid. These are ui/automations.go's three strings, verbatim.
+  const cases: [TaskData["unschedulable_reason"], string][] = [
+    ["no-trigger", "No trigger"],
+    ["invalid-expression", "Invalid cron expression"],
+    ["no-occurrence", "No upcoming run"],
+  ];
+  for (const [reason, want] of cases) {
+    const t = task({ unschedulable: true, unschedulable_reason: reason });
+    assert.equal(taskNeedsAttention(t), true);
+    assert.equal(taskHealthSummary(t), want);
+  }
+});
 
-  const bad = task({ cron_expr: "99 * * * *", unschedulable: true });
-  assert.equal(taskHealthSummary(bad), "Cannot be scheduled");
+test("an unschedulable verdict with no reason still says the verdict", () => {
+  // A daemon older than the reason field sends `unschedulable` alone. The row
+  // must still be marked and still say something true — the one thing it must not
+  // do is guess which shape by looking at cron_expr.
+  const t = task({ cron_expr: "99 * * * *", unschedulable: true });
+  assert.equal(taskNeedsAttention(t), true);
+  assert.equal(taskHealthSummary(t), "Cannot be scheduled");
 });
 
 test("an unknown is neither healthy nor a failure", () => {
@@ -64,6 +80,17 @@ test("an unknown is neither healthy nor a failure", () => {
   assert.equal(taskNeedsAttention(t), false);
   assert.deepEqual(taskHealthMark(t), { icon: "circle-question", cls: "af-task-unknown" });
   assert.equal(taskHealthSummary(t), "Health unknown");
+});
+
+test("an unknown is muted in the text as well as the glyph", () => {
+  // The summary takes the MARK's class, so the words and the glyph explaining
+  // them cannot end up in different colours. Painting "Health unknown" with the
+  // warning token would present something unestablished as a failure.
+  const t = task({ unassessable: true });
+  assert.equal(taskHealthMark(t)?.cls, "af-task-unknown");
+
+  const overdue = task({ overdue: true, missed_occurrences: 2 });
+  assert.equal(taskHealthMark(overdue)?.cls, "af-task-warn");
 });
 
 test("a healthy task carries no mark and no health text", () => {

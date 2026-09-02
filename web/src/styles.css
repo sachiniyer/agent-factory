@@ -2825,6 +2825,12 @@ button:disabled,
   color: var(--af-dot-lost);
 }
 
+/* An unknown is not a failure. It is muted wherever it appears — the glyph and
+   the words it explains take the same class, so they cannot disagree. */
+.af-task-health.af-task-unknown {
+  color: var(--af-text-2);
+}
+
 .af-task-main {
   flex: 1;
   min-width: 0;

@@ -1287,6 +1287,33 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
     });
 }
 
+// How often an OPEN tasks view refetches, for the verdicts that change with the
+// clock rather than with an event (#3626).
+//
+// overdue / missed_occurrences / next_run_at are derived from now at read time, so
+// a task crosses into overdue with nothing to announce it: the daemon publishes
+// task.* on a MUTATION, and going quiet is the absence of one. Without this the
+// list showed whatever was true when the view was opened, and a row could sit
+// there reading healthy for as long as someone left the page up — which is
+// precisely the wall-mounted, nobody-opens-the-TUI box this feature is for.
+//
+// A minute is well inside the smallest window a verdict can flip in (the slack is
+// at least five minutes) and is one small RPC, which is what the view already
+// issues on arrival and on every task event.
+const TASK_HEALTH_POLL_MS = 60_000;
+
+// The GUARD is in the tick, not in switchView, deliberately: the view is also set
+// directly in places that never route through the switch (creating a session
+// jumps to "sessions"), so a start/stop pair hung off the switch would leak a
+// timer down one path and miss starting it down another. Asking the store each
+// tick cannot get out of step with it.
+window.setInterval(() => {
+  const state = store.get();
+  if (state.phase === "app" && state.view === "tasks") {
+    refreshTasks();
+  }
+}, TASK_HEALTH_POLL_MS);
+
 function refreshTasks(): void {
   const tok = token;
   if (tok === null) {

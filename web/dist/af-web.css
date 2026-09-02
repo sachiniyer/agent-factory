@@ -2132,6 +2132,9 @@ button:disabled,
 .af-task-health {
   color: var(--af-dot-lost);
 }
+.af-task-health.af-task-unknown {
+  color: var(--af-text-2);
+}
 .af-task-main {
   flex: 1;
   min-width: 0;

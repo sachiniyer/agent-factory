@@ -167,6 +167,12 @@ type ScheduleHealth struct {
 	// observation is not. `af tasks show` still names the parse error itself,
 	// because it has the expression in hand.
 	Unschedulable bool
+	// Reason is WHICH shape of unschedulable this is — one of the Reason*
+	// constants — and is empty whenever Unschedulable is false. The verdict stays
+	// one thing (see above); this is only the wording, and it exists so that a
+	// surface which cannot call UnschedulableReason reads its answer rather than
+	// inventing a fourth classification (#3626).
+	Reason string
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
 	OldestMissedAt time.Time
@@ -235,12 +241,16 @@ func deriveScheduleHealth(t Task, now time.Time, budget *int) ScheduleHealth {
 	// Through the shared classifier, which probes from NOW rather than from the
 	// reference point: the question is what the scheduler will do next, and that
 	// is what it asks too.
-	if UnschedulableReason(t, now) != "" {
-		return ScheduleHealth{Unschedulable: true}
+	if reason := UnschedulableReason(t, now); reason != "" {
+		return ScheduleHealth{Unschedulable: true, Reason: reason}
 	}
 	sched, err := ParseCron(t.CronExpr)
 	if err != nil {
-		return ScheduleHealth{Unschedulable: true}
+		// Unreachable while the classifier above owns the parse — it returns
+		// ReasonInvalidExpression for exactly this. Kept as a belt, and named the
+		// same way, so the belt cannot report a verdict with no wording if the two
+		// ever come apart.
+		return ScheduleHealth{Unschedulable: true, Reason: ReasonInvalidExpression}
 	}
 	ref, ok := scheduleReference(t)
 	if !ok {
@@ -461,6 +471,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated
 		tasks[i].Unschedulable = health.Unschedulable
+		tasks[i].UnschedulableReason = health.Reason
 		tasks[i].Unassessable = health.Unassessable
 	}
 	return tasks
@@ -499,6 +510,7 @@ func (t *Task) stripDerived() {
 	t.MissedOccurrences = 0
 	t.MissedOccurrencesCapped = false
 	t.Unschedulable = false
+	t.UnschedulableReason = ""
 	t.Unassessable = false
 	t.NextRunAt = nil
 	t.Arming = ""

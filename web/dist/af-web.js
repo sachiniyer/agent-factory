@@ -12562,10 +12562,16 @@ function taskHealthSummary(t) {
     return "Health unknown";
   }
   if (t.unschedulable) {
-    if (!t.cron_expr || t.cron_expr.trim() === "") {
-      return "No trigger";
+    switch (t.unschedulable_reason) {
+      case "no-trigger":
+        return "No trigger";
+      case "invalid-expression":
+        return "Invalid cron expression";
+      case "no-occurrence":
+        return "No upcoming run";
+      default:
+        return "Cannot be scheduled";
     }
-    return "Cannot be scheduled";
   }
   if (!t.overdue) {
     return "";
@@ -12659,7 +12665,7 @@ var TasksPane = class {
     const metaParts = [];
     const health = taskHealthSummary(t);
     if (health !== "") {
-      metaParts.push(h("span", { class: "af-task-health" }, health), " \xB7 ");
+      metaParts.push(h("span", { class: `af-task-health${mark ? ` ${mark.cls}` : ""}` }, health), " \xB7 ");
     }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
@@ -15651,6 +15657,13 @@ function applyConfigValueNow(key, value, tok) {
     store.set({ configStatus: { key, value: "", notice: "", error: errorText(err) } });
   });
 }
+var TASK_HEALTH_POLL_MS = 6e4;
+window.setInterval(() => {
+  const state = store.get();
+  if (state.phase === "app" && state.view === "tasks") {
+    refreshTasks();
+  }
+}, TASK_HEALTH_POLL_MS);
 function refreshTasks() {
   const tok = token;
   if (tok === null) {

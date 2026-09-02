@@ -233,6 +233,7 @@ func TestScheduleHealthIsNeverPersisted(t *testing.T) {
 	// load-modify-save path would do now that every load annotates.
 	next := at(2026, time.September, 1, 15, 20, 0)
 	tsk.Overdue, tsk.MissedOccurrences, tsk.Arming, tsk.NextRunAt = true, 432, ArmingArmed, &next
+	tsk.Unschedulable, tsk.UnschedulableReason = true, ReasonInvalidExpression
 	require.NoError(t, AddTask(tsk))
 	// The run history comes from its own writer, not from the create: a create
 	// supplies the task's definition and the store supplies its history (see
@@ -241,7 +242,7 @@ func TestScheduleHealthIsNeverPersisted(t *testing.T) {
 
 	raw, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
 	require.NoError(t, err)
-	for _, key := range []string{"overdue", "missed_occurrences", "next_run_at", "arming"} {
+	for _, key := range []string{"overdue", "missed_occurrences", "next_run_at", "arming", "unschedulable", "unschedulable_reason"} {
 		assert.NotContains(t, string(raw), key,
 			"a derived field must never reach disk: %s", key)
 	}
@@ -259,6 +260,8 @@ func TestScheduleHealthIsNeverPersisted(t *testing.T) {
 		"a disk read has not observed arming and must not claim to have")
 	assert.Nil(t, loaded[0].NextRunAt,
 		"a next-run time can only come from a live scheduler entry")
+	assert.False(t, loaded[0].Unschedulable, "and the forged verdict is re-derived, not restored")
+	assert.Empty(t, loaded[0].UnschedulableReason)
 }
 
 // TestLoadTasksDerivationSurvivesTheJSONShape guards the wire form the CLI and
@@ -788,4 +791,33 @@ func TestLoadTasksLocked_CarriesNoDerivedState(t *testing.T) {
 	assert.False(t, loaded[0].Unschedulable)
 	assert.False(t, loaded[0].Unassessable)
 	assert.Equal(t, "20 * * * *", loaded[0].CronExpr, "and the task itself is untouched")
+}
+
+// TestScheduleHealthCarriesTheUnschedulableReason: the verdict is one thing, but
+// its WORDING is three, and a surface that cannot call UnschedulableReason has to
+// read the classifier's answer rather than invent a fourth classification from
+// cron_expr — which is what had other surfaces calling an ABSENT expression
+// invalid (#3648). The field is the wire form of the classifier, so it must agree
+// with it on every shape.
+func TestScheduleHealthCarriesTheUnschedulableReason(t *testing.T) {
+	now := at(2026, time.September, 1, 14, 20, 0)
+	for name, tc := range map[string]struct {
+		cron string
+		want string
+	}{
+		"no trigger":         {cron: "", want: ReasonNoTrigger},
+		"cannot parse":       {cron: "99 * * * *", want: ReasonInvalidExpression},
+		"matches no date":    {cron: "0 0 31 2 *", want: ReasonNoOccurrence},
+		"perfectly ordinary": {cron: "0 3 * * *", want: ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tsk := Task{ID: "t", Name: "n", CronExpr: tc.cron, ProjectPath: "/repo", Enabled: true, CreatedAt: now}
+			got := WithScheduleHealth([]Task{tsk}, now)[0]
+			assert.Equal(t, tc.want, got.UnschedulableReason)
+			assert.Equal(t, tc.want != "", got.Unschedulable,
+				"the reason is present exactly when the verdict is")
+			assert.Equal(t, UnschedulableReason(tsk, now), got.UnschedulableReason,
+				"the record must say what the shared classifier says")
+		})
+	}
 }

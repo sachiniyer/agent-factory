@@ -161,13 +161,22 @@ export function taskHealthSummary(t: TaskData): string {
     return "Health unknown";
   }
   if (t.unschedulable) {
-    // Which shape, from the same three the daemon classifies (task.UnschedulableReason).
-    // Re-deriving it here is exactly what had the other surfaces calling an ABSENT
-    // expression invalid, so this reads the record instead.
-    if (!t.cron_expr || t.cron_expr.trim() === "") {
-      return "No trigger";
+    // The daemon's own classification, read rather than re-derived — the three
+    // shapes and the three strings are ui/automations.go's attentionFragment,
+    // exactly. Inspecting cron_expr here is what had other surfaces calling an
+    // ABSENT expression invalid (#3648), and an older daemon that sends the
+    // verdict without the reason falls back to the verdict's own words rather
+    // than to a local guess at which one it is.
+    switch (t.unschedulable_reason) {
+      case "no-trigger":
+        return "No trigger";
+      case "invalid-expression":
+        return "Invalid cron expression";
+      case "no-occurrence":
+        return "No upcoming run";
+      default:
+        return "Cannot be scheduled";
     }
-    return "Cannot be scheduled";
   }
   if (!t.overdue) {
     return "";
@@ -286,7 +295,12 @@ export class TasksPane {
     // Health LEADS the line — see taskHealthSummary.
     const health = taskHealthSummary(t);
     if (health !== "") {
-      metaParts.push(h("span", { class: "af-task-health" }, health), " · ");
+      // The text takes the MARK's class, so the glyph and the words it explains
+      // cannot end up in different colours: an unknown is muted in both places.
+      // Painting "Health unknown" in the warning colour would present something
+      // unestablished as a failure, which is how people learn to ignore the rows
+      // that are one.
+      metaParts.push(h("span", { class: `af-task-health${mark ? ` ${mark.cls}` : ""}` }, health), " · ");
     }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
