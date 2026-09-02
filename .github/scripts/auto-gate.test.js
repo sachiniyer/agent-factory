@@ -3154,6 +3154,23 @@ test("the conformance scan detects each spelling it claims to", () => {
   ]);
   assert.deepEqual(reasons("on:\n  <<: *defaults\n  push:\n"), ["a merge key (`<<: *base`)"]);
 
+  // A COMPACT block scalar owns its body from the key's column, not the dash's.
+  // Measuring from the dash swallowed every later sibling of that key — so a
+  // step spelled `- run: |` could carry an unreadable `if :` below its script
+  // and this scan would report nothing at all, which is the silent direction.
+  assert.deepEqual(
+    reasons("jobs:\n  g:\n    steps:\n      - run: |\n          echo hi\n        if : github.event_name == 'push'\n"),
+    ["a key with whitespace before its colon"],
+    "a sibling key after a compact block scalar must still be scanned",
+  );
+
+  // A double-quoted scalar DECODES: `"pu\\u0073h"` is the token `push` to
+  // GitHub and to nothing here, so the workflow gates master while every scan
+  // reads it as one that does not.
+  assert.deepEqual(reasons('on: "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on: ["pu\\u0073h"]\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on:\n  - "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+
   // The canonical forms this repository is written in, and the two exemptions
   // that keep the rules honest: a quoted `'true'` is a STRING in a choice input,
   // and a block scalar's body is a program rather than YAML — `run: |` holds
@@ -3169,6 +3186,8 @@ test("the conformance scan detects each spelling it claims to", () => {
     "jobs:\n  gate:\n    name: Build & verify\n    steps:\n      - uses: actions/checkout@v6\n",
     "jobs:\n  gate:\n    steps:\n      - name: Scope\n        run: ${{ steps.scope.outputs.run }}\n",
     'jobs:\n  gate:\n    steps:\n      - run: |\n          jq \'{ "required": true }\' <<<"$x"\n          test a : b\n          echo "? explicit" && echo &pid\n',
+    "jobs:\n  gate:\n    steps:\n      - run: |\n          echo hi\n        if: github.event_name == 'workflow_dispatch'\n",
+    'jobs:\n  gate:\n    steps:\n      - name: Set up Go\n        with:\n          go-version: "1.25"\n',
   ]) {
     assert.deepEqual(reasons(canonical), [], `a canonical workflow must be clean: ${JSON.stringify(canonical)}`);
   }
@@ -5393,8 +5412,17 @@ function structuralLines(text) {
       scalarIndent = null;
     }
     rows.push([index + 1, line]);
-    if (/(?::|^\s*-)\s*[|>][+-]?[0-9]*\s*(?:#.*)?$/.test(line)) {
-      scalarIndent = indentOf(line);
+    const header = /^(?<indent>[ \t]*)(?<dashes>(?:-[ \t]+)*)(?<key>[^\s#][^:]*:)?[ \t]*[|>][+-]?[0-9]*[ \t]*(?:#.*)?$/.exec(
+      line,
+    );
+    if (header) {
+      // A block scalar's body is indented past the node that OWNS it, and for a
+      // compact sequence entry that node is the key, not the dash: in
+      // `- run: |`, a later `if:` sibling of `run` sits between the dash column
+      // and the body, so measuring from the dash swallows a real key — silently,
+      // which is the one direction this whole test exists to prevent. A bare
+      // `- |` is the entry itself, so there the dash column is right.
+      scalarIndent = header.groups.indent.length + (header.groups.key ? header.groups.dashes.length : 0);
     }
   }
   return rows;
@@ -5414,16 +5442,28 @@ const NON_SCALAR_VALUES = {
 // sequence of those, or a block-scalar header (whose body is a program, not
 // YAML, and is dropped by structuralLines above). Returns why it is not, or
 // null.
+function scalarFault(text) {
+  if (NON_SCALAR_VALUES[text[0]]) {
+    return NON_SCALAR_VALUES[text[0]];
+  }
+  // A DOUBLE-quoted scalar processes escapes, so `"pu\\u0073h"` is the token
+  // `push` to GitHub and is not the token `push` to anything here — the workflow
+  // gates master and every scan reads it as one that does not. Plain and
+  // single-quoted scalars do no such decoding, and every escape begins with a
+  // backslash, so the whole class is this one test.
+  if (/^"(?:[^"\\]|\\.)*"$/.test(text) && text.includes("\\")) {
+    return "an escaped double-quoted scalar";
+  }
+  return null;
+}
+
 function nonScalarValueFault(value) {
   const text = value.trim();
   if (text.length === 0 || /^[|>][+-]?[0-9]*$/.test(text)) {
     return null;
   }
-  if (NON_SCALAR_VALUES[text[0]]) {
-    return NON_SCALAR_VALUES[text[0]];
-  }
   if (!text.startsWith("[")) {
-    return null;
+    return scalarFault(text);
   }
   const sequence = /^\[(?<entries>.*)\]$/.exec(text);
   if (!sequence) {
@@ -5431,8 +5471,15 @@ function nonScalarValueFault(value) {
   }
   for (const entry of sequence.groups.entries.split(",")) {
     const item = entry.trim();
-    if (item.length > 0 && (NON_SCALAR_VALUES[item[0]] || item.startsWith("["))) {
+    if (item.length === 0) {
+      continue;
+    }
+    if (item.startsWith("[")) {
       return "a flow sequence with a non-scalar entry";
+    }
+    const fault = scalarFault(item);
+    if (fault) {
+      return NON_SCALAR_VALUES[item[0]] ? "a flow sequence with a non-scalar entry" : fault;
     }
   }
   return null;
@@ -5488,7 +5535,7 @@ function canonicalLineFault(line) {
     return nonScalarValueFault(mapping.groups.value || "");
   }
   if (sequenceEntry) {
-    return NON_SCALAR_VALUES[rest[0]] || nonScalarValueFault(rest);
+    return scalarFault(rest) || nonScalarValueFault(rest);
   }
   return "a line that is neither `key: value` nor a sequence entry";
 }
