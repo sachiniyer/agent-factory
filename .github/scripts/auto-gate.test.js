@@ -2227,6 +2227,36 @@ test("a usage-limited reviewer does not waive an unrelated blocker", async () =>
   assert.match(result.reasons.join("\n"), /usage-limited/);
 });
 
+// The TUI path gate asks whether a user could SEE the change, and answered it by
+// prefix alone — so a diff whose only file under app/, ui/ or session/tmux/ was
+// a `_test.go` file demanded a play-test of nothing (#3607). #3601 paid for one.
+test("a test-only change under a TUI prefix does not demand the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane_test.go", "session/tmux/pty_test.go", "app/app_test.go"],
+  });
+
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /play-tested/,
+    "a Go test file is not compiled into the binary, so it changes nothing a play-test could see",
+  );
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// The subtraction is per FILE. Excluding tests must not exempt a PR that merely
+// contains one, which is how "skip the gate when any test file is present" would
+// read — the same diff with one production file in it is still a visible change.
+test("a TUI change shipped alongside its test still demands the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane.go", "ui/config_pane_test.go"],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
   const result = await evaluateGate({
     issueComments: [codexRateLimit()],
@@ -3007,6 +3037,132 @@ test("the master-verify list names every workflow that gates master on push", ()
   }
 });
 
+test("every workflow is spelled the way the scans above read it", () => {
+  // #3617. The conformance half of the arrangement: the scans above stay lexical
+  // and this makes their assumptions TRUE, rather than each of them growing a
+  // regex per valid YAML spelling — a series #3550 established has no end.
+  //
+  // What it protects is not the workflow, which GitHub runs either way. It is
+  // the reading: `if : …` is skipped before `consultsEvent()` sees it, a quoted
+  // `"required": true` slips past the dispatch-contract check, a flow-style job
+  // hides every key it contains, a trailing comment on an `if:` line becomes
+  // part of the expression `topLevelDisjuncts()` splits, and a `push` token in
+  // an input's `options:` list keeps answering "this workflow gates master"
+  // after the real trigger is gone. Every one of those is silent.
+  const workflowDir = path.join(__dirname, "..", "workflows");
+  const workflowFiles = fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  assert.ok(workflowFiles.length > 0, "no workflow files were found, so this test proved nothing");
+
+  const violations = [];
+  for (const name of workflowFiles) {
+    const text = fs.readFileSync(path.join(workflowDir, name), "utf8");
+    for (const { number, source, reason } of nonCanonicalSpellings(text)) {
+      violations.push(`${name}:${number}: ${reason}\n    ${source.trim()}`);
+    }
+    for (const { number, source } of misplacedEventTokens(onSection(text))) {
+      violations.push(
+        `${name}: a push/workflow_dispatch token under \`on:\` outside an event position\n    ${source.trim()}` +
+          ` (line ${number} of the trigger section)`,
+      );
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    "a workflow uses a spelling the lexical scans in this file cannot read, so it is silently " +
+      "unscanned while they stay green. Rewrite the line in the canonical form — `key: value`, " +
+      "unquoted keys, lowercase booleans, block mappings, no comment on an `if:` line, and no " +
+      "push/workflow_dispatch token under `on:` outside an event key or shorthand entry — or, if " +
+      "the spelling has to stay, teach the scan to read it and relax the rule here in the same " +
+      `change:\n\n${violations.join("\n")}\n`,
+  );
+});
+
+test("the conformance scan detects each spelling it claims to", () => {
+  // A conformance test passes by finding NOTHING, so a detector that has stopped
+  // detecting is indistinguishable from a clean tree — it would go green on the
+  // day it broke and stay green forever after. Each banned spelling is asserted
+  // against a synthetic workflow here, and each canonical form asserted clean, so
+  // the green above means "no such spelling" rather than "no scan".
+  const reasons = (text) => nonCanonicalSpellings(text).map((finding) => finding.reason);
+
+  assert.deepEqual(reasons("jobs:\n  gate:\n    if : github.event_name == 'push'\n"), [
+    "a key with whitespace before its colon",
+  ]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs:\n      token:\n        required : true\n"), [
+    "a key with whitespace before its colon",
+  ]);
+  assert.deepEqual(reasons('on:\n  workflow_dispatch:\n    inputs:\n      token:\n        "required": true\n'), [
+    "a quoted key",
+  ]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs:\n      token:\n        required: TRUE\n"), [
+    "a non-lowercase boolean (`TRUE`)",
+  ]);
+  assert.deepEqual(reasons("jobs:\n  gate:\n    steps: [{ if: github.event_name == 'push' }]\n"), [
+    "a flow-style mapping",
+  ]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs: { token: { required: true } }\n"), [
+    "a flow-style mapping",
+  ]);
+  assert.deepEqual(
+    reasons("jobs:\n  gate:\n    if: github.event_name == 'push' # || github.event_name == 'workflow_dispatch'\n"),
+    ["a comment on the same line as an `if:` expression"],
+  );
+
+  // The canonical forms this repository is written in, and the two exemptions
+  // that keep the rules honest: a quoted `'true'` is a STRING in a choice input,
+  // and a block scalar's body is a program rather than YAML.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      dry_run:\n        type: boolean\n        default: false\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [auto, 'true', 'false']\n",
+    "jobs:\n  gate:\n    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n",
+    "jobs:\n  gate:\n    if: >-\n      always() &&\n      needs.a.outputs.b != ''\n",
+    "jobs:\n  gate:\n    steps:\n      - run: ${{ steps.scope.outputs.run }}\n",
+    'jobs:\n  gate:\n    steps:\n      - run: |\n          jq \'{ "required": true }\' <<<"$x"\n          test a : b\n',
+  ]) {
+    assert.deepEqual(reasons(canonical), [], `a canonical workflow must be clean: ${JSON.stringify(canonical)}`);
+  }
+
+  // The event-position rule, which is about WHERE a token is rather than how it
+  // is spelled, so it is asked of the trigger section separately.
+  const misplaced = (text) => misplacedEventTokens(onSection(text)).map((finding) => finding.source.trim());
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [push, dry-run]\n"),
+    ["options: [push, dry-run]"],
+    "a push token in an input's options keeps answering `gates master` after the trigger is removed",
+  );
+  assert.deepEqual(
+    misplaced("on:\n  push:\n    paths:\n      - 'scripts/push-release.sh'\n"),
+    ["- 'scripts/push-release.sh'"],
+  );
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      push:\n        type: boolean\n"),
+    ["push:"],
+    "an INPUT named push is not an event key; only the direct child of `on:` is",
+  );
+  // Legitimate positions: event keys at the direct-child indent, and every
+  // shorthand form of the trigger list.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n    push:\n      branches: [master]\n    workflow_dispatch:\n",
+    "on: push\njobs:\n",
+    "on: 'push'\njobs:\n",
+    "on: [push, pull_request]\njobs:\n",
+    'on: ["push", "workflow_dispatch"]\njobs:\n',
+    "on:\n  - push\n  - workflow_dispatch\njobs:\n",
+  ]) {
+    assert.deepEqual(misplaced(canonical), [], `a canonical trigger must be clean: ${JSON.stringify(canonical)}`);
+  }
+  // A flow-style `on:` is not shorthand: it is a mapping, reported as one by the
+  // rule above, and its tokens are not in a position this scan can vouch for.
+  assert.deepEqual(misplaced('on: {"push": {"branches": ["master"]}}\njobs:\n'), [
+    'on: {"push": {"branches": ["master"]}}',
+  ]);
+});
 
 test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
   // #3396: this is not retryable by status (404), so before this change it went
@@ -5130,6 +5286,165 @@ function mentionsPushTrigger(section) {
   // are as valid as their bare forms, and a scan that requires the token to end
   // the line answers "no push trigger" for them.
   return /(?:^|[\s[{,"'])push["']?\s*(?::|,|\]|\}|$)/m.test(triggers);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow spelling conformance (#3617).
+//
+// Everything above reads these workflows lexically, and #3550's review found —
+// correctly, four separate times in its last two rounds — that valid YAML
+// escapes it: `if :`, `"required": true`, `required: TRUE`, a flow-style job
+// mapping, a trailing `# comment` on an `if:` line, and a `push` token sitting
+// in an input's `options:` list rather than in an event position. Each miss
+// leaves that workflow silently unscanned while the tests above stay green.
+//
+// The maintainer ACCEPTED all four rather than widening a sixth regex: the scan
+// is a tripwire over files THIS repository controls, it was never a YAML parser,
+// and making it one is an unbounded series. So the assumptions are enforced
+// instead. These helpers answer the opposite question — does any workflow use a
+// spelling the scan cannot read? — and the conformance test below fails naming
+// the file and the line. A non-canonical spelling is then loud at the moment it
+// is introduced, which is the direction that cannot cost master a silent gap.
+//
+// Being a tripwire too, its errors run the same way: a false positive is a
+// visible failure someone resolves by rewriting one line canonically, and every
+// rule is written to fail in that direction rather than to be clever.
+// ---------------------------------------------------------------------------
+
+function indentOf(line) {
+  return line.match(/^ */)[0].length;
+}
+
+// GitHub expression spans removed. `${{ fromJSON(…) }}` is not a flow mapping
+// and `${{ steps.x.outputs.y }}` carries no key; left in, every expression in
+// the repository reads as one.
+function withoutExpressions(line) {
+  return line.replace(/\$\{\{.*?\}\}/g, "");
+}
+
+// A workflow's YAML STRUCTURE lines, as [lineNumber, text] pairs. A block
+// scalar's body is arbitrary text — `run: |` holds shell, and shell holds
+// colons, braces and quoted keys — so scanning it for YAML spellings reports
+// the program rather than the workflow. Everything indented under a block-scalar
+// header is dropped; the header line itself stays, since it is a real key.
+function structuralLines(text) {
+  const rows = [];
+  let scalarIndent = null;
+  for (const [index, line] of text.split("\n").entries()) {
+    if (scalarIndent !== null) {
+      if (line.trim().length === 0 || indentOf(line) > scalarIndent) {
+        continue;
+      }
+      scalarIndent = null;
+    }
+    rows.push([index + 1, line]);
+    if (/(?::|^\s*-)\s*[|>][+-]?[0-9]*\s*(?:#.*)?$/.test(line)) {
+      scalarIndent = indentOf(line);
+    }
+  }
+  return rows;
+}
+
+// Every spelling in a workflow file that the scans above would read wrongly.
+// Each one is valid YAML that GitHub honours, so the workflow itself works —
+// what breaks is this suite's reading of it, silently, which is the failure mode
+// all four findings shared.
+function nonCanonicalSpellings(text) {
+  const findings = [];
+  for (const [number, source] of structuralLines(text)) {
+    const line = withoutExpressions(source);
+    // Comments are prose about workflows and routinely quote the very spellings
+    // being banned, so the structural rules read the line without them. Rule
+    // `if-comment` below is the one that needs them and takes the raw line.
+    const bare = withoutComments(line);
+
+    // `if : …` and `required : true` are valid YAML. Every check above anchors
+    // on the colon immediately following the name and reads neither.
+    if (/^\s*(?:-\s+)*[A-Za-z_][A-Za-z0-9_.-]*[ \t]+:/.test(bare)) {
+      findings.push({ number, source, reason: "a key with whitespace before its colon" });
+    }
+
+    // `"required": true`, `'if': …`. Same key to GitHub; invisible to `^ *name:`.
+    if (/^\s*(?:-\s+)*["'][^"']*["'][ \t]*:/.test(bare)) {
+      findings.push({ number, source, reason: "a quoted key" });
+    }
+
+    // `required: TRUE` is a boolean to YAML and not to `/required:\s*true\b/`,
+    // which is case-sensitive on purpose — matching case-insensitively would
+    // also match the string "True" in a choice input. Quoted values are exempt:
+    // docs.yml's `options: [auto, 'true', 'false']` are strings by intent.
+    const property = /^\s*(?:-\s+)*[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:[ \t]*(?<value>.*)$/.exec(bare);
+    const value = property ? property.groups.value.trim() : "";
+    if (/^(?:true|false)$/i.test(value) && !/^(?:true|false)$/.test(value)) {
+      findings.push({ number, source, reason: `a non-lowercase boolean (\`${value}\`)` });
+    }
+
+    // A flow mapping puts keys mid-line — `build: { if: …, steps: [ … ] }`,
+    // `inputs: { token: { required: true } }` — past every anchored `^ *key:`.
+    if (/\{[^{}]*[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:/.test(bare)) {
+      findings.push({ number, source, reason: "a flow-style mapping" });
+    }
+
+    // `topLevelDisjuncts()` reads the raw scalar, so a trailing comment is part
+    // of the expression it splits: `if: … == 'push' # || … 'workflow_dispatch'`
+    // reads as admitting a dispatch that it does not admit.
+    if (/^\s*if[ \t]*:/.test(line) && /(?:^|\s)#/.test(line)) {
+      findings.push({ number, source, reason: "a comment on the same line as an `if:` expression" });
+    }
+  }
+  return findings;
+}
+
+// Every `push` / `workflow_dispatch` token in a trigger section that is not in a
+// position the scan reads as an event. `mentionsPushTrigger()` matches the token
+// anywhere in the section and the dispatch check matches `workflow_dispatch:` at
+// any depth, so an input named `push`, a `paths:` glob containing it, or an
+// `options: [push, dry-run]` list is read as a trigger that is not declared —
+// and, worse, keeps reading as one after the real trigger is removed.
+//
+// Two positions are legitimate: an event KEY at the direct-child indent of
+// `on:`, and a SHORTHAND entry (`on: push`, `on: [push, …]`, `on:` with a
+// `- push` list under it). Everything else is reported.
+function misplacedEventTokens(section) {
+  if (section == null) {
+    return [];
+  }
+  const lines = withoutComments(section).split("\n");
+  const content = lines.slice(1).filter((line) => line.trim().length > 0);
+  // Read from the section rather than assumed. This repository indents `on:` by
+  // two; the scans above do not require that and neither does this.
+  const childIndent = content.length === 0 ? null : Math.min(...content.map(indentOf));
+  const misplaced = [];
+  for (const [index, source] of lines.entries()) {
+    let line = source;
+    if (index === 0) {
+      const shorthand = /^on[ \t]*:[ \t]*(?<value>.*)$/.exec(line);
+      if (shorthand && isPlainEventShorthand(shorthand.groups.value)) {
+        line = "on:";
+      }
+    } else if (indentOf(line) === childIndent) {
+      line = line
+        .replace(/^([ \t]*)(?:push|workflow_dispatch)[ \t]*:/, "$1:")
+        .replace(/^([ \t]*-[ \t]*)(?:push|workflow_dispatch)[ \t]*$/, "$1");
+    }
+    if (/\b(?:push|workflow_dispatch)\b/.test(line)) {
+      misplaced.push({ number: index + 1, source: source.trimEnd() });
+    }
+  }
+  return misplaced;
+}
+
+// Whether an `on:` value is the shorthand form: one plain event name, or a flow
+// sequence of them. `on: {"push": {…}}` is not — it is a flow mapping, reported
+// as one — and neither is anything carrying nested structure.
+function isPlainEventShorthand(value) {
+  const text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  const sequence = /^\[(?<entries>[^[\]{}]*)\]$/.exec(text);
+  const entries = sequence ? sequence.groups.entries.split(",") : [text];
+  return entries.every((entry) => /^[ \t]*(?:"[A-Za-z_]+"|'[A-Za-z_]+'|[A-Za-z_]+)[ \t]*$/.test(entry));
 }
 
 // The exact wire shape from Auto Gate run 32044471684: GET

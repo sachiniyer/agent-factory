@@ -15,7 +15,14 @@ on:
         # nothing therefore gets the push behaviour rather than a second copy of
         # the path list living in the caller, where it had already drifted.
         # 'true'/'false' stay available for a manual deploy or a dry run.
-        description: 'Deploy docs: auto (same rule as a push), or force true/false'
+        #
+        # The description says "the same paths" rather than naming the push
+        # event, deliberately. auto-gate.test.js reads this `on:` section
+        # lexically to decide whether this workflow gates master, and it counts
+        # that token wherever it appears — so the word belongs in a comment,
+        # which the scan strips, and not in a value, which it does not. The
+        # conformance test there fails if it moves back (#3617).
+        description: 'Deploy docs: auto (the same paths a master commit uses), or force true/false'
         required: false
         default: auto
         type: choice

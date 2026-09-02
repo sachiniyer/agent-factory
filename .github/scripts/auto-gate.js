@@ -524,7 +524,16 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // most sharply when it adds a push-gated workflow, which cannot be in the list
   // the running copy holds.
   const workflowsChanged = files.some((path) => path.startsWith(".github/workflows/"));
-  const touchesTui = files.some((path) => TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)));
+  // A `_test.go` file is not compiled into the shipped binary, so it cannot
+  // change what a user sees — and the label this gate demands is a claim that
+  // someone drove the TUI and looked. #3601's only file under these prefixes was
+  // `ui/config_pane_test.go`, and the lane had to run a play-test to satisfy a
+  // gate for a diff with nothing to look at. The subtraction is per FILE, not
+  // per PR: a production file under any prefix still requires the label, and so
+  // does a diff that changes a test and a production file together.
+  const touchesTui = files.some(
+    (path) => !path.endsWith("_test.go") && TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)),
+  );
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   if (touchesTui && !labels.has("play-tested")) {
