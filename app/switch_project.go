@@ -323,6 +323,12 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *home) handleAddProject(path string) (tea.Model, tea.Cmd) {
 	repo, err := config.RepoFromPath(config.ExpandTilde(path))
 	if err != nil {
+		// A probe that never answered says nothing about what the user typed
+		// (#3504): tell them it is worth retrying instead of rejecting the path.
+		if config.RepoProbeUnanswered(err) {
+			m.projectPickerOverlay.SetAddError(fmt.Sprintf("could not check %s — git did not answer; try again", path))
+			return m, nil
+		}
 		m.projectPickerOverlay.SetAddError(fmt.Sprintf("not a git repository: %s", path))
 		return m, nil
 	}

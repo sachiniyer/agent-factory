@@ -11,7 +11,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/spf13/cobra"
 )
 
@@ -178,8 +177,8 @@ can inspect per-session results.`,
 			}
 			workspace := repo.WorkspacePath()
 
-			if !git.IsGitRepo(workspace) {
-				return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
+			if err := requireGitRepoWorkspace(workspace); err != nil {
+				return jsonError(err)
 			}
 
 			cfg, err := config.ResolveConfigForRepo(repo)

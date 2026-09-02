@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -138,6 +139,16 @@ func checkGit(report *Report) {
 	}
 	out, err := exec.Command(gitPath, "-C", cwd, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
+		// Advice is worse than useless when the probe never answered: "run af
+		// from a repo root" sends a user who is already at one somewhere else
+		// (#3504). Classify through the same rule the resolver uses.
+		if classified := config.ClassifyGitProbeError(context.Background(), err); config.RepoProbeUnanswered(classified) {
+			report.addActionableFinding(Finding{
+				Check:  "git-repo",
+				Detail: fmt.Sprintf("%s — run `af doctor` again; if it persists, check that git runs here: %v", config.RepoProbeUnansweredClaim("the current directory", cwd), err),
+			})
+			return
+		}
 		report.addActionableFinding(Finding{
 			Check:  "git-repo",
 			Detail: fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),

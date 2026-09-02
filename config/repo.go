@@ -98,6 +98,40 @@ func probeWentUnanswered(err error) bool {
 	return true
 }
 
+// RepoProbeUnanswered reports whether a repository-resolution failure left the
+// question unanswered — the git child was never started, was killed, or its
+// output was abandoned — rather than answered with a verdict about the path.
+//
+// It is the predicate every site that NARRATES such a failure should branch on
+// (#3504). "git answered, and the answer is no" and "we could not ask git" are
+// different states, and only the first entitles a caller to tell a user that
+// their path is not a repository.
+func RepoProbeUnanswered(err error) bool {
+	return errors.Is(err, ErrRepoProbeUnanswered)
+}
+
+// ClassifyGitProbeError marks a failed git invocation with ErrRepoProbeUnanswered
+// when nothing proves git answered, for callers that run a repository probe of
+// their OWN rather than going through RepoFromPath (session/git's repo check,
+// doctor's setup probe). Sharing the classifier is what keeps those callers from
+// re-deriving the rule and drifting from it — the enumeration this replaced had
+// a measured gap (a fork/exec failure is an *fs.PathError, matching neither exec
+// error type), and a second copy would grow its own.
+//
+// It returns err unchanged when the outcome proves git answered.
+func ClassifyGitProbeError(ctx context.Context, err error) error {
+	return markUnansweredProbe(ctx, err)
+}
+
+// RepoProbeUnansweredClaim words what an unanswered probe entitles a caller to
+// say about path. subject names the thing being resolved ("--repo", "project
+// path", "root_agents entry"), so one sentence serves every surface and cannot
+// drift between them. The ANSWERED half stays with each call site, whose
+// existing copy is already correct for a real verdict.
+func RepoProbeUnansweredClaim(subject, path string) string {
+	return fmt.Sprintf("%s %q could not be checked: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so whether the path is a git repository is unknown", subject, path)
+}
+
 // maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
 // 12 chars; the cap is loose enough to accommodate future schemes while
 // preventing unbounded allocation in path joins or error messages.

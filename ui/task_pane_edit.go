@@ -52,7 +52,10 @@ func (s *TaskPane) validateForm() (string, int) {
 	if err != nil {
 		return fmt.Sprintf("invalid path: %v", err), taskFocusPath
 	}
-	if !git.IsGitRepo(absPath) {
+	if err := git.CheckGitRepo(absPath); err != nil {
+		if config.RepoProbeUnanswered(err) {
+			return fmt.Sprintf("could not check %s — git did not answer; try again", absPath), taskFocusPath
+		}
 		return fmt.Sprintf("%s is not a git repository", absPath), taskFocusPath
 	}
 	s.editPath.SetValue(absPath)
