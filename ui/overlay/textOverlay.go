@@ -80,8 +80,11 @@ func (t *TextOverlay) Render() string {
 		BorderForeground(ui.CurrentTheme().Accent).
 		Padding(textOverlayVerticalPadding, textOverlayHorizontalPadding).
 		Width(t.width)
-	if inner := t.innerHeight(); inner > 0 && t.contentOverflows(inner) {
-		style = style.Height(inner)
+	// One predicate for "this overlay windows its content", so the ↑/↓ markers
+	// visibleContent paints and the Scrollable() the host gates its keys on can
+	// never disagree (#3628).
+	if t.Scrollable() {
+		style = style.Height(t.innerHeight())
 	}
 
 	// Apply the border style and return
@@ -96,6 +99,20 @@ func (t *TextOverlay) SetWidth(width int) {
 func (t *TextOverlay) SetHeight(height int) {
 	t.height = height
 	t.clampScroll(t.innerHeight())
+}
+
+// Scrollable reports whether the content is taller than the visible window —
+// i.e. exactly whether Render will paint an "↑ more" / "↓ more" marker.
+//
+// It is the seam that makes scrolling a property of the CONTENT rather than of
+// the caller (#3628). The markers were painted for every overflowing overlay
+// while only the general `?` help wired scroll keys up (#1290/#1399/#1447), so
+// the one-shot "Session created" screen advertised a `↓` that dismissed it —
+// and, being a once-per-home screen, took its unread tail with it forever.
+// Hosts must gate their scroll/dismiss policy on this so no overlay can
+// advertise an affordance it does not honour.
+func (t *TextOverlay) Scrollable() bool {
+	return t.contentOverflows(t.innerHeight())
 }
 
 func (t *TextOverlay) ScrollUp() {

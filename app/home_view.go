@@ -85,8 +85,8 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	}
 	m.textOverlay = overlay.NewTextOverlay(title + "\n\n" + full)
 	m.textOverlayDismissAnyKey = false
-	m.textOverlayScrollable = true
 	m.textOverlayDismissPolicy = nil
+	m.textOverlayPendingSeenMask = 0
 	m.replayHelpDismissKey = false
 	m.layoutTextOverlay()
 	m.state = stateHelp

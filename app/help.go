@@ -497,12 +497,14 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 	// in the seen bitmask.
 	m.replayHelpDismissKey = false
 	m.textOverlayDismissPolicy = nil
-	m.textOverlayScrollable = false
+	m.textOverlayPendingSeenMask = 0
 	if alwaysShow || (m.appState.GetHelpScreensSeen()&flag) == 0 {
-		// Mark this help screen as seen and save state
-		if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
-			log.WarningLog.Printf("failed to save help screen state: %v", err)
-		}
+		// Record "seen" when the user DISMISSES the screen, not when it is
+		// painted (#3628). A once-per-home screen that overflows 80x24 was
+		// being burned on display, so a user who closed it before reaching the
+		// bottom — which the old any-key dismiss made the default outcome —
+		// could never get the rest back.
+		m.textOverlayPendingSeenMask = flag
 
 		if responsive, ok := helpType.(responsiveHelpText); ok {
 			m.textOverlay = overlay.NewResponsiveTextOverlay(responsive.toContentWidth)
@@ -511,15 +513,22 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 		}
 		m.textOverlay.OnDismiss = onDismiss
 		m.textOverlayDismissAnyKey = true
-		if _, ok := helpType.(helpTypeGeneral); ok {
+		switch helpType.(type) {
+		case helpTypeGeneral:
 			m.textOverlayDismissAnyKey = false
-			m.textOverlayScrollable = true
-		}
-		if _, ok := helpType.(helpTypeInstanceAttach); ok {
+		case helpTypeInstanceStart:
+			// This screen advertises its own close keys ("enter continue · esc
+			// close"), so it is not a press-any-key gate — and it must behave the
+			// same way whether or not it happens to overflow the terminal (#3628).
+			m.textOverlayDismissAnyKey = false
+		case helpTypeInstanceAttach:
 			m.textOverlayDismissAnyKey = false
 			m.textOverlayDismissPolicy = attachHelpDismissPolicy
-		}
-		if _, ok := helpType.(helpTypeInteractive); ok {
+		case helpTypeInteractive:
+			// The one screen that stays a press-any-key gate: its dismiss
+			// keystroke is deliberately the user's first pane input and gets
+			// replayed into the pane (#1576/#2413). An overflowing overlay still
+			// narrows that to the dismiss keys — see handleHelpState.
 			m.replayHelpDismissKey = true
 		}
 		m.layoutTextOverlay()
@@ -536,7 +545,11 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 
 // handleHelpState handles key events when in help state
 func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.textOverlayScrollable && !isHelpDismissKey(msg) {
+	// Scrolling is a property of the CONTENT, not of the caller: any overlay
+	// that overflows paints "↓ more", so any overlay that overflows must honour
+	// the keys that marker advertises (#3628).
+	scrolling := m.textOverlay != nil && m.textOverlay.Scrollable()
+	if scrolling && !isHelpDismissKey(msg) {
 		// Effective bindings precede hardcoded aliases so an advertised rebind
 		// such as up=pgdown keeps its configured meaning inside help.
 		if isHelpLineUpKey(msg) {
@@ -580,7 +593,10 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		runOnDismiss = run
-	} else if !m.textOverlayDismissAnyKey && !isHelpDismissKey(msg) {
+	} else if (scrolling || !m.textOverlayDismissAnyKey) && !isHelpDismissKey(msg) {
+		// While the content overflows, the press-any-key gate is suspended: the
+		// scroll keys the "↓ more" marker advertises must scroll rather than
+		// close the screen out from under an unread tail (#3628).
 		return m, nil
 	}
 
@@ -603,10 +619,10 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		shouldClose = true
 	}
 	if shouldClose {
+		m.recordHelpScreenSeen()
 		replayDismissKey := m.replayHelpDismissKey
 		m.replayHelpDismissKey = false
 		m.textOverlayDismissAnyKey = false
-		m.textOverlayScrollable = false
 		m.textOverlayDismissPolicy = nil
 		m.state = stateDefault
 		// Menu.SetState rebuilds the options slice; call it synchronously
@@ -623,6 +639,21 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// recordHelpScreenSeen persists the one-shot mask of the overlay the user just
+// dismissed. It is deliberately the LAST step of the screen's life rather than
+// the first (#3628): a screen the user never finished reading has not been
+// seen, and quitting with one open leaves it to be shown again.
+func (m *home) recordHelpScreenSeen() {
+	flag := m.textOverlayPendingSeenMask
+	m.textOverlayPendingSeenMask = 0
+	if flag == 0 {
+		return
+	}
+	if err := m.appState.SetHelpScreensSeen(m.appState.GetHelpScreensSeen() | flag); err != nil {
+		log.WarningLog.Printf("failed to save help screen state: %v", err)
+	}
 }
 
 func attachHelpDismissPolicy(msg tea.KeyMsg) (bool, bool) {
@@ -673,10 +704,17 @@ func isHelpLineDownKey(msg tea.KeyMsg) bool {
 	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDown])
 }
 
+// isHelpDismissKey is the explicit close set for every text overlay that is not
+// a press-any-key gate. enter and q join esc here because a scrolling overlay
+// no longer closes on just anything (#3628), and the first-run screens advertise
+// "enter continue · esc close" in their own copy. The bindings are read from the
+// generated table so a [keys] rebind moves them (#1026).
 func isHelpDismissKey(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyEsc ||
 		msg.Type == tea.KeyCtrlC ||
-		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyHelp])
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyHelp]) ||
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyEnter]) ||
+		key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit])
 }
 
 func replayKeyAfterInteractiveHelpDismiss(dismissCmd tea.Cmd, keyMsg tea.KeyMsg) tea.Cmd {
