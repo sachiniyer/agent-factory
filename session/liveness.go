@@ -641,10 +641,7 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 // and map a persisted Dead → Lost (recovery-eligible, #1108). Shared so the
 // snapshot reconcile mirrors liveness identically to a cold-start restore.
 func livenessFromData(data InstanceData) Liveness {
-	lv := data.Liveness
-	if lv == LivenessUnset {
-		lv = LivenessForStatus(data.Status)
-	}
+	lv := RecordedLiveness(data)
 	if lv == LiveDead {
 		lv = LiveLost
 	}
@@ -664,7 +661,13 @@ func IsArchivedData(data InstanceData) bool {
 
 // EffectiveLiveness resolves the liveness a serialized record actually has,
 // applying the same rollforward IsArchivedData relies on: prefer the `liveness`
-// field, fall back to the legacy `status` int for records written before #1195.
+// field, fall back to the legacy `status` int for records written before #1195,
+// and rewrite a persisted Dead to Lost. That last step is what separates it from
+// RecordedLiveness (session/state_names.go), which reports the record's own
+// value and is therefore what `liveness_name` and the `--status` filter read: a
+// caller asking "what state should this session be treated as" wants Dead folded
+// into recovery-eligible Lost, while a caller NAMING the `liveness` integer must
+// not rename the value sitting beside it.
 //
 // Exported because reading data.Liveness directly is a trap for any caller that
 // iterates records rather than live instances — a pre-#1195 record carries the

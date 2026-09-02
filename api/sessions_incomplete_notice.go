@@ -8,6 +8,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -95,6 +96,32 @@ func warnIncompleteTitleWidening(title string, gaps []config.RepoInstancesSkip, 
 type sessionGetResult struct {
 	session.InstanceData
 	Warnings []string `json:"warnings,omitempty"`
+}
+
+// MarshalJSON encodes the session and then splices Warnings in beside it.
+//
+// The embedding above would otherwise be silently lossy: InstanceData carries
+// its own MarshalJSON (it derives status_name/liveness_name at encode time,
+// #3631), that method is PROMOTED to this struct, and encoding/json calls the
+// promoted method for the whole value — emitting a bare session object and
+// dropping `warnings` entirely. Delegating explicitly restores the flat shape
+// this type exists for, with both halves present.
+//
+// The splice preserves the session's field order rather than re-encoding through
+// a map, which would alphabetize every key of a public payload.
+func (r sessionGetResult) MarshalJSON() ([]byte, error) {
+	object, err := json.Marshal(r.InstanceData)
+	if err != nil {
+		return nil, err
+	}
+	if len(r.Warnings) == 0 {
+		return object, nil
+	}
+	warnings, err := json.Marshal(r.Warnings)
+	if err != nil {
+		return nil, err
+	}
+	return session.AppendJSONMember(object, "warnings", warnings)
 }
 
 // sessionGetPayload builds sessionsGetCmd's --json payload for a resolved

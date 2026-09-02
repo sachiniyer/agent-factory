@@ -221,6 +221,53 @@ moved projects in between. Omitting `expect` (or sending `enforce: false`) skips
 the check, which is what a caller with no project context does — existing
 clients are unaffected.
 
+### Session state names
+
+The `<session>` objects above spell three of their enums twice, on purpose
+(#3631).
+
+`status`, `liveness` and `tabs[].kind` are **integers** and stay integers —
+external scripts already decode them as numbers, and retyping them would break
+every one of those consumers. Beside each sits a **string twin** that names the
+same value, so a payload can be read without consulting Go source:
+
+| Integer | Twin | Vocabulary |
+|---------|------|------------|
+| `status` | `status_name` | `running`, `ready`, `loading`, `deleting`, `dead`, `lost`, `archived` |
+| `liveness` | `liveness_name` | `running`, `ready`, `lost`, `dead`, `archived`, `limit-reached` |
+| `tabs[].kind` | `tabs[].kind_name` | `agent`, `shell`, `process`, `web`, `vscode` |
+
+The twins are **always present** — never omitted, even when the integer beside
+them is (`liveness` carries `omitempty`) — and they are derived by whichever
+binary encodes the payload rather than stored, so a record read off disk or
+received from an older daemon is named correctly all the same. Nothing decodes
+them back: a client that sends one is ignored.
+
+`liveness_name` is the vocabulary the `statuses` filter above accepts, and it is
+resolved by the SAME derivation the filter runs — including the fallback to the
+legacy `status` int for a record written before `liveness` existed. So the round
+trip holds: every row a `statuses` value selects reports that value as its
+`liveness_name`, and vice versa.
+
+`status_name` names the LEGACY composed axis, which is not always the same
+answer, and the difference is the reason both fields exist:
+
+- `loading` and `deleting` are in-flight operations with no liveness of their
+  own, so no `statuses` word can select them.
+- A session parked at a usage-limit wall has no legacy `status` value at all: it
+  composes to `ready` (`status: 1`, `status_name: "ready"`) while
+  `liveness_name` reports `limit-reached`. **Filter and branch on
+  `liveness_name`**; read `status_name` only when you are reading `status`.
+
+`tabs[].kind_name` uses the same words as `tab_kinds[].kind` — the two arrays no
+longer disagree about what a `kind` is. Every creatable kind's name is also its
+`--kind` / `CreateTab` `kind` value, so a tab's reported kind can be handed
+straight back to a create call; `agent` and `process` are named but are not
+creatable (see `tab_kinds` for what a session will accept).
+
+An integer this binary does not recognize — a record from a newer `af` — names
+itself `""` rather than guessing a word.
+
 ### Session idle diagnosis
 
 The `<session>` objects above mirror `af sessions list` output. Two of their

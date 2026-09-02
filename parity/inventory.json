@@ -763,10 +763,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:204 sessionsGetCmd"
+        "pointer": "api/sessions.go:288 sessionsGetCmd"
       },
       "verdict": "deliberate",
-      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen."
+      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen. Its payload is the same self-describing session object `list` emits (see session.list; #3631 added status_name/liveness_name/tabs[].kind_name), and the ambiguity-widening `warnings` member of the --json form rides beside it."
     },
     {
       "id": "session.handoff",
@@ -837,10 +837,10 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions.go:186 sessionsListCmd"
+        "pointer": "api/sessions.go:221 sessionsListCmd"
       },
       "verdict": "parity",
-      "notes": ""
+      "notes": "Every surface renders the same daemon Snapshot. The CLI half is the SCRIPTING shape of it, so #3631 made that payload self-describing: `status`, `liveness` and `tabs[].kind` keep their integer types (external scripters already decode them as numbers, and retyping a public field is not a bug fix) and each gained an always-present string twin — `status_name`, `liveness_name`, `tabs[].kind_name` — derived at encode time from the SAME vocabulary tables the `--status` filter and `tab_kinds[].kind` already used (session/state_names.go). The TUI and web are unaffected by construction: they render state as glyphs and rows from the typed struct, never from these words, so this is a wire-shape property of one shared payload rather than a capability a surface can lack."
     },
     {
       "id": "session.list.filters",
@@ -859,7 +859,7 @@
       },
       "verdict": "deliberate",
       "issue": "#3362",
-      "notes": "The CLI and public POST /v1/Snapshot API are query surfaces, so they expose composable daemon-side bounds before transfer. The TUI and web use Snapshot as their authoritative navigation rail and must reconcile every session; filtering that rail would make an omitted row indistinguishable from deletion and strand it from interactive management. A separate client-side search/view control could hide rows without narrowing the authoritative snapshot, but that is a different UI feature rather than parity for this bounded scripting query."
+      "notes": "The CLI and public POST /v1/Snapshot API are query surfaces, so they expose composable daemon-side bounds before transfer. The TUI and web use Snapshot as their authoritative navigation rail and must reconcile every session; filtering that rail would make an omitted row indistinguishable from deletion and strand it from interactive management. A separate client-side search/view control could hide rows without narrowing the authoritative snapshot, but that is a different UI feature rather than parity for this bounded scripting query. #3631 closed the round-trip hole this flag left open: the vocabulary it accepts is now derived from the same table that names each row's `liveness_name`, so a client can list, read a row's own word, and filter on it without hardcoding enum integers no document defined."
     },
     {
       "id": "session.pr.open",

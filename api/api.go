@@ -778,7 +778,13 @@ func init() {
 	// opt-in to global breadth, matching `tasks list` (#2089).
 	sessionsListCmd.Flags().BoolVar(&sessionsListAllFlag, "all", false, "List sessions across every project instead of only the current one")
 	sessionsListCmd.Flags().BoolVar(&sessionsListLiveFlag, "live", false, "Exclude archived sessions")
-	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil, "Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached)")
+	// The vocabulary comes from session's canonical Liveness ↔ name table, which
+	// is also what every row's `liveness_name` is spelled from (#3631) — so the
+	// help can never advertise a word the payload does not report, or miss one it
+	// does.
+	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil,
+		fmt.Sprintf("Filter by lifecycle status; repeat for more than one (%s). Each row reports its own value as liveness_name",
+			strings.Join(session.LivenessNameList(), ", ")))
 	sessionsListCmd.Flags().DurationVar(&sessionsListMaxAgeFlag, "max-age", 0, "Only list sessions created within this duration (for example 24h)")
 	sessionsListCmd.Flags().IntVar(&sessionsListLimitFlag, "limit", 0, "Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded)")
 
