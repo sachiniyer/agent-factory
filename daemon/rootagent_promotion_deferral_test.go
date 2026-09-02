@@ -886,3 +886,212 @@ func TestReprovedIdentityCarriesTheProjectWithIt(t *testing.T) {
 		t.Fatalf("the identity just proven must also be recorded: got %q", recorded)
 	}
 }
+
+// TestStartupProofUnderANewIdentityPublishesIt pins #3530 review id 3919604357.
+//
+// The startup switch handled a proof that AGREED and a proof that failed, and
+// dropped the one that named a different identity — the same MARKED checkout
+// whose repository's common directory moved between the resolution and the
+// proof. The project was then published under the stale identity with nothing
+// latched, and a resolved project never enters unresolvedRoots, so no pass
+// would ever revisit it.
+func TestStartupProofUnderANewIdentityPublishesIt(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	base := testguard.CanonicalTempDir(t)
+	source := filepath.Join(base, "source")
+	if err := exec.Command("git", "init", source).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-C", source, "config", "user.email", "t@t"},
+		{"-C", source, "config", "user.name", "t"},
+		{"-C", source, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	bareA := filepath.Join(base, "A.git")
+	bareB := filepath.Join(base, "B.git")
+	for _, bare := range []string{bareA, bareB} {
+		if err := exec.Command("git", "clone", "--quiet", "--bare", source, bare).Run(); err != nil {
+			t.Fatalf("git clone --bare: %v", err)
+		}
+	}
+	workspace := filepath.Join(base, "workspace")
+	if err := exec.Command("git", "-C", bareA, "worktree", "add", "--detach", workspace).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+	project := registerTestProject(t, workspace)
+	clearRecordedRepoID(t, project.ID)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	idA, idB := config.RepoIDFromRoot(bareA), config.RepoIDFromRoot(bareB)
+	if idA == idB {
+		t.Fatalf("fixture needs two distinct bare identities")
+	}
+
+	// Between the resolution and the proof, the SAME marked checkout comes to
+	// resolve under B: its common directory moved, and the marker moved with
+	// it — which is what makes the proof succeed while naming another identity.
+	moved := false
+	config.SetRegisteredProjectProofRaceHookForTest(t, func() {
+		if moved {
+			return
+		}
+		moved = true
+		markers, err := filepath.Glob(filepath.Join(bareA, "agent-factory", "checkout-id-*"))
+		if err != nil || len(markers) == 0 {
+			t.Fatalf("find marker under %s: %v (%v)", bareA, err, markers)
+		}
+		data, err := os.ReadFile(markers[0])
+		if err != nil {
+			t.Fatalf("read marker: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(bareB, "agent-factory"), 0o755); err != nil {
+			t.Fatalf("mkdir marker dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(bareB, "agent-factory", filepath.Base(markers[0])), data, 0o644); err != nil {
+			t.Fatalf("write marker: %v", err)
+		}
+		if err := exec.Command("git", "-C", bareA, "worktree", "remove", "--force", workspace).Run(); err != nil {
+			t.Fatalf("detach the workspace from A: %v", err)
+		}
+		if err := exec.Command("git", "-C", bareB, "worktree", "add", "--detach", workspace).Run(); err != nil {
+			t.Fatalf("attach the workspace to B: %v", err)
+		}
+	})
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if !moved {
+		t.Fatalf("fixture never reached the proof, so it pins nothing")
+	}
+	layers := manager.rootAgentLayers.Load()
+	if _, stale := layers.projectRoots[idA]; stale {
+		t.Fatalf("the project must not be published under the identity its resolution named (%s) once the proof names another", idA)
+	}
+	if root, ok := layers.projectRoots[idB]; !ok || root != workspace {
+		t.Fatalf("it must be published under the identity its checkout PROVES (%s at %s), got %q (present=%v)", idB, workspace, root, ok)
+	}
+	if _, ok := layers.personal[idB]; !ok {
+		t.Fatalf("its personal layer must be filed there too, or a legacy opt-in starts the root the user disabled")
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != idB {
+		t.Fatalf("and the proven identity must be recorded: got %q, want %s", recorded, idB)
+	}
+}
+
+// TestDestinationFenceDefersThePromotion pins #3530 review id 3919604386.
+//
+// A delete aimed at the candidate identity installs its fence there and
+// resolves no registry row — the row still answers to the identity it is filed
+// under. A promotion that checked only the SOURCE fence would move the durable
+// project into the identity being torn down: archived and suppressed, never
+// deregistered, and back after a restart.
+func TestDestinationFenceDefersThePromotion(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	realID := repoID(t, repoPath)
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+
+	// A delete holds the DESTINATION identity, not the one the record is filed
+	// under.
+	manager.mu.Lock()
+	if manager.projectDeletes == nil {
+		manager.projectDeletes = make(map[string]struct{})
+	}
+	manager.projectDeletes[realID] = struct{}{}
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	layers := manager.rootAgentLayers.Load()
+	if _, still := layers.unresolvedRoots[derivedID]; !still {
+		t.Fatalf("a promotion into an identity a delete holds must be deferred, leaving the record where it is")
+	}
+	if root, published := layers.projectRoots[realID]; published {
+		t.Fatalf("and nothing may be published under %s (root %q) while that delete runs", realID, root)
+	}
+	manager.mu.Lock()
+	probe := manager.rootHealProbes[derivedID]
+	manager.mu.Unlock()
+	if probe == nil {
+		t.Fatalf("the probe must be kept for the pass that completes the transition")
+	}
+}
+
+// TestSuccessfulProofSurvivesAFailedWrite pins #3530 review id 3919604378.
+//
+// A retry that PROVES the checkout and then fails to write recorded that proof
+// only in its local map, and returned without publishing when nothing else
+// changed — so the next pass reverted to the unproven latch. If the checkout
+// disappears after the proof but before the write recovers, every later
+// re-proof fails and the established identity is never written.
+func TestSuccessfulProofSurvivesAFailedWrite(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	marker := checkoutMarkerPathForTest(t, repoPath)
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatalf("chmod marker: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if entry := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; entry.proven {
+		t.Fatalf("fixture must start UNPROVEN")
+	}
+
+	// The marker becomes readable, so the proof succeeds — while the record's
+	// own directory is read-only, so only the WRITE fails. (A corrupt sibling
+	// record would fail the registry LIST too, which is a different branch:
+	// see TestUnprovenLatchSurvivesAnUnreadableRegistry.)
+	if err := os.Chmod(marker, 0o644); err != nil {
+		t.Fatalf("restore marker: %v", err)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	recordDir := filepath.Join(dir, project.ID)
+	if err := os.Chmod(recordDir, 0o555); err != nil {
+		t.Fatalf("chmod record dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(recordDir, 0o755) })
+	if err := os.WriteFile(filepath.Join(recordDir, "probe"), nil, 0o644); err == nil {
+		t.Skip("this test needs an unwritable directory to be unwritable; running as a user that ignores it")
+	}
+	manager.EnsureRootAgents()
+
+	entry, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]
+	if !kept {
+		t.Fatalf("the latch must survive a failed write")
+	}
+	if !entry.proven || entry.repoID != realID {
+		t.Fatalf("and must carry the proof it established, so a checkout that disappears afterwards cannot make it unwritable: got %+v", entry)
+	}
+}

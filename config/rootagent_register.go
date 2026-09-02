@@ -68,7 +68,8 @@ func DeregisterRootAgentsForRepo(repoIDs ...string) ([]string, error) {
 // hashing the expanded/cleaned path when the repo no longer resolves.
 func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	expanded := ExpandTilde(key)
-	if repo, err := RepoFromPath(expanded); err == nil {
+	repo, probeErr := RepoFromPath(expanded)
+	if probeErr == nil {
 		return repo.ID == repoID
 	}
 	// CANONICAL role (#3530): the question is "does this key name that
@@ -78,6 +79,16 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	cleaned := filepath.Clean(expanded)
 	if RepoIDFromRoot(cleaned) == repoID {
 		return true
+	}
+	// The CANONICAL fallback is gated on a determinate verdict (#3530 review id
+	// 3919604362), unlike the lexical one above it, which is master's rule and
+	// stays as it was. A symlink-spelled key may name a live repository through
+	// an operational git failure, and hashing its canonical spelling can then
+	// match a DIFFERENT repository's old path-derived id — sweeping the live
+	// one's opt-in on that project's behalf. Uncertainty declines the extra
+	// match rather than making it.
+	if !PathIsDeterminatelyFree(cleaned, probeErr) {
+		return false
 	}
 	// …and again through the key's CANONICAL spelling (#3530 review id
 	// 3918120733). The caller derives its id from a path the registry

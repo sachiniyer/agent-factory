@@ -784,6 +784,11 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 		break
 	}
 	remaining := make(map[string]reconcileOwedEntry, len(healed.reconcileOwed))
+	// changed covers BOTH kinds of progress: an entry leaving the latch, and an
+	// entry whose content advanced (#3530 review id 3919604378). A proof that
+	// succeeded while the write failed only records that in `remaining`, so
+	// returning false there would discard it and make the next pass re-derive a
+	// proof the checkout may no longer be able to give.
 	changed := false
 	for projectID, owed := range healed.reconcileOwed {
 		if !owed.proven {
@@ -823,6 +828,7 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 				owed.repoID = proven
 			}
 			owed.proven = true
+			changed = true
 		}
 		wrote, err := config.ReconcileProjectRepoID(projectID, owed.repoID)
 		if err != nil {
@@ -922,9 +928,17 @@ func promoteRecordedIdentity(m *Manager, healed *rootAgentSnapshot, recordedID, 
 	// Refusing the promotion is the honest answer — the delete owns this
 	// identity right now, and the next pass promotes once it settles.
 	m.mu.Lock()
-	_, fenced := m.projectDeletes[recordedID]
+	_, sourceFenced := m.projectDeletes[recordedID]
+	// The DESTINATION fence counts too (#3530 review id 3919604386). A delete
+	// aimed at the candidate identity installs it, resolves no registry row —
+	// the row still answers to the identity it is filed under — and would
+	// otherwise have this promotion move the durable project into the very
+	// identity being torn down: archived and suppressed, never deregistered,
+	// and back after a restart. Either fence defers the promotion; the next
+	// pass runs once the delete settles.
+	_, destinationFenced := m.projectDeletes[realID]
 	m.mu.Unlock()
-	if fenced {
+	if sourceFenced || destinationFenced {
 		return false
 	}
 	// And refuse when the identity being left behind is one ANOTHER live

@@ -257,6 +257,22 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
 						log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; retrying on the ensure cadence — until it succeeds, a path that goes away falls back to a provisional identity: %v", p.ID, repoID, err)
 					}
+				case ok:
+					// The proof named a DIFFERENT identity than the resolution
+					// a moment earlier did — the same marked checkout, its
+					// repository's identity root moved in between (#3530 review
+					// id 3919604357). Handling only equality published the
+					// project and its personal policy under the stale one with
+					// NOTHING latched, and a resolved project never enters
+					// unresolvedRoots, so no pass would ever revisit it: a
+					// legacy opt-in resolving the proven identity could then
+					// start without the project's disable. The proof wins,
+					// because it is the evidence about which checkout this is.
+					repoID, repoRoot = proven, p.Root
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
+						reconcileOwed[p.ID] = reconcileOwedEntry{repoID: repoID, proven: true}
+						log.WarningLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the identity its path resolved to, but that could not be recorded; retrying on the ensure cadence: %v", p.ID, repoID, err)
+					}
 				case !ok:
 					// The PROOF is what failed — a marker read that timed out
 					// or could not be read — and that is just as unfinished as

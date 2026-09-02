@@ -733,3 +733,55 @@ func TestSweepRequiresADeterminateVerdictAboutTheRecordedPath(t *testing.T) {
 		})
 	}
 }
+
+// TestAbandonedRowClearsTheSelectionFlag pins #3530 review id 3919604370.
+//
+// A pathname match sets "a row was selected", but when claimantForRecord finds
+// no proof the row is abandoned and its path dropped — so nothing will be
+// deregistered. Leaving the flag set told the transition gate a project had
+// been selected and skipped the reverse check, letting the delete act on the
+// candidate identity while the unresolved row survived to reappear.
+func TestAbandonedRowClearsTheSelectionFlag(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// An unrelated checkout takes the path: present, so the record's claim is
+	// unproven and its row will be abandoned, while a probe holds the candidate
+	// identity it resolved.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	occupantID := repoID(t, repoPath)
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	pending := &rootReattributionProbe{done: make(chan struct{})}
+	pending.candidate.Store(repo)
+	manager.mu.Lock()
+	manager.rootHealProbes[derivedID] = pending
+	manager.mu.Unlock()
+
+	// By PATH, so the claimant scan runs against the matched row and abandons
+	// it — a RepoID-only request never selects the row at all and so cannot
+	// exercise this branch.
+	_, err = manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	if err == nil {
+		t.Fatalf("the row was abandoned, so no project was selected: the reverse transition check must run and refuse rather than act on %s", occupantID)
+	}
+	if !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("the refusal must state that nothing was mutated: %v", err)
+	}
+}

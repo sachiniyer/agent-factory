@@ -481,7 +481,15 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 					// id 3910519845). Drop the path: the delete still tears
 					// down and suppresses the occupant, and the stale record
 					// stays for its own owner to resolve or remove.
+					//
+					// And with the path goes the CLAIM that a row was selected
+					// (#3530 review id 3919604370): this row is abandoned, so
+					// leaving the flag set would tell the transition gate a
+					// project had been selected and skip the reverse check —
+					// letting the delete act on the candidate identity while
+					// the unresolved row survives to reappear.
 					repoPath = ""
+					rowFound = false
 				}
 				break
 			}
