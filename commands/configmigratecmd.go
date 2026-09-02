@@ -62,11 +62,18 @@ Two things it will not do:
   root_agents is reported and left exactly where it is. Its successor is a
   registered project's personal [root_agent], so migrating it would mean
   registering projects for you: durable state outside this file. The keys that
-  can move still move.`,
+  can move still move.
+
+Local-only: it rewrites the file on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to migrate that host.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config migrate", "rewrites this machine's config file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 
 		result, err := config.MigrateGlobalConfig()
 		if err != nil {
