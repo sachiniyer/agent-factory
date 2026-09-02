@@ -270,3 +270,42 @@ func TestApplyLiveArmingToleratesAnUnbackfilledRepoID(t *testing.T) {
 	require.NotNil(t, got[0].NextRunAt)
 	assert.Equal(t, next, *got[0].NextRunAt)
 }
+
+func TestApplyLiveArmingWillNotGuessBetweenConflictingBindings(t *testing.T) {
+	// The backfill straddle, at its worst: the disk read landed before the daemon
+	// wrote this row's RepoID and ListTasks landed after, so the local record is
+	// unbound while the observations are not. A reused path means an older row
+	// retained to ANOTHER repo shares the id, the path and the expression — and a
+	// missing id matching anything would take that row's armed answer over this
+	// record's own not-armed one, reporting a task the daemon skipped as scheduled.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	otherRepo := armingFixture("dup", "0 9 * * *")
+	otherRepo.RepoID = "repo-a"
+	otherRepo.Arming, otherRepo.NextRunAt = ArmingArmed, &next
+	thisRepo := armingFixture("dup", "0 9 * * *")
+	thisRepo.RepoID = "repo-b"
+	thisRepo.Arming = ArmingNotArmed
+
+	unbound := armingFixture("dup", "0 9 * * *") // read before the backfill
+	require.Empty(t, unbound.RepoID)
+
+	got := ApplyLiveArming([]Task{unbound}, []Task{otherRepo, thisRepo})
+	assert.Equal(t, ArmingUnknown, got[0].Arming,
+		"two candidates bound to different repos are not something an unbound row may choose between")
+	assert.Nil(t, got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingStillTakesAnUnambiguousObservationWhileUnbound(t *testing.T) {
+	// The fallback has to keep working for the case it exists for. One candidate
+	// is never ambiguous however it is bound, and neither is a set that agrees —
+	// refusing those would turn every mid-backfill poll into a blank rail.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	observed := armingFixture("a", "0 9 * * *")
+	observed.RepoID = "repo-a"
+	observed.Arming, observed.NextRunAt = ArmingArmed, &next
+
+	unbound := armingFixture("a", "0 9 * * *")
+	got := ApplyLiveArming([]Task{unbound}, []Task{observed})
+	assert.Equal(t, ArmingArmed, got[0].Arming)
+	require.NotNil(t, got[0].NextRunAt)
+}

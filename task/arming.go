@@ -96,6 +96,17 @@ func takeMatching(live map[string][]Task, used map[string][]bool, t Task) (Task,
 		claimed = make([]bool, len(observed))
 		used[t.ID] = claimed
 	}
+	// An unbound record must not GUESS between candidates that disagree about
+	// which project they belong to. sameBinding lets a missing RepoID match
+	// anything, which is right while the field is being backfilled — but if the
+	// disk read landed before the backfill and ListTasks after it, an older row
+	// retained to a different repo can still share the reused path, the id and the
+	// expression, and "match anything" would take its armed answer over this
+	// record's own not-armed one. Tolerate the missing identity only where it
+	// cannot pick the wrong row (#3626 review).
+	if t.RepoID == "" && ambiguousBinding(observed, claimed, t) {
+		return Task{}, false
+	}
 	for j, o := range observed {
 		if claimed[j] || !sameTrigger(o, t) {
 			continue
@@ -104,6 +115,28 @@ func takeMatching(live map[string][]Task, used map[string][]bool, t Task) (Task,
 		return o, true
 	}
 	return Task{}, false
+}
+
+// ambiguousBinding reports whether the unclaimed candidates for t disagree about
+// which repo they belong to. Two candidates carrying DIFFERENT non-empty RepoIDs
+// are two different tasks that a record with no id of its own cannot choose
+// between, and choosing wrong reports a row the daemon skipped as armed.
+//
+// A single candidate is never ambiguous however it is bound, and neither is a
+// set that agrees — those are the ordinary cases the backfill fallback exists
+// for, and they keep working.
+func ambiguousBinding(observed []Task, claimed []bool, t Task) bool {
+	seen := ""
+	for j, o := range observed {
+		if claimed[j] || o.RepoID == "" || !sameTrigger(o, t) {
+			continue
+		}
+		if seen != "" && seen != o.RepoID {
+			return true
+		}
+		seen = o.RepoID
+	}
+	return false
 }
 
 // sameTrigger reports whether an observation about o describes the same trigger
