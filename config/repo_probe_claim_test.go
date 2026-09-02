@@ -77,3 +77,39 @@ func TestRepoProbeUnansweredClaimAssertsNothingAboutThePath(t *testing.T) {
 	assert.NotContains(t, claim, "is not a git repository",
 		"an unanswered probe must never carry the verdict this sweep exists to remove")
 }
+
+// TestResolveProjectSelectorDoesNotBlameThePathForAnUnansweredProbe is a WIRING
+// test, and it exists because the mechanism passing proves nothing about the
+// call site: resolveProjectBinding runs its OWN git probes, so until those were
+// classified the sentinel never reached the selector's narration and its
+// unanswered branch was dead code for exactly the case it was added for (#3504
+// review).
+func TestResolveProjectSelectorDoesNotBlameThePathForAnUnansweredProbe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	dir := t.TempDir()
+	installFakeGit(t, `#!/bin/sh
+kill -9 $$
+`)
+
+	_, err := ResolveProjectSelector(dir)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "is not inside a git repository",
+		"a killed probe is not evidence that the path is outside a repository")
+	assert.Contains(t, err.Error(), "git never answered",
+		"the selector must name the subprocess outcome")
+	assert.True(t, RepoProbeUnanswered(err),
+		"and the classification must survive the selector's own wrapping")
+}
+
+// TestResolveProjectSelectorStillReportsARealNonRepository guards the other
+// direction: when git answers, the existing message is the honest one.
+func TestResolveProjectSelectorStillReportsARealNonRepository(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	dir := t.TempDir()
+
+	_, err := ResolveProjectSelector(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not inside a git repository",
+		"git answered, and the answer is no")
+	assert.False(t, RepoProbeUnanswered(err))
+}
