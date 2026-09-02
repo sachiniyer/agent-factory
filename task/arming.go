@@ -116,8 +116,34 @@ func sameTrigger(o, t Task) bool {
 	if o.IsWatch() != t.IsWatch() || o.Enabled != t.Enabled {
 		return false
 	}
+	if !sameBinding(o, t) {
+		return false
+	}
 	if t.IsWatch() {
 		return o.WatchCmd == t.WatchCmd && o.ProjectPath == t.ProjectPath && o.Name == t.Name
 	}
 	return o.CronExpr == t.CronExpr && o.ProjectPath == t.ProjectPath
+}
+
+// sameBinding reports whether two records are bound to the same project, by the
+// identity the display scope itself keys on.
+//
+// ProjectPath alone is not that identity. repoScope.matches treats a RETAINED
+// RepoID as authoritative and only falls back to the path, precisely so a task
+// survives its project being moved — which means two rows can share a path and
+// still belong to different repos, after a path is deleted and reused. The rail
+// then displays the new repo's row while an id-and-path match would hand it the
+// old repo's armed entry and its fire time (#3626 review).
+//
+// Compared only when BOTH sides carry one, which is the fallback legacy rows
+// need and is not merely a concession to them. RepoID is daemon-backfilled, so
+// two reads of the same file can straddle a backfill and disagree about a record
+// nobody changed; demanding equality there would spend real observations on
+// spurious unknowns. An empty id on either side means "not bound yet", and the
+// path comparison the callers already make is then the best available answer.
+func sameBinding(o, t Task) bool {
+	if o.RepoID == "" || t.RepoID == "" {
+		return true
+	}
+	return o.RepoID == t.RepoID
 }

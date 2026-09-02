@@ -185,3 +185,46 @@ func TestApplyLiveArmingStaysUnknownWhenNoObservationIsAboutThisRow(t *testing.T
 	assert.Equal(t, ArmingUnknown, got[0].Arming)
 	assert.Nil(t, got[0].NextRunAt)
 }
+
+func TestApplyLiveArmingRefusesAnObservationBoundToAnotherRepo(t *testing.T) {
+	// A path can be deleted and reused, and repoScope.matches treats a RETAINED
+	// RepoID as authoritative over the path — that is what lets a task survive its
+	// project moving. So two rows can share an id, a trigger AND a ProjectPath and
+	// still belong to different repos, and the pane displays whichever one its
+	// RepoID selects. Matching on id and path alone would hand the displayed row
+	// the OTHER repo's armed entry, complete with a fire time.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	oldRepo := armingFixture("dup", "0 9 * * *")
+	oldRepo.RepoID = "repo-a"
+	oldRepo.Arming, oldRepo.NextRunAt = ArmingArmed, &next
+	newRepo := armingFixture("dup", "0 9 * * *")
+	newRepo.RepoID = "repo-b"
+	newRepo.Arming = ArmingNotArmed
+
+	local := armingFixture("dup", "0 9 * * *")
+	local.RepoID = "repo-b"
+
+	got := ApplyLiveArming([]Task{local}, []Task{oldRepo, newRepo})
+	assert.Equal(t, ArmingNotArmed, got[0].Arming,
+		"the observation bound to THIS repo is the one that answers")
+	assert.Nil(t, got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingToleratesAnUnbackfilledRepoID(t *testing.T) {
+	// RepoID is daemon-backfilled, so two reads of the same file can straddle a
+	// backfill and disagree about a record nobody changed. An empty id on either
+	// side means "not bound yet", not "a different project" — demanding equality
+	// there would throw away real observations for a field in transition.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	observed := armingFixture("a", "0 9 * * *")
+	observed.RepoID = "repo-a"
+	observed.Arming, observed.NextRunAt = ArmingArmed, &next
+
+	legacy := armingFixture("a", "0 9 * * *") // read before the backfill landed
+	require.Empty(t, legacy.RepoID)
+
+	got := ApplyLiveArming([]Task{legacy}, []Task{observed})
+	assert.Equal(t, ArmingArmed, got[0].Arming, "an unbound id is not a different project")
+	require.NotNil(t, got[0].NextRunAt)
+	assert.Equal(t, next, *got[0].NextRunAt)
+}
