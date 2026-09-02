@@ -539,7 +539,13 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		return
 	}
 
-	for _, dir := range candidateTempHomes(tempDir) {
+	sweep := candidateTempHomes(tempDir, ctx.opts.MaxTempHomeCandidates)
+	// Reported BEFORE the per-home findings, deliberately. This row is the
+	// caveat on every count below it, and a caveat printed after the thing it
+	// qualifies is a caveat most readers never reach.
+	reportTempHomeSweepTruncation(report, tempDir, sweep, ctx.opts.MaxTempHomeCandidates)
+
+	for _, dir := range sweep.candidates {
 		dir = filepath.Clean(dir)
 		if dir == activeHome || !isAFHome(dir) {
 			continue
@@ -615,6 +621,41 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 	}
 }
 
+// reportTempHomeSweepTruncation says out loud that the temp-home sweep did not
+// see the whole temp dir.
+//
+// This is the half of #3466 that actually misleads. A bounded sweep finds fewer
+// stale homes than an unbounded one, and without this row the two runs differ
+// only in a number nobody can calibrate — the shorter list reads as the
+// healthier box. The issue was filed by someone who misread exactly that while
+// looking straight at it.
+//
+// It carries its OWN check slug rather than "stale-temp-home", which matters
+// more than it looks: stale-temp-home findings collapse into a single summary
+// row, so filing this under that slug would fold the warning that the scan was
+// incomplete into the very count it is warning about, and it would vanish.
+//
+// Advisory, not actionable. "I did not finish looking" is an unknown, and this
+// package never lets an unknown assert that a machine is unhealthy — see the
+// Finding.Actionable contract. It reaches the reader through the summary line
+// and summary.incomplete instead of through the exit code.
+func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHomeSweep, budget int) {
+	if !sweep.truncated() {
+		return
+	}
+	report.markIncomplete("stale-temp-home")
+	report.addAdvisoryFinding(Finding{
+		Check: "temp-home-scan",
+		Detail: fmt.Sprintf("this run did NOT assess every temp home: it inspected %d of the %d directories "+
+			"under %s before hitting its %d-candidate budget, so any stale home among the remaining %d was "+
+			"not looked at and is missing from the counts below",
+			sweep.visited, sweep.offered, tempDir, budget, sweep.offered-sweep.visited),
+		Severity: StatusWarn,
+		Remediation: "clear out " + tempDir + " so the sweep can finish, and treat the temp-home rows below as a " +
+			"lower bound until it does",
+	})
+}
+
 // lockUnknownReason renders the cause of an undetermined lock probe for the
 // report, defaulting to a plain phrase when the probe carried none.
 func lockUnknownReason(cause error) string {
@@ -627,32 +668,102 @@ func lockUnknownReason(cause error) string {
 // timeSince is time.Since, indirected so tests can pin the clock if needed.
 var timeSince = time.Since
 
+// defaultMaxTempHomeCandidates bounds how many candidate directories one
+// temp-home sweep will inspect.
+//
+// The cost of this check is dominated by IDENTIFYING candidates, not by
+// assessing them. isAFHome stats up to seven marker paths per candidate, so on
+// the box that prompted #3466 a temp dir holding 48,169 candidate directories
+// cost ~337,000 stat syscalls to find 53 real homes. None of that work is
+// proportional to anything af did — it scales with whatever else has been
+// dropped in /tmp — and on a cold dentry cache under load it is what turned
+// `af doctor` into a ten-minute command.
+//
+// Cheaper identification was tried and REJECTED on measurement, not taste.
+// Pre-filtering each candidate from its own directory listing (one ReadDir
+// instead of seven stats, sound because a stat-able marker must appear in its
+// parent's listing) found the identical 53 homes and ran 4x SLOWER: 14.8s
+// against 3.6s, because a ReadDir per second-level directory costs far more
+// than the seven stats it replaces. The stat path is already the cheap one, so
+// the cost is BOUNDED rather than optimized.
+//
+// The default is a SAFETY VALVE, not routine behavior, and the number is chosen
+// against measurement rather than taste. The reporting box offers 48,169
+// candidates; 50,000 clears it with headroom, so a machine that works today
+// keeps finding exactly what it found before. A tighter bound was tried first
+// and rejected on evidence: at 20,000 that same box truncated at 15,194 of its
+// 21,762 directories and reported 28 abandoned homes instead of 49 — loudly,
+// but it still means a real machine quietly assesses less of itself on every
+// run, forever, because nothing about clearing /tmp is on anyone's list.
+//
+// Bounding growth is the goal; reducing what a working box sees is not. A temp
+// dir that blows past this is pathological, and for that case truncating and
+// SAYING SO beats a ten-minute command that finishes.
+const defaultMaxTempHomeCandidates = 50000
+
+// tempHomeSweep is one enumeration of the temp dir: the candidates to inspect,
+// and how much of the temp dir the sweep actually got through.
+//
+// The second half is not bookkeeping. A sweep that stopped early yields FEWER
+// findings than one that finished, and without these counts the two are
+// indistinguishable in the output — which is exactly how a truncated run reads
+// as the healthier machine (#3466).
+type tempHomeSweep struct {
+	candidates []string
+	// offered and visited count FIRST-LEVEL entries of the temp dir, because
+	// that is both the number an operator can act on ("/tmp holds 48,000
+	// directories") and a number known EXACTLY: one ReadDir yields it before
+	// any bound applies. Counting candidates instead would mean reporting a
+	// total the sweep stopped before it could compute.
+	offered int
+	visited int
+}
+
+// truncated reports whether the sweep gave up before seeing the whole temp dir.
+func (s tempHomeSweep) truncated() bool { return s.visited < s.offered }
+
 // candidateTempHomes lists directories one and two levels below tempDir —
 // Go tests produce /tmp/TestName123/001-style homes, manual runs
 // /tmp/tmp.XXXX ones.
-func candidateTempHomes(tempDir string) []string {
-	var out []string
+//
+// It stops once it has produced limit candidates, at a first-level BOUNDARY so
+// the counts it returns describe whole entries rather than a partially expanded
+// one. A limit <= 0 disables the bound.
+func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
 	level1, err := os.ReadDir(tempDir)
 	if err != nil {
-		return nil
+		// An unreadable temp dir offers nothing and skips nothing, so this is
+		// not a truncated sweep — it is an empty one. checkStaleTempHomes has
+		// nothing to assess either way.
+		return tempHomeSweep{}
+	}
+	var sweep tempHomeSweep
+	for _, e := range level1 {
+		if e.IsDir() {
+			sweep.offered++
+		}
 	}
 	for _, e := range level1 {
 		if !e.IsDir() {
 			continue
 		}
+		if limit > 0 && len(sweep.candidates) >= limit {
+			break
+		}
+		sweep.visited++
 		dir := filepath.Join(tempDir, e.Name())
-		out = append(out, dir)
+		sweep.candidates = append(sweep.candidates, dir)
 		level2, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
 		for _, e2 := range level2 {
 			if e2.IsDir() {
-				out = append(out, filepath.Join(dir, e2.Name()))
+				sweep.candidates = append(sweep.candidates, filepath.Join(dir, e2.Name()))
 			}
 		}
 	}
-	return out
+	return sweep
 }
 
 func isAFHome(dir string) bool {

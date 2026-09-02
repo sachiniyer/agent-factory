@@ -191,9 +191,18 @@ func renderRows(r *Report, fixMode, verbose bool) []renderRow {
 	return rows
 }
 
+// collapsibleFinding names the checks whose findings are per-ITEM and can run
+// to hundreds or thousands on a busy machine, so the default view shows one row
+// per class and --verbose shows the items.
+//
+// stale-temp-home belongs here for the same reason the process checks do, and
+// was missing (#3466): a box with a large temp dir produced 51 individual WARN
+// rows, one per directory, burying every other finding in the report. The
+// underlying Findings are untouched — --verbose still lists each home and --fix
+// still removes them one by one — only the default rendering collapses.
 func collapsibleFinding(check string) bool {
 	switch check {
-	case "orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu":
+	case "orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home":
 		return true
 	default:
 		return false
@@ -208,7 +217,7 @@ func collapseProcessFindings(findings []Finding, fixMode bool) []renderRow {
 		}
 	}
 	var rows []renderRow
-	for _, check := range []string{"orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu"} {
+	for _, check := range []string{"orphaned-process", "escaped-process", "possible-orphan", "runaway-cpu", "stale-temp-home"} {
 		group := byCheck[check]
 		if len(group) == 0 {
 			continue
@@ -239,8 +248,23 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 		}
 	}
 
+	// Collapsing changes how many ROWS a class occupies. It must not change
+	// what the class SAYS about the machine.
+	//
+	// The "anything fixable is a FAIL" rule below is right for the process
+	// checks, which set no explicit Severity and lean on it. It is wrong for a
+	// class that states its own: every stale-temp-home finding is deliberately
+	// StatusWarn — an abandoned directory is not a broken machine — and letting
+	// the rule override that escalated 49 WARN rows into one FAIL row purely by
+	// being collapsed. A rendering change that alters severity is a rendering
+	// change that lies.
 	status := StatusWarn
-	if fixable > 0 || failed > 0 {
+	if declared := strongestDeclaredSeverity(findings); declared != "" {
+		status = declared
+	} else if fixable > 0 {
+		status = StatusFail
+	}
+	if failed > 0 {
 		status = StatusFail
 	}
 	if fixed == len(findings) && failed == 0 {
@@ -259,6 +283,25 @@ func collapsedProcessRow(check string, findings []Finding, fixMode bool) renderR
 	}
 }
 
+// strongestDeclaredSeverity returns the most severe Severity the group's
+// findings declare for themselves, or "" when none of them declares one.
+//
+// Only FAIL and WARN participate: a collapsed row stands for findings that are
+// still outstanding, so a PASS/FIXED among them is accounted for by the
+// fixed/failed tallies rather than by softening the row.
+func strongestDeclaredSeverity(findings []Finding) CheckStatus {
+	strongest := CheckStatus("")
+	for _, f := range findings {
+		switch f.Severity {
+		case StatusFail:
+			return StatusFail
+		case StatusWarn:
+			strongest = StatusWarn
+		}
+	}
+	return strongest
+}
+
 func collapsedProcessName(check string) string {
 	switch check {
 	case "orphaned-process":
@@ -269,6 +312,8 @@ func collapsedProcessName(check string) string {
 		return "possible-orphans"
 	case "runaway-cpu":
 		return "runaway-cpu"
+	case "stale-temp-home":
+		return "stale-temp-homes"
 	default:
 		return check
 	}
@@ -294,6 +339,22 @@ func collapsedProcessDetail(check string, total, fixable, fixed, failed int, fix
 		return fmt.Sprintf("%s belong to dead tmux servers without agent-factory markers", plural(total, "process", "processes"))
 	case "runaway-cpu":
 		return fmt.Sprintf("%s averaged a pegged CPU core inside live sessions", plural(total, "process", "processes"))
+	case "stale-temp-home":
+		// Mirrors orphaned-process: lead with the count, then how many carry a
+		// proof strong enough for --fix. The rest are the UNKNOWN homes doctor
+		// refuses to remove, and saying "N safe to clean" out of a larger total
+		// is what keeps that distinction visible after collapsing.
+		parts := []string{fmt.Sprintf("%s abandoned under the temp dir", plural(total, "agent-factory home", "agent-factory homes"))}
+		if fixable > 0 {
+			parts = append(parts, fmt.Sprintf("%d safe to remove", fixable))
+		}
+		if fixMode && fixed > 0 {
+			parts = append(parts, fmt.Sprintf("%d removed", fixed))
+		}
+		if failed > 0 {
+			parts = append(parts, fmt.Sprintf("%d removal failed", failed))
+		}
+		return strings.Join(parts, ", ")
 	default:
 		return fmt.Sprintf("%s reported", plural(total, "finding", "findings"))
 	}
@@ -312,6 +373,11 @@ func collapsedProcessRemediation(check string, fixable int, fixMode bool) string
 		return "rerun with `--verbose` for details; verify ownership before killing anything manually"
 	case "runaway-cpu":
 		return "rerun with `--verbose` for details; inspect the live session before stopping processes"
+	case "stale-temp-home":
+		if fixable > 0 && !fixMode {
+			return "run `af doctor --fix` to remove the provably unused homes; rerun with `--verbose` to see each one"
+		}
+		return "rerun with `--verbose` to see each home; verify nothing is using the rest before removing them"
 	default:
 		return "rerun with `--verbose` for details"
 	}
@@ -516,6 +582,14 @@ func summaryLine(r *Report, rows []renderRow, fixMode bool) string {
 	case fixMode && fixedCount(r) > 0:
 		summary = strings.TrimSuffix(summary, ".") +
 			fmt.Sprintf("; %d fixed.", fixedCount(r))
+	}
+	// LAST, so it is the note the summary ends on. Every count above it is a
+	// lower bound while this is present, and a reader who takes the tally at
+	// face value has been misled — which is the defect #3466 was filed for.
+	if len(r.Incomplete) > 0 {
+		summary = strings.TrimSuffix(summary, ".") +
+			fmt.Sprintf("; INCOMPLETE — %s did not finish looking, so these counts are a lower bound.",
+				strings.Join(r.Incomplete, ", "))
 	}
 	return summary
 }
