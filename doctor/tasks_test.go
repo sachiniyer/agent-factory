@@ -276,7 +276,32 @@ func TestDoctor_ReportsATaskThatCanNeverFire(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusWarn, row.Status)
-	assert.Contains(t, row.Detail, "matches no date, so it can never fire")
+	assert.Contains(t, row.Detail, "a cron expression that can never fire")
 	assert.Contains(t, row.Detail, `feb31111 "February 31st"`)
+	assert.Positive(t, report.UnresolvedCount())
+}
+
+// TestDoctor_ReportsAnInvalidExpressionWithNoDaemon is the half the first
+// unschedulable fix missed. A hand-edited or legacy expression that does not
+// parse was classified only by a LIVE not-armed observation — so on a box whose
+// daemon is down or still warming up, doctor reported "firing on schedule" for a
+// task the scheduler will refuse forever. The verdict comes from the record now,
+// so it survives having no daemon at all.
+func TestDoctor_ReportsAnInvalidExpressionWithNoDaemon(t *testing.T) {
+	opts := testOptions(t, false)
+	broken := healthyTask("badcr0n1")
+	broken.Name = "Hand-edited watchdog"
+	broken.CronExpr = "99 * * * *"
+	// Arming deliberately left unobserved: no daemon answered.
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{broken}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusWarn, row.Status)
+	assert.Contains(t, row.Detail, "a cron expression that can never fire")
+	assert.Contains(t, row.Detail, `badcr0n1 "Hand-edited watchdog"`)
+	assert.NotContains(t, row.Detail, "firing on schedule")
 	assert.Positive(t, report.UnresolvedCount())
 }

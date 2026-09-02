@@ -166,14 +166,17 @@ func TestOverdue_NotDerivedWhereItWouldBeMeaningless(t *testing.T) {
 	})
 	t.Run("unparseable expression", func(t *testing.T) {
 		tsk := cronTask("not a cron", &long)
-		assert.False(t, DeriveScheduleHealth(tsk, now).Overdue,
-			"nothing can be derived from an expression with no occurrences; the arming state reports this task instead")
+		health := DeriveScheduleHealth(tsk, now)
+		assert.False(t, health.Overdue, "an expression with no occurrences was never due")
+		assert.True(t, health.Unschedulable, "but it can never fire, which is its own verdict")
 	})
 	t.Run("expression that matches no date", func(t *testing.T) {
 		// February 31st: legal syntax, never occurs. Next() gives up after five
 		// years and returns the zero time.
 		tsk := cronTask("0 0 31 2 *", &long)
-		assert.False(t, DeriveScheduleHealth(tsk, now).Overdue)
+		health := DeriveScheduleHealth(tsk, now)
+		assert.False(t, health.Overdue)
+		assert.True(t, health.Unschedulable)
 	})
 	t.Run("record with no timestamps at all", func(t *testing.T) {
 		tsk := cronTask("20 * * * *", nil)
@@ -393,8 +396,9 @@ func TestOverdue_UnschedulableIsReportedNotIgnored(t *testing.T) {
 func TestOverdue_SchedulableTasksAreNotFlaggedUnschedulable(t *testing.T) {
 	last := at(2026, time.September, 1, 14, 20, 0)
 	assert.False(t, DeriveScheduleHealth(cronTask("20 * * * *", &last), at(2026, time.September, 1, 15, 0, 0)).Unschedulable)
-	assert.False(t, DeriveScheduleHealth(cronTask("not a cron", &last), at(2026, time.September, 1, 15, 0, 0)).Unschedulable,
-		"an unparseable expression is a different condition, reported by the arming state")
+	assert.True(t, DeriveScheduleHealth(cronTask("not a cron", &last), at(2026, time.September, 1, 15, 0, 0)).Unschedulable,
+		"an expression that does not parse can never fire either, and the verdict must come from the "+
+			"record: leaning on a live not-armed observation left a box with no daemon calling it healthy")
 
 	watch := Task{ID: "w", WatchCmd: "tail -f x", Enabled: true, LastRunAt: &last}
 	assert.False(t, DeriveScheduleHealth(watch, at(2026, time.September, 1, 15, 0, 0)).Unschedulable)
@@ -450,4 +454,27 @@ func TestWithScheduleHealth_CarriesSaturation(t *testing.T) {
 	encoded, err := json.Marshal(got[0])
 	require.NoError(t, err)
 	assert.Contains(t, string(encoded), `"missed_occurrences_capped":true`)
+}
+
+// TestOverdue_UnschedulableRidesTheRecord: only `af tasks show` and `af doctor`
+// recompute health; every other consumer — `af tasks list --json`, the web, the
+// TUI rail — reads the record. A verdict that lives only in ScheduleHealth is a
+// verdict those surfaces cannot see, so they would render a task that can never
+// fire exactly like a healthy one.
+func TestOverdue_UnschedulableRidesTheRecord(t *testing.T) {
+	last := at(2026, time.January, 1, 0, 0, 0)
+	for _, expr := range []string{"0 0 31 2 *", "not a cron"} {
+		got := WithScheduleHealth([]Task{cronTask(expr, &last)}, at(2026, time.September, 1, 12, 0, 0))
+		assert.True(t, got[0].Unschedulable, "expression %q", expr)
+		assert.False(t, got[0].Overdue, "expression %q was never due", expr)
+
+		encoded, err := json.Marshal(got[0])
+		require.NoError(t, err)
+		assert.Contains(t, string(encoded), `"unschedulable":true`)
+	}
+
+	healthy := WithScheduleHealth([]Task{cronTask("20 * * * *", &last)}, at(2026, time.September, 1, 12, 0, 0))
+	encoded, err := json.Marshal(healthy[0])
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "unschedulable", "and it is absent when it does not apply")
 }

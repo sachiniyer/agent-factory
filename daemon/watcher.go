@@ -191,6 +191,14 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 			log.WarningLog.Printf("not watching task with invalid id %q: %v", t.ID, err)
 			continue
 		}
+		// Duplicate IDs in a hand-edited store: watch the FIRST occurrence, which
+		// is what the cron scheduler already does (#855). A map assignment quietly
+		// kept the LAST instead, so the two subsystems disagreed about which row a
+		// duplicated ID meant — and nothing anywhere said a row had been skipped.
+		if _, dup := desired[t.ID]; dup {
+			log.WarningLog.Printf("duplicate task ID %q in tasks.json, watching only its first occurrence", t.ID)
+			continue
+		}
 		desired[t.ID] = t
 	}
 

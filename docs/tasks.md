@@ -35,6 +35,7 @@ Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CL
 | `audit` | Bounded trail (last 20 entries) of mutations to this task: `{at, actor, action, fields}`, where `action` is `created` / `updated` / `enabled` / `disabled` and `actor` is the surface that made it (`cli`, `tui`, `api`, `daemon-upgrade`, `unknown`). Written by the task store inside the same locked write that commits the change; never a client input. See [Is it actually firing?](#is-it-actually-firing) |
 | `overdue` / `missed_occurrences` | **Derived at read time, never stored.** Whether an enabled cron task has gone more than one slack window past its most recent scheduled occurrence, and how many fires the schedule has had since — both measured from the latest of its last run, its last enable or retime, and its creation. Absent (`false` / `0`) on a task that is on schedule |
 | `missed_occurrences_capped` | **Derived at read time, never stored.** The count above hit the derivation's cap (10000) and is a *floor*, not an exact number |
+| `unschedulable` | **Derived at read time, never stored.** This task's cron expression can never produce a fire — it does not parse, or it matches no date. Such a task is not overdue (nothing was ever due) and is not healthy either |
 | `next_run_at` | **Derived at read time, never stored.** When the daemon's *live* scheduler entry will next fire this task — read off what is armed, not recomputed from `cron_expr`. Absent when the task is not armed, and that absence is itself the signal |
 | `arming` | **Derived at read time, never stored.** `armed`, `not-armed`, or absent when no running daemon answered (nothing observed it — which is not the same as "not armed") |
 
@@ -192,7 +193,7 @@ Lateness is measured from the **latest** of the last run, the last time the sche
 
 Those times come from the audit trail below, so they are bounded too: a restart old enough to have fallen out of the window leaves the reference at the last run, which can only make the verdict more eager, never hide a task that has genuinely stopped.
 
-An expression that is legal but matches no date — `0 0 31 2 *` is February 31st — is reported in its own right. Such a task is enabled, the scheduler arms it, and it can never fire; nothing is ever late because nothing was ever due, so `af tasks show` and the `af doctor` row say exactly that instead of reporting health.
+An expression that **can never fire** is reported in its own right, as `unschedulable`. That covers both an expression that does not parse (a hand-edited or legacy row the scheduler refuses) and one that is legal but matches no date — `0 0 31 2 *` is February 31st, which the scheduler happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `never fires`, and `af tasks show` and the `af doctor` row say exactly that instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
 
 Watch tasks are never overdue: they fire when their command emits a line, which may legitimately be never. Neither is a disabled task — whether disabling it was *intended* is what the audit trail answers.
 

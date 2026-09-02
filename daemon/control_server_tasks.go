@@ -23,6 +23,26 @@ import (
 // see — whether the task is actually armed, and what the armed entry will fire
 // next (#3623).
 func (s *controlServer) ListTasks(_ ListTasksRequest, resp *ListTasksResponse) error {
+	// The two halves are taken under ONE hold of the task-control lock, which is
+	// what every task mutation holds across its write AND its scheduler reload.
+	// Without it the read straddles a mutation: a removal committing between the
+	// load and the arming lookup returns the deleted task paired with "not
+	// armed", and doctor raises an actionable alarm about a task that no longer
+	// exists. armingSnapshot's own lock cannot help — it makes the scheduler's two
+	// structures agree with each other, not with a task list loaded a moment
+	// earlier. Publishing task events before the reload makes an event-driven
+	// refetch land in exactly this window.
+	//
+	// It stays ungated on manager readiness (see above): the lock serializes this
+	// read against task writes only, so a read during instance restore still
+	// answers.
+	if s.scheduler != nil {
+		unlock, err := s.lockTaskControl()
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
 	tasks, err := task.LoadTasks()
 	if err != nil {
 		return err

@@ -2041,6 +2041,9 @@
           "task.missed_occurrences_capped": {
             "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
           },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
           "task.missed_occurrences": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
@@ -2069,6 +2072,9 @@
           },
           "task.missed_occurrences_capped": {
             "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+          },
+          "task.unschedulable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
           },
           "task.missed_occurrences": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2301,6 +2307,9 @@
         },
         "task.missed_occurrences_capped": {
           "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
+        },
+        "task.unschedulable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
         },
         "task.missed_occurrences": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."

@@ -80,11 +80,17 @@ type ScheduleHealth struct {
 	// (MissedOccurrencesCapped): a consumer that reads "10000" and cannot tell it
 	// from an exact count has been handed a number that is quietly wrong.
 	Saturated bool
-	// Unschedulable reports an expression that PARSES but matches no date — the
-	// February 31st class. Nothing can be derived about lateness for such a task
-	// because it has no occurrences at all, and reporting the absence of a verdict
-	// as health would be the worst answer available: the task is armed, the
-	// scheduler holds an entry with a zero next-fire time, and it will never run.
+	// Unschedulable reports an expression that can never produce a fire: it does
+	// not parse, or it parses and matches no date (the February 31st class).
+	//
+	// The two are ONE verdict on purpose. They differ in how they got there and
+	// in nothing a reader can act on — both mean the task is enabled and will
+	// never run — and splitting them left a gap: while the parse failure was
+	// treated as "reported by the arming state", a box whose daemon was down or
+	// warming up observed no arming at all and doctor called such a task healthy.
+	// A verdict derived from the record alone is available everywhere; one that
+	// depends on a live observation is not. `af tasks show` still names the parse
+	// error itself, because it has the expression in hand.
 	Unschedulable bool
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
@@ -105,9 +111,10 @@ type ScheduleHealth struct {
 //   - A disabled task is not expected to fire. Whether disabling it was
 //     INTENDED is exactly what the audit trail answers (see task/audit.go); it
 //     is not something this derivation can know.
-//   - An expression that no longer parses derives nothing. The task is still
-//     broken, and the arming state says so: the scheduler skips what it cannot
-//     parse, so the record reports arming "not-armed" while enabled.
+//   - An expression that can never fire — one that does not parse, or that
+//     parses and matches no date — has no occurrences to be late against, so the
+//     answer is Unschedulable rather than a lateness verdict. It is emphatically
+//     not health: the task is enabled and will never run.
 //
 // The verdict is one Next() call, not a scan. The task is overdue exactly when
 // some scheduled occurrence lands at or before now and more than slack after the
@@ -122,7 +129,7 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	}
 	sched, err := ParseCron(t.CronExpr)
 	if err != nil {
-		return ScheduleHealth{}
+		return ScheduleHealth{Unschedulable: true}
 	}
 	ref, ok := scheduleReference(t)
 	if !ok {
@@ -298,6 +305,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated
+		tasks[i].Unschedulable = health.Unschedulable
 	}
 	return tasks
 }
@@ -311,6 +319,7 @@ func (t *Task) stripDerived() {
 	t.Overdue = false
 	t.MissedOccurrences = 0
 	t.MissedOccurrencesCapped = false
+	t.Unschedulable = false
 	t.NextRunAt = nil
 	t.Arming = ""
 }

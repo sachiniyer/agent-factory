@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -218,4 +219,54 @@ func TestArmingSnapshot_SurvivesAConcurrentReload(t *testing.T) {
 			t.Fatalf("snapshot %d reported an armed task as not armed; a reload landed between reading the entry map and the cron", i)
 		}
 	}
+}
+
+// TestWithLiveArming_DuplicateIDsAreArmedAtMostOnce: a hand-edited store can
+// hold two rows with the same ID, and both subsystems arm only the FIRST. An
+// ID-keyed lookup alone handed the surviving entry to every matching row, so a
+// skipped duplicate — a different expression that will never execute — reported
+// armed, carrying the other row's next_run_at. Exactly the "looks healthy, never
+// runs" shape this whole change exists to remove.
+func TestWithLiveArming_DuplicateIDsAreArmedAtMostOnce(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	first := enabledCronTask("dupe0001", "")
+	second := enabledCronTask("dupe0001", "")
+	second.CronExpr = "45 4 * * *"
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.reloadTasks([]task.Task{first, second}))
+	srv.scheduler.Start()
+	t.Cleanup(srv.scheduler.Stop)
+
+	got := srv.withLiveArming([]task.Task{first, second})
+	assert.Equal(t, task.ArmingArmed, got[0].Arming, "the scheduler armed the first occurrence")
+	assert.NotNil(t, got[0].NextRunAt)
+	assert.Equal(t, task.ArmingNotArmed, got[1].Arming,
+		"and the row it skipped must not borrow that entry")
+	assert.Nil(t, got[1].NextRunAt)
+}
+
+// TestWatcherSupervisor_DuplicateIDsWatchTheFirst pins the rule the annotation
+// above relies on. A map assignment quietly kept the LAST occurrence, so the
+// watch supervisor and the cron scheduler disagreed about which row a duplicated
+// ID meant, and nothing anywhere said a row had been skipped.
+func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	supervisor := newWatcherSupervisor()
+	supervisor.queueDir = func() (string, error) { return dir, nil }
+	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
+	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.setStatus = func(string, string) {}
+	t.Cleanup(supervisor.Stop)
+
+	first := watchTask("dupe0002", "printf 'first\\n'; sleep 30", dir)
+	second := watchTask("dupe0002", "printf 'second\\n'; sleep 30", dir)
+	require.NoError(t, supervisor.reloadSnapshot([]task.Task{first, second}, []task.Task{first, second}))
+
+	supervisor.mu.Lock()
+	w := supervisor.watchers["dupe0002"]
+	supervisor.mu.Unlock()
+	require.NotNil(t, w)
+	assert.Equal(t, watcherSignature(first), w.sig,
+		"the first occurrence is the one watched, matching the cron scheduler's rule")
 }

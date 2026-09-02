@@ -156,3 +156,35 @@ func TestAutomationsMarksACappedMissedCount(t *testing.T) {
 	assert.Contains(t, out, "overdue · missed 10000+",
 		"a saturated count is a lower bound and must read as one:\n%s", out)
 }
+
+// TestAutomationsMarksATaskThatCanNeverFire: the rail reads the RECORD, so a
+// verdict that lives only in a recomputed ScheduleHealth is one it cannot see —
+// and it would render an enabled task with an impossible expression exactly like
+// a healthy one.
+func TestAutomationsMarksATaskThatCanNeverFire(t *testing.T) {
+	feb31 := stripTasks()[0]
+	feb31.CronExpr, feb31.Unschedulable = "0 0 31 2 *", true
+
+	a := newTestAutomations([]task.Task{feb31})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "▾[!]  nightly-sweep",
+		"a task that can never fire carries the same warning glyph as one that stopped:\n%s", out)
+	assert.Contains(t, out, "never fires")
+	assert.NotContains(t, out, "overdue", "it was never due, so it is not late")
+}
+
+// TestAutomationsCompactSummaryCountsTasksThatCanNeverFire: the degraded
+// one-liner counts every task needing attention, not only the overdue ones.
+func TestAutomationsCompactSummaryCountsTasksThatCanNeverFire(t *testing.T) {
+	feb31 := stripTasks()[0]
+	feb31.Unschedulable = true
+
+	a := newTestAutomations([]task.Task{feb31, overdueStripTask()})
+	a.SetRect(layout.Rect{W: 70, H: 1})
+	a.SetCompact(true)
+
+	assert.Contains(t, a.View(), "2 overdue")
+}

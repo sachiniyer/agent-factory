@@ -140,6 +140,11 @@ type Task struct {
 	// not an exact count. Without it a reader cannot tell "exactly 10000" from
 	// "at least 10000", and every surface would render a capped count as precise.
 	MissedOccurrencesCapped bool `json:"missed_occurrences_capped,omitempty"`
+	// Unschedulable says this task's cron expression can never produce a fire —
+	// it does not parse, or it matches no date. Such a task is not late (nothing
+	// was ever due) and is emphatically not healthy either, so it needs a field of
+	// its own rather than the absence of one.
+	Unschedulable bool `json:"unschedulable,omitempty"`
 	// NextRunAt is what the LIVE scheduler will actually fire next, read off its
 	// armed entry rather than recomputed from the expression. Absent when the
 	// task is not armed, and that absence is itself the signal.
@@ -370,13 +375,24 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	// on that task indefinitely. A create has exactly one entry, and this function
 	// writes it.
 	t.Audit = nil
-	// Stamp the creation time when the caller did not. It is the reference the
-	// lateness derivation falls back to for a task that has never run, so a
-	// record without one is precisely the never-fired task that would otherwise
-	// report healthy forever — the failure this feature exists to catch. An HTTP
-	// client can omit the field; the store cannot.
-	if t.CreatedAt.IsZero() {
-		t.CreatedAt = nowFn()
+	// The store owns the creation stamp, in both directions.
+	//
+	// A MISSING one is the failure this feature exists to catch: CreatedAt is the
+	// reference the lateness derivation falls back to for a task that has never
+	// run, so a record without it derives no verdict at all and an enabled cron
+	// task that never fires reports healthy forever. An HTTP client can omit the
+	// field; the store cannot.
+	//
+	// A FUTURE one is the same hole the sanitized audit trail above closes, via a
+	// different field: `scheduleReference` trusts it for a never-run task, so a
+	// timestamp dated next year switches overdue detection off until then. It is
+	// clamped rather than rejected because no client can be trusted to agree with
+	// this clock to the second — a remote `--daemon-url` caller stamps its own —
+	// and refusing an add over a second of skew would be a worse bargain than
+	// correcting a value that is never legitimately in the future. An EARLIER
+	// stamp is kept: that is a migration importing real history.
+	if now := nowFn(); t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
+		t.CreatedAt = now
 	}
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target

@@ -60,14 +60,32 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 	if s.scheduler != nil {
 		scheduled, observed = s.scheduler.armingSnapshot()
 	}
+	// A hand-edited store can hold two rows with the same ID, and both subsystems
+	// arm only the FIRST (see taskScheduler.reloadTasks and
+	// watcherSupervisor.reloadSnapshot). An ID-keyed lookup alone would hand the
+	// surviving entry to every matching row, so a skipped duplicate — a different
+	// expression that will never execute — would report armed, with the other
+	// row's next_run_at. At most one row per ID can be armed, and it is the first.
+	seen := make(map[string]bool, len(tasks))
 	for i := range tasks {
+		duplicate := seen[tasks[i].ID]
+		seen[tasks[i].ID] = true
 		if tasks[i].IsWatch() {
-			if s.watchers != nil {
-				tasks[i].Arming = s.watchers.armingFor(tasks[i].ID)
+			if s.watchers == nil {
+				continue
 			}
+			arming := s.watchers.armingFor(tasks[i].ID)
+			if duplicate && arming == task.ArmingArmed {
+				arming = task.ArmingNotArmed
+			}
+			tasks[i].Arming = arming
 			continue
 		}
 		if !observed {
+			continue
+		}
+		if duplicate {
+			tasks[i].Arming = task.ArmingNotArmed
 			continue
 		}
 		next, armed := scheduled[tasks[i].ID]

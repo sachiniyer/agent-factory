@@ -267,7 +267,7 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	// the row exactly as wide as it was at the 22-column rail minimum. Collapsed
 	// rows are the point: a warning you have to focus a row to see is one nobody
 	// sees.
-	if tsk.Overdue {
+	if needsAttention(tsk) {
 		glyph, glyphStyle = "[!]", automationsOverdueStyle
 	}
 	marker := " "
@@ -299,8 +299,8 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
 	// sits last is what gets cut: at the 22-column minimum the cron expression
 	// would survive and the warning would not, which is backwards.
-	if tsk.Overdue {
-		parts = append(parts, overdueFragment(tsk))
+	if fragment := attentionFragment(tsk); fragment != "" {
+		parts = append(parts, fragment)
 	}
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
@@ -315,12 +315,27 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	return strings.Join(parts, " · ")
 }
 
-// overdueFragment is the detail line's warning text. The missed count is omitted
-// rather than printed as zero when the walk found none — an uncounted "missed 0"
-// beside "overdue" reads as a contradiction — and a count that hit the
-// derivation's cap is marked with a trailing "+" so a floor never renders as an
-// exact number.
-func overdueFragment(tsk task.Task) string {
+// needsAttention reports whether the row carries a warning: the task has stopped
+// firing on its schedule, or its expression can never fire at all. Both are read
+// off the record, so the rail's disk-backed poll sees them without a daemon.
+func needsAttention(tsk task.Task) bool {
+	return tsk.Overdue || tsk.Unschedulable
+}
+
+// attentionFragment is the detail line's warning text, or "" when the row is
+// healthy. The missed count is omitted rather than printed as zero when the walk
+// found none — an uncounted "missed 0" beside "overdue" reads as a
+// contradiction — and a count that hit the derivation's cap is marked with a
+// trailing "+" so a floor never renders as an exact number.
+func attentionFragment(tsk task.Task) string {
+	if tsk.Unschedulable {
+		// Ahead of overdue, and mutually exclusive with it: a task with no
+		// occurrences at all is never late, because nothing was ever due.
+		return "never fires"
+	}
+	if !tsk.Overdue {
+		return ""
+	}
 	if tsk.MissedOccurrences <= 0 {
 		return "overdue"
 	}
@@ -346,7 +361,7 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 func (a *AutomationsPane) overdueCount() int {
 	n := 0
 	for _, tsk := range a.proj.GetTasks() {
-		if tsk.Overdue {
+		if needsAttention(tsk) {
 			n++
 		}
 	}

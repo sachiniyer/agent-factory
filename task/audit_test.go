@@ -278,3 +278,28 @@ func TestAddTask_KeepsAnExplicitCreatedAt(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, want.Equal(created.CreatedAt))
 }
+
+// TestAddTask_ClampsAFutureCreatedAt is the sanitized audit trail's twin through
+// a different field: `scheduleReference` trusts CreatedAt for a task that has
+// never run, so a stamp dated next year switches overdue detection off until
+// then. Clamped rather than rejected — no client agrees with this clock to the
+// second, and refusing an add over a second of skew is a worse bargain than
+// correcting a value that is never legitimately in the future.
+func TestAddTask_ClampsAFutureCreatedAt(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	created, err := AddTaskChecked(Task{
+		ID: "future01", Name: "From the future", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+		CreatedAt: time.Now().Add(365 * 24 * time.Hour),
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)),
+		"the stamp was pulled back to the store's own clock")
+
+	stored, err := GetTask("future01")
+	require.NoError(t, err)
+	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
+		"and overdue detection reaches the task again")
+}
