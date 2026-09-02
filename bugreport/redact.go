@@ -82,7 +82,14 @@ const (
 	// exact tokenizer for the renderer's output, not an approximation of one.
 	archiveWarningQuotedPattern = `"(?:[^"\\]|\\.)*"`
 	archiveWarningRetainedItem  = `(?:` + archiveWarningQuotedPattern + `|and \d+ more in archive_report)`
-	archiveWarningSkippedItem   = archiveWarningQuotedPattern + ` \([^()\r\n]*\)`
+	// The reason field admits no `"` — session/git takes quotes, parens and
+	// control characters out of an unknown reason before rendering it, precisely
+	// so each entry stays delimitable. Requiring here what the emitter
+	// guarantees is what makes a line from a binary older than that change fail
+	// the grammar and take the whole-remainder fallback, instead of parsing into
+	// a walk that an ODD number of quotes puts out of step — which would pair a
+	// reason's quote with the NEXT entry's opening one and ship that entry's name.
+	archiveWarningSkippedItem = archiveWarningQuotedPattern + ` \([^()"\r\n]*\)`
 )
 
 var (

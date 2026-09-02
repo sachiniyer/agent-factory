@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -327,9 +328,32 @@ func insertBoundedArchivePath(paths []string, path string, limit int) []string {
 	return paths
 }
 
+// skipReasonText renders one reason into the bounded warning. A known reason is
+// a compile-time constant; an unknown one is a STORED string — a record written
+// by another binary, or a corrupt one — and it is the only field in this format
+// that is neither a number nor %q-quoted, so it is first reduced to what a
+// single line can carry.
+//
+// The warning is one log line, one TUI row, one error string. A newline in that
+// value splits all three. A parenthesis or a quote closes its field early, which
+// is also how the bug-report redactor loses track of what to remove: it reads
+// this format to take the user file names back out of a bundled log (#3553), and
+// an entry it cannot delimit is an entry whose name ships. Only the emitter can
+// prevent that — a single-line row cannot be reassembled downstream — so the
+// value is passed through, minus the characters that would break the row it
+// lands in.
 func skipReasonText(reason ArchiveSkipReason) string {
 	if reason == ArchiveSkipPermissionDenied {
 		return "permission denied"
 	}
-	return string(reason)
+	return strings.Map(archiveReasonRune, string(reason))
+}
+
+// archiveReasonRune keeps one rune of an unknown reason, or replaces it with the
+// same replacement character an unrepresentable path display carries.
+func archiveReasonRune(r rune) rune {
+	if r == '(' || r == ')' || r == '"' || r == utf8.RuneError || unicode.IsControl(r) {
+		return '\uFFFD'
+	}
+	return r
 }

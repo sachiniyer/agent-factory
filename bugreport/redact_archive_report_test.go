@@ -599,6 +599,76 @@ func TestScrubLogRedactsArchiveWarningWithAppendedText(t *testing.T) {
 	}
 }
 
+// TestScrubLogRedactsArchiveWarningWithMetacharacterReason covers the one field
+// in the warning that is neither a number nor %q-quoted: the skip reason, which
+// is a STORED string rendered with %s, so an unknown value from a newer or
+// corrupt record reaches the format verbatim. Two characters in it break the
+// read of that format, and each leaves a file name behind:
+//
+//   - a newline splits the warning across log lines, so the entries after it sit
+//     on a line with no anchor for the matcher to find;
+//   - a `"` opens a token that is not a path, desynchronizing the walk over %q
+//     tokens so the NEXT entry'"'"'s name loses its opening quote and survives.
+//
+// Neither is fixable downstream — a single-line diagnostic cannot be reassembled
+// out of a log tail — so session/git reduces an unknown reason to what its one
+// line can carry, and this asserts the result end to end, from the real renderer.
+func TestScrubLogRedactsArchiveWarningWithMetacharacterReason(t *testing.T) {
+	report := &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+		Path: "/worktrees/.af-source-abc123",
+		Skipped: []sessiongit.ArchiveSkippedEntry{
+			{Path: "first.txt", Reason: sessiongit.ArchiveSkipReason("read failed\n  (detail) \"quoted\"")},
+			{Path: "private/second.txt", Reason: sessiongit.ArchiveSkipPermissionDenied},
+		},
+	}}}
+
+	r := &redactor{}
+	got := r.scrubLog(archiveWarningLog(report, "restore"))
+
+	for _, name := range []string{"first.txt", "private/second.txt", "second"} {
+		if strings.Contains(got, name) {
+			t.Errorf("skipped file name %q survived a warning with a metacharacter reason:\n%s", name, got)
+		}
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("the warning reached the log on more than one line:\n%s", got)
+	}
+}
+
+// TestScrubLogRedactsLegacyQuoteBearingReason is the OLD-LOG half of the guard
+// above. The renderer can no longer emit a raw `"` inside a reason, so this
+// input cannot be built from it — a bundled tail, though, can hold lines a
+// binary written before that change wrote, and the redactor has to fail safely
+// on them rather than half-redact. Everything but the reason is still taken from
+// the real renderer; only that one field is put back the way the old one spelled
+// it, which is what a legacy shape means here.
+//
+// The quote count is the hazard, and it has to be ODD. A reason carrying a
+// balanced pair reads as one more %q token and the walk stays in step; a single
+// unterminated quote pairs with the NEXT entry'"'"'s opening quote instead, so that
+// entry loses its quote, falls out of the walk, and its name ships.
+func TestScrubLogRedactsLegacyQuoteBearingReason(t *testing.T) {
+	report := archiveReportWithSkipped("/worktrees/.af-source-abc123", "first.txt", "private/second.txt")
+	legacy := strings.Replace(
+		archiveWarningLog(report, "restore"),
+		`"first.txt" (permission denied)`, `"first.txt" (read failed: unterminated ")`, 1)
+	if !strings.Contains(legacy, `(read failed: unterminated ")`) {
+		t.Fatalf("fixture did not reproduce the legacy reason shape:\n%s", legacy)
+	}
+
+	r := &redactor{}
+	got := r.scrubLog(legacy)
+
+	for _, name := range []string{"first.txt", "private/second.txt", "second"} {
+		if strings.Contains(got, name) {
+			t.Errorf("skipped file name %q survived a legacy quote-bearing reason:\n%s", name, got)
+		}
+	}
+	if !strings.Contains(got, redactedMarker) {
+		t.Errorf("expected the redaction marker for the unparseable list:\n%s", got)
+	}
+}
+
 // TestScrubLogRedactsUnrecognizedArchiveWarningTail pins the direction this
 // scrub fails in. It reads the renderer's grammar, so anything that breaks that
 // grammar before the bundle is built — a wrapper appending a QUOTED token of its
