@@ -32,13 +32,10 @@ func agentForCommandAtDepth(command string, depth int) string {
 		return agentForCommandAtDepth(nested, depth+1)
 	}
 
-	args, _ := literalCommandArgs(call.Args)
-	if len(args) > 0 && args[0] == "exec" {
-		args = args[1:]
-		if len(args) > 0 && args[0] == "--" {
-			args = args[1:]
-		}
-	}
+	// Detection, so the separator is ignored: `exec -- claude` is still a command
+	// about claude, and the account boundary refuses it with its own message.
+	words, _ := stripExecPrefix(call.Args)
+	args, _ := literalCommandArgs(words)
 	if len(args) == 0 {
 		return ""
 	}
@@ -102,13 +99,7 @@ func singleSimpleCall(command string) (*syntax.CallExpr, bool) {
 }
 
 func directAgentFlagState(call *syntax.CallExpr, agent, name string) (found, enabled bool) {
-	words := call.Args
-	if wordEquals(words[0], "exec") {
-		words = words[1:]
-		if len(words) > 0 && wordEquals(words[0], "--") {
-			words = words[1:]
-		}
-	}
+	words, _ := stripExecPrefix(call.Args)
 	if len(words) == 0 {
 		return false, false
 	}
@@ -188,13 +179,8 @@ func literalAgentServerProgram(call *syntax.CallExpr) (string, bool) {
 	if !callIsLiteral(call) || len(call.Assigns) != 0 {
 		return "", false
 	}
-	args, _ := literalCommandArgs(call.Args)
-	if len(args) > 0 && args[0] == "exec" {
-		args = args[1:]
-		if len(args) > 0 && args[0] == "--" {
-			args = args[1:]
-		}
-	}
+	words, _ := stripExecPrefix(call.Args)
+	args, _ := literalCommandArgs(words)
 	if len(args) < 10 || filepath.Base(args[0]) != "af" || args[1] != "agent-server" {
 		return "", false
 	}

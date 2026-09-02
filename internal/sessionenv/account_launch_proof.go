@@ -46,6 +46,11 @@ func IsAccountCommandValidationError(err error) bool {
 // base words. Relative executable spellings are resolved again from the pane's
 // workdir, so their arguments can be declared but their identity cannot. Any
 // other base arguments stay undeclared.
+//
+// A base whose exec builtin carries the `--` separator declares nothing, for the
+// same reason ValidateAccountCommand refuses it: dash runs no such command, so a
+// proof about it would describe a pane that exits 127 (#3557). Producer and
+// consumer share stripExecPrefix so neither can drift into accepting it alone.
 func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (AccountLaunchProof, bool) {
 	added, ok := GeneratedArgsBetween(base, final)
 	if !ok {
@@ -60,17 +65,12 @@ func GenerateAccountLaunchProof(base, final string, trustedBaseArgs []string) (A
 	if !ok || !callIsLiteral(call) || len(call.Assigns) > 0 {
 		return AccountLaunchProof{}, false
 	}
-	words, ok := literalCommandArgs(call.Args)
-	if !ok || len(words) == 0 {
+	stripped, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
 		return AccountLaunchProof{}, false
 	}
-	if words[0] == "exec" {
-		words = words[1:]
-		if len(words) > 0 && words[0] == "--" {
-			words = words[1:]
-		}
-	}
-	if len(words) == 0 {
+	words, ok := literalCommandArgs(stripped)
+	if !ok || len(words) == 0 {
 		return AccountLaunchProof{}, false
 	}
 	if len(words) < len(trustedBaseArgs)+1 {
@@ -106,6 +106,14 @@ func ValidateAccountCommand(command string, account Account) error {
 	}
 	if provable {
 		return nil
+	}
+	if commandUsesExecSeparator(command) {
+		return accountCommandValidationErrorf(
+			"account %q cannot scope agent %q: its program begins with `exec --`, and af runs that program through "+
+				"/bin/sh, where the separator is not portable; dash — /bin/sh on Debian and Ubuntu — gives its exec "+
+				"builtin no options, so it takes `--` as the command name and the pane exits 127 with "+
+				"`exec: --: not found`. Remove the `--`: af accepts the same program written `exec <agent> …`",
+			account.Name, account.Agent)
 	}
 	if args, ok := undeclaredAccountArguments(command, proof); ok {
 		return accountCommandValidationErrorf(
@@ -151,12 +159,10 @@ func undeclaredAccountArguments(command string, proof commandProof) ([]string, b
 	if !ok || len(call.Assigns) > 0 || !callIsLiteral(call) {
 		return nil, false
 	}
-	words := call.Args
-	if len(words) > 0 && wordEquals(words[0], "exec") {
-		words = words[1:]
-		if len(words) > 0 && wordEquals(words[0], "--") {
-			words = words[1:]
-		}
+	words, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
+		// The refusal is about the separator, not about the arguments behind it.
+		return nil, false
 	}
 	stripped, ok := stripDeclaredSuffixForDiagnostics(words, proof.generated)
 	if !ok || len(stripped) < 2 {

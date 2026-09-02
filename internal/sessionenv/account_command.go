@@ -73,12 +73,12 @@ func callOverridesName(call *syntax.CallExpr, proof commandProof, depth int) (ov
 		}
 	}
 
-	words := call.Args
-	if len(words) > 0 && wordEquals(words[0], "exec") {
-		words = words[1:]
-		if len(words) > 0 && wordEquals(words[0], "--") {
-			words = words[1:]
-		}
+	// UNPROVABLE, not safe. What the pane runs is decided by its /bin/sh, and
+	// dash refuses `exec --` outright — see stripExecPrefix. Which shell that is
+	// cannot be read from here, so the form is refused everywhere (#3557).
+	words, execSeparator := stripExecPrefix(call.Args)
+	if execSeparator {
+		return false, false
 	}
 	if len(words) == 0 {
 		return false, true
