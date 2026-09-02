@@ -181,20 +181,17 @@ func lineWidth(s string) int {
 // lineWidth, which discounts the OSC sequences either way, so the placement
 // arithmetic sees the cells the row actually occupies.
 func clipLine(line string, width int) string {
-	if lineWidth(line) == ansi.PrintableRuneWidth(line) {
-		// The two measures agree, so the row carries nothing the reflow truncator
-		// would mis-parse, and its accounting is the one the rest of this function
-		// uses. Derived from the measures rather than sniffed for "\x1b]", so a
-		// sequence form nobody thought of routes itself.
-		return truncate.String(line, uint(width))
-	}
-	// The row carries sequences the reflow truncator would cut through, so the
-	// parser does the clipping. Its own width accounting is the cell-accurate one,
-	// which is NOT what the arithmetic below uses, so ask it for progressively less
-	// until the result fits the compositor's measure — a row mixing a hyperlink with
-	// clustered text survives an x/ansi clip at its cell width while still measuring
-	// far wider here, and capping the recorded width would only hide that from the
-	// clamp.
+	// ONE truncator, no routing. Choosing between them on whether the two measures
+	// disagree looked sound and is not: the OSC overcount can CANCEL the grapheme
+	// disagreement, so a row carrying a hyperlink can measure identically under both
+	// and take the branch that cuts through it. Any predicate of this file's own is
+	// the same bet in a different disguise, so the parser clips everything and the
+	// question does not arise.
+	//
+	// x/ansi truncates by CELLS, which is not the measure the arithmetic below uses,
+	// so it is asked for progressively less until the result fits by lineWidth. For
+	// a plain row the two agree and the first attempt is already the answer; only an
+	// over-wide row iterates, and only down to what fits.
 	for w := width; w >= 0; w-- {
 		out := xansi.Truncate(line, w, "")
 		if lineWidth(out) <= width {
@@ -216,8 +213,13 @@ func widestLine(lines []string) int {
 	return widest
 }
 
-// osc8Regex matches an OSC 8 hyperlink introducer with either terminator, ST
-// (ESC backslash) or BEL. The capture is the URI: a hyperlink is OPENED by a
+// osc8Regex matches an OSC 8 hyperlink introducer with any terminator xansi.Strip
+// recognises — ST (ESC backslash), BEL, and the C1 ST (U+009C).
+//
+// Its coverage is PINNED to the parser's by a test rather than left to drift: a
+// terminator the parser discounts in the width but this pattern does not recognise
+// would mean a link the compositor never closes. They share one gap, the C1 OSC
+// INTRODUCER (U+009D), which xansi.Strip does not handle either. The capture is the URI: a hyperlink is OPENED by a
 // sequence carrying one and CLOSED by the same sequence with it empty.
 //
 // Written as a raw literal with \x1b and \x07 as REGEX escapes rather than as
@@ -226,7 +228,7 @@ func widestLine(lines []string) int {
 // far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
 // place it is genuinely intended is exactly this, an OSC terminator. Spelling it
 // as an escape says so, to the query and to the next reader.
-var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07]*)(?:\x1b\\|\x07)`)
+var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07\x{9c}]*)(?:\x1b\\|\x07|\x{9c})`)
 
 // closeSequences returns what must be emitted after line so that whatever follows
 // it — a background segment, or the end of the frame — starts clean.

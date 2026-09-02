@@ -438,3 +438,51 @@ func TestLineWidthDiscountsAnEightBitTerminatedHyperlink(t *testing.T) {
 			"terminator it uses", got)
 	}
 }
+
+// #3433 review. The routing predicate this replaces compared the two measures and
+// treated equality as "safe for the reflow truncator". Unsound: the OSC overcount
+// can CANCEL the grapheme disagreement. Codex's example — one ASCII char, a
+// hyperlink, and a joined family — measures 9 under BOTH expressions, so it took
+// the reflow branch and came out as an unterminated OSC command.
+func TestPlaceOverlayClipsARowWhoseMeasuresCoincidentallyAgree(t *testing.T) {
+	const cols, rows = 8, 3
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	row := "a\x1b]8;;https://x\x1b\\" + joinedFamily
+	if lineWidth(row) != ansi.PrintableRuneWidth(row) {
+		t.Skipf("this case needs the two measures to coincide; got %d and %d",
+			lineWidth(row), ansi.PrintableRuneWidth(row))
+	}
+	fg := strings.Join([]string{row, row}, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+	if hasUnterminatedOSC(out) {
+		t.Fatalf("a row whose measures happen to agree still must not be cut through; got %q", out)
+	}
+	for i, line := range strings.Split(out, "\n") {
+		if w := lineWidth(line); w != cols {
+			t.Fatalf("line %d is %d cells, want exactly %d", i, w, cols)
+		}
+	}
+}
+
+// The hyperlink detector's coverage must not drift from the parser's. A terminator
+// the parser discounts in the width but this pattern fails to recognise is a link
+// the compositor never closes — which is how the C1 ST form was missed.
+func TestOSC8DetectionCoversEveryFormTheParserDiscounts(t *testing.T) {
+	for _, form := range []struct{ name, opener string }{
+		{"7-bit ST", "\x1b]8;;https://example.com\x1b\\"},
+		{"BEL", "\x1b]8;;https://example.com\a"},
+		{"C1 ST", "\x1b]8;;https://example.com\u009c"},
+	} {
+		row := form.opener + "LINK"
+		// The parser discounts it: the row is four visible cells.
+		if got := lineWidth(row); got != 4 {
+			t.Fatalf("%s: lineWidth = %d, want 4 (precondition: the parser discounts this form)", form.name, got)
+		}
+		// So the detector must see the open link and close it.
+		if closeSequences(row) == "" {
+			t.Fatalf("%s: an opened hyperlink was not detected, so the compositor would never close it", form.name)
+		}
+	}
+}
