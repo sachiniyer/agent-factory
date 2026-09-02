@@ -55,7 +55,14 @@ func TestLayoutCutover_ViewComposesFullWindow(t *testing.T) {
 		assert.Contains(t, view, "alpha · ◆ Agent", "%dx%d: pane header carries title · tab", tc.w, tc.h)
 		// The header ellipsizes at the narrowest rails, so assert the stable
 		// prefix plus the manage affordance FIX 2 guarantees is never cut.
-		assert.Contains(t, view, "Automation", "%dx%d: automations section", tc.w, tc.h)
+		//
+		// The prefix shortened from "Automation" to "Autom" in #3630: the header
+		// now keeps its task COUNT at every width, and at the 22-column rail that
+		// 80x24 produces, the count plus the guaranteed manage hint leave six
+		// cells for the noun. The old header fit "Automation…" there only by
+		// dropping the count, which made a section with two tasks byte-identical
+		// to one with none. "Autom" is the prefix that survives every rail width.
+		assert.Contains(t, view, "Autom", "%dx%d: automations section", tc.w, tc.h)
 		manageHint := helpKey(keys.KeyTaskList) + " manage"
 		assert.Contains(t, view, manageHint, "%dx%d: the manage affordance survives", tc.w, tc.h)
 		// #1087: the automations section lives inside the left rail, under a
