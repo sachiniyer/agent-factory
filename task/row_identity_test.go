@@ -265,4 +265,43 @@ func TestStableRepoBindingUpdatesDoNotMoveRows(t *testing.T) {
 	// the honest answer until both sides are reading the same store again.
 	assert.NotEqual(t, before[0].StoreGeneration, after[0].StoreGeneration,
 		"a rewrite that touched the file is a new generation, however stable the rows")
+
+	// And everything the transaction handed back names the file it WROTE, not the
+	// one it read. These records are published as EventTaskUpdated; carrying the
+	// pre-write generation they would pair with no later read at all, so a client
+	// merging one into its list would quietly lose that row's arming.
+	for _, tk := range authoritative {
+		assert.Equal(t, after[0].StoreGeneration, tk.StoreGeneration,
+			"the authoritative list must name the store the backfill produced")
+	}
+	for _, tk := range updated {
+		assert.Equal(t, after[0].StoreGeneration, tk.StoreGeneration,
+			"and so must every record it publishes")
+	}
+}
+
+func TestUpdateTaskReturnsTheIdentityTheNextReadWillReport(t *testing.T) {
+	// UpdateTask loads under the lock, mutates, and saves — so the record it
+	// returns was identified against the PRE-write bytes. It is published as
+	// EventTaskUpdated and handed back as the update response, and left alone it
+	// would name a version of the store that stopped existing at the save: it
+	// pairs with no later read, and a consumer merging it into its list drops that
+	// row's arming without a word (#3684 review).
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	setupTestTasks(t, []Task{
+		ordinalRow("aaa00001", "first", "0 9 * * *", "/repo"),
+		ordinalRow("bbb00002", "second", "0 10 * * *", "/repo"),
+	})
+
+	disabled := false
+	merged, err := UpdateTask("bbb00002", TaskUpdate{Enabled: &disabled}, ProjectExpectation{})
+	require.NoError(t, err)
+	require.False(t, merged.Enabled, "precondition: the update actually landed")
+
+	read, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, read, 2)
+	assert.Equal(t, read[1].StoreGeneration, merged.StoreGeneration,
+		"the update names the store it wrote, which is the one the next read sees")
+	assert.Equal(t, read[1].Ordinal, merged.Ordinal, "and the row it still occupies")
 }

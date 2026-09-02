@@ -352,7 +352,7 @@ func LoadTasks() ([]Task, error) {
 	// rather than in each surface is what stops the next surface from being the
 	// one that renders a dark task as healthy. loadTasksLocked — the WRITE path's
 	// loader — deliberately does not, so nothing derived can reach disk.
-	return stampRowIdentity(WithScheduleHealth(tasks, nowFn()), data), nil
+	return stampRowIdentity(WithScheduleHealth(tasks, nowFn()), storeGeneration(data)), nil
 }
 
 // stampRowIdentity gives every record the two halves of its row identity: the
@@ -368,8 +368,19 @@ func LoadTasks() ([]Task, error) {
 // that produced it and never a value the file supplied. A hand-typed "ordinal"
 // or "store_generation" is therefore overwritten rather than believed, which is
 // the rule the health fields follow and for the same reason.
-func stampRowIdentity(tasks []Task, raw []byte) []Task {
-	generation := storeGeneration(raw)
+//
+// WRITE paths call it too, with the generation writeTasks reports, and they have
+// to. A write loads under the lock, and loadTasksLocked stamps what it READ —
+// the pre-write bytes. Mutate and save, and every record the path hands back
+// names a version of the store that no longer exists, so it can never pair with
+// a later read and a consumer merging a mutation response or an EventTaskUpdated
+// record into its list would silently lose that row's arming (#3684 review).
+//
+// Re-derived over the whole written slice rather than patched onto one record,
+// because a write can move rows: replacing the generation while leaving a stale
+// ordinal would produce an identity that MATCHES and is wrong, which is the one
+// failure direction worth spending code to avoid.
+func stampRowIdentity(tasks []Task, generation string) []Task {
 	for i := range tasks {
 		tasks[i].Ordinal = i + 1
 		tasks[i].StoreGeneration = generation
@@ -436,7 +447,7 @@ func loadTasksLocked(path string) ([]Task, error) {
 	// caller a set of rows that all claim to be unidentified — the one shape
 	// ApplyLiveArming reads as "nothing to pair on" and refuses. Every read path
 	// returns identified rows; only the write path carries none (#3680).
-	return stampRowIdentity(tasks, migrated), nil
+	return stampRowIdentity(tasks, storeGeneration(migrated)), nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {
@@ -566,26 +577,19 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		// timestamp is the commit's and an entry can never exist for a create
 		// that a validator or a failed write rolled back.
 		appendAudit(&t, actor, AuditCreated, nil, nowFn())
-		// The row this record will occupy is knowable here and nowhere else: the
-		// append happens under the tasks-file lock, so it lands last in the file
-		// that is about to be written. Stamping it is what makes the returned
-		// record canonical in the ordinal too — the same reason RepoID is derived
-		// and returned rather than echoed back from the request. Without it a
-		// create publishes "no row" for a record the very next read numbers, so
-		// EventTaskCreated and GetTask disagree about the same task in a field a
-		// client can see (#3684 review). saveTasks strips it on the way to disk, so
-		// the number lives only on the record handed back.
-		t.Ordinal = len(tasks) + 1
 		tasks = append(tasks, t)
 		generation, err := writeTasks(tasks)
 		if err != nil {
 			return err
 		}
-		// The other half of the identity, and it can only be taken from the write:
-		// a generation describes the whole file, so the appended row has none until
-		// the bytes exist. Stamped on the returned record only — saveTasks strips
-		// both halves, so neither reaches disk.
-		t.StoreGeneration = generation
+		// Identified from the write, which is the only thing that knows both
+		// halves: the append happens under the tasks-file lock, so this slice IS
+		// the file that was just written. Without it a create publishes "no row"
+		// for a record the very next read identifies, so EventTaskCreated and
+		// GetTask disagree about the same task in fields a client can see — the
+		// same reason RepoID is derived and returned rather than echoed back from
+		// the request. saveTasks strips both halves, so neither reaches disk.
+		t = stampRowIdentity(tasks, generation)[len(tasks)-1]
 		return nil
 	})
 	if lockErr != nil {

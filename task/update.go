@@ -264,6 +264,7 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 		}
 
 		found := false
+		row := -1
 		for i, existing := range tasks {
 			if existing.ID == id {
 				// Verify against the freshly loaded record, before the patch is
@@ -322,6 +323,7 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 				// actually landed, at the instant it landed.
 				auditUpdate(&existing, &merged, actor, nowFn())
 				tasks[i] = merged
+				row = i
 				found = true
 				break
 			}
@@ -331,7 +333,18 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 			return fmt.Errorf("task with id %q not found", id)
 		}
 
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		// The record this returns is published as EventTaskUpdated and handed back
+		// as the update response, and loadTasksLocked identified it against the
+		// PRE-write bytes. Left alone it would name a version of the store that no
+		// longer exists — unpairable with every later read, so a consumer merging
+		// it into its list would quietly lose that row's arming (#3684 review).
+		// Re-derived over the slice that was actually written; see stampRowIdentity.
+		merged = stampRowIdentity(tasks, generation)[row]
+		return nil
 	})
 	if lockErr != nil {
 		return Task{}, lockErr
