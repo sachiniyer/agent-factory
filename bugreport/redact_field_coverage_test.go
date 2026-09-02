@@ -44,10 +44,7 @@ var verbatimInstanceFields = map[string]string{
 	"BackendType":  "bounded backend discriminator (\"local\", \"remote\", \"\")",
 	"CurrentAgent": "agent enum name (tmux.SupportedPrograms), not user text",
 
-	"Path":                   "absolute session path; scrub collapses $HOME and the username",
 	"Branch":                 "the username segment collapses via scrub; the branch SUFFIX is deliberately retained — see TestScrubRedactsUsernameEndingInNonWordChar, which asserts \"[user]/fix-login-bug\"",
-	"Worktree.RepoPath":      "absolute repo path; scrub collapses $HOME and the username",
-	"Worktree.WorktreePath":  "absolute worktree path; scrub collapses $HOME and the username",
 	"Worktree.BranchName":    "same branch-name policy as Branch above",
 	"Worktree.BaseCommitSHA": "git SHA, machine-minted",
 
@@ -89,12 +86,9 @@ var verbatimInstanceFields = map[string]string{
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",
 
 	"ArchiveReport.RetainedTrees[].Skipped[].Reason":                           "af-authored skip diagnostic (\"permission denied\"), not a user-chosen name; redact.go's stated policy keeps it for triage while blanking the Path beside it",
-	"ArchiveReport.RetainedTrees[].Path":                                       "the retained tree's own path is the system worktree path, which scrub collapses via $HOME — the policy redact.go states for this field",
-	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.AlternatePath":     "absolute alternate worktree path; scrub collapses $HOME and the username",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",
-	"Worktree.RelocationRecovery.AlternatePath":                                "absolute alternate worktree path; scrub collapses $HOME and the username",
 	"Worktree.RelocationRecovery.CleanupGeneration":                            "minted cleanup-generation token",
 	"Worktree.RelocationRecovery.CleanupLifecycle":                             "bounded RelocationRecoveryState enum",
 	"Worktree.RelocationRecovery.State":                                        "bounded RelocationRecoveryState enum",
@@ -109,6 +103,19 @@ var verbatimInstanceFields = map[string]string{
 // Do not add an entry here to make a failing build green. Add one only for a
 // leak that predates the guard and has an issue.
 var knownUnredactedFields = map[string]string{
+	// Absolute paths are NOT guaranteed to be reachable by the scrub. scrub
+	// replaces r.home and the username tokens and nothing else, so a repo or
+	// worktree outside $HOME — /srv/ConfidentialClient/repo, a sibling checkout,
+	// anything reached via --repo — ships its directory names verbatim. Claiming
+	// these as "scrub collapses $HOME" asserted a guarantee the pipeline does not
+	// make, which is the same false intuition that produced #3541 (#3592 review).
+	"Path":                                      "#3588 — absolute session path, only collapsed when it happens to sit under $HOME",
+	"Worktree.RepoPath":                         "#3588 — the USER's repo path; routinely outside $HOME and never collapsed there",
+	"Worktree.WorktreePath":                     "#3588 — absolute worktree path, only collapsed when it happens to sit under $HOME",
+	"ArchiveReport.RetainedTrees[].Path":        "#3588 — retained tree root; same unguaranteed-$HOME assumption",
+	"Worktree.RelocationRecovery.AlternatePath": "#3588 — alternate worktree path; same unguaranteed-$HOME assumption",
+	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.AlternatePath": "#3588 — same unguaranteed-$HOME assumption",
+
 	"Tabs[].Name":              "#3588 — user-chosen tab name; not a title (scrubSessionTitles cannot know it) and not a path",
 	"PendingTabs[].Name":       "#3588 — same user-chosen tab name under the staging roster",
 	"Account":                  "#3588 — user-chosen credential-account label (--account work); nothing in the pipeline touches it",
@@ -139,7 +146,26 @@ var knownUnredactedFields = map[string]string{
 func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	var data session.InstanceData
 	v := reflect.ValueOf(&data).Elem()
-	fillWithSentinel(t, v, 0)
+	filler := &sentinelFiller{}
+	filler.fill(v, "", 0)
+
+	// A subtree the walk could not reach is a subtree this guard cannot speak
+	// for. Fail rather than quietly cover less than the name promises.
+	if len(filler.tooDeep) > 0 {
+		sort.Strings(filler.tooDeep)
+		t.Errorf("the reflective walk hit its depth limit (%d) and skipped %d subtree(s):\n  %s\n\n"+
+			"Those fields were never sentinel-planted, so this guard says nothing about them. "+
+			"Raise guardMaxDepth, or flatten the shape.",
+			guardMaxDepth, len(filler.tooDeep), strings.Join(filler.tooDeep, "\n  "))
+	}
+	if len(filler.unsupported) > 0 {
+		sort.Strings(filler.unsupported)
+		t.Errorf("the reflective walk met %d field(s) of a kind it cannot plant a sentinel in:\n  %s\n\n"+
+			"encoding/json CAN serialize an interface's concrete value, so these are holes in the "+
+			"guard, not fields it may ignore. Extend sentinelFiller.fill to populate a concrete "+
+			"value for them.",
+			len(filler.unsupported), strings.Join(filler.unsupported, "\n  "))
+	}
 
 	// Prove the fill actually planted something, or an empty walk would make
 	// this test vacuously green forever.
@@ -158,12 +184,19 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	}
 
 	var unjustified []string
+	seen := make(map[string]struct{}, len(leaked))
 	for _, path := range leaked {
 		_, safe := verbatimInstanceFields[path]
 		_, known := knownUnredactedFields[path]
-		if !safe && !known {
-			unjustified = append(unjustified, path)
+		if safe || known {
+			continue
 		}
+		// Seeded slices yield the same path once per element; report it once.
+		if _, dup := seen[path]; dup {
+			continue
+		}
+		seen[path] = struct{}{}
+		unjustified = append(unjustified, path)
 	}
 	if len(unjustified) > 0 {
 		sort.Strings(unjustified)
@@ -209,17 +242,36 @@ func assertNoStaleEntries(t *testing.T, name string, classified map[string]strin
 		len(stale), name, strings.Join(stale, "\n  "), advice)
 }
 
-// fillWithSentinel plants guardSentinel in every settable string-bearing field
-// reachable from v, allocating pointers, one-element slices and one-entry maps
+// sentinelFiller plants guardSentinel in every settable string-bearing field
+// reachable from a value, and records the places it could NOT reach. Those
+// records are failures, not diagnostics: a subtree this walk silently skipped is
+// a subtree the guard cannot speak for, and a guard that stays green over a
+// field it never visited is worse than no guard (#3592 review).
+type sentinelFiller struct {
+	tooDeep     []string
+	unsupported []string
+}
+
+// guardSliceSeed is how many elements every reflected slice is filled with.
+// TWO, not one: a redaction that touches only index 0 — the natural shape of a
+// hand-written `x[0].Field = ...` or a loop with a stray break — passes a
+// one-element probe while every later element still reaches the bundle
+// verbatim. Two elements make the collection-wide contract observable.
+const guardSliceSeed = 2
+
+// fill plants guardSentinel throughout v, allocating pointers, slices and maps
 // on the way so nested shapes are actually visited.
 //
-// Unexported fields are skipped: reflect cannot set them, and they carry no
-// json tag, so they never reach a bundle. time.Time is skipped for the same
-// reason in the other direction — it is opaque, holds no user text, and
-// recursing into its unexported internals would panic.
-func fillWithSentinel(t *testing.T, v reflect.Value, depth int) {
-	t.Helper()
-	if depth > guardMaxDepth || !v.CanSet() {
+// Unexported fields are skipped: reflect cannot set them, they carry no json
+// tag, and they never reach a bundle. time.Time is skipped for the mirror
+// reason — opaque, no user text, and recursing into its unexported internals
+// would panic.
+func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
+	if !v.CanSet() {
+		return
+	}
+	if depth > guardMaxDepth {
+		f.tooDeep = append(f.tooDeep, path)
 		return
 	}
 	switch v.Kind() {
@@ -229,36 +281,49 @@ func fillWithSentinel(t *testing.T, v reflect.Value, depth int) {
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
-		fillWithSentinel(t, v.Elem(), depth+1)
+		f.fill(v.Elem(), path, depth+1)
 	case reflect.Struct:
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return
 		}
 		for i := 0; i < v.NumField(); i++ {
-			if !v.Type().Field(i).IsExported() {
+			field := v.Type().Field(i)
+			if !field.IsExported() {
 				continue
 			}
-			fillWithSentinel(t, v.Field(i), depth+1)
+			f.fill(v.Field(i), join(path, field.Name), depth+1)
 		}
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			v.SetBytes([]byte(guardSentinel))
 			return
 		}
-		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
-		fillWithSentinel(t, v.Index(0), depth+1)
+		v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
+		for i := 0; i < v.Len(); i++ {
+			f.fill(v.Index(i), path+"[]", depth+1)
+		}
 	case reflect.Array:
 		for i := 0; i < v.Len(); i++ {
-			fillWithSentinel(t, v.Index(i), depth+1)
+			f.fill(v.Index(i), path+"[]", depth+1)
 		}
 	case reflect.Map:
 		key := reflect.New(v.Type().Key()).Elem()
-		fillWithSentinel(t, key, depth+1)
+		f.fill(key, path+"[key]", depth+1)
 		val := reflect.New(v.Type().Elem()).Elem()
-		fillWithSentinel(t, val, depth+1)
+		f.fill(val, path+"[]", depth+1)
 		m := reflect.MakeMap(v.Type())
 		m.SetMapIndex(key, val)
 		v.Set(m)
+	case reflect.Interface:
+		// encoding/json happily serializes whatever concrete string, map or
+		// slice an interface field holds, so an unhandled interface is a hole
+		// in the guard rather than a field it may ignore. There is no correct
+		// sentinel to plant without knowing the concrete type, so this fails
+		// loudly and asks the author to extend the walk (#3592 review).
+		f.unsupported = append(f.unsupported, path+" (interface)")
+	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		// Not serializable by encoding/json — it errors rather than emitting
+		// them — so they cannot reach a bundle and need no sentinel.
 	}
 }
 
