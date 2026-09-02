@@ -937,7 +937,22 @@ function guardedTabRebind(
       // user made during the await (pickSelection keeps their newer choice) — the one
       // input that deliberately does read the committed state.
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      const outcome = rebindTargetAfterAwait(gen, selId, currentGen, store.get().selectedId, targetIdx);
+      // Whether the session this gesture was aimed at survived the round trip. A
+      // session killed by another client mid-flight ALSO moves the selection
+      // (pickSelection lands elsewhere) and ALSO takes the target with it, so without
+      // this the guard would report the user's own doing for something done to them
+      // (#3668 Codex). An EMPTY pinned id is not evidence of a death: a record with no
+      // id never matches the store's selection either, and the selection guard is the
+      // one that refuses it.
+      const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
+      const outcome = rebindTargetAfterAwait({
+        pinnedGen: gen,
+        pinnedSelId: selId,
+        currentGen,
+        currentSelId: store.get().selectedId,
+        pinnedSessionAlive,
+        targetIdx,
+      });
       if (outcome.kind === "rebind") {
         splitView.setFocusedTab(outcome.idx);
         if (verb === "create") {

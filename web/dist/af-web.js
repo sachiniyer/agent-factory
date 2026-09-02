@@ -10850,25 +10850,30 @@ function tabToKeepOnClose(ids, closedIndex, activeIndex) {
   const keepIndex = closedIndex === activeIndex ? activeIndex - 1 : activeIndex;
   return ids[keepIndex] ?? "";
 }
-function rebindTargetAfterAwait(pinnedGen, pinnedSelId, currentGen, currentSelId, targetIdx) {
-  if (currentSelId !== pinnedSelId) {
+function rebindTargetAfterAwait(inputs) {
+  if (!inputs.pinnedSessionAlive) {
+    return { kind: "refused", reason: "session-gone" };
+  }
+  if (inputs.currentSelId !== inputs.pinnedSelId) {
     return { kind: "refused", reason: "selection-moved" };
   }
-  if (currentGen !== pinnedGen) {
+  if (inputs.currentGen !== inputs.pinnedGen) {
     return { kind: "refused", reason: "layout-moved" };
   }
-  if (targetIdx < 0) {
+  if (inputs.targetIdx < 0) {
     return { kind: "refused", reason: "tab-gone" };
   }
-  return { kind: "rebind", idx: targetIdx };
+  return { kind: "rebind", idx: inputs.targetIdx };
 }
 function tabRebindRefusalNotice(reason, verb) {
   const done = verb === "create" ? "Tab created" : "Tab closed";
   switch (reason) {
+    case "session-gone":
+      return `${done} \xB7 its session is gone now`;
     case "selection-moved":
       return `${done} on the session you left \xB7 this pane kept its tab`;
     case "layout-moved":
-      return `${done} \xB7 the pane you focused meanwhile kept its tab`;
+      return `${done} \xB7 the layout changed meanwhile, so the pane kept its tab`;
     case "tab-gone":
       return verb === "create" ? `${done}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done} \xB7 the tab the pane would have moved to is gone too`;
   }
@@ -15532,7 +15537,15 @@ function guardedTabRebind(selId, run, resolve, verb) {
     const targetIdx = resolve(sessions);
     const currentGen = splitView.layoutGeneration();
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    const outcome = rebindTargetAfterAwait(gen, selId, currentGen, store.get().selectedId, targetIdx);
+    const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
+    const outcome = rebindTargetAfterAwait({
+      pinnedGen: gen,
+      pinnedSelId: selId,
+      currentGen,
+      currentSelId: store.get().selectedId,
+      pinnedSessionAlive,
+      targetIdx
+    });
     if (outcome.kind === "rebind") {
       splitView.setFocusedTab(outcome.idx);
       if (verb === "create") {
