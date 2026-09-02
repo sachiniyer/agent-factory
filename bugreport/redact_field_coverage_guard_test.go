@@ -1,6 +1,7 @@
 package bugreport
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -415,21 +416,23 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 			// carries five unexported fields, two of them
 			// (snapshotStorageTabs, runtimeCleanup) holding user text
 			// (#3592 review).
+			hiddenAt := len(filler.planted)
 			hiddenForms := plantHiddenState(filler, value)
 
-			custom := marshalOrFail(t, typ.String()+".MarshalJSON", value)
-			// The twin copies the EXPORTED fields only, so the hidden state
-			// just planted cannot reach the baseline — which is what makes it
-			// show up below as an added member rather than a matching one.
+			// The baseline is captured FIRST. The twin shares the planted
+			// slices and maps, so a value-receiver marshaler that rewrites what
+			// it renders — encoding a field in place before emitting it — would
+			// otherwise be compared against a baseline it had already rewritten,
+			// and the two would agree (#3592 review).
+			//
+			// The twin copies the EXPORTED fields only, so the hidden state just
+			// planted cannot reach it — which is what makes hidden output show
+			// up below as an added member rather than a matching one.
 			baseline := marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value))
+			custom := marshalReviewed(t, typ, value)
 
-			var customMembers, baselineMembers map[string]json.RawMessage
-			if err := json.Unmarshal(custom, &customMembers); err != nil {
-				t.Fatalf("%s did not render a JSON object: %v\n%s", typ, err, custom)
-			}
-			if err := json.Unmarshal(baseline, &baselineMembers); err != nil {
-				t.Fatalf("the plain twin of %s did not render a JSON object: %v", typ, err)
-			}
+			customMembers := decodeMembers(t, typ.String()+".MarshalJSON", custom)
+			baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), baseline)
 
 			var added, changed, dropped []string
 			for name, got := range customMembers {
@@ -465,6 +468,44 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 			for _, form := range hiddenForms {
 				if strings.Contains(string(custom), form) {
 					added = append(added, fmt.Sprintf("text planted in an UNEXPORTED field: %s", form))
+				}
+			}
+
+			// Everything above reads ONE state: every scalar at zero, because
+			// that is what the walk leaves. Two claims survive only if other
+			// states are read too — a marshaler that emits its hidden state
+			// while a flag is set (session.InstanceData has exactly such a
+			// flag, snapshotTabsProjected, which production sets alongside
+			// snapshotStorageTabs), and one that reaches for user text only for
+			// a particular status. Both match a zero fixture exactly
+			// (#3592 review).
+			//
+			// So the scalars are varied and the output re-read. What is asserted
+			// there is the exemption's own words — "never from user text" — not
+			// the enum vocabulary, which session/state_names_test.go owns: a
+			// declared extra must carry no planted marker in ANY state, and no
+			// hidden marker may appear.
+			for _, state := range []int{1, 7} {
+				seedScalars(value, state)
+				varied := marshalReviewed(t, typ, value)
+				variedMembers := decodeMembers(t, typ.String()+".MarshalJSON", varied)
+				for name := range entry.extra {
+					got := string(variedMembers[name])
+					for _, planted := range filler.planted[:hiddenAt] {
+						if strings.Contains(got, planted.forms[0]) {
+							changed = append(changed, fmt.Sprintf(
+								"%s carries %s from %s once the scalars are set (state %d) — the entry "+
+									"claims it is derived from the enum beside it, never from user text",
+								name, got, planted.path, state))
+						}
+					}
+				}
+				for _, form := range hiddenForms {
+					if strings.Contains(string(varied), form) {
+						added = append(added, fmt.Sprintf(
+							"text planted in an UNEXPORTED field, once the scalars are set (state %d): %s",
+							state, form))
+					}
 				}
 			}
 
@@ -544,6 +585,103 @@ func plantHiddenState(filler *sentinelFiller, value reflect.Value) []string {
 		forms = append(forms, planted.forms...)
 	}
 	return forms
+}
+
+// marshalReviewed marshals through the form that actually implements the
+// reviewed interface. A MarshalJSON declared on *T is not invoked for a
+// non-addressable T, so marshalling the value would compare json's DEFAULT
+// encoding against the plain twin and agree every time, whatever *T emits
+// (#3592 review). fill already accepts a reviewed type through a pointer, so
+// this is a shape the walk admits.
+func marshalReviewed(t *testing.T, typ reflect.Type, value reflect.Value) []byte {
+	t.Helper()
+	target := value
+	if !typ.Implements(jsonMarshalerType) && !typ.Implements(textMarshalerType) {
+		target = value.Addr()
+	}
+	return marshalOrFail(t, typ.String()+".MarshalJSON", target)
+}
+
+// decodeMembers reads a JSON object's top-level members and REFUSES a repeated
+// name.
+//
+// Unmarshalling into a map keeps one occurrence and silently drops the rest, so
+// a marshaler that emits a member twice — which this repo's own
+// AppendJSONMember makes easy to do by splicing — could carry user text in the
+// first and the expected value in the second, match the baseline, and still ship
+// the text in the bundle that consumers actually read (#3592 review).
+func decodeMembers(t *testing.T, what string, doc []byte) map[string]json.RawMessage {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(doc))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		t.Fatalf("%s did not render a JSON object (%v): %s", what, err, doc)
+	}
+	members := map[string]json.RawMessage{}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			t.Fatalf("%s: reading a member name failed: %v", what, err)
+		}
+		name, ok := key.(string)
+		if !ok {
+			t.Fatalf("%s: member name %v is not a string", what, key)
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			t.Fatalf("%s: reading the value of %q failed: %v", what, name, err)
+		}
+		if previous, dup := members[name]; dup {
+			t.Errorf("%s emits the member %q more than once — %s, then %s.\n\n"+
+				"Only the last survives a map decode, so every check below reads one of them "+
+				"and never sees the other, while the bundle carries both and different readers "+
+				"pick different ones.", what, name, previous, raw)
+		}
+		members[name] = raw
+	}
+	return members
+}
+
+// seedScalars sets every scalar leaf reachable from value — exported and
+// unexported alike — to a non-zero value derived from n, so the marshaler can be
+// read in a state other than the all-zero one the walk leaves behind.
+//
+// Byte and rune containers are stepped over: their elements are the planted text
+// itself, and overwriting them would destroy the evidence the rest of the test
+// searches for. Maps are stepped over too — their values were planted through
+// reflect.MakeMap and are not addressable here.
+func seedScalars(value reflect.Value, n int) {
+	switch value.Kind() {
+	case reflect.Pointer:
+		if !value.IsNil() {
+			seedScalars(value.Elem(), n)
+		}
+	case reflect.Struct:
+		if value.Type() == reflect.TypeOf(time.Time{}) {
+			return
+		}
+		for i := 0; i < value.NumField(); i++ {
+			field := value.Field(i)
+			if value.Type().Field(i).PkgPath != "" {
+				field = reflect.NewAt(field.Type(), field.Addr().UnsafePointer()).Elem()
+			}
+			seedScalars(field, n)
+		}
+	case reflect.Slice, reflect.Array:
+		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
+			return
+		}
+		for i := 0; i < value.Len(); i++ {
+			seedScalars(value.Index(i), n)
+		}
+	case reflect.Bool:
+		value.SetBool(true)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		value.SetInt(int64(n))
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		value.SetUint(uint64(n))
+	case reflect.Float32, reflect.Float64:
+		value.SetFloat(float64(n))
+	}
 }
 
 func marshalOrFail(t *testing.T, what string, value reflect.Value) []byte {
