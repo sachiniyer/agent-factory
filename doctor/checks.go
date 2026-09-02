@@ -529,8 +529,15 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		// session that would not answer, often one that vanished mid-scan — is
 		// an ordinary unknown, not a broken machine. Either way nothing is
 		// assessed and nothing is removed, which is the part that matters.
+		// temp-home-scan, NOT stale-temp-home: this is one statement about the
+		// SCAN, and stale-temp-home findings are per-home and collapse into a
+		// counted row. Filed under that slug the collapse rewrote this advisory
+		// as "1 agent-factory home abandoned under the temp dir" — inventing a
+		// home that was never found and deleting the reason the scan did no
+		// work. A fabricated positive on the report that gates an rm -rf.
+		report.markIncomplete("stale-temp-home")
 		report.addAdvisoryFinding(Finding{
-			Check: "stale-temp-home",
+			Check: "temp-home-scan",
 			Detail: fmt.Sprintf("no temp home could be assessed: cannot establish which AF homes live tmux "+
 				"sessions claim (%v), and a home a live session claims must never be removed", tmuxHomesErr),
 			Severity:    StatusWarn,
@@ -644,6 +651,16 @@ func reportTempHomeSweepTruncation(report *Report, tempDir string, sweep tempHom
 		return
 	}
 	report.markIncomplete("stale-temp-home")
+	if sweep.unreadable {
+		report.addAdvisoryFinding(Finding{
+			Check: "temp-home-scan",
+			Detail: fmt.Sprintf("no temp home was assessed: %s could not be listed at all, so this run has "+
+				"nothing to say about abandoned homes — which is not the same as saying there are none", tempDir),
+			Severity:    StatusWarn,
+			Remediation: "check that " + tempDir + " exists and is readable, then re-run `af doctor`",
+		})
+		return
+	}
 	report.addAdvisoryFinding(Finding{
 		Check: "temp-home-scan",
 		Detail: fmt.Sprintf("this run did NOT assess every temp home: it inspected %d of the %d directories "+
@@ -717,10 +734,14 @@ type tempHomeSweep struct {
 	// total the sweep stopped before it could compute.
 	offered int
 	visited int
+	// unreadable records that the temp dir itself could not be listed.
+	unreadable bool
 }
 
-// truncated reports whether the sweep gave up before seeing the whole temp dir.
-func (s tempHomeSweep) truncated() bool { return s.visited < s.offered }
+// truncated reports whether the sweep gave up before seeing the whole temp dir,
+// INCLUDING the case where it could not start: an unreadable temp dir is a
+// sweep that saw nothing, not a sweep that found nothing.
+func (s tempHomeSweep) truncated() bool { return s.unreadable || s.visited < s.offered }
 
 // candidateTempHomes lists directories one and two levels below tempDir —
 // Go tests produce /tmp/TestName123/001-style homes, manual runs
@@ -732,10 +753,11 @@ func (s tempHomeSweep) truncated() bool { return s.visited < s.offered }
 func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
 	level1, err := os.ReadDir(tempDir)
 	if err != nil {
-		// An unreadable temp dir offers nothing and skips nothing, so this is
-		// not a truncated sweep — it is an empty one. checkStaleTempHomes has
-		// nothing to assess either way.
-		return tempHomeSweep{}
+		// A temp dir that cannot be listed has told us NOTHING. That is not the
+		// same as telling us it holds no homes, and reporting the second is this
+		// package's signature failure (#1939, #2874). The sweep says it is
+		// unreadable and the caller reports the run as incomplete.
+		return tempHomeSweep{unreadable: true}
 	}
 	var sweep tempHomeSweep
 	for _, e := range level1 {
@@ -750,18 +772,37 @@ func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
 		if limit > 0 && len(sweep.candidates) >= limit {
 			break
 		}
-		sweep.visited++
 		dir := filepath.Join(tempDir, e.Name())
 		sweep.candidates = append(sweep.candidates, dir)
-		level2, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e2 := range level2 {
-			if e2.IsDir() {
+		// The bound is re-checked for every CHILD, not only between first-level
+		// entries. Checking only at the boundary meant a directory, once
+		// started, was always expanded in full: one /tmp/TestFoo holding a
+		// million children produced a million candidates against a 50,000
+		// budget, and — being the only first-level entry — left visited equal to
+		// offered, so nothing was reported either. Unbounded work and silence
+		// together, through the exact /tmp/TestFoo/001 shape that made this
+		// check expensive in the first place.
+		expanded := true
+		if level2, err := os.ReadDir(dir); err == nil {
+			for _, e2 := range level2 {
+				if !e2.IsDir() {
+					continue
+				}
+				if limit > 0 && len(sweep.candidates) >= limit {
+					expanded = false
+					break
+				}
 				sweep.candidates = append(sweep.candidates, filepath.Join(dir, e2.Name()))
 			}
 		}
+		if !expanded {
+			// Deliberately NOT counted as visited. A partly expanded entry is
+			// one we did not finish, and counting it would make visited equal
+			// offered on a single-directory temp dir — hiding the truncation
+			// behind the very entry that caused it.
+			break
+		}
+		sweep.visited++
 	}
 	return sweep
 }

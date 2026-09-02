@@ -3,10 +3,12 @@ package doctor
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/cmd/cmd_test"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -84,13 +86,53 @@ func TestCandidateTempHomesCountsSecondLevelAgainstTheBudget(t *testing.T) {
 		}
 	}
 
-	// "a" alone yields 6 candidates (itself + 5 children), already past a
-	// budget of 4, so the sweep stops after that one first-level entry.
 	sweep := candidateTempHomes(root, 4)
-	assert.Equal(t, 1, sweep.visited, "the bound is checked at a first-level boundary, after expanding one entry")
+	assert.LessOrEqual(t, len(sweep.candidates), 4, "the budget bounds candidates, second-level ones included")
 	assert.Equal(t, 3, sweep.offered)
-	assert.Len(t, sweep.candidates, 6, "the entry being expanded when the budget ran out is still expanded fully")
 	assert.True(t, sweep.truncated())
+}
+
+// TestCandidateTempHomesBoundsAHugeSingleDirectory is the P1 from #3568's
+// review, and it is the case the budget exists for.
+//
+// The bound used to be checked only BETWEEN first-level entries, so one
+// directory was always expanded in full once started. A single /tmp/TestFoo
+// holding a million children therefore produced a million candidates despite a
+// 50,000 budget — and because it was the only first-level entry, visited(1)
+// equalled offered(1), so truncated() was false and nothing was reported
+// either. Unbounded work AND silence: both halves of #3466 back at once,
+// through the exact directory shape that made the sweep expensive.
+//
+// The earlier version of this test asserted the overshoot was intentional
+// ("the entry being expanded when the budget ran out is still expanded
+// fully"). That was the defect written down as a requirement: harmless for the
+// five children it used, unbounded for a million.
+func TestCandidateTempHomesBoundsAHugeSingleDirectory(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 50; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "TestFoo", fmt.Sprintf("%03d", i)), 0755))
+	}
+
+	sweep := candidateTempHomes(root, 10)
+
+	assert.LessOrEqual(t, len(sweep.candidates), 10,
+		"one first-level directory must not be able to blow past the budget by having many children")
+	assert.True(t, sweep.truncated(),
+		"a directory that was only PARTLY expanded means the sweep did not see everything, "+
+			"and a sweep that stops without saying so is the whole defect")
+	assert.Equal(t, 0, sweep.visited,
+		"a partly expanded entry is not a visited one; counting it would make visited==offered and hide the truncation")
+}
+
+// TestCandidateTempHomesUnreadableTempDirIsNotAnEmptyOne: a temp dir that
+// cannot be listed has told us NOTHING, which is not the same as telling us it
+// holds no homes. Reporting the latter is this repo's signature failure.
+func TestCandidateTempHomesUnreadableTempDirIsNotAnEmptyOne(t *testing.T) {
+	sweep := candidateTempHomes(filepath.Join(t.TempDir(), "does-not-exist"), 100)
+
+	assert.True(t, sweep.unreadable)
+	assert.True(t, sweep.truncated(), "an unreadable temp dir must not present as a completed sweep")
+	assert.Empty(t, sweep.candidates)
 }
 
 // stageTruncatedSweep puts a genuinely stale AF home BEHIND enough filler
@@ -333,3 +375,73 @@ func TestProcessCollapseSeverityUnchanged(t *testing.T) {
 }
 
 func assertAnError() error { return fmt.Errorf("permission denied") }
+
+// TestEveryAbortedScanIsMarkedIncomplete covers the second P2 from #3568's
+// review: the completeness signal was set ONLY when the candidate budget bit,
+// while two other paths abandon the check just as thoroughly.
+//
+// Both leave summary.incomplete empty in the old code, so a probe following the
+// help text this PR added — "unresolved == 0 AND incomplete is empty means
+// healthy" — reads a scan that never ran as a completed one.
+func TestEveryAbortedScanIsMarkedIncomplete(t *testing.T) {
+	t.Run("an unreadable temp dir", func(t *testing.T) {
+		opts := macLikeTempHomeOptions(t, filepath.Join(t.TempDir(), "gone"), false)
+		ctx, err := newScanContext(opts)
+		require.NoError(t, err)
+		report := &Report{}
+		checkStaleTempHomes(ctx, report)
+
+		assert.Equal(t, []string{"stale-temp-home"}, report.Incomplete,
+			"doctor could not list the temp dir at all; that is not a clean bill of health")
+	})
+
+	t.Run("an unreadable tmux session list", func(t *testing.T) {
+		root := t.TempDir()
+		makeOldTempAFHome(t, root, "abandoned")
+		opts := macLikeTempHomeOptions(t, root, false)
+		opts.Exec = cmd_test.MockCmdExec{
+			RunFunc:    func(*exec.Cmd) error { return nil },
+			OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, fmt.Errorf("tmux will not answer") },
+		}
+		ctx, err := newScanContext(opts)
+		require.NoError(t, err)
+		report := &Report{}
+		checkStaleTempHomes(ctx, report)
+
+		require.Empty(t, findingsFor(report, "stale-temp-home"),
+			"precondition: this path assesses no home at all")
+		assert.Equal(t, []string{"stale-temp-home"}, report.Incomplete,
+			"the check returned before enumerating anything, so the run did not look")
+	})
+}
+
+// TestScanWideAdvisoryIsNotCollapsedIntoAPhantomHome is the first P2 from
+// #3568's review, and it was a fabrication rather than a formatting slip.
+//
+// When liveTmuxHomes fails, checkStaleTempHomes files ONE scan-wide advisory
+// explaining that nothing could be assessed. Filed under the per-home
+// stale-temp-home slug, the collapse rewrote it as "1 agent-factory home
+// abandoned under the temp dir" — inventing a home that was never found, and
+// deleting the reason the scan did no work.
+func TestScanWideAdvisoryIsNotCollapsedIntoAPhantomHome(t *testing.T) {
+	root := t.TempDir()
+	makeOldTempAFHome(t, root, "abandoned")
+	opts := macLikeTempHomeOptions(t, root, false)
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc:    func(*exec.Cmd) error { return nil },
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, fmt.Errorf("tmux will not answer") },
+	}
+	ctx, err := newScanContext(opts)
+	require.NoError(t, err)
+	report := &Report{}
+	checkStaleTempHomes(ctx, report)
+
+	rows := renderRows(report, false, false)
+	for _, row := range rows {
+		assert.NotContains(t, row.detail, "abandoned under the temp dir",
+			"no home was assessed, so no row may claim one was found")
+	}
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0].detail, "no temp home could be assessed",
+		"the reason the scan did no work must survive to the default rendering")
+}
