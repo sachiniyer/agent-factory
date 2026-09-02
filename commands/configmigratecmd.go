@@ -32,13 +32,16 @@ that would change even one effective value is refused rather than written. The
 readers of the old spellings stay, so an older config keeps loading and nothing
 about your running configuration changes.
 
-One thing to know before you downgrade. The grouped spellings have been read
-since 2026-08-14 (#3354). An af older than that does not know them, so it would
-fall back to the built-in default for a migrated key rather than read the
-value — for every migrated key that default is the conservative one (a loopback
-listener, strict host-key checking, no credential mount), so the fallback is
-safe rather than surprising. config.toml.bak holds the old spellings if you need
-to go back further.
+One thing to know before you DOWNGRADE. The grouped spellings have only been
+read since 2026-08-14 (#3354); an af older than that does not know them and
+falls back to the built-in default for a migrated key. For most keys that
+default is the conservative one (strict host-key checking, no credential
+mount). For the two token keys it is not: network.require_token and
+network.require_loopback_token both default to false while the listener still
+defaults to a live 127.0.0.1:8443, so a machine that migrated either as true and
+then downgraded past that release serves its control plane to every local user
+with no token. Migrate says so explicitly when it moves them. Restore the backup
+before such a downgrade.
 
 The previous file is kept beside it as config.toml.bak (an existing backup is
 never overwritten; the copy is numbered instead). A legacy config.json is
@@ -89,8 +92,20 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 			}
 			fmt.Fprintf(w, "  %s → %s\n", migrated.From, migrated.To)
 		}
+		// The summary goes ABOVE the diff, not below it. A moved key renders as a
+		// removed line and an added one, and the surrounding lines can shift with
+		// it, so the raw diff of a two-key migration can look far larger than the
+		// change it describes. A reader who meets that first is alarmed and then
+		// reassured; this way they are told what it means before they read it.
+		// Name the backup that was actually written. availableBackupPath numbers
+		// the copy when config.toml.bak already exists, so a hardcoded
+		// "config.toml.bak" here would point a reader recovering from a bad
+		// migration at an OLDER file than the one this run just saved.
+		fmt.Fprintf(w, "\nthe effective configuration is unchanged — af reads both spellings · moved keys show below as a removed and an added line, and %s holds the original\n", prettyPath(result.Backup))
 		fmt.Fprintf(w, "\n%s\n", strings.TrimRight(result.Diff, "\n"))
-		fmt.Fprintln(w, "\nthe effective configuration is unchanged — af reads both spellings · config.toml.bak holds the old ones")
+	}
+	for _, caution := range result.Cautions {
+		fmt.Fprintf(w, "\ncaution — %s\n", caution)
 	}
 	for _, left := range result.Left {
 		fmt.Fprintf(w, "\nleft in place — %s has no in-file migration · %s\n", left.Key, left.Step)

@@ -232,7 +232,7 @@ program = 'codex'
 	require.Len(t, result.Migrated, 2, "the migratable keys still migrate")
 	require.Len(t, result.Left, 1)
 	assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
-	assert.Equal(t, "register <path> as a project, then set [root_agent] there", result.Left[0].Step)
+	assert.Equal(t, "register <path> as a project, set [root_agent] there, then remove its root_agents entry", result.Left[0].Step)
 	assert.Equal(t, []string{"/home/me/one", "/home/me/two"}, result.Left[0].Detail,
 		"each legacy path is named, sorted, so the reader need not open the file")
 
@@ -482,4 +482,52 @@ func TestMigrateJoinsATableAlreadyOpenedByADottedKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
 	assert.True(t, cfg.RequireToken, "the unrelated dotted leaf survives")
+}
+
+// TestMigrateCautionsWhenATokenRequirementMoves is the #3624-review P1. The
+// grouped spellings have only been read since #3354, and for the token keys the
+// pre-#3354 fallback is NOT the conservative one: both default to false while
+// ListenAddr still defaults to a live 127.0.0.1:8443 listener, so a host that
+// migrated require_token/require_loopback_token = true and then downgraded past
+// that release serves its control plane to every local user with no token —
+// exactly what require_loopback_token exists to prevent on a shared machine.
+// Migrating must say so.
+func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
+	t.Run("names both keys and the backup", func(t *testing.T) {
+		migrateHome(t, "schema_version = 1\nrequire_token = true\nrequire_loopback_token = true\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Cautions, 1)
+		caution := result.Cautions[0]
+		assert.Contains(t, caution, "network.require_token")
+		assert.Contains(t, caution, "network.require_loopback_token")
+		assert.Contains(t, caution, "#3354")
+		assert.Contains(t, caution, prettyHomePath(result.Backup),
+			"the caution must name the backup that restores the setting")
+		assert.Contains(t, caution, "127.0.0.1:8443",
+			"the listener stays up on a downgrade — that is what makes the fallback unsafe")
+	})
+
+	t.Run("silent when the requirement was off", func(t *testing.T) {
+		// A migrated `false` is the built-in default anyway, so there is nothing
+		// to lose and nothing to say. Warning here would train readers to skip
+		// the notice that matters.
+		migrateHome(t, "schema_version = 1\nrequire_token = false\nlisten_addr = '127.0.0.1:8443'\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Migrated)
+		assert.Empty(t, result.Cautions)
+	})
+
+	t.Run("silent for keys whose fallback really is conservative", func(t *testing.T) {
+		migrateHome(t, "schema_version = 1\nssh_host_key_verification = 'insecure'\ndocker_mount_agent_credentials = true\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 2)
+		assert.Empty(t, result.Cautions,
+			"strict host-key checking and no credential mount are the safe fallbacks")
+	})
 }

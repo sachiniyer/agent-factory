@@ -69,8 +69,13 @@ func TestConfigMigrateReportsMigratedAndLeftInPlace(t *testing.T) {
 	assert.Contains(t, out, "-listen_addr = '0.0.0.0:8443'")
 	assert.Contains(t, out, "+[network]")
 	assert.Contains(t, out, "the effective configuration is unchanged")
+	assert.Contains(t, out, path+".bak holds the original",
+		"the recovery hint must name the backup this run wrote, which availableBackupPath numbers when one already exists")
+	assert.Less(t, strings.Index(out, "the effective configuration is unchanged"), strings.Index(out, "--- "+path),
+		"the summary must frame the diff, not follow it — a moved key renders as a removed and an added line, "+
+			"so a reader who meets the raw diff first is alarmed before they are told what it means")
 	assert.Contains(t, out,
-		"left in place — root_agents has no in-file migration · register <path> as a project, then set [root_agent] there")
+		"left in place — root_agents has no in-file migration · register <path> as a project, set [root_agent] there, then remove its root_agents entry")
 	assert.Contains(t, out, "  /home/me/one")
 	assert.Contains(t, out, "  /home/me/two")
 
@@ -97,7 +102,7 @@ func TestConfigMigrateSecondRunIsIdempotentAndStillNamesRootAgents(t *testing.T)
 	assert.Contains(t, out, "nothing to migrate in "+path)
 	assert.NotContains(t, out, "migrated ")
 	assert.NotContains(t, out, "backup ")
-	assert.Contains(t, out, "left in place — root_agents has no in-file migration · register <path> as a project, then set [root_agent] there")
+	assert.Contains(t, out, "left in place — root_agents has no in-file migration · register <path> as a project, set [root_agent] there, then remove its root_agents entry")
 
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -169,4 +174,34 @@ func TestConfigMigrateHelpNamesItsTwoRefusals(t *testing.T) {
 	assert.Contains(t, help, "config.toml.bak")
 	assert.True(t, strings.Contains(help, "idempotent") || strings.Contains(help, "twice is safe"),
 		"the help must say a second run is safe")
+}
+
+// TestConfigMigrateHintNamesTheNumberedBackup pins the #3624-review P2: when
+// config.toml.bak already exists the copy is numbered, and a hardcoded
+// "config.toml.bak" in the recovery hint would point a reader recovering from a
+// bad migration at an OLDER file than the one this run just saved.
+func TestConfigMigrateHintNamesTheNumberedBackup(t *testing.T) {
+	path := migrateHome(t, bothDeprecationsConfig)
+	require.NoError(t, os.WriteFile(path+".bak", []byte("an older backup\n"), 0644))
+
+	out, err := runConfigMigrate(t)
+	require.NoError(t, err)
+	assert.Contains(t, out, path+".bak.1 holds the original")
+	assert.NotContains(t, out, path+".bak holds the original")
+
+	preserved, err := os.ReadFile(path + ".bak")
+	require.NoError(t, err)
+	assert.Equal(t, "an older backup\n", string(preserved), "the existing backup is never overwritten")
+}
+
+// TestConfigMigrateRendersTheDowngradeCaution pins that the security caution
+// reaches the terminal, not just the JSON envelope.
+func TestConfigMigrateRendersTheDowngradeCaution(t *testing.T) {
+	migrateHome(t, "schema_version = 1\nrequire_token = true\nrequire_loopback_token = true\n")
+
+	out, err := runConfigMigrate(t)
+	require.NoError(t, err)
+	assert.Contains(t, out, "caution — ")
+	assert.Contains(t, out, "network.require_loopback_token")
+	assert.Contains(t, out, "no token")
 }

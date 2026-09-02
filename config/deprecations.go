@@ -65,7 +65,13 @@ type configDeprecation struct {
 // the config file, and visible in the TUI's project list. A config migration
 // does not get to make that decision on the reader's behalf, so migrate names
 // the step and stops.
-const legacyRootAgentsManualStep = "register <path> as a project, then set [root_agent] there"
+//
+// The step ends with removing the legacy entry on purpose. Registering the
+// project and writing its [root_agent] reproduces the behavior, but the
+// root_agents key is what the loader warns about — a remedy that stops before
+// the removal leaves the reader having done the work and still seeing the
+// warning that sent them (#3624 review).
+const legacyRootAgentsManualStep = "register <path> as a project, set [root_agent] there, then remove its root_agents entry"
 
 // configDeprecations returns every deprecated global-config key in one list.
 // The flat aliases are derived from configKeyAliases rather than restated, so a

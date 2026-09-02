@@ -82,6 +82,10 @@ type MigrationResult struct {
 	Left []UnmigratedKey `json:"left,omitempty"`
 	// Diff is the unified diff of the rewrite, empty when nothing changed.
 	Diff string `json:"diff,omitempty"`
+	// Cautions are consequences of THIS migration the reader has to know about,
+	// not general advice — today, the one downgrade that costs a security
+	// setting rather than a convenience one.
+	Cautions []string `json:"cautions,omitempty"`
 }
 
 // Changed reports whether the run rewrote the file.
@@ -226,7 +230,39 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	// should be the ordinary unified diff they already know how to read — and one
 	// this repo does not have to own a differ to produce.
 	result.Diff = udiff.Unified(prettyPath, prettyPath, before, content)
+	result.Cautions = downgradeCautions(result.Migrated, prettyHomePath(backup))
 	return result, nil
+}
+
+// tokenKeysLostOnDowngrade are the migrated keys whose pre-#3354 fallback is
+// UNSAFE rather than conservative. Both default to false, and ListenAddr still
+// defaults to a live 127.0.0.1:8443 listener, so losing them does not turn the
+// control plane off — it turns its authentication off, for every local user, on
+// exactly the shared hosts where someone bothered to set them.
+var tokenKeysLostOnDowngrade = map[string]bool{
+	"network.require_token":          true,
+	"network.require_loopback_token": true,
+}
+
+// downgradeCautions reports what this migration costs a reader who later runs an
+// af predating the grouped spellings. It fires only when a token requirement was
+// actually turned ON and then moved: a migrated `false` is the default anyway, so
+// warning about it would be noise that teaches people to skip the notice.
+func downgradeCautions(migrated []MigratedKey, backup string) []string {
+	var affected []string
+	for _, key := range migrated {
+		if tokenKeysLostOnDowngrade[key.To] && key.Value == "true" {
+			affected = append(affected, key.To)
+		}
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s moved to the grouped spelling, which af only began reading on 2026-08-14 (#3354) · "+
+			"an older af reads neither spelling, falls back to false, and keeps serving the control plane on the "+
+			"default 127.0.0.1:8443 listener with no token — restore %s before downgrading past that release",
+		strings.Join(affected, " and "), backup)}
 }
 
 // unmigratedKey builds the report for a deprecation with no in-file migration,
