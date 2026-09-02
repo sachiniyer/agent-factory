@@ -9,6 +9,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Runtime verification of the account boundary (#3598).
@@ -166,28 +168,95 @@ func quotedPathList(paths []string) string {
 	return strings.Join(quoted, ", ")
 }
 
+// accountFS opens the host account directory for the residue walk. A
+// package-level seam (mirroring dockerExec and dockerSelfBinary) rather than a
+// direct os.DirFS call, because no unprivileged process can mknod a character
+// device — so this is what lets a test present a real device MODE to the walk
+// production runs. Production never reassigns it.
+var accountFS = os.DirFS
+
+// accountSourceVerdict classifies the bind source Docker RECORDED for the mount
+// at dockerAccountHome against the directory af asked it to bind.
+type accountSourceVerdict int
+
+const (
+	// accountSourceSame: the same directory, by spelling or by identity.
+	accountSourceSame accountSourceVerdict = iota
+	// accountSourceForeign: a DIFFERENT directory that exists on this host — the
+	// one case where af can say the mount is not the account.
+	accountSourceForeign
+	// accountSourceUnresolvable: a path this host cannot interpret, which is what a
+	// daemon that translates client paths reports.
+	accountSourceUnresolvable
+)
+
+// classifyAccountMountSource decides whether the mount Docker installed at
+// dockerAccountHome is the account af named.
+//
+// A string comparison is NOT that decision, and an earlier cut of this file made
+// it one. Docker records a bind source verbatim on a plain Linux daemon
+// (measured on 29.4.0, including sources reached through a symlinked leaf and a
+// symlinked ancestor) — but ensureAccountDockerEngineLocal deliberately accepts
+// unix:// and npipe:// endpoints, which include Docker Desktop, and a daemon
+// that lives in a VM can report its OWN spelling of the client's path. Refusing
+// on a mismatch there would refuse every account session on that engine, which
+// is a worse outcome than the one the check was guarding (#3602 review).
+//
+// So it refuses only what it can actually establish: a source this host resolves
+// to a DIFFERENT directory. A source this host cannot resolve at all is not
+// evidence of anything — af says so and lets the session continue, because the
+// identity of that mount does not rest on this comparison in the first place.
+// af appends the account mount itself, and Docker refuses a second mount at the
+// same destination outright ("Duplicate mount point: /af-account", measured), so
+// no run_arg can take that slot; what this adds is a check on the one thing
+// those facts do not cover.
+func classifyAccountMountSource(recorded, want string) accountSourceVerdict {
+	if path.Clean(recorded) == path.Clean(want) {
+		return accountSourceSame
+	}
+	recordedInfo, err := os.Stat(recorded)
+	if err != nil {
+		return accountSourceUnresolvable
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		return accountSourceUnresolvable
+	}
+	if os.SameFile(recordedInfo, wantInfo) {
+		return accountSourceSame
+	}
+	return accountSourceForeign
+}
+
 // verifyConfiguredAccountBoundary holds the boundary against what Docker was
 // CONFIGURED to install, which is the daemon's record rather than af's reading
 // of run_args. It is the backstop for an option the argv walk misparses and for
 // an image VOLUME, which never appears in argv at all; the aliased cases it
 // cannot see by construction are the resolved check's job.
 //
-// accountSource is the host directory af mounted, so this also proves the mount
-// sitting at dockerAccountHome is af's own rather than something that arrived
-// with the same destination. A string comparison is the right one: Docker
-// records a bind source verbatim rather than canonicalising it (measured on
-// 29.4.0, including a source reached through a symlinked ancestor), and af hands
-// it filepath.Abs of the account directory, which does not resolve symlinks
-// either — so the two spellings are the same spelling.
-func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource string) error {
+// accountSource is the host directory af mounted. warn receives one line when
+// Docker reported a source this host cannot resolve — see
+// classifyAccountMountSource for why that is a note rather than a refusal.
+func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource string, warn func(string, ...any)) error {
 	own := 0
 	for _, mount := range c.Mounts {
 		destination := path.Clean(mount.Destination)
 		if destination == dockerAccountHome {
-			if mount.Type != "bind" || path.Clean(mount.Source) != path.Clean(accountSource) {
+			if mount.Type != "bind" {
 				return fmt.Errorf(
-					"Docker recorded a %q mount from %q at %s, but af mounted the account from %q; refusing rather than running the session on a directory af did not select",
-					mount.Type, mount.Source, dockerAccountHome, accountSource)
+					"Docker recorded a %q mount at %s where af installed a bind of the account directory; refusing rather than running the session on something af did not select",
+					mount.Type, dockerAccountHome)
+			}
+			switch classifyAccountMountSource(mount.Source, accountSource) {
+			case accountSourceForeign:
+				return fmt.Errorf(
+					"Docker recorded the mount at %s as a bind of %q, which is a different directory on this host than the account af selected (%q); refusing rather than running the session on a directory af did not name",
+					dockerAccountHome, mount.Source, accountSource)
+			case accountSourceUnresolvable:
+				if warn != nil {
+					warn("backend=docker: the Docker daemon reports the account mount at %s as a bind of %q, which this host cannot resolve; af asked for %q. That is what a daemon translating client paths looks like, so it is not treated as a mismatch — but if these are genuinely different directories, the session is running on the wrong one.",
+						dockerAccountHome, mount.Source, accountSource)
+				}
 			}
 			own++
 			continue
@@ -311,7 +380,7 @@ func unescapeMountinfoField(field string) (string, error) {
 // mount. They reach the refusal as CANDIDATES — one of them may be what the
 // image aliased onto the account, and af cannot say which, or whether it was any
 // of them; see resolvedMountCauses.
-func verifyResolvedAccountBoundary(targets, configured []string) error {
+func verifyResolvedAccountBoundary(targets, configured []string, accountSource string) error {
 	atAccountHome := 0
 	for _, target := range targets {
 		if target == dockerAccountHome {
@@ -321,7 +390,7 @@ func verifyResolvedAccountBoundary(targets, configured []string) error {
 		if root := accountProtectedPath(target); root != "" {
 			return boundaryRefusal(fmt.Sprintf(
 				"the kernel mounted %q, inside af's account boundary at %s, which af did not configure",
-				target, root), resolvedMountCauses(configured), "")
+				target, root), resolvedMountCauses(configured), mountpointResidueNote(target, accountSource))
 		}
 	}
 	if atAccountHome != 1 {
@@ -359,6 +428,35 @@ func resolvedMountCauses(configured []string) []string {
 	causes = append(causes,
 		"the account directory on this host may itself contain a nested mount point, which the account's recursive bind carries into the container — move it out of the account directory")
 	return causes
+}
+
+// mountpointResidueNote names the HOST path a foreign mount landed on, when that
+// is inside the account bind.
+//
+// Docker creates a destination that does not exist yet, and it does so as root,
+// through the account bind, before any runtime check can run — so the directory
+// or file it made is in the operator's account directory and survives the reap
+// this refusal triggers. The file header has always said this refuses and NAMES
+// the residue; for a mount it was naming only the container-side path, which is
+// no help on a host where that path does not exist (#3602 review).
+//
+// It says "if it was not already yours" rather than "delete it", and that
+// hedge is the honest part: Docker leaves an EXISTING destination alone, so a
+// mount landing on a path the account already had — /af-account/.config, say —
+// left nothing behind, and af cannot tell the two apart after the fact. Telling
+// an operator to remove a path that holds their own credentials would be worse
+// than saying nothing.
+//
+// A mount under dockerAccountRuntimeHome earns no note: af creates that
+// directory inside the container, so nothing there reaches the host.
+func mountpointResidueNote(target, accountSource string) string {
+	if accountSource == "" || !strings.HasPrefix(target, dockerAccountHome+"/") {
+		return ""
+	}
+	host := path.Join(accountSource, strings.TrimPrefix(target, dockerAccountHome+"/"))
+	return fmt.Sprintf(
+		"Its mountpoint on this host is %q. Docker creates a destination that does not exist yet, as ROOT and through the account bind, before any check can run — so if that path was not already yours, it is residue this refusal cannot undo; remove it by hand",
+		host)
 }
 
 // verifyAccountDeviceResidue looks for device nodes af never put in the account
@@ -543,13 +641,25 @@ func boundaryRefusal(observed string, causes []string, note string) error {
 // af could not read — returns an error, and the caller reaps the container on
 // the way out, so a refusal tears the session down rather than starting it with
 // a shadowed account.
+//
+// Once the container's own record is in hand, the remaining checks all RUN and
+// their findings are joined; the first one does not return early. They report
+// different things — a mount af must refuse, versus a root-created device node
+// sitting in the operator's account directory that the reap does not remove —
+// and an operator who is told only about the mount never learns to go delete the
+// node (#3602 review). Reading a source still stops the sequence, because a
+// check that could not see has nothing to add.
 func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	if p.spec.Account.Dir == "" {
 		return nil
 	}
-	refuse := func(err error) error {
+	refuse := func(errs ...error) error {
+		joined := errors.Join(errs...)
+		if joined == nil {
+			return nil
+		}
 		return fmt.Errorf("backend=docker: refusing account %q for session %q: %w",
-			p.spec.Account.Name, p.spec.Title, err)
+			p.spec.Account.Name, p.spec.Title, joined)
 	}
 	out, err := p.docker(dockerShortStepTimeout, "inspect", "--type", "container", p.containerID)
 	if err != nil {
@@ -563,28 +673,22 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	if err != nil {
 		return refuse(err)
 	}
-	if err := verifyConfiguredAccountBoundary(inspected, source); err != nil {
-		return refuse(err)
-	}
 	configured := configuredContainerPaths(inspected)
+	findings := []error{verifyConfiguredAccountBoundary(inspected, source, log.WarningLog.Printf)}
 
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "cat", "/proc/1/mountinfo")
 	if err != nil {
-		return refuse(fmt.Errorf("cannot read the container's resolved mount table: %s: %w", strings.TrimSpace(string(out)), err))
-	}
-	targets, err := parseMountinfoTargets(out)
-	if err != nil {
-		return refuse(fmt.Errorf("cannot read the container's resolved mount table: %w", err))
-	}
-	if err := verifyResolvedAccountBoundary(targets, configured); err != nil {
-		return refuse(err)
+		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %s: %w", strings.TrimSpace(string(out)), err))
+	} else if targets, perr := parseMountinfoTargets(out); perr != nil {
+		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %w", perr))
+	} else {
+		findings = append(findings, verifyResolvedAccountBoundary(targets, configured, source))
 	}
 
-	if err := verifyAccountDeviceResidue(os.DirFS(source), source, inspected.HostConfig.Devices, configured); err != nil {
-		return refuse(err)
-	}
-	return nil
+	findings = append(findings,
+		verifyAccountDeviceResidue(accountFS(source), source, inspected.HostConfig.Devices, configured))
+	return refuse(findings...)
 }
 
 // accountBoundarySourceDir resolves the host directory the verification must

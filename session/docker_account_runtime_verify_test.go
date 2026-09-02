@@ -62,11 +62,11 @@ const cleanMountinfo = `2421 268 0:67 / / rw,relatime - overlay overlay rw,lower
 func TestAccountRuntimeVerify_CleanContainerPasses(t *testing.T) {
 	inspected, err := parseDockerInspectContainer([]byte(cleanInspect(verifyAccountSource)))
 	require.NoError(t, err)
-	require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource))
+	require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil))
 
 	targets, err := parseMountinfoTargets([]byte(cleanMountinfo))
 	require.NoError(t, err)
-	require.NoError(t, verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected)))
+	require.NoError(t, verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected), verifyAccountSource))
 
 	require.NoError(t, verifyAccountDeviceResidue(os.DirFS(t.TempDir()), verifyAccountSource, inspected.HostConfig.Devices, nil))
 }
@@ -166,13 +166,13 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 			require.NoError(t, err)
 			// The configured half passes: every recorded container path is
 			// outside the boundary, which is exactly why a lexical check fails.
-			require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource),
+			require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil),
 				"the configured set is lexically clean — that is the defect")
 			configured := configuredContainerPaths(inspected)
 
 			targets, err := parseMountinfoTargets([]byte(cleanMountinfo + tt.extraMountinfo))
 			require.NoError(t, err)
-			err = verifyResolvedAccountBoundary(targets, configured)
+			err = verifyResolvedAccountBoundary(targets, configured, verifyAccountSource)
 			if err == nil {
 				err = verifyAccountDeviceResidue(tt.residue, verifyAccountSource, inspected.HostConfig.Devices, configured)
 			}
@@ -195,12 +195,12 @@ func TestAccountRuntimeVerify_RefusesAnAliasedImageVolume(t *testing.T) {
 		"HostConfig":{"Tmpfs":null,"Devices":null}}]`
 	inspected, err := parseDockerInspectContainer([]byte(inspect))
 	require.NoError(t, err)
-	require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource))
+	require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil))
 
 	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
 		"2683 2674 8:1 /var/lib/docker/volumes/anon/_data /af-account rw,relatime - ext4 /dev/root rw,discard\n"))
 	require.NoError(t, err)
-	err = verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected))
+	err = verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected), verifyAccountSource)
 	require.Error(t, err, "an image VOLUME aliased onto the account must refuse; run_args is not the only source of a mount")
 	assert.Contains(t, err.Error(), "/device-target")
 }
@@ -223,7 +223,7 @@ func TestAccountRuntimeVerify_WithNothingConfiguredDoesNotBlameRunArgs(t *testin
 		targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
 			"2441 2440 8:2 / /af-account/vault rw,relatime - ext4 /dev/sdb rw\n"))
 		require.NoError(t, err)
-		err = verifyResolvedAccountBoundary(targets, configured)
+		err = verifyResolvedAccountBoundary(targets, configured, verifyAccountSource)
 		require.Error(t, err, "af cannot tell a nested mount from an aliased one, so it must still refuse")
 		assert.Contains(t, err.Error(), "/af-account/vault")
 		assert.Contains(t, err.Error(), "nested mount point")
@@ -258,7 +258,7 @@ func TestAccountRuntimeVerify_DoesNotAssertWhichCauseItWas(t *testing.T) {
 	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
 		"2441 2440 8:2 / /af-account/vault rw,relatime - ext4 /dev/sdb rw\n"))
 	require.NoError(t, err)
-	err = verifyResolvedAccountBoundary(targets, configured)
+	err = verifyResolvedAccountBoundary(targets, configured, verifyAccountSource)
 	require.Error(t, err)
 
 	message := err.Error()
@@ -380,10 +380,10 @@ func TestAccountRuntimeVerify_ConfiguredSetIsTheBackstop(t *testing.T) {
 			want: "/af-account/planted",
 		},
 		{
-			name: "the account mount replaced by a foreign source",
-			inspect: `[{"Mounts":[{"Type":"bind","Source":"/repo/evil","Destination":"/af-account","RW":true}],
+			name: "a volume where af installed a bind",
+			inspect: `[{"Mounts":[{"Type":"volume","Name":"anon","Source":"/var/lib/docker/volumes/anon/_data","Destination":"/af-account","RW":true}],
 				"HostConfig":{}}]`,
-			want: "/repo/evil",
+			want: "volume",
 		},
 		{
 			name:    "no account mount at all",
@@ -395,11 +395,146 @@ func TestAccountRuntimeVerify_ConfiguredSetIsTheBackstop(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			inspected, err := parseDockerInspectContainer([]byte(tt.inspect))
 			require.NoError(t, err)
-			err = verifyConfiguredAccountBoundary(inspected, verifyAccountSource)
+			err = verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+// The mount at dockerAccountHome is the account af named — decided by DIRECTORY
+// identity, never by string equality (#3602 review).
+//
+// ensureAccountDockerEngineLocal accepts unix:// and npipe:// endpoints, which
+// include Docker Desktop, and a daemon that lives in a VM can report its own
+// spelling of the client's path. Refusing on a mismatch there would refuse every
+// account session on that engine — a worse outcome than the one the check was
+// guarding — so af refuses only what it can establish: a source this host
+// resolves to a DIFFERENT directory.
+func TestClassifyAccountMountSource(t *testing.T) {
+	account := t.TempDir()
+	other := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(account, link))
+
+	tests := []struct {
+		name           string
+		recorded, want string
+		verdict        accountSourceVerdict
+	}{
+		{"the same spelling", account, account, accountSourceSame},
+		{"the same spelling, uncleaned", account + "/.", account, accountSourceSame},
+		{"the same directory through a symlink", link, account, accountSourceSame},
+		{"a different directory on this host", other, account, accountSourceForeign},
+		{"a path this host cannot resolve", "/run/desktop/mnt/host/c/Users/op/.agent-factory", account, accountSourceUnresolvable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.verdict, classifyAccountMountSource(tt.recorded, tt.want))
+		})
+	}
+}
+
+// A source this host cannot resolve WARNS and continues. A daemon translating
+// client paths is not evidence of a wrong account, and treating it as one takes
+// the whole feature away on that engine.
+func TestAccountRuntimeVerify_TranslatedSourceWarnsRatherThanRefuses(t *testing.T) {
+	account := t.TempDir()
+	inspect := `[{"Mounts":[{"Type":"bind","Source":"/run/desktop/mnt/host/wsl/af","Destination":"/af-account","Mode":"z","RW":true}],
+		"HostConfig":{}}]`
+	inspected, err := parseDockerInspectContainer([]byte(inspect))
+	require.NoError(t, err)
+
+	var warnings []string
+	err = verifyConfiguredAccountBoundary(inspected, account, func(format string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(format, args...))
+	})
+	require.NoError(t, err, "a source this host cannot resolve is not evidence the account is wrong")
+	require.Len(t, warnings, 1, "but it must be said out loud, not swallowed")
+	assert.Contains(t, warnings[0], "/run/desktop/mnt/host/wsl/af")
+	assert.Contains(t, warnings[0], account)
+}
+
+// A source this host CAN resolve, to a different directory, is the one case af
+// can actually establish — and it still refuses.
+func TestAccountRuntimeVerify_ForeignLocalSourceStillRefuses(t *testing.T) {
+	account := t.TempDir()
+	other := t.TempDir()
+	inspect := `[{"Mounts":[{"Type":"bind","Source":"` + other + `","Destination":"/af-account","Mode":"z","RW":true}],
+		"HostConfig":{}}]`
+	inspected, err := parseDockerInspectContainer([]byte(inspect))
+	require.NoError(t, err)
+	err = verifyConfiguredAccountBoundary(inspected, account, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), other)
+	assert.Contains(t, err.Error(), account)
+}
+
+// Every check runs, and every finding reaches the operator (#3602 review).
+//
+// A container can carry an aliased mount AND an aliased --device at once. The
+// mount is a refusal; the device node is a root-created special file sitting in
+// the operator's account directory that reaping the container does not remove.
+// An operator told only about the first never learns to go delete the second.
+func TestAccountRuntimeVerify_ReportsEveryFindingNotJustTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		switch {
+		case args[0] == "inspect":
+			return []byte(`[{"Mounts":[
+				{"Type":"bind","Source":"` + dir + `","Destination":"/af-account","Mode":"z","RW":true},
+				{"Type":"bind","Source":"/repo/evil","Destination":"/device-target/.config","RW":true}],
+				"HostConfig":{"Devices":[{"PathOnHost":"/dev/zero","PathInContainer":"/device-target/planted"}]}}]`), nil
+		case args[len(args)-1] == "/proc/1/mountinfo":
+			return []byte(cleanMountinfoFor(dir) +
+				"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
+	})()
+
+	// The node the daemon already planted, through the account bind, before any
+	// check could run. A real one cannot be mknod'd by a test, so the walk is
+	// given a filesystem that reports one.
+	restore := setAccountFSForTest(func(string) fs.FS {
+		return fstest.MapFS{"planted": &fstest.MapFile{Mode: fs.ModeDevice | fs.ModeCharDevice}}
+	})
+	defer restore()
+
+	p := &dockerProvisioner{
+		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
+		containerID: "cid",
+	}
+	err := p.verifyAccountRuntimeBoundary()
+	require.Error(t, err)
+	message := err.Error()
+	assert.Contains(t, message, "/af-account/.config", "the aliased mount")
+	assert.Contains(t, message, "/af-account/planted",
+		"AND the device node the reap will not remove — reporting only the first leaves it on the operator's disk")
+	assert.Contains(t, message, filepath.Join(dir, "planted"), "named where they must remove it")
+}
+
+// An aliased bind whose destination did not exist is a mountpoint Docker created
+// as root, through the account bind, before any check ran — so it survives the
+// reap this refusal triggers, and the refusal has to name it on the HOST.
+func TestAccountRuntimeVerify_NamesTheHostMountpointResidue(t *testing.T) {
+	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+		"2442 2440 8:1 /repo/evil /af-account/planted-dir rw,relatime - ext4 /dev/root rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets, []string{"/device-target/planted-dir"}, verifyAccountSource)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), verifyAccountSource+"/planted-dir",
+		"the container-side path is no help on a host where it does not exist")
+	assert.Contains(t, err.Error(), "if that path was not already yours",
+		"and af must not tell an operator to delete a path that may hold their own credentials")
+
+	// Nothing under the runtime home reaches the host, so nothing is claimed.
+	targets, err = parseMountinfoTargets([]byte(cleanMountinfo +
+		"2442 2421 8:1 /repo/evil /af-home/x rw,relatime - ext4 /dev/root rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets, []string{"/device-target/x"}, verifyAccountSource)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "mountpoint on this host",
+		"/af-home is created inside the container; nothing there is on the host to remove")
 }
 
 // A source af cannot READ is a refusal. A check that cannot see is not a check
@@ -615,7 +750,7 @@ func TestAccountRuntimeVerify_MatchesTheAbsoluteMountSource(t *testing.T) {
 	require.NoError(t, err)
 	inspected, err := parseDockerInspectContainer([]byte(cleanInspect(absolute)))
 	require.NoError(t, err)
-	require.NoError(t, verifyConfiguredAccountBoundary(inspected, absolute))
+	require.NoError(t, verifyConfiguredAccountBoundary(inspected, absolute, nil))
 }
 
 // cleanMountinfoFor is cleanMountinfo with the account bind's source swapped for
@@ -718,4 +853,12 @@ func fakeAccountBoundaryDockerResponse(args []string, accountDir string) ([]byte
 		return []byte(cleanMountinfoFor(accountDir)), nil
 	}
 	return nil, nil
+}
+
+// setAccountFSForTest swaps the filesystem the residue walk reads and returns a
+// restore func, so a test can present a real character-device mode.
+func setAccountFSForTest(f func(string) fs.FS) func() {
+	previous := accountFS
+	accountFS = f
+	return func() { accountFS = previous }
 }
