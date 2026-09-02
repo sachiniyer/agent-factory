@@ -3,7 +3,6 @@ package layout
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -35,13 +34,13 @@ func ClampToRect(s string, r Rect) string {
 		if i < len(lines) {
 			line = lines[i]
 		}
-		width := lipgloss.Width(line)
+		width := Cells(line)
 		if width > r.W {
 			line = xansi.Truncate(line, r.W, "")
 			if strings.Contains(line, "\x1b") {
 				line += "\x1b[0m"
 			}
-			width = lipgloss.Width(line)
+			width = Cells(line)
 		}
 		if width < r.W {
 			line += strings.Repeat(" ", r.W-width)
