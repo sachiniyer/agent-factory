@@ -10,7 +10,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 // SidebarProject is one row of the Projects section: a repo af has seen, with
@@ -239,25 +238,23 @@ func (p *ProjectsPane) ScrollDown() {
 
 // projectsSwitchHint is the affordance suffix on the section header: the key
 // that switches to the cursor row, kept visible down to the rail minimum.
-func projectsSwitchHint() string { return "· enter switch" }
+func projectsSwitchHint() string { return "enter switch" }
 
-// titleLine renders the section header width-aware: the switch affordance is the
-// last thing cut, so the key to switch stays visible even at the 22-col rail
-// minimum, exactly as the Automations header keeps its manage affordance.
-func (p *ProjectsPane) titleLine(name string, nameStyle lipgloss.Style) string {
-	w := p.rect.W
-	const shortName = " Projects "
-	// No leading pad: every `name` passed in already ends with a space, exactly
-	// as the Automations header's does, and adding another produced the double
-	// space the two headers showed side by side in one frame (#2580).
-	hint := projectsSwitchHint() + " "
-	if runewidth.StringWidth(name+hint) <= w {
-		return nameStyle.Render(name) + projectsHintStyle.Render(hint)
-	}
-	if runewidth.StringWidth(shortName+hint) <= w {
-		return nameStyle.Render(shortName) + projectsHintStyle.Render(hint)
-	}
-	return nameStyle.Render(fitLine(name, w))
+// titleLine renders the section header through the shared rail ladder
+// (ui/rail_header.go). The switch affordance is hints[0], so it is the last
+// thing cut — which is what this comment has always claimed and what the code
+// did not do (#3642).
+//
+// The old ladder swapped in a count-free `" Projects "` short name at 25-28
+// columns and then, below that, kept the whole name and dropped the hint
+// instead. So the count was shown at 22-24, gone at 25-28, and back at 29+: a
+// wider rail said LESS. The shared ladder shrinks the noun beside an intact
+// count rather than swapping in a shorter name, which is what makes it
+// monotonic.
+func (p *ProjectsPane) titleLine(header railHeader, nameStyle lipgloss.Style) string {
+	return railTitleLine(header, p.rect.W, nameStyle, projectsHintStyle,
+		railHintSeparator+projectsSwitchHint(),
+	)
 }
 
 // projectRow renders one project row: "● name (N)" for the active project (the
@@ -317,14 +314,17 @@ func (p *ProjectsPane) String() string {
 			count += "?"
 		}
 		return layout.ClampToRect(
-			p.titleLine(fmt.Sprintf(" Projects: %s ", count), style), p.rect)
+			p.titleLine(railHeader{noun: "Projects:", counts: count}, style), p.rect)
 	}
 
 	nameStyle := projectsTitleDimStyle
 	if p.focused {
 		nameStyle = projectsTitleStyle
 	}
-	title := p.titleLine(fmt.Sprintf(" Projects (%d) ", len(p.projects)), nameStyle)
+	title := p.titleLine(railHeader{
+		noun:   "Projects",
+		counts: fmt.Sprintf("(%d)", len(p.projects)),
+	}, nameStyle)
 	lines := []string{title}
 	if p.degraded {
 		// The registry read failed, so the rows below may be missing every

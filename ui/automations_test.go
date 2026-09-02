@@ -430,7 +430,7 @@ func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
 
 		require.Containsf(t, line, manageHint,
 			"%d tasks: the manage affordance is the last thing cut, and 22 is the supported rail minimum: %q", n, line)
-		require.NotContainsf(t, line, "…"+automationsHintSeparator,
+		require.NotContainsf(t, line, "…"+railHintSeparator,
 			"%d tasks: the separator must stay intact: %q", n, line)
 		require.Containsf(t, line, fmt.Sprintf("%d", n),
 			"%d tasks: the task count survives: %q", n, line)
