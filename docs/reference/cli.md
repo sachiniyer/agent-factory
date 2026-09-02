@@ -619,6 +619,9 @@ only; this command does not register a project or write identity state.
 --project remains accepted as a deprecated alias. --explain prints the same
 resolved value with the complete source trace.
 
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
+
 ```
 af config get <key> [flags]
 ```
@@ -650,6 +653,9 @@ every source candidate and the reason it won, was shadowed, was absent, or is
 disallowed for that key. Human output renders an empty built-in value as
 "(unset)"; an explicitly configured empty value remains visible as "", [], {},
 or null. JSON output preserves the typed effective values.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.
 
 ```
 af config list [flags]
@@ -714,6 +720,10 @@ Two things it will not do:
   registered project's personal [root_agent], so migrating it would mean
   registering projects for you: durable state outside this file. The keys that
   can move still move.
+
+Local-only: it rewrites the file on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to migrate that host.
 
 ```
 af config migrate [flags]
@@ -878,6 +888,10 @@ This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
 names what must be fixed before the next launch.
+
+Local-only: it checks the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to check that host.
 
 ```
 af config validate [flags]

@@ -242,11 +242,17 @@ print as JSON.
 Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
 --project remains accepted as a deprecated alias. --explain prints the same
-resolved value with the complete source trace.`,
+resolved value with the complete source trace.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config get", "resolves the value from this machine's config"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, explicitProject, err := configReadProjectSelector(configGetRepoFlag, configGetProjectFlag)
@@ -354,11 +360,17 @@ project. --project remains accepted as a deprecated alias. --explain prints
 every source candidate and the reason it won, was shadowed, was absent, or is
 disallowed for that key. Human output renders an empty built-in value as
 "(unset)"; an explicitly configured empty value remains visible as "", [], {},
-or null. JSON output preserves the typed effective values.`,
+or null. JSON output preserves the typed effective values.
+
+Local-only: it answers about the machine it runs on, so --daemon-url/AF_DAEMON_URL
+is refused rather than ignored. Run it on the daemon host to ask about that host.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config list", "resolves values from this machine's config"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 		warnDeprecatedConfigProjectAlias(cmd)
 
 		projectSelector, explicitProject, err := configReadProjectSelector(configListRepoFlag, configListProjectFlag)
@@ -580,11 +592,18 @@ materializes nothing — a read-only check.
 This is the companion to a raw hand-edit. "af config set" validates every scalar
 and structured key before it writes and so cannot leave a broken file. A manual
 edit bypasses that protection: exit 0 means af can load it, while a non-zero exit
-names what must be fixed before the next launch.`,
+names what must be fixed before the next launch.
+
+Local-only: it checks the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to check that host.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		if err := requireLocalTarget("af config validate", "checks this machine's config file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 
 		// LoadConfigReadOnly is the same parse+validate af runs at startup, minus
 		// the materialize/convert/secure side effects LoadConfig has — so validate
