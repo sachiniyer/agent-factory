@@ -502,7 +502,7 @@ func TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Archived target delivery to fail")
 	}
-	want := `target session "captain" is Archived; prompt not delivered; restore it first (af sessions restore captain)`
+	want := `target session "captain" is Archived; prompt not delivered; restore it first (af sessions restore -- captain)`
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("expected actionable Archived error, got: %v", err)
 	}
@@ -526,6 +526,11 @@ func TestDeliverPrompt_RefusesArchivedTargetBeforeTmuxSend(t *testing.T) {
 // which is the property that matters and which a string comparison here could
 // never establish. What stays local is the check that carries the value: the
 // raw, unquoted form must not appear.
+//
+// The seam is PositionalCommand, not Command (#3432): the title is a positional,
+// so the suggestion carries an option terminator and a title beginning with "-"
+// is not parsed as a flag by af itself. Building the expectation the same way is
+// what keeps this test about the site's routing rather than about the idiom.
 func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -536,6 +541,8 @@ func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 		{"space quoted", "my session", "restore my session)"},
 		{"semicolon quoted", "a;rm -rf ~", "restore a;rm -rf ~"},
 		{"embedded quote escaped", "it's", ""},
+		// Quoting cannot save this one — only the terminator can (#3432).
+		{"dash-leading title terminated", "-worker", "restore -worker)"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -543,7 +550,7 @@ func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected an Archived liveness error for %q", tc.title)
 			}
-			wantCmd := shellsuggest.Command("af", "sessions", "restore", tc.title)
+			wantCmd := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, tc.title)
 			if !strings.Contains(err.Error(), wantCmd) {
 				t.Fatalf("expected restore command %q in error, got: %v", wantCmd, err)
 			}
@@ -555,7 +562,7 @@ func TestPromptTargetLivenessError_ArchivedQuotesRestoreCommand(t *testing.T) {
 
 	// The readable common case is a real requirement, not an accident of the
 	// seam: a suggestion exists to be read, so pin it literally here.
-	if got := shellsuggest.Command("af", "sessions", "restore", "captain"); got != "af sessions restore captain" {
+	if got := shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, "captain"); got != "af sessions restore -- captain" {
 		t.Errorf("plain title must stay unquoted for readability, got %q", got)
 	}
 }

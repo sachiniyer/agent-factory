@@ -88,7 +88,7 @@ func TestNotAttemptedGuaranteesTheWireMarker(t *testing.T) {
 // the `af sessions restore …` suggestion the Archived refusal ends with. The
 // message below is the real one from promptTargetLivenessError.
 func TestNotAttemptedKeepsAlreadyMarkedMessagesVerbatim(t *testing.T) {
-	msg := `target session "captain" is Archived; prompt not delivered; restore it first (af sessions restore captain)`
+	msg := `target session "captain" is Archived; prompt not delivered; restore it first (af sessions restore -- captain)`
 	got := notAttempted(errors.New(msg)).Error()
 	if got != msg {
 		t.Fatalf("an already-marked message must pass through verbatim (#2512)\n got: %q\nwant: %q", got, msg)

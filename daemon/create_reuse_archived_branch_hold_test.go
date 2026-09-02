@@ -121,7 +121,10 @@ func TestReserveCreate_PublishedArchivedBranchStillRefuses(t *testing.T) {
 	msg := err.Error()
 	assert.Contains(t, msg, branch, "the error must name the branch that blocks the create")
 	assert.Contains(t, msg, "published", "the error must say WHY the branch could not be moved aside")
-	assert.Contains(t, msg, "af sessions kill", "the error must offer a way to release the branch")
+	// The terminator is part of the contract, not decoration: an archived title may
+	// begin with "-", and without it the advertised release exits "unknown flag"
+	// (#3432).
+	assert.Contains(t, msg, "af sessions kill -- ", "the error must offer a PASTEABLE way to release the branch")
 
 	// And nothing moved: the refusal is still side-effect-free.
 	assert.Equal(t, "foo", archived.Title, "the archived session must keep its name after a refusal")
