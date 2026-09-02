@@ -146,6 +146,14 @@ type Task struct {
 	// not healthy either, so it needs a field of its own rather than the absence
 	// of one.
 	Unschedulable bool `json:"unschedulable,omitempty"`
+	// UnschedulableReason is WHICH shape it is — one of the Reason* constants —
+	// and is empty unless Unschedulable is set. The verdict is deliberately one
+	// thing; this is the wording, and it rides the record so that a surface which
+	// cannot call UnschedulableReason (the web, a script reading --json) renders
+	// the classifier's own answer instead of re-deriving one from cron_expr. Go
+	// surfaces keep calling the classifier directly — they have the record and a
+	// clock, which is all it needs (#3626).
+	UnschedulableReason string `json:"unschedulable_reason,omitempty"`
 	// Unassessable says no lateness verdict could be reached: there is no instant
 	// to measure from, or none the schedule can be evaluated against. UNKNOWN, not
 	// healthy — see ScheduleHealth.Unassessable for both ways in.

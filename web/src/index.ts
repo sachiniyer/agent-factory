@@ -1287,13 +1287,60 @@ function applyConfigValueNow(key: string, value: string, tok: string): Promise<v
     });
 }
 
+// How often an OPEN tasks view refetches, for the verdicts that change with the
+// clock rather than with an event (#3626).
+//
+// overdue / missed_occurrences / next_run_at are derived from now at read time, so
+// a task crosses into overdue with nothing to announce it: the daemon publishes
+// task.* on a MUTATION, and going quiet is the absence of one. Without this the
+// list showed whatever was true when the view was opened, and a row could sit
+// there reading healthy for as long as someone left the page up — which is
+// precisely the wall-mounted, nobody-opens-the-TUI box this feature is for.
+//
+// A minute is well inside the smallest window a verdict can flip in (the slack is
+// at least five minutes) and is one small RPC, which is what the view already
+// issues on arrival and on every task event.
+const TASK_HEALTH_POLL_MS = 60_000;
+
+// The GUARD is in the tick, not in switchView, deliberately: the view is also set
+// directly in places that never route through the switch (creating a session
+// jumps to "sessions"), so a start/stop pair hung off the switch would leak a
+// timer down one path and miss starting it down another. Asking the store each
+// tick cannot get out of step with it.
+window.setInterval(() => {
+  const state = store.get();
+  if (state.phase === "app" && state.view === "tasks") {
+    refreshTasks();
+  }
+}, TASK_HEALTH_POLL_MS);
+
+// Fences overlapping ListTasks refetches so a slow one cannot overwrite a newer
+// one — the rule #2330 already applies to the session snapshot, one projection
+// over (sessionEventGeneration / resyncRequestGeneration).
+//
+// refreshTasks commits whatever it receives, and it is called from a mutation, a
+// debounced event resync, a view switch, and now a poll. A request issued just
+// before an edit can resolve just after the edit's own refetch, restoring the
+// pre-mutation list — an old health verdict, or a row that was removed — until
+// something else happens to refresh. The poll is what made these genuinely
+// concurrent rather than merely capable of it (#3626 review).
+let taskRefreshGeneration = 0;
+
 function refreshTasks(): void {
   const tok = token;
   if (tok === null) {
     return;
   }
+  const generation = ++taskRefreshGeneration;
   void listTasks(tok)
     .then((tasks) => {
+      // A newer refetch has been issued since this one left, so this answer is
+      // stale by construction whatever it contains. The token is checked too: a
+      // rotation means this response describes a session that is no longer the
+      // one on screen, and the generation alone would not catch it.
+      if (generation !== taskRefreshGeneration || token !== tok) {
+        return;
+      }
       // Reconcile the project scope against the new task set (redesign PR2): a
       // task-only project appears once its tasks load, and drops when its last task
       // is removed (if it also has no live sessions). This is what makes a task-only
@@ -1789,6 +1836,15 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
+  // And the task list, for the same reason and through one door the
+  // generation+token fence in refreshTasks cannot close by itself: reconnecting
+  // with the SAME credential moves neither of them, and the tokenless loopback
+  // (#1696) makes "the same credential" the ordinary path rather than an edge
+  // case. connect() loads tasks directly rather than through refreshTasks, so
+  // without this a request still in flight from the previous stream outlives the
+  // disconnect and overwrites the freshly-connected list, restoring rows that
+  // were removed while it was away (#3626 review).
+  taskRefreshGeneration += 1;
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");
