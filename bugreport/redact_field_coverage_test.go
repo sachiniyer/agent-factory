@@ -444,11 +444,34 @@ type sentinelFiller struct {
 }
 
 // nextMarker puts the unique sequence FIRST, so a marker that is truncated or
-// windowed keeps the part that names its field.
+// windowed keeps the part that names its field, and follows the readable stem
+// with repeated UNITS.
+//
+// The units are what survives a partial edit. A string's evidence was the whole
+// marker and its whole JSON encoding, and nothing else — so a redactor that
+// removed one byte destroyed both and the field read as fully redacted, while
+// almost all of the planted value still reached the document (#3592 review).
+// That is the same failure the byte and rune containers were given windows for,
+// on the far more common path.
+//
+// Two units, so an edit at either end leaves one intact, and each names its
+// field for the reason the container units do: the delimiter cannot occur inside
+// a number and the width is fixed.
 func (f *sentinelFiller) nextMarker() string {
 	f.seq++
-	return fmt.Sprintf("%0*d-%s", guardUnitDigits, f.seq, guardSentinel)
+	return fmt.Sprintf("%0*d-%s%s", guardUnitDigits, f.seq, guardSentinel,
+		strings.Repeat(markerUnit(f.seq), guardStringUnits))
 }
+
+// markerUnit is one field-unique unit: the delimiter, then the sequence number
+// at fixed width.
+func markerUnit(seq int) string {
+	return fmt.Sprintf("%s%0*d", guardUnitDelim, guardUnitDigits, seq)
+}
+
+// guardStringUnits is how many units follow a string marker's readable stem.
+// TWO, so an edit at either end of the marker leaves one whole.
+const guardStringUnits = 2
 
 // nextContainerMarker returns exactly n bytes of field-unique filler for a byte
 // or rune container: the field's unit, repeated. Unlike nextMarker's readable
@@ -462,7 +485,7 @@ func (f *sentinelFiller) nextMarker() string {
 // scheme exists to remove.
 func (f *sentinelFiller) nextContainerMarker(n int) string {
 	f.seq++
-	unit := fmt.Sprintf("%s%0*d", guardUnitDelim, guardUnitDigits, f.seq)
+	unit := markerUnit(f.seq)
 	return strings.Repeat(unit, n/len(unit)+1)[:n]
 }
 
@@ -481,6 +504,11 @@ func (f *sentinelFiller) nextContainerMarker(n int) string {
 // from them.)
 func (f *sentinelFiller) record(v reflect.Value, path, marker string) {
 	forms, encoded := f.formsFor(v, marker, false)
+	// The unit alone, so a partial edit to the planted text still leaves
+	// something attributable — see nextMarker.
+	if unit := markerUnit(f.seq); strings.Contains(marker, unit) {
+		forms = append(forms, unit)
+	}
 	f.planted = append(f.planted, plantedField{path: path, forms: forms, encoded: encoded})
 }
 
