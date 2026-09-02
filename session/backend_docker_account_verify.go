@@ -343,17 +343,46 @@ func verifyResolvedAccountBoundary(targets, configured []string) error {
 			continue
 		}
 		if root := accountBoundaryRoot(target); root != "" {
-			return aliasRefusal(fmt.Sprintf(
+			return boundaryRefusal(fmt.Sprintf(
 				"the kernel mounted %q, inside af's account boundary at %s, which af did not configure",
-				target, root), configured, "")
+				target, root), resolvedMountCauses(configured), "")
 		}
 	}
 	if atAccountHome != 1 {
-		return aliasRefusal(fmt.Sprintf(
+		return boundaryRefusal(fmt.Sprintf(
 			"the kernel mounted %d filesystems at %s where af configured exactly one — its own account bind",
-			atAccountHome, dockerAccountHome), configured, "")
+			atAccountHome, dockerAccountHome), resolvedMountCauses(configured), "")
 	}
 	return nil
+}
+
+// resolvedMountCauses lists what could put a filesystem inside the boundary that
+// af did not configure. BOTH are offered whenever both are possible, and that is
+// the point: a candidate list is not causation.
+//
+// An earlier cut branched on whether Docker recorded any other container path
+// and, when it had, told the operator flat out that the image aliased one of
+// them. That is wrong whenever the real cause is the other one — the
+// clone-source bind every docker session already carries is enough to make the
+// list non-empty — and it sends them to remove a valid run_arg, after which the
+// session is still refused because the host-side mount is still there (#3602
+// review).
+//
+// af cannot correlate the two from what it has: mountinfo names where a mount
+// landed, not which configured entry resolved onto it, and for a tmpfs or a
+// same-filesystem bind there is nothing in the line to match against. So it says
+// what it observed and what could explain it, and leaves the diagnosis to the
+// operator, who can see both sides.
+func resolvedMountCauses(configured []string) []string {
+	var causes []string
+	if len(configured) > 0 {
+		causes = append(causes, fmt.Sprintf(
+			"the selected image may alias one of the container paths Docker was also asked to install (%s) onto the account — remove that entry from docker.run_args, or select an image that has no symlink at that path",
+			quotedPathList(configured)))
+	}
+	causes = append(causes,
+		"the account directory on this host may itself contain a nested mount point, which the account's recursive bind carries into the container — move it out of the account directory")
+	return causes
 }
 
 // verifyAccountDeviceResidue looks for device nodes af never put in the account
@@ -401,24 +430,58 @@ func verifyAccountDeviceResidue(accountFS fs.FS, accountSource string, devices [
 	for _, node := range found {
 		inContainer = append(inContainer, path.Join(dockerAccountHome, node))
 	}
-	return aliasRefusal(fmt.Sprintf(
-		"the Docker daemon created the device node(s) %s inside af's account boundary, which af did not configure",
-		quotedPathList(inContainer)), configured, deviceResidueNote(found, accountSource))
+	return boundaryRefusal(fmt.Sprintf(
+		"the account directory holds the device node(s) %s, inside af's account boundary, which af did not put there",
+		quotedPathList(inContainer)), deviceResidueCauses(configured), deviceResidueNote(found, accountSource))
 }
 
 // accountDeviceResidue walks an account directory and returns the paths of every
 // character or block device in it, relative to its root.
 //
 // An fs.FS rather than a path so a test can present a real device MODE, which no
-// unprivileged process can mknod. Symlinks are never followed: fs.WalkDir reads
-// directory entries, so a symlink is an entry rather than a door.
+// unprivileged process can mknod. Symlinks are never followed — fs.WalkDir reads
+// directory entries, so a symlink is an entry rather than a door, and Info()
+// describes the link itself.
+//
+// It classifies on Info() rather than on DirEntry.Type(), which is the stricter
+// of the two for a reason worth recording. Type() is allowed to be the zero
+// FileMode when a directory read cannot say what an entry is, and a zero read as
+// "not a device" is a fail-OPEN: the node is there and the walk reports a clean
+// account. That cannot happen through os.DirFS today — Go lstats an entry whose
+// d_type is DT_UNKNOWN before handing it back (os/file_unix.go, newUnixDirent,
+// go1.25) — but this walks whatever fs.FS it is given, and a credential boundary
+// should not rest on another package's implementation detail (#3602 review).
+//
+// An entry that has VANISHED between the read and the stat is skipped rather
+// than refused: an account is shared by every session using it, so another
+// session's agent deleting a file mid-walk is ordinary, and a file that is gone
+// is not residue. The ROOT is never skipped that way — see below.
 func accountDeviceResidue(fsys fs.FS) ([]string, error) {
 	var found []string
 	err := fs.WalkDir(fsys, ".", func(name string, entry fs.DirEntry, err error) error {
+		// The root is never "vanished". An account directory that is not there
+		// is a directory af could not READ, which is a refusal; swallowing its
+		// ErrNotExist the way an entry's is swallowed would turn "af cannot see
+		// the account" into "the account is clean" — the exact fail-open shape
+		// this file exists to refuse. Held by
+		// TestAccountRuntimeVerify_UnreadableSourceRefuses, which caught it.
+		vanished := func(err error) bool {
+			return name != "." && errors.Is(err, fs.ErrNotExist)
+		}
 		if err != nil {
+			if vanished(err) {
+				return nil
+			}
 			return err
 		}
-		if entry.Type()&fs.ModeDevice != 0 {
+		info, err := entry.Info()
+		if err != nil {
+			if vanished(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&fs.ModeDevice != 0 {
 			found = append(found, name)
 		}
 		return nil
@@ -436,41 +499,61 @@ func accountDeviceResidue(fsys fs.FS) ([]string, error) {
 // can look the node already exists, and it outlives the container this refusal
 // tears down. af does not delete it: removing files from the operator's
 // credential directory on a repository's say-so is not a thing this boundary
-// should do. It names the path instead.
+// should do. It names the path instead, and travels as the refusal's closing
+// NOTE rather than as one of its candidate causes — it is the remedy either
+// cause needs, not a claim about which one it was.
 func deviceResidueNote(found []string, accountSource string) string {
 	residue := make([]string, 0, len(found))
 	for _, node := range found {
 		residue = append(residue, path.Join(accountSource, node))
 	}
 	return fmt.Sprintf(
-		"The Docker daemon created it as root through the account bind, so it is now on this host at %s and outlives the container; remove it there by hand",
+		"Either way the daemon created it as ROOT through the account bind, so it is on this host at %s and outlives the container af is about to reap; remove it there by hand",
 		quotedPathList(residue))
 }
 
-// aliasRefusal is the shared wording for "the kernel put something in the
-// account boundary that af did not configure". It names both halves the
-// operator needs: where it landed, and which configured container paths could
-// have resolved onto it.
-//
-// The two branches are not decoration. When Docker recorded no container path
-// but af's own account mount, NOTHING could have been aliased — there was no
-// entry to resolve — and blaming the image would send the operator hunting for a
-// symlink that is not there. What remains reachable is a nested mount point
-// inside the account directory on this host, which a recursive bind carries into
-// the container and af cannot tell apart from an aliased mount. That needs a
-// different remedy than "edit run_args", so it gets a different sentence.
-func aliasRefusal(found string, configured []string, note string) error {
-	var message strings.Builder
+// deviceResidueCauses lists what could have put a device node in the account
+// directory. As with resolvedMountCauses, both are offered rather than one
+// asserted: the gate proves a node can only come from a --device, but not that
+// it came from THIS session's, and one an earlier session planted is still
+// sitting there when the next one starts.
+func deviceResidueCauses(configured []string) []string {
+	var causes []string
 	if len(configured) > 0 {
-		message.WriteString("the selected image aliases af's account boundary — ")
-		message.WriteString(found)
-		fmt.Fprintf(&message,
-			". af configured only its own account mount there; Docker was also configured to install %s, and the image resolves one of those onto the account, so the session would run on repository content instead of the selected identity. Remove that entry from docker.run_args, or select an image that has no symlink at that path",
-			quotedPathList(configured))
-	} else {
-		message.WriteString("af's account boundary does not hold — ")
-		message.WriteString(found)
-		message.WriteString(". Docker records no container path here but af's own account mount, so nothing in docker.run_args aliased onto it — the likely cause is a nested mount point inside the account directory on this host, which the account's recursive bind carries in. af cannot tell that apart from an aliased mount, and will not run the session on a boundary it cannot account for. Move it out of the account directory")
+		causes = append(causes, fmt.Sprintf(
+			"the selected image may alias one of the container paths Docker was asked to install (%s) onto the account — remove that entry from docker.run_args, or select an image that has no symlink at that path",
+			quotedPathList(configured)))
+	}
+	causes = append(causes,
+		"an earlier session may have left it: the daemon creates a --device node at container start, before any check can run, so one outlives the refusal that finds it")
+	return causes
+}
+
+// boundaryRefusal states what af OBSERVED, then lists the explanations it cannot
+// tell apart — never one of them as though it were established.
+//
+// That distinction is the whole content of #3602's second review finding. af
+// sees a mount or a node inside the boundary; it does not see which configured
+// entry produced it, and picking the likeliest-sounding one hands the operator a
+// remedy that may leave the session refused for the reason it did not name.
+func boundaryRefusal(observed string, causes []string, note string) error {
+	var message strings.Builder
+	message.WriteString("af's account boundary does not hold — ")
+	message.WriteString(observed)
+	message.WriteString(". af configured only its own account mount there")
+	switch len(causes) {
+	case 0:
+		message.WriteString(", and will not run the session on a boundary it cannot account for")
+	case 1:
+		message.WriteString(", and ")
+		message.WriteString(causes[0])
+		message.WriteString(". af will not run the session on a boundary it cannot account for")
+	default:
+		message.WriteString(". Either ")
+		message.WriteString(strings.Join(causes[:len(causes)-1], "; or "))
+		message.WriteString("; or ")
+		message.WriteString(causes[len(causes)-1])
+		message.WriteString(". af cannot tell these apart from here, and will not run the session on a boundary it cannot account for")
 	}
 	if note != "" {
 		message.WriteString(". ")

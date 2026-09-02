@@ -6,9 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -232,6 +234,120 @@ func TestAccountRuntimeVerify_WithNothingConfiguredDoesNotBlameRunArgs(t *testin
 	})
 
 }
+
+// A candidate list is not causation (#3602 review).
+//
+// The clone-source bind every docker session already carries is enough to make
+// the configured list non-empty, so a refusal that reads a non-empty list as
+// "the image aliased one of these" tells an operator whose real problem is a
+// nested host mount to delete a valid run_arg — after which the session is still
+// refused, for the reason the message did not name.
+func TestAccountRuntimeVerify_DoesNotAssertWhichCauseItWas(t *testing.T) {
+	// An ordinary docker session's own run_args: the clone source, nothing near
+	// the account.
+	inspect := `[{"Mounts":[
+		{"Type":"bind","Source":"` + verifyAccountSource + `","Destination":"/af-account","Mode":"z","RW":true},
+		{"Type":"bind","Source":"/host/repo.git","Destination":"/repo.git","RW":false}],
+		"HostConfig":{}}]`
+	inspected, err := parseDockerInspectContainer([]byte(inspect))
+	require.NoError(t, err)
+	configured := configuredContainerPaths(inspected)
+	require.Equal(t, []string{"/repo.git"}, configured)
+
+	// …and a mount inside the boundary that the clone source cannot explain.
+	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+		"2441 2440 8:2 / /af-account/vault rw,relatime - ext4 /dev/sdb rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets, configured)
+	require.Error(t, err)
+
+	message := err.Error()
+	assert.Contains(t, message, "nested mount point",
+		"the host-side cause must survive a non-empty candidate list — it is the one a run_args edit cannot fix")
+	assert.Contains(t, message, "/repo.git",
+		"the candidates are still worth naming, as candidates")
+	assert.Contains(t, message, "cannot tell these apart",
+		"and the refusal must say it is offering alternatives rather than a diagnosis")
+	assert.NotContains(t, message, "the selected image aliases",
+		"af did not establish that, and asserting it sends the operator to remove a valid run_arg")
+}
+
+// The residue walk classifies on Info(), not on DirEntry.Type(). Type() is
+// permitted to be the zero FileMode when a directory read cannot say, and zero
+// read as "not a device" is a fail-OPEN: the node is there and the walk reports
+// a clean account.
+//
+// os.DirFS does not produce that today — Go lstats a DT_UNKNOWN entry before
+// handing it back — so this presents an fs.FS that does, which is the only way
+// to hold the property rather than the current behaviour of another package.
+func TestAccountDeviceResidue_DoesNotTrustAnUnknownDirEntryType(t *testing.T) {
+	found, err := accountDeviceResidue(unknownTypeFS{
+		"planted":   fs.ModeDevice | fs.ModeCharDevice,
+		"auth.json": 0,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"planted"}, found,
+		"a directory read that cannot say what an entry is must not read as 'not a device'")
+}
+
+// unknownTypeFS is a filesystem whose directory entries report an UNKNOWN type
+// (the zero FileMode) while Info() tells the truth — the shape a network, FUSE
+// or older XFS filesystem presents through DT_UNKNOWN.
+type unknownTypeFS map[string]fs.FileMode
+
+func (f unknownTypeFS) Open(name string) (fs.File, error) { return nil, fs.ErrNotExist }
+
+func (f unknownTypeFS) Stat(name string) (fs.FileInfo, error) {
+	if name == "." {
+		return unknownTypeInfo{name: ".", mode: fs.ModeDir}, nil
+	}
+	mode, ok := f[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return unknownTypeInfo{name: name, mode: mode}, nil
+}
+
+func (f unknownTypeFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name != "." {
+		return nil, fs.ErrNotExist
+	}
+	names := make([]string, 0, len(f))
+	for entry := range f {
+		names = append(names, entry)
+	}
+	sort.Strings(names)
+	entries := make([]fs.DirEntry, 0, len(names))
+	for _, entry := range names {
+		entries = append(entries, unknownTypeEntry{fsys: f, name: entry})
+	}
+	return entries, nil
+}
+
+type unknownTypeEntry struct {
+	fsys unknownTypeFS
+	name string
+}
+
+func (e unknownTypeEntry) Name() string { return e.name }
+func (e unknownTypeEntry) IsDir() bool  { return false }
+
+// The whole point: the read cannot say, so it says nothing.
+func (e unknownTypeEntry) Type() fs.FileMode { return 0 }
+
+func (e unknownTypeEntry) Info() (fs.FileInfo, error) { return e.fsys.Stat(e.name) }
+
+type unknownTypeInfo struct {
+	name string
+	mode fs.FileMode
+}
+
+func (i unknownTypeInfo) Name() string       { return i.name }
+func (i unknownTypeInfo) Size() int64        { return 0 }
+func (i unknownTypeInfo) Mode() fs.FileMode  { return i.mode }
+func (i unknownTypeInfo) ModTime() time.Time { return time.Time{} }
+func (i unknownTypeInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i unknownTypeInfo) Sys() any           { return nil }
 
 // The configured half is the backstop for what no resolution is needed to see:
 // an entry Docker recorded straight onto the boundary. The lexical guard already
