@@ -339,6 +339,11 @@ func ReconcileProjectRepoID(projectID, repoID string) (bool, error) {
 				continue
 			}
 			record.RepoID = repoID
+			// Stamp the migration, or the version bump protects nothing for
+			// exactly the records it was added for (#3530 review id
+			// 3915518778): a v1 record carrying repo_id is still accepted by an
+			// older af, which drops the field on its next rewrite.
+			record.SchemaVersion = projectRegistrySchemaVersion
 			if err := writeProjectRecord(dir, record); err != nil {
 				return err
 			}

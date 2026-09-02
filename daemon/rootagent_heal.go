@@ -695,7 +695,10 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			// resolution under the real id would miss a personal disable, miss
 			// a fail-closed latch, or miss a deletion, and start a root from
 			// the lower-precedence layers.
-			promoteDerivedIdentity(m, healed, derivedID, repo.ID)
+			if !promoteDerivedIdentity(m, healed, derivedID, repo.ID) {
+				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified, but a delete holds its provisional identity; leaving the promotion to the next pass", record.root)
+				continue
+			}
 		}
 		healed.projectRoots[repo.ID] = record.root
 		delete(healed.unresolvedRoots, derivedID)
@@ -720,9 +723,24 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 // taught every consumer to check the other one, which is the collision class
 // this change removes; this moves the state once and leaves nothing behind to
 // reconcile later.
-func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, realID string) {
+// Returns false when the promotion must not happen yet, in which case the
+// caller leaves the project on its provisional identity for another pass.
+func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, realID string) bool {
 	if derivedID == realID {
-		return
+		return true
+	}
+	// A delete that fenced this identity between the pass's fence check and
+	// here must not have its fence copied forward: DeleteProject's defer
+	// removes only the id IT fenced, so a copy at the real id would never be
+	// cleared and would reject every later create and restore for that
+	// repository until the daemon restarts (#3530 review id 3915518792).
+	// Refusing the promotion is the honest answer — the delete owns this
+	// identity right now, and the next pass promotes once it settles.
+	m.mu.Lock()
+	_, fenced := m.projectDeletes[derivedID]
+	m.mu.Unlock()
+	if fenced {
+		return false
 	}
 	if layer, ok := healed.personal[derivedID]; ok {
 		healed.personal[realID] = layer
@@ -741,8 +759,6 @@ func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, re
 		}
 		delete(m.deletedRootRepos, derivedID)
 	}
-	if _, ok := m.projectDeletes[derivedID]; ok {
-		m.projectDeletes[realID] = struct{}{}
-	}
 	m.mu.Unlock()
+	return true
 }

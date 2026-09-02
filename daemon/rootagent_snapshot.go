@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -203,8 +204,24 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// sessions and policy keyed under the real one. Idempotent: the
 			// writer is a no-op once the identity is recorded.
 			if p.RepoID == "" {
-				if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
-					log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; if its path goes away before this succeeds it will fall back to a provisional identity: %v", p.ID, repoID, err)
+				// AVAILABILITY IS NOT IDENTITY, and this write is permanent —
+				// the one-way writer will never replace it (#3530 review id
+				// 3915518804). RepoFromPath succeeding proves a repository is
+				// reachable at the recorded path, not that it is the
+				// registered checkout: a replacement clone answers, and a
+				// vanished nested root resolves UPWARD into whatever encloses
+				// it. Either would bind this project to a stranger forever,
+				// and every later missing-path delete and personal-policy
+				// decision would target that stranger.
+				//
+				// ResolveRegisteredProjectRepoID is the proof that exists for
+				// this: exact-workspace match plus the record's own checkout
+				// marker. Unproven simply means not yet — the project stays
+				// provisional and the next pass tries again.
+				if proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), p); ok && proven == repoID {
+					if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
+						log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; if its path goes away before this succeeds it will fall back to a provisional identity: %v", p.ID, repoID, err)
+					}
 				}
 			}
 			projectRoots[repoID] = p.Root
