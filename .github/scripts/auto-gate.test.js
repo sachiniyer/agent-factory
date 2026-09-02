@@ -2246,6 +2246,40 @@ test("an unlisted merge refusal is never conceded, even on a merged PR", async (
   assert.equal(github.pullGetReads, 0, "an unlisted shape must not even be investigated");
 });
 
+test("a merged PR with an unreadable owner concedes without writing", async () => {
+  // Codex P1: the merged branch fell back with `||`, which discards the
+  // ownership-unknown marker and answers "merged" — sending the caller into the
+  // generic invalidation. Both facts have to survive: the race is conceded
+  // because the PR really did merge, AND the aggregate must not be written,
+  // because a newer generation created blind supersedes whoever owns the head.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && options?.filter === "all") {
+      throw new Error("fetch failed");
+    }
+    return realPaginate(fn, options);
+  };
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a merged PR is still a conceded race");
+  assert.ok(notices.some((notice) => notice.includes("already merged winner-sha")));
+  assert.ok(
+    notices.some((notice) => notice.includes("ownership could not be determined")),
+    "the notice must say why the aggregate was left alone",
+  );
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an undetermined owner must not be overwritten by a blind invalidation",
+  );
+});
+
 test("an unreadable ownership check never becomes 'nobody owns this head'", async () => {
   // Codex P1: readOrNull turned a transient listForRef failure into an EMPTY
   // list, which reads as "no newer owner" — and the caller acts on that by

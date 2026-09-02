@@ -1028,7 +1028,14 @@ async function processAggregateHead({
       // merge raises no event, so nothing would come along to repair it. That
       // one falls through to the ordinary invalidation below, exactly as a
       // successful merge does, and for the same reason.
-      if (error?.autoGateConcessionReason === "newer-owner") {
+      // Both reasons mean the same thing to this catch: another actor's outcome
+      // stands and this run must not write to the aggregate — one because a live
+      // transaction owns it, one because the read that would have proved
+      // otherwise failed.
+      if (
+        error?.autoGateConcessionReason === "newer-owner" ||
+        error?.autoGateConcessionReason === "merged-owner-unknown"
+      ) {
         core.notice(message);
         return { state: "conceded", pending, aggregate };
       }
@@ -1597,14 +1604,29 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
       github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
     );
     if (pull?.data?.merged) {
-      return (
-        (await newerOwnerConcession()) || {
-          reason: "merged",
+      const owned = await newerOwnerConcession();
+      if (owned) {
+        return owned;
+      }
+      const winner =
+        `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
+        `already merged ${pull.data.merge_commit_sha || expectedHeadSha}.`;
+      // Merged, but the ownership read failed — and a `||` fallback here would
+      // discard that, answering "merged" and sending the caller into the generic
+      // invalidation. Both facts have to survive: the race IS conceded (the PR is
+      // merged, so the outcome converged), and the aggregate must NOT be written,
+      // because a newer generation created blind would supersede whichever
+      // transaction owns this shared head.
+      if (error.autoGateOwnershipUnknown) {
+        return {
+          reason: "merged-owner-unknown",
           message:
-            `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
-            `already merged ${pull.data.merge_commit_sha || expectedHeadSha}.`,
-        }
-      );
+            `${winner} Not invalidating ${expectedHeadSha}: ownership could not be determined ` +
+            `(${error.autoGateOwnershipUnknown}), so this run will not overwrite whichever ` +
+            "transaction owns it.",
+        };
+      }
+      return { reason: "merged", message: winner };
     }
   }
 
