@@ -30,6 +30,16 @@ func observeAlive(m *Manager, repoID string, inst *session.Instance) {
 	m.noteAliveObservation(repoID, inst)
 }
 
+// confirmAlive drives the SUSTAINED liveness a restore takes (#3412). One answer
+// proves the agent came up, and the flap this fixes is the shape where that is all
+// it ever does — so tests that mean "and now the recovery is confirmed" call this,
+// and the count lives in one place rather than in each of them.
+func confirmAlive(m *Manager, repoID string, inst *session.Instance) {
+	for i := 0; i < lostRestoreConfirmObservations; i++ {
+		observeAlive(m, repoID, inst)
+	}
+}
+
 // diesOnSpawnBackend models the reported agent: its Recover SUCCEEDS — the spawn
 // is real and returns nil — but the runtime does not survive, so the row is Lost
 // again by the time the next poll looks. This is the exact case the old code read
@@ -113,7 +123,7 @@ func TestRestoreLostSessions_ConfirmedAliveLogsTerminalSuccess(t *testing.T) {
 	if strings.Contains(info.String(), "restored after") {
 		t.Fatalf("spawn was logged as terminal recovery before liveness confirmation:\n%s", info.String())
 	}
-	observeAlive(manager, repoID, inst)
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 
 	want := fmt.Sprintf("restore of lost session %q (repo %s): restored after 1 attempt", inst.Title, repoID)
@@ -247,9 +257,9 @@ func TestRestoreLostSessions_ConfirmedAliveClearsRetryState(t *testing.T) {
 		t.Fatalf("status = %v, want Running after recovery", got)
 	}
 
-	// A poll gets an ANSWER out of the new runtime: THAT is the confirmation. No
-	// clock is advanced anywhere in this test.
-	observeAlive(manager, repoID, inst)
+	// Polls get ANSWERS out of the new runtime: THAT is the confirmation, and it
+	// takes several (#3412). No clock is advanced anywhere in this test.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, stillTracked := manager.lostRestoreStates[key]
@@ -333,8 +343,8 @@ func TestRestoreLostSessions_ObservationConfirms_NotElapsedTime(t *testing.T) {
 			"life (a remote inside its loss grace reads non-Lost while dead)")
 	}
 
-	// One ANSWER, and it is confirmed.
-	observeAlive(manager, repoID, inst)
+	// Sustained ANSWERS, and it is confirmed.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, tracked := manager.lostRestoreStates[key]
@@ -470,7 +480,10 @@ func TestRefreshInstanceStatus_RetiredProbeCannotConfirmReplacement(t *testing.T
 
 	manager.mu.Lock()
 	state := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
-	confirmed := state != nil && manager.observedAliveSinceSpawnLocked(repoID, inst, state)
+	// The COUNT, not the confirmation predicate: this test is about a stale answer
+	// being recorded against the new boundary at all, and a bar of several
+	// observations would let one leaked answer pass unnoticed (#3412).
+	confirmed := state != nil && manager.observationsSinceSpawnLocked(repoID, inst, state) > 0
 	manager.mu.Unlock()
 	if confirmed {
 		t.Fatal("predecessor liveness was counted after replacement armed its confirmation boundary")
