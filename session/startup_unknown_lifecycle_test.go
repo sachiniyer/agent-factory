@@ -116,6 +116,7 @@ func TestStartupUnknownVetoesEveryRuntimeAction(t *testing.T) {
 		RuntimeActionRestoreArchived:   {Title: "unknown", Liveness: LiveArchived},
 		RuntimeActionRestoreLostOrDead: {Title: "unknown", Liveness: LiveDead, Started: true},
 		RuntimeActionRecoverLost:       {Title: "unknown", Liveness: LiveLost, Started: true},
+		RuntimeActionRecoverFenced:     {Title: "unknown", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		RuntimeActionResumeLimit:       {Title: "unknown", Liveness: LiveLimitReached, Started: true},
 		RuntimeActionHandoff:           {Title: "unknown", Liveness: LiveRunning, Started: true},
 	}

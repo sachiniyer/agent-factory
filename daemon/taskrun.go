@@ -307,7 +307,12 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	if !git.IsGitInstalled() {
 		return fmt.Errorf("git is not installed or could not be found in PATH; install git and ensure it is available in your PATH")
 	}
-	if !git.IsGitRepo(t.ProjectPath) {
+	if err := git.CheckGitRepo(t.ProjectPath); err != nil {
+		// The underlying error was dropped entirely here, so an unanswered
+		// probe left no trace at all in the recorded task status (#3504).
+		if config.RepoProbeUnanswered(err) {
+			return fmt.Errorf("%s: %w", config.RepoProbeUnansweredClaim("project path", t.ProjectPath), err)
+		}
 		return fmt.Errorf("project path %s is not a valid git repository", t.ProjectPath)
 	}
 

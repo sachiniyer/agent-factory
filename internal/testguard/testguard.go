@@ -298,6 +298,49 @@ func SandboxTmux() func() {
 	}
 }
 
+// KeepTmuxServerOnEmpty stops the private tmux server from exiting when its
+// last session is killed. Call it after staging a session, on any test that
+// stages, drops, and stages again on one private server.
+//
+// tmux defaults exit-empty to ON, so a server exits the moment it holds no
+// sessions. Several reap tests stage a session, kill it to model a vanished
+// one, and then stage another on the SAME private server; the kill starts the
+// server shutting down and the next `new-session` reaches a socket whose server
+// is already on the way out. tmux answers `server exited unexpectedly` and the
+// failure lands in the harness's own staging step, before the code under test
+// runs, so it reads as a defect in the reaper (#3559).
+//
+// Reproduced before fixing: the reported test fails 5 times in 500 at head with
+// tmux's exact wording, and a bare new-session/kill-session/new-session loop
+// fails 1 in 200 and 1 in 400 on tmux 3.4 with the default, 0 in 400 pinned.
+//
+// This lives at STAGING rather than in IsolateTmux on purpose. Pinning during
+// isolation would start a server for every isolated test, including the ones
+// whose premise is that no server is running —
+// TestEnsuredSessionClientCannotRecreateVanishedServer requires its `-N` client
+// to fail against an absent server, and an eager pin makes it succeed. A test
+// that never stages a session cannot hit the shutdown race, so attaching the
+// pin to staging covers exactly the exposed tests and no others, by
+// construction rather than by an opt-out list.
+//
+// The server is already running by the time this is called, so it only sets the
+// option. `-s` because exit-empty is a server option — the same spelling
+// sessionlessTmuxServer already uses in session/tmux, where this race was first
+// worked around in a single test while pinning the state #3469 needed.
+//
+// Pinning also closes a quieter hazard than the flake: when an emptied server
+// exits, the next tmux command silently starts a BRAND NEW server on the same
+// socket, so a test can lose server-scoped state and read the replacement's
+// empty answers as fact. That path never errors.
+func KeepTmuxServerOnEmpty(t testing.TB) {
+	t.Helper()
+	out, err := exec.Command("tmux", "set", "-s", "exit-empty", "off").CombinedOutput()
+	if err != nil {
+		t.Fatalf("testguard: cannot pin the private tmux server against going empty: %v: %s",
+			err, bytes.TrimSpace(out))
+	}
+}
+
 // IsolateTmux points the test at a private tmux server: a fresh TMUX_TMPDIR
 // socket dir with $TMUX cleared, so a test run from inside a tmux pane does
 // not fall back to the surrounding server ($TMUX wins over TMUX_TMPDIR in

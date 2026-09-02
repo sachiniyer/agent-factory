@@ -1,6 +1,7 @@
 package git
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"os/exec"
@@ -220,8 +221,21 @@ func IsGitInstalled() bool {
 // to surface an actionable startup error) should call EnsureGitInstalled
 // before relying on IsGitRepo.
 func IsGitRepo(path string) bool {
+	return CheckGitRepo(path) == nil
+}
+
+// CheckGitRepo is IsGitRepo with the reason kept. The bool cannot express the
+// difference between "git says no" and "git never answered", so every caller
+// that NARRATES the result collapsed a killed or unstartable probe into a
+// verdict about the user's path (#3504). Callers branch on
+// config.RepoProbeUnanswered to word that honestly; callers that only need a
+// yes/no decision keep IsGitRepo.
+//
+// The probe is the same single rev-parse — no WaitDelay is added here, so the
+// abandoned-read failure mode #3503 covers is not introduced on this path.
+func CheckGitRepo(path string) error {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
-	return cmd.Run() == nil
+	return config.ClassifyGitProbeError(context.Background(), cmd.Run())
 }
 
 // EnsureGitInstalled returns an actionable error when the git binary is not on

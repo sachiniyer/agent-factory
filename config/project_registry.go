@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -433,7 +434,11 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	commonCmd := exec.Command("git", "-C", resolved, "rev-parse", "--show-toplevel", "--git-common-dir")
 	commonOut, err := commonCmd.Output()
 	if err != nil {
-		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", err)
+		// Classified where the child ran (#3504): this resolver runs its own
+		// probes, so without this the sentinel never reaches
+		// ResolveProjectSelector and a killed git is still reported to the user
+		// as "not inside a git repository".
+		return projectBinding{}, fmt.Errorf("resolve git common directory: %w", markUnansweredProbe(context.Background(), err))
 	}
 	commonParts := strings.SplitN(trimGitOutputLine(commonOut), "\n", 2)
 	if len(commonParts) != 2 {
@@ -457,7 +462,7 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	bareCmd := exec.Command("git", "--git-dir", commonDir, "rev-parse", "--is-bare-repository")
 	bareOut, err := bareCmd.Output()
 	if err != nil {
-		return projectBinding{}, fmt.Errorf("inspect git common directory: %w", err)
+		return projectBinding{}, fmt.Errorf("inspect git common directory: %w", markUnansweredProbe(context.Background(), err))
 	}
 	bare := strings.TrimSpace(string(bareOut))
 	if bare != "true" && bare != "false" {

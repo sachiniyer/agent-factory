@@ -84,21 +84,77 @@ func (i *Instance) Recover() error {
 // the poll goroutine. A precondition that holds because of where its caller runs
 // is not a precondition the next caller inherits.
 func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
-	if err := i.beginRecoverFence(); err != nil {
+	if err := i.BeginRecoverFence(); err != nil {
 		return err
 	}
-	err := i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
+	err := i.recoverUnderHeldFence(beforeLive)
 	if err != nil {
 		// ConfirmLive clears OpRestoring on success; lower it here on failure so
-		// the row does not stay permanently busy.
-		_ = i.Transition(ClearOp())
+		// the row does not stay permanently busy. This method raised the fence, so
+		// this method owns lowering it — the held variant below leaves that to the
+		// caller that raised it, exactly as Respawn leaves it to EndLimitResume.
+		i.EndRecoverFence()
 	}
 	return err
 }
 
-// beginRecoverFence validates the recover precondition and raises the restore
+// RecoverHeldFencedWithLiveBoundary is RecoverFencedWithLiveBoundary for a caller
+// that already holds the restore fence over a LONGER interval than the backend
+// call — the manual Lost/Dead restore RPC, whose two network phases (a liveness
+// probe and a pre-reap push bounded at 3m30s) run in front of it (#3586).
+//
+// It is a separate method rather than a re-entrant flag for the reason
+// BeginLimitResume/Respawn are separate next door: the two legal orderings are
+// made explicit instead of folded into one call that silently does different
+// things depending on state it did not establish.
+//
+// The precondition is validated, not assumed, and it is validated through the
+// SHARED ledger (RuntimeActionRecoverFenced) rather than a bare op comparison, so
+// the pending-kill and startup-unknown vetoes that fence every other runtime entry
+// point cover this one too. The caller owns the release: on failure the fence
+// stays up for EndRecoverFence, and on success ConfirmLive clears it.
+func (i *Instance) RecoverHeldFencedWithLiveBoundary(beforeLive func()) error {
+	if err := i.ValidateRuntimeAction(RuntimeActionRecoverFenced); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
+	return i.recoverUnderHeldFence(beforeLive)
+}
+
+func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
+	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
+}
+
+// EndRecoverFence lowers the fence BeginRecoverFence raised, and reports whether
+// it actually lowered one. Safe to defer unconditionally: it is a no-op once
+// ConfirmLive has cleared the op on the success path, and it never disturbs an op
+// some other owner raised.
+//
+// Deferring it is how the manual restore covers EVERY early return between the
+// raise and the backend call — the probe-alive heal, the indeterminate refusal,
+// the two durable-branch refusals, the failed pre-reap push — without each one
+// having to remember. A missed path would leave the row permanently busy: the poll
+// skips any session with an op in flight and every runtime action refuses it, which
+// is strictly worse than the advertised-Kill bug the fence exists to fix.
+//
+// ClearOp is unconditionally legal, so the OpRestoring check is not about legality:
+// it makes sure a kill or archive overlay that SUPERSEDED this fence is not cleared
+// out from under its own owner — which is why the check and the clear share one
+// critical section in clearOpIfHeld rather than being read-then-write.
+func (i *Instance) EndRecoverFence() bool {
+	return i.clearOpIfHeld(OpRestoring, "restore")
+}
+
+// BeginRecoverFence validates the recover precondition and raises the restore
 // fence in ONE critical section (#3555, the same defect #2997 fixed in
 // BeginLimitResume next door).
+//
+// It is exported because the fence's owner is not always the backend call: the
+// manual restore RPC raises it at the top of the operation so the fence is
+// COEXTENSIVE with the claim that already refuses Kill at the admission gate
+// (#3586), then continues through RecoverHeldFencedWithLiveBoundary. Raising and
+// validating stay welded together here whichever caller does it, which is the
+// property #3555 established and the reason there is still no way to raise this
+// fence without validating, or to validate without raising.
 //
 // Splitting them is its own race, and the epoch guard cannot cover it: an
 // observation landing in the gap is CURRENT, not stale, so nothing drops it, and
@@ -111,7 +167,7 @@ func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
 // critical section, which validation sees and refuses, and one blocked until
 // after the raise, which the epoch guard drops as superseded. See
 // lifecycleViewLocked, which documents this as the pattern.
-func (i *Instance) beginRecoverFence() error {
+func (i *Instance) BeginRecoverFence() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
@@ -207,11 +263,30 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	if i.GetInFlightOp() != OpRespawning {
+	return i.clearOpIfHeld(OpRespawning, "limit resume")
+}
+
+// clearOpIfHeld lowers the in-flight fence ONLY while it is still the op the caller
+// raised, deciding and clearing in ONE critical section.
+//
+// The two halves cannot be split (Codex on #3597), and the reason is the very case
+// the comparison exists for. tkBeginKill is allowed-from-always — a kill supersedes
+// any in-flight op — so a BeginKill landing after a released read lock and before
+// the write lock would install OpKilling, and the fence owner's release would then
+// clear a teardown overlay it was supposed to leave alone: Kill and Archive back on
+// offer for a session whose teardown is already running. Read-then-write made that
+// window real; one write lock removes it.
+//
+// It is shared rather than written twice because both fence owners want the identical
+// rule, and a second copy is the one that would keep the split.
+func (i *Instance) clearOpIfHeld(held InFlightOp, operation string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != held {
 		return false
 	}
-	if err := i.Transition(ClearOp()); err != nil {
-		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
+	if err := i.transitionLocked(ClearOp()); err != nil {
+		log.WarningLog.Printf("%s: clearing the in-flight fence for %q: %v", operation, i.Title, err)
 		return false
 	}
 	return true

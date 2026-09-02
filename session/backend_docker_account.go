@@ -353,24 +353,38 @@ func localDockerEndpoint(endpoint string) bool {
 		strings.HasPrefix(endpoint, "fd://")
 }
 
+// dockerEngineEndpoint resolves the endpoint this provisioner's docker CLI will
+// talk to and reports whether it is local. Two callers need that answer for the
+// same underlying reason — Docker resolves AND labels a bind source on the daemon
+// host, not the CLI host: ensureAccountDockerEngineLocal refuses a remote engine
+// outright, and bindMountRelabel keeps the SELinux relabel when locality cannot
+// be proven (#3589).
+func (p *dockerProvisioner) dockerEngineEndpoint() (endpoint string, local bool, err error) {
+	environ := p.dockerEnvironment()
+	dockerHost := environmentValue(environ, "DOCKER_HOST")
+	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
+	endpoint = dockerHost
+	if dockerContext != "" || endpoint == "" {
+		out, derr := p.docker(dockerShortStepTimeout, "context", "inspect", "--format", dockerEndpointFormat)
+		if derr != nil {
+			return "", false, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), derr)
+		}
+		endpoint = strings.TrimSpace(string(out))
+	}
+	return endpoint, localDockerEndpoint(endpoint), nil
+}
+
 // ensureAccountDockerEngineLocal proves bind mounts are interpreted on this
 // host. Docker resolves a bind source on the daemon host, not the CLI host, so a
 // remote endpoint would mount an unrelated path while reporting the local
 // account name.
 func (p *dockerProvisioner) ensureAccountDockerEngineLocal() error {
-	environ := p.dockerEnvironment()
-	dockerHost := environmentValue(environ, "DOCKER_HOST")
-	dockerContext := environmentValue(environ, "DOCKER_CONTEXT")
-	endpoint := dockerHost
-	if dockerContext != "" || endpoint == "" {
-		out, err := p.docker(dockerShortStepTimeout, "context", "inspect", "--format", dockerEndpointFormat)
-		if err != nil {
-			return fmt.Errorf("backend=docker: cannot establish that the Docker daemon is local before mounting account %q: %s: %w",
-				p.spec.Account.Name, strings.TrimSpace(string(out)), err)
-		}
-		endpoint = strings.TrimSpace(string(out))
+	endpoint, local, err := p.dockerEngineEndpoint()
+	if err != nil {
+		return fmt.Errorf("backend=docker: cannot establish that the Docker daemon is local before mounting account %q: %w",
+			p.spec.Account.Name, err)
 	}
-	if !localDockerEndpoint(endpoint) {
+	if !local {
 		return fmt.Errorf(
 			"backend=docker: account %q cannot be used with remote Docker endpoint %q: bind mounts resolve on the daemon host, so this host's account path would not be the selected identity",
 			p.spec.Account.Name, endpoint)
