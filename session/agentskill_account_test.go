@@ -61,12 +61,104 @@ func TestResolveSkillTarget_DistinguishesUnscopedFromUnresolvable(t *testing.T) 
 	unsupported := resolveSkillTarget(&Instance{Program: "amp", Account: "work"}, "amp")
 	require.True(t, unsupported.unresolved)
 
-	// The agent comes from the RESOLVED command, not from i.Program: a claude
-	// account with the command resolving to gemini must not write into claude's
-	// account directory just because the label says claude.
-	drifted := resolveSkillTarget(&Instance{Program: "claude", Account: "work"}, "gemini")
-	require.Equal(t, skillTarget{root: dir}, drifted,
-		"the resolved command names the agent whose registry is read")
+	// A FOREIGN NAMESPACE. The name was validated against the session's own agent,
+	// and account namespaces are separate — "work" means a different identity for
+	// each agent. Resolving it against the resolved command's registry would write
+	// into a gemini account the operator never selected, moments before the launch
+	// refuses for exactly that reason (#3082/#3108, #3645 review).
+	foreign := resolveSkillTarget(&Instance{Program: "claude", Account: "work"}, "gemini")
+	require.True(t, foreign.unresolved,
+		"a claude account name must not be resolved against gemini's registry")
+	require.Empty(t, foreign.root)
+}
+
+// A handoff is the path that reaches the foreign-namespace case in production.
+//
+// PrepareAgentSwap freezes the TARGET agent's command and runs injectSystemPrompt
+// on it, and it runs BEFORE SwapAgent refuses every account-scoped handoff. So a
+// claude session scoped to "work", handed off to gemini while a gemini account
+// also called "work" exists, would write af's skill into that gemini account — an
+// account the operator never selected, for a process that can never launch.
+func TestPrepareAgentSwap_DoesNotWriteIntoTheTargetAgentsAccount(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	ambient := t.TempDir()
+	t.Setenv("GEMINI_CLI_HOME", ambient)
+	geminiDir := registerAccount(t, "gemini", "work")
+	registerAccount(t, "claude", "work")
+
+	scoped := &Instance{Program: "claude", Account: "work"}
+	target := resolveSkillTarget(scoped, "gemini")
+	require.True(t, target.unresolved, "the handoff target's account namespace is not this session's")
+
+	injectSystemPrompt("gemini", target)
+	require.NoFileExists(t, geminiSkillPathUnder(geminiDir),
+		"a handoff that will be refused must not mutate the target agent's account directory")
+	require.NoFileExists(t, geminiSkillPathUnder(ambient),
+		"and it must not fall back to the daemon's root either")
+}
+
+// An af-MOUNTED account root belongs to the host, and the process reading it may
+// be the agent-server inside the container af mounted it into.
+//
+// That server builds its instance with no account and the local backend, while
+// docker has pointed the agent's config variable at /af-account — a writable bind
+// mount of the host's account directory. Read as an ordinary ambient root, the
+// container's own config (global_agent_skills defaults false) would DELETE the
+// af-marked skill the host's scoped launch just wrote (#3645 review).
+func TestResolveSkillTarget_RefusesAMountedAccountRoot(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+
+	for name, root := range map[string]string{
+		"the mount itself": dockerAccountHome,
+		"a path inside it": dockerAccountHome + "/nested",
+		"a trailing slash": dockerAccountHome + "/",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("GEMINI_CLI_HOME", root)
+			target := resolveSkillTarget(&Instance{Program: "gemini"}, "gemini")
+			require.True(t, target.unresolved,
+				"the container cannot know whether the host opted in, so it must neither write nor clean")
+		})
+	}
+
+	// A SIBLING with the same prefix is not the mount. Compared as path segments,
+	// never as a string prefix.
+	t.Setenv("GEMINI_CLI_HOME", dockerAccountHome+"-backup")
+	require.Equal(t, skillTarget{}, resolveSkillTarget(&Instance{Program: "gemini"}, "gemini"),
+		"a sibling directory that merely shares the prefix is an ordinary ambient root")
+}
+
+// #1977's promise: af's edits to the user's global config must not outlive the
+// decision not to make them. Moving the WRITE target to the account root must not
+// quietly narrow it — an operator who launches only scoped sessions would
+// otherwise keep a stale af-managed skill in their ambient config forever.
+func TestEnsureSkillDir_DeclinedCleansTheLegacyAmbientLocationToo(t *testing.T) {
+	agentHome(t)
+	grantGlobalAgentSkills(t)
+	ambient := t.TempDir()
+	t.Setenv("GEMINI_CLI_HOME", ambient)
+	dir := registerAccount(t, "gemini", "work")
+	scoped := skillTarget{root: dir}
+
+	// A prior af version wrote into the ambient root; this one writes into the
+	// account root. Both af-marked, both af's to clean.
+	_, err := ensureGeminiSkillDir(skillTarget{})
+	require.NoError(t, err)
+	_, err = ensureGeminiSkillDir(scoped)
+	require.NoError(t, err)
+	require.FileExists(t, geminiSkillPathUnder(ambient))
+	require.FileExists(t, geminiSkillPathUnder(dir))
+
+	// The operator now declines. A SCOPED launch must clean both.
+	writeAfConfig(t, false)
+	_, err = ensureGeminiSkillDir(scoped)
+	require.NoError(t, err)
+	require.NoFileExists(t, geminiSkillPathUnder(dir),
+		"the account copy is af's and the operator declined")
+	require.NoFileExists(t, geminiSkillPathUnder(ambient),
+		"the ambient copy an older af left is af's too, and only a scoped launch may ever visit it again")
 }
 
 // The skills base is a function of the agent's CONFIG-ROOT VALUE, and scoping a
