@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -254,14 +255,7 @@ func guardProjectBinding(repo *config.RepoContext, explicit bool) error {
 func pathIsInside(parent, child string) bool {
 	p := resolveRealPath(parent)
 	c := resolveRealPath(child)
-	rel, err := filepath.Rel(p, c)
-	if err != nil {
-		return false
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return true
+	return pathutil.IsAtOrInside(c, p)
 }
 
 func resolveRealPath(path string) string {

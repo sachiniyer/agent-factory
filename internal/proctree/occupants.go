@@ -90,7 +90,7 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			// as either would be inventing a fact.
 			continue
 		}
-		if !dirContains(root, filepath.Clean(cwd)) {
+		if !pathutil.IsAtOrInside(filepath.Clean(cwd), root) {
 			continue
 		}
 		if IsTmuxServer(pid) {
@@ -158,19 +158,6 @@ func DescribeOccupants(occupants []Occupant) string {
 		out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
 	}
 	return out
-}
-
-// dirContains reports whether p is root or lies beneath it. Path containment,
-// never a string prefix: /x/wt-backup starts with /x/wt and is not inside it.
-func dirContains(root, p string) bool {
-	if p == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, p)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // IsTmuxServer reports whether pid is a tmux server, POSITIVELY — from its own

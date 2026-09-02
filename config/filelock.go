@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -289,8 +288,7 @@ func secureAFHomeForPath(path string) error {
 	if err != nil {
 		return fmt.Errorf("resolve storage path: %w", err)
 	}
-	rel, err := filepath.Rel(absHome, absPath)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if !pathutil.IsAtOrInside(absPath, absHome) {
 		return nil
 	}
 	info, statErr := os.Lstat(absHome)
