@@ -37,10 +37,11 @@ func newArchiveSkippedEntry(path string, reason ArchiveSkipReason) ArchiveSkippe
 }
 
 // FilesystemPath is the on-disk name this entry stands for: the raw bytes when
-// the name is not valid UTF-8, otherwise the display path. It is exported
-// because it is what the incomplete-archive warning PRINTS, and the bug-report
-// redactor has to remove exactly that string from the bundled daemon log — a
-// second, independently derived copy of this rule is how the two drift (#3541).
+// the name is not valid UTF-8, otherwise the display path. It is what the
+// incomplete-archive warning PRINTS, and it is exported for that reason: the
+// bug-report redactor has to take exactly this string back out of the bundled
+// daemon log, so its tests assert against this accessor rather than deriving
+// the same rule a second time — which is how the two would drift apart (#3553).
 func (entry ArchiveSkippedEntry) FilesystemPath() string {
 	return archiveFilesystemPath(entry.Path, entry.PathBytes)
 }
