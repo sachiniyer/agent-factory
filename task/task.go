@@ -303,7 +303,25 @@ func loadTasksLocked(path string) ([]Task, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse tasks file: %w", err)
 	}
-	return tasksFromSchemaBytes(migrated)
+	tasks, err := tasksFromSchemaBytes(migrated)
+	if err != nil {
+		return nil, err
+	}
+	// Derived state is stripped here as well as on the way out (saveTasks), and
+	// for a reason the write path does not make obvious: records loaded here do
+	// not only go back to disk. They ride EventTaskUpdated to every connected
+	// client — the legacy RepoID backfill publishes them, and so does an update
+	// whose post-commit reload failed — so a hand-edited tasks.json carrying
+	// `arming` or `next_run_at` would have those fields decoded and broadcast as
+	// though a daemon had observed them (#3623 review).
+	//
+	// The write path derives nothing, so clearing is the whole of it: a reader
+	// gets its verdict from LoadTasks, which derives, and every other exit
+	// carries none.
+	for i := range tasks {
+		tasks[i].stripDerived()
+	}
+	return tasks, nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {

@@ -327,3 +327,30 @@ func TestAutomationsLeadsWithBothUnschedulableDiagnoses(t *testing.T) {
 			"%q: enough of it survives the rail minimum to read as a reason:\n%s", tc.expr, narrow)
 	}
 }
+
+// TestAutomationsDiagnosesEveryUnschedulableShape is the pane's half of the
+// consolidation: it renders the SHARED classification instead of re-deriving it,
+// which is what had it calling an absent expression invalid. Every shape, at
+// full width and at the rail minimum where the reason is all that survives.
+func TestAutomationsDiagnosesEveryUnschedulableShape(t *testing.T) {
+	for _, tc := range []struct{ expr, want string }{
+		{"", "No trigger"},
+		{"99 * * * *", "Invalid cron expression"},
+		{"0 0 31 2 *", "No upcoming run"},
+	} {
+		tsk := stripTasks()[0]
+		tsk.CronExpr, tsk.Unschedulable = tc.expr, true
+
+		a := newTestAutomations([]task.Task{tsk})
+		a.SetRect(layout.Rect{W: 100, H: 4})
+		a.Focus()
+		wide := a.View()
+		assert.Contains(t, wide, "▾[!]  nightly-sweep", "%q is marked", tc.expr)
+		assert.Contains(t, wide, tc.want, "%q reads %q:\n%s", tc.expr, tc.want, wide)
+		assert.Equal(t, 1, strings.Count(wide, tc.want), "%q: said once", tc.expr)
+
+		a.SetRect(layout.Rect{W: 22, H: 4})
+		assert.Contains(t, a.View(), tc.want[:8],
+			"%q: the reason survives the rail minimum", tc.expr)
+	}
+}

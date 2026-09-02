@@ -434,3 +434,26 @@ func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
 	renamed.Name = "renamed"
 	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(renamed))
 }
+
+// TestWatchArming_DuringShutdownIsUnknown is the twin of the scheduler resetting
+// its started latch in Stop. The supervisor's Stop EMPTIES the watcher map while
+// the control socket deliberately stays open to drain in-flight deliveries, so a
+// read landing there found no watcher for any task and reported every one of
+// them not-armed — a fabricated negative that would raise a doctor alarm about a
+// daemon that is simply on its way out.
+func TestWatchArming_DuringShutdownIsUnknown(t *testing.T) {
+	dir := t.TempDir()
+	supervisor := newWatcherSupervisor()
+	supervisor.queueDir = func() (string, error) { return dir, nil }
+	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
+	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.setStatus = func(string, string) {}
+
+	watch := watchTask("shutdown", "printf 'a\\n'; sleep 30", dir)
+	require.NoError(t, supervisor.reloadSnapshot([]task.Task{watch}, []task.Task{watch}))
+	require.Equal(t, task.ArmingArmed, supervisor.armingFor(watch), "precondition: armed")
+
+	supervisor.Stop()
+	assert.Equal(t, task.ArmingUnknown, supervisor.armingFor(watch),
+		"a daemon on its way out has observed nothing about steady state")
+}

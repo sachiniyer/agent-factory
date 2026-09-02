@@ -42,7 +42,13 @@ import (
 func (s *watcherSupervisor) armingFor(t task.Task) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.armed {
+	if !s.armed || s.stopped {
+		// stopped is the shutdown twin of the scheduler resetting its started
+		// latch in Stop, and it matters for the same reason: Stop EMPTIES this map
+		// while the control socket deliberately stays open to drain in-flight
+		// deliveries, so a read landing there would find no watcher for any task
+		// and report every one of them as not armed. A daemon on its way out has
+		// observed nothing about steady state (#3623 review).
 		return task.ArmingUnknown
 	}
 	w, ok := s.watchers[t.ID]
