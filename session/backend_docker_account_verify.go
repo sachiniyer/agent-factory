@@ -34,11 +34,22 @@ import (
 //	docker inspect     — what Docker was CONFIGURED to install. The daemon's own
 //	                     record, so it also covers an option af's argv parse
 //	                     misread, and an image VOLUME that appears in no argv.
-//	/proc/1/mountinfo  — what the kernel actually MOUNTED, symlinks resolved.
-//	the account dir    — read on the HOST, and only when Docker recorded a
-//	                     --device. A device is a mknod, so it lands in no mount
-//	                     table at all; one aliased onto the account is written
-//	                     through the bind, so it is visible from this side.
+//	/proc/self/mountinfo of the exec'd reader — what the kernel actually
+//	                     MOUNTED, symlinks resolved. SELF rather than PID 1: a
+//	                     run_arg may set --pid=host, and PID 1 is then the HOST's
+//	                     init, whose mount table has no /af-account at all
+//	                     (measured — 55 lines, zero matches, which the check would
+//	                     read as "af's account mount is missing" and refuse every
+//	                     such session). docker exec joins the container's MOUNT
+//	                     namespace whatever its PID namespace, so the reader's own
+//	                     table is always the container's. Identical to PID 1's in
+//	                     the ordinary case, also measured.
+//	the account dir    — read on the HOST. A device is a mknod, so it lands in no
+//	                     mount table at all; one aliased onto the account is
+//	                     written through the bind, so it is visible from this
+//	                     side — and it outlives the session that planted it, so
+//	                     this looks on every provision rather than only when this
+//	                     container configured a --device.
 //
 // The verdict is #3402's policy, unchanged: exactly af's own bind covers
 // dockerAccountHome, and nothing else lands at or under it or
@@ -469,32 +480,35 @@ func mountpointResidueNote(target, accountSource string) string {
 // contract does not already require, and nothing the container could forge.
 //
 // The account directory arrives as an fs.FS, which production fills with
-// os.DirFS: no unprivileged process can mknod a character device, so that is
+// accountFS: no unprivileged process can mknod a character device, so that is
 // what lets a test present a real device MODE to the walk that production runs.
 //
-// It runs ONLY when `docker inspect` recorded at least one --device, and that
-// gate is a proof rather than an optimisation: every device node Docker creates
-// comes from .HostConfig.Devices, so a container configured with none created
-// none, and walking an account home — which internal/sessionenv defines as the
-// agent's WHOLE home, history included — on every provision would be work with
-// no question behind it (#3602 review).
+// It runs on EVERY account provision, and not only when this container
+// configured a --device. An earlier cut gated it on that, reasoning that a
+// container configured with no device created none — true, and beside the point.
+// The node the daemon plants outlives the session that planted it: it is written
+// as root at container start, before any check can run, and the refusal that
+// finds it reaps a container without touching the host. So the very next
+// provision — the operator's retry, which has typically had the offending
+// run_arg removed and therefore configures no device at all — would have skipped
+// the walk and handed the agent an account with an active device node still
+// sitting in it, at /af-account/.config/settings.json for all af knows (#3602
+// review).
 //
-// What reading the host side gives up, so it is not discovered later: an aliased
-// --device under dockerAccountRuntimeHome is NOT detected. af creates that
-// directory inside the container, so a node there is written into the
-// container's own filesystem, leaves nothing on the host, and dies with the
-// container — while verifyConfiguredAccountBoundary still refuses a
-// non-aliased one, because Docker recorded the path. What is given up is
-// container-local nuisance, never the credential substitution this file exists
-// to stop.
-func verifyAccountDeviceResidue(accountFS fs.FS, accountSource string, devices []dockerInspectDevice, configured []string) error {
-	if len(devices) == 0 {
-		return nil
-	}
-	found, err := accountDeviceResidue(accountFS)
+// The cost that gate was buying is already paid down by reading the host side:
+// this is af's own in-process walk of a local directory, with no docker exec
+// round trip and no dockerShortStepTimeout over it, unlike the in-container
+// `find` an earlier cut used.
+//
+// devices is the container paths Docker was asked to create nodes at. It shapes
+// the REFUSAL rather than gating the walk, and only --device entries appear in
+// it, because only a --device can make a node — naming an ordinary bind as a
+// candidate would send the operator after the wrong line.
+func verifyAccountDeviceResidue(fsys fs.FS, accountSource string, devices []dockerInspectDevice) error {
+	found, err := accountDeviceResidue(fsys)
 	if err != nil {
 		return fmt.Errorf(
-			"cannot read account directory %q to establish that docker.run_args planted no device node in it: %w",
+			"cannot read account directory %q to establish that no device node has been planted in it: %w",
 			accountSource, err)
 	}
 	if len(found) == 0 {
@@ -504,9 +518,14 @@ func verifyAccountDeviceResidue(accountFS fs.FS, accountSource string, devices [
 	for _, node := range found {
 		inContainer = append(inContainer, path.Join(dockerAccountHome, node))
 	}
+	configuredDevices := make([]string, 0, len(devices))
+	for _, device := range devices {
+		configuredDevices = append(configuredDevices, device.PathInContainer)
+	}
+	sort.Strings(configuredDevices)
 	return boundaryRefusal(fmt.Sprintf(
 		"the account directory holds the device node(s) %s, inside af's account boundary, which af did not put there",
-		quotedPathList(inContainer)), deviceResidueCauses(configured), deviceResidueNote(found, accountSource))
+		quotedPathList(inContainer)), deviceResidueCauses(configuredDevices), deviceResidueNote(found, accountSource))
 }
 
 // accountDeviceResidue walks an account directory and returns the paths of every
@@ -587,19 +606,24 @@ func deviceResidueNote(found []string, accountSource string) string {
 }
 
 // deviceResidueCauses lists what could have put a device node in the account
-// directory. As with resolvedMountCauses, both are offered rather than one
-// asserted: the gate proves a node can only come from a --device, but not that
-// it came from THIS session's, and one an earlier session planted is still
-// sitting there when the next one starts.
-func deviceResidueCauses(configured []string) []string {
+// directory. Both are offered rather than one asserted, as in resolvedMountCauses:
+// only a --device can make a node, but never necessarily THIS session's, since
+// one an earlier session planted is still sitting there when the next one starts.
+//
+// devices is the container paths this session asked Docker to create nodes at —
+// only those, not every configured path, because an ordinary bind cannot make a
+// device node and naming one as a candidate sends the operator after the wrong
+// line. Empty means this session configured none, so the alias cause is not
+// offered at all.
+func deviceResidueCauses(devices []string) []string {
 	var causes []string
-	if len(configured) > 0 {
+	if len(devices) > 0 {
 		causes = append(causes, fmt.Sprintf(
-			"the selected image may alias one of the container paths Docker was asked to install (%s) onto the account — remove that entry from docker.run_args, or select an image that has no symlink at that path",
-			quotedPathList(configured)))
+			"the selected image may alias one of the container paths this session asked Docker to create a device node at (%s) onto the account — remove that entry from docker.run_args, or select an image that has no symlink at that path",
+			quotedPathList(devices)))
 	}
 	causes = append(causes,
-		"an earlier session may have left it: the daemon creates a --device node at container start, before any check can run, so one outlives the refusal that finds it")
+		"an earlier session may have left it: the daemon creates a --device node at container start, before any check can run, so one outlives the refusal that finds it and the reap that follows")
 	return causes
 }
 
@@ -677,7 +701,7 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	findings := []error{verifyConfiguredAccountBoundary(inspected, source, log.WarningLog.Printf)}
 
 	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "cat", "/proc/1/mountinfo")
+		"exec", "--user", "0:0", p.containerID, "cat", "/proc/self/mountinfo")
 	if err != nil {
 		findings = append(findings, fmt.Errorf("cannot read the container's resolved mount table: %s: %w", strings.TrimSpace(string(out)), err))
 	} else if targets, perr := parseMountinfoTargets(out); perr != nil {
@@ -687,7 +711,7 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	}
 
 	findings = append(findings,
-		verifyAccountDeviceResidue(accountFS(source), source, inspected.HostConfig.Devices, configured))
+		verifyAccountDeviceResidue(accountFS(source), source, inspected.HostConfig.Devices))
 	return refuse(findings...)
 }
 
