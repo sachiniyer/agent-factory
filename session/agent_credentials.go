@@ -80,31 +80,55 @@ const (
 	dockerCredentialMountModeRelabeled = "ro,z"
 )
 
-// selinuxRelabelForHost reports whether THIS host's SELinux mode calls for the
-// shared relabel on af's docker bind mounts. It is the local half of the
-// decision; bindMountRelabel is what callers use, because a bind source is
-// labeled on the ENGINE host and this probe can only see the af process's own.
+// selinuxRelabelForHost reports whether the kernel af is running on calls for the
+// shared relabel. It is the local half of the decision; bindMountRelabel is what
+// callers use, because a bind source is labeled on the ENGINE host.
 //
-// A PROBE FAILURE RELABELS ANYWAY, and that direction is the whole reason this
-// is a named function rather than an inline call. Applying z where SELinux is
-// off is a verified no-op — Docker ignores the flag, and a `-v …:ro,z` mount
-// reads back identically to `:ro` on a host with no SELinux at all — while
-// omitting it on an enforcing host reinstates #3451 exactly: a silently
-// unauthenticated session. The two failure directions are not symmetric, so an
-// unreadable /sys must not resolve to "no relabel".
+// The rule is ONE-SIDED on purpose: af skips the relabel only where it can
+// POSITIVELY establish that SELinux cannot deny the read. Applying z where
+// SELinux is not enforcing is a verified no-op — Docker ignores the flag, and a
+// `-v …:ro,z` mount reads back identically to `:ro` on a host with no SELinux at
+// all — while omitting it on an enforcing host reinstates #3451 exactly: a
+// silently unauthenticated session. The two directions are not symmetric, so
+// every uncertain case relabels.
 //
-// Permissive (enforce=0) deliberately does NOT relabel: SELinux logs the denial
-// there rather than acting on it, so the read succeeds unlabeled and the host
-// file is left untouched. The residual case is a host switched to enforcing
-// mid-session, which needs the session restarted to pick the label up; that is
-// inherent to deciding a mount mode at `docker run` time.
+//   - enforcing      → relabel.
+//   - permissive     → no relabel. SELinux logs the denial rather than acting on
+//     it, so the read succeeds unlabeled and the operator's file is left
+//     untouched. And the value is trustworthy wherever it is readable: selinuxfs
+//     is a kernel interface, not a namespaced one, so a container that has it
+//     mounted still reports its HOST's mode.
+//   - unreadable     → relabel.
+//   - not observable → ask the kernel. An absent enforce file means "no SELinux"
+//     on a bare host, but inside a CONTAINER it usually means only that selinuxfs
+//     was not mounted, while the kernel underneath may be enforcing — which is
+//     precisely the af-in-a-container-with-the-host-socket case. /proc/filesystems
+//     is kernel-global, so it settles it: if the kernel registers selinuxfs at
+//     all, af cannot prove SELinux is off and relabels.
+//
+// Residual, and deliberately not chased: a unix socket forwarded to a DIFFERENT
+// kernel (socat, or a VM whose engine af reaches through a local path) is
+// indistinguishable from a local daemon by any local means. Docker Desktop is the
+// common instance and its VM is not SELinux-enforcing, so the gap is theoretical;
+// closing it properly would require asking the engine, which is a container
+// execution on the remote host to read one file.
 func selinuxRelabelForHost() bool {
-	enforcing, err := hostSELinuxEnforcing()
+	mode, err := hostSELinuxMode()
 	if err != nil {
-		log.WarningLog.Printf("backend=docker: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is disabled", err)
+		log.WarningLog.Printf("backend=docker: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is not enforcing", err)
 		return true
 	}
-	return enforcing
+	switch mode {
+	case selinuxEnforcing:
+		return true
+	case selinuxPermissive:
+		return false
+	}
+	if kernelRegistersSELinuxfs() {
+		log.InfoLog.Printf("backend=docker: no SELinux enforce file is visible here, but this kernel registers selinuxfs — af may be containerized while the engine host enforces; applying the SELinux relabel")
+		return true
+	}
+	return false
 }
 
 // bindMountRelabel decides the SELinux relabel for every bind mount af installs
@@ -195,32 +219,75 @@ func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 // operator's filesystem layout crosses the boundary.
 const dockerAccountHome = "/af-account"
 
+// selinuxMode is what af could observe about SELinux, kept as three states
+// rather than a bool because "permissive" and "af cannot see selinuxfs at all"
+// are NOT the same answer and must not resolve alike (#3589 review).
+type selinuxMode int
+
+const (
+	// selinuxUnobserved: no enforce file in THIS process's mount namespace. On a
+	// bare host that means SELinux is absent; inside a container it usually means
+	// only that selinuxfs was not mounted, while the kernel underneath may well
+	// be enforcing.
+	selinuxUnobserved selinuxMode = iota
+	selinuxPermissive
+	selinuxEnforcing
+)
+
 // selinuxEnforcePaths are the kernel files that report the SELinux mode, newest
 // location first. A var, not a const slice, only so a test can point the probe
 // at a fixture; production never reassigns it.
 var selinuxEnforcePaths = []string{"/sys/fs/selinux/enforce", "/selinux/enforce"}
 
-func hostSELinuxEnforcing() (bool, error) {
+// procFilesystemsPath lists the filesystems the RUNNING KERNEL registers. Also a
+// var only for tests.
+var procFilesystemsPath = "/proc/filesystems"
+
+func hostSELinuxMode() (selinuxMode, error) {
 	if runtime.GOOS != "linux" {
-		return false, nil
+		return selinuxUnobserved, nil
 	}
 	for _, enforcePath := range selinuxEnforcePaths {
 		value, err := os.ReadFile(enforcePath)
 		if err == nil {
 			switch strings.TrimSpace(string(value)) {
 			case "1":
-				return true, nil
+				return selinuxEnforcing, nil
 			case "0":
-				return false, nil
+				return selinuxPermissive, nil
 			default:
-				return false, fmt.Errorf("unexpected value in %s", enforcePath)
+				return selinuxUnobserved, fmt.Errorf("unexpected value in %s", enforcePath)
 			}
 		}
 		if !os.IsNotExist(err) {
-			return false, fmt.Errorf("read %s: %w", enforcePath, err)
+			return selinuxUnobserved, fmt.Errorf("read %s: %w", enforcePath, err)
 		}
 	}
-	return false, nil
+	return selinuxUnobserved, nil
+}
+
+// kernelRegistersSELinuxfs reports whether the running kernel has SELinux
+// compiled in, read from /proc/filesystems.
+//
+// This is the signal that SURVIVES A CONTAINER, and it is the reason an absent
+// enforce file is no longer read as "this machine has no SELinux". selinuxfs is
+// normally not mounted inside a container, so af running in one against the
+// host's Docker socket sees no enforce file at all — while /proc/filesystems is
+// a KERNEL-global list rather than a namespaced one, so it still describes the
+// machine Docker will label the bind source on.
+//
+// Unreadable resolves to true, on the same fail-toward-relabel rule as the rest.
+func kernelRegistersSELinuxfs() bool {
+	data, err := os.ReadFile(procFilesystemsPath)
+	if err != nil {
+		return true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[len(fields)-1] == "selinuxfs" {
+			return true
+		}
+	}
+	return false
 }
 
 // dockerAccountMount builds the account bind mount. relabel comes from

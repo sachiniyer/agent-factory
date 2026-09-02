@@ -169,12 +169,25 @@ user's real home and mounts it only if it exists, so:
     `z` is inert wherever SELinux is not enforcing, while skipping it on an
     enforcing host costs you a silently unauthenticated session — so the two
     directions are not worth treating alike, and every uncertain case resolves to
-    relabeling. That covers a `/sys` af cannot read, and it also covers a
-    **remote Docker engine**: with `DOCKER_HOST` or `DOCKER_CONTEXT` pointing off
-    this machine (or af itself running against a mounted engine socket), Docker
-    resolves *and labels* the bind source on the daemon host, so this host's
-    SELinux mode describes the wrong machine. Unless the endpoint is a local
-    socket, af keeps the relabel.
+    relabeling. Concretely, af keeps the relabel when:
+
+    - it cannot read the SELinux mode at all;
+    - the Docker endpoint is **not local** (`DOCKER_HOST` / `DOCKER_CONTEXT`
+      pointing off this machine). Docker resolves *and labels* a bind source on
+      the daemon host, so this host's SELinux mode describes the wrong machine;
+    - no enforce file is visible **but the kernel registers `selinuxfs`**. This is
+      the af-in-a-container case: with the host's Docker socket mounted, af sees a
+      local `unix://` endpoint, yet `selinuxfs` is usually not mounted inside a
+      container — so an absent enforce file there means "af cannot see it", not
+      "the machine has no SELinux". `/proc/filesystems` is kernel-global rather
+      than namespaced, so it still describes the machine that will label the
+      mount.
+
+    One case af cannot see through: a `unix://` socket **forwarded to a different
+    kernel** (`socat`, or a VM reached through a local path) is indistinguishable
+    from a local daemon. Docker Desktop is the common instance and its VM does not
+    enforce SELinux, so this is theoretical — but if you forward a socket to an
+    enforcing host, set the mount mode yourself via `docker.run_args`.
 
     The **account** mount (below) takes the same decision, for the same reasons —
     af installs both mounts into the same container on the same engine, so they

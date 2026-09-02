@@ -223,7 +223,7 @@ func TestAgentCredentialMounts_PassTheAccountRunArgsGuard(t *testing.T) {
 // and the operator's host file is left untouched.
 func TestSelinuxRelabelForHost_FollowsTheEnforceFile(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
+		t.Skip("hostSELinuxMode short-circuits to unobserved off linux")
 	}
 	for _, tt := range []struct {
 		name    string
@@ -252,17 +252,18 @@ func TestSelinuxRelabelForHost_FollowsTheEnforceFile(t *testing.T) {
 // non-SELinux host — no enforce file anywhere, no relabel, and no error.
 func TestSelinuxRelabelForHost_AbsentSELinuxDoesNotRelabel(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
+		t.Skip("hostSELinuxMode short-circuits to unobserved off linux")
 	}
 	setSELinuxEnforcePaths(t, filepath.Join(t.TempDir(), "absent"))
+	setProcFilesystems(t, "nodev\tsysfs\nnodev\tproc\n\text4\n")
 	if selinuxRelabelForHost() {
-		t.Error("a host with no SELinux enforce file must not relabel")
+		t.Error("a host with no SELinux enforce file and no selinuxfs in the kernel must not relabel")
 	}
 }
 
 // TestSelinuxRelabelForHost_ProbeFailureStillRelabels is the load-bearing one,
 // and the reason the gate goes through selinuxRelabelForHost rather than
-// calling hostSELinuxEnforcing inline.
+// calling hostSELinuxMode inline.
 //
 // The two failure directions are NOT symmetric. Applying z where SELinux is off
 // is a no-op — Docker ignores the flag — while omitting it on an enforcing host
@@ -272,7 +273,7 @@ func TestSelinuxRelabelForHost_AbsentSELinuxDoesNotRelabel(t *testing.T) {
 // "relabel", never to "skip it".
 func TestSelinuxRelabelForHost_ProbeFailureStillRelabels(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
+		t.Skip("hostSELinuxMode short-circuits to unobserved off linux")
 	}
 	t.Run("unreadable enforce path", func(t *testing.T) {
 		// A directory where a file is expected: ReadFile fails with something
@@ -283,7 +284,7 @@ func TestSelinuxRelabelForHost_ProbeFailureStillRelabels(t *testing.T) {
 			t.Fatal(err)
 		}
 		setSELinuxEnforcePaths(t, enforce)
-		if _, err := hostSELinuxEnforcing(); err == nil {
+		if _, err := hostSELinuxMode(); err == nil {
 			t.Fatal("expected the probe to fail on a directory; the test fixture proves nothing otherwise")
 		}
 		if !selinuxRelabelForHost() {
@@ -297,7 +298,7 @@ func TestSelinuxRelabelForHost_ProbeFailureStillRelabels(t *testing.T) {
 			t.Fatal(err)
 		}
 		setSELinuxEnforcePaths(t, enforce)
-		if _, err := hostSELinuxEnforcing(); err == nil {
+		if _, err := hostSELinuxMode(); err == nil {
 			t.Fatal("expected the probe to reject a nonsense value")
 		}
 		if !selinuxRelabelForHost() {
