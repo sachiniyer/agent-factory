@@ -2044,6 +2044,9 @@
           "task.unschedulable": {
             "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
           },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
+          },
           "task.missed_occurrences": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
           },
@@ -2075,6 +2078,9 @@
           },
           "task.unschedulable": {
             "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          },
+          "task.unassessable": {
+            "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
           },
           "task.missed_occurrences": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2310,6 +2316,9 @@
         },
         "task.unschedulable": {
           "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+        },
+        "task.unassessable": {
+          "ok": "Derived at READ time and stripped on write (#3623): it says no verdict could be reached because the record carries neither a last run nor a creation time. A surface cannot assert that about a record the store is the one reading."
         },
         "task.missed_occurrences": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."

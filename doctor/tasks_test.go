@@ -328,3 +328,66 @@ func TestDoctor_UnschedulableTaskIsNotAlsoListedAsUnarmed(t *testing.T) {
 		"one condition, reported once:\n%s", row.Detail)
 	assert.Equal(t, 1, strings.Count(row.Detail, "badcr0n2"))
 }
+
+// TestDoctor_UnassessableTaskIsAQualifierNotAnAlarm: nothing was established
+// about this task, so doctor's own rule applies — visible, never a clean bill,
+// and never actionable. A record with no timestamps is a hand edit to look at,
+// not a proven failure to exit non-zero on.
+func TestDoctor_UnassessableTaskIsAQualifierNotAnAlarm(t *testing.T) {
+	opts := testOptions(t, false)
+	blank := healthyTask("blank001")
+	blank.Name = "Hand-edited row"
+	blank.LastRunAt, blank.CreatedAt = nil, time.Time{}
+	armed := healthyTask("d0d0cafe")
+	armed.Arming = task.ArmingArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{blank, armed}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusPass, row.Status)
+	assert.Contains(t, row.Detail, "1 enabled task is firing on schedule",
+		"the count covers what was actually assessed:\n%s", row.Detail)
+	assert.Contains(t, row.Detail, "1 could not be assessed")
+	assert.Contains(t, row.Detail, `blank001 "Hand-edited row"`)
+	assert.Zero(t, report.UnresolvedCount(), "an unknown is not a proven failure")
+}
+
+// TestDoctor_AllTasksUnassessableClaimsNothing: with nothing assessed there is
+// nothing to call healthy, so the row must not lead with a count of zero tasks
+// firing on schedule.
+func TestDoctor_AllTasksUnassessableClaimsNothing(t *testing.T) {
+	opts := testOptions(t, false)
+	blank := healthyTask("blank002")
+	blank.LastRunAt, blank.CreatedAt = nil, time.Time{}
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{blank}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Contains(t, row.Detail, "could not be assessed")
+	assert.NotContains(t, row.Detail, "firing on schedule")
+	assert.Zero(t, report.UnresolvedCount())
+}
+
+// TestDoctor_QualifiersRideTheAlarmingRowToo: what a run could not establish is
+// as true when something else went wrong as when nothing did.
+func TestDoctor_QualifiersRideTheAlarmingRowToo(t *testing.T) {
+	opts := testOptions(t, false)
+	blank := healthyTask("blank003")
+	blank.LastRunAt, blank.CreatedAt = nil, time.Time{}
+	opts.taskInventory = func() ([]task.Task, error) {
+		return []task.Task{blank, darkTask("4ab7ba4f", "Master Health Watch")}, nil
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusWarn, row.Status)
+	assert.Contains(t, row.Detail, "not fired on schedule")
+	assert.Contains(t, row.Detail, "could not be assessed")
+	assert.Positive(t, report.UnresolvedCount(), "the overdue task is still the actionable part")
+}

@@ -68,16 +68,29 @@ func newTaskScheduler() *taskScheduler {
 // schedules; overlapping fires of the same task are serialized by RunTask's
 // per-task lock file.
 func (s *taskScheduler) Start() {
+	// Starting the cron and publishing the latch are ONE step, under the lock
+	// armingSnapshot takes. Split, they leave a window where started is true and
+	// the cron is not: Entries() then takes its not-running path and hands back
+	// every entry with a zero Next, the zero-time filter drops all of them, and
+	// every enabled cron task on the box reports not-armed during startup — the
+	// fabricated negative that filter exists to avoid, reintroduced by the fix
+	// for it (#3623 review).
 	s.mu.Lock()
-	s.started = true
-	s.mu.Unlock()
+	defer s.mu.Unlock()
 	s.cron.Start()
+	s.started = true
 }
 
 // Stop halts schedule evaluation. Already-running task fires are left to
 // finish on their own goroutines.
 func (s *taskScheduler) Stop() {
+	// Symmetric with Start, and for the same reason: a stopped cron's Entries()
+	// takes the not-running path, so leaving started latched would make every
+	// entry's zero Next read as "will not fire" during shutdown.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.cron.Stop()
+	s.started = false
 }
 
 // Reload re-reads tasks.json and replaces the scheduled entry set so it

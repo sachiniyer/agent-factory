@@ -108,6 +108,18 @@ type ScheduleHealth struct {
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
 	OldestMissedAt time.Time
+	// Unassessable reports that no verdict could be reached at all: the record
+	// carries neither a last run nor a creation time, so there is no instant to
+	// measure lateness from.
+	//
+	// It is a THIRD answer, not a flavour of health, and that is the whole point.
+	// The store stamps CreatedAt on every create now, so only a hand-edited or
+	// truncated row can land here — but reporting such a row as "on schedule" is
+	// the exact lie this feature exists to remove, and it would be told about a
+	// task that may never have fired. Consumers treat it as UNKNOWN: visible,
+	// never a clean bill, and never an actionable alarm either, which is the same
+	// line `af doctor` already draws for everything it could not establish.
+	Unassessable bool
 	// Slack is the window that was allowed before calling the task late, kept so
 	// a report can explain its own verdict.
 	Slack time.Duration
@@ -158,10 +170,12 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	}
 	ref, ok := scheduleReference(t)
 	if !ok {
-		return ScheduleHealth{}
+		return ScheduleHealth{Unassessable: true}
 	}
 	slack, ok := slackFor(sched, ref)
 	if !ok {
+		// Also unassessable rather than healthy — see below for why this is not
+		// "unschedulable".
 		// NOT unschedulable — the probe above already proved a future fire exists,
 		// so this is only "no lateness can be measured from THIS reference". The
 		// two come apart when the reference is old enough that the schedule's next
@@ -170,7 +184,7 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 		// from now) while nothing can be computed from 2096. Answering
 		// "unschedulable" there would be a false claim about a task the scheduler
 		// is going to run.
-		return ScheduleHealth{}
+		return ScheduleHealth{Unassessable: true}
 	}
 	oldest := sched.Next(ref.Add(slack))
 	if oldest.IsZero() || oldest.After(now) {
@@ -337,6 +351,7 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated
 		tasks[i].Unschedulable = health.Unschedulable
+		tasks[i].Unassessable = health.Unassessable
 	}
 	return tasks
 }
@@ -351,6 +366,7 @@ func (t *Task) stripDerived() {
 	t.MissedOccurrences = 0
 	t.MissedOccurrencesCapped = false
 	t.Unschedulable = false
+	t.Unassessable = false
 	t.NextRunAt = nil
 	t.Arming = ""
 }

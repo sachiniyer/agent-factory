@@ -544,3 +544,48 @@ func TestOverdue_UnschedulableIsAClaimAboutTheScheduler(t *testing.T) {
 	ordinary := cronTask("0 0 29 2 *", &recent)
 	assert.False(t, DeriveScheduleHealth(ordinary, at(2026, time.June, 1, 0, 0, 0)).Unschedulable)
 }
+
+// TestOverdue_NoReferenceIsUnknownNotHealthy: the store stamps CreatedAt on
+// every create now, so only a hand-edited or truncated row can reach this — but
+// reporting such a row as "on schedule" would be the exact lie this feature
+// exists to remove, told about a task that may never have fired.
+func TestOverdue_NoReferenceIsUnknownNotHealthy(t *testing.T) {
+	tsk := cronTask("20 * * * *", nil)
+	tsk.CreatedAt = time.Time{}
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 12, 0, 0))
+	assert.True(t, health.Unassessable, "nothing to measure from is a verdict of its own")
+	assert.False(t, health.Overdue, "and it is not a claim that the task is late")
+	assert.False(t, health.Unschedulable, "nor that the expression is bad — it is fine")
+
+	// It reaches the record, so the surfaces that read one rather than
+	// recomputing get it too.
+	got := WithScheduleHealth([]Task{tsk}, at(2026, time.September, 1, 12, 0, 0))
+	assert.True(t, got[0].Unassessable)
+	encoded, err := json.Marshal(got[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(encoded), `"unassessable":true`)
+
+	// A record with a reference is assessed normally and carries no such flag.
+	fine := cronTask("20 * * * *", nil)
+	fine.CreatedAt = at(2026, time.September, 1, 11, 0, 0)
+	assert.False(t, DeriveScheduleHealth(fine, at(2026, time.September, 1, 11, 30, 0)).Unassessable)
+}
+
+// TestOverdue_AuditTrailRescuesARecordWithNoTimestamps documents the fallback
+// order, and the reason it matters: a task re-enabled through any surface gains
+// a reference point from the trail even if its own timestamps were lost, so the
+// unassessable verdict is genuinely last resort rather than the common answer
+// for legacy rows.
+func TestOverdue_AuditTrailRescuesARecordWithNoTimestamps(t *testing.T) {
+	tsk := cronTask("20 * * * *", nil)
+	tsk.CreatedAt = time.Time{}
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 9, 0, 0), Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
+	}
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 11, 0, 0))
+	assert.False(t, health.Unassessable, "the enable is a reference point")
+	assert.True(t, health.Overdue, "and two unfired occurrences since it is a real silence")
+	assert.Equal(t, 2, health.MissedOccurrences)
+}

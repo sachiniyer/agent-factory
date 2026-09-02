@@ -195,6 +195,12 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 		return "the scheduler cannot derive a next run from this expression " +
 			"(it matches no date within its five-year horizon), so the task will not fire"
 	}
+	if health.Unassessable {
+		// Never a clean bill for a record nothing could be measured from. It may
+		// have been firing perfectly and it may never have fired at all; saying
+		// which would be inventing the answer.
+		return "cannot be assessed — this record has neither a last run nor a creation time to measure from"
+	}
 	if !health.Overdue {
 		if !t.Enabled || t.CronExpr == "" {
 			return ""

@@ -146,6 +146,10 @@ type Task struct {
 	// not healthy either, so it needs a field of its own rather than the absence
 	// of one.
 	Unschedulable bool `json:"unschedulable,omitempty"`
+	// Unassessable says no verdict could be reached: the record has neither a last
+	// run nor a creation time to measure lateness from. UNKNOWN, not healthy — see
+	// ScheduleHealth.Unassessable.
+	Unassessable bool `json:"unassessable,omitempty"`
 	// NextRunAt is what the LIVE scheduler will actually fire next, read off its
 	// armed entry rather than recomputed from the expression. Absent when the
 	// task is not armed, and that absence is itself the signal.

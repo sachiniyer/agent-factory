@@ -49,6 +49,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	var health []task.ScheduleHealth
 	var unarmed []task.Task
 	var unschedulable []task.Task
+	var unassessable []task.Task
 	enabled := 0
 	armingUnobserved := 0
 	for _, t := range tasks {
@@ -64,6 +65,12 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 			health = append(health, h)
 		case h.Unschedulable:
 			unschedulable = append(unschedulable, t)
+		case h.Unassessable:
+			// UNKNOWN, and doctor's line on unknowns is that they stay visible and
+			// stay advisory: nothing was established here, so this must not raise an
+			// alarm — and must not hand out a clean bill either.
+			unassessable = append(unassessable, t)
+			classified = false
 		default:
 			classified = false
 		}
@@ -90,14 +97,38 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		report.Pass(sectionAutomations, "task schedules", "no enabled tasks")
 		return
 	}
-	if len(overdue) == 0 && len(unarmed) == 0 && len(unschedulable) == 0 {
-		detail := fmt.Sprintf("%s firing on schedule", countTasksAre(enabled))
-		if armingUnobserved > 0 {
-			// Whether they are ARMED was not checked, and saying so is the
-			// difference between "healthy" and "healthy as far as I could see".
-			detail += fmt.Sprintf("; arming not observed for %d of them (no daemon has reported on those)", armingUnobserved)
+
+	// Qualifiers say what this run could NOT establish. They ride both the clean
+	// row and the alarming one, and neither of them makes the row actionable on
+	// its own — the difference between "healthy" and "healthy as far as I could
+	// see" is the only thing they are for.
+	var qualifiers []string
+	if armingUnobserved > 0 {
+		qualifiers = append(qualifiers, fmt.Sprintf(
+			"arming not observed for %d of them (no daemon has reported on those)", armingUnobserved))
+	}
+	if len(unassessable) > 0 {
+		qualifiers = append(qualifiers, fmt.Sprintf(
+			"%d could not be assessed (no last run and no creation time to measure from) — %s",
+			len(unassessable), describeTaskNames(unassessable)))
+	}
+	withQualifiers := func(detail string) string {
+		if len(qualifiers) == 0 {
+			return detail
 		}
-		report.Pass(sectionAutomations, "task schedules", detail)
+		return detail + "; " + strings.Join(qualifiers, "; ")
+	}
+
+	if len(overdue) == 0 && len(unarmed) == 0 && len(unschedulable) == 0 {
+		assessed := enabled - len(unassessable)
+		if assessed == 0 {
+			// Every enabled task is an unknown, so there is nothing to call healthy.
+			report.Pass(sectionAutomations, "task schedules",
+				strings.Join(qualifiers, "; "))
+			return
+		}
+		report.Pass(sectionAutomations, "task schedules",
+			withQualifiers(fmt.Sprintf("%s firing on schedule", countTasksAre(assessed))))
 		return
 	}
 
@@ -130,7 +161,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		fixes = append(fixes, "correct the expression with `af tasks update <id> --cron <expr>`")
 	}
 	report.Warn(sectionAutomations, "task schedules",
-		strings.Join(details, " · "), strings.Join(fixes, "; "), true)
+		withQualifiers(strings.Join(details, " · ")), strings.Join(fixes, "; "), true)
 }
 
 // taskTimeFormat is the doctor row's timestamp layout — local, sortable, and

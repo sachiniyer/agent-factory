@@ -189,3 +189,24 @@ func TestTasksShow_UnschedulableExpressionSaysSo(t *testing.T) {
 	assert.Contains(t, got, "the scheduler cannot derive a next run from this expression")
 	assert.NotContains(t, got, "on schedule")
 }
+
+// TestTasksShow_UnassessableRecordSaysSo: a record with nothing to measure from
+// gets an honest "unknown", never a clean bill — it may have been firing
+// perfectly and it may never have fired at all, and saying which would be
+// inventing the answer.
+func TestTasksShow_UnassessableRecordSaysSo(t *testing.T) {
+	tsk := showFixture()
+	tsk.LastRunAt, tsk.LastRunStatus = nil, ""
+	tsk.CreatedAt = time.Time{}
+	// The trail is cleared too: an `enabled` entry in it IS a reference point,
+	// and would make this record perfectly assessable.
+	tsk.Audit = nil
+	tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	got := out.String()
+
+	assert.Contains(t, got, "cannot be assessed")
+	assert.NotContains(t, got, "on schedule")
+}
