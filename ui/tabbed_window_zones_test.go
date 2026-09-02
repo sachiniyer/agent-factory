@@ -35,7 +35,7 @@ func TestTabbedWindowRegistersBodyAndHeaderZones(t *testing.T) {
 		"the header sits inside the frame border")
 	// The header zone's row renders the header text (nil binding here, so
 	// the placeholder header).
-	assert.Contains(t, lines[header.Y-rect.Y], "no session selected",
+	assert.Contains(t, lines[header.Y-rect.Y], "No session selected",
 		"the header zone must sit on the rendered header line")
 
 	// No live view bound: there must be no term zone to forward into.

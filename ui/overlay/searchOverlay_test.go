@@ -1,6 +1,12 @@
 package overlay
 
-import "testing"
+import (
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/require"
+)
 
 // Explicit forms so the source encoding can't silently change what is tested:
 // cafeNFC uses composed U+00E9, cafeNFD uses "e" + combining acute U+0301.
@@ -58,4 +64,24 @@ func TestFuzzyMatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSearchOverlayEmptyStatesUseSentenceCase is #3632: the "no matches found"
+// line was the one empty state in this file with no test pin at all, so nothing
+// noticed it drifting out of sentence case. Its sibling — the "type to search…"
+// prompt — is a mid-sentence instruction, not an empty state, and stays as it is.
+func TestSearchOverlayEmptyStatesUseSentenceCase(t *testing.T) {
+	s := NewSearchOverlay(nil)
+	s.SetWidth(60)
+	// Type a query the (empty) instance list cannot match, so the overlay is in
+	// its no-results state rather than its "type to search…" prompt.
+	for _, r := range "zzzz" {
+		s.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	out := xansi.Strip(s.Render())
+	require.Contains(t, out, "No matches found",
+		"the empty result state renders in sentence case:\n%s", out)
+	require.NotContains(t, out, "no matches found",
+		"the lowercase form must be gone:\n%s", out)
 }

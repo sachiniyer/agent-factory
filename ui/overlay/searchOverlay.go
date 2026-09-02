@@ -285,7 +285,7 @@ func (s *SearchOverlay) Render() string {
 		if s.query == "" {
 			lines = append(lines, truncateOverlayLine(normalStyle.Render("  type to search…"), plan.contentWidth))
 		} else {
-			lines = append(lines, truncateOverlayLine(normalStyle.Render("  no matches found"), plan.contentWidth))
+			lines = append(lines, truncateOverlayLine(normalStyle.Render("  No matches found"), plan.contentWidth))
 		}
 	}
 
