@@ -1,0 +1,136 @@
+package task
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func armingFixture(id, cron string) Task {
+	return Task{ID: id, Name: "nightly", CronExpr: cron, ProjectPath: "/repo", Enabled: true}
+}
+
+func TestApplyLiveArmingCarriesTheObservation(t *testing.T) {
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	observed := armingFixture("a", "0 9 * * *")
+	observed.Arming = ArmingArmed
+	observed.NextRunAt = &next
+
+	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *")}, []Task{observed})
+
+	assert.Equal(t, ArmingArmed, got[0].Arming)
+	require.NotNil(t, got[0].NextRunAt, "an armed observation carries the entry's own next fire")
+	assert.Equal(t, next, *got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingLeavesUnobservedTasksUnknown(t *testing.T) {
+	// The whole point of the tri-state: a task the daemon said nothing about must
+	// not come back as not-armed. Reported as such it would accuse every task on
+	// the box the moment a daemon was slow to answer.
+	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *")}, []Task{armingFixture("b", "0 9 * * *")})
+	assert.Equal(t, ArmingUnknown, got[0].Arming)
+	assert.Nil(t, got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingRefusesAnObservationAboutADifferentTrigger(t *testing.T) {
+	// The two lists are two separate reads of tasks.json, so they can straddle an
+	// edit. An observation adopted across one reports a fire time for a schedule
+	// that is no longer the schedule — which is worse than reporting nothing.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	observed := armingFixture("a", "0 9 * * *")
+	observed.Arming = ArmingArmed
+	observed.NextRunAt = &next
+
+	edited := armingFixture("a", "0 21 * * *") // the user just moved it to 9pm
+	got := ApplyLiveArming([]Task{edited}, []Task{observed})
+
+	assert.Equal(t, ArmingUnknown, got[0].Arming, "the armed entry is for the OLD expression")
+	assert.Nil(t, got[0].NextRunAt, "and so is the fire time it computed")
+}
+
+func TestApplyLiveArmingRefusesAnObservationAboutADisabledTwin(t *testing.T) {
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	observed := armingFixture("a", "0 9 * * *")
+	observed.Arming = ArmingArmed
+	observed.NextRunAt = &next
+
+	disabled := armingFixture("a", "0 9 * * *")
+	disabled.Enabled = false
+	got := ApplyLiveArming([]Task{disabled}, []Task{observed})
+
+	assert.Equal(t, ArmingUnknown, got[0].Arming, "a task switched off is not armed, however recently it was")
+	assert.Nil(t, got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingComparesTheWatcherSignatureForWatchTasks(t *testing.T) {
+	// A watcher RUNS a command in a directory under a name; a write commits and
+	// reloads the supervisor as a separate step, so the old process can outlive
+	// the edit. Each of watcherSignature's three fields has to invalidate.
+	base := Task{ID: "w", Name: "build", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
+	observed := base
+	observed.Arming = ArmingArmed
+
+	for name, edit := range map[string]func(Task) Task{
+		"watch_cmd":    func(t Task) Task { t.WatchCmd = "tail -f other"; return t },
+		"project_path": func(t Task) Task { t.ProjectPath = "/elsewhere"; return t },
+		"name":         func(t Task) Task { t.Name = "renamed"; return t },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := ApplyLiveArming([]Task{edit(base)}, []Task{observed})
+			assert.Equal(t, ArmingUnknown, got[0].Arming)
+		})
+	}
+
+	t.Run("unchanged", func(t *testing.T) {
+		got := ApplyLiveArming([]Task{base}, []Task{observed})
+		assert.Equal(t, ArmingArmed, got[0].Arming)
+	})
+}
+
+func TestApplyLiveArmingRefusesAcrossTriggerKinds(t *testing.T) {
+	// A hand-edited store can turn a cron task into a watch task under the same
+	// id. The two subsystems arm different things; neither observation describes
+	// the other.
+	observed := armingFixture("a", "0 9 * * *")
+	observed.Arming = ArmingArmed
+	watch := Task{ID: "a", Name: "nightly", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
+
+	got := ApplyLiveArming([]Task{watch}, []Task{observed})
+	assert.Equal(t, ArmingUnknown, got[0].Arming)
+}
+
+func TestApplyLiveArmingResolvesDuplicateIDsFirstWins(t *testing.T) {
+	// Only the FIRST row for an id is ever armed (#855), on both sides: the
+	// daemon arms the first, and a second local row must not inherit its answer.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	first := armingFixture("a", "0 9 * * *")
+	first.Arming = ArmingArmed
+	first.NextRunAt = &next
+	second := armingFixture("a", "0 9 * * *")
+	second.Arming = ArmingNotArmed
+
+	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *"), armingFixture("a", "0 9 * * *")}, []Task{first, second})
+
+	assert.Equal(t, ArmingArmed, got[0].Arming, "the first observation wins over the duplicate behind it")
+	assert.Equal(t, ArmingUnknown, got[1].Arming, "the duplicate row claims nothing")
+	assert.Nil(t, got[1].NextRunAt)
+}
+
+func TestApplyLiveArmingCarriesNotArmed(t *testing.T) {
+	// The negative observation is the one #2929 was about: an enabled task the
+	// daemon refused to arm. It has to cross over as readily as the positive.
+	observed := armingFixture("a", "0 9 * * *")
+	observed.Arming = ArmingNotArmed
+
+	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *")}, []Task{observed})
+	assert.Equal(t, ArmingNotArmed, got[0].Arming)
+	assert.Nil(t, got[0].NextRunAt)
+}
+
+func TestApplyLiveArmingIsANoOpWithNothingObserved(t *testing.T) {
+	tasks := []Task{armingFixture("a", "0 9 * * *")}
+	assert.Equal(t, tasks, ApplyLiveArming(tasks, nil))
+	assert.Nil(t, ApplyLiveArming(nil, []Task{armingFixture("a", "0 9 * * *")}))
+}

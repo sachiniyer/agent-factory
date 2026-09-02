@@ -401,6 +401,60 @@ func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewRespons
 	return resp, err
 }
 
+// liveTaskArmingFetcher returns the daemon's task list, whose records carry the
+// LIVE arming state — whether the running scheduler is actually holding each
+// task, and what its armed entry will fire next (#3623).
+//
+// The TUI reads tasks.json itself every 750ms (#1168) and that read can observe
+// nothing about the running scheduler, so the automations rail had to fall back
+// to evaluating the cron expression: it rendered a confident "next Mar 04 09:00"
+// for a task no daemon was holding, which is exactly how two tasks went dark for
+// 18 days while every surface called them healthy. This is the observation the
+// rail was missing (#3626).
+//
+// It deliberately does NOT go through withDaemonHTTP, which is the only seam in
+// this file that does not. Two reasons, both about what a 750ms poll is allowed
+// to do:
+//
+//   - withDaemonHTTP ensures a daemon, and EnsureDaemon SPAWNS one when none is
+//     running. Starting a background process is not something an observation may
+//     do as a side effect — least of all this observation, whose entire subject
+//     is whether a daemon is holding these tasks. Snapshot already owns the
+//     ensure; the TUI's cold start cannot proceed without it, so by the time this
+//     runs the daemon question has been settled by something whose job it is.
+//   - withDaemonHTTP also retries a transient failure for up to five seconds,
+//     inline. This call shares its goroutine with the session snapshot, so a
+//     down daemon would stretch the poll from 750ms to five seconds and stall
+//     the sidebar behind a health field.
+//
+// So it dials whatever is already listening, once. No daemon means no answer,
+// which is the case the fallback exists for.
+//
+// A package var, like allReposSnapshotFetcher above and for the same reasons: it
+// holds no per-home state, tests swap it wholesale, and fetchSnapshotCmd reads it
+// ON the event loop before handing the value to its goroutine.
+//
+// Its error is deliberately not surfaced. A daemon that cannot answer this also
+// cannot answer Snapshot, which reports the outage once; and the failure mode
+// here is benign by construction — no observation leaves every record's arming
+// UNKNOWN, which is the honest answer, and never the not-armed that would accuse
+// every task on the box of being broken because one poll missed.
+var liveTaskArmingFetcher = func() ([]task.Task, error) {
+	c, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListTasks()
+}
+
+// SetLiveTaskArmingFetcherForTest swaps the live arming fetcher and returns a
+// restore func. Test-only.
+func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
+	prev := liveTaskArmingFetcher
+	liveTaskArmingFetcher = f
+	return func() { liveTaskArmingFetcher = prev }
+}
+
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo
 // (RepoID:"" = all repos), used only to build the project-picker's list with a
 // per-project session count (#1461). A package var so the project-switch tests

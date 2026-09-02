@@ -109,6 +109,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	repoRoot := m.repoRoot
 	fetch := m.snapshotFetcher
 	allRepos := allReposSnapshotFetcher
+	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
 		resp, err := fetch(repoID)
 		// Re-read the ACTIVE repo's tasks on the same poll so an out-of-band task
@@ -118,6 +119,19 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// error is carried separately so a warming-daemon RPC failure never
 		// suppresses a successful disk task read.
 		tasks, tasksErr := task.LoadTasksForKnownRepo(repoRoot, repoID)
+		// The disk read is the DEFINITION and stays authoritative; what it cannot
+		// see is whether the running scheduler is holding each task, which is
+		// observable only inside the daemon. Fetched here, beside the snapshot,
+		// rather than by teaching the rail to talk to the daemon on its own: one
+		// poll, one place, and the rail keeps its single input (#3626).
+		//
+		// On a failed fetch this is a no-op and every record keeps arming UNKNOWN,
+		// which is what the rail renders as the labelled cron-expression fallback.
+		// Nothing here can turn a missed poll into a not-armed accusation.
+		observed, armingErr := liveArming()
+		if armingErr == nil {
+			tasks = task.ApplyLiveArming(tasks, observed)
+		}
 		// Fetch the cross-repo session list on the same off-loop poll so the
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event

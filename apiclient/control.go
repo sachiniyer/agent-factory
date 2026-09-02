@@ -185,6 +185,22 @@ func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.Proje
 	return resp.Task, nil
 }
 
+// ListTasks returns the daemon's task list, every record carrying both halves
+// of its schedule health: the derivation any reader can do, plus the LIVE
+// arming state only the process holding the scheduler can observe (#3623).
+//
+// It is a read for the arming half specifically. A caller that already reads
+// tasks.json itself — the TUI's automations rail does, every 750ms — keeps its
+// own repo-scoped records as the definition and adopts only the observation,
+// through task.ApplyLiveArming (#3626).
+func (c *Client) ListTasks() ([]task.Task, error) {
+	var resp daemon.ListTasksResponse
+	if err := c.call("ListTasks", daemon.ListTasksRequest{}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Tasks, nil
+}
+
 // RemoveTask asks the daemon to delete a task and re-arm its schedule. expect
 // is the same required project compare-and-swap as UpdateTask's — this is the
 // destructive verb the CAS most exists for (#3230).

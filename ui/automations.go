@@ -211,7 +211,20 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
 		parts = append(parts, watchTaskStatus(tsk))
-	} else if tsk.Enabled && tsk.CronExpr != "" {
+	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
+		// An unschedulable record says nothing HERE, in any of the cases below.
+		// attentionFragment diagnoses every shape of it at the FRONT of the line,
+		// because the rail clips from the right and a reason behind the trigger is
+		// the half that gets cut. That was already true of the computed fallback;
+		// it became true of the arming cases the moment app/sync.go started
+		// feeding them (#3626), and "not armed" beside "No upcoming run" is not a
+		// second finding — an expression that matches no date will not fire
+		// whoever is holding it, so the expression is the only thing to fix.
+		//
+		// The record's verdict is what decides, not a second local evaluation: a
+		// record carrying no verdict (a caller that did not annotate) still falls
+		// through to the evaluation below, which is where "No upcoming run" came
+		// from before (#2596).
 		switch {
 		case tsk.NextRunAt != nil:
 			// The LIVE armed entry when the record carries one (#3623): a number
@@ -220,30 +233,35 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
 		case tsk.Arming == task.ArmingNotArmed:
 			parts = append(parts, "not armed")
+		case tsk.Arming == task.ArmingArmed:
+			// Armed, with no fire time on the entry yet — the daemon has taken the
+			// task but its cron has not computed first fires (see withLiveArming).
+			// Falling through to the expression here would label a LIVE observation
+			// as computed, which is the mislabel in the other direction; the
+			// observation is worth more than the number anyway.
+			parts = append(parts, "armed")
 		default:
-			// The rail reads tasks.json directly rather than through the daemon, so
-			// it usually has no live entry to read and falls back to evaluating the
-			// expression. That fallback is what used to render a confident "next"
-			// for a task that had been dark for 18 days; the warning fragment below
-			// is what stops it being read as health.
-			// An unschedulable expression says nothing here — neither shape of it.
-			// attentionFragment diagnoses both, and it LEADS the detail line so the
-			// reason survives the rail's clip; repeating it after the trigger would
-			// only push the line further past the width.
+			// Nothing has reported on this task, so the expression is all there is
+			// and the fragment SAYS so (#3626). The rail is a tasks.json reader on a
+			// 750ms poll; app/sync.go now fetches the daemon's arming observation
+			// beside that read, so in steady state one of the cases above answers
+			// and this is the daemon-down (or not-yet-answered) path.
 			//
-			// The record's verdict is what decides, not a second local evaluation:
-			// the two must not be able to disagree about the same task. A record
-			// with no verdict on it (a caller that did not annotate) still falls
-			// through to the evaluation below, which is where "No upcoming run"
-			// came from before (#2596).
-			if tsk.Unschedulable {
-				break
-			}
+			// The qualifier is the whole point of keeping the fallback. "What a
+			// running daemon will fire" and "what this expression would imply if
+			// something were holding it" are different claims that used to render
+			// as the same string — and a task can be enabled, correctly configured
+			// and held by nothing at all (#2929). It rides INSIDE the fragment
+			// rather than as another "·" part so the caveat cannot drift away from
+			// the number it qualifies when the line is joined.
 			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
 				if next := sched.Next(a.now()); next.IsZero() {
+					// No caveat on this one: an expression that matches no date will
+					// never fire whoever is holding it, so the absence is a property of
+					// the record and not of what was observed (#2596).
 					parts = append(parts, "No upcoming run")
 				} else {
-					parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+					parts = append(parts, "next "+next.Format("Jan 02 15:04")+" (from cron)")
 				}
 			}
 		}

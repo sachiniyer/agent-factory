@@ -354,3 +354,84 @@ func TestAutomationsDiagnosesEveryUnschedulableShape(t *testing.T) {
 			"%q: the reason survives the rail minimum", tc.expr)
 	}
 }
+
+// TestAutomationsLabelsTheComputedNextRun: with no arming observation on the
+// record, the row still shows what the expression implies — but says that is
+// where the number came from (#3626).
+//
+// The rail is a disk reader, so before the daemon answers it has only the
+// expression, and evaluating it produces a time that looks exactly like one read
+// off the scheduler. Those are different claims: one is what a running daemon
+// will do, the other is what the file would imply if something were holding it.
+// A task can be enabled, correctly configured, and held by nothing at all — that
+// is #2929, and the identical rendering is what made it invisible.
+func TestAutomationsLabelsTheComputedNextRun(t *testing.T) {
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming, "the fixture is a plain disk read")
+
+	a := newTestAutomations([]task.Task{unobserved})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "next Jul 02 03:00 (from cron)",
+		"an unobserved next run says the expression is its source:\n%s", out)
+}
+
+// TestAutomationsDoesNotLabelTheLiveNextRun is the other half: a time read off
+// the armed entry is not qualified, because nothing about it is inferred.
+func TestAutomationsDoesNotLabelTheLiveNextRun(t *testing.T) {
+	armed := stripTasks()[0]
+	live := time.Date(2026, time.July, 2, 9, 30, 0, 0, time.UTC)
+	armed.Arming, armed.NextRunAt = task.ArmingArmed, &live
+
+	a := newTestAutomations([]task.Task{armed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	assert.NotContains(t, a.View(), "from cron",
+		"the scheduler's own answer needs no caveat")
+}
+
+// TestAutomationsSaysArmedWhenTheEntryHasNoTimeYet: a daemon that has armed the
+// task but not yet started its cron reports armed with no next fire. Falling
+// through to the expression there would label a LIVE observation as computed,
+// which is the mislabel in the opposite direction.
+func TestAutomationsSaysArmedWhenTheEntryHasNoTimeYet(t *testing.T) {
+	armed := stripTasks()[0]
+	armed.Arming, armed.NextRunAt = task.ArmingArmed, nil
+
+	a := newTestAutomations([]task.Task{armed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "armed", "the observation is what it is")
+	assert.NotContains(t, out, "from cron", "and it is not an inference")
+	assert.NotContains(t, out, "next Jul 02 03:00",
+		"nor is a fire time invented for it:\n%s", out)
+}
+
+// TestAutomationsSaysTheReasonOnceForAnUnschedulableTask: with arming plumbed
+// into the rail (#3626), a task whose expression can never fire is ALSO reported
+// not-armed by the daemon — truthfully, since a running cron drops a zero-next
+// entry. Both facts on one line would spend the rail's width saying the same
+// thing twice, and only one of them is actionable: fix the expression.
+func TestAutomationsSaysTheReasonOnceForAnUnschedulableTask(t *testing.T) {
+	impossible := stripTasks()[0]
+	impossible.CronExpr = "0 0 31 2 *" // February 31st
+	impossible.Unschedulable = true
+	impossible.Arming = task.ArmingNotArmed
+	impossible.LastRunAt = nil
+
+	a := newTestAutomations([]task.Task{impossible})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "No upcoming run · 0 0 31 2 *",
+		"the reason leads the line, ahead of the expression it is about:\n%s", out)
+	assert.NotContains(t, out, "not armed",
+		"and the arming observation adds no second finding:\n%s", out)
+	assert.NotContains(t, out, "from cron", "nor is a fire time computed for it")
+}
