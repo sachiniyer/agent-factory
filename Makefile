@@ -30,6 +30,10 @@ docs:
 # Full `go test ./...` inside the container — the one sanctioned way to run
 # the bare full suite on a shared box. Narrow or extend the run with
 # GOTESTARGS, e.g.: make test-container GOTESTARGS="-race ./daemon/..."
+#
+# AF_TESTBOX_NETWORK=none runs it with no container network at all, which is
+# what gets the suite going on a box whose docker bridge is missing (every
+# default-network run dies there). See docs/container-testing.md.
 test-container:
 	scripts/testbox.sh test $(GOTESTARGS)
 

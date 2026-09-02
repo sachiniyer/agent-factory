@@ -53,6 +53,71 @@ var (
 	taskParkedInstanceTitle  = regexp.MustCompile(`(?m)(task \S+ parked at a usage limit as instance )(.+)(; waiting for the limit window to reset)$`)
 )
 
+// The incomplete-archive warning is the one daemon log line that prints the
+// names of files a USER chose. session/git renders it in a single place
+// (ArchiveReport.warningSuffix), in a single shape:
+//
+//	<operation> completed with an incomplete archive: af skipped <N> unreadable
+//	files; complete original tree(s) were retained at "<root>"[, "<root>"][, and
+//	<N> more in archive_report]; skipped paths[ (showing first <X> of <Y>)]:
+//	"<path>" (<reason>)[, "<path>" (<reason>)]
+//
+// The matchers below key on THAT SHAPE and on nothing else — no live
+// ArchiveReport, no note* call, no per-run state — because the log outlives the
+// state such a key would come from (#3553): an instances.json that fails
+// the typed decode never reaches the typed walk that could record the paths, a
+// session killed after the warning was written leaves neither report nor row
+// behind, and a bundled tail can hold lines an older binary wrote. Reading the
+// renderer instead is also what makes ONE pass over the (up to 2 MiB) tail
+// enough, however many unreadable files a generated tree produced.
+//
+// The renderer being the only source of this shape is the cost of that: a change
+// to the format silently stops the scrub. It is paid down in the tests, which
+// build every input from the real ArchiveReport.Warning rather than from a
+// hand-written fixture, so format and matcher cannot drift apart without a red
+// test.
+const (
+	// archiveWarningQuotedPattern matches one %q-rendered value. strconv.Quote
+	// escapes every interior `"` as `\"` and every `\` as `\\`, so this is an
+	// exact tokenizer for the renderer's output, not an approximation of one.
+	archiveWarningQuotedPattern = `"(?:[^"\\]|\\.)*"`
+	archiveWarningRetainedItem  = `(?:` + archiveWarningQuotedPattern + `|and \d+ more in archive_report)`
+	// The reason field admits no `"` — session/git takes quotes, parens and
+	// control characters out of an unknown reason before rendering it, precisely
+	// so each entry stays delimitable. Requiring here what the emitter
+	// guarantees is what makes a line from a binary older than that change fail
+	// the grammar and take the whole-remainder fallback, instead of parsing into
+	// a walk that an ODD number of quotes puts out of step — which would pair a
+	// reason's quote with the NEXT entry's opening one and ship that entry's name.
+	archiveWarningSkippedItem = archiveWarningQuotedPattern + ` \([^()"\r\n]*\)`
+)
+
+var (
+	// archiveWarningRetainedAt finds one warning and captures the rest of its
+	// line. It anchors on the renderer's most distinctive literal, which sits
+	// immediately before the first path; %q never emits a raw newline, so the
+	// whole clause is always on that one line, and collectLog drops the partial
+	// first line of a truncated tail, so a bundled clause is never half a line.
+	archiveWarningRetainedAt = regexp.MustCompile(`complete original tree\(s\) were retained at ([^\r\n]*)`)
+	// archiveWarningTail is the renderer's grammar for that remainder, in four
+	// groups: the retained-root list, the label between them, the skipped-path
+	// list (empty when a tree was retained with nothing recorded under it), and
+	// whatever a caller appended to the same line.
+	//
+	// That last group is why the invariant holds: it admits no `"` at all, so
+	// EVERY quoted token in a parsed remainder sits in group 1 or group 3 and is
+	// rewritten. A wrapper that adds quote-free text — `failedArchiveWithHook`
+	// appends "(its on-archive hook also failed: …)" to a joined error whose last
+	// line is this warning — keeps its diagnostics; one that adds a quoted token
+	// fails the grammar and takes the fail-safe path in redactArchiveWarningTail.
+	archiveWarningTail = regexp.MustCompile(
+		`\A(` + archiveWarningRetainedItem + `(?:, ` + archiveWarningRetainedItem + `)*)` +
+			`(; skipped paths(?: \(showing first \d+ of \d+\))?: )` +
+			`((?:` + archiveWarningSkippedItem + `(?:, ` + archiveWarningSkippedItem + `)*)?)` +
+			`([^"\r\n]*)\z`)
+	archiveWarningQuoted = regexp.MustCompile(archiveWarningQuotedPattern)
+)
+
 // redactor holds the per-run redaction context — the home directory to
 // collapse to "~" and the username token(s) to blank to "[user]" — resolved
 // once so every section scrubs against the same values. Constructed with
@@ -95,9 +160,14 @@ func newRedactor() *redactor {
 // that leak for the same class as the non-word-boundary one (#2533).
 func appendUserToken(users []string, name string) []string {
 	name = strings.TrimSpace(name)
-	users = addUserVariant(users, name)
-	if lower := strings.ToLower(name); lower != name {
-		users = addUserVariant(users, lower)
+	for _, variant := range []string{name, strings.ToLower(name)} {
+		users = addUserVariant(users, variant)
+		// And the display spelling of each, for the same reason scrub() collapses
+		// both spellings of $HOME: a username that is not valid UTF-8 reaches a
+		// bundle through JSON, and through the archive warning's rewritten
+		// retained root, as replacement characters. addUserVariant dedupes, so on
+		// every ordinary account this adds nothing.
+		users = addUserVariant(users, strings.ToValidUTF8(variant, "\uFFFD"))
 	}
 	return users
 }
@@ -126,6 +196,16 @@ func (r *redactor) scrub(s string) string {
 	s = credscrub.Scrub(s)
 	if r.home != "" && r.home != "/" {
 		s = strings.ReplaceAll(s, r.home, "~")
+		// A home directory whose bytes are not valid UTF-8 also reaches a bundle
+		// in its DISPLAY spelling: encoding/json cannot carry the raw bytes, and
+		// the archive warning's retained root is rewritten to that same form
+		// (redactArchiveWarningTail). Matching only the raw token would leave the
+		// user's home path — and the username inside it — in both. The two
+		// spellings differ only when the home path is invalid UTF-8, and the
+		// display form then contains U+FFFD, so this can only ever redact more.
+		if display := strings.ToValidUTF8(r.home, "\uFFFD"); display != r.home {
+			s = strings.ReplaceAll(s, display, "~")
+		}
 	}
 	// Blank bare username tokens with the SAME manual token boundary the title
 	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
@@ -167,6 +247,17 @@ func (r *redactor) scrubUnstructured(s string) string {
 // the log section; it ends by delegating to scrub() for the usual
 // $HOME/username/secret pass.
 func (r *redactor) scrubLog(s string) string {
+	// The incomplete-archive warning goes first, because it is the one pass here
+	// that reads the emitter's LITERAL PROSE, and every pass below rewrites text
+	// anywhere it appears. A session titled "paths" is enough to break it: the
+	// title pass rewrites the renderer's own "skipped paths:" label to
+	// "skipped [redacted]:", the anchor is gone before this pass looks for it,
+	// and every user file name in the list ships. It is also the ordering the
+	// review on #3554 asked for from the other side — a title INSIDE a skipped path
+	// ("secret" in "docs/secret-plan.txt") used to be rewritten first and strand
+	// the rest of the name — and matching the whole quoted token makes that
+	// impossible in either order.
+	s = scrubArchiveWarningPaths(s)
 	// Remove every known full title representation before any shape-based pass
 	// can consume only part of it. In particular, the legacy raw task-start
 	// matcher is line-oriented while a legal title may contain newlines; running
@@ -215,6 +306,84 @@ func (r *redactor) scrubSessionTitles(s string) string {
 		s = replaceBareTitle(s, title)
 	}
 	return s
+}
+
+// scrubArchiveWarningPaths takes the user-chosen file names out of every
+// incomplete-archive warning in a log tail, and rewrites the retained root
+// printed beside them. It is a plain function, not a redactor method, because it
+// needs nothing from the run: see the matchers above for why keying on the
+// renderer rather than on live session state is the point.
+func scrubArchiveWarningPaths(s string) string {
+	clauses := archiveWarningRetainedAt.FindAllStringSubmatchIndex(s, -1)
+	if clauses == nil {
+		return s
+	}
+	var out strings.Builder
+	copied := 0
+	for _, clause := range clauses {
+		// clause[2]:clause[3] is the captured remainder of the line; everything
+		// before it (the anchor prose included) is copied through untouched.
+		out.WriteString(s[copied:clause[2]])
+		out.WriteString(redactArchiveWarningTail(s[clause[2]:clause[3]]))
+		copied = clause[3]
+	}
+	out.WriteString(s[copied:])
+	return out.String()
+}
+
+// redactArchiveWarningTail rewrites what one warning prints after "retained
+// at ": the retained roots, then the skipped file names with their reasons.
+//
+// The two lists are treated differently because the policy for the two VALUES
+// differs, and this keeps the log agreeing with the JSON section instead of
+// inventing a second policy for the same fields:
+//
+//   - A skipped path is a RELATIVE name a user chose for a file af could not
+//     read, so it goes — exactly as redactInstanceData blanks
+//     archive_report.retained_trees[].skipped[].path.
+//   - A retained root is a SYSTEM path, which that same function keeps on
+//     purpose so the closing scrub can collapse $HOME in it. What the log adds
+//     is the %q escaping, and that escaping IS the leak: a root that is not
+//     valid UTF-8 arrives as `\xNN` escapes, which no home or username
+//     replacement can see through. Rewriting the token to the DISPLAY spelling
+//     the JSON copy carries drops the raw bytes and hands the collapse something
+//     it can match — and for a root that is already valid UTF-8, which is every
+//     ordinary one, that rewrite is the identity.
+//
+// A remainder that does not parse as the renderer's grammar is dropped WHOLE.
+// The format moved, or something appended a quoted token of its own; either way
+// the quoted runs can no longer be told apart, and a bundle that loses a skip
+// reason is a nuisance where one that ships a user's file names is the bug being
+// fixed. Between the grammar and that fallback, no quoted token in a matched
+// clause can reach the bundle unrewritten.
+func redactArchiveWarningTail(tail string) string {
+	parsed := archiveWarningTail.FindStringSubmatchIndex(tail)
+	if parsed == nil {
+		return redactedMarker
+	}
+	var out strings.Builder
+	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
+		tail[parsed[2]:parsed[3]], archiveWarningDisplayRoot))
+	// The label, kept verbatim: it carries the "(showing first X of Y)" count
+	// triage reads. Like the trailing group, it holds no quoted token.
+	out.WriteString(tail[parsed[4]:parsed[5]])
+	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
+		tail[parsed[6]:parsed[7]],
+		func(string) string { return strconv.Quote(redactedMarker) }))
+	out.WriteString(tail[parsed[8]:parsed[9]])
+	return out.String()
+}
+
+// archiveWarningDisplayRoot rewrites one %q-rendered retained root to the
+// display spelling of the same path — the form encoding/json can carry, and the
+// form the $HOME collapse can match. A token that will not unquote did not come
+// from this renderer, so it is redacted rather than guessed at.
+func archiveWarningDisplayRoot(token string) string {
+	raw, err := strconv.Unquote(token)
+	if err != nil {
+		return strconv.Quote(redactedMarker)
+	}
+	return strconv.Quote(strings.ToValidUTF8(raw, "\uFFFD"))
 }
 
 // sortLongestFirst keeps redaction order in one place: replace longer secrets
@@ -499,6 +668,13 @@ var sensitiveJSONKeys = map[string]bool{
 	"auth": true, "authorization": true, "bearer": true,
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
+	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
+	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
+	// bundle in a form the closing text scrub cannot recognize as a path, a home
+	// directory, or a username — strictly worse than the plain field it stands
+	// in for. It is the fallback's copy of the typed clearing in
+	// redactInstanceData (#3541).
+	"path_bytes":  true,
 	"remote_meta": true,
 	// A typed record drops this storage-only teardown union in
 	// redactInstanceData. Drop the whole object on the generic fallback too: a
@@ -645,6 +821,22 @@ func redactInstanceData(d *session.InstanceData) {
 	// diagnostic ("permission denied on N files").
 	if d.ArchiveReport != nil {
 		for i := range d.ArchiveReport.RetainedTrees {
+			// The tree's display Path is kept on purpose (see above), but its
+			// PathBytes is not the same field twice: json emits it base64-encoded,
+			// and the $HOME/username scrub the display form relies on cannot see
+			// through base64. A root whose own name is not valid UTF-8 therefore
+			// shipped raw.
+			//
+			// Clearing PathBytes is not enough on its own: ArchiveRetainedTree's
+			// MarshalJSON RE-DERIVES it from Path whenever it is empty, so a Path
+			// carrying invalid UTF-8 would put the raw bytes straight back on the
+			// wire. Reducing Path to its display form first is what makes the
+			// clearing hold, and it makes that an invariant of this function rather
+			// than an inherited property of whoever decoded the record. It is
+			// lossless for triage: the display form is what the JSON section would
+			// have shown anyway, and the text scrub still collapses $HOME in it.
+			d.ArchiveReport.RetainedTrees[i].Path = strings.ToValidUTF8(d.ArchiveReport.RetainedTrees[i].Path, "\uFFFD")
+			d.ArchiveReport.RetainedTrees[i].PathBytes = nil
 			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].PathBytes = nil
