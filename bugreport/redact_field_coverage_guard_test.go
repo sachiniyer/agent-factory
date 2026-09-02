@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -112,20 +113,48 @@ func TestGuardSeesAPartiallyRedactedContainer(t *testing.T) {
 	}
 }
 
-// TestGuardRefusesAShortArray covers the other end of the same property: an
-// array too small to hold one complete unit could only be planted with a prefix
-// every field shares, so it must be reported rather than probed.
-func TestGuardRefusesAShortArray(t *testing.T) {
+// TestGuardRefusesAnArrayWithoutIndependentEvidence covers the other end of the
+// same property. One complete unit is enough to NAME a field, but an array
+// holding only one has no evidence beyond its exact whole-array encoding, and a
+// redactor that rewrites a single element erases that — the field then reads as
+// redacted while the rest of it ships verbatim.
+func TestGuardRefusesAnArrayWithoutIndependentEvidence(t *testing.T) {
 	var probe struct {
 		Digest [guardMinContainer - 1]byte
 	}
 	filler := &sentinelFiller{}
 	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
 	if len(filler.planted) != 0 {
-		t.Errorf("planted %d marker(s) in an array too short to name its field", len(filler.planted))
+		t.Errorf("planted %d marker(s) in an array too short to survive a partial edit",
+			len(filler.planted))
 	}
 	if len(filler.unsupported) != 1 || !strings.Contains(filler.unsupported[0], "Digest") {
 		t.Errorf("unsupported = %v, want one entry naming Digest", filler.unsupported)
+	}
+}
+
+// TestGuardSeesAPartialEditOfTheSmallestArray is the accepted end of that
+// boundary: the shortest array the guard WILL plant into must still be reported
+// after a redaction that rewrites its head and stops.
+func TestGuardSeesAPartialEditOfTheSmallestArray(t *testing.T) {
+	var probe struct {
+		Digest [guardMinContainer]byte
+	}
+	record := reflect.ValueOf(&probe).Elem()
+	filler := &sentinelFiller{}
+	filler.fill(record, "", 0)
+	if len(filler.planted) != 1 {
+		t.Fatalf("planted %d field(s), want 1: unsupported=%v", len(filler.planted), filler.unsupported)
+	}
+	for i := 0; i < guardUnitLen; i++ {
+		probe.Digest[i] = 'X'
+	}
+	doc, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshalling the fixture failed: %v", err)
+	}
+	if _, leaked := filler.leakedPaths(string(doc)); len(leaked) != 1 {
+		t.Errorf("leakedPaths = %v, want [Digest]\ndocument: %s", leaked, doc)
 	}
 }
 
@@ -219,5 +248,78 @@ func TestGuardRejectsContradictoryClassification(t *testing.T) {
 	// cannot be introduced while this file is the only one being read.
 	if got := classificationOverlap(verbatimInstanceFields, knownUnredactedFields); len(got) > 0 {
 		t.Errorf("%d path(s) are classified both safe and leaking: %v", len(got), got)
+	}
+}
+
+// guardTextScalar is a named int32 that renders itself as text. It is the one
+// scalar shape that can carry arbitrary user text into a bundle, and the walk
+// plants no marker in a scalar leaf — so it has to be refused before it gets
+// there, or the guard would stay green over a field emitting whatever this
+// method returns.
+type guardTextScalar int32
+
+func (guardTextScalar) MarshalText() ([]byte, error) { return []byte("secret-text"), nil }
+
+func TestGuardRefusesSelfRenderingScalarLeaves(t *testing.T) {
+	var probe struct {
+		Key    guardTextScalar
+		KeyPtr *guardTextScalar
+	}
+	filler := &sentinelFiller{}
+	filler.fill(reflect.ValueOf(&probe).Elem(), "", 0)
+	if len(filler.planted) != 0 {
+		t.Errorf("planted %d marker(s) in a self-rendering scalar", len(filler.planted))
+	}
+	got := dedupeSorted(filler.unsupported)
+	if len(got) != 2 || !strings.Contains(got[0], "Key ") || !strings.Contains(got[1], "KeyPtr") {
+		t.Errorf("unsupported = %v, want both Key and KeyPtr reported as self-rendering", got)
+	}
+}
+
+// guardNamedKey is a named string type that renders itself. encoding/json
+// resolves a string-kind MAP KEY from its underlying string and never calls this
+// method, which is why fillMap deliberately exempts such key types — but a
+// capture that marshals the key VALUE does call it, recording a form the
+// document never contains.
+type guardNamedKey string
+
+func (guardNamedKey) MarshalText() ([]byte, error) { return []byte("CONSTANT-KEY-FORM"), nil }
+
+// TestGuardRecordsMapKeysAsJSONEmitsThem pins that capture. With the key
+// marshalled as a value, two such fields record the SAME constant form, so
+// ambiguousEvidence fails the suite on the very shape the exemption supports —
+// while the document holds their distinct raw markers all along.
+func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
+	var probe struct {
+		A map[guardNamedKey]string
+		B map[guardNamedKey]string
+	}
+	record := reflect.ValueOf(&probe).Elem()
+	filler := &sentinelFiller{}
+	filler.fill(record, "", 0)
+	if len(filler.unsupported) > 0 {
+		t.Fatalf("the walk could not plant the fixture: %v", filler.unsupported)
+	}
+	if ambiguous := dedupeSorted(filler.ambiguousEvidence()); len(ambiguous) > 0 {
+		t.Errorf("map-key evidence is not field-specific:\n  %s", strings.Join(ambiguous, "\n  "))
+	}
+
+	doc, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshalling the fixture failed: %v", err)
+	}
+	// Nothing redacted anything, so every planted path must be reported — and
+	// each recorded key form must be one the document actually contains.
+	_, leaked := filler.leakedPaths(string(doc))
+	sort.Strings(leaked)
+	want := []string{"A[]", "A[key]", "B[]", "B[key]"}
+	if !reflect.DeepEqual(leaked, want) {
+		t.Errorf("leakedPaths = %v, want %v\ndocument: %s", leaked, want, doc)
+	}
+	for _, p := range filler.planted {
+		if p.encoded != "" && !strings.Contains(string(doc), p.encoded) {
+			t.Errorf("%s recorded the encoding %s, which the document does not contain: %s",
+				p.path, p.encoded, doc)
+		}
 	}
 }

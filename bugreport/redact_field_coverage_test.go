@@ -61,12 +61,21 @@ const (
 	guardMaxSeq  = 9999
 )
 
-// guardMinContainer is the shortest fixed array the guard will plant into: it
-// must hold at least one COMPLETE unit, since that unit is the whole of what
-// names the field the bytes came from. An array shorter than this would hold a
-// prefix every field shares, so it is reported rather than silently probed with
-// something that cannot be attributed.
-const guardMinContainer = guardUnitLen
+// guardMinContainer is the shortest fixed array the guard will plant into: TWO
+// complete units.
+//
+// One unit is the minimum that can name its field, but an array holding exactly
+// one has no evidence beyond the exact whole-array encoding, and a redactor that
+// rewrites a single element erases that. Measured on a one-unit array: the
+// planted [124,48,48,48,49] became [88,48,48,48,49] — four bytes still verbatim
+// — and the guard reported the field as redacted (#3592 review). With two
+// units, an edit that destroys one leaves the other, and the surviving unit is
+// still found.
+//
+// The residual is honest and small: an edit STRADDLING the boundary of a
+// two-unit array breaks both. Arrays with more units tolerate that; nothing in
+// InstanceData has a fixed array at all.
+const guardMinContainer = 2 * guardUnitLen
 
 // guardContainerLen is how many bytes or runes a planted SLICE gets — enough
 // units for several windows, so a redaction that rewrites part of a container is
@@ -437,48 +446,54 @@ func marshalPlanted(v reflect.Value) ([]byte, error) {
 	return json.Marshal(cp.Interface())
 }
 
-// A window is sized in SOURCE elements, not in encoded characters, because what
-// makes it attributable is the planted text it covers. guardWindowElems is
-// 2*guardUnitLen-1: any run of that many consecutive elements contains one
-// COMPLETE unit whatever offset it starts at, and a complete unit belongs to
-// exactly one field.
+// A fragment must carry a COMPLETE unit — that is the whole of what names the
+// field it came from — and the two encodings reach that differently.
 //
-// An earlier revision sized windows by encoded LENGTH instead — 12 characters —
-// which for a two-digit integer list is only four elements, short enough to hold
-// no complete unit and to coincide between fields (#3592 review).
+// An integer list writes each element the same way wherever it sits, so the
+// fragment is a fixed string: the encoding of one unit, taken from the front of
+// the list where the planted text is unit-aligned by construction. It then
+// matches wherever ANY intact unit survives, which is strictly more sensitive
+// than a set of disjoint windows — those match only if one particular run of
+// elements is untouched.
+//
+// base64 cannot do that: it emits 4 characters per 3 bytes, so a unit's encoding
+// depends on its byte phase and is not one fixed string. Windows of whole
+// quartets are used instead, each covering guardWindowBytes = 2*guardUnitLen-1
+// bytes — that many consecutive bytes always contain a complete unit, whatever
+// offset the window starts at.
+//
+// An earlier revision sized both by encoded LENGTH — 12 characters — which for a
+// two-digit integer list is four elements, short enough to hold no complete unit
+// and to coincide between fields (#3592 review).
 const (
-	guardWindowElems = 2*guardUnitLen - 1
-	// base64 emits 4 characters per 3 source bytes, so a window of whole
-	// quartets covering at least guardWindowElems bytes is this many characters
-	// — and, being a multiple of 4, every window starts on a source-byte
-	// boundary too.
-	guardWindowChars = 4 * ((guardWindowElems + 2) / 3)
+	guardWindowBytes = 2*guardUnitLen - 1
+	guardWindowChars = 4 * ((guardWindowBytes + 2) / 3)
 )
 
-// encodedWindows splits a container's encoding into DISJOINT fragments, each a
-// literal substring of it, so an edit anywhere in the container leaves at least
-// one fragment intact and the survivor is still found.
+// encodedWindows returns the fragments of a container's encoding that are
+// searched alongside the whole-value form, so a redaction touching only part of
+// the container is still observable.
 //
-// A single tail is not enough. An earlier revision kept only "everything after
-// the first element", which catches a redactor that rewrites element zero and
-// nothing else: an edit at element three changes the whole form AND that tail,
-// and the guard then reads a barely-touched container as fully redacted
-// (#3592 review).
-//
-//   - An integer list "[a,b,c,d]" is split on commas into contiguous runs; each
-//     run appears verbatim inside the whole.
-//   - A base64 string encodes in 3-byte groups, so windows aligned to 4
-//     characters are likewise substrings.
-//
-// Only FULL windows are kept. A short remainder covers too few elements to hold
-// a complete unit, and a fragment that cannot name its own field is not
-// evidence. The remainder is not uncovered in practice: an edit confined to it
-// still breaks the whole-value form, which is checked too.
+// The whole-value form alone is not enough: a redactor that rewrites element
+// zero and stops changes it completely, and the guard would read a container
+// that still ships every later byte as fully redacted (#3592 review).
 func encodedWindows(form string) []string {
 	if len(form) > 2 && form[0] == '[' && form[len(form)-1] == ']' {
-		return chunkJoin(strings.Split(form[1:len(form)-1], ","), ",", guardWindowElems)
+		parts := strings.Split(form[1:len(form)-1], ",")
+		// Below two units there is no fragment worth keeping: the only one
+		// available IS the whole content, so it adds nothing the form does not
+		// already say. guardMinContainer refuses to plant such an array for
+		// exactly that reason.
+		if len(parts) < 2*guardUnitLen {
+			return nil
+		}
+		return []string{strings.Join(parts[:guardUnitLen], ",")}
 	}
 	if len(form) > 2 && form[0] == '"' && form[len(form)-1] == '"' {
+		// Whole windows only. A short remainder covers too few bytes to hold a
+		// complete unit, and a fragment that cannot name its own field is not
+		// evidence. It is not left uncovered: an edit confined to it still
+		// breaks the whole-value form, which is checked too.
 		body := form[1 : len(form)-1]
 		var out []string
 		for i := 0; i+guardWindowChars <= len(body); i += guardWindowChars {
@@ -487,15 +502,6 @@ func encodedWindows(form string) []string {
 		return out
 	}
 	return nil
-}
-
-// chunkJoin groups consecutive elements into runs of exactly size elements.
-func chunkJoin(parts []string, sep string, size int) []string {
-	var out []string
-	for i := 0; i+size <= len(parts); i += size {
-		out = append(out, strings.Join(parts[i:i+size], sep))
-	}
-	return out
 }
 
 // fill plants markers throughout v, allocating pointers, slices and maps on the
@@ -581,6 +587,35 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
 		// Not serializable by encoding/json — it errors rather than emitting
 		// them — so they cannot reach a bundle and need no marker.
+	default:
+		// Every kind left is a SCALAR leaf: bool, an integer, a float, a
+		// complex. json emits them and this walk plants nothing in them, which
+		// looks like the shape the sequence and map paths refuse — and it is
+		// deliberately NOT treated the same way. The line between them is
+		// CAPACITY, not kind.
+		//
+		// A numeric CONTAINER is unbounded: `[]int32` holds a session title, a
+		// path, a filename — the leak class this guard exists for (#2419,
+		// #3541) — so a container the walk cannot plant in is a hole it must
+		// refuse. A scalar leaf holds one bounded value: a bool has two states,
+		// and no integer width holds a filename. InstanceData has 54 such
+		// leaves today, 40 of them bool, and a bool cannot carry a distinctive
+		// marker at all — so refusing them would fail the suite over 54 fields
+		// that cannot hold the thing being guarded against.
+		//
+		// The scalar shape that CAN carry arbitrary text is a named type with
+		// its own MarshalJSON/MarshalText, and that one is refused before this
+		// switch by the rendersItself check — see
+		// TestGuardRefusesSelfRenderingScalarLeaves. What is left uncovered is
+		// text packed into a plain integer's bytes, which nothing in af writes.
+		//
+		// The arm is a `default` rather than a list of kinds so that a kind
+		// neither cased above nor scalar — there is none today — is reported
+		// instead of joining this exemption silently.
+		if !isScalarNumeric(v.Kind()) {
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s (unhandled kind %s)", path, v.Kind()))
+		}
 	}
 }
 
@@ -754,7 +789,7 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 			// nothing detectable and passed unconditionally (#3592 review).
 			marker := f.nextMarker()
 			key.SetString(marker)
-			f.record(key, path+"[key]", marker)
+			f.recordMapKey(path+"[key]", marker)
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			key.SetInt(int64(i))
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -772,6 +807,30 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 		m.SetMapIndex(key, val)
 	}
 	v.Set(m)
+}
+
+// recordMapKey records a string-kind map key the way json actually emits one.
+//
+// NOT by marshalling the key value, which is what record does: json resolves a
+// string-kind key from its underlying string and never calls MarshalText on it
+// (measured, see fillMap), but marshalling the key VALUE does call it. For a
+// named key type with its own marshaler the two disagree, and recording the
+// marshaler's output stores a form the document never contains — worse, if that
+// output is constant, EVERY such field records the same form and
+// ambiguousEvidence then fails the suite on the exact shape fillMap's exemption
+// exists to support (#3592 review). Measured: two map fields keyed by a named
+// string type both recorded "CONSTANT-KEY-FORM" while the document held their
+// distinct raw markers.
+//
+// json is still the authority for the quoting — the marker is marshalled as a
+// plain string, which is precisely what a string-kind key becomes.
+func (f *sentinelFiller) recordMapKey(path, marker string) {
+	entry := plantedField{path: path, forms: []string{marker}}
+	if quoted, err := json.Marshal(marker); err == nil {
+		entry.forms = append(entry.forms, string(quoted))
+		entry.encoded = string(quoted)
+	}
+	f.planted = append(f.planted, entry)
 }
 
 // leakedPaths reports the planted paths whose evidence survived into rendered —
