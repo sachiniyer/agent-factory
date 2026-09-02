@@ -459,8 +459,10 @@ type sentinelFiller struct {
 // a number and the width is fixed.
 func (f *sentinelFiller) nextMarker() string {
 	f.seq++
-	return fmt.Sprintf("%0*d-%s%s", guardUnitDigits, f.seq, guardSentinel,
-		strings.Repeat(markerUnit(f.seq), guardStringUnits))
+	unit := markerUnit(f.seq)
+	return strings.Repeat(unit, guardStringUnits) +
+		fmt.Sprintf("%0*d-%s", guardUnitDigits, f.seq, guardSentinel) +
+		strings.Repeat(unit, guardStringUnits)
 }
 
 // markerUnit is one field-unique unit: the delimiter, then the sequence number
@@ -469,8 +471,14 @@ func markerUnit(seq int) string {
 	return fmt.Sprintf("%s%0*d", guardUnitDelim, guardUnitDigits, seq)
 }
 
-// guardStringUnits is how many units follow a string marker's readable stem.
-// TWO, so an edit at either end of the marker leaves one whole.
+// guardStringUnits is how many units sit at EACH END of a string marker.
+//
+// Both ends, not one. The first version of this put them only after the stem,
+// which is evidence against an edit at the front and none at all against one at
+// the back: truncating the last ten bytes took the exact marker, its encoding
+// and every recorded unit with it, while the unique prefix and nearly the whole
+// sentinel still shipped (#3592 review). Two at each end so an edit that eats
+// one still leaves its partner.
 const guardStringUnits = 2
 
 // nextContainerMarker returns exactly n bytes of field-unique filler for a byte
@@ -956,6 +964,13 @@ func (f *sentinelFiller) recordMapKey(path, marker string) {
 	if quoted, err := json.Marshal(marker); err == nil {
 		entry.forms = append(entry.forms, string(quoted))
 		entry.encoded = string(quoted)
+	}
+	// The unit too. A key goes through this rather than through record, so it
+	// was the one planted string left with no fragment that survives a partial
+	// edit — a redactor rewriting half a key left it reading as clean
+	// (#3592 review).
+	if unit := markerUnit(f.seq); strings.Contains(marker, unit) {
+		entry.forms = append(entry.forms, unit)
 	}
 	f.planted = append(f.planted, entry)
 }
