@@ -156,8 +156,8 @@ var knownUnredactedFields = map[string]string{
 // [N]byte and []rune (integer lists) detectable without this file knowing how
 // json encodes any of them.
 type plantedField struct {
-	path string
-	form string
+	path  string
+	forms []string
 }
 
 // mustVisit reports whether a struct field can carry text into a bundle and so
@@ -173,6 +173,14 @@ type plantedField struct {
 // CanSet=false, but its promoted exported members report CanSet=true — measured,
 // not assumed — which is why fill can descend and plant in them.
 func mustVisit(f reflect.StructField) bool {
+	// `json:"-"` is an explicit never-serialize marker, not a selection rule
+	// among competing fields, so honouring it is not the modelling this guard
+	// gave up. It must be honoured BEFORE the walk, because an unplantable
+	// shape behind that tag (any, []int, an unreviewed marshaler) would
+	// otherwise be reported as a hole in a field json cannot emit (#3592 review).
+	if f.Tag.Get("json") == "-" {
+		return false
+	}
 	if f.IsExported() {
 		return true
 	}
@@ -231,23 +239,36 @@ type sentinelFiller struct {
 	seq         int
 }
 
+// nextMarker puts the unique sequence FIRST. A fixed array is filled by
+// truncation, so a marker whose distinguishing suffix falls off the end gives
+// every short array identical contents — two [8]byte fields would both read
+// "AF-REDAC", and one field's surviving fragment would mark the other leaked
+// too, wrecking attribution and the stale-entry check (#3592 review).
+// guardMinContainer is sized so the sequence always survives.
 func (f *sentinelFiller) nextMarker() string {
 	f.seq++
-	return fmt.Sprintf("%s-%d", guardSentinel, f.seq)
+	return fmt.Sprintf("%04d-%s", f.seq, guardSentinel)
 }
 
 // record captures the JSON fragment the just-planted value produces.
-func (f *sentinelFiller) record(v reflect.Value, path string) {
-	if !v.CanInterface() {
-		f.unsupported = append(f.unsupported, path+" (value cannot be read back for encoding)")
-		return
+// record captures every JSON fragment the just-planted value can produce.
+//
+// BOTH the raw marker and the marshalled form are kept, and a match on either
+// counts. The raw marker is what survives an encoding option that re-quotes the
+// value: a field tagged `json:",string"` serializes a string as "\"marker\"",
+// so the marshalled form ("marker", with its own quotes) is NOT a substring of
+// the document while the bare marker still is (#3592 review). The marshalled
+// form is what catches the containers whose encoding hides the text entirely —
+// []byte as base64, [N]byte and []rune as integer lists. Markers are
+// alphanumeric-and-dash, so json never escapes them and the raw form is exact.
+func (f *sentinelFiller) record(v reflect.Value, path, marker string) {
+	forms := []string{marker}
+	if v.CanInterface() {
+		if form, err := json.Marshal(v.Interface()); err == nil {
+			forms = append(forms, string(form))
+		}
 	}
-	form, err := json.Marshal(v.Interface())
-	if err != nil {
-		f.unsupported = append(f.unsupported, fmt.Sprintf("%s (cannot be marshalled: %v)", path, err))
-		return
-	}
-	f.planted = append(f.planted, plantedField{path: path, form: string(form)})
+	f.planted = append(f.planted, plantedField{path: path, forms: forms})
 }
 
 // fill plants markers throughout v, allocating pointers, slices and maps on the
@@ -261,11 +282,21 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		f.tooDeep = append(f.tooDeep, path)
 		return
 	}
-	if ty := v.Type(); ty != reflect.TypeOf(time.Time{}) &&
-		(ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
-			ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType)) {
-		if _, reviewed := reviewedMarshalerTypes[ty]; !reviewed {
+	// Normalize through pointers before the reviewed lookup. *time.Time
+	// implements json.Marshaler via the promoted value method, so keying on the
+	// POINTER type missed the exemption and failed the suite on an ordinary
+	// optional timestamp (#3592 review).
+	if ty := v.Type(); ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
+		ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType) {
+		base := ty
+		for base.Kind() == reflect.Ptr {
+			base = base.Elem()
+		}
+		if _, reviewed := reviewedMarshalerTypes[base]; !reviewed {
 			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
+			return
+		}
+		if base == reflect.TypeOf(time.Time{}) {
 			return
 		}
 	}
@@ -279,8 +310,9 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	}
 	switch v.Kind() {
 	case reflect.String:
-		v.SetString(f.nextMarker())
-		f.record(v, path)
+		marker := f.nextMarker()
+		v.SetString(marker)
+		f.record(v, path, marker)
 	case reflect.Ptr:
 		if v.IsNil() {
 			v.Set(reflect.New(v.Type().Elem()))
@@ -332,7 +364,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			}
 			reflect.Copy(v, reflect.ValueOf([]byte(marker)))
 		}
-		f.record(v, path)
+		f.record(v, path, marker)
 	case elem == reflect.Int32:
 		// []rune is []int32, and json emits it as code points from which the
 		// exact text reconstructs.
@@ -357,7 +389,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 				v.Index(i).SetInt(int64(r))
 			}
 		}
-		f.record(v, path)
+		f.record(v, path, marker)
 	case isUnplantableScalar(elem):
 		f.unsupported = append(f.unsupported,
 			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), elem))
@@ -378,10 +410,15 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	m := reflect.MakeMap(v.Type())
 	for i := 0; i < guardSliceSeed; i++ {
 		key := reflect.New(v.Type().Key()).Elem()
-		f.fill(key, path+"[key]", depth+1)
 		switch key.Kind() {
 		case reflect.String:
-			key.SetString(fmt.Sprintf("%s-key-%d", guardSentinel, i))
+			// The key must be planted and recorded in ONE step. Filling it and
+			// then overwriting it for distinctness recorded a marker that no
+			// longer existed, so a map with user-controlled KEYS contributed
+			// nothing detectable and passed unconditionally (#3592 review).
+			marker := f.nextMarker()
+			key.SetString(marker)
+			f.record(key, path+"[key]", marker)
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			key.SetInt(int64(i))
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -464,7 +501,14 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	leakedSet := make(map[string]struct{})
 	var leaked []string
 	for _, p := range filler.planted {
-		if !strings.Contains(rendered, p.form) {
+		escaped := false
+		for _, form := range p.forms {
+			if strings.Contains(rendered, form) {
+				escaped = true
+				break
+			}
+		}
+		if !escaped {
 			continue
 		}
 		if _, dup := leakedSet[p.path]; dup {
