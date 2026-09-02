@@ -41,47 +41,53 @@ package task
 // which is the model reporting that it has run out of information rather than
 // that it needs an eighth field.
 //
-// sameTrigger stays, as the ONE guard, for the case the two reads straddle a
-// write that added or removed a row: ordinals then refer to different rows, and
-// an observation adopted across that reports a fire time for a schedule that is
-// no longer the schedule. It is the client-side twin of the checks the daemon
-// already makes internally against its own live state — controlServer's
-// withLiveArming compares the armed entry's expression, watcherSupervisor's
-// armingFor compares the watcher's signature. All three ask the same question:
-// is this observation ABOUT the definition in front of me? Where it cannot tell,
-// the answer is unknown, which is the honest one.
+// The row is qualified by the STORE GENERATION it was read in, and that is what
+// answers the straddling write. A row number is only meaningful inside one
+// version of a mutable file: a removal shifts every row below it up, and when
+// the rows involved are duplicates — same id, same project, same expression,
+// which is the store this feature exists for — the two records are identical, so
+// no comparison of their content can tell that the reads came from different
+// generations. Review found exactly that (#3684). Lists whose generations differ
+// pair nothing and every answer stays unknown, which after a task edit costs a
+// poll or two of the labelled cron fallback and is the honest reading meanwhile.
+//
+// sameTrigger is kept behind it. With generations equal the two reads decoded the
+// same bytes, so in production it can no longer fire — it is the assertion that
+// the pairing really is about the definition in hand, so that a future weakening
+// of the generation (a cheaper digest, a partial hash, a generation carried per
+// response rather than per record) fails loudly instead of quietly restoring the
+// mispairing class. It is also the client-side twin of the checks the daemon
+// makes against its own live state: controlServer's withLiveArming compares the
+// armed entry's expression, watcherSupervisor's armingFor compares the watcher's
+// signature, and all three ask whether this observation is ABOUT the definition
+// in front of them.
 func ApplyLiveArming(tasks, observed []Task) []Task {
 	if len(tasks) == 0 || len(observed) == 0 {
 		return tasks
 	}
-	live := make(map[int]Task, len(observed))
-	// An ordinal claimed by two observations means the list is not one read of
-	// one file — the shape a future remote read would produce by merging two
-	// stores, which both have a row 3. Neither claimant is trustworthy then, so
-	// the row is left unknown rather than resolved by arrival order: a fabricated
-	// "armed" is the false clean bill this whole feature exists to remove, and it
-	// would be worse coming from a store on another machine. Documented on
-	// Task.Ordinal; enforced here so the hazard cannot be reintroduced quietly.
-	contested := make(map[int]bool)
+	live := make(map[rowIdentity]Task, len(observed))
+	// One identity claimed by two observations means the list is not one read of
+	// one store. Neither claimant is trustworthy then, so the row is left unknown
+	// rather than resolved by arrival order — a fabricated "armed" is the false
+	// clean bill this whole feature exists to remove.
+	contested := make(map[rowIdentity]bool)
 	for _, o := range observed {
-		// Unnumbered records identify no row. That is the version-skew case — an
-		// older daemon's response carries no ordinal field at all — and skipping
-		// them leaves every record unknown, which is exactly right for an answer
-		// that cannot be attributed.
-		if o.Ordinal == unstampedOrdinal {
+		key, ok := identifyRow(o)
+		if !ok {
 			continue
 		}
-		if _, taken := live[o.Ordinal]; taken {
-			contested[o.Ordinal] = true
+		if _, taken := live[key]; taken {
+			contested[key] = true
 			continue
 		}
-		live[o.Ordinal] = o
+		live[key] = o
 	}
 	for i := range tasks {
-		if tasks[i].Ordinal == unstampedOrdinal || contested[tasks[i].Ordinal] {
+		key, ok := identifyRow(tasks[i])
+		if !ok || contested[key] {
 			continue
 		}
-		o, ok := live[tasks[i].Ordinal]
+		o, ok := live[key]
 		if !ok || !sameTrigger(o, tasks[i]) {
 			continue
 		}
@@ -93,6 +99,31 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 		tasks[i].NextRunAt = o.NextRunAt
 	}
 	return tasks
+}
+
+// rowIdentity is which row of which version of tasks.json a record came from.
+//
+// The two halves are one key, never two comparisons, because a row number is
+// only meaningful inside the generation it was read in — and a guard that can be
+// half-applied is one a later change will half-apply. Keyed on the pair, a
+// lookup CANNOT ask "which row" without also asking "of which file" (#3684).
+type rowIdentity struct {
+	generation string
+	row        int
+}
+
+// identifyRow reports a record's row identity, and false when it has none.
+//
+// Either half missing means the record came from no read this can reason
+// about — a record built in memory, or one decoded from an older daemon whose
+// response carries neither field, which JSON gives back as the zero values. It
+// pairs with nothing, which leaves arming UNKNOWN: the answer the rail already
+// renders honestly, and the one direction in which being wrong is safe.
+func identifyRow(t Task) (rowIdentity, bool) {
+	if t.StoreGeneration == "" || t.Ordinal == unstampedOrdinal {
+		return rowIdentity{}, false
+	}
+	return rowIdentity{generation: t.StoreGeneration, row: t.Ordinal}, true
 }
 
 // sameTrigger reports whether an observation about o describes the same trigger

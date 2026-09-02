@@ -8,15 +8,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// oneRead and aLaterRead are two store generations. Everything below is read
+// from oneRead unless a test is specifically about two reads that straddled a
+// write, which is the case the generation exists to detect.
+const (
+	oneRead    = "1111aaaa2222bbbb"
+	aLaterRead = "3333cccc4444dddd"
+)
+
 // armingFixture builds a record the way a loader hands it over: a definition
-// plus the row it occupies in tasks.json.
+// plus the identity of the row it came from — which version of tasks.json, and
+// which row of it.
 //
 // The row is a required argument rather than a defaulted one on purpose. It is
-// the thing being matched on now, so a fixture that let it default would pin the
-// zero value — which means "no row" and pairs with nothing — and every test here
-// would pass for the wrong reason.
+// half of the thing being matched on, so a fixture that let it default would pin
+// the zero value — which means "no row" and pairs with nothing — and every test
+// here would pass for the wrong reason.
 func armingFixture(row int, id, cron string) Task {
-	return Task{Ordinal: row, ID: id, Name: "nightly", CronExpr: cron, ProjectPath: "/repo", Enabled: true}
+	return Task{
+		StoreGeneration: oneRead, Ordinal: row,
+		ID: id, Name: "nightly", CronExpr: cron, ProjectPath: "/repo", Enabled: true,
+	}
+}
+
+// fromALaterRead moves a record into the generation a later read produced, which
+// is what every observation carries once a write has landed between the two
+// reads.
+func fromALaterRead(t Task) Task {
+	t.StoreGeneration = aLaterRead
+	return t
 }
 
 func TestApplyLiveArmingCarriesTheObservation(t *testing.T) {
@@ -75,7 +95,7 @@ func TestApplyLiveArmingComparesTheWatcherSignatureForWatchTasks(t *testing.T) {
 	// A watcher RUNS a command in a directory under a name; a write commits and
 	// reloads the supervisor as a separate step, so the old process can outlive
 	// the edit. Each of watcherSignature's three fields has to invalidate.
-	base := Task{Ordinal: 1, ID: "w", Name: "build", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
+	base := Task{StoreGeneration: oneRead, Ordinal: 1, ID: "w", Name: "build", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
 	observed := base
 	observed.Arming = ArmingArmed
 
@@ -102,7 +122,7 @@ func TestApplyLiveArmingRefusesAcrossTriggerKinds(t *testing.T) {
 	// the other.
 	observed := armingFixture(1, "a", "0 9 * * *")
 	observed.Arming = ArmingArmed
-	watch := Task{Ordinal: 1, ID: "a", Name: "nightly", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
+	watch := Task{StoreGeneration: oneRead, Ordinal: 1, ID: "a", Name: "nightly", WatchCmd: "tail -f log", ProjectPath: "/repo", Enabled: true}
 
 	got := ApplyLiveArming([]Task{watch}, []Task{observed})
 	assert.Equal(t, ArmingUnknown, got[0].Arming)
@@ -330,11 +350,15 @@ func TestApplyLiveArmingWorksOnAStoreWithNoBindingsAtAll(t *testing.T) {
 }
 
 func TestApplyLiveArmingRefusesObservationsShiftedByAStraddlingWrite(t *testing.T) {
-	// The one remaining way to mispair, and what sameTrigger is kept for. The
-	// reads straddled an INSERT, which is the mutation that moves rows: the rail
-	// read the file before a task was prepended, the daemon read it after, so the
-	// daemon's row 1 is a task the rail has never seen and its row 2 is the rail's
-	// row 1.
+	// sameTrigger on its own, with the generation held equal so the guard behind
+	// it is what is being measured. In production the generation catches this
+	// first — an insert rewrites the file — and this pins that the assertion
+	// standing behind it is real rather than decorative.
+	//
+	// The reads straddled an INSERT, which is the mutation that moves rows: the
+	// rail read the file before a task was prepended, the daemon read it after, so
+	// the daemon's row 1 is a task the rail has never seen and its row 2 is the
+	// rail's row 1.
 	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
 	inserted := armingFixture(1, "new", "0 6 * * *")
 	inserted.Arming, inserted.NextRunAt = ArmingArmed, &next
@@ -379,6 +403,92 @@ func TestApplyLiveArmingRefusesAShiftedRowThatAgreesOnEverythingButItsID(t *test
 	assert.Nil(t, got[0].NextRunAt, "least of all its next fire")
 	assert.Equal(t, ArmingUnknown, got[1].Arming, "and nothing was observed about row 2 any more")
 	assert.Nil(t, got[1].NextRunAt)
+}
+
+func TestApplyLiveArmingRefusesDuplicateRowsShiftedByARemoval(t *testing.T) {
+	// The case sameTrigger cannot see, and the reason the row is qualified by the
+	// generation it was read in (#3684 review).
+	//
+	// The store held an unrelated row 1, then a duplicated id at rows 2 and 3 —
+	// same id, same project, same expression, which is the store this whole
+	// feature is about. The daemon arms the FIRST occurrence, so row 2 is armed and
+	// row 3 is the skipped duplicate. Then row 1 is deleted, and every row below it
+	// moves up: the armed task is now row 1 and the skipped duplicate is now row 2.
+	//
+	// The rail is still holding its earlier read, where the armed task is row 2. A
+	// row-number lookup alone hands it the observation now sitting at row 2 — the
+	// SKIPPED duplicate's not-armed — and every field sameTrigger compares agrees,
+	// id included, because the two rows are copies of each other. The rail would
+	// mark a task that is genuinely armed as one that will never fire.
+	//
+	// Nothing about the two records can distinguish them. What can is that the two
+	// reads saw different bytes.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	armedNow := fromALaterRead(armingFixture(1, "dup", "0 9 * * *"))
+	armedNow.Arming, armedNow.NextRunAt = ArmingArmed, &next
+	skippedNow := fromALaterRead(armingFixture(2, "dup", "0 9 * * *"))
+	skippedNow.Arming = ArmingNotArmed
+
+	// What the rail read before the delete: the armed row at 2, its duplicate at 3.
+	stale := []Task{armingFixture(2, "dup", "0 9 * * *"), armingFixture(3, "dup", "0 9 * * *")}
+	got := ApplyLiveArming(stale, []Task{armedNow, skippedNow})
+
+	assert.Equal(t, ArmingUnknown, got[0].Arming,
+		"the armed task must not be reported not-armed by the duplicate that took its row number")
+	assert.Nil(t, got[0].NextRunAt)
+	assert.Equal(t, ArmingUnknown, got[1].Arming,
+		"and the duplicate's row is not comparable across the write either")
+	assert.Nil(t, got[1].NextRunAt)
+}
+
+func TestApplyLiveArmingPairsWhenBothReadsSawTheSameStore(t *testing.T) {
+	// The other half of the generation, and the one that keeps it from being a
+	// blanket refusal: reads that saw the same bytes pair exactly, duplicates
+	// included. Without this the fix above would be indistinguishable from
+	// switching the feature off.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	armed := armingFixture(2, "dup", "0 9 * * *")
+	armed.Arming, armed.NextRunAt = ArmingArmed, &next
+	skipped := armingFixture(3, "dup", "0 9 * * *")
+	skipped.Arming = ArmingNotArmed
+
+	got := ApplyLiveArming(
+		[]Task{armingFixture(2, "dup", "0 9 * * *"), armingFixture(3, "dup", "0 9 * * *")},
+		[]Task{skipped, armed},
+	)
+
+	assert.Equal(t, ArmingArmed, got[0].Arming, "row 2 is the occurrence the daemon armed")
+	require.NotNil(t, got[0].NextRunAt)
+	assert.Equal(t, ArmingNotArmed, got[1].Arming, "row 3 is the duplicate it skipped")
+	assert.Nil(t, got[1].NextRunAt)
+}
+
+func TestApplyLiveArmingIgnoresRecordsWithNoGeneration(t *testing.T) {
+	// The version-skew half that the ordinal alone cannot cover: an older daemon's
+	// response carries neither field, and JSON decodes both absences to their zero
+	// values. A record that cannot say which read it came from pairs with nothing.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+
+	t.Run("observation from no read", func(t *testing.T) {
+		observed := armingFixture(1, "a", "0 9 * * *")
+		observed.StoreGeneration = ""
+		observed.Arming, observed.NextRunAt = ArmingArmed, &next
+
+		got := ApplyLiveArming([]Task{armingFixture(1, "a", "0 9 * * *")}, []Task{observed})
+		assert.Equal(t, ArmingUnknown, got[0].Arming)
+		assert.Nil(t, got[0].NextRunAt)
+	})
+
+	t.Run("record from no read", func(t *testing.T) {
+		observed := armingFixture(1, "a", "0 9 * * *")
+		observed.Arming, observed.NextRunAt = ArmingArmed, &next
+
+		local := armingFixture(1, "a", "0 9 * * *")
+		local.StoreGeneration = ""
+		got := ApplyLiveArming([]Task{local}, []Task{observed})
+		assert.Equal(t, ArmingUnknown, got[0].Arming)
+		assert.Nil(t, got[0].NextRunAt)
+	})
 }
 
 func TestApplyLiveArmingIgnoresUnnumberedRecords(t *testing.T) {

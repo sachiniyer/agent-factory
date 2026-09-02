@@ -11,11 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Task.Ordinal is the row a record occupies in tasks.json, and it is what
-// ApplyLiveArming pairs an observation to (#3680). These pin the four things
-// that has to be true of it: every read numbers the rows, the numbering starts
-// at one so the zero value can mean "no row", the file cannot supply one, and
-// nothing that rewrites the store moves a row out from under its number.
+// A record's ROW IDENTITY is which row of which version of tasks.json it came
+// from — Task.Ordinal and Task.StoreGeneration — and it is what ApplyLiveArming
+// pairs an observation to (#3680, #3684). These pin what has to be true of it:
+// every read stamps both halves, the numbering starts at one so the zero value
+// can mean "no row", the generation tracks the bytes so two reads can tell
+// whether they saw the same store, the file cannot supply either half, neither
+// reaches disk, repo filtering preserves them, and nothing that rewrites the
+// store moves a row out from under its number.
 
 func ordinalRow(id, name, cron, projectPath string) Task {
 	return Task{
@@ -32,6 +35,38 @@ func rowsByID(tasks []Task) map[string]int {
 		rows[t.ID] = t.Ordinal
 	}
 	return rows
+}
+
+func TestLoadTasksTagsEveryReadWithTheStoreGeneration(t *testing.T) {
+	// A row number is only meaningful inside one version of a mutable file, so the
+	// read stamps which version it saw. Two reads of an unchanged store agree —
+	// without that the pairing would refuse every poll and the feature would be off
+	// — and a write moves it, which is what stops two reads straddling that write
+	// from comparing row numbers that mean different things (#3684).
+	setupTestTasks(t, []Task{
+		ordinalRow("aaa00001", "first", "0 9 * * *", "/repo"),
+		ordinalRow("bbb00002", "second", "0 10 * * *", "/repo"),
+	})
+
+	first, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	require.NotEmpty(t, first[0].StoreGeneration)
+	assert.Equal(t, first[0].StoreGeneration, first[1].StoreGeneration,
+		"one read is one generation, whatever the row")
+
+	again, err := LoadTasks()
+	require.NoError(t, err)
+	assert.Equal(t, first[0].StoreGeneration, again[0].StoreGeneration,
+		"two reads of an unchanged store must agree, or nothing would ever pair")
+
+	ran := time.Now()
+	require.NoError(t, UpdateTaskStatus("bbb00002", &ran, "started"))
+
+	after, err := LoadTasks()
+	require.NoError(t, err)
+	assert.NotEqual(t, first[0].StoreGeneration, after[0].StoreGeneration,
+		"and a write must move it, or a straddling read could not tell")
 }
 
 func TestLoadTasksNumbersRowsFromOne(t *testing.T) {
@@ -58,8 +93,8 @@ func TestLoadTasksOverwritesAnOrdinalFoundInTheFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, tasksFileName)
 	require.NoError(t, os.WriteFile(path, []byte(`[
-  {"id":"aaa00001","name":"first","prompt":"p","cron_expr":"0 9 * * *","project_path":"/repo","enabled":true,"created_at":"2026-01-01T00:00:00Z","ordinal":1},
-  {"id":"bbb00002","name":"second","prompt":"p","cron_expr":"0 10 * * *","project_path":"/repo","enabled":true,"created_at":"2026-01-01T00:00:00Z","ordinal":1}
+  {"id":"aaa00001","name":"first","prompt":"p","cron_expr":"0 9 * * *","project_path":"/repo","enabled":true,"created_at":"2026-01-01T00:00:00Z","ordinal":1,"store_generation":"deadbeefdeadbeef"},
+  {"id":"bbb00002","name":"second","prompt":"p","cron_expr":"0 10 * * *","project_path":"/repo","enabled":true,"created_at":"2026-01-01T00:00:00Z","ordinal":1,"store_generation":"deadbeefdeadbeef"}
 ]`), 0644))
 	origGetPath := getTasksPathFn
 	getTasksPathFn = func() (string, error) { return path, nil }
@@ -69,6 +104,11 @@ func TestLoadTasksOverwritesAnOrdinalFoundInTheFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"aaa00001": 1, "bbb00002": 2}, rowsByID(tasks),
 		"a row number the file supplied is overwritten, never believed")
+	for _, tk := range tasks {
+		assert.NotEqual(t, "deadbeefdeadbeef", tk.StoreGeneration,
+			"and neither half of the identity may be taken from the file — a store that "+
+				"could name its own generation could make a stale observation look current")
+	}
 }
 
 func TestOrdinalNeverReachesDisk(t *testing.T) {
@@ -93,8 +133,10 @@ func TestOrdinalNeverReachesDisk(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &envelope))
 	require.Len(t, envelope.Tasks, 2)
 	for i, stored := range envelope.Tasks {
-		_, present := stored["ordinal"]
-		assert.False(t, present, "row %d was written to disk carrying its row number", i+1)
+		for _, field := range []string{"ordinal", "store_generation"} {
+			_, present := stored[field]
+			assert.False(t, present, "row %d was written to disk carrying %q", i+1, field)
+		}
 	}
 
 	// And the read still hands them back, so the strip did not cost the reader
@@ -123,6 +165,7 @@ func TestAddTaskReturnsTheRowTheNextReadWillReport(t *testing.T) {
 		created, err := AddTaskChecked(ordinalRow(id, "row", "0 9 * * *", "/repo"), ActorCLI, nil)
 		require.NoError(t, err)
 		assert.Equal(t, i+1, created.Ordinal, "the create returns the row it landed on")
+		require.NotEmpty(t, created.StoreGeneration, "and the generation of the store it wrote")
 		want = append(want, created.Ordinal)
 	}
 
@@ -130,6 +173,14 @@ func TestAddTaskReturnsTheRowTheNextReadWillReport(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"aaa00001": want[0], "bbb00002": want[1], "ccc00003": want[2]},
 		rowsByID(read), "and a later read agrees with every one of them")
+
+	last, err := AddTaskChecked(ordinalRow("ddd00004", "row", "0 9 * * *", "/repo"), ActorCLI, nil)
+	require.NoError(t, err)
+	fresh, err := LoadTasks()
+	require.NoError(t, err)
+	assert.Equal(t, fresh[0].StoreGeneration, last.StoreGeneration,
+		"the create's generation is the one the very next read reports, so the record it "+
+			"publishes can be paired against that read rather than being unidentifiable")
 }
 
 func TestRepoFilteringKeepsEachSurvivorsRowNumber(t *testing.T) {
@@ -207,4 +258,11 @@ func TestStableRepoBindingUpdatesDoNotMoveRows(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantRows, rowsByID(after),
 		"the backfill rewrote every row's repo_id and moved none of them")
+
+	// It DID change the file, though, and the generation says so. That is the
+	// intended reading rather than a wart: a rail holding a read from before the
+	// backfill is holding different bytes, and one poll of "nothing reported" is
+	// the honest answer until both sides are reading the same store again.
+	assert.NotEqual(t, before[0].StoreGeneration, after[0].StoreGeneration,
+		"a rewrite that touched the file is a new generation, however stable the rows")
 }

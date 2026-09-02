@@ -2055,6 +2055,9 @@
       },
       "AddTaskRequest": {
         "cli": {
+          "task.store_generation": {
+            "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
+          },
           "task.ordinal": {
             "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
           },
@@ -2096,6 +2099,9 @@
           }
         },
         "tui": {
+          "task.store_generation": {
+            "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
+          },
           "task.ordinal": {
             "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
           },
@@ -2339,6 +2345,9 @@
       "AddTask": {
         "actor": {
           "ok": "The web client IS the API surface, and the daemon resolves an undeclared actor from the transport (daemon/task_health.go taskActor), so an HTTP caller that sends nothing is already recorded as \"api\". The TUI declares \"tui\" because it reaches the daemon over these same HTTP routes and the transport alone cannot tell the two apart."
+        },
+        "task.store_generation": {
+          "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
         },
         "task.ordinal": {
           "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."

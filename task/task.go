@@ -2,6 +2,7 @@ package task
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -199,6 +200,31 @@ type Task struct {
 	// answer produced by a MISSING field. Numbered from one, that skew degrades
 	// to unknown, which is what the rail already renders honestly.
 	Ordinal int `json:"ordinal,omitempty"`
+
+	// StoreGeneration identifies the VERSION of tasks.json this record was read
+	// from — a digest of the bytes the read decoded, stamped beside the ordinal by
+	// the same helper and stripped with it.
+	//
+	// A row number alone is not an identity, because the file is mutable. Two
+	// reads that straddle a write disagree about which task row N is: a removal
+	// shifts every row below it up, and if the rows involved are duplicates — same
+	// id, same project, same expression, which is exactly the store this feature
+	// exists for — nothing about the two records differs, so no comparison of
+	// their CONTENT can tell that the reads came from different generations. It
+	// took a review round to find that case (#3684), and it is the same shape as
+	// the heuristic this change replaced: a guard that needs one more field.
+	//
+	// So the row is qualified by the generation it was read in, and the two are
+	// only ever used together (see ApplyLiveArming's key). Two lists pair only
+	// when they saw the same bytes; when they did not, every answer is UNKNOWN,
+	// which costs a poll or two of the labelled cron fallback after a task edit
+	// and is the honest reading in between.
+	//
+	// It also settles the remote question by construction rather than by comment:
+	// two stores on two machines are two different files, so their rows can never
+	// pair. Empty means the record came from no read — see Ordinal for why that
+	// has to fail closed.
+	StoreGeneration string `json:"store_generation,omitempty"`
 }
 
 // unstampedOrdinal is the Ordinal of a record no read has numbered. See
@@ -326,22 +352,43 @@ func LoadTasks() ([]Task, error) {
 	// rather than in each surface is what stops the next surface from being the
 	// one that renders a dark task as healthy. loadTasksLocked — the WRITE path's
 	// loader — deliberately does not, so nothing derived can reach disk.
-	return stampOrdinals(WithScheduleHealth(tasks, nowFn())), nil
+	return stampRowIdentity(WithScheduleHealth(tasks, nowFn()), data), nil
 }
 
-// stampOrdinals numbers every record with its 1-based position in the file and
-// returns tasks. See Task.Ordinal for what the number is for.
+// stampRowIdentity gives every record the two halves of its row identity: the
+// generation of the bytes this read decoded, and its 1-based position within
+// them. See Task.Ordinal and Task.StoreGeneration.
+//
+// One helper for both halves on purpose. They are meaningless apart — a row
+// number without the version it was read in is the bug #3684 found — so nothing
+// should be able to stamp one and forget the other.
 //
 // It runs LAST on each read path — after WithScheduleHealth here, and after the
-// strip in loadTasksLocked — so a record's ordinal always describes the read
+// strip in loadTasksLocked — so a record's identity always describes the read
 // that produced it and never a value the file supplied. A hand-typed "ordinal"
-// is therefore overwritten rather than believed, which is the same rule the
-// health fields follow and for the same reason.
-func stampOrdinals(tasks []Task) []Task {
+// or "store_generation" is therefore overwritten rather than believed, which is
+// the rule the health fields follow and for the same reason.
+func stampRowIdentity(tasks []Task, raw []byte) []Task {
+	generation := storeGeneration(raw)
 	for i := range tasks {
 		tasks[i].Ordinal = i + 1
+		tasks[i].StoreGeneration = generation
 	}
 	return tasks
+}
+
+// storeGeneration tags one version of the store, so two reads can tell whether
+// they saw the same bytes.
+//
+// Truncated deliberately. This is an EQUALITY TAG for two reads taken seconds
+// apart, not a security primitive: the only question asked of it is "are these
+// the same file contents", and anyone who could aim a collision at it can edit
+// tasks.json directly and skip the trouble. Sixty-four bits puts an accidental
+// match between two specific stores at about one in 1.8e19, and keeps the tag
+// short enough to ride every record of every ListTasks response.
+func storeGeneration(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 // nowFn is the clock the read-time derivation reads. A package variable so tests
@@ -382,14 +429,14 @@ func loadTasksLocked(path string) ([]Task, error) {
 	for i := range tasks {
 		tasks[i].stripDerived()
 	}
-	// Numbered after the strip, not before it: stripDerived clears the ordinal
-	// along with the rest, and this path's records do not only go back to disk
-	// either. LoadTasksWithStableRepoBindingUpdates returns exactly this slice as
-	// its authoritative list, so leaving it unnumbered would hand a future caller
-	// a set of rows that all claim to be unidentified — the one shape
-	// ApplyLiveArming reads as "no row identity" and refuses to pair. Every read
-	// path returns numbered rows; only the write path carries none (#3680).
-	return stampOrdinals(tasks), nil
+	// Identified after the strip, not before it: stripDerived clears the row
+	// identity along with the rest, and this path's records do not only go back to
+	// disk either. LoadTasksWithStableRepoBindingUpdates returns exactly this
+	// slice as its authoritative list, so leaving it unstamped would hand a future
+	// caller a set of rows that all claim to be unidentified — the one shape
+	// ApplyLiveArming reads as "nothing to pair on" and refuses. Every read path
+	// returns identified rows; only the write path carries none (#3680).
+	return stampRowIdentity(tasks, migrated), nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {
@@ -415,9 +462,22 @@ func ensureTasksSchemaMigrated(path string) error {
 // caller is what makes "derived, never persisted" a property instead of a
 // convention.
 func saveTasks(tasks []Task) error {
+	_, err := writeTasks(tasks)
+	return err
+}
+
+// writeTasks is saveTasks, also reporting the generation of the bytes it wrote.
+//
+// Only the create path needs it, and it needs it for a reason worth stating: the
+// record AddTaskChecked hands back is published as EventTaskCreated, and a
+// generation is a property of the file as a whole, so the appended row cannot
+// know its own until the write that produces it has been marshalled. Reading it
+// off the write is exact and costs nothing; re-reading the file afterwards would
+// be a second read that a concurrent writer could make disagree.
+func writeTasks(tasks []Task) (string, error) {
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return "", err
 	}
 	stored := make([]Task, len(tasks))
 	copy(stored, tasks)
@@ -426,13 +486,16 @@ func saveTasks(tasks []Task) error {
 	}
 	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks: %w", err)
 	}
 	enveloped, err := marshalTasksEnvelope(data)
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks envelope: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks envelope: %w", err)
 	}
-	return config.AtomicWriteFile(path, enveloped, 0644)
+	if err := config.AtomicWriteFile(path, enveloped, 0644); err != nil {
+		return "", err
+	}
+	return storeGeneration(enveloped), nil
 }
 
 // AddTask appends a task with no declared actor, recording the create in the
@@ -514,7 +577,16 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		// the number lives only on the record handed back.
 		t.Ordinal = len(tasks) + 1
 		tasks = append(tasks, t)
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		// The other half of the identity, and it can only be taken from the write:
+		// a generation describes the whole file, so the appended row has none until
+		// the bytes exist. Stamped on the returned record only — saveTasks strips
+		// both halves, so neither reaches disk.
+		t.StoreGeneration = generation
+		return nil
 	})
 	if lockErr != nil {
 		return Task{}, lockErr
