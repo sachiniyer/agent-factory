@@ -3423,205 +3423,255 @@ test("tabs: create a shell tab, switch to it, see its distinct output, close it 
   await page.unroute("**/v1/CloseTab");
 });
 
-test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so there is a distinct tab to drag into a
-  // split (dragging the only tab onto itself just moves it — no split).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-
-  // A single pane so far — today's zero-config default.
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
-  // new right pane bound to the agent tab with its OWN live WS stream.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  // Two concurrent xterm instances now render side by side, each with per-pane chrome.
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes show live output. The new agent pane streams the ready marker over its
-  // own stream — identify it by that marker.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  // The other pane (the shell tab) is an independent live PTY — focus it and type, and
-  // its echo comes back over its own stream, proving both panes are live at once.
-  await shellPane.locator(".af-pane-host").click();
-  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
-  await page.keyboard.type("echo AF_SPLIT_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
-
-  // Close the agent pane via its × — the split collapses and the shell pane fills the
-  // whole area (one pane again), without closing the underlying tab.
-  await agentPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  // The tab list is unchanged — only the pane closed, not the underlying tab.
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2);
-
-  // Restore A to a single tab for the later create/kill/archive flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
-  // The regression: only tabs present at first render were drag sources; a tab created
-  // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
-  // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
-  // splits into two live panes — the drag wiring must cover tabs created after render.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
-  await expect(shellTab).toHaveClass(/af-tab-active/);
-
-  // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
-  // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
-  // would fire regardless), so assert it directly — a missing draggable is exactly the
-  // "the new tab isn't a drag source" framing of the bug.
-  await expect(shellTab).toHaveJSProperty("draggable", true);
-
-  // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
-  // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
-  await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
-  await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-
-  // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
-  // the new right pane bound to the shell tab with its OWN live WS stream.
-  await dragTabToPane(page, "Terminal", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
-  await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
-
-  // BOTH panes are live: the agent pane still streams the ready marker, and the other
-  // pane is the shell tab the freshly-created drag source bound. Type into the shell
-  // pane and its echo returns over its own stream — proving the split from the NEW tab
-  // is a real, independent PTY, not a dead pane.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
-  const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
-  const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
-  await expect(agentPane).toHaveCount(1);
-  await expect(shellPane).toHaveCount(1);
-  await shellPane.locator(".af-pane-host").click();
-  await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
-  await page.keyboard.press("Enter");
-  await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
-
-  // Collapse the split and restore A to a single tab for the later flows.
-  await shellPane.locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
-
-test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
-  // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
-  // bar), no dragend can fire on the now-detached source — the global "dragging" state
-  // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
-  // bar rebuild must reconcile-clear that state.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-
-  // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
-  // overlay — the exact on-screen state a drop/dragend would normally clear. The single
-  // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
-  await page.evaluate(() => {
-    const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
-    const pane = document.querySelector(".af-term-host .af-pane");
-    if (!tab || !pane) {
-      throw new Error("drag source or pane not found");
+/**
+ * The five split-pane flows below drive one shared roster — `SESSION_A` — and each ends
+ * by restoring it to a single tab "for the later flows". That tail is precisely what does
+ * NOT run when a test aborts mid-body, and #3663 is what that costs: a rebind race redded
+ * out :3531's setup, SESSION_A kept the Terminal tab it had just created, and the next
+ * test in the block — which asserts an ABSOLUTE count of 2 — then failed at 3. One race,
+ * two reds, the second pointing at the wrong subject (#1897). Playwright restarts the
+ * worker after a failure and hands the next test a fresh page, but the roster lives in
+ * the daemon, so the stray tab outlives that reset.
+ *
+ * The hook normalizes the roster regardless of outcome, so a failure costs one red that
+ * names its own cause. A describe-scoped afterEach rather than a `resetToAgentTab` at
+ * each entry, deliberately: an entry call only covers the test someone remembered to
+ * annotate, and this block is where the next split-pane flow will be written. The entry
+ * calls already in the file stay — asserting the state you need is still cheaper than
+ * inheriting it, and they read as each test's own precondition rather than as cleanup.
+ *
+ * NOT `mode: "serial"`. That is #2816's remedy for a different defect — a test consuming
+ * state it never established — and it would SKIP the rest of the block on the first
+ * failure, trading a misattributed red for lost coverage. These tests each do establish
+ * their own precondition; the gap is the state a FAILING one leaves behind.
+ */
+test.describe("split panes (SESSION_A roster)", () => {
+  test.afterEach(async ({}, testInfo) => {
+    // A test skipped because the seeded rail is unavailable (the #2276 beforeEach) still
+    // runs this hook, and there is no live app to normalize. Asserting against it would
+    // turn one honest diagnostic failure into a red for every test in the block.
+    if (realRailUnavailable !== "") {
+      return;
     }
-    const dt = new DataTransfer();
-    tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
-    const r = pane.getBoundingClientRect();
-    const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
-    pane.dispatchEvent(new DragEvent("dragenter", init));
-    pane.dispatchEvent(new DragEvent("dragover", init));
+    // Hook time is spent from the TEST's budget, so a flow that used most of its 60s
+    // would starve the cleanup and red out here instead of where it actually went wrong.
+    // Buy the cleanup its own headroom (the documented shape for a slow hook).
+    testInfo.setTimeout(testInfo.timeout + 60_000);
+
+    // Re-select A rather than assume the aborted test left it selected — re-selecting the
+    // session already showing is a supported no-op (#1855), so the healthy path pays one
+    // click and two settled assertions.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await resetToAgentTab(page);
+    // The layout follows the roster: layout.ts's validate() clamps every leaf into the
+    // surviving tab range and drops the duplicates it produces, so dropping to one tab
+    // collapses a stray split back to one pane. Assert that rather than assume it — a
+    // leftover split reds the next test's entry `toHaveCount(1)` on `.af-pane` exactly as
+    // surely as a stray tab reds its tab count.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
   });
-  // The drag is visibly in progress: body flag set, a drop overlay shown.
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
 
-  // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
-  // add another tab (a concurrent tab change would do the same).
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+  test("split panes (feat): drag a tab to a pane edge splits into two live panes; close collapses back", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so there is a distinct tab to drag into a
+    // split (dragging the only tab onto itself just moves it — no split).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
-  // visibility is gated on the now-cleared flag).
-  await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
-  await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
 
-  // Restore A to a single tab for the later flows.
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
-});
+    // A single pane so far — today's zero-config default.
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
 
-test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
-  // Attach to A (a single agent tab, so tab index 1+ does not exist).
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Drag the Agent tab (index 0) onto the RIGHT edge → the pane splits into two, the
+    // new right pane bound to the agent tab with its OWN live WS stream.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    // Two concurrent xterm instances now render side by side, each with per-pane chrome.
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
 
-  // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
-  // it against the live tab count and no-ops it — no split is created, so no pane can
-  // bind to a nonexistent tab and break its stream.
-  await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
-  // The one pane still shows the live agent output — it was never disturbed.
-  await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
-});
+    // BOTH panes show live output. The new agent pane streams the ready marker over its
+    // own stream — identify it by that marker.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    // The other pane (the shell tab) is an independent live PTY — focus it and type, and
+    // its echo comes back over its own stream, proving both panes are live at once.
+    await shellPane.locator(".af-pane-host").click();
+    await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+    await page.keyboard.type("echo AF_SPLIT_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_SPLIT_OK", { timeout: 15_000 });
 
-test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
-  // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
-  // This is the T-Rex reproduction: the index is valid, but the tab set changed since
-  // the drag began, so binding by index alone would attach the new pane to the WRONG
-  // live tab.
-  await row(page, SESSION_A).click();
-  await expect(page.locator(".af-main.af-main-term")).toBeVisible();
-  const tabbar = page.locator(".af-tabbar");
-  await createTerminalTab(page);
-  await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    // Close the agent pane via its × — the split collapses and the shell pane fills the
+    // whole area (one pane again), without closing the underlying tab.
+    await agentPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    // The tab list is unchanged — only the pane closed, not the underlying tab.
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2);
 
-  // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
-  // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
-  // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
-  // it must: the layout stays a single pane, no split bound to the wrong tab.
-  await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
-  await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // Restore A to a single tab for the later create/kill/archive flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 
-  // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
-  // proven here to show the cancel above was the stale check, not a broken drop path.
-  await dragTabToPane(page, "Agent", "right");
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+  test("split panes (feat): a FRESHLY-CREATED tab is a drag source too — drag the new tab splits (#1737 follow-up)", REAL_FIXTURE, async () => {
+    // The regression: only tabs present at first render were drag sources; a tab created
+    // AFTER load (a new terminal tab) could not be dragged into a split. Create a new
+    // terminal tab, then drag THAT tab (not an initial one) onto a pane edge and prove it
+    // splits into two live panes — the drag wiring must cover tabs created after render.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
 
-  // Clean up: collapse back to one pane and restore A to a single tab.
-  await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
-  await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
-  await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
-  await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    const shellTab = tabbar.locator(".af-tab", { hasText: "Terminal" });
+    await expect(shellTab).toHaveClass(/af-tab-active/);
+
+    // The freshly-created tab is a real HTML5 drag source: draggable is set on it just
+    // like an initial tab. A real mouse drag needs this attribute (a synthetic dispatch
+    // would fire regardless), so assert it directly — a missing draggable is exactly the
+    // "the new tab isn't a drag source" framing of the bug.
+    await expect(shellTab).toHaveJSProperty("draggable", true);
+
+    // Show the AGENT tab in the single pane, so dragging the new Terminal tab produces a
+    // split with two DISTINCT tabs (agent + the freshly-created shell), not a self-split.
+    await tabbar.locator(".af-tab", { hasText: "Agent" }).click();
+    await expect(page.locator(".af-tab.af-tab-active .af-tab-label")).toHaveText("Agent");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drag the NEWLY-CREATED Terminal tab (index 1) onto the RIGHT edge → the pane splits,
+    // the new right pane bound to the shell tab with its OWN live WS stream.
+    await dragTabToPane(page, "Terminal", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(2);
+    await expect(page.locator(".af-term-host .af-pane.af-pane-multi")).toHaveCount(2);
+
+    // BOTH panes are live: the agent pane still streams the ready marker, and the other
+    // pane is the shell tab the freshly-created drag source bound. Type into the shell
+    // pane and its echo returns over its own stream — proving the split from the NEW tab
+    // is a real, independent PTY, not a dead pane.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER, { timeout: 15_000 });
+    const agentPane = page.locator(".af-term-host .af-pane", { hasText: READY_MARKER });
+    const shellPane = page.locator(".af-term-host .af-pane", { hasNotText: READY_MARKER });
+    await expect(agentPane).toHaveCount(1);
+    await expect(shellPane).toHaveCount(1);
+    await shellPane.locator(".af-pane-host").click();
+    await page.keyboard.type("echo AF_NEWTAB_DRAG_OK");
+    await page.keyboard.press("Enter");
+    await expect(shellPane).toContainText("AF_NEWTAB_DRAG_OK", { timeout: 15_000 });
+
+    // Collapse the split and restore A to a single tab for the later flows.
+    await shellPane.locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): a bar rebuild that replaces a drag's source ends the drag cleanly — no stuck state (#1737 Greptile)", REAL_FIXTURE, async () => {
+    // If the source tab button is REPLACED mid-drag (a concurrent tab change rebuilds the
+    // bar), no dragend can fire on the now-detached source — the global "dragging" state
+    // would otherwise stick, leaving the pane hints + drop overlay on screen forever. The
+    // bar rebuild must reconcile-clear that state.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+
+    // Begin a real drag on the Terminal tab and drive a dragover so a pane shows its drop
+    // overlay — the exact on-screen state a drop/dragend would normally clear. The single
+    // shared DataTransfer carries the tab MIME, so split.ts recognises the drag.
+    await page.evaluate(() => {
+      const tab = [...document.querySelectorAll(".af-tabbar .af-tab")].find((t) => t.textContent?.includes("Terminal"));
+      const pane = document.querySelector(".af-term-host .af-pane");
+      if (!tab || !pane) {
+        throw new Error("drag source or pane not found");
+      }
+      const dt = new DataTransfer();
+      tab.dispatchEvent(new DragEvent("dragstart", { bubbles: true, cancelable: true, dataTransfer: dt }));
+      const r = pane.getBoundingClientRect();
+      const init = { bubbles: true, cancelable: true, dataTransfer: dt, clientX: r.right - 6, clientY: r.top + r.height / 2 };
+      pane.dispatchEvent(new DragEvent("dragenter", init));
+      pane.dispatchEvent(new DragEvent("dragover", init));
+    });
+    // The drag is visibly in progress: body flag set, a drop overlay shown.
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).toBeVisible();
+
+    // Force a bar rebuild that REPLACES the drag's source button, with NO dragend on it —
+    // add another tab (a concurrent tab change would do the same).
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(3, { timeout: 30_000 });
+
+    // The drag ended cleanly: no stuck flag, and the overlay is no longer shown (its
+    // visibility is gated on the now-cleared flag).
+    await expect(page.locator("body.af-dragging-tab")).toHaveCount(0);
+    await expect(page.locator(".af-term-host .af-drop-overlay.af-drop-show")).not.toBeVisible();
+
+    // Restore A to a single tab for the later flows.
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).first().locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
+
+  test("split panes (feat): an out-of-range dropped tab is ignored — no broken pane", REAL_FIXTURE, async () => {
+    // Attach to A (a single agent tab, so tab index 1+ does not exist).
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an out-of-range tab index (99) on the pane's edge. The drop handler validates
+    // it against the live tab count and no-ops it — no split is created, so no pane can
+    // bind to a nonexistent tab and break its stream.
+    await dropSnapshotOnPane(page, { index: 99, tabs: ["0:x"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+    // The one pane still shows the live agent output — it was never disturbed.
+    await expect(page.locator(".af-term-host")).toContainText(READY_MARKER);
+  });
+
+  test("split panes (feat): a mid-drag tab-set change cancels the drop — no misbinding (#1738 repro)", REAL_FIXTURE, async () => {
+    // Attach to A and give it a second tab, so a drop index of 1 is IN RANGE (2 tabs).
+    // This is the T-Rex reproduction: the index is valid, but the tab set changed since
+    // the drag began, so binding by index alone would attach the new pane to the WRONG
+    // live tab.
+    await row(page, SESSION_A).click();
+    await expect(page.locator(".af-main.af-main-term")).toBeVisible();
+    const tabbar = page.locator(".af-tabbar");
+    await createTerminalTab(page);
+    await expect(tabbar.locator(".af-tab")).toHaveCount(2, { timeout: 30_000 });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+
+    // Drop an IN-RANGE index (1) whose drag-time snapshot (2 entries — count matches the
+    // live 2 tabs, so neither the range nor a count check would catch it) does NOT match
+    // the live tab identities. Only the snapshot-vs-live comparison can reject this, and
+    // it must: the layout stays a single pane, no split bound to the wrong tab.
+    await dropSnapshotOnPane(page, { index: 1, tabs: ["0:stale-agent", "1:stale-shell"] });
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1);
+    await expect(page.locator(".af-term-host .xterm")).toHaveCount(1);
+
+    // A well-formed drag with the LIVE snapshot still splits (the happy path is intact) —
+    // proven here to show the cancel above was the stale check, not a broken drop path.
+    await dragTabToPane(page, "Agent", "right");
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2, { timeout: 15_000 });
+
+    // Clean up: collapse back to one pane and restore A to a single tab.
+    await page.locator(".af-term-host .af-pane", { hasText: READY_MARKER }).locator(".af-pane-close").click();
+    await expect(page.locator(".af-term-host .af-pane")).toHaveCount(1, { timeout: 15_000 });
+    await tabbar.locator(".af-tab", { hasText: "Terminal" }).locator(".af-tab-close").click();
+    await expect(tabbar.locator(".af-tab")).toHaveCount(1, { timeout: 30_000 });
+  });
 });
 
 test("split panes (#1901): dragging the ACTIVE tab splits and opens a DIFFERENT tab beside it", REAL_FIXTURE, async () => {
