@@ -2268,6 +2268,49 @@ test("a commit link this PR never had does not place a finding", async () => {
   assert.equal(stale.shouldMerge, true, `blocked on: ${stale.reasons.join("; ")}`);
 });
 
+test("a truncated commit list says so in the blocker", async () => {
+  // Codex P2 on #3676: GitHub serves at most 250 commits from pulls.listCommits
+  // however you paginate it, so on a longer PR a permalink to an earlier commit
+  // cannot be checked. The classification stays fail-closed — the artifact still
+  // blocks — but the reason has to SAY why, or the maintainer reads "names no
+  // commit" about an artifact that plainly names one.
+  const foreign = "9f2c1a4e77d0b3856ac21e0f4b9d6c8a13e57f20";
+  const citing = codexIssueCommentFinding(HEAD_SHA, {
+    ref: foreign,
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  // 250 distinct commits, none of them the linked one: the cap, exactly.
+  const capped = Array.from({ length: 249 }, (_, index) =>
+    `${index.toString(16).padStart(40, "0")}`,
+  ).concat(HEAD_SHA);
+
+  const truncated = await evaluateGate({
+    prCommits: capped,
+    issueComments: [citing, summary],
+  });
+  assert.equal(truncated.shouldMerge, false, "an unconfirmable link still blocks");
+  assert.ok(
+    truncated.reasons.some((reason) => reason.includes("commit list is truncated")),
+    `got: ${truncated.reasons.join("; ")}`,
+  );
+
+  // One commit shorter, the list is complete and the reason does not claim
+  // otherwise — the message must not cry truncation on every PR.
+  const complete = await evaluateGate({
+    prCommits: capped.slice(1),
+    issueComments: [citing, summary],
+  });
+  assert.equal(complete.shouldMerge, false);
+  assert.ok(
+    !complete.reasons.some((reason) => reason.includes("commit list is truncated")),
+    `got: ${complete.reasons.join("; ")}`,
+  );
+});
+
 test("an unclassifiable finding clears only by an answer that names it", async () => {
   // The block has to terminate, and nothing mechanical can end this one: no push
   // changes the fact that the artifact names no commit, and there is no thread to

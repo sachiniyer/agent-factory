@@ -101,6 +101,9 @@ const CODEX_SUMMARY_ROW_TIME_RE = /<relative-time[^>]*\bdatetime="([^"]+)"/i;
 // lookahead keeps a longer hex run from matching its first 40 characters.
 const CODEX_BODY_COMMIT_RE =
   /\/(?:blob|blame|commit|commits|raw|tree)\/([0-9a-f]{40})(?![0-9a-f])/gi;
+// What GitHub will serve from pulls.listCommits, however you paginate it.
+// Reaching it means the list is a prefix of the PR's history, not the history.
+const PR_COMMIT_LIST_CAP = 250;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
@@ -2877,26 +2880,34 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // else's retention policy is not a thing to gate merges on. Measure it first;
   // until then one acknowledgement is the cost, on a PR that has both been
   // rebased and carries a finding no head-bound artifact answers.
-  const prCommitShas =
+  const prCommits =
     findingCandidates.length === 0
-      ? new Set()
-      : new Set(
-          (
-            await retryRead(
-              `could not read commits for PR #${number}`,
-              () =>
-                github.paginate(github.rest.pulls.listCommits, {
-                  owner,
-                  repo,
-                  pull_number: number,
-                  per_page: 100,
-                }),
-              subject,
-            )
-          )
-            .map((commit) => String(commit.sha || "").toLowerCase())
-            .filter(Boolean),
+      ? []
+      : await retryRead(
+          `could not read commits for PR #${number}`,
+          () =>
+            github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: number,
+              per_page: 100,
+            }),
+          subject,
         );
+  const prCommitShas = new Set(
+    prCommits.map((commit) => String(commit.sha || "").toLowerCase()).filter(Boolean),
+  );
+  // GitHub serves at most 250 commits from this endpoint however you paginate
+  // it, so on a longer PR the list is a prefix of the history rather than the
+  // history (Codex P2 on #3676). The classification is unchanged — a link it
+  // cannot confirm still blocks, which is the fail-closed side — but the reason
+  // has to SAY so, or the maintainer reads "names no commit" about an artifact
+  // that plainly names one and has no way to tell why. A truncated list needs a
+  // PR longer than this repo's conventions allow; if that stops being true, the
+  // fix is range traversal from the merge base, not ancestry, which would let a
+  // link to a pre-branch master commit place the artifact and reopen the hole
+  // closed one commit earlier.
+  const prCommitsTruncated = prCommits.length >= PR_COMMIT_LIST_CAP;
   const unboundFindingArtifacts = findingCandidates.filter((artifact) => {
     if ([...parseBodyCommits(artifact.body)].some((commit) => prCommitShas.has(commit))) {
       return false;
@@ -2936,7 +2947,11 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     const unboundReason =
       `${unboundFindingArtifacts.length} Codex artifact(s) carrying a P0-P3 finding name no ` +
       "commit, so the gate cannot tell which head they are about" +
-      (named.length > 0 ? `: ${named.join(", ")}` : "");
+      (named.length > 0 ? `: ${named.join(", ")}` : "") +
+      (prCommitsTruncated
+        ? `; this PR has more than ${PR_COMMIT_LIST_CAP} commits, so its commit list is truncated ` +
+          "and a permalink to an earlier commit could not be checked"
+        : "");
     reasons.push(unboundReason);
     findingBlockers.push({
       reason: unboundReason,
