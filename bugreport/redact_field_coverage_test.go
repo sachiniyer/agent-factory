@@ -88,6 +88,7 @@ var verbatimInstanceFields = map[string]string{
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",
 
+	"ArchiveReport.RetainedTrees[].Skipped[].Reason":                           "af-authored skip diagnostic (\"permission denied\"), not a user-chosen name; redact.go's stated policy keeps it for triage while blanking the Path beside it",
 	"ArchiveReport.RetainedTrees[].Path":                                       "the retained tree's own path is the system worktree path, which scrub collapses via $HOME — the policy redact.go states for this field",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.AlternatePath":     "absolute alternate worktree path; scrub collapses $HOME and the username",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
@@ -108,15 +109,13 @@ var verbatimInstanceFields = map[string]string{
 // Do not add an entry here to make a failing build green. Add one only for a
 // leak that predates the guard and has an issue.
 var knownUnredactedFields = map[string]string{
-	"ArchiveReport.RetainedTrees[].PathBytes": "#3588 — JSON base64-encodes []byte, so scrub sees base64 and the raw absolute path survives; the sibling Skipped[].PathBytes is already cleared for exactly this reason",
 	"Tabs[].Name":              "#3588 — user-chosen tab name; not a title (scrubSessionTitles cannot know it) and not a path",
 	"PendingTabs[].Name":       "#3588 — same user-chosen tab name under the staging roster",
 	"Account":                  "#3588 — user-chosen credential-account label (--account work); nothing in the pipeline touches it",
 	"LostRestoreFailure.Error": "#3588 — af-authored diagnostic; embedded paths collapse via scrub, but an embedded session title does not",
 	"Program":                  "#3588 — may be an arbitrary command line; redactTabData redacts the TabData.Command analogue wholesale, so leaving this verbatim is an inconsistency, not a decision",
 
-	"ArchiveWarning": "#3554 owns this — the rendered incomplete-archive warning embeds skipped file names",
-	"ArchiveReport.RetainedTrees[].Skipped[].Reason": "#3554 owns this — skip reason rendered alongside the file names it is finishing",
+	"ArchiveWarning": "#3588 — the bounded warning projection embeds the user-chosen skipped file names. #3554 (74e3b06f) closed the LOG path for exactly this text, but scrubArchiveWarningPaths is called only from scrubLog; redactInstancesJSON applies plain scrub, so the FIELD still carries them into the JSON section",
 }
 
 // TestRedactInstanceDataCoversEveryStringField is the #3548 guard. Two fields
