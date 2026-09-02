@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -127,9 +128,12 @@ func TestAutomationsOverdueSurvivesTheNarrowRail(t *testing.T) {
 
 // TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum: the compact mode
 // has no rows, so this one line is the entire section — and it is also the
-// narrowest thing the rail ever draws. At 22 columns the section label itself
-// does not fit; the count has to survive where it does not, or the degraded rail
-// shows no warning at all.
+// narrowest thing the rail ever draws. At 22 columns #3641's ladder has shed the
+// noun and the secondary number; the count that says something is WRONG has to
+// be what survives that last rung, or the degraded rail shows no warning at all.
+//
+// It survives as the row glyph rather than the word, and that is a width
+// decision rather than a style one — see TestAutomationsCompactPrimaryFitsAtAnyCount.
 func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 	a := newTestAutomations([]task.Task{overdueStripTask(), stripTasks()[1]})
 	a.SetRect(layout.Rect{W: 22, H: 1})
@@ -137,8 +141,37 @@ func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "compact strip at the rail minimum")
-	assert.Contains(t, out, "1 overdue", "the count outranks the section label here:\n%s", out)
-	assert.Contains(t, out, "manage", "and the manager key is still the last thing cut")
+	assert.Contains(t, out, "[!] 1", "the warning count outranks the total here:\n%s", out)
+	assert.Contains(t, out, "m manage", "and the manager key is still the last thing cut")
+}
+
+// TestAutomationsCompactPrimaryFitsAtAnyCount: #3641's last rung exists to keep
+// the manage affordance from being clipped at the 22-column rail minimum, and a
+// three-digit count spelled out as "100 overdue" needs 12 of the 11 cells that
+// rung has — measured, it fell straight through to the clip and truncated the
+// affordance, which is the contract that rung protects. The glyph form fits at
+// any count, and a spelling chosen by digit count would be no better: rebinding
+// the manager key changes the budget.
+func TestAutomationsCompactPrimaryFitsAtAnyCount(t *testing.T) {
+	last := time.Date(2026, time.June, 14, 3, 0, 0, 0, time.UTC)
+	for _, overdue := range []int{1, 99, 150} {
+		var tasks []task.Task
+		for i := 0; i < overdue; i++ {
+			tasks = append(tasks, task.Task{
+				ID: fmt.Sprintf("t%d", i), Name: "x", CronExpr: "0 3 * * *", Enabled: true,
+				LastRunAt: &last, Overdue: true, MissedOccurrences: 5,
+			})
+		}
+		a := newTestAutomations(tasks)
+		a.SetRect(layout.Rect{W: 22, H: 1})
+		a.SetCompact(true)
+
+		out := a.View()
+		assert.Contains(t, out, fmt.Sprintf("[!] %d", overdue),
+			"the warning count survives at %d overdue:\n%s", overdue, out)
+		assert.Contains(t, out, "m manage",
+			"and the affordance is still the last thing cut at %d overdue:\n%s", overdue, out)
+	}
 }
 
 // TestAutomationsMarksACappedMissedCount: the derivation saturates its walk, so
