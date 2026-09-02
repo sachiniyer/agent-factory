@@ -315,6 +315,13 @@ var (
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
 
+// isTextFree reports a reviewed type this walk plants NOTHING in, so nothing
+// json may drop from it can be hiding a marker. time.Time is the only one:
+// every other reviewed type is descended into and planted throughout.
+func isTextFree(t reflect.Type) bool {
+	return baseType(t) == reflect.TypeOf(time.Time{})
+}
+
 // baseType strips pointers so a reviewed value type is recognised through one.
 func baseType(t reflect.Type) reflect.Type {
 	for t.Kind() == reflect.Ptr {
@@ -629,11 +636,15 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int, repeated 
 			// marker zero even though real values are not — json would then
 			// drop the marker before the leak search and the guard would pass
 			// over a field that serializes in production (#3592 review).
-			// Not a concern for a reviewed self-rendering type: this walk
-			// plants no marker in one (time.Time is skipped as text-free), so
-			// there is nothing for omitzero to drop.
-			_, reviewedField := reviewedMarshalerTypes[baseType(field.Type)]
-			if !reviewedField && hasJSONOption(field, "omitzero") && definesIsZero(field.Type) {
+			//
+			// Only a TEXT-FREE type is exempt, which today means time.Time and
+			// nothing else. An earlier revision exempted every reviewed
+			// marshaler type on the premise that the walk plants no marker in
+			// one. That is false for all of them but time.Time: fill descends
+			// into a reviewed struct and plants throughout it, so an omitzero
+			// field of such a type could have every one of those markers dropped
+			// by json while this guard read them as redacted (#3592 review).
+			if !isTextFree(field.Type) && hasJSONOption(field, "omitzero") && definesIsZero(field.Type) {
 				f.unsupported = append(f.unsupported,
 					fmt.Sprintf("%s (omitzero with a custom %s.IsZero may drop the marker)",
 						join(path, field.Name), field.Type.String()))

@@ -373,6 +373,49 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 	}
 }
 
+// guardMarshalerStates are the scalar values every reviewed marshaler is read
+// at, one fixture per state. They span the enum ranges rather than a couple of
+// arbitrary numbers: production sets InstanceData's hidden tab projection for
+// LiveArchived / Archived specifically, and a marshaler gated on those would
+// stay silent in any run that happened to miss them (#3592 review).
+var guardMarshalerStates = []int{1, 2, 3, 4, 5, 6, 7, 8}
+
+// marshalerFixture is one planted record and what its marshaler made of it.
+type marshalerFixture struct {
+	custom   []byte
+	baseline []byte
+	// unwalked are the forms planted into fields encoding/json would never emit
+	// on its own — unexported, and exported-but-`json:"-"`. None of them may
+	// appear in the custom output.
+	unwalked []string
+}
+
+// newMarshalerFixture builds a FRESH record for one state and marshals it.
+//
+// Fresh every time on purpose. A marshaler that mutates what it renders — hidden
+// state, or a shared backing array — taints the value for every later reading,
+// and the state that would have leaked then sees only what the previous call
+// left behind (#3592 review). The filler is shared across fixtures so the marker
+// sequence keeps advancing, which is what lets two fixtures of the SAME state be
+// compared for independence below.
+func newMarshalerFixture(t *testing.T, filler *sentinelFiller, typ reflect.Type, state int) marshalerFixture {
+	t.Helper()
+	value := reflect.New(typ).Elem()
+	filler.fill(value, "", 0, false)
+	unwalked := plantUnwalkedState(filler, value)
+	if state >= 0 {
+		seedScalars(value, state)
+	}
+	// The baseline is captured FIRST. The twin shares the planted slices and
+	// maps, so a value-receiver marshaler that rewrites what it renders would
+	// otherwise be compared against a baseline it had already rewritten.
+	return marshalerFixture{
+		baseline: marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value)),
+		custom:   marshalReviewed(t, typ, value),
+		unwalked: unwalked,
+	}
+}
+
 // TestGuardReviewedMarshalersMatchTheirFieldSet turns every entry of
 // reviewedMarshalerTypes from a point-in-time reading into a checked contract.
 //
@@ -380,14 +423,23 @@ func TestGuardRecordsMapKeysAsJSONEmitsThem(t *testing.T) {
 // walk plants into, plus the extras it declares. Nothing tied that claim to the
 // code. A marshaler that later base64-encodes a field keeps its exemption while
 // the walk records evidence the document no longer shows; one that starts
-// emitting text out of an UNEXPORTED field — which the walk can never plant into
-// — keeps it while shipping something the guard has never seen (#3592 review).
+// emitting text out of state the walk cannot reach keeps it while shipping
+// something the guard has never seen (#3592 review).
 //
-// So the claim is executed, by DIFF. A plain twin of the type is built with
-// reflect.StructOf: the same exported fields, same tags, no method set to
-// intercept — so encoding/json itself produces the baseline the custom output is
-// compared against. Every member must match value for value, and any member the
-// marshaler adds must be declared in the entry.
+// So the claim is executed, three ways:
+//
+//   - a DIFF against a plain twin built with reflect.StructOf — the same
+//     exported fields, same tags, no method set — so encoding/json itself
+//     produces the baseline. Every shared member must match value for value, an
+//     added member must be declared, and a dropped one fails.
+//   - the same reading repeated across guardMarshalerStates, on a fresh fixture
+//     each time, because a marshaler can be gated on a scalar the walk leaves at
+//     zero.
+//   - an INDEPENDENCE check: two fixtures of the same state differ only in the
+//     text planted in them, so a declared extra derived from any of that text
+//     differs between them. That catches a derivation a substring search cannot
+//     — base64 of a planted name, a hash of it — which is exactly what "never
+//     from user text" has to mean.
 func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 	for typ, entry := range reviewedMarshalerTypes {
 		t.Run(typ.String(), func(t *testing.T) {
@@ -395,12 +447,12 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				// The one entry exempt as TEXT-FREE rather than field-faithful:
 				// it renders as a quoted timestamp, not an object of its fields,
 				// and the walk plants nothing in it. There is no field-set claim
-				// to diff.
+				// to execute.
 				return
 			}
-			value := reflect.New(typ).Elem()
 			filler := &sentinelFiller{}
-			filler.fill(value, "", 0, false)
+			probe := reflect.New(typ).Elem()
+			filler.fill(probe, "", 0, false)
 			if len(filler.unsupported) > 0 || len(filler.tooDeep) > 0 {
 				t.Fatalf("the walk could not plant %s: unsupported=%v tooDeep=%v",
 					typ, filler.unsupported, filler.tooDeep)
@@ -409,49 +461,28 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				t.Fatalf("planted nothing in %s, so this contract check would pass vacuously", typ)
 			}
 
-			// Hidden state, populated BEFORE anything is marshalled. Everything
-			// below compares what the walk could plant; a marshaler that emits
-			// an unexported field only when it is set matches a zero-valued
-			// baseline exactly while a real record leaks. session.InstanceData
-			// carries five unexported fields, two of them
-			// (snapshotStorageTabs, runtimeCleanup) holding user text
-			// (#3592 review).
-			hiddenAt := len(filler.planted)
-			hiddenForms := plantHiddenState(filler, value)
-
-			// The baseline is captured FIRST. The twin shares the planted
-			// slices and maps, so a value-receiver marshaler that rewrites what
-			// it renders — encoding a field in place before emitting it — would
-			// otherwise be compared against a baseline it had already rewritten,
-			// and the two would agree (#3592 review).
-			//
-			// The twin copies the EXPORTED fields only, so the hidden state just
-			// planted cannot reach it — which is what makes hidden output show
-			// up below as an added member rather than a matching one.
-			baseline := marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value))
-			custom := marshalReviewed(t, typ, value)
-
-			customMembers := decodeMembers(t, typ.String()+".MarshalJSON", custom)
-			baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), baseline)
-
 			var added, changed, dropped []string
+			note := func(into *[]string, format string, args ...any) {
+				*into = append(*into, fmt.Sprintf(format, args...))
+			}
+
+			// The field-set diff, read in the state the walk leaves behind —
+			// which is the state the declared extra VALUES describe.
+			zero := newMarshalerFixture(t, filler, typ, -1)
+			customMembers := decodeMembers(t, typ.String()+".MarshalJSON", zero.custom)
+			baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), zero.baseline)
 			for name, got := range customMembers {
 				want, isField := baselineMembers[name]
 				switch {
 				case !isField:
-					// A declared extra is checked by VALUE, not just by name: a
-					// member that keeps its name and starts carrying user text
-					// satisfies a name-only declaration while the reason for the
-					// exemption stops being true (#3592 review).
 					declared, ok := entry.extra[name]
 					if !ok {
-						added = append(added, fmt.Sprintf("%s = %s", name, got))
+						note(&added, "%s = %s", name, got)
 					} else if string(got) != declared {
-						changed = append(changed,
-							fmt.Sprintf("%s: emits %s, the entry declares %s", name, got, declared))
+						note(&changed, "%s: emits %s, the entry declares %s", name, got, declared)
 					}
 				case string(got) != string(want):
-					changed = append(changed, fmt.Sprintf("%s: emits %s, the field holds %s", name, got, want))
+					note(&changed, "%s: emits %s, the field holds %s", name, got, want)
 				}
 			}
 			for name := range baselineMembers {
@@ -465,54 +496,39 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				}
 			}
 
-			for _, form := range hiddenForms {
-				if strings.Contains(string(custom), form) {
-					added = append(added, fmt.Sprintf("text planted in an UNEXPORTED field: %s", form))
+			// Every state, on fresh fixtures, twice over.
+			for _, state := range append([]int{-1}, guardMarshalerStates...) {
+				first := zero
+				if state >= 0 {
+					first = newMarshalerFixture(t, filler, typ, state)
 				}
-			}
+				second := newMarshalerFixture(t, filler, typ, state)
 
-			// Everything above reads ONE state: every scalar at zero, because
-			// that is what the walk leaves. Two claims survive only if other
-			// states are read too — a marshaler that emits its hidden state
-			// while a flag is set (session.InstanceData has exactly such a
-			// flag, snapshotTabsProjected, which production sets alongside
-			// snapshotStorageTabs), and one that reaches for user text only for
-			// a particular status. Both match a zero fixture exactly
-			// (#3592 review).
-			//
-			// So the scalars are varied and the output re-read. What is asserted
-			// there is the exemption's own words — "never from user text" — not
-			// the enum vocabulary, which session/state_names_test.go owns: a
-			// declared extra must carry no planted marker in ANY state, and no
-			// hidden marker may appear.
-			for _, state := range []int{1, 7} {
-				seedScalars(value, state)
-				varied := marshalReviewed(t, typ, value)
-				variedMembers := decodeMembers(t, typ.String()+".MarshalJSON", varied)
-				for name := range entry.extra {
-					got := string(variedMembers[name])
-					for _, planted := range filler.planted[:hiddenAt] {
-						if strings.Contains(got, planted.forms[0]) {
-							changed = append(changed, fmt.Sprintf(
-								"%s carries %s from %s once the scalars are set (state %d) — the entry "+
-									"claims it is derived from the enum beside it, never from user text",
-								name, got, planted.path, state))
+				for _, fixture := range []marshalerFixture{first, second} {
+					for _, form := range fixture.unwalked {
+						if strings.Contains(string(fixture.custom), form) {
+							note(&added, "state %d: text planted where encoding/json would never "+
+								"reach it (an unexported or json:\"-\" field): %s", state, form)
 						}
 					}
 				}
-				for _, form := range hiddenForms {
-					if strings.Contains(string(varied), form) {
-						added = append(added, fmt.Sprintf(
-							"text planted in an UNEXPORTED field, once the scalars are set (state %d): %s",
-							state, form))
+
+				firstMembers := decodeMembers(t, typ.String()+".MarshalJSON", first.custom)
+				secondMembers := decodeMembers(t, typ.String()+".MarshalJSON", second.custom)
+				for name := range entry.extra {
+					if string(firstMembers[name]) != string(secondMembers[name]) {
+						note(&changed, "state %d: %s emits %s for one record and %s for another "+
+							"whose only difference is the text planted in it — the entry claims it "+
+							"is derived from the enum beside it, never from user text",
+							state, name, firstMembers[name], secondMembers[name])
 					}
 				}
 			}
 
 			for label, found := range map[string][]string{
-				"emits member(s) the entry does not declare":            added,
-				"renders field(s) differently from the value they hold": changed,
-				"no longer emits member(s)":                             dropped,
+				"emits member(s) the entry does not declare":        added,
+				"renders member(s) differently from what it claims": changed,
+				"no longer emits member(s)":                         dropped,
 			} {
 				if len(found) == 0 {
 					continue
@@ -558,27 +574,33 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 	return twin
 }
 
-// plantHiddenState plants markers into the UNEXPORTED fields of value and
-// returns the forms to search the marshaler's output for. reflect will not set
-// them, so it reaches each one through the pointer its address gives — the only
-// way to ask what a marshaler does with state this walk cannot otherwise
-// populate.
+// plantUnwalkedState plants markers into every field encoding/json would never
+// emit on its own — UNEXPORTED ones, which reflect will not set and which it
+// reaches through the pointer their address gives, and exported ones tagged
+// `json:"-"`, which mustVisit skips.
 //
-// It runs AFTER the exported checks, on the same filler, so its markers continue
+// Both are invisible to the plain twin, so anything the custom marshaler makes
+// of them shows up as an added member rather than a matching one. The `json:"-"`
+// half matters because that tag constrains the DEFAULT encoder and says nothing
+// about a custom parent: a sensitive field can be tagged out of the ordinary
+// document and still be exposed under another member name (#3592 review).
+//
+// It runs after the exported checks, on the same filler, so its markers continue
 // the same sequence and cannot collide with theirs; whatever it cannot plant is
-// not a hole in the guard, because hidden state is exactly what the marshaler
-// exemption is supposed to forbid emitting at all. Its own unsupported reports
-// are ignored for the same reason — they are read before this runs.
-func plantHiddenState(filler *sentinelFiller, value reflect.Value) []string {
+// not a hole in the guard, because this state is exactly what the marshaler
+// exemption is supposed to forbid emitting at all.
+func plantUnwalkedState(filler *sentinelFiller, value reflect.Value) []string {
 	first := len(filler.planted)
 	typ := value.Type()
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		if field.PkgPath == "" {
-			continue
+		switch {
+		case field.PkgPath != "":
+			hidden := value.Field(i)
+			filler.fill(reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem(), field.Name, 0, false)
+		case field.Tag.Get("json") == "-":
+			filler.fill(value.Field(i), field.Name, 0, false)
 		}
-		hidden := value.Field(i)
-		filler.fill(reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem(), field.Name, 0, false)
 	}
 	var forms []string
 	for _, planted := range filler.planted[first:] {
