@@ -887,3 +887,154 @@ func TestDockerAccount_RefusesEveryMountInstallingOption(t *testing.T) {
 		})
 	}
 }
+
+// TestDockerAccount_RejectsProtectedDeviceTargets covers --device, whose value
+// is host:container[:permissions] — a container path the repository chooses,
+// the same shape -v has. Docker creates the node at that path, and under af's
+// account bind mount the node is written THROUGH to the operator's registered
+// account directory on the host, root-owned and outliving the container
+// (#3521).
+//
+// #3403 recorded --device as "not a vector" and that reading was too narrow: it
+// tested a container path that already EXISTS, which Docker leaves intact. A
+// path that does not exist yet is created, and `.HostConfig.Devices` records it
+// while `.Mounts` stays empty — the column the earlier classifier never read.
+func TestDockerAccount_RejectsProtectedDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "account subdirectory", args: []string{"--device", "/dev/zero:/af-account/.config/planted"}},
+		{name: "account root", args: []string{"--device", "/dev/zero:/af-account"}},
+		{name: "runtime home subdirectory", args: []string{"--device", "/dev/zero:/af-home/.config/planted"}},
+		{name: "inline spelling", args: []string{"--device=/dev/zero:/af-account/.config/planted"}},
+		{name: "with permissions", args: []string{"--device", "/dev/zero:/af-account/.config/planted:rwm"}},
+		{name: "inline spelling on the runtime home", args: []string{"--device=/dev/zero:/af-home:rwm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a --device wrote a node into the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "--device")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsHarmlessDeviceTargets is the over-refusal boundary
+// #3398 drew for /af-account-cache, held for --device: passing a real device
+// through is ordinary configuration, and refusing the whole option would break
+// GPU, FUSE and audio passthrough for every account-scoped session while
+// buying nothing the path check does not already give.
+//
+// Measured on Docker 29.4.0, reading `.HostConfig.Devices`: each row below
+// resolves to the container path shown, and none of them is under the boundary.
+func TestDockerAccount_AllowsHarmlessDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "host path only", args: []string{"--device", "/dev/fuse"}},                          // -> /dev/fuse
+		{name: "explicit container path", args: []string{"--device", "/dev/nvidia0:/dev/nvidia0"}}, // -> /dev/nvidia0
+		{name: "permissions in the second field", args: []string{"--device", "/dev/zero:rwm"}},     // -> /dev/zero
+		{name: "similarly named path", args: []string{"--device", "/dev/sda:/af-account-cache/disk"}},
+		{name: "another similarly named path", args: []string{"--device", "/dev/sda:/af-accountant/disk"}},
+		{name: "inline spelling", args: []string{"--device=/dev/snd"}},
+		// pflag reads a single dash as a shorthand cluster, so `-device X` is
+		// `-d -e vice` and X becomes the IMAGE — measured: Docker fails with
+		// "invalid reference format" and installs no device at all.
+		{name: "single dash is not the option", args: []string{"-device", "/dev/zero:/af-account/.config/planted"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless --device was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_DeviceScanDoesNotSkipALaterMount pins that consuming
+// --device's value does not step over what follows it, the same trap #3402's
+// cluster scan had to avoid.
+func TestDockerAccount_DeviceScanDoesNotSkipALaterMount(t *testing.T) {
+	tests := [][]string{
+		{"--device", "/dev/fuse", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"--device", "/dev/fuse", "--mount", `type=bind,src=/tmp/other,"DST=/af-account/.config"`},
+		{"--device=/dev/fuse", "-v", "/tmp/other:/af-home"},
+		{"--device", "/dev/fuse", "-e", "CODEX_API_KEY=repo-identity"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"a guarded option after --device escaped validation: %v", args)
+		})
+	}
+}
+
+// TestDockerDeviceMode_MatchesDockersMask pins the predicate that tells a
+// permission mask from a container path. Docker accepts any non-empty
+// combination of r, w and m with no repeats, in any order; anything else is
+// read as a path and must then be absolute (measured on 29.4.0: `rwmm` and `x`
+// both fail with "is not an absolute path").
+func TestDockerDeviceMode_MatchesDockersMask(t *testing.T) {
+	for _, mask := range []string{"r", "w", "m", "rw", "rm", "wm", "rwm", "mrw", "wr"} {
+		require.Truef(t, dockerDeviceMode(mask), "%q is a permission mask to Docker", mask)
+	}
+	// Repeats are masks HERE by choice, not by Docker's behaviour: 29.4.0
+	// refuses `--device /dev/zero:rr` outright ("rr is not an absolute path")
+	// because its validator deletes each letter as it is seen. Reading them as
+	// a mask keeps the effective target on the HOST field, which is the
+	// fail-closed side if any build honours the `^[rwm]{1,3}$` its regexp
+	// advertises, and it costs nothing: a container target must be absolute, so
+	// a bare `rr` is never a legitimate one.
+	for _, repeat := range []string{"rr", "rww", "mmm", "wrr"} {
+		require.Truef(t, dockerDeviceMode(repeat), "%q must be read as a mask so the host path stays the target", repeat)
+	}
+	for _, notMask := range []string{"", "rwmm", "rrrr", "x", "rwx", "/dev/zero", "/af-account", "rwm/"} {
+		require.Falsef(t, dockerDeviceMode(notMask), "%q is not a permission mask to Docker", notMask)
+	}
+}
+
+// TestDockerAccount_ChecksTheEffectiveDeviceTarget checks the container path
+// Docker actually creates the node at, rather than every ':' field. The
+// host-side field is a path on the HOST and never where the node lands, so
+// checking it refused valid mappings such as
+// `--device /af-account/devices/fuse:/dev/fuse:rwm`, whose node is created at
+// /dev/fuse — outside the boundary entirely.
+//
+// The target is not simply "field 2": Docker reads a two-field value whose
+// second field is a permission mask as host-only, leaving the container path
+// equal to the host path. Every row's expectation below is what
+// `.HostConfig.Devices[].PathInContainer` reported on Docker 29.4.0.
+func TestDockerAccount_ChecksTheEffectiveDeviceTarget(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		refused bool
+	}{
+		{name: "host side under the boundary, container path outside", value: "/af-account/devices/fuse:/dev/fuse:rwm"},
+		{name: "host side under the runtime home", value: "/af-home/devices/snd:/dev/snd"},
+		{name: "mask keeps the host path as the target", value: "/dev/zero:rwm"},
+		{name: "short mask", value: "/dev/zero:r"},
+		{name: "reordered mask", value: "/dev/zero:mrw"},
+		{name: "container path ending in a mask-like segment", value: "/dev/zero:/af-account/rwm", refused: true},
+		{name: "container path with a mask third field", value: "/dev/zero:/af-account/x:r", refused: true},
+		{name: "container path under the runtime home", value: "/dev/zero:/af-home/x", refused: true},
+		{name: "single field naming the boundary", value: "/af-account/planted", refused: true},
+		// The mask reading keeps the HOST field as the target, so a host device
+		// under the boundary is refused rather than validated as the harmless
+		// relative string "rr". Docker 29.4.0 refuses this value outright, so
+		// nothing is installed either way — af simply does not depend on that.
+		{name: "repeated mask over a host path under the boundary", value: "/af-account/dev/zero:rr", refused: true},
+		{name: "repeated mask over a harmless host path", value: "/dev/zero:rr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs([]string{"--device", tt.value}, "codex")
+			if tt.refused {
+				require.Errorf(t, err, "a device node landed inside the account boundary: --device %s", tt.value)
+				require.Contains(t, err.Error(), "--device")
+				return
+			}
+			require.NoErrorf(t, err, "a device Docker creates outside the boundary was refused: --device %s", tt.value)
+		})
+	}
+}

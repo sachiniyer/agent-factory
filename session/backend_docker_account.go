@@ -137,6 +137,71 @@ func dockerShorthandValue(arg string, pos int, args []string, index int) (string
 	return "", false
 }
 
+// dockerDeviceMode reports whether a --device field is a permission mask rather
+// than a container path: one to three characters drawn from r, w and m, which
+// is docker/cli's own `^[rwm]{1,3}$`. Anything else is read as a path, which
+// must then be absolute (measured on 29.4.0: `x` and the four-character `rwmm`
+// both fail with "is not an absolute path").
+//
+// Repeats such as `rr` are DELIBERATELY treated as a mask here even though
+// Docker 29.4.0 refuses them — its effective validator deletes each letter as
+// it is seen, so a repeat falls through to the path branch and the argument
+// dies as "not an absolute path", installing nothing. Reading them as a mask
+// is both free and the fail-closed choice: a container target must be
+// absolute, so a bare `rr` can never legitimately BE one, and calling it a
+// mask makes the effective target the HOST path — the field that could sit
+// under the account boundary. Should any Docker build accept the grammar its
+// regexp advertises, af has already drawn the boundary in the safe place
+// (#3595 review).
+func dockerDeviceMode(field string) bool {
+	if field == "" || len(field) > 3 {
+		return false
+	}
+	for index := 0; index < len(field); index++ {
+		switch field[index] {
+		case 'r', 'w', 'm':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// dockerDeviceTarget reports the container path Docker creates the node at, for
+// a --device value of host[:container][:permissions]. The host field is a path
+// on the HOST and never where the node lands, so only this target is the
+// account boundary's business (#3595 review).
+//
+// It is not simply "the second field": Docker reads a second field that is a
+// permission mask as permissions, leaving the container path equal to the host
+// path — `/dev/zero:rwm` creates /dev/zero, not a node called "rwm". A value
+// Docker refuses outright (more than three fields, a non-absolute path) creates
+// nothing, so reporting the host field for those is safe.
+func dockerDeviceTarget(value string) string {
+	fields := strings.Split(value, ":")
+	if len(fields) == 2 || len(fields) == 3 {
+		if !dockerDeviceMode(fields[1]) {
+			return fields[1]
+		}
+	}
+	return fields[0]
+}
+
+// accountProtectedPath reports which account path a container path lands on or
+// inside, or "" for anything else. Shared by every option that names a
+// container path so they all draw the boundary in the same place: at or under
+// the path, never as a substring, which is what keeps /af-account-cache and
+// /af-accountant accepted (#3398).
+func accountProtectedPath(target string) string {
+	target = path.Clean(target)
+	for _, protected := range []string{dockerAccountHome, dockerAccountRuntimeHome} {
+		if target == protected || strings.HasPrefix(target, protected+"/") {
+			return protected
+		}
+	}
+	return ""
+}
+
 // validateAccountDockerRunArgs refuses repo-controlled sources that Docker can
 // apply after af has selected the account. Environment files are opaque to af,
 // so none are accepted in account mode; direct environment options are refused
@@ -153,22 +218,13 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 		return nil
 	}
 	checkMount := func(value string) error {
-		protectedPath := func(target string) string {
-			target = path.Clean(target)
-			for _, protected := range []string{dockerAccountHome, dockerAccountRuntimeHome} {
-				if target == protected || strings.HasPrefix(target, protected+"/") {
-					return protected
-				}
-			}
-			return ""
-		}
 		mountsProtectedPath := func() string {
 			for _, field := range dockerMountFields(value) {
 				target, names := dockerMountTarget(field)
 				if !names {
 					continue
 				}
-				if protected := protectedPath(target); protected != "" {
+				if protected := accountProtectedPath(target); protected != "" {
 					return protected
 				}
 			}
@@ -176,7 +232,7 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			// exact field avoids refusing harmless paths such as
 			// /af-account-cache.
 			for _, field := range strings.Split(value, ":") {
-				if protected := protectedPath(field); protected != "" {
+				if protected := accountProtectedPath(field); protected != "" {
 					return protected
 				}
 			}
@@ -186,6 +242,31 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot install an account mount over %s because it would replace af's selected account boundary",
 				protected)
+		}
+		return nil
+	}
+	// checkDevice reads --device, whose value is host:container[:permissions].
+	// Docker creates the node at the container path, and under af's account
+	// bind mount that write goes THROUGH to the operator's registered account
+	// directory on the host: root-owned, and it outlives the container (#3521).
+	//
+	// Only the CONTAINER path is checked, via dockerDeviceTarget. The host
+	// field names a device on the host and is never where the node lands, so
+	// checking it refused valid mappings such as
+	// `--device /af-account/devices/fuse:/dev/fuse` whose node is created
+	// outside the boundary entirely. Whole-path matching keeps the #3398
+	// boundary either way: /af-account-cache is not the account path.
+	//
+	// Only the double-dash spellings are the option. pflag reads a single dash
+	// as a shorthand cluster, so `-device …` is `-d -e vice` with the value
+	// taken as the IMAGE (measured: Docker fails with "invalid reference
+	// format" and installs no device), which the cluster case already reads.
+	checkDevice := func(value string) error {
+		target := dockerDeviceTarget(value)
+		if protected := accountProtectedPath(target); protected != "" {
+			return fmt.Errorf(
+				"backend=docker: docker.run_args cannot use --device to create %s for an account-scoped session because the node is written into af's selected account directory on the host and outlives the container; name a container path outside %s",
+				target, protected)
 		}
 		return nil
 	}
@@ -308,6 +389,17 @@ func validateAccountDockerRunArgs(args []string, agent string) error {
 			return fmt.Errorf(
 				"backend=docker: docker.run_args cannot use --volumes-from for an account-scoped session because af cannot prove what the donor container mounts, and the donor's mounts land at its own container paths — %s included; name the mount explicitly with -v or --mount instead",
 				dockerAccountHome)
+		case arg == "--device":
+			if index+1 < len(args) {
+				index++
+				if err := checkDevice(args[index]); err != nil {
+					return err
+				}
+			}
+		case strings.HasPrefix(arg, "--device="):
+			if err := checkDevice(strings.TrimPrefix(arg, "--device=")); err != nil {
+				return err
+			}
 		case arg == "-v" || arg == "--volume" || arg == "--mount" || arg == "--tmpfs":
 			if index+1 < len(args) {
 				index++
