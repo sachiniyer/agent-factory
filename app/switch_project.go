@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -215,7 +216,11 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 			}
 			rootPriority = 0
 		}
-		recordedIdentities[filepath.Clean(project.Root)] = resolved.id
+		// Keyed by the CANONICAL spelling: a root_agents key is written by a
+		// human, through whatever symlink they had, while a record stores the
+		// path registration resolved (#2110's rule — macOS `/var` ->
+		// `/private/var` makes the two unequal every time).
+		recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(project.Root))] = resolved.id
 		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
@@ -241,7 +246,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 			// otherwise look like a fallback.
 			priority := 2
 			if resolved.resolvedAt.IsZero() && expanded != m.repoRoot {
-				if recorded, ok := recordedIdentities[filepath.Clean(expanded)]; ok && recorded != "" {
+				if recorded, ok := recordedIdentities[pathutil.ResolveForCompare(filepath.Clean(expanded))]; ok && recorded != "" {
 					resolved.id = recorded
 					// Identity and root SPELLING are separate decisions, the
 					// same split an unproven registry row makes above (#3530

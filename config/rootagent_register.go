@@ -3,6 +3,8 @@ package config
 import (
 	"path/filepath"
 	"sort"
+
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
@@ -98,6 +100,15 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 		return nil, ""
 	}
 	cleaned := filepath.Clean(recordedRoot)
+	// Both sides go through ResolveForCompare, because the spellings genuinely
+	// differ: a root_agents key is written by a human — through whatever
+	// symlink they had — while the record stores the path registration
+	// resolved. Comparing Clean-ed strings makes those unequal wherever the
+	// temp or working root is itself a symlink, which is macOS `/var` ->
+	// `/private/var` every time (#2110's rule; caught by CI's darwin job on
+	// #3530). The recorded root does not exist in the case this function is
+	// FOR, so plain EvalSymlinks cannot be used on either side.
+	target := pathutil.ResolveForCompare(cleaned)
 	// Sorted for the same reason LegacyRootAgentForRepo sorts: inspection, the
 	// daemon lookup and the ensure pass must agree on one winner when two
 	// spellings name the same root.
@@ -108,7 +119,7 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 	sort.Strings(keys)
 	matched := ""
 	for _, key := range keys {
-		if filepath.Clean(ExpandTilde(key)) == cleaned {
+		if pathutil.ResolveForCompare(filepath.Clean(ExpandTilde(key))) == target {
 			matched = key
 			break
 		}
