@@ -1284,7 +1284,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\") and taskArmingSummary (next run, or \"enabled but not armed\"), rendered from the fields ListTasks already returns"
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
       },
       "cli": {
         "status": "yes",

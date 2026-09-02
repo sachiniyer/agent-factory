@@ -12546,7 +12546,10 @@ function lastRunSummary(t) {
   return `last run ${t.last_run_at}${status}`;
 }
 function taskNeedsAttention(t) {
-  return !!t.overdue || !!t.unschedulable;
+  return !!t.overdue || !!t.unschedulable || notArmed(t);
+}
+function notArmed(t) {
+  return !!t.enabled && t.arming === "not-armed";
 }
 function taskHealthMark(t) {
   if (taskNeedsAttention(t)) {
@@ -12557,10 +12560,8 @@ function taskHealthMark(t) {
   }
   return null;
 }
+var NOT_ARMED = "enabled but not armed";
 function taskHealthSummary(t) {
-  if (t.unassessable) {
-    return "Health unknown";
-  }
   if (t.unschedulable) {
     switch (t.unschedulable_reason) {
       case "no-trigger":
@@ -12573,21 +12574,21 @@ function taskHealthSummary(t) {
         return "Cannot be scheduled";
     }
   }
-  if (!t.overdue) {
-    return "";
+  if (t.overdue) {
+    if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+      return "overdue";
+    }
+    const capped = t.missed_occurrences_capped ? "+" : "";
+    return `overdue \xB7 missed ${t.missed_occurrences}${capped}`;
   }
-  if (!t.missed_occurrences || t.missed_occurrences <= 0) {
-    return "overdue";
+  if (notArmed(t)) {
+    return NOT_ARMED;
   }
-  const capped = t.missed_occurrences_capped ? "+" : "";
-  return `overdue \xB7 missed ${t.missed_occurrences}${capped}`;
+  return t.unassessable ? "Health unknown" : "";
 }
 function taskArmingSummary(t) {
   if (t.next_run_at) {
     return `next run ${t.next_run_at}`;
-  }
-  if (t.arming === "not-armed" && t.enabled) {
-    return "enabled but not armed";
   }
   return "";
 }
@@ -15664,12 +15665,17 @@ window.setInterval(() => {
     refreshTasks();
   }
 }, TASK_HEALTH_POLL_MS);
+var taskRefreshGeneration = 0;
 function refreshTasks() {
   const tok = token;
   if (tok === null) {
     return;
   }
+  const generation = ++taskRefreshGeneration;
   void listTasks(tok).then((tasks) => {
+    if (generation !== taskRefreshGeneration || token !== tok) {
+      return;
+    }
     const selectedProject = reconcileProject(
       store.get().sessions,
       tasks,

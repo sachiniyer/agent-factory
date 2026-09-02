@@ -73,6 +73,25 @@ test("an unschedulable verdict with no reason still says the verdict", () => {
   assert.equal(taskHealthSummary(t), "Cannot be scheduled");
 });
 
+test("a row's mark and its words describe the SAME fact", () => {
+  // The mark and the summary run one precedence chain. Where they disagreed, a
+  // task with nothing to measure from that the daemon had also refused to arm got
+  // the WARNING glyph explained by "Health unknown" — a marked row whose text is
+  // about something else, which is the leading-fragment design failing at its one
+  // job. Reachable because arming is layered on separately: unschedulable,
+  // overdue and unassessable are mutually exclusive, but any of them can coexist
+  // with not-armed.
+  const both = task({ unassessable: true, arming: "not-armed" });
+  assert.deepEqual(taskHealthMark(both), { icon: "triangle-alert", cls: "af-task-warn" });
+  assert.equal(taskHealthSummary(both), "enabled but not armed", "the stronger fact wins BOTH");
+
+  // And with nothing stronger, the unknown keeps its own muted mark and its own
+  // words.
+  const unknownOnly = task({ unassessable: true });
+  assert.deepEqual(taskHealthMark(unknownOnly), { icon: "circle-question", cls: "af-task-unknown" });
+  assert.equal(taskHealthSummary(unknownOnly), "Health unknown");
+});
+
 test("an unknown is neither healthy nor a failure", () => {
   const t = task({ unassessable: true });
   // Not counted as attention: that count answers "is anything wrong?", and an
@@ -102,10 +121,45 @@ test("a healthy task carries no mark and no health text", () => {
 
 test("next run comes from the live entry, and its absence is not an accusation", () => {
   assert.equal(taskArmingSummary(task({ next_run_at: "2026-09-03T03:00:00Z", arming: "armed" })), "next run 2026-09-03T03:00:00Z");
-  assert.equal(taskArmingSummary(task({ arming: "not-armed" })), "enabled but not armed");
-  // ABSENT arming means no daemon has reported on it — none running, or one
-  // still starting. It must never render as "not armed".
-  assert.equal(taskArmingSummary(task()), "");
-  // Nor is a DISABLED task accused of being unarmed; it is not expected to fire.
-  assert.equal(taskArmingSummary(task({ enabled: false, arming: "not-armed" })), "");
+  // The not-armed fact lives in the HEALTH fragment, which leads the line and
+  // carries the mark — not in the dim tail that ellipsizes first.
+  assert.equal(taskArmingSummary(task({ arming: "not-armed" })), "");
+});
+
+test("an enabled task the daemon is not holding is marked, and says so", () => {
+  // It will not fire. That is #2929 exactly, and af doctor already calls it
+  // actionable; a green tick beside "enabled but not armed" in the dim tail was
+  // the same false clean bill this feature exists to remove.
+  const t = task({ arming: "not-armed" });
+  assert.equal(taskNeedsAttention(t), true);
+  assert.deepEqual(taskHealthMark(t), { icon: "triangle-alert", cls: "af-task-warn" });
+  assert.equal(taskHealthSummary(t), "enabled but not armed");
+});
+
+test("a DISABLED task is never accused of being unarmed", () => {
+  // The daemon reports arming for every task, and "disabled and therefore not
+  // armed" is a true, unsurprising reading of the same field. A task nobody asked
+  // to run is not a finding.
+  const t = task({ enabled: false, arming: "not-armed" });
+  assert.equal(taskNeedsAttention(t), false);
+  assert.equal(taskHealthMark(t), null);
+  assert.equal(taskHealthSummary(t), "");
+});
+
+test("ABSENT arming is not an accusation either", () => {
+  // No daemon has reported — none running, or one still starting. Reporting that
+  // as not-armed would mark every task on the box during a daemon restart.
+  const t = task();
+  assert.equal(taskNeedsAttention(t), false);
+  assert.equal(taskHealthSummary(t), "");
+});
+
+test("a stronger verdict wins the line, as af doctor orders them", () => {
+  // An overdue task is usually also unarmed. "It has missed 432 fires" is the
+  // sentence worth the width, and doctor does not name a row twice either.
+  const t = task({ overdue: true, missed_occurrences: 432, arming: "not-armed" });
+  assert.equal(taskHealthSummary(t), "overdue · missed 432");
+
+  const impossible = task({ unschedulable: true, unschedulable_reason: "no-occurrence", arming: "not-armed" });
+  assert.equal(taskHealthSummary(impossible), "No upcoming run");
 });

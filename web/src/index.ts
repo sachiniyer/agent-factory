@@ -1314,13 +1314,33 @@ window.setInterval(() => {
   }
 }, TASK_HEALTH_POLL_MS);
 
+// Fences overlapping ListTasks refetches so a slow one cannot overwrite a newer
+// one — the rule #2330 already applies to the session snapshot, one projection
+// over (sessionEventGeneration / resyncRequestGeneration).
+//
+// refreshTasks commits whatever it receives, and it is called from a mutation, a
+// debounced event resync, a view switch, and now a poll. A request issued just
+// before an edit can resolve just after the edit's own refetch, restoring the
+// pre-mutation list — an old health verdict, or a row that was removed — until
+// something else happens to refresh. The poll is what made these genuinely
+// concurrent rather than merely capable of it (#3626 review).
+let taskRefreshGeneration = 0;
+
 function refreshTasks(): void {
   const tok = token;
   if (tok === null) {
     return;
   }
+  const generation = ++taskRefreshGeneration;
   void listTasks(tok)
     .then((tasks) => {
+      // A newer refetch has been issued since this one left, so this answer is
+      // stale by construction whatever it contains. The token is checked too: a
+      // rotation means this response describes a session that is no longer the
+      // one on screen, and the generation alone would not catch it.
+      if (generation !== taskRefreshGeneration || token !== tok) {
+        return;
+      }
       // Reconcile the project scope against the new task set (redesign PR2): a
       // task-only project appears once its tasks load, and drops when its last task
       // is removed (if it also has no live sessions). This is what makes a task-only

@@ -130,10 +130,24 @@ function lastRunSummary(t: TaskData): string {
  * order about the same task.
  */
 
-/** Whether the row carries a WARNING: it has stopped firing, or the scheduler
- *  cannot fire it at all. An unknown is deliberately not one — see taskHealth. */
+/** Whether the row carries a WARNING: it has stopped firing, the scheduler
+ *  cannot fire it at all, or the daemon reports it is not holding it. An unknown
+ *  is deliberately not one — see taskHealthMark. */
 export function taskNeedsAttention(t: TaskData): boolean {
-  return !!t.overdue || !!t.unschedulable;
+  return !!t.overdue || !!t.unschedulable || notArmed(t);
+}
+
+/** An ENABLED task the running daemon reports it is not holding. It will not
+ *  fire, which is #2929 exactly, and `af doctor` raises it as actionable.
+ *
+ *  Gated on `enabled` because the daemon reports arming for every task, and
+ *  "disabled and therefore not armed" is a true, unsurprising reading of the same
+ *  field — deciding that an unarmed ENABLED task is the interesting one is the
+ *  consuming surface's job. And on `not-armed` specifically, never on the absence
+ *  of an answer: nothing having reported is not an observation that it is
+ *  unarmed. */
+function notArmed(t: TaskData): boolean {
+  return !!t.enabled && t.arming === "not-armed";
 }
 
 /** The row's health mark: which static glyph it carries, and the modifier class
@@ -152,14 +166,21 @@ export function taskHealthMark(t: TaskData): { icon: IconName; cls: string } | n
   return null;
 }
 
+const NOT_ARMED = "enabled but not armed";
+
 /** The leading health fragment, or "" when the row is healthy. It LEADS the meta
  *  line for the reason the TUI's leads its detail line: these lines ellipsize
  *  from the right, so a reason placed behind the configuration is the half that
  *  gets cut, leaving a marked row with nothing explaining it. */
 export function taskHealthSummary(t: TaskData): string {
-  if (t.unassessable) {
-    return "Health unknown";
-  }
+  // ONE precedence chain, and it is taskHealthMark's: everything taskNeedsAttention
+  // covers first, then the unknown, then nothing. The two must agree about which
+  // fact a row is showing, or a row gets a warning glyph explained by text about
+  // something else — "Health unknown" beside a warning mark, which is the round-1
+  // finding reintroduced through a different door. Reachable because arming is
+  // layered on separately from the derivation: unschedulable/overdue/unassessable
+  // are mutually exclusive, but a task with nothing to measure from can also be
+  // one the daemon refused to arm (#3626 review).
   if (t.unschedulable) {
     // The daemon's own classification, read rather than re-derived — the three
     // shapes and the three strings are ui/automations.go's attentionFragment,
@@ -178,16 +199,25 @@ export function taskHealthSummary(t: TaskData): string {
         return "Cannot be scheduled";
     }
   }
-  if (!t.overdue) {
-    return "";
+  if (t.overdue) {
+    if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+      // A count nobody took is not a count of zero: the daemon's walk budget can
+      // be spent before it reaches a task, and it says so by capping a zero.
+      return "overdue";
+    }
+    const capped = t.missed_occurrences_capped ? "+" : "";
+    return `overdue · missed ${t.missed_occurrences}${capped}`;
   }
-  if (!t.missed_occurrences || t.missed_occurrences <= 0) {
-    // A count nobody took is not a count of zero: the daemon's walk budget can be
-    // spent before it reaches a task, and it says so by capping a zero.
-    return "overdue";
+  if (notArmed(t)) {
+    // After the three above, because each is a stronger statement about the same
+    // task and af doctor orders them the same way — a row it has already named is
+    // not named again. An overdue task is usually also unarmed; "it has missed 432
+    // fires" is the sentence worth the width.
+    return NOT_ARMED;
   }
-  const capped = t.missed_occurrences_capped ? "+" : "";
-  return `overdue · missed ${t.missed_occurrences}${capped}`;
+  // Only now: an unknown is the weakest thing a row can say, and anything above
+  // is both truer and more actionable.
+  return t.unassessable ? "Health unknown" : "";
 }
 
 /** The next-run fragment: what the LIVE scheduler entry will fire, or the fact
@@ -197,9 +227,10 @@ export function taskArmingSummary(t: TaskData): string {
   if (t.next_run_at) {
     return `next run ${t.next_run_at}`;
   }
-  if (t.arming === "not-armed" && t.enabled) {
-    return "enabled but not armed";
-  }
+  // The not-armed fact belongs to the HEALTH fragment now, which leads the line
+  // and carries the mark with it — a fact that will stop the task firing has no
+  // business in the dim tail that ellipsizes first. Repeating it here would say
+  // it twice on the one row narrow enough to lose the second copy.
   return "";
 }
 
