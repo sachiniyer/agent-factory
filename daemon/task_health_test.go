@@ -92,9 +92,11 @@ func TestListTasks_CarriesTheOverdueDerivation(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	dark := enabledCronTask("aaaa1004", "")
 	dark.CronExpr = "20 * * * *"
-	last := time.Now().Add(-18 * 24 * time.Hour)
-	dark.LastRunAt = &last
 	require.NoError(t, task.AddTask(dark))
+	// Through the scheduler-owned writer: a create supplies the task's
+	// definition and the store supplies its history (task.resetStoreOwnedFields).
+	last := time.Now().Add(-18 * 24 * time.Hour)
+	require.NoError(t, task.UpdateTaskStatus("aaaa1004", &last, "started"))
 
 	srv := &controlServer{scheduler: newTaskScheduler()}
 	var resp ListTasksResponse
