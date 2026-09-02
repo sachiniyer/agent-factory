@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
 
@@ -432,4 +433,108 @@ func TestGeneralHelpWrappedDescriptionsStayOutOfKeyColumnAt80x24(t *testing.T) {
 	continuationColumn := len(continuationContent) - len(strings.TrimLeft(continuationContent, " "))
 	require.Equal(t, descriptionColumn, continuationColumn,
 		"wrapped descriptions must use a hanging indent at the description column")
+}
+
+// TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow is #3629. The key column
+// was sized to the widest key across ALL sections with no cap, and the help has
+// exactly one wide key — "tab / shift+tab / ctrl+r", 24 cells — against ~30 rows
+// of 1-6. At 80x24 (overlay 48 wide, contentWidth 44) it took 26 of the 44
+// content columns and left 16 for every description.
+func TestHelpKeyColumnCapStopsOneWideKeyStarvingEveryRow(t *testing.T) {
+	// contentWidth at 80x24: layoutTextOverlay sets the overlay to 80*0.6 = 48,
+	// textWidth() subtracts 2*textOverlayHorizontalPadding.
+	narrow := 44
+	// The real distribution: the 24-cell outlier, then the widest ordinary key
+	// ("ctrl+u/ctrl+d", 13), then the rest.
+	widths := []int{24, 13, 9, 8, 6, 6, 5, 1, 1, 1}
+
+	got := helpKeyColumnWidth(widths, narrow)
+	require.LessOrEqual(t, got, int(float64(narrow)*helpKeyColumnFraction),
+		"the key column must never exceed its share of the content width")
+	require.Equal(t, 15, got,
+		"it snaps to the widest key that FITS under the 17-cell cap (13+2), not to the cap")
+
+	desc := narrow - got - 2
+	require.Greater(t, desc, got,
+		"the descriptions must get more columns than the keys — 16 of 44 was the bug")
+	require.Equal(t, 27, desc)
+
+	// Wide terminals are untouched: at 200x50 contentWidth is 116, the cap is 46,
+	// and the natural 26 is far below it.
+	wide := 116
+	require.Equal(t, 26, helpKeyColumnWidth(widths, wide),
+		"the cap must be inert where the layout already reads correctly")
+}
+
+// The cap must claim exactly one victim — the outlier that caused the problem.
+// Snapping to the widest key that FITS under the cap, rather than to the cap
+// itself, is what keeps an ordinary key from wrapping as collateral.
+func TestHelpKeyColumnWrapsOnlyTheOutlier(t *testing.T) {
+	narrow := 44
+	sections := []helpSection{{title: "Managing:", rows: []helpRow{
+		{"tab / shift+tab / ctrl+r", "While naming a new session: pick its agent / initial prompt / backend"},
+		{"ctrl+u/ctrl+d", "Scroll the current tab preview (navigation mode only)"},
+		{"n", "Create a new session"},
+	}}}
+
+	lines := strings.Split(xansi.Strip(renderHelpSections("header", sections, narrow)), "\n")
+	var wideRow, ordinaryRow string
+	for _, line := range lines {
+		if strings.Contains(line, "ctrl+u/ctrl+d") {
+			ordinaryRow = line
+		}
+		if strings.Contains(line, "shift+tab") {
+			wideRow = line
+		}
+	}
+	require.NotEmpty(t, ordinaryRow)
+	require.NotEmpty(t, wideRow)
+
+	require.Contains(t, ordinaryRow, "Scroll the current tab",
+		"the widest ORDINARY key must still fit its column on one line, beside its description")
+	require.NotContains(t, wideRow, "ctrl+r",
+		"the over-cap key must wrap inside its own column rather than widen everyone's")
+	// The 2 cells past the widest key are a GUTTER: a wrapped key must not spend
+	// them, or the row reads "tab / shift+tab- While naming…" — the key colliding
+	// with its own separator.
+	for _, line := range lines {
+		if i := strings.Index(line, "- "); i > 0 {
+			require.Equalf(t, " ", line[i-1:i],
+				"the key column must keep a blank cell before its separator: %q", line)
+		}
+	}
+	for _, line := range lines {
+		require.LessOrEqualf(t, lipgloss.Width(line), narrow,
+			"no rendered row may exceed the content width: %q", line)
+	}
+}
+
+// TestGeneralHelpReadsInFarFewerPagesAt80x24 is the user-visible metric from
+// #3629: the help was 8 page-downs at 80x24 versus 1 at 200x50, because every
+// description had 16 columns and wrapped into 3-5-line ribbons.
+//
+// 3 is the structural floor at this size — ~36 rows plus the header and section
+// chrome is more than twice an 18-row viewport even if every row were a single
+// line — so this asserts the count is near it, not at 1.
+func TestGeneralHelpReadsInFarFewerPagesAt80x24(t *testing.T) {
+	pagesToBottom := func(w, hgt int) int {
+		h := newTestHome(t)
+		resizeHome(h, w, hgt)
+		_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+		pages := 0
+		for strings.Contains(xansi.Strip(h.View()), "↓ more") {
+			_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+			pages++
+			require.Less(t, pages, 30, "paging must reach the bottom of the help")
+		}
+		return pages
+	}
+
+	narrow := pagesToBottom(80, 24)
+	require.LessOrEqualf(t, narrow, 5,
+		"the help must read in at most 5 page-downs at 80x24 (it was 8); got %d", narrow)
+
+	wide := pagesToBottom(200, 50)
+	require.LessOrEqualf(t, wide, 1,
+		"200x50 already read in one page and must not regress; got %d", wide)
 }

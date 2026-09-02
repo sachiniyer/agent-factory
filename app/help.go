@@ -40,17 +40,97 @@ type helpSection struct {
 	rows  []helpRow
 }
 
-// renderHelpSections lays the sections out with a single key column whose width
-// fits the widest effective key across ALL sections. When contentWidth is
-// known, the description is a separate block: lipgloss wraps it beneath its
-// first word, never beneath the key (#2577).
+// helpKeyColumnFraction caps the key column as a share of the overlay's content
+// width. The column is otherwise sized to the widest key across ALL sections, so
+// a single unusually wide entry sets it for every row — and the help has exactly
+// one: "tab / shift+tab / ctrl+r" at 24 cells, against ~30 rows of 1-6 cells.
+//
+// At 80x24 the overlay's content is 44 columns, so that one key took 26 of them
+// (59%) and left 16 for every description. The screen a new user opens to learn
+// the app became a column of 3-5-line ribbons with ~25 blank columns beside each
+// of them: 8 page-downs to read, versus 1 at 200x50 (#3629).
+//
+// A key wider than the cap wraps inside its own column rather than widening
+// everyone else's — it pays for its own length. The cap is inert at wide sizes:
+// at 200x50 (contentWidth 116) 40% is 46 and the natural 26 is far below it, so
+// the layout that already reads correctly there is untouched.
+const helpKeyColumnFraction = 0.4
+
+// helpKeyColumnWidth is the key column's width for a given content width: the
+// widest key plus its 2-cell gutter, capped by helpKeyColumnFraction.
+//
+// When the cap bites, the column shrinks to the widest key that still FITS
+// under it rather than to the cap itself. That is what keeps the cap from
+// creating a second victim: at 80x24 the cap is 17, and snapping to the widest
+// fitting key gives 15 — enough for "ctrl+u/ctrl+d", the widest ordinary key —
+// so exactly one row wraps and it is the outlier that caused the problem.
+func helpKeyColumnWidth(keyWidths []int, contentWidth int) int {
+	widest := 0
+	for _, w := range keyWidths {
+		if w > widest {
+			widest = w
+		}
+	}
+	width := widest + 2
+	if capped := int(float64(contentWidth) * helpKeyColumnFraction); width > capped {
+		width = capped
+		widestFitting := 0
+		for _, w := range keyWidths {
+			if fits := w + 2; fits <= capped && fits > widestFitting {
+				widestFitting = fits
+			}
+		}
+		// Zero means every key is over the cap; then the cap itself is the
+		// column and they all wrap, which is the only fair answer.
+		if widestFitting > 0 {
+			width = widestFitting
+		}
+	}
+	// Leave room for the "- " separator and at least one description cell.
+	if room := contentWidth - 3; width > room {
+		width = room
+	}
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+// helpKeyColumnGutter is the blank space reserved on the right of the key
+// column, so no key — wrapped or not — can touch the "- " that follows it. It
+// collapses to zero only on a column too narrow to hold both.
+func helpKeyColumnGutter(keyColumnWidth int) int {
+	const gutter = 2
+	if keyColumnWidth-gutter < 1 {
+		return 0
+	}
+	return gutter
+}
+
+// renderHelpSections lays the sections out with a single key column sized to the
+// widest effective key across ALL sections, capped at helpKeyColumnFraction of
+// the content width. When contentWidth is known, the description is a separate
+// block: lipgloss wraps it beneath its first word, never beneath the key (#2577).
 func renderHelpSections(header string, sections []helpSection, contentWidth int) string {
 	keyWidth := 0
+	var keyWidths []int
 	for _, s := range sections {
 		for _, r := range s.rows {
-			if w := lipgloss.Width(r.key); w > keyWidth {
+			w := lipgloss.Width(r.key)
+			keyWidths = append(keyWidths, w)
+			if w > keyWidth {
 				keyWidth = w
 			}
+		}
+	}
+	// One layout for the whole screen, computed once: every row shares the
+	// column so the descriptions line up.
+	keyColumnWidth, descWidth := 0, 0
+	if contentWidth > 0 {
+		keyColumnWidth = helpKeyColumnWidth(keyWidths, contentWidth)
+		descWidth = contentWidth - keyColumnWidth - 2
+		if descWidth < 1 {
+			descWidth = 1
 		}
 	}
 
@@ -65,18 +145,15 @@ func renderHelpSections(header string, sections []helpSection, contentWidth int)
 				continue
 			}
 
-			keyColumnWidth := keyWidth + 2
-			if keyColumnWidth+3 > contentWidth {
-				keyColumnWidth = contentWidth / 2
-				if keyColumnWidth < 1 {
-					keyColumnWidth = 1
-				}
-			}
-			descWidth := contentWidth - keyColumnWidth - 2
-			if descWidth < 1 {
-				descWidth = 1
-			}
-			keyBlock := lipgloss.NewStyle().Width(keyColumnWidth).Render(keyStyle.Render(r.key))
+			// PaddingRight, not bare Width: the 2 cells are a GUTTER, and an
+			// over-cap key must wrap inside its own text width rather than
+			// spend the gutter on a wrapped line. Without it the row rendered
+			// "tab / shift+tab- While naming…", the key colliding with its own
+			// separator (#3629, same class as #3630's "Automation…·").
+			keyBlock := lipgloss.NewStyle().
+				Width(keyColumnWidth).
+				PaddingRight(helpKeyColumnGutter(keyColumnWidth)).
+				Render(keyStyle.Render(r.key))
 			dashBlock := descStyle.Render("- ")
 			descBlock := lipgloss.NewStyle().Width(descWidth).Render(descStyle.Render(r.desc))
 			lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, keyBlock, dashBlock, descBlock))
