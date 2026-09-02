@@ -435,3 +435,100 @@ func TestAutomationsSaysTheReasonOnceForAnUnschedulableTask(t *testing.T) {
 		"and the arming observation adds no second finding:\n%s", out)
 	assert.NotContains(t, out, "from cron", "nor is a fire time computed for it")
 }
+
+// TestAutomationsMarksAnUnarmedTask: an enabled task the daemon says it is not
+// holding will not fire, and the rail could not say so before #3626 gave it the
+// arming observation. A green tick beside "not armed" in the detail line is the
+// clean bill #2929 was about — and the detail line only renders on the FOCUSED
+// row, so on every other row there was nothing at all.
+func TestAutomationsMarksAnUnarmedTask(t *testing.T) {
+	unarmed := stripTasks()[0]
+	unarmed.Arming = task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{unarmed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "[!]", "the collapsed row carries the mark:\n%s", out)
+	assert.Contains(t, out, "not armed")
+	assert.NotContains(t, out, "next Jul 02 03:00",
+		"and no fire time is computed for a task nothing is holding")
+	assert.NotContains(t, out, "from cron")
+}
+
+// TestAutomationsDoesNotAccuseADisabledOrUnobservedTask: the two ways a row must
+// NOT be marked. The daemon reports arming for every task, so a disabled one is
+// not-armed as a matter of course; and an absent observation is not an
+// observation of absence — reporting it as one would mark every row on the box
+// while a daemon restarts, which the rail polls straight through.
+func TestAutomationsDoesNotAccuseADisabledOrUnobservedTask(t *testing.T) {
+	disabled := stripTasks()[0]
+	disabled.Enabled, disabled.Arming = false, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{disabled})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+	assert.NotContains(t, a.View(), "[!]", "a task nobody asked to run is not a finding")
+
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming)
+	b := newTestAutomations([]task.Task{unobserved})
+	b.SetRect(layout.Rect{W: 100, H: 4})
+	b.Focus()
+	out := b.View()
+	assert.NotContains(t, out, "[!]", "nothing reported is not a report of nothing:\n%s", out)
+	assert.NotContains(t, out, "not armed")
+}
+
+// TestAutomationsMarkAndDetailDescribeTheSameFact: titleRow's glyph and
+// attentionFragment's words run one precedence chain, so a marked row is always
+// explained by text about the thing that marked it.
+//
+// Unassessable is the case that proves it. The derivation's own verdicts are
+// mutually exclusive, but arming is layered on separately, so a record with
+// nothing to measure from can ALSO be one the daemon refused to arm — and that
+// task took "[!]" from needsAttention while the detail line said "Health
+// unknown", which explains a warning with a non-warning.
+func TestAutomationsMarkAndDetailDescribeTheSameFact(t *testing.T) {
+	both := stripTasks()[0]
+	both.Unassessable, both.Arming = true, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{both})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+	out := a.View()
+	assert.Contains(t, out, "[!]")
+	assert.Contains(t, out, "not armed", "the stronger fact wins BOTH the mark and the words:\n%s", out)
+	assert.NotContains(t, out, "Health unknown")
+
+	// With nothing stronger, the unknown keeps its own muted mark and its own words.
+	unknown := stripTasks()[0]
+	unknown.Unassessable = true
+	b := newTestAutomations([]task.Task{unknown})
+	b.SetRect(layout.Rect{W: 100, H: 4})
+	b.Focus()
+	out = b.View()
+	assert.Contains(t, out, "[?]")
+	assert.Contains(t, out, "Health unknown")
+}
+
+// TestAutomationsStopsClaimingADeadWatcherIsWatching: watchTaskStatus answers
+// "watching" for any enabled watch task, so a watcher whose process died past its
+// restart budget read as healthy forever. Its arming IS its signal — a watch task
+// is never overdue and never unschedulable, so this is the only mark it can carry.
+func TestAutomationsStopsClaimingADeadWatcherIsWatching(t *testing.T) {
+	dead := stripTasks()[1]
+	require.True(t, dead.IsWatch(), "the fixture's second task is the watch one")
+	dead.Enabled, dead.Arming = true, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{dead})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "[!]")
+	assert.Contains(t, out, "not armed")
+	assert.NotContains(t, out, "watching",
+		"the supervisor says it is not running this watcher:\n%s", out)
+}

@@ -210,7 +210,14 @@ func (a *AutomationsPane) ScrollDown() {
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
-		parts = append(parts, watchTaskStatus(tsk))
+		// Nothing here when the supervisor says it is not running a watcher for
+		// this definition: attentionFragment already leads with "not armed", and
+		// watchTaskStatus would answer "watching" for the same task — the exact
+		// claim the observation contradicts. An enabled watch task whose process
+		// died past its restart budget used to read "watching" forever (#3626).
+		if !notArmed(tsk) {
+			parts = append(parts, watchTaskStatus(tsk))
+		}
 	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
 		// An unschedulable record says nothing HERE, in any of the cases below.
 		// attentionFragment diagnoses every shape of it at the FRONT of the line,
@@ -231,8 +238,11 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// read off the scheduler cannot promise a fire the scheduler is not
 			// holding.
 			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
-		case tsk.Arming == task.ArmingNotArmed:
-			parts = append(parts, "not armed")
+		case notArmed(tsk):
+			// Nothing: attentionFragment leads the line with "not armed", and the
+			// rail's rule is to say it once. Emphatically NOT falling through to the
+			// computed fallback below — a task nothing is holding gets no fire time,
+			// which is the whole lie #3623 was about.
 		case tsk.Arming == task.ArmingArmed:
 			// Armed, with no fire time on the entry yet — the daemon has taken the
 			// task but its cron has not computed first fires (see withLiveArming).
@@ -358,10 +368,26 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 }
 
 // needsAttention reports whether the row carries a warning: the task has stopped
-// firing on its schedule, or its expression can never fire at all. Both are read
-// off the record, so the rail's disk-backed poll sees them without a daemon.
+// firing on its schedule, its expression can never fire at all, or the daemon
+// reports it is not holding it. The first two are read off the record, so the
+// rail's disk-backed poll sees them without a daemon; the third arrives on the
+// snapshot poll (#3626) and is simply absent when no daemon answered.
 func needsAttention(tsk task.Task) bool {
-	return tsk.Overdue || tsk.Unschedulable
+	return tsk.Overdue || tsk.Unschedulable || notArmed(tsk)
+}
+
+// notArmed reports an ENABLED task the running daemon says it is not holding. It
+// will not fire — that is #2929 — and af doctor already treats it as actionable.
+//
+// Gated on Enabled because the daemon reports arming for every task, and
+// "disabled and therefore not armed" is a true, unsurprising reading of the same
+// field; deciding that the enabled one is the interesting case is this surface's
+// job. And on ArmingNotArmed specifically, never on ArmingUnknown: nothing having
+// reported is not an observation that the task is unarmed, and treating it as one
+// would mark every row on the box while a daemon restarts — which is exactly what
+// the rail sees, since it polls straight through a restart.
+func notArmed(tsk task.Task) bool {
+	return tsk.Enabled && tsk.Arming == task.ArmingNotArmed
 }
 
 // attentionFragment is the detail line's warning text, or "" when the row is
@@ -369,12 +395,20 @@ func needsAttention(tsk task.Task) bool {
 // found none — an uncounted "missed 0" beside "overdue" reads as a
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
+// The order below is a PRECEDENCE CHAIN, and titleRow's glyph selection runs the
+// same one: each rung is a stronger statement about the same task than the rung
+// under it, and af doctor orders these facts identically for the same reason — a
+// row it has already named is not named again.
+//
+// Unassessable sits at the BOTTOM, which it did not before arming reached this
+// pane. The derivation's own verdicts are mutually exclusive, so while attention
+// meant "overdue or unschedulable" nothing could outrank an unknown and checking
+// it first was harmless. Arming is layered on separately, so a record with
+// nothing to measure from can ALSO be one the daemon refused to arm — and that
+// task took the "[!]" glyph from needsAttention while this function explained it
+// with "Health unknown", a marked row whose text is about something else. The web
+// hit the identical defect the moment its mark widened (#3626 review).
 func attentionFragment(tsk task.Task, now time.Time) string {
-	if tsk.Unassessable {
-		// Says what could not be done rather than what is wrong, and leads the line
-		// for the same reason the others do — the rail clips from the right.
-		return "Health unknown"
-	}
 	if tsk.Unschedulable {
 		// EVERY shape is diagnosed here, at the front, for the same reason the
 		// overdue fragment leads: at the 22-column rail minimum the line is clipped
@@ -396,16 +430,26 @@ func attentionFragment(tsk task.Task, now time.Time) string {
 			return "No upcoming run"
 		}
 	}
-	if !tsk.Overdue {
-		return ""
+	if tsk.Overdue {
+		if tsk.MissedOccurrences <= 0 {
+			return "overdue"
+		}
+		if tsk.MissedOccurrencesCapped {
+			return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+		}
+		return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
 	}
-	if tsk.MissedOccurrences <= 0 {
-		return "overdue"
+	if notArmed(tsk) {
+		// Below overdue deliberately: an overdue task is usually also unarmed, and
+		// "it has missed 432 fires" is the sentence worth the rail's width.
+		return "not armed"
 	}
-	if tsk.MissedOccurrencesCapped {
-		return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+	if tsk.Unassessable {
+		// Says what could not be done rather than what is wrong, and leads the line
+		// for the same reason the others do — the rail clips from the right.
+		return "Health unknown"
 	}
-	return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
+	return ""
 }
 
 // detailRow renders the expanded row's detail as a dim line indented under the
