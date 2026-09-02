@@ -36,8 +36,8 @@ var writerConventionExemptions = map[string]string{
 	"filelock.go:TryWithFileLock:os.OpenFile":             "lock file, not config content",
 	"filelock.go:WithFileLockTimeout:os.OpenFile":         "lock file, not config content",
 	"filelock.go:WithFileLock:os.OpenFile":                "lock file, not config content",
-	"filelock.go:AtomicWriteFile:os.CreateTemp":           "AtomicWriteFile's own temp file",
-	"filelock.go:AtomicWriteFile:os.Rename":               "AtomicWriteFile's own rename",
+	"filelock.go:atomicWrite:os.CreateTemp":               "the shared writer's own temp file",
+	"filelock.go:atomicWrite:os.Rename":                   "the shared writer's own rename",
 	"project_registry.go:writeNewProjectRecord:os.Rename": "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with",
 	// The in-repo writer is the deliberate ASYMMETRY, not an oversight. A global
 	// config.toml is the user's own file and a link there is their arrangement,
@@ -135,7 +135,8 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 	}
 
 	assert.Empty(t, offenders,
-		"these calls write to disk without going through AtomicWriteFile.\n"+
+		"these calls write to disk without going through AtomicWriteFile (or its "+
+			"AtomicWriteFileFollowingLink variant).\n"+
 			"A config writer must use it — that is where symlink following (#3660), atomicity, and "+
 			"AF-home hardening live, and adding a writer that skips it silently reacquires all three bugs.\n"+
 			"If a call genuinely cannot use it, add it to writerConventionExemptions with the reason.")
@@ -148,4 +149,64 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 
 	// And the guard must actually be pointed at this package.
 	assert.FileExists(t, filepath.Join(".", "filelock.go"))
+}
+
+// TestFollowingWriterStaysInsideTheConfigPackage is the fence that keeps the
+// symlink-following promise scoped to the file it was decided for.
+//
+// AtomicWriteFileFollowingLink exists for the GLOBAL CONFIG: the one file af
+// rewrites on the user's behalf rather than owns, where a link into a dotfiles
+// repository is the user's arrangement and every editor writes through it
+// (#3660). af's own managed files — the bearer token, autostart units, the task
+// store, skills, plugins — deliberately keep the plain writer, because "write
+// through whatever this points at" is a stronger promise than any of them asked
+// for, and #3672 records that as a per-caller decision still to be made rather
+// than a default to inherit.
+//
+// Nothing in the language stops a caller elsewhere from picking the follow
+// variant because it sounds safer. This does: the promise spreads only by
+// someone editing this list and saying why.
+func TestFollowingWriterStaysInsideTheConfigPackage(t *testing.T) {
+	const followingWriter = "AtomicWriteFileFollowingLink"
+
+	root, err := filepath.Abs("..")
+	require.NoError(t, err)
+
+	var outside []string
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "web", "docs", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		// The config package is where the variant lives and is used.
+		if filepath.Dir(path) == filepath.Join(root, "config") {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(data), followingWriter) {
+			rel, _ := filepath.Rel(root, path)
+			outside = append(outside, rel)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, outside,
+		"%s follows a symlink, and that promise was decided for the global config only (#3660, #3672).\n"+
+			"A caller outside config/ writes a file af manages, where following a link changes semantics "+
+			"nobody asked for — daemon/autostart.go, for one, cleans up with os.Remove of the SAME path it "+
+			"wrote, so a followed write would leave the cleanup unlinking a link whose content went elsewhere.\n"+
+			"Use AtomicWriteFile, or take the decision on #3672 first.", followingWriter)
 }

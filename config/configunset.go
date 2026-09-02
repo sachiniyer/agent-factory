@@ -140,7 +140,7 @@ func UnsetGlobalConfigValue(key string) (*UnsetResult, error) {
 	prettyPath := prettyHomePath(path)
 
 	var result *UnsetResult
-	writeErr := WithFileLock(path, func() error {
+	writeErr := WithFollowedFileLock(path, func() error {
 		var err error
 		result, err = applyGlobalUnset(path, prettyPath, canonicalKey, alias)
 		return err
@@ -185,7 +185,7 @@ func applyGlobalUnset(path, prettyPath, canonicalKey string, alias configKeyAlia
 	if drift := configRewriteDrift(before, resulting, canonicalKey, SchemaVersionField); drift != "" {
 		return nil, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", canonicalKey, prettyPath, drift)
 	}
-	if err := AtomicWriteFile(path, []byte(updated), 0o644); err != nil {
+	if err := AtomicWriteFileFollowingLink(path, []byte(updated), 0o644); err != nil {
 		return nil, err
 	}
 	return &UnsetResult{Key: canonicalKey, Path: path, Removed: true, RequiresRestart: true}, nil

@@ -67,7 +67,7 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	}
 
 	var result *MigrationResult
-	if err := WithFileLock(tomlPath, func() error {
+	if err := WithFollowedFileLock(tomlPath, func() error {
 		var err error
 		result, err = migrateConfigFile(tomlPath)
 		return err
@@ -264,10 +264,13 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if info, statErr := os.Stat(tomlPath); statErr == nil {
 		mode = info.Mode().Perm()
 	}
+	// The backup path is already derived from the RESOLVED config, and
+	// availableBackupPath only returns a path that does not exist — so there is
+	// no link to follow here and the plain writer says so.
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(bom+content), mode); err != nil {
+	if err := AtomicWriteFileFollowingLink(tomlPath, []byte(bom+content), mode); err != nil {
 		return nil, err
 	}
 	result.Backup = backup

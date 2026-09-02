@@ -153,16 +153,16 @@ func TestJSONConversionRefusesADanglingConfigLink(t *testing.T) {
 		"and the legacy config.json is still there to convert once the link is fixed")
 }
 
-// TestAtomicWriteFileRefusesADanglingLink pins the error case. Following a link
+// TestFollowingWriterRefusesADanglingLink pins the error case. Following a link
 // to nowhere would either fail obscurely inside CreateTemp or silently create
 // the target, and neither tells the user their link is broken.
-func TestAtomicWriteFileRefusesADanglingLink(t *testing.T) {
+func TestFollowingWriterRefusesADanglingLink(t *testing.T) {
 	dir := t.TempDir()
 	link := filepath.Join(dir, "config.toml")
 	missing := filepath.Join(dir, "gone", "af-config.toml")
 	require.NoError(t, os.Symlink(missing, link))
 
-	err := AtomicWriteFile(link, []byte("schema_version = 1\n"), 0644)
+	err := AtomicWriteFileFollowingLink(link, []byte("schema_version = 1\n"), 0644)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), link, "the error names the link")
 	assert.Contains(t, err.Error(), missing, "and the target it points at")
@@ -174,10 +174,10 @@ func TestAtomicWriteFileRefusesADanglingLink(t *testing.T) {
 	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink, "the broken link is left as it was")
 }
 
-// TestAtomicWriteFileNoticesTheLinkOncePerProcess pins the one-line notice. It
+// TestFollowingWriterNoticesTheLinkOncePerProcess pins the one-line notice. It
 // is per process rather than per write because af rewrites its config many
 // times in a session and the fact does not change between them.
-func TestAtomicWriteFileNoticesTheLinkOncePerProcess(t *testing.T) {
+func TestFollowingWriterNoticesTheLinkOncePerProcess(t *testing.T) {
 	logged := captureLog(t, &aflog.InfoLog)
 	resetSymlinkWriteNotices()
 
@@ -189,7 +189,7 @@ func TestAtomicWriteFileNoticesTheLinkOncePerProcess(t *testing.T) {
 	require.NoError(t, os.Symlink(real, link))
 
 	for i := 0; i < 3; i++ {
-		require.NoError(t, AtomicWriteFile(link, []byte("schema_version = 1\n"), 0644))
+		require.NoError(t, AtomicWriteFileFollowingLink(link, []byte("schema_version = 1\n"), 0644))
 	}
 
 	assert.Equal(t, 1, strings.Count(logged.String(), link),
@@ -197,7 +197,7 @@ func TestAtomicWriteFileNoticesTheLinkOncePerProcess(t *testing.T) {
 	assert.Contains(t, logged.String(), real, "the notice names where the write landed")
 }
 
-// TestAtomicWriteFileStillHardensAFHomeThroughALink is the ordering pin.
+// TestFollowingWriterStillHardensAFHome is the ordering pin.
 // ensureStorageParent -> secureAFHomeForPath only tightens the AF home when the
 // write path is at or inside it (pathutil.IsAtOrInside), and only for the
 // CONCRETE default home, so this test uses that home rather than a temp-dir
@@ -207,7 +207,7 @@ func TestAtomicWriteFileNoticesTheLinkOncePerProcess(t *testing.T) {
 // Resolving the link BEFORE ensureStorageParent would move the path outside the
 // home and silently skip the hardening, for exactly the users who symlink their
 // config into a dotfiles repo. The resolution has to happen after.
-func TestAtomicWriteFileStillHardensAFHomeThroughALink(t *testing.T) {
+func TestFollowingWriterStillHardensAFHome(t *testing.T) {
 	userHome := t.TempDir()
 	dotfiles := t.TempDir()
 	afHome := filepath.Join(userHome, ".agent-factory")
@@ -222,7 +222,7 @@ func TestAtomicWriteFileStillHardensAFHomeThroughALink(t *testing.T) {
 	link := filepath.Join(afHome, TomlConfigFileName)
 	require.NoError(t, os.Symlink(real, link))
 
-	require.NoError(t, AtomicWriteFile(link, []byte("schema_version = 1\n"), 0644))
+	require.NoError(t, AtomicWriteFileFollowingLink(link, []byte("schema_version = 1\n"), 0644))
 
 	info, err := os.Stat(afHome)
 	require.NoError(t, err)
@@ -231,12 +231,12 @@ func TestAtomicWriteFileStillHardensAFHomeThroughALink(t *testing.T) {
 	assertWroteThroughLink(t, link, real, "schema_version")
 }
 
-// TestAtomicWriteFileDoesNotWidenAFollowedTarget pins the mode rule. Ordinary
+// TestFollowingWriterDoesNotWidenTheTarget pins the mode rule. Ordinary
 // writers pass 0644 because that is the mode for a config af itself created; a
 // dotfiles target the user keeps at 0600 is a deliberate choice about a file af
 // is only REWRITING, and following the link must not quietly relax it
 // (#3660 review).
-func TestAtomicWriteFileDoesNotWidenAFollowedTarget(t *testing.T) {
+func TestFollowingWriterDoesNotWidenTheTarget(t *testing.T) {
 	for _, mode := range []os.FileMode{0600, 0640} {
 		t.Run(mode.String(), func(t *testing.T) {
 			link, real := linkedConfigHome(t, "schema_version = 1\nbranch_prefix = 'old/'\n")
@@ -255,28 +255,24 @@ func TestAtomicWriteFileDoesNotWidenAFollowedTarget(t *testing.T) {
 	}
 }
 
-// TestFileLockGuardsTheResolvedTarget pins that the lock and the write agree on
-// which file they are about. Two AF homes linking to one dotfiles config would
-// otherwise take two different <link>.lock files while rewriting a single file,
-// which is no mutual exclusion at all (#3660 review).
-func TestFileLockGuardsTheResolvedTarget(t *testing.T) {
+// TestFollowedFileLockGuardsTheResolvedTarget pins that the followed lock and
+// the followed write agree on which file they are about. Two AF homes linking to
+// one dotfiles config would otherwise take two different <link>.lock files while
+// rewriting a single file, which is no mutual exclusion at all (#3660 review).
+func TestFollowedFileLockGuardsTheResolvedTarget(t *testing.T) {
 	dotfiles := t.TempDir()
 	real := filepath.Join(dotfiles, "af-config.toml")
 	require.NoError(t, os.WriteFile(real, []byte("schema_version = 1\n"), 0644))
 
-	homeA, homeB := t.TempDir(), t.TempDir()
-	linkA := filepath.Join(homeA, TomlConfigFileName)
-	linkB := filepath.Join(homeB, TomlConfigFileName)
-	require.NoError(t, os.Symlink(real, linkA))
-	require.NoError(t, os.Symlink(real, linkB))
+	home := t.TempDir()
+	link := filepath.Join(home, TomlConfigFileName)
+	require.NoError(t, os.Symlink(real, link))
 
-	// Holding the lock through one alias must block the other, because both
-	// resolve to the same file.
 	held := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- WithFileLock(linkA, func() error {
+		done <- WithFollowedFileLock(link, func() error {
 			close(held)
 			<-release
 			return nil
@@ -284,16 +280,54 @@ func TestFileLockGuardsTheResolvedTarget(t *testing.T) {
 	}()
 	<-held
 
-	acquired, err := TryWithFileLock(linkB, func() error { return nil })
+	// Holding it through the LINK must exclude a plain lock on the REAL file:
+	// that is what proves the lock landed on the file the write will touch.
+	acquired, err := TryWithFileLock(real, func() error { return nil })
 	require.NoError(t, err)
-	assert.False(t, acquired,
-		"a lock taken through one alias must exclude the other — they rewrite one file")
+	assert.False(t, acquired, "the followed lock must guard the resolved target")
 
 	close(release)
 	require.NoError(t, <-done)
 
-	// And the lock file sits beside the real file, not beside either link.
 	assert.FileExists(t, real+".lock")
-	assert.NoFileExists(t, linkA+".lock")
-	assert.NoFileExists(t, linkB+".lock")
+	assert.NoFileExists(t, link+".lock",
+		"and must not leave a lock file beside the link")
+}
+
+// TestAtomicWriteFileDoesNotFollowLinksByDefault is the counterpart guarantee,
+// and the reason following is a separate function rather than a flag.
+//
+// af's own managed files — the bearer token, autostart units, the task store —
+// go through the plain writer, and #3672's caller table depends on their
+// semantics being unchanged. The concrete case there: daemon/autostart.go writes
+// a unit with AtomicWriteFile and cleans up with os.Remove of the SAME path, so
+// a writer that silently followed would leave the cleanup unlinking a link whose
+// content had gone somewhere else.
+//
+// This is the behaviour that a follow-by-default AtomicWriteFile broke, which is
+// why it is pinned rather than assumed.
+func TestAtomicWriteFileDoesNotFollowLinksByDefault(t *testing.T) {
+	dir := t.TempDir()
+	elsewhere := t.TempDir()
+	target := filepath.Join(elsewhere, "unit-target")
+	require.NoError(t, os.WriteFile(target, []byte("original\n"), 0644))
+
+	link := filepath.Join(dir, "af-daemon.service")
+	require.NoError(t, os.Symlink(target, link))
+
+	require.NoError(t, AtomicWriteFile(link, []byte("replaced\n"), 0644))
+
+	info, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode()&os.ModeSymlink,
+		"the plain writer replaces the link with a regular file, exactly as before")
+
+	wrote, err := os.ReadFile(link)
+	require.NoError(t, err)
+	assert.Equal(t, "replaced\n", string(wrote))
+
+	untouched, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "original\n", string(untouched),
+		"and leaves what the link pointed at alone")
 }

@@ -20,17 +20,28 @@ import (
 // queue behind it. Use this on latency-sensitive paths (a user is waiting)
 // where duplicating another process's work is pointless — blocking there turns
 // a peer's slow operation into an unexplained hang of your own.
-// lockTargetPath is the path whose .lock file guards writes to `path`.
+// WithFollowedFileLock is WithFileLock for a path whose write FOLLOWS a symlink
+// — today only the global config, via AtomicWriteFileFollowingLink.
 //
-// It resolves a symlink for the same reason AtomicWriteFile does, and the two
-// must agree or the lock stops meaning anything: once two aliases (two AF homes
-// pointing at one dotfiles config, say) redirect their writes to a single file,
-// locking each unresolved path produces two different .lock files and no mutual
-// exclusion over the file both are rewriting (#3660 review).
+// The lock has to resolve because the write does, and the two must agree or the
+// lock stops meaning anything: once two aliases (two AF homes pointing at one
+// dotfiles config) redirect their writes to a single file, locking each
+// unresolved path produces two different .lock files and no mutual exclusion
+// over the file both are rewriting (#3660 review).
+//
+// It is deliberately NOT what plain WithFileLock does. A caller that does not
+// follow links writes a real file at its own path, so its lock belongs there —
+// and resolving would drop a .lock file into whatever directory the link points
+// at, which for a dotfiles repository is somebody's tracked working tree.
+func WithFollowedFileLock(path string, fn func() error) error {
+	return WithFileLock(lockTargetPath(path), fn)
+}
+
+// lockTargetPath is the file whose .lock guards a followed write.
 //
 // A path that cannot be resolved falls back to itself. The lock is advisory and
-// a failure to resolve is reported by the write that follows, so refusing to
-// lock here would replace a real error message with a confusing one.
+// a failure to resolve is reported by the write that follows, so refusing here
+// would replace a real error message with a confusing one.
 func lockTargetPath(path string) string {
 	if resolved, err := resolveWriteTarget(path); err == nil {
 		return resolved
@@ -39,7 +50,7 @@ func lockTargetPath(path string) string {
 }
 
 func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
-	lockPath := lockTargetPath(path) + ".lock"
+	lockPath := path + ".lock"
 
 	if err := ensureStorageParent(lockPath); err != nil {
 		return false, fmt.Errorf("failed to create lock directory: %w", err)
@@ -95,7 +106,7 @@ var ErrLockTimeout = errors.New("timed out waiting for file lock")
 // replaced while waiting, the stale inode is unlocked and the current path is
 // opened before retrying.
 func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) error {
-	lockPath := lockTargetPath(path) + ".lock"
+	lockPath := path + ".lock"
 
 	if err := ensureStorageParent(lockPath); err != nil {
 		return fmt.Errorf("failed to create lock directory: %w", err)
@@ -157,7 +168,7 @@ var lockPollInterval = 20 * time.Millisecond
 // TryWithFileLock when a user is waiting on the result, or WithFileLockTimeout
 // when the caller must do the work but must not hang (#1917).
 func WithFileLock(path string, fn func() error) error {
-	lockPath := lockTargetPath(path) + ".lock"
+	lockPath := path + ".lock"
 
 	// Ensure the directory exists so the lock file can be created.
 	if err := ensureStorageParent(lockPath); err != nil {
@@ -208,7 +219,30 @@ func lockFileIsCurrent(f *os.File, lockPath string) (bool, error) {
 // and atomically renames it to path. This prevents partial writes from being
 // visible to readers.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	// ensureStorageParent runs on the ORIGINAL path, before the link is
+	return atomicWrite(path, data, perm, false)
+}
+
+// AtomicWriteFileFollowingLink is AtomicWriteFile for the one file af rewrites
+// on the user's behalf rather than owns: the global config (#3660, #3672).
+//
+// When path is a symlink it writes the file the link names, leaving the link in
+// place. That is right for config.toml — the user pointed it at their dotfiles
+// deliberately and every editor writes through it — and it is NOT right by
+// default, which is why it is a separate function rather than a flag on the
+// shared one. af's own managed files (the bearer token, autostart units, the
+// task store) keep the plain writer's semantics, and the in-repo config goes
+// further in the other direction with an O_NOFOLLOW pinned directory, because a
+// checked-in config belongs to a repository a clone does not control.
+//
+// Callers outside config/ are refused by
+// TestFollowingWriterStaysInsideTheConfigPackage rather than by the compiler,
+// so the promise cannot spread silently.
+func AtomicWriteFileFollowingLink(path string, data []byte, perm os.FileMode) error {
+	return atomicWrite(path, data, perm, true)
+}
+
+func atomicWrite(path string, data []byte, perm os.FileMode, followLink bool) error {
+	// ensureStorageParent runs on the ORIGINAL path, before any link is
 	// resolved, and the order is load-bearing: secureAFHomeForPath hardens the
 	// AF home only when the write path is at or inside it, so resolving first
 	// would move the path outside the home and silently skip that hardening —
@@ -217,28 +251,27 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(path), err)
 	}
 
-	// From here on the write targets the REAL file. A symlink is something the
-	// user set up deliberately and every editor writes through; af rewriting its
-	// own config at the place the user keeps it is af writing the file it was
-	// asked to write, not writing somewhere new.
-	target, err := resolveWriteTarget(path)
-	if err != nil {
-		return err
-	}
-	if target != path {
-		noticeSymlinkWrite(path, target)
-		// Do not widen the real file. Ordinary writers pass 0644 because that is
-		// the mode for a config af itself created; a target the user keeps at
-		// 0600 in their dotfiles is a deliberate choice about a file af is only
-		// rewriting, and following the link must not quietly relax it
-		// (#3660 review).
-		if info, statErr := os.Stat(target); statErr == nil {
-			perm = info.Mode().Perm()
+	target := path
+	if followLink {
+		resolved, err := resolveWriteTarget(path)
+		if err != nil {
+			return err
 		}
+		if resolved != path {
+			noticeSymlinkWrite(path, resolved)
+			// Do not widen the real file. Callers pass 0644 because that is the
+			// mode for a config af itself created; a target the user keeps at
+			// 0600 in their dotfiles is a deliberate choice about a file af is
+			// only rewriting, and following must not quietly relax it.
+			if info, statErr := os.Stat(resolved); statErr == nil {
+				perm = info.Mode().Perm()
+			}
+		}
+		target = resolved
 	}
-	// The temp file has to live in the REAL file's directory: os.Rename cannot
-	// cross filesystems, and a link into another mount is the whole point of the
-	// arrangement.
+	// The temp file lives in the TARGET's directory: os.Rename cannot cross
+	// filesystems, and a link into another mount is the whole point of the
+	// arrangement when one is being followed.
 	dir := filepath.Dir(target)
 
 	tmp, err := os.CreateTemp(dir, filepath.Base(target)+".tmp.*")

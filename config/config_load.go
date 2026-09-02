@@ -268,7 +268,7 @@ var convertRaceHookForTest func()
 // best-effort — a failure is logged, not fatal.
 func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, prettyTomlPath string) (*Config, error) {
 	var result *Config
-	lockErr := WithFileLock(tomlPath, func() error {
+	lockErr := WithFollowedFileLock(tomlPath, func() error {
 		if convertRaceHookForTest != nil {
 			convertRaceHookForTest()
 		}
@@ -315,7 +315,7 @@ func convertJSONToTOML(configDir, configPath, tomlPath, prettyConfigPath, pretty
 		if err != nil {
 			return fmt.Errorf("failed to marshal config %s as TOML: %w", prettyConfigPath, err)
 		}
-		if err := AtomicWriteFile(tomlPath, tomlBytes, 0644); err != nil {
+		if err := AtomicWriteFileFollowingLink(tomlPath, tomlBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write %s during conversion: %w", prettyTomlPath, err)
 		}
 
