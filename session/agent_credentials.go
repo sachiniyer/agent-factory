@@ -113,6 +113,16 @@ const (
 // closing it properly would require asking the engine, which is a container
 // execution on the remote host to read one file.
 func selinuxRelabelForHost() bool {
+	// SELinux is a LINUX LSM. Off linux there is nothing to relabel and no /proc
+	// to consult, and without this guard the unobserved branch below would read
+	// the expected absence of /proc/filesystems as "cannot prove" and relabel —
+	// which on macOS made dockerAccountMount REFUSE a colon-bearing
+	// AGENT_FACTORY_HOME that used to mount fine via Docker's --mount form
+	// (#3589 review). A non-local engine is still handled before this is
+	// reached, so a mac driving a remote enforcing daemon keeps its relabel.
+	if runtime.GOOS != "linux" {
+		return false
+	}
 	mode, err := hostSELinuxMode()
 	if err != nil {
 		log.WarningLog.Printf("backend=docker: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is not enforcing", err)

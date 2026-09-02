@@ -280,3 +280,30 @@ func TestBindMountRelabel_ContainerizedAfKeepsTheRelabel(t *testing.T) {
 		}
 	})
 }
+
+// TestDockerAccountMount_ColonPathFollowsTheRelabelDecision pins both halves of
+// the colon-bearing account path, on every platform (it takes the decision as an
+// argument rather than reading the host).
+//
+// A colon forces Docker's --mount form, which cannot carry a relabel — so the
+// two answers are "refuse" and "--mount", and which one you get is entirely the
+// relabel decision. Nothing covered the --mount half before, which is how a
+// refusal could start appearing on macOS without a test noticing (#3589 review).
+func TestDockerAccountMount_ColonPathFollowsTheRelabelDecision(t *testing.T) {
+	const source = "/srv/af:work/accounts/codex/work"
+
+	mount, err := dockerAccountMount("work", source, false)
+	if err != nil {
+		t.Fatalf("no relabel required: a colon path must mount via --mount, got %v", err)
+	}
+	want := []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}
+	if strings.Join(mount, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("colon path without a relabel:\n got %v\nwant %v", mount, want)
+	}
+
+	if _, err := dockerAccountMount("work", source, true); err == nil {
+		t.Error("relabel required: a colon path must be refused, since --mount cannot carry z")
+	} else if !strings.Contains(err.Error(), "SELinux relabel") {
+		t.Errorf("the refusal must say why and name the remedy; got %v", err)
+	}
+}
