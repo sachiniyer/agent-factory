@@ -149,3 +149,31 @@ func setDialogKeystrokeClock(t *testing.T, now func() time.Time) func(func() tim
 	dialogKeystrokeNow = now
 	return func(next func() time.Time) { dialogKeystrokeNow = next }
 }
+
+// #3587 review, P2. Navigating a dialog is not answering one. If the pane dies
+// after a movement key but before the confirming Enter — for instance while
+// af is capturing to see where the cursor landed — the diagnostic must not
+// claim af "answered" the dialog, and must not claim it chose an option. That
+// would put a decision af never made into the one message an operator has to
+// reconstruct the failure from.
+func TestSessionGoneError_NavigationWithoutConfirmationIsNotAnAnsweredDialog(t *testing.T) {
+	session := newTmuxSession(toTmuxName("nav", ""), ProgramClaude, NewMockPtyFactory(t), cmd_test.MockCmdExec{})
+	session.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Down")
+
+	message := session.sessionGoneError("capture-pane", errors.New("exit status 1")).Error()
+	require.Contains(t, message, "still navigating")
+	require.Contains(t, message, "confirmed nothing")
+	require.Contains(t, message, "Down")
+	require.Contains(t, message, claudeTrustAffirmativeLabel)
+	require.NotContains(t, message, "answered its",
+		"af had not answered the dialog; it had only moved the cursor")
+	require.NotContains(t, message, "to choose",
+		"af chose nothing without the confirming Enter")
+
+	// The confirming key changes the claim, and only then.
+	session.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Enter")
+	answered := session.sessionGoneError("capture-pane", errors.New("exit status 1")).Error()
+	require.Contains(t, answered, "answered its")
+	require.Contains(t, answered, "Down Enter")
+	require.Contains(t, answered, "to choose")
+}

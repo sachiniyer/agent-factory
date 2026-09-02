@@ -130,9 +130,30 @@ func (t *TmuxSession) sessionGoneError(op string, cause error) error {
 	if !ok {
 		return fmt.Errorf("%w: %s: %v", ErrSessionGone, op, cause)
 	}
+	// Navigating a dialog is not answering one. If af never sent the confirming
+	// key, saying it "answered" the dialog — and worse, that it chose an option
+	// — would describe a decision af did not make, in the one message an
+	// operator has to reconstruct what happened.
+	if !keystroke.confirmed() {
+		return fmt.Errorf("the agent exited %s while af was still navigating its %s dialog, having sent %s%s and confirmed nothing; %w: %s: %v",
+			describeDialogDeathDelay(elapsed), keystroke.dialog, strings.Join(keystroke.keys, " "),
+			keystroke.towardClause(), ErrSessionGone, op, cause)
+	}
 	return fmt.Errorf("the agent exited %s after af answered its %s dialog by sending %s%s; %w: %s: %v",
 		describeDialogDeathDelay(elapsed), keystroke.dialog, strings.Join(keystroke.keys, " "),
 		keystroke.choiceClause(), ErrSessionGone, op, cause)
+}
+
+// confirmed reports whether af actually sent the key that commits a choice.
+// Every dialog af answers is committed with Enter; the movement keys before it
+// select nothing on their own.
+func (k dialogKeystroke) confirmed() bool {
+	for _, key := range k.keys {
+		if key == "Enter" {
+			return true
+		}
+	}
+	return false
 }
 
 // describeDialogDeathDelay keeps the sub-millisecond case readable: an agent
@@ -150,4 +171,13 @@ func (k dialogKeystroke) choiceClause() string {
 		return ""
 	}
 	return fmt.Sprintf(" to choose %q", k.choice)
+}
+
+// towardClause states the option af was moving toward without claiming it got
+// there, let alone chose it.
+func (k dialogKeystroke) towardClause() string {
+	if k.choice == "" {
+		return ""
+	}
+	return fmt.Sprintf(" toward %q", k.choice)
 }

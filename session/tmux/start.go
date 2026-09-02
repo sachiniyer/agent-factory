@@ -35,6 +35,7 @@ func (t *TmuxSession) Start(workDir string) error {
 	// Same proven boundary: a key af sent to the PREVIOUS pane process cannot
 	// explain anything the new one does (#3579).
 	t.resetDialogKeystroke()
+	t.resetClaudeTrustState()
 
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane
@@ -287,7 +288,13 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		}
 		// A pane with no dialog on it retires the refusal notice, so a later
 		// dialog af cannot read is reported again rather than swallowed.
-		t.claudeTrust = claudeTrustState{}
+		//
+		// It deliberately does NOT release a pending movement key. A capture
+		// taken mid-repaint can match no dialog at all, and treating that as
+		// "the dialog is gone" would let the next complete frame re-send a key
+		// af has already sent. Only an observed change of the selected row, or
+		// a new pane process (Start), releases that.
+		t.claudeTrust.refusalLogged = false
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
 			return true

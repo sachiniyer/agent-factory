@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -57,6 +58,23 @@ type claudeFolderTrustPane struct {
 	staleFrames  int
 	pendingStale int
 	stale        string
+	// frozen holds the LAST painted frame on screen no matter what the picker's
+	// internal selection does, modelling an application whose redraw has not
+	// reached the terminal yet.
+	frozen bool
+	// deaf is how many movement keys the picker DROPS before it starts acting on
+	// them — Claude Code does exactly this in the instant after it paints the
+	// dialog, before it is reading input.
+	deaf int
+}
+
+func (p *claudeFolderTrustPane) freeze(frozen bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if frozen && p.stale == "" {
+		p.stale = p.render()
+	}
+	p.frozen = frozen
 }
 
 func (p *claudeFolderTrustPane) render() string {
@@ -101,6 +119,9 @@ func (p *claudeFolderTrustPane) capture() string {
 		// that accepted the affirmative option actually shows next.
 		return "╭──────────────────────────────────────────╮\n│ > Try \"how do I…\"                        │\n╰──────────────────────────────────────────╯\n? for shortcuts\n"
 	}
+	if p.frozen {
+		return p.stale
+	}
 	if p.pendingStale > 0 {
 		p.pendingStale--
 		return p.stale
@@ -115,6 +136,10 @@ func (p *claudeFolderTrustPane) key(name string) {
 	if len(p.committed) > 0 {
 		return
 	}
+	if p.deaf > 0 && (name == "Down" || name == "Up") {
+		p.deaf--
+		return
+	}
 	switch name {
 	case "Down":
 		p.stale, p.pendingStale = p.render(), p.staleFrames
@@ -125,6 +150,12 @@ func (p *claudeFolderTrustPane) key(name string) {
 	case "Enter":
 		p.committed = append(p.committed, p.options[p.selected])
 	}
+}
+
+func (p *claudeFolderTrustPane) selectedIndex() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.selected
 }
 
 func (p *claudeFolderTrustPane) committedLabels() []string {
@@ -139,14 +170,30 @@ func (p *claudeFolderTrustPane) committedLabels() []string {
 // issued across the whole run.
 func driveClaudeTrustPane(t *testing.T, pane *claudeFolderTrustPane, polls int) []string {
 	t.Helper()
-	var keys []string
+	session, keys := claudeTrustSession(t, pane)
+	for i := 0; i < polls; i++ {
+		if !session.CheckAndHandleTrustPrompt() {
+			break
+		}
+		if len(pane.committedLabels()) > 0 {
+			break
+		}
+	}
+	return *keys
+}
+
+// claudeTrustSession binds a session to the live picker and returns it together
+// with the send-keys commands it issues, so a test can poll it by hand.
+func claudeTrustSession(t *testing.T, pane *claudeFolderTrustPane) (*TmuxSession, *[]string) {
+	t.Helper()
+	keys := &[]string{}
 	cmdExec := cmd_test.MockCmdExec{
 		RunFunc: func(c *exec.Cmd) error {
 			joined := strings.Join(c.Args, " ")
 			if !strings.Contains(joined, "send-keys") {
 				return nil
 			}
-			keys = append(keys, joined)
+			*keys = append(*keys, joined)
 			for _, name := range injectedKeyNames([]string{joined}) {
 				pane.key(name)
 			}
@@ -159,16 +206,7 @@ func driveClaudeTrustPane(t *testing.T, pane *claudeFolderTrustPane, polls int) 
 			return []byte(pane.capture()), nil
 		},
 	}
-	session := newTmuxSession(toTmuxName("trust", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec)
-	for i := 0; i < polls; i++ {
-		if !session.CheckAndHandleTrustPrompt() {
-			break
-		}
-		if len(pane.committedLabels()) > 0 {
-			break
-		}
-	}
-	return keys
+	return newTmuxSession(toTmuxName("trust", ""), ProgramClaude, NewMockPtyFactory(t), cmdExec), keys
 }
 
 // This is the assertion the issue names as missing: not that a keystroke was
@@ -374,10 +412,34 @@ func TestParseClaudeFolderTrustDialog(t *testing.T) {
 			reason: "2 rows are labelled",
 		},
 		{
+			name: "a label carrying trailing prose is not an option row",
+			content: "❯ Resume the previous conversation\n" +
+				claudeTrustYesLabel + " (quoted from the docs)\n" +
+				"Enter to confirm · Esc to cancel\n",
+			reason: "no row is labelled",
+		},
+		{
 			name: "the cursor and the label are not one picker",
 			content: "❯ Resume the previous conversation\n\nsome output\n\n" +
-				claudeTrustYesLabel + " (quoted from the docs)\n",
-			reason: "not two options of one picker",
+				claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n",
+			reason: "not in one unbroken block",
+		},
+		{
+			name:    "one option is not a picker",
+			content: "❯ " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n",
+			reason:  "is the only row in its block",
+		},
+		{
+			name:    "no modal footer under the options",
+			content: "❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nsomething else\n",
+			reason:  "not followed by the modal's",
+		},
+		{
+			name: "a quoted dialog with the agent's composer painted below it",
+			content: "❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+				"Enter to confirm · Esc to cancel\n\n" +
+				"╭──────────────────────────────╮\n│ > Type your message here     │\n╰──────────────────────────────╯\n",
+			reason: "content is painted below",
 		},
 	}
 	for _, tt := range refusals {
@@ -446,4 +508,198 @@ func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustNeverRepaintsSoNothingIsConf
 	require.Equal(t, []string{"Down"}, injectedKeyNames(keys),
 		"exactly one movement key, and no Enter behind it; got %v", keys)
 	require.Empty(t, errLog.String(), "an unproven repaint is a retry, not an error")
+}
+
+// setClaudeTrustClock installs a virtual clock for the repaint window and
+// returns a knob that advances it, so a test can age a pending movement without
+// sleeping through it.
+func setClaudeTrustClock(t *testing.T) func(time.Duration) {
+	t.Helper()
+	now := time.Now()
+	previousNow, previousSleep := claudeTrustNow, claudeTrustSleep
+	t.Cleanup(func() { claudeTrustNow, claudeTrustSleep = previousNow, previousSleep })
+	claudeTrustNow = func() time.Time { return now }
+	claudeTrustSleep = func(d time.Duration) { now = now.Add(d) }
+	return func(d time.Duration) { now = now.Add(d) }
+}
+
+// #3587 review, P1. `send-keys` returning is not proof the key landed, and a
+// terminal that has not repainted is not proof it did not. If af re-sent the
+// movement key on the next poll against a frame that had not caught up, the
+// picker's real cursor — already moved — would be pushed BACK off the
+// affirmative row; a redraw landing between the verification and confirmation
+// captures could then let Enter reach "No, exit" and reproduce #3579 through
+// the very code that fixes it.
+//
+// So a movement key af did not see land makes this handler read-only until a
+// frame proves the cursor moved.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustDoesNotResendAnUnverifiedMove(t *testing.T) {
+	setClaudeTrustClock(t)
+	_, _, errLog := captureTrustPromptLogs(t)
+
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	// The terminal stops repainting the moment af starts driving the picker.
+	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+	require.Equal(t, 1, pane.selectedIndex(),
+		"precondition: the picker's INTERNAL selection moved, even though the screen still shows the old row")
+
+	for i := 0; i < 5; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt(), "the dialog is still in the way")
+	}
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"a second movement key would push the cursor back off %q; got %v", claudeTrustYesLabel, *keys)
+	require.Empty(t, pane.committedLabels(), "nothing may be confirmed while af cannot see the cursor")
+
+	// The redraw finally lands, inside the window. af has its proof, and
+	// confirms — with no second movement key anywhere in the sequence.
+	pane.freeze(false)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down", "Enter"}, injectedKeyNames(*keys))
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+	require.Empty(t, errLog.String())
+}
+
+// The other half of the same window, and it is not symmetric with the first.
+// Claude Code drops keys sent in the instant after it paints this dialog —
+// measured on 2.1.258 at roughly one create in six — and a movement key that
+// never reached the agent MUST be re-sent, or the dialog is never answered and
+// the session start fails. What separates the two cases is time: a key that
+// landed repaints in tens of milliseconds, so a cursor still sitting on the old
+// row long past that is evidence about the key, not about the terminal.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustResendsAMovementKeyThatNeverLanded(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	_, warnLog, errLog := captureTrustPromptLogs(t)
+
+	// A pane that swallows the first movement key outright: the picker's own
+	// selection does not move, because the key never reached it.
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, deaf: 1}
+	session, keys := claudeTrustSession(t, pane)
+
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+	require.Equal(t, 0, pane.selectedIndex(), "precondition: the key was dropped, so nothing moved")
+
+	// Inside the window af still sends nothing: the key might have landed.
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"a key that could still be in flight must not be re-sent; got %v", *keys)
+
+	// Past it, a cursor that never moved is proof the key was lost.
+	advance(claudeTrustMoveProofWindow + time.Second)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down", "Down", "Enter"}, injectedKeyNames(*keys),
+		"the lost key is re-sent — once — and the dialog answered; got %v", *keys)
+	require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels())
+	require.Contains(t, warnLog.String(), "re-sending")
+	require.Empty(t, errLog.String())
+}
+
+// A picker that swallows every movement key is not one af can drive, and af
+// says so rather than retrying until the create's budget runs out.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustGivesUpOnAPickerThatSwallowsEveryKey(t *testing.T) {
+	advance := setClaudeTrustClock(t)
+	_, _, errLog := captureTrustPromptLogs(t)
+
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}, deaf: 1 << 20}
+	session, keys := claudeTrustSession(t, pane)
+
+	for i := 0; i < claudeTrustMaxMoveAttempts+3; i++ {
+		require.True(t, session.CheckAndHandleTrustPrompt())
+		advance(claudeTrustMoveProofWindow + time.Second)
+	}
+	require.Empty(t, pane.committedLabels(), "nothing may be confirmed on a picker af never moved")
+	require.LessOrEqual(t, len(injectedKeyNames(*keys)), claudeTrustMaxMoveAttempts,
+		"re-sends are bounded; got %v", *keys)
+	require.Contains(t, errLog.String(), "never reached")
+}
+
+// A frame af cannot parse at all is not evidence that a pending movement key
+// did nothing either, so it holds rather than refusing and starting over.
+func TestCheckAndHandleTrustPrompt_ClaudeFolderTrustHoldsThroughAnUnparseableFrame(t *testing.T) {
+	setClaudeTrustClock(t)
+	pane := &claudeFolderTrustPane{options: []string{claudeTrustNoLabel, claudeTrustYesLabel}}
+	session, keys := claudeTrustSession(t, pane)
+
+	pane.freeze(true)
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys))
+
+	// A capture caught mid-repaint: the dialog's text is there, but no row
+	// carries the cursor.
+	pane.mu.Lock()
+	pane.stale = "Quick safety check:\nIs this a project you created or one you trust?\n\n" +
+		"  " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\nEnter to confirm · Esc to cancel\n"
+	pane.mu.Unlock()
+	require.True(t, session.CheckAndHandleTrustPrompt())
+	require.Equal(t, []string{"Down"}, injectedKeyNames(*keys),
+		"an unreadable frame must not release the pending movement; got %v", *keys)
+}
+
+// #3587 review, P1. This handler runs on the daemon's continuous poll against
+// ARBITRARY agent output, and Down/Up/Enter typed into a working composer
+// cannot be taken back. Output that quotes the dialog — including this repo's
+// own source and issue text, which is how #1952 and #2638 happened — must
+// inject nothing.
+func TestCheckAndHandleTrustPrompt_QuotedClaudeFolderTrustDialogInjectsNothing(t *testing.T) {
+	dialog := "Quick safety check: Is this a project you created or one you trust?\n\n" +
+		"❯ " + claudeTrustNoLabel + "\n  " + claudeTrustYesLabel + "\n\n" +
+		"Enter to confirm · Esc to cancel\n"
+
+	for _, tt := range []struct{ name, content string }{
+		{
+			// The agent is showing the dialog inside its own transcript, with
+			// its composer painted below — the shape every live pane has.
+			name: "quoted above the agent's composer",
+			content: dialog + "\n╭────────────────────────────────────╮\n" +
+				"│ > Type your message here           │\n╰────────────────────────────────────╯\n? for shortcuts\n",
+		},
+		{
+			name:    "quoted with trailing prose",
+			content: dialog + "\nThat is the dialog af answers at startup.\n",
+		},
+		{
+			name: "the label mentioned in a sentence next to the composer cursor",
+			content: "Quick safety check: Is this a project you created or one you trust?\n" +
+				"❯ I will select \"" + claudeTrustYesLabel + "\" for you\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := runTrustPromptCheck(t, ProgramClaude, tt.content)
+			require.True(t, handled, "af has not OBSERVED a dialog-free pane, so it may not report one (#3302)")
+			require.Empty(t, sentKeystrokes(cmds),
+				"no key may be injected into a pane that only quotes the dialog; got %v", cmds)
+		})
+	}
+}
+
+// #3587 review, P2. RestoreWithResult respawns a missing session through Start
+// on the SAME TmuxSession. Cross-poll state describes one pane process: a
+// movement key pending against the dead pane must not hold its replacement, and
+// a refusal already reported for the dead pane must not silence the same
+// refusal for the new one.
+func TestStart_ResetsClaudeTrustStateAtTheProvenRuntimeBoundary(t *testing.T) {
+	session := newTmuxSession(toTmuxName("respawn", ""), ProgramClaude, NewMockPtyFactory(t), cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			for _, arg := range c.Args {
+				if arg == "has-session" {
+					// Determinate absence: Start proceeds past the existence gate.
+					return errors.New("can't find session")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(*exec.Cmd) ([]byte, error) { return nil, errors.New("no server running") },
+	})
+	session.claudeTrust = claudeTrustState{refusalLogged: true, pendingFrom: claudeTrustNoLabel}
+
+	// Start fails somewhere after the resets — which is fine; the boundary is
+	// the name being proven absent, not the launch succeeding.
+	_ = session.Start(t.TempDir())
+
+	require.Equal(t, claudeTrustState{}, session.claudeTrust,
+		"a new pane process inherits no pending movement and no silenced refusal")
 }

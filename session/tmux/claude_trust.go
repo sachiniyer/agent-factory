@@ -22,7 +22,45 @@ const claudeTrustAffirmativeLabel = "Yes, I trust this folder"
 // has already identified.
 const claudeTrustSelectionGlyph = "❯"
 
+// claudeTrustAffordancePrefix is the modal's own footer. Requiring it to be the
+// LAST content on screen is what separates a live dialog from a transcript that
+// quotes one: the composer of a working agent is always painted below its
+// output, so a quoted dialog can never be the last thing in the pane. Measured
+// against claude 2.1.258 with af's own capture flags (-p -e -J): rows 15/16 are
+// the options, 17 is blank, 18 is this footer, and 19-30 are blank.
+//
+// The hidden-cursor oracle the codex branch uses is NOT available here. Claude
+// Code hides the terminal cursor in the modal (cursor_flag=0) — and in its
+// ordinary composer too, also measured — so cursor visibility cannot tell the
+// two apart for this agent. Structure is the only discriminator, so it carries
+// the whole weight.
+const claudeTrustAffordancePrefix = "Enter to confirm"
+
 const (
+	// claudeTrustMoveProofWindow is how long af treats a movement key it has not
+	// seen land as possibly still in flight. Inside it af sends NOTHING; past
+	// it, af concludes the key never reached the agent and may send another.
+	//
+	// Both directions are real, and the window is what separates them:
+	//
+	//   - A key that LANDED but has not repainted yet must not be re-sent: the
+	//     cursor has already moved, so a second key would push it back off the
+	//     affirmative row.
+	//   - A key that was DROPPED must be re-sent, or the dialog is never
+	//     answered and the session start fails. Claude Code drops keys sent in
+	//     the instant after it paints this dialog and before it is reading
+	//     input — measured on 2.1.258, roughly one create in six.
+	//
+	// 3s is the margin between them, and it is measured rather than guessed: on
+	// this box, a Down that landed repainted in 31-92ms across every successful
+	// run, while a dropped one showed no change through 16 consecutive captures.
+	// 3s is ~30x the observed repaint, so a pane still showing the old row after
+	// it is evidence about the key, not about the terminal.
+	claudeTrustMoveProofWindow = 3 * time.Second
+	// claudeTrustMaxMoveAttempts bounds re-sends across polls. A dialog that
+	// swallows this many movement keys is not one af can drive, and saying so is
+	// worth more than a session that retries until its budget runs out.
+	claudeTrustMaxMoveAttempts = 4
 	// claudeTrustMaxMovementKeys bounds the Down/Up keys af may inject into one
 	// dialog in a single check. Direction is recomputed from a fresh capture
 	// after every key, so a picker that moves the cursor somewhere af did not
@@ -57,6 +95,42 @@ var (
 // Access only while inputMu is held.
 type claudeTrustState struct {
 	refusalLogged bool
+	// pendingFrom is the label the cursor sat on when af last sent a movement
+	// key whose redraw it did not get to observe. While it is set af sends NO
+	// further movement key: `send-keys` returning is not proof the key landed,
+	// and a terminal that has not repainted yet is not proof it did not. A
+	// second key sent against a cursor that already moved would push it back
+	// off the affirmative row, and a redraw landing between the verification
+	// and confirmation captures could then let Enter reach the wrong option —
+	// which is the very failure #3579 is about.
+	//
+	// Only a frame showing a DIFFERENT selected label releases it, or a new
+	// pane process. This mirrors handleCodexSafetyBuffering's pending-selection
+	// discipline: holding costs a session that stays blocked on a dialog it was
+	// already blocked on, and that failure is loud and bounded; a movement key
+	// af cannot take back is neither.
+	pendingFrom  string
+	pendingSince time.Time
+	pendingPolls int
+	// moveAttempts counts movement keys af has sent for the dialog currently on
+	// screen. It resets whenever the cursor is observed to move, so it counts
+	// keys that achieved nothing, not keys.
+	moveAttempts int
+}
+
+func (s *claudeTrustState) beginPendingMove(from string) {
+	s.pendingFrom, s.pendingSince, s.pendingPolls = from, claudeTrustNow(), 0
+	s.moveAttempts++
+}
+
+func (s *claudeTrustState) clearPendingMove() {
+	s.pendingFrom, s.pendingSince, s.pendingPolls = "", time.Time{}, 0
+}
+
+// pendingMoveUnproven reports whether a movement key af sent could still be in
+// flight, so af must send nothing.
+func (s *claudeTrustState) pendingMoveUnproven() bool {
+	return s.pendingFrom != "" && claudeTrustNow().Sub(s.pendingSince) < claudeTrustMoveProofWindow
 }
 
 // claudeTrustRow is one visible pane line reduced to what af navigates by: the
@@ -69,12 +143,19 @@ type claudeTrustRow struct {
 	blank    bool
 }
 
+// claudeTrustBoxDrawing is the frame some Claude Code builds draw around this
+// dialog. Every rune here is chrome: a row made only of them says nothing about
+// what is on screen, so it neither separates options nor counts as content
+// painted below the footer. claude 2.1.258 draws the dialog unframed, but the
+// framed form must parse identically — a rendering change is not a reason to
+// stop answering the dialog.
+const claudeTrustBoxDrawing = "│┃║╭╮╰╯┌┐└┘╔╗╚╝─━═┄┈├┤┏┓┗┛┬┴┼╠╣╦╩╬▏▕"
+
 func claudeTrustRowOf(line string) claudeTrustRow {
 	line = strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
-	// Claude Code draws this dialog inside a box on most terminals. The border
-	// is chrome, not content, so a bordered row and a bare row must reduce to
-	// the same label.
-	line = strings.TrimSpace(strings.Trim(line, "│┃"))
+	// Strip the side borders so a bordered row and a bare row reduce to the
+	// same label, then treat a row that was ONLY frame as blank.
+	line = strings.TrimSpace(strings.Trim(line, claudeTrustBoxDrawing))
 	if line == "" {
 		return claudeTrustRow{blank: true}
 	}
@@ -161,7 +242,9 @@ func parseClaudeFolderTrustDialog(content string) (claudeFolderTrustDialog, erro
 		if row.selected {
 			dialog.cursor, cursors = idx, cursors+1
 		}
-		if strings.HasPrefix(row.label, claudeTrustAffirmativeLabel) {
+		// EXACT, not a prefix: "Yes, I trust this folder (quoted from the docs)"
+		// is prose about the dialog, not an option of one.
+		if row.label == claudeTrustAffirmativeLabel {
 			dialog.affirmative, affirmatives = idx, affirmatives+1
 		}
 	}
@@ -179,26 +262,73 @@ func parseClaudeFolderTrustDialog(content string) (claudeFolderTrustDialog, erro
 		return claudeFolderTrustDialog{}, fmt.Errorf("no row is labelled %q", claudeTrustAffirmativeLabel)
 	case affirmatives > 1:
 		return claudeFolderTrustDialog{}, fmt.Errorf("%d rows are labelled %q", affirmatives, claudeTrustAffirmativeLabel)
-	case !claudeTrustRowsAdjacent(rows, dialog.cursor, dialog.affirmative):
-		return claudeFolderTrustDialog{}, fmt.Errorf(
-			"the selected row %q and the %q row are separated by a blank line, so they are not two options of one picker",
-			rows[dialog.cursor].label, claudeTrustAffirmativeLabel)
+	}
+	if err := claudeTrustPickerStructure(rows, dialog.cursor, dialog.affirmative); err != nil {
+		return claudeFolderTrustDialog{}, err
 	}
 	return dialog, nil
 }
 
-// claudeTrustRowsAdjacent reports whether two rows sit in the same run of
-// non-blank lines.
-func claudeTrustRowsAdjacent(rows []claudeTrustRow, a, b int) bool {
-	if a > b {
-		a, b = b, a
+// claudeTrustPickerStructure requires the two rows to be options of a LIVE
+// picker rather than two lines that happen to be on screen together.
+//
+// Text alone cannot decide that. This handler runs on the daemon's continuous
+// poll against arbitrary agent output — including output that quotes this very
+// dialog, or this very file — and injecting Down/Up/Enter into a working
+// agent's composer is not recoverable. So the shape is required, all of it:
+//
+//   - the two rows sit in one unbroken run of non-blank rows (one picker),
+//   - that run holds at least two rows (a picker has options, plural),
+//   - the modal's footer is the next content below the run, and
+//   - that footer is the LAST content in the pane.
+//
+// The last requirement is the load-bearing one, and it is the same shape
+// CodexTrustPromptPresent's `affordance == last` rule already relies on: a
+// working agent paints its composer beneath its output, so a quoted dialog has
+// something after it and a live one does not.
+func claudeTrustPickerStructure(rows []claudeTrustRow, cursor, affirmative int) error {
+	first, last := claudeTrustRunBounds(rows, affirmative)
+	if cursor < first || cursor > last {
+		return fmt.Errorf("the selected row %q and the %q row are not in one unbroken block, so they are not two options of one picker",
+			rows[cursor].label, claudeTrustAffirmativeLabel)
 	}
-	for idx := a + 1; idx < b; idx++ {
-		if rows[idx].blank {
-			return false
+	if last-first+1 < 2 {
+		return fmt.Errorf("%q is the only row in its block; a picker af can navigate has more than one option",
+			claudeTrustAffirmativeLabel)
+	}
+	footer := claudeTrustNextContentRow(rows, last+1)
+	if footer < 0 || !strings.HasPrefix(rows[footer].label, claudeTrustAffordancePrefix) {
+		return fmt.Errorf("the option block is not followed by the modal's %q footer", claudeTrustAffordancePrefix)
+	}
+	if claudeTrustNextContentRow(rows, footer+1) >= 0 {
+		return fmt.Errorf("content is painted below the %q footer, so this is a dialog being quoted rather than one waiting for input",
+			claudeTrustAffordancePrefix)
+	}
+	return nil
+}
+
+// claudeTrustRunBounds returns the inclusive bounds of the unbroken run of
+// non-blank rows containing idx.
+func claudeTrustRunBounds(rows []claudeTrustRow, idx int) (first, last int) {
+	first, last = idx, idx
+	for first > 0 && !rows[first-1].blank {
+		first--
+	}
+	for last < len(rows)-1 && !rows[last+1].blank {
+		last++
+	}
+	return first, last
+}
+
+// claudeTrustNextContentRow returns the first non-blank row at or after from,
+// or -1 when the rest of the pane is blank.
+func claudeTrustNextContentRow(rows []claudeTrustRow, from int) int {
+	for idx := from; idx < len(rows); idx++ {
+		if !rows[idx].blank {
+			return idx
 		}
 	}
-	return true
+	return -1
 }
 
 // answerClaudeTrustPrompt answers a Claude Code launch gate that
@@ -232,20 +362,55 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 // dialog is still the thing on screen; without that second proof, a dialog that
 // closed underneath af would take the Enter into the agent's composer.
 func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
+	state := &t.claudeTrust
 	dialog, err := parseClaudeFolderTrustDialog(content)
 	if err != nil {
+		if state.pendingMoveUnproven() {
+			// A frame af cannot read is not evidence that a movement key it
+			// already sent did nothing either. Keep holding.
+			state.pendingPolls++
+			return true
+		}
 		t.refuseClaudeFolderTrust(err)
 		return true
 	}
 
+	// A movement key af sent but never saw land keeps this handler read-only
+	// while it could still be in flight. See claudeTrustMoveProofWindow.
+	if state.pendingFrom != "" {
+		switch {
+		case dialog.selectedLabel() != state.pendingFrom:
+			// The cursor moved: the key landed, and af may act on what it sees.
+			state.clearPendingMove()
+			state.moveAttempts = 0
+		case state.pendingMoveUnproven():
+			state.pendingPolls++
+			return true
+		default:
+			// Far past any repaint and the cursor never moved, so the key never
+			// reached the agent — Claude Code drops keys sent in the instant
+			// after it paints this dialog. Re-sending is now the safe action;
+			// it is the one thing af must NOT do while the key might still be
+			// in flight.
+			log.WarningLog.Printf(
+				"session %q: %s did not act on the %d key(s) af sent in %s (cursor still on %q); re-sending",
+				t.sanitizedName, claudeFolderTrustDialogName, state.moveAttempts,
+				claudeTrustNow().Sub(state.pendingSince).Round(time.Millisecond), state.pendingFrom)
+			state.clearPendingMove()
+		}
+	}
+
 	for moves := 0; !dialog.onAffirmative(); moves++ {
-		if moves >= claudeTrustMaxMovementKeys {
+		if moves >= claudeTrustMaxMovementKeys || state.moveAttempts >= claudeTrustMaxMoveAttempts {
 			t.refuseClaudeFolderTrust(fmt.Errorf(
 				"the cursor stayed on %q after %d movement keys and never reached %q",
-				dialog.selectedLabel(), moves, claudeTrustAffirmativeLabel))
+				dialog.selectedLabel(), state.moveAttempts, claudeTrustAffirmativeLabel))
 			return true
 		}
 		key := dialog.keyTowardAffirmative()
+		// Recorded BEFORE the send: a send-keys that errors — or times out — is
+		// not proof the key failed to reach the pane, so it must hold too.
+		state.beginPendingMove(dialog.selectedLabel())
 		if err := t.tapPromptKeys(key); err != nil {
 			log.ErrorLog.Printf("could not move the %s cursor onto %q for session %q: %v",
 				claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, t.sanitizedName, err)
@@ -255,13 +420,15 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 
 		moved, ok := t.awaitClaudeFolderTrustRepaint(dialog)
 		if !ok {
-			// af has no proof of where the cursor is now, so it must not confirm.
-			// Holding costs one poll against a dialog the session was already
-			// blocked on; confirming an unknown row cannot be taken back.
-			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; re-reading on the next check",
-				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key)
+			// af has no proof of where the cursor is now, so it must not confirm
+			// — and the pending record above is what stops the next poll from
+			// re-sending this key against a cursor that may already have moved.
+			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; sending nothing further for %s, in case the key is still in flight",
+				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key, claudeTrustMoveProofWindow)
 			return true
 		}
+		state.clearPendingMove()
+		state.moveAttempts = 0
 		dialog = moved
 	}
 
@@ -282,8 +449,18 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 		return true
 	}
 	t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Enter")
-	t.claudeTrust.refusalLogged = false
+	state.refusalLogged = false
 	return true
+}
+
+// resetClaudeTrustState drops this handler's cross-poll memory at a proven
+// runtime boundary. A movement key af sent to the PREVIOUS pane process cannot
+// be pending against a new one, and a refusal reported for the old pane must not
+// silence the same refusal for its replacement.
+func (t *TmuxSession) resetClaudeTrustState() {
+	t.inputMu.Lock()
+	defer t.inputMu.Unlock()
+	t.claudeTrust = claudeTrustState{}
 }
 
 // awaitClaudeFolderTrustRepaint waits for the pane to show the cursor on a
