@@ -44,6 +44,7 @@ func spawnSessionWithEscapee(t *testing.T, name string) proctree.Process {
 	script := "nohup sleep 300 >/dev/null 2>&1 & " + recordPIDShell("$!", pidFile) + "; exec sleep 300"
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 
 	var pid int
 	require.Eventually(t, func() bool {
@@ -613,6 +614,7 @@ func spawnMarkedSessionWithEscapee(t *testing.T, name, home string, generation .
 	args = append(args, "nohup sleep 300 >/dev/null 2>&1 & "+recordPIDShell("$!", pidFile)+"; exec sleep 300")
 	out, err := exec.Command("tmux", args...).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 
 	var pid int
 	require.Eventually(t, func() bool {
@@ -648,6 +650,7 @@ func spawnSessionWaitingToStartHelper(t *testing.T, name, home string) (trigger,
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		if data, readErr := os.ReadFile(pidFile); readErr == nil {
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
@@ -936,6 +939,7 @@ func spawnSessionWaitingToStartUnmarkedHelper(t *testing.T, name, home string) (
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		if data, readErr := os.ReadFile(pidFile); readErr == nil {
 			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data))); parseErr == nil {
@@ -978,6 +982,7 @@ func spawnSessionWaitingToForkUnmarkedHelper(t *testing.T, name, home string) (t
 	out, err := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
 		"-e", EnvMarkerSession+"="+name, "-e", EnvMarkerHome+"="+home, script).CombinedOutput()
 	require.NoError(t, err, "tmux new-session: %s", out)
+	testguard.KeepTmuxServerOnEmpty(t)
 	t.Cleanup(func() {
 		for _, pidFile := range []string{parentPIDFile, childPIDFile} {
 			if data, readErr := os.ReadFile(pidFile); readErr == nil {

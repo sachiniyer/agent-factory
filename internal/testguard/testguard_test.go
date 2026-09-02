@@ -345,7 +345,7 @@ func tmuxServerPID() (pid, diagnostic string) {
 	return strings.TrimSpace(string(out)), ""
 }
 
-// TestIsolateTmuxServerSurvivesGoingEmpty is the #3559 regression.
+// TestKeepTmuxServerOnEmptySurvivesGoingEmpty is the #3559 regression.
 //
 // tmux defaults exit-empty to ON, so a private server exits the moment its last
 // session is killed. Several reap tests kill their only session to model a
@@ -355,15 +355,15 @@ func tmuxServerPID() (pid, diagnostic string) {
 //	tmux new-session: server exited unexpectedly
 //
 // The failure is in the harness's own staging step, before the code under test
-// runs, so it reads as a defect in the reaper. IsolateTmux pins exit-empty off;
-// this asserts the server actually survives going empty.
+// runs, so it reads as a defect in the reaper. KeepTmuxServerOnEmpty pins
+// exit-empty off at staging time; this asserts the server survives going empty.
 //
 // Deterministic in both directions, unlike the flake it prevents: measured 40/40
 // servers gone with the default and 40/40 alive with the pin. The server-PID
 // check is what makes it so — an unpinned run either finds no server at all or
 // finds a REPLACEMENT started by this very command, and a replacement is caught
 // on identity no matter how the shutdown raced.
-func TestIsolateTmuxServerSurvivesGoingEmpty(t *testing.T) {
+func TestKeepTmuxServerOnEmptySurvivesGoingEmpty(t *testing.T) {
 	IsolateTmux(t)
 
 	// Stage first, then read the identity. Mirroring the reap tests, which start
@@ -373,6 +373,7 @@ func TestIsolateTmuxServerSurvivesGoingEmpty(t *testing.T) {
 	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "tg_empty_probe", "sleep 300").CombinedOutput(); err != nil {
 		t.Fatalf("stage first session: %v: %s", err, out)
 	}
+	KeepTmuxServerOnEmpty(t)
 	before, diag := tmuxServerPID()
 	if before == "" {
 		t.Fatalf("private tmux server unreachable while a session exists: %s", diag)
