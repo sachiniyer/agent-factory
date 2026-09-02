@@ -118,19 +118,82 @@ func KeyEffectClass(key string) EffectClass {
 	return keyEffectClasses[base]
 }
 
-// EffectNotice is the one sentence a save surface shows after writing key, stating
-// WHEN the change takes effect. daemonApplied reports whether a running daemon just
-// applied the on-disk config (Manager.ApplyConfig succeeded); it only changes the
-// applied-live answer, because an applied-live key that no daemon was running to
-// apply waits for the next daemon start just like the deferred keys.
+// ApplyOutcome is what a running daemon actually DID with the write a save surface
+// is about to report — the WHOLE outcome, not the single "did the apply call
+// return nil" bit EffectNotice used to take.
 //
-// It deliberately never tells the user to run a command (#2479) and never claims a
-// running daemon acted on a key the daemon does not read (#2480). Sentence case,
-// one clause set off with an em dash, per the copy conventions.
-func EffectNotice(key string, daemonApplied bool) string {
+// That bit was the defect behind #3397. A listener key has three outcomes, not two:
+// applied live, deferred because no daemon was running, and applied-on-disk but
+// NOT live because the socket rebind failed and the old listener is still serving.
+// The third one was inexpressible here, so each save surface had to reconstruct it
+// from daemon.ApplyConfigResult with its own branch — and a decision that lives at
+// the call site is a decision the next surface can be written without. Two of the
+// four surfaces were (set, server and client); two were not (unset, server and
+// client), and the unset pair printed "Applied — the running daemon is using the
+// new value now." over a warning saying the daemon was still serving the old
+// address. Carrying the outcome makes EffectNotice the one owner of the decision.
+//
+// The zero value is the honest "nothing applied it": no daemon was running, or its
+// apply returned an error. A caller with no apply result stays expressible.
+type ApplyOutcome struct {
+	// DaemonApplied reports that a running daemon applied the on-disk config
+	// (daemon.Manager.ApplyConfig returned without error). It does NOT report that
+	// every changed key took effect — FailedListenerKeys is the rest of the answer.
+	DaemonApplied bool
+	// FailedListenerKeys names the socket keys (network.listen_addr /
+	// network.preview_listen_addr) whose live rebind failed, so bind-new-before-close
+	// left the OLD listener serving. Both daemon.ApplyConfigResult and
+	// daemon.ApplyConfigResponse carry this; config owns no daemon types and must not
+	// import daemon (daemon imports config), so it travels as the plain slice.
+	FailedListenerKeys []string
+}
+
+// listenerRebindFailed reports whether key is one of the socket keys whose live
+// rebind failed in this apply.
+//
+// Both sides are canonicalized, which today is belt and braces: every producer of
+// FailedListenerKeys is a hardcoded canonical literal in webListeners.reconcile,
+// and both config.SetResult.Key and config.UnsetResult.Key are canonicalConfigKey'd
+// before the result is built, so an `af config set listen_addr …` already arrives
+// here as "network.listen_addr". But "both sides happen to be canonical" is an
+// invariant spread across three files with nothing pinning it, and it is exactly
+// the invariant a raw comparison would fail silently — printing "Applied" over a
+// rebind warning, which is the bug this function exists to prevent. A map lookup is
+// cheaper than the standing risk.
+func (o ApplyOutcome) listenerRebindFailed(key string) bool {
+	key = canonicalConfigKey(key)
+	for _, failed := range o.FailedListenerKeys {
+		if canonicalConfigKey(failed) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectNotice is the one sentence a save surface shows after writing key, stating
+// WHEN the change takes effect. outcome is what the running daemon did with it (see
+// ApplyOutcome); it only changes the applied-live answer, because an applied-live
+// key that no daemon was running to apply waits for the next daemon start just like
+// the deferred keys.
+//
+// It deliberately never tells the user to run a command (#2479), never claims a
+// running daemon acted on a key the daemon does not read (#2480), and since #3397
+// never claims a key is live when the rebind that would have made it live failed.
+// Sentence case, one clause set off with an em dash, per the copy conventions.
+func EffectNotice(key string, outcome ApplyOutcome) string {
+	key = canonicalConfigKey(key)
+	// Ahead of the class switch, mirroring exactly where the two already-correct
+	// save surfaces made this check before #3397 moved it in here, so those two come
+	// out behaviourally identical. The placement is not load-bearing either way: only
+	// the two socket keys ever appear in FailedListenerKeys and both are
+	// EffectAppliedLive, so testing it inside that case would decide every real input
+	// the same way.
+	if outcome.listenerRebindFailed(key) {
+		return listenerRebindDeferredNotice(key)
+	}
 	switch KeyEffectClass(key) {
 	case EffectAppliedLive:
-		if daemonApplied {
+		if outcome.DaemonApplied {
 			return "Applied — the running daemon is using the new value now."
 		}
 		return "Saved — no daemon is running to apply it, so it takes effect on the next daemon start."
@@ -143,12 +206,18 @@ func EffectNotice(key string, daemonApplied bool) string {
 	}
 }
 
-// ListenerRebindDeferredNotice is the honest notice when a listen_addr /
-// preview_listen_addr change could NOT be applied to the running daemon: the
-// bind-new-before-close rebind failed, so the OLD listener is still serving. The
+// listenerRebindDeferredNotice is the honest notice when a network.listen_addr /
+// network.preview_listen_addr change could NOT be applied to the running daemon:
+// the bind-new-before-close rebind failed, so the OLD listener is still serving. The
 // value is on disk and takes effect on the next daemon start; the actionable
 // reason (address + why) rides alongside in the save surface's warnings. Like every
 // #2480 notice it names no command to run.
-func ListenerRebindDeferredNotice(key string) string {
+//
+// Unexported since #3397. It was exported for the save surfaces to call directly,
+// which is precisely how two of them came to decide this correctly and two not at
+// all. EffectNotice above is now the only way to reach it, so no surface can pick
+// the wrong sentence — or forget that this sentence exists. The wording itself is
+// unchanged; it is user-visible.
+func listenerRebindDeferredNotice(key string) string {
 	return fmt.Sprintf("Saved — %s could not be applied to the running daemon; it takes effect on the next daemon start (see the warning for the reason).", key)
 }
