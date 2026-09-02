@@ -62,6 +62,10 @@ const MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON =
   "degraded to maintainer review. This PR has NOT been reviewed — a maintainer must review " +
   "and merge it manually.";
 const RETRY_DELAYS_MS = [250, 1000];
+// A merge that has already STARTED needs longer than a read retry to land.
+// Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
+// read back as "nobody merged" — refusing the concession this exists to grant.
+const MERGE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
 // GitHub reads are side-effect-free, and check-run updates are idempotent when
@@ -1024,7 +1028,13 @@ async function processAggregateHead({
       // merge raises no event, so nothing would come along to repair it. That
       // one falls through to the ordinary invalidation below, exactly as a
       // successful merge does, and for the same reason.
-      if (error?.autoGateConcessionReason === "newer-owner") {
+      // "owner-unknown" joins it: both mean this run must not write to the
+      // aggregate, one because a live transaction owns it and one because the
+      // read that would have proved it failed.
+      if (
+        error?.autoGateConcessionReason === "newer-owner" ||
+        error?.autoGateConcessionReason === "owner-unknown"
+      ) {
         core.notice(message);
         return { state: "conceded", pending, aggregate };
       }
@@ -1501,8 +1511,13 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
       return null;
     }
     const aggregateExternalId = `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${expectedHeadSha}`;
-    const aggregateChecks =
-      (await readOrNull(() =>
+    // NOT readOrNull: an empty list here reads as "nobody owns this head", and
+    // the caller acts on that by creating another invalidation — which supersedes
+    // the very transaction this read failed to see. "No answer" and "no owner"
+    // must not be the same value, so this retries and then reports the unknown.
+    let aggregateChecks;
+    try {
+      aggregateChecks = await retryRead(`could not read aggregate checks at ${expectedHeadSha}`, () =>
         github.paginate(github.rest.checks.listForRef, {
           owner,
           repo,
@@ -1510,7 +1525,16 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
           filter: "all",
           per_page: 100,
         }),
-      )) || [];
+      );
+    } catch (error) {
+      return {
+        reason: "owner-unknown",
+        message:
+          `Conceding merge-refused race for PR #${prNumber} without invalidating ` +
+          `${expectedHeadSha}: ownership could not be determined (${formatError(error)}), and ` +
+          "a blind invalidation would supersede whichever transaction owns it.",
+      };
+    }
     const newerOwner = aggregateChecks
       .filter((check) => {
         const createdAt = Date.parse(check.created_at || "") || 0;
@@ -1553,10 +1577,10 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   // error AND abandon the remaining settlement window — so the winning merge
   // could land inside the window this loop exists to wait through, and the run
   // would still fail with the red master alarm this is meant to prevent.
-  const confirmations = refusal.settling ? RETRY_DELAYS_MS.length + 1 : 1;
-  for (let attempt = 0; attempt < confirmations; attempt += 1) {
+  const settleDelays = refusal.settling ? MERGE_SETTLE_DELAYS_MS : [];
+  for (let attempt = 0; attempt <= settleDelays.length; attempt += 1) {
     if (attempt > 0) {
-      await delay(RETRY_DELAYS_MS[attempt - 1]);
+      await delay(settleDelays[attempt - 1]);
     }
     const pull = await readOrNull(() =>
       github.rest.pulls.get({ owner, repo, pull_number: prNumber }),

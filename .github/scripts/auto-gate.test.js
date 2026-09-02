@@ -2012,6 +2012,30 @@ test("a merge already in progress is conceded after the winner settles", async (
   assert.ok(notices.some((notice) => notice.includes("already merged settled-sha")));
 });
 
+test("the settlement window outlasts a slow in-flight merge", async () => {
+  // Codex P2: the settlement re-reads reused the generic read-retry delays, so
+  // the winner had 1.25s total to land. A merge GitHub has already STARTED can
+  // take longer than that, and the run then read back "nobody merged" and failed
+  // — refusing the concession this shape exists to grant.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    // Still open through the first three reads; merged only on the fourth, which
+    // the old 250ms + 1s window could never have reached.
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: false, merge_commit_sha: null },
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "slow-winner-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a merge that lands late is still a conceded race");
+  assert.ok(notices.some((notice) => notice.includes("already merged slow-winner-sha")));
+  assert.equal(github.pullGetReads, 4);
+});
+
 test("a merge already in progress on a head nobody merged still fails loudly", async () => {
   // The loud path the concession must not swallow: a refusal with the PR still
   // open and no winner is a genuinely unmergeable head.
@@ -2025,9 +2049,10 @@ test("a merge already in progress on a head nobody merged still fails loudly", a
   assert.match(error?.message || "", /Merge already in progress/);
   assert.equal(error?.autoGateMergeConceded, undefined);
   assert.ok(!notices.some((notice) => notice.includes("Conceding merge-refused race")));
-  // Bounded: exhausting the re-reads concludes "nobody merged" rather than
-  // holding the serialized lane open waiting for one.
-  assert.equal(github.pullGetReads, 3);
+  // Bounded: exhausting the settlement window concludes "nobody merged" rather
+  // than holding the serialized lane open waiting for one. Four reads — the
+  // first plus one per MERGE_SETTLE_DELAYS_MS step.
+  assert.equal(github.pullGetReads, 4);
 });
 
 test("a transient read inside the settlement window does not abandon it", async () => {
@@ -2219,6 +2244,41 @@ test("an unlisted merge refusal is never conceded, even on a merged PR", async (
 
   assert.match(error?.message || "", /Base branch was modified/);
   assert.equal(github.pullGetReads, 0, "an unlisted shape must not even be investigated");
+});
+
+test("an unreadable ownership check never becomes 'nobody owns this head'", async () => {
+  // Codex P1: readOrNull turned a transient listForRef failure into an EMPTY
+  // list, which reads as "no newer owner" — and the caller acts on that by
+  // creating another invalidation, superseding the very transaction the failed
+  // read could not see. "No answer" and "no owner" must not be the same value.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+  const unavailable = new Error("fetch failed");
+  const realPaginate = github.paginate;
+  let checkReads = 0;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && options?.filter === "all") {
+      checkReads += 1;
+      throw unavailable;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "the refusal is conceded rather than reddening the run");
+  // Retried before giving up, then reported as unknown rather than as absent.
+  assert.equal(checkReads, 3);
+  // …and crucially, no new WAITING generation: a blind invalidation here is what
+  // supersedes whichever transaction actually owns the head.
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an undetermined owner must not be overwritten by a blind invalidation",
+  );
 });
 
 test("a newer transaction owning the head concedes a refused merge", async () => {
