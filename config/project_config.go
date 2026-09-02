@@ -357,6 +357,9 @@ func ResolveProjectSelector(selector string) (Project, error) {
 	}
 	binding, err := resolveProjectBinding(selector)
 	if err != nil {
+		if RepoProbeUnanswered(err) {
+			return Project{}, fmt.Errorf("%q is not a registered project, and %s: %w", selector, RepoProbeUnansweredClaim("the path", selector), err)
+		}
 		return Project{}, fmt.Errorf("%q is not a registered project and is not inside a git repository: %w", selector, err)
 	}
 	for _, p := range projects {

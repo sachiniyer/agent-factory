@@ -67,6 +67,9 @@ func repoFromFlag() (*config.RepoContext, error) {
 	}
 	repo, err := config.RepoFromPath(absPath)
 	if err != nil {
+		if config.RepoProbeUnanswered(err) {
+			return nil, fmt.Errorf("%s — retry, or pass a different --repo: %w", config.RepoProbeUnansweredClaim("--repo", absPath), err)
+		}
 		return nil, fmt.Errorf("--repo %q is not a valid git repository: %w", absPath, err)
 	}
 	return repo, nil
@@ -188,6 +191,16 @@ func resolveRepo() (*config.RepoContext, error) {
 	} else {
 		repo, err = config.CurrentRepo()
 		if err != nil {
+			if config.RepoProbeUnanswered(err) {
+				// Name the directory the probe actually ran in: a user reading
+				// this may not be where they think they are, and the claim
+				// helper wants a path rather than a pronoun.
+				cwd, cwdErr := os.Getwd()
+				if cwdErr != nil {
+					cwd = "."
+				}
+				return nil, fmt.Errorf("--repo is required: %s — retry, or pass --repo <path> to target a project (%w)", config.RepoProbeUnansweredClaim("the current directory", cwd), err)
+			}
 			return nil, fmt.Errorf("--repo is required: the current directory is not a git repository — pass --repo <path> to target a project (%w)", err)
 		}
 	}

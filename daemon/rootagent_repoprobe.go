@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -27,8 +26,11 @@ import (
 // verdict. subject names the thing being resolved ("root_agents entry",
 // "project <id> root") so one wording serves both sites.
 func repoResolveClaim(subject, path string, err error) string {
-	if errors.Is(err, config.ErrRepoProbeUnanswered) {
-		return fmt.Sprintf("%s %q could not be checked: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so whether the path is a git repository is unknown", subject, path)
+	if config.RepoProbeUnanswered(err) {
+		// One sentence for every surface that has to say this, so the honest
+		// half cannot drift between the daemon log and the CLI/TUI sites the
+		// #3504 sweep fixed.
+		return config.RepoProbeUnansweredClaim(subject, path)
 	}
 	return fmt.Sprintf("%s %q does not resolve to a git repository", subject, path)
 }
