@@ -32,11 +32,46 @@ const guardMaxDepth = 12
 // the bundle verbatim.
 const guardSliceSeed = 2
 
-// guardMinContainer is the shortest fixed array that can hold a marker
-// distinctive enough to trust. Below it, a truncated marker is too short to
-// tell a planted value from incidental data, so the field is reported rather
-// than silently probed with something meaningless.
-const guardMinContainer = 8
+// A byte or rune container is planted with a repetition of guardUnitDelim
+// followed by the field's sequence number at guardUnitDigits fixed width —
+// "|0007|0007|0007…" — rather than with the plain marker used for strings.
+//
+// EVERY fragment of a container's encoding has to name the field it came from,
+// and a unique prefix on a shared stem does not manage that. Two []byte markers
+// that differ only in their leading digits encode to base64 that is IDENTICAL
+// after the first quartet, and two rune markers to integer lists identical after
+// the first few elements, so any fragment past that point matches the other
+// container's text just as well. A correctly redacted field then reads as
+// leaked, and a stale allowlist entry survives assertNoStaleEntries on evidence
+// that belongs to its neighbour (#3592 review).
+//
+// The delimiter cannot occur inside a number and the width is fixed, so a
+// COMPLETE unit occurs in exactly one field's text — that is what makes a
+// fragment attributable.
+const (
+	guardUnitDelim  = "|"
+	guardUnitDigits = 4
+)
+
+// guardUnitLen is the length of one complete unit. guardMaxSeq is the largest
+// sequence number that still renders at guardUnitDigits: past it the width is no
+// longer fixed, "|1000" becomes a prefix of "|10000", and attribution breaks.
+const (
+	guardUnitLen = len(guardUnitDelim) + guardUnitDigits
+	guardMaxSeq  = 9999
+)
+
+// guardMinContainer is the shortest fixed array the guard will plant into: it
+// must hold at least one COMPLETE unit, since that unit is the whole of what
+// names the field the bytes came from. An array shorter than this would hold a
+// prefix every field shares, so it is reported rather than silently probed with
+// something that cannot be attributed.
+const guardMinContainer = guardUnitLen
+
+// guardContainerLen is how many bytes or runes a planted SLICE gets — enough
+// units for several windows, so a redaction that rewrites part of a container is
+// still observable in the part it left alone.
+const guardContainerLen = 9 * guardUnitLen
 
 var verbatimInstanceFields = map[string]string{
 	"ID":     "minted instance id, never derived from user text",
@@ -158,20 +193,12 @@ var knownUnredactedFields = map[string]string{
 type plantedField struct {
 	path  string
 	forms []string
+	// encoded is the value's own JSON encoding, kept so attribution can be
+	// checked: a fragment recorded for one field must not occur inside another
+	// field's encoding, or the two are indistinguishable in the document.
+	encoded string
 }
 
-// mustVisit reports whether a struct field can carry text into a bundle and so
-// must be walked.
-//
-// The anonymous clause is the subtle half. encoding/json PROMOTES the exported
-// members of an anonymously embedded struct, even when the embedded TYPE is
-// unexported, so `struct{ inner }` with `inner{ Secret string }` serializes as
-// {"secret": ...}. A plain IsExported check skips that whole subtree while json
-// happily publishes it. A pointer embed promotes the same way.
-//
-// reflect agrees this is reachable: the embedded field itself reports
-// CanSet=false, but its promoted exported members report CanSet=true — measured,
-// not assumed — which is why fill can descend and plant in them.
 // hasJSONOption reports whether a json tag carries the given option.
 func hasJSONOption(f reflect.StructField, want string) bool {
 	parts := strings.Split(f.Tag.Get("json"), ",")
@@ -198,6 +225,18 @@ func definesIsZero(t reflect.Type) bool {
 	return ok && m.Type.NumIn() == 1 && m.Type.NumOut() == 1 && m.Type.Out(0).Kind() == reflect.Bool
 }
 
+// mustVisit reports whether a struct field can carry text into a bundle and so
+// must be walked.
+//
+// The anonymous clause is the subtle half. encoding/json PROMOTES the exported
+// members of an anonymously embedded struct, even when the embedded TYPE is
+// unexported, so `struct{ inner }` with `inner{ Secret string }` serializes as
+// {"secret": ...}. A plain IsExported check skips that whole subtree while json
+// happily publishes it. A pointer embed promotes the same way.
+//
+// reflect agrees this is reachable: the embedded field itself reports
+// CanSet=false, but its promoted exported members report CanSet=true — measured,
+// not assumed — which is why fill can descend and plant in them.
 func mustVisit(f reflect.StructField) bool {
 	// `json:"-"` is an explicit never-serialize marker, not a selection rule
 	// among competing fields, so honouring it is not the modelling this guard
@@ -307,18 +346,29 @@ type sentinelFiller struct {
 	seq         int
 }
 
-// nextMarker puts the unique sequence FIRST. A fixed array is filled by
-// truncation, so a marker whose distinguishing suffix falls off the end gives
-// every short array identical contents — two [8]byte fields would both read
-// "AF-REDAC", and one field's surviving fragment would mark the other leaked
-// too, wrecking attribution and the stale-entry check (#3592 review).
-// guardMinContainer is sized so the sequence always survives.
+// nextMarker puts the unique sequence FIRST, so a marker that is truncated or
+// windowed keeps the part that names its field.
 func (f *sentinelFiller) nextMarker() string {
 	f.seq++
-	return fmt.Sprintf("%04d-%s", f.seq, guardSentinel)
+	return fmt.Sprintf("%0*d-%s", guardUnitDigits, f.seq, guardSentinel)
 }
 
-// record captures the JSON fragment the just-planted value produces.
+// nextContainerMarker returns exactly n bytes of field-unique filler for a byte
+// or rune container: the field's unit, repeated. Unlike nextMarker's readable
+// stem, EVERY position of this text carries the sequence number, which is what
+// makes each of its encoded windows attributable to one field — see the
+// guardUnitDelim block above.
+//
+// The whole container is filled, arrays included. Filling only a prefix would
+// leave a zero tail whose encoding ("0,0,0,0,…") is identical in every field, so
+// a long array would reintroduce exactly the shared-fragment problem the unit
+// scheme exists to remove.
+func (f *sentinelFiller) nextContainerMarker(n int) string {
+	f.seq++
+	unit := fmt.Sprintf("%s%0*d", guardUnitDelim, guardUnitDigits, f.seq)
+	return strings.Repeat(unit, n/len(unit)+1)[:n]
+}
+
 // record captures every JSON fragment the just-planted value can produce.
 //
 // BOTH the raw marker and the marshalled form are kept, and a match on either
@@ -330,39 +380,77 @@ func (f *sentinelFiller) nextMarker() string {
 // []byte as base64, [N]byte and []rune as integer lists. Markers are
 // alphanumeric-and-dash, so json never escapes them and the raw form is exact.
 func (f *sentinelFiller) record(v reflect.Value, path, marker string) {
-	f.planted = append(f.planted, plantedField{path: path, forms: f.formsFor(v, marker, false)})
+	forms, encoded := f.formsFor(v, marker, false)
+	f.planted = append(f.planted, plantedField{path: path, forms: forms, encoded: encoded})
 }
 
 // recordContainer is record for a byte or rune container, which additionally
-// keeps a tail fragment so a redaction touching only the first element is still
-// observable.
+// keeps windowed fragments so a redaction touching only part of the container is
+// still observable.
 func (f *sentinelFiller) recordContainer(v reflect.Value, path, marker string) {
-	f.planted = append(f.planted, plantedField{path: path, forms: f.formsFor(v, marker, true)})
+	forms, encoded := f.formsFor(v, marker, true)
+	f.planted = append(f.planted, plantedField{path: path, forms: forms, encoded: encoded})
 }
 
-func (f *sentinelFiller) formsFor(v reflect.Value, marker string, withTail bool) []string {
+func (f *sentinelFiller) formsFor(v reflect.Value, marker string, withWindows bool) ([]string, string) {
 	forms := []string{marker}
 	if !v.CanInterface() {
-		return forms
+		return forms, ""
 	}
-	form, err := json.Marshal(v.Interface())
+	form, err := marshalPlanted(v)
 	if err != nil {
-		return forms
+		return forms, ""
 	}
 	forms = append(forms, string(form))
-	// A tail is only meaningful for a container. Deriving one from a plain
+	// Windows are only meaningful for a container. Deriving one from a plain
 	// string would strip the marker's unique prefix and leave a fragment every
 	// other marker shares, matching any field at all — measured, as 38 spurious
 	// leaks (#3592 review).
-	if withTail {
+	if withWindows {
 		forms = append(forms, encodedWindows(string(form))...)
 	}
-	return forms
+	return forms, string(form)
 }
 
-// guardWindowMin is the shortest encoded fragment trusted as evidence. Shorter
-// runs of base64 or digits could plausibly coincide between two fields.
-const guardWindowMin = 12
+// marshalPlanted marshals a COPY of the planted value, never the value itself.
+//
+// A MarshalJSON with a POINTER receiver may mutate what it renders, and json
+// takes the address of an addressable element rather than a copy, so marshalling
+// the live container hands the marshaler the very array this walk just planted
+// into. One that clears its receiver — a wipe-after-read secret, say — would
+// leave the record holding zeroes and this walk holding fragments that no longer
+// exist anywhere, so a completely UNREDACTED field would read as clean
+// (#3592 review). Copying first means the mutation lands on the copy.
+func marshalPlanted(v reflect.Value) ([]byte, error) {
+	cp := reflect.New(v.Type()).Elem()
+	if v.Kind() == reflect.Slice && !v.IsNil() {
+		// Same element type by construction, so reflect.Copy cannot hit the
+		// exactly-[]byte restriction that SetBytes does on a named byte type.
+		cp.Set(reflect.MakeSlice(v.Type(), v.Len(), v.Len()))
+		reflect.Copy(cp, v)
+	} else {
+		cp.Set(v)
+	}
+	return json.Marshal(cp.Interface())
+}
+
+// A window is sized in SOURCE elements, not in encoded characters, because what
+// makes it attributable is the planted text it covers. guardWindowElems is
+// 2*guardUnitLen-1: any run of that many consecutive elements contains one
+// COMPLETE unit whatever offset it starts at, and a complete unit belongs to
+// exactly one field.
+//
+// An earlier revision sized windows by encoded LENGTH instead — 12 characters —
+// which for a two-digit integer list is only four elements, short enough to hold
+// no complete unit and to coincide between fields (#3592 review).
+const (
+	guardWindowElems = 2*guardUnitLen - 1
+	// base64 emits 4 characters per 3 source bytes, so a window of whole
+	// quartets covering at least guardWindowElems bytes is this many characters
+	// — and, being a multiple of 4, every window starts on a source-byte
+	// boundary too.
+	guardWindowChars = 4 * ((guardWindowElems + 2) / 3)
+)
 
 // encodedWindows splits a container's encoding into DISJOINT fragments, each a
 // literal substring of it, so an edit anywhere in the container leaves at least
@@ -378,46 +466,31 @@ const guardWindowMin = 12
 //     run appears verbatim inside the whole.
 //   - A base64 string encodes in 3-byte groups, so windows aligned to 4
 //     characters are likewise substrings.
+//
+// Only FULL windows are kept. A short remainder covers too few elements to hold
+// a complete unit, and a fragment that cannot name its own field is not
+// evidence. The remainder is not uncovered in practice: an edit confined to it
+// still breaks the whole-value form, which is checked too.
 func encodedWindows(form string) []string {
 	if len(form) > 2 && form[0] == '[' && form[len(form)-1] == ']' {
-		return chunkJoin(strings.Split(form[1:len(form)-1], ","), ",")
+		return chunkJoin(strings.Split(form[1:len(form)-1], ","), ",", guardWindowElems)
 	}
 	if len(form) > 2 && form[0] == '"' && form[len(form)-1] == '"' {
 		body := form[1 : len(form)-1]
 		var out []string
-		for i := 0; i < len(body); i += guardWindowMin {
-			end := i + guardWindowMin
-			if end > len(body) {
-				end = len(body)
-			}
-			end -= (end - i) % 4 // keep the window on a quartet boundary
-			if end-i >= 8 {
-				out = append(out, body[i:end])
-			}
+		for i := 0; i+guardWindowChars <= len(body); i += guardWindowChars {
+			out = append(out, body[i:i+guardWindowChars])
 		}
 		return out
 	}
 	return nil
 }
 
-// chunkJoin groups consecutive elements into fragments that are long enough to
-// be distinctive once joined.
-func chunkJoin(parts []string, sep string) []string {
+// chunkJoin groups consecutive elements into runs of exactly size elements.
+func chunkJoin(parts []string, sep string, size int) []string {
 	var out []string
-	cur := ""
-	for _, p := range parts {
-		if cur == "" {
-			cur = p
-		} else {
-			cur += sep + p
-		}
-		if len(cur) >= guardWindowMin {
-			out = append(out, cur)
-			cur = ""
-		}
-	}
-	if len(cur) >= guardWindowMin {
-		out = append(out, cur)
+	for i := 0; i+size <= len(parts); i += size {
+		out = append(out, strings.Join(parts[i:i+size], sep))
 	}
 	return out
 }
@@ -518,38 +591,65 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 	// which reconstructs text (#3592 review). The uint8/int32 PLANTING branches
 	// deliberately keep using the direct kind: []*byte is not a byte container.
 	baseElem := baseType(v.Type().Elem()).Kind()
+	// An ELEMENT type that renders itself decides its own encoding, and the
+	// byte/rune branches below dispatch on kind alone — so a named uint8 or
+	// int32 carrying a MarshalJSON/MarshalText walked straight past the
+	// rendersItself rejection every other shape gets. Two ways that goes wrong:
+	// the marshaler can emit text from state this walk never plants into, and a
+	// POINTER-receiver one can mutate the elements it renders, so the value the
+	// document finally shows is not the value the markers were taken from
+	// (#3592 review). Applied before the switch, so it covers the recursive
+	// branch too — where fill would reject it one level down anyway.
+	if et := v.Type().Elem(); rendersItself(et) {
+		if _, reviewed := reviewedMarshalerTypes[baseType(et)]; !reviewed {
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s (element %s renders itself)", path, et.String()))
+			return
+		}
+	}
 	switch {
 	case elem == reflect.Uint8:
 		// Written element by element rather than with SetBytes/reflect.Copy:
 		// both demand EXACTLY uint8, so a named byte type (`type DigestByte
 		// uint8`) — which this kind-based branch admits — panicked and crashed
 		// the suite instead of being classified (#3592 review).
-		marker := f.nextMarker()
+		n := guardContainerLen
+		if !isSlice {
+			if v.Len() < guardMinContainer {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]byte is too short to hold one complete marker unit)", path, v.Len()))
+				return
+			}
+			n = v.Len()
+		}
+		marker := f.nextContainerMarker(n)
+		raw := []byte(marker)
 		if isSlice {
-			raw := []byte(marker)
 			sv := reflect.MakeSlice(v.Type(), len(raw), len(raw))
 			for i, b := range raw {
 				sv.Index(i).SetUint(uint64(b))
 			}
 			v.Set(sv)
 		} else {
-			if v.Len() < guardMinContainer {
-				f.unsupported = append(f.unsupported,
-					fmt.Sprintf("%s ([%d]byte is too short to hold a distinctive marker)", path, v.Len()))
-				return
-			}
-			for i, b := range []byte(marker) {
-				if i >= v.Len() {
-					break
-				}
+			for i, b := range raw {
 				v.Index(i).SetUint(uint64(b))
 			}
 		}
 		f.recordContainer(v, path, marker)
 	case elem == reflect.Int32:
 		// []rune is []int32, and json emits it as code points from which the
-		// exact text reconstructs.
-		marker := f.nextMarker()
+		// exact text reconstructs. The unit text is ASCII, so one rune per byte
+		// and the array is filled exactly.
+		n := guardContainerLen
+		if !isSlice {
+			if v.Len() < guardMinContainer {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]rune is too short to hold one complete marker unit)", path, v.Len()))
+				return
+			}
+			n = v.Len()
+		}
+		marker := f.nextContainerMarker(n)
 		runes := []rune(marker)
 		if isSlice {
 			rv := reflect.MakeSlice(v.Type(), len(runes), len(runes))
@@ -558,15 +658,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			}
 			v.Set(rv)
 		} else {
-			if v.Len() < guardMinContainer {
-				f.unsupported = append(f.unsupported,
-					fmt.Sprintf("%s ([%d]rune is too short to hold a distinctive marker)", path, v.Len()))
-				return
-			}
 			for i, r := range runes {
-				if i >= v.Len() {
-					break
-				}
 				v.Index(i).SetInt(int64(r))
 			}
 		}
@@ -670,6 +762,76 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	v.Set(m)
 }
 
+// leakedPaths reports the planted paths whose evidence survived into rendered —
+// the document produced by marshalling the record AFTER redaction ran.
+func (f *sentinelFiller) leakedPaths(rendered string) (map[string]struct{}, []string) {
+	seen := make(map[string]struct{})
+	var paths []string
+	for _, p := range f.planted {
+		escaped := false
+		for _, form := range p.forms {
+			if strings.Contains(rendered, form) {
+				escaped = true
+				break
+			}
+		}
+		if !escaped {
+			continue
+		}
+		if _, dup := seen[p.path]; dup {
+			continue
+		}
+		seen[p.path] = struct{}{}
+		paths = append(paths, p.path)
+	}
+	return seen, paths
+}
+
+// ambiguousEvidence reports every fragment that cannot be attributed to ONE
+// field: a form recorded for one path which also occurs inside a DIFFERENT
+// path's encoded value.
+//
+// Attribution is the whole basis of the verdict. A shared fragment makes a
+// redacted field read as leaked whenever its neighbour survives, and lets a
+// stale allowlist entry pass assertNoStaleEntries on evidence that is not its
+// own (#3592 review). The unit scheme above is what prevents this; this check is
+// what proves it, every run, for whatever shapes InstanceData grows.
+func (f *sentinelFiller) ambiguousEvidence() []string {
+	var out []string
+	for _, p := range f.planted {
+		for _, form := range p.forms {
+			for _, other := range f.planted {
+				if other.path == p.path || other.encoded == "" {
+					continue
+				}
+				if strings.Contains(other.encoded, form) {
+					out = append(out, fmt.Sprintf("%s shares the fragment %q with %s", p.path, form, other.path))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// classificationOverlap returns the paths present in BOTH classification maps.
+//
+// A path in both is declared safe to publish AND tracked as an unfixed leak at
+// the same time, which is not a classification — it is two contradictory ones,
+// and the accept test (safe || known) waves it through while both stale checks
+// stay quiet because the marker really does still survive. The likely way in is
+// a reclassification that adds the entry to one map and forgets to delete it
+// from the other, which silently retires the debt (#3592 review).
+func classificationOverlap(safe, known map[string]string) []string {
+	var out []string
+	for path := range safe {
+		if _, dup := known[path]; dup {
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // dedupeSorted removes repeats and orders the result. Seeded containers visit
 // the same path once per element, so a single unplantable field would otherwise
 // be listed guardSliceSeed times and counted as that many fields — a report that
@@ -736,6 +898,21 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 		t.Fatal("the reflective fill planted no marker: the walk is broken, " +
 			"and this guard would pass no matter what redactInstanceData did")
 	}
+	// Container evidence is attributable only while every sequence number
+	// renders at the fixed width its unit assumes — past guardMaxSeq, "|1000"
+	// becomes a prefix of "|10000" and two fields' fragments coincide again.
+	if filler.seq > guardMaxSeq {
+		t.Fatalf("the walk planted %d markers, past the %d that render at %d fixed digits: "+
+			"widen guardUnitDigits, or container fragments stop naming one field",
+			filler.seq, guardMaxSeq, guardUnitDigits)
+	}
+	if ambiguous := dedupeSorted(filler.ambiguousEvidence()); len(ambiguous) > 0 {
+		t.Errorf("%d planted fragment(s) cannot be attributed to one field:\n  %s\n\n"+
+			"A fragment that occurs in another field's value marks that field leaked whenever "+
+			"its neighbour survives, and lets a stale allowlist entry pass on borrowed evidence. "+
+			"Make the planted content field-unique throughout.",
+			len(ambiguous), strings.Join(ambiguous, "\n  "))
+	}
 
 	redactInstanceData(&data)
 
@@ -748,24 +925,17 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	}
 	rendered := string(doc)
 
-	leakedSet := make(map[string]struct{})
-	var leaked []string
-	for _, p := range filler.planted {
-		escaped := false
-		for _, form := range p.forms {
-			if strings.Contains(rendered, form) {
-				escaped = true
-				break
-			}
-		}
-		if !escaped {
-			continue
-		}
-		if _, dup := leakedSet[p.path]; dup {
-			continue
-		}
-		leakedSet[p.path] = struct{}{}
-		leaked = append(leaked, p.path)
+	leakedSet, leaked := filler.leakedPaths(rendered)
+
+	// The two maps must stay DISJOINT. "Safe to publish" and "a tracked leak"
+	// are opposite verdicts, and a path holding both is accepted by the test
+	// below purely because it holds one.
+	if overlap := classificationOverlap(verbatimInstanceFields, knownUnredactedFields); len(overlap) > 0 {
+		t.Errorf("%d path(s) are classified BOTH safe and leaking:\n  %s\n\n"+
+			"verbatimInstanceFields says the value is safe to publish; knownUnredactedFields "+
+			"says it leaks and is still owed a fix. Delete whichever entry no longer holds — "+
+			"a path in both is accepted by this guard without either verdict being true.",
+			len(overlap), strings.Join(overlap, "\n  "))
 	}
 
 	// An entry with an empty reason is not a classification. Both maps exist to
