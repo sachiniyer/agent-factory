@@ -332,3 +332,75 @@ func TestTmuxTripwire_IgnoresNonAFSessions(t *testing.T) {
 		t.Fatalf("tripwire must ignore sessions without the af_ prefix; got: %v", err)
 	}
 }
+
+// tmuxServerPID returns the private tmux server's own PID, which is stable for
+// the life of one server and therefore identifies it across commands. On
+// failure it returns an empty PID plus tmux's own diagnostic, so a caller can
+// report WHY the server was unreachable rather than only that a read failed.
+func tmuxServerPID() (pid, diagnostic string) {
+	out, err := exec.Command("tmux", "display-message", "-p", "#{pid}").CombinedOutput()
+	if err != nil {
+		return "", strings.TrimSpace(string(out))
+	}
+	return strings.TrimSpace(string(out)), ""
+}
+
+// TestIsolateTmuxServerSurvivesGoingEmpty is the #3559 regression.
+//
+// tmux defaults exit-empty to ON, so a private server exits the moment its last
+// session is killed. Several reap tests kill their only session to model a
+// vanished one and then stage another on the SAME private server, and that
+// second new-session lands on a server already shutting down:
+//
+//	tmux new-session: server exited unexpectedly
+//
+// The failure is in the harness's own staging step, before the code under test
+// runs, so it reads as a defect in the reaper. IsolateTmux pins exit-empty off;
+// this asserts the server actually survives going empty.
+//
+// Deterministic in both directions, unlike the flake it prevents: measured 40/40
+// servers gone with the default and 40/40 alive with the pin. The server-PID
+// check is what makes it so — an unpinned run either finds no server at all or
+// finds a REPLACEMENT started by this very command, and a replacement is caught
+// on identity no matter how the shutdown raced.
+func TestIsolateTmuxServerSurvivesGoingEmpty(t *testing.T) {
+	IsolateTmux(t)
+
+	// Stage first, then read the identity. Mirroring the reap tests, which start
+	// the private server implicitly with their first new-session, keeps the
+	// failure below on the SURVIVAL property rather than on "a server exists" —
+	// otherwise an unpinned run fails before it reaches the interesting step.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "tg_empty_probe", "sleep 300").CombinedOutput(); err != nil {
+		t.Fatalf("stage first session: %v: %s", err, out)
+	}
+	before, diag := tmuxServerPID()
+	if before == "" {
+		t.Fatalf("private tmux server unreachable while a session exists: %s", diag)
+	}
+	if out, err := exec.Command("tmux", "kill-session", "-t", "=tg_empty_probe:").CombinedOutput(); err != nil {
+		t.Fatalf("kill the only session: %v: %s", err, out)
+	}
+
+	// Zero sessions from here. Unpinned, the server exits at this point.
+	after, diag := tmuxServerPID()
+	switch {
+	case after == "":
+		t.Fatalf("the private tmux server did not survive going empty (pid %s is gone): %s", before, diag)
+	case after != before:
+		t.Fatalf("the private tmux server was REPLACED when it went empty: pid %s became %s; "+
+			"anything staged on the old server is silently gone", before, after)
+	}
+	out, err := exec.Command("tmux", "show-options", "-g", "exit-empty").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read exit-empty: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "exit-empty off" {
+		t.Fatalf("private tmux server is not pinned against going empty: %q", got)
+	}
+
+	// The step that actually failed in #3559: staging another session on the
+	// same private server after it went empty.
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", "tg_empty_probe_2", "sleep 300").CombinedOutput(); err != nil {
+		t.Fatalf("stage a second session after the server went empty: %v: %s", err, out)
+	}
+}
