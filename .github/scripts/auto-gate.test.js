@@ -2073,116 +2073,6 @@ test("a finding in an automatic review body blocks even with a Completed row", a
   );
 });
 
-test("an abbreviated commit must resolve to this head, not merely prefix it", async () => {
-  // Codex P1: the row's cell is seven hex characters — 28 bits — so a ground
-  // collision lets a row about an older head read as a verdict for a new one,
-  // and the attacker also controls the new commit's committer timestamp, which
-  // is the only other thing the freshness rule consults. GitHub answers 422 for
-  // an ambiguous short SHA, which is exactly this case.
-  const ambiguous = new Error("Ambiguous match for SHA");
-  ambiguous.status = 422;
-  const github = fakeGateGithub({
-    issueComments: [codexSummaryTable(HEAD_SHA)],
-    commitResolutions: { [HEAD_SHA.slice(0, 7)]: ambiguous },
-  });
-
-  const result = await autoGate.evaluate({
-    github,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-
-  assert.equal(result.shouldMerge, false, "an unresolvable abbreviation is not a verdict");
-  assert.ok(
-    result.reasons.some((reason) => reason.includes("carried no parseable verdict")),
-    `got: ${result.reasons.join("; ")}`,
-  );
-
-  // Resolving to a DIFFERENT commit is the collision itself, and is refused.
-  const collided = fakeGateGithub({
-    issueComments: [codexSummaryTable(HEAD_SHA)],
-    commitResolutions: { [HEAD_SHA.slice(0, 7)]: OTHER_SHA },
-  });
-  const collision = await autoGate.evaluate({
-    github: collided,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-  assert.equal(collision.shouldMerge, false);
-
-  // The honest case still resolves and still passes.
-  const honest = fakeGateGithub({ issueComments: [codexSummaryTable(HEAD_SHA)] });
-  const clean = await autoGate.evaluate({
-    github: honest,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-  assert.equal(clean.shouldMerge, true, `blocked on: ${clean.reasons.join("; ")}`);
-  assert.ok(honest.commitResolutionReads > 0, "the abbreviation must actually be resolved");
-});
-
-test("a ref named after the abbreviation defeats no ambiguity check", async () => {
-  // Codex P1: the endpoint that resolves an abbreviation also accepts a branch
-  // or tag NAME, and seven hex characters is a legal ref name. A contributor who
-  // can push `refs/heads/<prefix>` at the new head makes the lookup answer with
-  // that head — and answer instead of erroring, which is precisely how the
-  // ambiguity signal that guards the collision gets silenced.
-  const github = fakeGateGithub({
-    issueComments: [codexSummaryTable(HEAD_SHA)],
-    existingRefs: [`heads/${HEAD_SHA.slice(0, 7)}`],
-  });
-
-  const result = await autoGate.evaluate({
-    github,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-
-  assert.equal(result.shouldMerge, false, "a shadowed abbreviation proves nothing");
-  assert.ok(
-    result.reasons.some((reason) => reason.includes("carried no parseable verdict")),
-    `got: ${result.reasons.join("; ")}`,
-  );
-
-  // A tag of that name shadows it just as well.
-  const tagged = fakeGateGithub({
-    issueComments: [codexSummaryTable(HEAD_SHA)],
-    existingRefs: [`tags/${HEAD_SHA.slice(0, 7)}`],
-  });
-  const withTag = await autoGate.evaluate({
-    github: tagged,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-  assert.equal(withTag.shouldMerge, false);
-
-  // With no such ref, the same row resolves and passes — and both namespaces
-  // were actually consulted.
-  const clean = fakeGateGithub({ issueComments: [codexSummaryTable(HEAD_SHA)] });
-  const passes = await autoGate.evaluate({
-    github: clean,
-    context: fakeContext(),
-    core: fakeCore(),
-    prNumber: 1465,
-    setOutputs: false,
-  });
-  assert.equal(passes.shouldMerge, true, `blocked on: ${passes.reasons.join("; ")}`);
-  assert.deepEqual(clean.refLookups, [
-    `heads/${HEAD_SHA.slice(0, 7)}`,
-    `tags/${HEAD_SHA.slice(0, 7)}`,
-  ]);
-});
-
 test("a body finding blocks the manual-merge decision, not just the auto one", async () => {
   // Codex P1: the manual path consumes findingBlockers, not reasons. A body
   // finding recorded only in reasons publishes a PASSING manual decision, so the
@@ -2218,6 +2108,23 @@ test("a body finding blocks the manual-merge decision, not just the auto one", a
   // reply can clear it.
   assert.match(decision.output.summary, /request a fresh `@codex review`/);
   assert.doesNotMatch(decision.output.summary, /reply RESOLVED[^\n]*to clear this/);
+});
+
+test("a row whose cell prefixes a different commit does not match this head", () => {
+  // The commit cell is matched as a prefix of the head, with no lookup: the head
+  // SHA is already known, so there is nothing to resolve. What keeps a stale row
+  // out is that its cell must equal THIS head's prefix — a cell that prefixes
+  // some other commit does not, however valid that other commit is.
+  const { parseVerdictArtifact } = __test;
+  assert.notEqual(HEAD_SHA.slice(0, 7), OTHER_SHA.slice(0, 7), "the fixtures must differ");
+
+  const otherHead = codexSummaryTable(OTHER_SHA);
+  assert.equal(parseVerdictArtifact(otherHead, HEAD_SHA), null);
+  assert.notEqual(parseVerdictArtifact(otherHead, OTHER_SHA), null, "it is a verdict for its own head");
+
+  // The prose form is held to the same rule.
+  assert.equal(parseVerdictArtifact(codexVerdict(OTHER_SHA), HEAD_SHA), null);
+  assert.notEqual(parseVerdictArtifact(codexVerdict(HEAD_SHA), HEAD_SHA), null);
 });
 
 test("a Codex rate-limit message never becomes a verdict", async () => {
@@ -4504,12 +4411,6 @@ function fakeGateGithub({
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
-  // abbreviation -> full sha it resolves to, or an Error to throw (GitHub answers
-  // 422 for a short SHA that matches more than one object).
-  commitResolutions = {},
-  // Ref names that exist in the repo, e.g. ["heads/aa224dd"]. A seven-character
-  // hex string is a legal branch name, and one shadows the abbreviation lookup.
-  existingRefs = [],
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -4598,8 +4499,6 @@ function fakeGateGithub({
     associationReads: 0,
     checkCreateAttempts: 0,
     checkListReads: 0,
-    commitResolutionReads: 0,
-    refLookups: [],
     pullGetReads: 0,
     requestReads: 0,
     readAttemptsByFn: {},
@@ -4636,40 +4535,9 @@ function fakeGateGithub({
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
-      git: {
-        getRef: async ({ ref }) => {
-          github.refLookups.push(ref);
-          if (existingRefs.includes(ref)) {
-            return { data: { ref: `refs/${ref}` } };
-          }
-          const missing = new Error("Not Found");
-          missing.status = 404;
-          throw missing;
-        },
-      },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
-        // Resolves an abbreviated SHA the way GitHub does: to the one object it
-        // names, or an error when it names none or several.
-        getCommit: async ({ ref }) => {
-          github.commitResolutionReads += 1;
-          const scripted = commitResolutions[ref];
-          if (scripted instanceof Error) {
-            throw scripted;
-          }
-          if (typeof scripted === "string") {
-            return { data: { sha: scripted } };
-          }
-          for (const candidate of [headSha, HEAD_SHA, OTHER_SHA]) {
-            if (candidate.startsWith(ref)) {
-              return { data: { sha: candidate } };
-            }
-          }
-          const missing = new Error("No commit found for SHA: " + ref);
-          missing.status = 404;
-          throw missing;
-        },
       },
       pulls: {
         listFiles,

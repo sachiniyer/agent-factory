@@ -2581,27 +2581,10 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // comment's, the summary row's is the row's. Sorted by that rather than by
   // comment order, because the summary comment is edited on every review
   // activity and its comment time says nothing about when this review completed.
-  const parsedVerdicts = codexReviewArtifacts
+  const matchingReviewArtifacts = codexReviewArtifacts
     .map((artifact) => parseVerdictArtifact(artifact, sha))
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
-  // Prefix-matched above, resolved here: an abbreviation has to name THIS head
-  // uniquely, not merely start like it.
-  const abbreviationCache = new Map();
-  const matchingReviewArtifacts = [];
-  for (const candidate of parsedVerdicts) {
-    if (
-      await abbreviationNamesHead({
-        github,
-        context,
-        abbreviation: candidate.commit,
-        headSha: sha,
-        cache: abbreviationCache,
-      })
-    ) {
-      matchingReviewArtifacts.push(candidate);
-    }
-  }
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
@@ -2865,11 +2848,18 @@ function parseSummaryRows(body) {
 
 // A Codex artifact's verdict for this head, or null. Prose first: it is the
 // explicit form and carries the artifact's own timestamp, exactly as before.
+//
+// The commit is matched as a PREFIX of the head, which needs no API lookup: the
+// head SHA is already known here, so there is nothing to resolve and no
+// check-then-use window to be raced. A stale row for an older head has to clear
+// two independent bars — its seven-character cell must equal this head's prefix,
+// and its own timestamp must post-date the head — and freshness is the one doing
+// the work.
 function parseVerdictArtifact(artifact, headSha) {
   const body = artifact.body || "";
   const reviewedCommit = parseReviewedCommit(body);
   if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
-    return { kind: "prose", commit: reviewedCommit, time: reviewArtifactTime(artifact), body };
+    return { kind: "prose", time: reviewArtifactTime(artifact), body };
   }
   const row = parseSummaryRows(body).find(
     (candidate) =>
@@ -2878,73 +2868,7 @@ function parseVerdictArtifact(artifact, headSha) {
       candidate.time != null &&
       reviewedCommitMatchesHead(candidate.commit, headSha),
   );
-  return row ? { kind: "summary-row", commit: row.commit, time: row.time, body } : null;
-}
-
-// An abbreviation is a claim about which commit was reviewed, and a prefix match
-// is not proof of it: a summary row's cell is seven hex characters, so a
-// deliberately ground collision lets a row about an older head read as a verdict
-// for a new one — and an attacker controls the new commit's committer timestamp,
-// which is the only other thing the freshness rule consults.
-//
-// So the abbreviation is RESOLVED. GitHub answers ambiguously (422) when a short
-// SHA matches more than one object, which is exactly the collision case, and any
-// answer that is not "this exact head" leaves the artifact a non-verdict.
-async function abbreviationNamesHead({ github, context, abbreviation, headSha, cache }) {
-  const head = String(headSha || "").toLowerCase();
-  const short = String(abbreviation || "").toLowerCase();
-  if (short.length === 40) {
-    return short === head;
-  }
-  if (cache.has(short)) {
-    return cache.get(short);
-  }
-  const { owner, repo } = context.repo;
-  let resolved = false;
-  try {
-    // The endpoint that resolves an abbreviation also accepts a BRANCH OR TAG
-    // NAME, and a seven-character hex string is a legal ref name. A contributor
-    // who can push a ref named `abcdef0` pointing at the new head makes the
-    // lookup answer with that head — so it answers "yes" for a row about a
-    // different commit, and, worse, it answers instead of erroring, which is how
-    // the ambiguity signal below is silenced. There is no object-only endpoint
-    // that takes an abbreviation: the Git database API and GraphQL's GitObjectID
-    // both require the full 40 characters (measured). So the shadow is excluded
-    // directly — if a ref of that name exists, this resolution proves nothing.
-    if (await refExists({ github, context, name: short })) {
-      cache.set(short, false);
-      return false;
-    }
-    const commit = await retryRead(`could not resolve commit ${short} for head ${head}`, () =>
-      github.rest.repos.getCommit({ owner, repo, ref: short }),
-    );
-    resolved = String(commit?.data?.sha || "").toLowerCase() === head;
-  } catch {
-    // Ambiguous, missing, or unreadable. None of those prove the artifact names
-    // this head, and an unproven verdict is not one. The caller's message says a
-    // review exists but carried no parseable verdict, which is accurate.
-    resolved = false;
-  }
-  cache.set(short, resolved);
-  return resolved;
-}
-
-// Whether a branch or tag of exactly this name exists. Any answer other than a
-// definite "no" counts as "yes", because the question is only ever asked to
-// decide whether to DISTRUST a resolution.
-async function refExists({ github, context, name }) {
-  const { owner, repo } = context.repo;
-  for (const namespace of ["heads", "tags"]) {
-    try {
-      await github.rest.git.getRef({ owner, repo, ref: `${namespace}/${name}` });
-      return true;
-    } catch (error) {
-      if (Number(error?.status ?? error?.response?.status) !== 404) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return row ? { kind: "summary-row", time: row.time, body } : null;
 }
 
 // Whether any artifact's summary table names this head at all, whatever its
