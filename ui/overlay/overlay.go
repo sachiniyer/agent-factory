@@ -139,48 +139,11 @@ func lineWidth(s string) int {
 	return layout.Cells(s)
 }
 
-// clipLine truncates one foreground row to width WITHOUT ever cutting through a
-// control sequence.
-//
-// Two truncators, because neither is right for both kinds of row and the failure
-// modes are not symmetric:
-//
-//   - reflow's truncator accounts per printable rune with runewidth, exactly as
-//     getLines and the placement arithmetic below do, so its result really is
-//     within width by this compositor's measure. But it is not OSC-aware: it takes
-//     the first letter of a hyperlink's URI for the sequence terminator, counts the
-//     rest of the URI as visible text, and will happily cut in the middle of it.
-//     Measured, truncating a 4-cell hyperlink to 10 yields "\x1b]8;;https://exa" —
-//     an unterminated OSC command, which swallows whatever the terminal is given
-//     next.
-//   - x/ansi parses OSC properly and keeps sequences atomic, but measures in cells
-//     rather than printable runes, so it does not bound the row by the measure the
-//     rest of this function uses.
-//
-// A mangled control sequence is the worse failure — it corrupts output past the
-// modal, not just inside it — so a row carrying one is clipped with the parser and
-// a plain row with the measure-consistent truncator. Both are then measured by
-// lineWidth, which discounts the OSC sequences either way, so the placement
-// arithmetic sees the cells the row actually occupies.
+// clipLine truncates one foreground row to width. layout.TruncateToCells is the
+// shared implementation — the compositor and the pane clamp had the same
+// measure-versus-truncator problem and now have one answer to it (#3585).
 func clipLine(line string, width int) string {
-	// ONE truncator, no routing. Choosing between them on whether the two measures
-	// disagree looked sound and is not: the OSC overcount can CANCEL the grapheme
-	// disagreement, so a row carrying a hyperlink can measure identically under both
-	// and take the branch that cuts through it. Any predicate of this file's own is
-	// the same bet in a different disguise, so the parser clips everything and the
-	// question does not arise.
-	//
-	// x/ansi truncates by CELLS, which is not the measure the arithmetic below uses,
-	// so it is asked for progressively less until the result fits by lineWidth. For
-	// a plain row the two agree and the first attempt is already the answer; only an
-	// over-wide row iterates, and only down to what fits.
-	for w := width; w >= 0; w-- {
-		out := xansi.Truncate(line, w, "")
-		if lineWidth(out) <= width {
-			return out
-		}
-	}
-	return ""
+	return layout.TruncateToCells(line, width)
 }
 
 // widestLine measures the widest of these rows with the same measure getLines

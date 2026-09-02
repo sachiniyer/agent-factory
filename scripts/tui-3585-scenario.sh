@@ -149,24 +149,36 @@ drive_confirmation_zone() {
 #
 # The search overlay registers full-width row zones and app routes them
 # (handleModalClick's stateSearch case), so it is the same mechanism the two
-# click-verified overlays below and above exercise. It is asserted here only for
-# RENDER, not for a click: the overlay draws to the right of the sidebar, so a
-# captured screen row carries the session title twice — once in the frame beneath
-# and once in the overlay — and I could not reliably resolve which occurrence a
-# click column belonged to within this scenario. That is a limitation of the
-# harness targeting, NOT evidence of a defect, and it is written down rather than
-# quietly dropped so the next person does not read this file as full coverage.
+# click-verified overlays exercise. It is asserted here for RENDER only: the
+# overlay draws to the right of the sidebar, so a captured screen row carries the
+# session title twice — once in the frame beneath and once in the overlay — and I
+# could not reliably resolve which occurrence a click column belonged to. That is
+# a limitation of the harness targeting, not evidence of a defect, and it is
+# written down rather than quietly dropped.
+#
+# The assertion is POSITIONAL, and the first version of it was wrong in a way
+# worth recording: it synced on the session title (already on screen in the
+# sidebar, so it could return before the overlay drew at all) and looked for "›",
+# which is a tab breadcrumb — SearchOverlay renders its rows with "▸". So it could
+# pass on background content while claiming to have checked the overlay. Now it
+# syncs on the overlay's own title and looks for the session only BELOW that row.
 drive_search_render() {
     _af_log "=== search: the clustered title reaches the overlay ==="
     af_ensure_nav
     af_send '/'
-    af_wait_for "$ANCHOR_HEAD" "$AF_DRIVER_TIMEOUT" 'search overlay listing the session' || return 1
-    af_capture | grep -F -- "$ANCHOR_TAIL" | grep -qF '›' || {
-        _af_fail "the search overlay has no result row for the clustered session"
+    af_wait_for 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay' || return 1
+
+    local header
+    header="$(_row_of 'Search sessions')"
+    [ -n "$header" ] || { _af_fail "search overlay header not found"; return 1; }
+    # Only rows BELOW the overlay's own header count; the sidebar's copy of the
+    # title sits above it.
+    af_capture | tail -n "+$((header + 1))" | grep -qF -- "$ANCHOR_TAIL" || {
+        _af_fail "no search-result row for the clustered session below the overlay header"
         return 1
     }
     af_send Escape
-    af_wait_gone '›.*'"$ANCHOR_TAIL" 5 'search overlay closed' || true
+    af_wait_gone 'Search sessions' "$AF_DRIVER_TIMEOUT" 'search overlay closed' || return 1
     _af_log "=== search: PASS (render only) ==="
 }
 
