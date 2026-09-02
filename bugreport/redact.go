@@ -715,9 +715,17 @@ func redactInstanceData(d *session.InstanceData) {
 			// PathBytes is not the same field twice: json emits it base64-encoded,
 			// and the $HOME/username scrub the display form relies on cannot see
 			// through base64. A root whose own name is not valid UTF-8 therefore
-			// shipped raw. Clearing it is lossless for triage — MarshalJSON
-			// re-derives PathBytes from Path, which is valid UTF-8 by construction,
-			// so the wire form simply omits it.
+			// shipped raw.
+			//
+			// Clearing PathBytes is not enough on its own: ArchiveRetainedTree's
+			// MarshalJSON RE-DERIVES it from Path whenever it is empty, so a Path
+			// carrying invalid UTF-8 would put the raw bytes straight back on the
+			// wire. Reducing Path to its display form first is what makes the
+			// clearing hold, and it makes that an invariant of this function rather
+			// than an inherited property of whoever decoded the record. It is
+			// lossless for triage: the display form is what the JSON section would
+			// have shown anyway, and the text scrub still collapses $HOME in it.
+			d.ArchiveReport.RetainedTrees[i].Path = strings.ToValidUTF8(d.ArchiveReport.RetainedTrees[i].Path, "\uFFFD")
 			d.ArchiveReport.RetainedTrees[i].PathBytes = nil
 			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker

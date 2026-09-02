@@ -430,3 +430,37 @@ func TestRedactUnknownJSONRedactsPathBytes(t *testing.T) {
 		t.Errorf("generic fallback dropped the structural skip reason:\n%s", out)
 	}
 }
+
+// TestRedactInstanceDataRetainedTreePathBytesStayClearedOnMarshal proves the
+// clearing above actually holds on the wire. ArchiveRetainedTree.MarshalJSON
+// re-derives PathBytes from Path whenever it is empty, so a record whose Path
+// still carries invalid UTF-8 would put the raw bytes back the moment the
+// bundle is marshaled — nil at the end of redactInstanceData is not the same
+// claim as absent from the bundle.
+func TestRedactInstanceDataRetainedTreePathBytesStayClearedOnMarshal(t *testing.T) {
+	const invalidRoot = "/worktrees/.af-source-\xff-kingfisher"
+	d := session.InstanceData{
+		ID: "rederive",
+		// Path invalid and PathBytes already empty: the shape MarshalJSON
+		// re-derives from.
+		ArchiveReport: &sessiongit.ArchiveReport{RetainedTrees: []sessiongit.ArchiveRetainedTree{{
+			Path: invalidRoot,
+			Skipped: []sessiongit.ArchiveSkippedEntry{{
+				Path: "private-work.txt", Reason: sessiongit.ArchiveSkipPermissionDenied,
+			}},
+		}}},
+	}
+
+	redactInstanceData(&d)
+
+	out, err := json.Marshal(d.ArchiveReport)
+	if err != nil {
+		t.Fatalf("marshal redacted report: %v", err)
+	}
+	if strings.Contains(string(out), "path_bytes") {
+		t.Errorf("MarshalJSON re-derived path_bytes from an invalid-UTF8 path:\n%s", out)
+	}
+	if strings.Contains(string(out), base64.StdEncoding.EncodeToString([]byte(invalidRoot))) {
+		t.Errorf("raw root path shipped base64-encoded:\n%s", out)
+	}
+}
