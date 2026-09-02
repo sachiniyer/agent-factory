@@ -190,8 +190,16 @@ func PositionalCommand(name string, argv []string, positionals ...string) string
 	}
 	// Copied, never appended in place: callers build argv with append (see
 	// daemon/sandbox_preserve.go's repo-scope flags), so writing through it would
-	// clobber whatever else shares that backing array.
-	parts := make([]string, 0, len(argv)+1+len(positionals))
+	// clobber whatever else shares that backing array. Appending to a nil slice
+	// allocates a fresh one, which is what makes the copy real.
+	//
+	// NO capacity hint, for the reason written out above Command: a summed-length
+	// expression inside make() raises CodeQL's go/allocation-size-overflow (high),
+	// which is a required check. This function shipped with
+	// `make([]string, 0, len(argv)+1+len(positionals))` and did exactly what that
+	// note says not to do — two high alerts on one line — to save an allocation on a
+	// path that formats one error message for a human.
+	var parts []string
 	parts = append(parts, argv...)
 	parts = append(parts, "--")
 	parts = append(parts, positionals...)
