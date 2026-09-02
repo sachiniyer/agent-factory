@@ -175,8 +175,19 @@ func marshalGlobalConfigTOML(cfg *Config, legacyShape map[string]any) ([]byte, e
 
 var configAliasWarnings sync.Map
 
+// warnLegacyConfigAliases names the deprecated flat spellings present in shape.
+// Every remedy clause comes from the shared deprecation table (deprecations.go),
+// so the warning can never point at a command that would not do what it says
+// (#3624).
 func warnLegacyConfigAliases(shape map[string]any, prettyPath string, format ConfigFormat) {
-	for _, alias := range configKeyAliases {
+	for _, deprecation := range configDeprecations() {
+		alias := deprecation.alias
+		if alias == nil {
+			// root_agents has its own warning, with its own presence test (an
+			// empty map is not a configured legacy entry). warnLegacyRootAgents
+			// reads the same table for its remedy.
+			continue
+		}
 		if _, present := shape[alias.legacy]; !present {
 			continue
 		}
@@ -185,14 +196,19 @@ func warnLegacyConfigAliases(shape map[string]any, prettyPath string, format Con
 			continue
 		}
 		if format == FormatJSON {
-			log.WarningLog.Printf("config %s: JSON config key %q remains supported; %q is TOML-only; retain the flat JSON spelling until the file is converted to %s", prettyPath, alias.legacy, alias.canonical, TomlConfigFileName)
+			// The flat key is the PERMANENT JSON spelling, not a deprecated one,
+			// so the remedy here is the format conversion rather than a rewrite.
+			// `af config migrate` performs that conversion on its way in, which
+			// is why it is still the verb to name.
+			log.WarningLog.Printf("config %s: JSON config key %q remains supported; %q is TOML-only; retain the flat JSON spelling until the file is converted to %s; run `af config migrate` to convert it now", prettyPath, alias.legacy, alias.canonical, TomlConfigFileName)
 			continue
 		}
-		if _, grouped := aliasGroupedValue(shape, alias); grouped {
-			log.WarningLog.Printf("config %s: deprecated config key %q; use %q; both are present, so the grouped value won", prettyPath, alias.legacy, alias.canonical)
+		_, grouped := aliasGroupedValue(shape, *alias)
+		if grouped {
+			log.WarningLog.Printf("config %s: deprecated config key %q; use %q; both are present, so the grouped value won; %s", prettyPath, alias.legacy, alias.canonical, deprecation.tomlRemedy(true))
 			continue
 		}
-		log.WarningLog.Printf("config %s: deprecated config key %q; use %q; the flat alias remains supported", prettyPath, alias.legacy, alias.canonical)
+		log.WarningLog.Printf("config %s: deprecated config key %q; use %q; the flat alias remains supported; %s", prettyPath, alias.legacy, alias.canonical, deprecation.tomlRemedy(false))
 	}
 }
 

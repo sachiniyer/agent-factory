@@ -146,6 +146,24 @@
       "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes."
     },
     {
+      "id": "config.migrate",
+      "title": "Rewrite deprecated config keys to their current spelling",
+      "tui": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "web": {
+        "status": "n/a",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
+      },
+      "verdict": "deliberate",
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+    },
+    {
       "id": "config.read-project",
       "title": "Read the effective config for a selected project",
       "tui": {
@@ -1514,6 +1532,7 @@
       "af completion zsh": "cli.shell-completion",
       "af config get": "config.read",
       "af config list": "config.read",
+      "af config migrate": "config.migrate",
       "af config set": "config.write",
       "af config unset": "config.unset-global-alias",
       "af config validate": "config.validate",
@@ -1732,6 +1751,8 @@
       "af config list --json": "cli.json-envelope",
       "af config list --project": "config.read-project",
       "af config list --repo": "config.read-project",
+      "af config migrate --help": "meta.discovery",
+      "af config migrate --json": "cli.json-envelope",
       "af config set --help": "meta.discovery",
       "af config set --json": "cli.json-envelope",
       "af config set --project": "config.write-project",
