@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  One daemon keeps local and off-box sessions, tabs, scheduled tasks, and usage-limit recovery visible from a dense TUI, the web UI, and a JSON CLI; launches can also be pinned to Claude or Codex credential accounts.
+  One daemon keeps local and off-box sessions, tabs, scheduled tasks, and usage-limit recovery visible from a dense TUI, the web UI, and a JSON CLI; launches can also be pinned to Claude, Codex, or Gemini credential accounts.
 </p>
 
 <p align="center">
@@ -128,12 +128,10 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
   another machine (with `ssh.host`), to `sandbox` through the operator's
   global `sandbox.ssh` command, or to `hook` to launch on your own infrastructure. See
   [backends](docs/backends.md).
-- **Account scoping** — register separate Claude or Codex credential homes with
-  `af accounts add`, then select one for a local or docker session with
-  `--account`. Gemini homes register and log in the same way, but no session can
-  be scoped to one yet — af has not verified how it launches that agent under an
-  account. `af` refuses an unproved fallback and never rotates accounts on its
-  own. See [`af accounts`](docs/reference/cli.md#af-accounts).
+- **Account scoping** — register separate Claude, Codex, or Gemini credential
+  homes with `af accounts add`, then select one for a local or docker session
+  with `--account`. `af` refuses an unproved fallback and never rotates accounts
+  on its own. See [`af accounts`](docs/reference/cli.md#af-accounts).
 - **Explicit idle and limit state** — state never relies on colour or motion:
   static glyphs and text distinguish ready, lost, dead, archived, and
   limit-blocked sessions, while an empty state cell means working. Ready rows

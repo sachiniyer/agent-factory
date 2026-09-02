@@ -273,81 +273,50 @@ func TestAccountsAddJSONSuccessEnvelope(t *testing.T) {
 	}
 }
 
-// `af accounts add gemini work` must say, at the moment it invites the operator
-// to log real credentials in, that no session can be scoped to the account yet.
+// #3639 verified gemini's launch proof, so `af accounts add gemini work` is a
+// plain registration again: the account can be logged in AND a session can be
+// scoped to it, so there is nothing to warn about.
 //
-// The roster and the launch boundary answer different questions, and gemini sits
-// between them: its credential root relocates, so registration and login work,
-// but af has not verified how it launches, so `--account` refuses. Registration
-// succeeding while the launch refusal said "supported: claude, codex" was the
-// contradiction #3609 was reviewed for — the operator had no way to tell which
-// surface was lying (#3609 review).
-func TestAccountsAddGeminiReportsRegistrationOnly(t *testing.T) {
+// This is the NEGATIVE half of the registration-only contract. The positive half —
+// that the notice appears, names the agent, and names its follow-up — is pinned in
+// internal/sessionenv, which can put an agent into that state; this package can
+// only observe the roster it is given (#3639).
+func TestAccountsAddGeminiIsAPlainRegistration(t *testing.T) {
 	_, stderr, err := runAccounts(t, "add", "gemini", "work")
 	if err != nil {
 		t.Fatalf("add failed: %v", err)
 	}
-	// Case-insensitively: the marker is the lowercase form a listing COLUMN takes,
-	// and prose at the head of a line is sentence case. Both must be the same words.
-	if !strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
-		t.Fatalf("add did not report the registration-only state:\n%s", stderr)
-	}
-	if !strings.Contains(stderr, "https://github.com/sachiniyer/agent-factory/issues/3639") {
-		t.Fatalf("the notice must name the follow-up that lifts it:\n%s", stderr)
-	}
 	if !strings.Contains(stderr, "GEMINI_CLI_HOME") {
-		t.Fatalf("add must still print the login guidance for a registration-only agent:\n%s", stderr)
+		t.Fatalf("add must print the login guidance with gemini's own variable:\n%s", stderr)
 	}
-
-	// A launch-proven agent gets no notice, so the guard cannot pass by printing
-	// it for everyone.
-	_, codexErr, err := runAccounts(t, "add", "codex", "work")
-	if err != nil {
-		t.Fatalf("add codex failed: %v", err)
-	}
-	if strings.Contains(strings.ToLower(codexErr), sessionenv.AccountRegistrationOnlyMarker) {
-		t.Fatalf("codex is launch-proven and must not be marked:\n%s", codexErr)
+	if strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("gemini is launch-proven now, so registration must carry no caveat:\n%s", stderr)
 	}
 }
 
-// `af accounts list` marks the rows a session cannot be scoped to, and says why
-// once — on stderr, so the listing on stdout stays parseable.
-func TestAccountsListMarksRegistrationOnlyRows(t *testing.T) {
+// `af accounts list` marks only the rows a session cannot be scoped to. With the
+// roster and the launch proof agreeing, that is none of them — every row keeps the
+// three columns a script reads, and the JSON says so explicitly rather than by
+// omission.
+func TestAccountsListMarksNothingWhileTheRosterAgrees(t *testing.T) {
 	home := t.TempDir()
-	if _, _, err := runAccountsInHome(t, home, "add", "gemini", "work"); err != nil {
-		t.Fatalf("add gemini failed: %v", err)
-	}
-	if _, _, err := runAccountsInHome(t, home, "add", "codex", "work"); err != nil {
-		t.Fatalf("add codex failed: %v", err)
+	for _, agent := range []string{"gemini", "codex"} {
+		if _, _, err := runAccountsInHome(t, home, "add", agent, "work"); err != nil {
+			t.Fatalf("add %s failed: %v", agent, err)
+		}
 	}
 
 	stdout, stderr, err := runAccountsInHome(t, home, "list")
 	if err != nil {
 		t.Fatalf("list failed: %v", err)
 	}
-	var gemini, codex string
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
-		switch {
-		case strings.HasPrefix(line, "gemini\t"):
-			gemini = line
-		case strings.HasPrefix(line, "codex\t"):
-			codex = line
+		if fields := strings.Split(line, "\t"); len(fields) != 3 {
+			t.Fatalf("every row must keep exactly three columns while nothing is registration-only: %q", line)
 		}
 	}
-	if gemini == "" || codex == "" {
-		t.Fatalf("both accounts must be listed:\n%s", stdout)
-	}
-	if fields := strings.Split(gemini, "\t"); len(fields) != 4 ||
-		fields[3] != sessionenv.AccountRegistrationOnlyMarker {
-		t.Fatalf("the gemini row must carry the marker as a fourth column: %q", gemini)
-	}
-	// The three fields a script already reads must not move for a launch-proven
-	// agent, so the marker cannot be a rewritten line.
-	if fields := strings.Split(codex, "\t"); len(fields) != 3 {
-		t.Fatalf("the codex row must keep its three columns: %q", codex)
-	}
-	if !strings.Contains(stderr, "https://github.com/sachiniyer/agent-factory/issues/3639") {
-		t.Fatalf("the listing must explain the marker on stderr:\n%s", stderr)
+	if strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("nothing is registration-only, so the listing must annotate nothing:\n%s", stderr)
 	}
 
 	jsonOut, _, err := runAccountsInHome(t, home, "list", "--json")
@@ -359,15 +328,18 @@ func TestAccountsListMarksRegistrationOnlyRows(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &entries); err != nil {
 		t.Fatalf("envelope data is not a list of accountEntry: %v (%q)", err, jsonOut)
 	}
-	seen := map[string]bool{}
+	if len(entries) != 2 {
+		t.Fatalf("both accounts must be listed: %q", jsonOut)
+	}
 	for _, entry := range entries {
-		seen[entry.Agent] = entry.RegistrationOnly
+		if entry.RegistrationOnly {
+			t.Fatalf("%s/%s must be registration_only:false: %q", entry.Agent, entry.Name, jsonOut)
+		}
 	}
-	if !seen["gemini"] {
-		t.Fatalf("gemini must be registration_only:true in the envelope: %q", jsonOut)
-	}
-	if seen["codex"] {
-		t.Fatalf("codex must be registration_only:false in the envelope: %q", jsonOut)
+	// The field is EMITTED, not omitted — an automation caller needs the difference
+	// between "false" and "this af is too old to say".
+	if !strings.Contains(jsonOut, "\"registration_only\"") {
+		t.Fatalf("registration_only must be present even when false: %q", jsonOut)
 	}
 }
 
@@ -384,7 +356,10 @@ func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
 			t.Fatalf("account help is missing %q:\n%s", want, accountsCmd.Long)
 		}
 	}
-	if !strings.Contains(strings.ToLower(accountsCmd.Long), sessionenv.AccountRegistrationOnlyMarker) {
-		t.Fatalf("account help must name the registration-only roster:\n%s", accountsCmd.Long)
+	// And it carries no registration-only paragraph while the roster and the launch
+	// proof agree — the paragraph is composed from the roster, so it removes itself
+	// rather than needing an edit (#3639).
+	if strings.Contains(strings.ToLower(accountsCmd.Long), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("no agent is registration-only, so the help must say nothing about it:\n%s", accountsCmd.Long)
 	}
 }
