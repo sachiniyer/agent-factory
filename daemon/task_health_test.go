@@ -112,12 +112,13 @@ func TestListTasks_CarriesTheOverdueDerivation(t *testing.T) {
 // signal — and a supervisor that has not reloaded yet says unknown, like the
 // scheduler.
 func TestWatchTaskArming(t *testing.T) {
+	w1 := watchTask("w1", "tail -f x", "")
 	supervisor := newWatcherSupervisor()
-	assert.Equal(t, task.ArmingUnknown, supervisor.armingFor("w1"),
+	assert.Equal(t, task.ArmingUnknown, supervisor.armingFor(w1),
 		"before the first reload nothing has been observed")
 
 	require.NoError(t, supervisor.reloadSnapshot(nil, nil))
-	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor("w1"),
+	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(w1),
 		"after a reload that did not include it, the task is genuinely not armed")
 }
 
@@ -396,4 +397,40 @@ func TestWithLiveArming_StaleEntryAfterAFailedReloadIsNotArmed(t *testing.T) {
 		"the cron is not holding THIS definition, whatever it is holding under this id")
 	assert.Nil(t, got[0].NextRunAt,
 		"and the previous schedule's fire time is not attached to the new one")
+}
+
+// TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed is the watch twin of
+// the cron stale-entry case, and it was left behind when that one was fixed. A
+// live watcher is not automatically a watcher for the record on disk: the write
+// commits and the supervisor reload is a separate step, so an edited watch_cmd
+// can leave the OLD process running under the same id — executing the previous
+// command, in the previous directory — while the new record reads armed.
+func TestWatchArming_StaleWatcherAfterAFailedReloadIsNotArmed(t *testing.T) {
+	dir := t.TempDir()
+	supervisor := newWatcherSupervisor()
+	supervisor.queueDir = func() (string, error) { return dir, nil }
+	supervisor.logPath = func(string) (string, error) { return filepath.Join(dir, "w.log"), nil }
+	supervisor.deliver = func(string, string) error { return nil }
+	supervisor.setStatus = func(string, string) {}
+	t.Cleanup(supervisor.Stop)
+
+	before := watchTask("stalew01", "printf 'a\\n'; sleep 30", dir)
+	require.NoError(t, supervisor.reloadSnapshot([]task.Task{before}, []task.Task{before}))
+	require.Equal(t, task.ArmingArmed, supervisor.armingFor(before),
+		"precondition: the running watcher is this definition's")
+
+	// The record's command moved; the reload that would replace the process failed.
+	after := before
+	after.WatchCmd = "printf 'b\\n'; sleep 30"
+	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(after),
+		"a process running the previous command is not this task armed")
+
+	// The other two fields the signature covers move the answer the same way,
+	// because the supervisor's own reload treats them as making a watcher stale.
+	moved := before
+	moved.ProjectPath = filepath.Join(dir, "elsewhere")
+	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(moved))
+	renamed := before
+	renamed.Name = "renamed"
+	assert.Equal(t, task.ArmingNotArmed, supervisor.armingFor(renamed))
 }

@@ -185,8 +185,18 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	// at all. The scheduler skips a disabled task before parsing it too, and the
 	// expression stays on screen under Trigger for anyone about to enable it
 	// (#3623 review).
-	if !t.Enabled || t.CronExpr == "" {
+	if !t.Enabled {
 		return ""
+	}
+	// ENABLED with no trigger at all. ValidateTrigger refuses to write one, so
+	// only a hand-edited or legacy row gets here — and it is the emptiest kind of
+	// broken: nothing schedules it, nothing watches it, and with no daemon to
+	// report arming the page would otherwise show "Enabled yes" and nothing else
+	// wrong. Named as the absence it is rather than routed through the
+	// invalid-expression wording, which would be about an expression it does not
+	// have (#3623 review).
+	if t.CronExpr == "" {
+		return "this task has no trigger, so nothing will ever run it"
 	}
 	if t.CronExpr != "" {
 		if _, err := task.ParseCron(t.CronExpr); err != nil {

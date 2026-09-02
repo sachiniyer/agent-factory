@@ -21,21 +21,32 @@ import (
 // a per-cause one — whatever the reason a task is not armed, the record says so.
 
 // armingFor reports the LIVE arming state of one watch task: whether this
-// supervisor holds a watcher for it that has not finished.
+// supervisor is running a watcher for THIS definition of it.
 //
 // A watch task has no schedule, so it has no next-run time and can never be
 // overdue — a command that emits nothing for a month may be working perfectly.
 // Its arming state is the whole signal, and it is a real one: a watcher whose
 // process crashed past its restart budget has FINISHED, so an enabled watch task
 // with a dead watcher reports not-armed instead of looking healthy forever.
-func (s *watcherSupervisor) armingFor(taskID string) string {
+//
+// It takes the task rather than the id because a live watcher is not
+// automatically a watcher for the record on disk. The write commits and the
+// supervisor reload is a separate, non-transactional step (the committed-outcome
+// error every task RPC can return), so an edited watch_cmd, project_path or name
+// can leave the OLD process running under the same id — executing the previous
+// command, in the previous directory. `watcherSignature` is what the supervisor
+// itself compares on reload to decide whether a watcher is stale, so comparing
+// it here makes this answer agree with the reload's own definition of current.
+// The cron path makes the same check against its entry's expression (#3623
+// review).
+func (s *watcherSupervisor) armingFor(t task.Task) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.armed {
 		return task.ArmingUnknown
 	}
-	w, ok := s.watchers[taskID]
-	if !ok || w.finished() {
+	w, ok := s.watchers[t.ID]
+	if !ok || w.finished() || w.sig != watcherSignature(t) {
 		return task.ArmingNotArmed
 	}
 	return task.ArmingArmed
@@ -73,7 +84,7 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 			if s.watchers == nil {
 				continue
 			}
-			arming := s.watchers.armingFor(tasks[i].ID)
+			arming := s.watchers.armingFor(tasks[i])
 			if duplicate && arming == task.ArmingArmed {
 				arming = task.ArmingNotArmed
 			}

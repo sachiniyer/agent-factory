@@ -251,3 +251,37 @@ func TestTasksShow_NoCountWhenNoneWasTaken(t *testing.T) {
 
 	assert.NotContains(t, got, "missed 0", "no count is not a count of zero:\n%s", got)
 }
+
+// TestTasksShow_EnabledWithNoTriggerSaysSo: ValidateTrigger refuses to write
+// one, so only a hand-edited or legacy row is enabled with neither a cron
+// expression nor a watch command — and it is the emptiest kind of broken.
+// Nothing schedules it, nothing watches it, and with no daemon to report arming
+// the page would otherwise show "Enabled yes" and no sign of trouble.
+func TestTasksShow_EnabledWithNoTriggerSaysSo(t *testing.T) {
+	tsk := showFixture()
+	tsk.CronExpr, tsk.WatchCmd = "", ""
+	tsk.Arming = task.ArmingUnknown
+	tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	got := out.String()
+
+	assert.Contains(t, got, "no trigger, so nothing will ever run it")
+	assert.NotContains(t, got, "on schedule")
+	assert.NotContains(t, got, "cron expression is invalid",
+		"it is not a bad expression; it is the absence of one")
+}
+
+// TestTasksShow_DisabledWithNoTriggerIsSilent: a disabled draft with no trigger
+// is the ordinary shape of a half-written task, and the exclusion for disabled
+// tasks still comes first.
+func TestTasksShow_DisabledWithNoTriggerIsSilent(t *testing.T) {
+	tsk := showFixture()
+	tsk.CronExpr, tsk.WatchCmd = "", ""
+	tsk.Enabled = false
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	assert.NotContains(t, out.String(), "Schedule")
+}
