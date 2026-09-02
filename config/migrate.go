@@ -431,29 +431,3 @@ func encodeAliasValue(cfg *Config, alias configKeyAlias) (string, error) {
 	}
 	return encoded, nil
 }
-
-// configValueDrift names the first exported Config field whose value differs
-// between two loads, or "" when the two configurations are identical. It is the
-// migration's proof that it moved a spelling and nothing else.
-func configValueDrift(before, after *Config) string {
-	if before == nil || after == nil {
-		return "the loaded configuration"
-	}
-	beforeValue := reflect.ValueOf(*snapshotConfig(before))
-	afterValue := reflect.ValueOf(*snapshotConfig(after))
-	for i := 0; i < beforeValue.NumField(); i++ {
-		field := beforeValue.Type().Field(i)
-		if field.PkgPath != "" {
-			continue
-		}
-		if reflect.DeepEqual(beforeValue.Field(i).Interface(), afterValue.Field(i).Interface()) {
-			continue
-		}
-		name := field.Name
-		if tag, ok := field.Tag.Lookup("toml"); ok {
-			name = strings.Split(tag, ",")[0]
-		}
-		return fmt.Sprintf("%s from %v to %v", name, beforeValue.Field(i).Interface(), afterValue.Field(i).Interface())
-	}
-	return ""
-}
