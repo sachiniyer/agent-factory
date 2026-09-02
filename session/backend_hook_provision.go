@@ -124,7 +124,7 @@ func hookProvisionKnownHosts(dir, host string, port int, hostKey string) (string
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("cannot create the per-session host-key directory %q: %w", dir, err)
 	}
-	path := filepath.Join(dir, "known_hosts")
+	path := filepath.Join(dir, HookHostsPinFileName)
 	// A non-default port is part of the known_hosts identity, and OpenSSH spells
 	// it "[host]:port". Getting this wrong makes verification fail with a message
 	// about an unknown host rather than about the port.
@@ -471,6 +471,20 @@ func (p *hookProvisioner) runProvisionCmd() (*hookProvisionRecord, error) {
 		"cloud-init before first boot%s", p.hooks.ProvisionCmd, hookOutputSuffix(out.Combined()))
 }
 
+// HookHostsRoot is the af-home subdirectory holding the per-session pinned
+// host-key directories, and HookHostsPinFileName is the single file each of them
+// holds.
+//
+// Exported because a consumer outside this package has to name the same two
+// things: `af doctor` collects the directories no session owns any more (#3560),
+// and it can only remove a directory it has PROVEN af wrote. #3454's lesson was
+// that two paths naming one directory drift apart — that drift WAS the bug — so
+// there is one spelling of each and everybody reads it from here.
+const (
+	HookHostsRoot        = "hook-hosts"
+	HookHostsPinFileName = "known_hosts"
+)
+
 // hookProvisionSessionDir is where this session's pinned known_hosts lives: under
 // the af home, never the repo, since it is machine state rather than project
 // state.
@@ -479,5 +493,5 @@ func hookProvisionSessionDir(slug string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve the af home for the per-session host-key store: %w", err)
 	}
-	return filepath.Join(base, "hook-hosts", slug), nil
+	return filepath.Join(base, HookHostsRoot, slug), nil
 }

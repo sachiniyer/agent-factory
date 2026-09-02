@@ -102,6 +102,14 @@ Each command value is the path of one executable — it is run directly, not thr
 
 Run `af doctor` from inside the repository to check the remote-hook setup: it validates that your provisioning command (`provision_cmd` or `launch_cmd`) and `delete_cmd` are configured (and that no removed key lingers), and that each configured script exists and is executable. There is no read-only connectivity probe — neither contract has a dry-run verb (running either provisioning script provisions real infrastructure), so the live wire round-trip is exercised by actually creating a session.
 
+### Collecting orphaned host-key pins
+
+A `provision_cmd` session pins one host key under `$AGENT_FACTORY_HOME/hook-hosts/<name>` and owns that directory until its `delete_cmd` succeeds. A few situations leave one behind with no owner — a `delete_cmd` that answers with an **error** keeps the pin on purpose, so a later retry can still verify the machine, and the record may go away before the retry does.
+
+`af doctor` reports those, and `af doctor --fix` removes them. It removes a directory only when it can PROVE nothing owns it: it asks the running daemon for every session on the machine — every project, not just this repository, since hook names are one namespace for the whole box — and reads every project's records from disk. If any part of that cannot be read (the daemon is unreachable or does not answer, a project's records are unreadable), the directories are reported as undetermined and **nothing is removed**. A live, archived, mid-kill or killed-but-not-yet-reaped session all count as owners: removing a live session's pin would make every later teardown fail host-key verification, stranding the machine it was supposed to destroy.
+
+This check is silent on a machine with no `hook-hosts` directory, so a local-only setup never sees it.
+
 ## Script protocol
 
 Both scripts run directly (not through a shell) and return exit code 0 on success. Write progress and log lines to **stderr** — af reads it for diagnostics and never for endpoints, so a script may say as much there as it likes, and so may anything it backgrounds. `launch_cmd`'s **stdout is reserved for its endpoint JSON**: see [stdout is the endpoint's, exclusively](#stdout-is-the-endpoints-exclusively).

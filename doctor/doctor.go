@@ -42,6 +42,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // Finding is one visible diagnostic observation.
@@ -213,6 +214,14 @@ type Options struct {
 	// containing only their own spawned processes so a --fix run can never act
 	// on anything outside the test.
 	snapshot func() (map[int]proctree.Process, error)
+
+	// sessionInventory returns the running daemon's GLOBAL session list — every
+	// project on the box, not the cwd's repo — and defaults to
+	// daemonSessionInventory. It is the preferred half of the owner set the
+	// orphaned-pin check computes: a session whose pin exists may not be
+	// checkpointed to disk yet, so an inventory that reads only disk would call
+	// a live session's directory an orphan (#3560).
+	sessionInventory func() ([]session.InstanceData, error)
 }
 
 // scanContext carries the shared, immutable inputs of one run.
@@ -295,6 +304,9 @@ func (o *Options) applyDefaults() error {
 	}
 	if o.snapshot == nil {
 		o.snapshot = proctree.Snapshot
+	}
+	if o.sessionInventory == nil {
+		o.sessionInventory = daemonSessionInventory
 	}
 	if o.daemonHealth == nil {
 		o.daemonHealth = daemon.Health
@@ -389,6 +401,7 @@ func Run(opts Options) (*Report, error) {
 	checkStaleTempHomes(ctx, report)
 	checkForeignDaemons(ctx, report)
 	checkRemoteSetup(ctx, report)
+	checkOrphanedHookHosts(ctx, report)
 
 	if ctx.opts.Fix {
 		for i := range report.Findings {

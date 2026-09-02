@@ -1050,6 +1050,13 @@ accumulate silently on a machine running agent-factory:
   - remote-hook setup for the current repo: config completeness and
     launch_cmd/delete_cmd script presence/executability
     (skipped cleanly when no remote backend is configured)
+  - pinned remote host-key directories under hook-hosts/ that no session owns.
+    Hook names are one namespace for the whole machine, so this one spans every
+    project rather than the current repo, and it runs whether or not this repo
+    configures a remote backend. --fix removes a directory only on proof that
+    no session owns it — live, archived, mid-kill and awaiting-teardown
+    sessions all count — and removes nothing at all when any part of that
+    inventory cannot be read
 
 The version-skew check exists because a skewed daemon fails quietly: it keeps
 answering while rejecting fields a newer client sends, which surfaces as

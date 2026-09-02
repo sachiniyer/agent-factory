@@ -1,6 +1,8 @@
 package apiclient
 
 import (
+	"context"
+
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -11,8 +13,24 @@ import (
 // result is byte-identical to daemon.SnapshotNoSpawn's on a running daemon. Like
 // the RPC read it is scoped by req.RepoID (empty = all repos).
 func (c *Client) Snapshot(req daemon.SnapshotRequest) ([]session.InstanceData, error) {
+	return c.SnapshotCtx(context.Background(), req)
+}
+
+// SnapshotCtx is Snapshot bounded by ctx.
+//
+// The LOCAL unix socket deliberately carries no overall request timeout (see
+// Client.requestTimeout), because most local RPCs return from an in-memory read
+// and a create legitimately runs long. That leaves one gap: a daemon that
+// ACCEPTS the connection and then never answers blocks the caller forever — the
+// 250ms dial timeout has already been satisfied by then.
+//
+// A read-only diagnostic must not hang on that. `af doctor`'s orphaned-pin
+// collector (#3560) bounds this read and treats the deadline as "the session
+// inventory could not be read", which reports UNKNOWN and refuses every removal
+// — the same answer an unreachable daemon produces.
+func (c *Client) SnapshotCtx(ctx context.Context, req daemon.SnapshotRequest) ([]session.InstanceData, error) {
 	var resp daemon.SnapshotResponse
-	if err := c.call("Snapshot", req, &resp); err != nil {
+	if err := c.callCtx(ctx, "Snapshot", req, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Instances, nil
