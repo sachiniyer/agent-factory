@@ -29,13 +29,20 @@ func installFakeGit(t *testing.T, script string) {
 
 // TestRepoFromPathClassifiesAbandonedProbeAsUnanswered reproduces the shape
 // reported in #3500: a helper outliving git holds the output pipe open, the
-// 100ms WaitDelay expires, and the read is abandoned. Nothing about the path
-// was learned, and the error must say so.
+// WaitDelay expires, and the read is abandoned. Nothing about the path was
+// learned, and the error must say so.
+//
+// The allowance is driven explicitly and the helper holds the pipe far past it
+// (#3503). This test is about the CLASSIFICATION of an abandoned read, so it
+// must not also depend on the production value — when that value rose to 2s the
+// original `sleep 2` fake became a race against the very bound it was meant to
+// trip.
 func TestRepoFromPathClassifiesAbandonedProbeAsUnanswered(t *testing.T) {
+	withRepoGitWaitDelay(t, 100*time.Millisecond)
 	installFakeGit(t, `#!/bin/sh
 # A background helper inherits git's stdout and outlives it, so the pipe never
 # reaches EOF and the parent's WaitDelay expires before the read completes.
-sleep 2 &
+sleep 30 &
 printf '%s\n' "/not/read"
 exit 0
 `)
