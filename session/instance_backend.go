@@ -43,7 +43,21 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // leaking the capture goroutine when a session is killed with a live stream open
 // (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
-	return i.AgentServer().Kill()
+	return i.AgentServer().Kill(false)
+}
+
+// KillTrustingOwnLifecycleLock is Kill for the ONE caller that holds this
+// session's exclusive lifecycle lock for its entire call — daemon's
+// KillSession (#3413). Every other Kill caller (create-failure cleanup,
+// root-kill, rootagent teardown, and any future one) must keep calling Kill
+// and get the strict #3309 default: none of them can make the same claim. See
+// tmux.TmuxSession.CloseAndWaitForPaneExitTrustingOwnGeneration.
+//
+// This stays a second method (rather than exposing the bool on Instance
+// itself) because Instance has no subtypes to lose an override on — the
+// Go-embedding hazard Backend.Kill's doc explains does not apply here.
+func (i *Instance) KillTrustingOwnLifecycleLock() error {
+	return i.AgentServer().Kill(true)
 }
 
 // runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the
@@ -539,16 +553,24 @@ func (i *Instance) ArchiveTeardownWithHook(dest string, beforeMove func() error)
 	if err != nil {
 		return nil, err
 	}
-	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove)
+	// false: neither this exported wrapper nor ArchiveTeardown has a production
+	// caller that holds the daemon's archive op-lock (#3413) — only
+	// daemon/archive.go's own direct ArchiveTeardownWithClaim call does, and it
+	// passes true explicitly. See closeTabForDestructiveTeardown.
+	return i.ArchiveTeardownWithClaim(dest, claim, beforeMove, false)
 }
 
 // ArchiveTeardownWithClaim carries the source claim obtained before teardown to
 // the hook and move use boundaries. Each boundary revalidates it independently.
-func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error) (hookErr, archiveErr error) {
+//
+// trustLiveGeneration must come from the caller — only daemon/archive.go's
+// archiveTeardown, which holds this session's exclusive lifecycle lock for the
+// whole call, may pass true (#3413); see closeTabForDestructiveTeardown.
+func (i *Instance) ArchiveTeardownWithClaim(dest string, claim git.RelocationClaim, beforeMove func() error, trustLiveGeneration bool) (hookErr, archiveErr error) {
 	claimHandled := false
 	mode := teardownArchive{
 		dest: dest, claim: &claim, claimHandled: &claimHandled,
-		beforeMove: beforeMove, hookErr: &hookErr,
+		beforeMove: beforeMove, hookErr: &hookErr, trustLiveGeneration: trustLiveGeneration,
 	}
 	archiveErr = i.teardownTabs(mode)
 	if !claimHandled {

@@ -237,7 +237,8 @@ func (s *remoteAgentServer) Resize(tab int, rows, cols uint16) error {
 	return br.resize(rows, cols)
 }
 
-func (s *remoteAgentServer) Kill() error {
+// trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+func (s *remoteAgentServer) Kill(_ bool) error {
 	// Tear every tab's data plane down first (closing each remote WS so subscribers
 	// see io.EOF), latch closed under the same lock that snapshots the brokers so a
 	// racing Subscribe can't resurrect one, then kill the remote workspace over REST.
@@ -341,7 +342,8 @@ func (s *deadRemoteAgentServer) Resize(int, uint16, uint16) error            { r
 // Kill is normally a no-op success: an ordinary inert sandbox has already been
 // reaped. A tombstoned row is different — its persisted teardown handle is the
 // work still owed after a daemon restart, so run it before the record can go.
-func (s *deadRemoteAgentServer) Kill() error {
+// trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+func (s *deadRemoteAgentServer) Kill(_ bool) error {
 	if s.teardown != nil {
 		return s.teardown()
 	}

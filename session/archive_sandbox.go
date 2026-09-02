@@ -101,7 +101,7 @@ func (i *Instance) ArchiveSandbox() (string, error) {
 	// 3. Tear the in-sandbox workspace down over REST and reap the sandbox itself
 	//    (container rm / remote dir cleanup + tunnel close) — the branch is durable,
 	//    the sandbox is disposable.
-	if err := as.Kill(); err != nil {
+	if err := as.Kill(false); err != nil {
 		if TeardownStateUnknown(err) {
 			i.markRuntimeCleanupStateUnknown()
 			return branch, fmt.Errorf("pushed branch %q but failed to tear the sandbox down for session %q: %w", branch, i.Title, err)

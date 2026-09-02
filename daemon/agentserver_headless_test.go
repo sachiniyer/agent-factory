@@ -105,7 +105,7 @@ func (f *fakeHeadlessAgentServer) Input(_ int, b []byte) error {
 
 func (f *fakeHeadlessAgentServer) Resize(_ int, _, _ uint16) error { return nil }
 
-func (f *fakeHeadlessAgentServer) Kill() error {
+func (f *fakeHeadlessAgentServer) Kill(bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.killed = true

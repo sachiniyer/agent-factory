@@ -53,7 +53,7 @@ func TestLocalBackendKill_PostCommitRelocationRefusalIsUnknown(t *testing.T) {
 	}
 	instance := &Instance{Title: "post-commit", gitWorktree: gw}
 
-	err = (&LocalBackend{}).Kill(instance)
+	err = (&LocalBackend{}).Kill(instance, false)
 	if !TeardownStateUnknown(err) {
 		t.Fatalf("a post-tombstone relocation refusal must retain the durable row as unknown; got %v", err)
 	}

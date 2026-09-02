@@ -444,8 +444,8 @@ func TestArchiveSession_FinalVSCodeStopFailureRollsBack(t *testing.T) {
 	key := daemonInstanceKey(repoID, "late-editor")
 
 	origTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, dest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
-		hookErr, err := origTeardown(target, dest, claim, beforeMove)
+	archiveTeardown = func(target *session.Instance, dest string, claim sessiongit.RelocationClaim, beforeMove func() error, trust bool) (error, error) {
+		hookErr, err := origTeardown(target, dest, claim, beforeMove, trust)
 		if err != nil {
 			return hookErr, err
 		}

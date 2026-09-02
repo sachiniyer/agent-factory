@@ -462,7 +462,8 @@ func (s *localAgentServer) Archive() (string, error) {
 	return s.inst.pushBranchForArchive()
 }
 
-func (s *localAgentServer) Kill() error {
+// trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
 	// Latch closed under the same lock that snapshots the brokers so a Subscribe
@@ -477,5 +478,5 @@ func (s *localAgentServer) Kill() error {
 	for _, br := range brokers {
 		br.close()
 	}
-	return s.inst.currentBackend().Kill(s.inst)
+	return s.inst.currentBackend().Kill(s.inst, trustLiveGeneration)
 }

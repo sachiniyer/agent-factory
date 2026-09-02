@@ -69,7 +69,8 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-func (b *remoteAgentBackend) Kill(i *Instance) error {
+// trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+func (b *remoteAgentBackend) Kill(i *Instance, _ bool) error {
 	i.mu.Lock()
 	i.started = false
 	i.mu.Unlock()

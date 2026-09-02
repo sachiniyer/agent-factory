@@ -252,6 +252,10 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a
 	// separate MoveArchivedWorktree step relying on duplicated ordering prose).
+	// Trusting: this call sits inside the per-session op-lock + killsInFlight
+	// acquired by ArchiveSession/archiveSession above, which rules out a
+	// same-name replacement appearing mid-teardown (#3413) — see
+	// session.Instance.ArchiveTeardownWithClaim.
 	hookErr, err := archiveTeardown(instance, dest, relocationClaim, func() error {
 		return runOnArchiveHook(onArchiveHookContext{
 			sessionID:   instance.ID,
@@ -260,7 +264,7 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 			worktree:    origPath,
 			archivePath: dest,
 		})
-	})
+	}, true)
 	if err != nil {
 		// The worktree is still at a valid location (the git layer guarantees
 		// worktreePath points at the actual bytes even on a repair failure).

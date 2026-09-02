@@ -24,9 +24,9 @@ type attachCountingBackend struct {
 	closeAttachOnly atomic.Int32
 }
 
-func (b *attachCountingBackend) Kill(i *session.Instance) error {
+func (b *attachCountingBackend) Kill(i *session.Instance, trustLiveGeneration bool) error {
 	b.kills.Add(1)
-	return b.FakeBackend.Kill(i)
+	return b.FakeBackend.Kill(i, trustLiveGeneration)
 }
 
 func (b *attachCountingBackend) CloseAttachOnly(i *session.Instance) error {

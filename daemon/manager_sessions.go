@@ -248,7 +248,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
 			return m.persistInstanceErr(repoID, instance)
 		})
-		teardownErr = instance.Kill()
+		// Trusting: this call sits inside killsInFlight + the per-session op-lock
+		// acquired above, which rules out a same-name replacement appearing
+		// mid-teardown (#3413) — see Instance.KillTrustingOwnLifecycleLock.
+		teardownErr = instance.KillTrustingOwnLifecycleLock()
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)

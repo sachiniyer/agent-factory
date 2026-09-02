@@ -17,8 +17,8 @@ type afterKillBackend struct {
 	afterKill func()
 }
 
-func (b *afterKillBackend) Kill(inst *session.Instance) error {
-	if err := b.Backend.Kill(inst); err != nil {
+func (b *afterKillBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
+	if err := b.Backend.Kill(inst, trustLiveGeneration); err != nil {
 		return err
 	}
 	b.afterKill()
