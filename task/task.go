@@ -140,10 +140,11 @@ type Task struct {
 	// not an exact count. Without it a reader cannot tell "exactly 10000" from
 	// "at least 10000", and every surface would render a capped count as precise.
 	MissedOccurrencesCapped bool `json:"missed_occurrences_capped,omitempty"`
-	// Unschedulable says this task's cron expression can never produce a fire —
-	// it does not parse, or it matches no date. Such a task is not late (nothing
-	// was ever due) and is emphatically not healthy either, so it needs a field of
-	// its own rather than the absence of one.
+	// Unschedulable says the scheduler cannot derive a next fire from this task's
+	// cron expression — it does not parse, or nothing matches inside the search
+	// horizon. Such a task is not late (nothing was ever due) and is emphatically
+	// not healthy either, so it needs a field of its own rather than the absence
+	// of one.
 	Unschedulable bool `json:"unschedulable,omitempty"`
 	// NextRunAt is what the LIVE scheduler will actually fire next, read off its
 	// armed entry rather than recomputed from the expression. Absent when the

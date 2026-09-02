@@ -276,7 +276,7 @@ func TestDoctor_ReportsATaskThatCanNeverFire(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusWarn, row.Status)
-	assert.Contains(t, row.Detail, "a cron expression that can never fire")
+	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
 	assert.Contains(t, row.Detail, `feb31111 "February 31st"`)
 	assert.Positive(t, report.UnresolvedCount())
 }
@@ -300,7 +300,7 @@ func TestDoctor_ReportsAnInvalidExpressionWithNoDaemon(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusWarn, row.Status)
-	assert.Contains(t, row.Detail, "a cron expression that can never fire")
+	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
 	assert.Contains(t, row.Detail, `badcr0n1 "Hand-edited watchdog"`)
 	assert.NotContains(t, row.Detail, "firing on schedule")
 	assert.Positive(t, report.UnresolvedCount())
@@ -323,7 +323,7 @@ func TestDoctor_UnschedulableTaskIsNotAlsoListedAsUnarmed(t *testing.T) {
 	require.NoError(t, err)
 
 	row := taskRow(t, report)
-	assert.Contains(t, row.Detail, "a cron expression that can never fire")
+	assert.Contains(t, row.Detail, "a cron expression the scheduler cannot fire")
 	assert.NotContains(t, row.Detail, "enabled but not armed",
 		"one condition, reported once:\n%s", row.Detail)
 	assert.Equal(t, 1, strings.Count(row.Detail, "badcr0n2"))

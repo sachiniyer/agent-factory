@@ -185,11 +185,15 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	}
 	health := task.DeriveScheduleHealth(t, now)
 	if health.Unschedulable {
-		// Legal syntax, no matching date — February 31st and friends. The task is
-		// enabled and the scheduler holds an entry for it, so every other line on
-		// this page reads as healthy; nothing is late only because nothing was
-		// ever due.
-		return "this expression matches no date, so the task can never fire"
+		// The task is enabled and the scheduler may well hold an entry for it, so
+		// every other line on this page reads as healthy; nothing is late only
+		// because nothing was ever due. The claim is about the SCHEDULER rather
+		// than the calendar, and the horizon is named because that is the whole
+		// difference between "February 31st, never" and "a leap-day expression
+		// whose next match is more than five years out" — the scheduler will not
+		// fire either one.
+		return "the scheduler cannot derive a next run from this expression " +
+			"(it matches no date within its five-year horizon), so the task will not fire"
 	}
 	if !health.Overdue {
 		if !t.Enabled || t.CronExpr == "" {

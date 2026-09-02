@@ -189,3 +189,23 @@ func TestAutomationsCompactSummaryCountsTasksThatCanNeverFire(t *testing.T) {
 
 	assert.Contains(t, a.View(), "2 overdue")
 }
+
+// TestAutomationsDiagnosesAMalformedExpression: an expression that does not
+// parse is the one unschedulable shape with no other explanation on the detail
+// line — "No upcoming run" is emitted only after a successful parse — so without
+// its own fragment the row showed a raw expression and a [!] with nothing saying
+// why.
+func TestAutomationsDiagnosesAMalformedExpression(t *testing.T) {
+	broken := stripTasks()[0]
+	broken.CronExpr, broken.Unschedulable = "99 * * * *", true
+
+	a := newTestAutomations([]task.Task{broken})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "▾[!]  nightly-sweep")
+	assert.Contains(t, out, "Invalid cron expression",
+		"the mark needs a reason on the line beneath it:\n%s", out)
+	assert.NotContains(t, out, "next ", "and no fire time is promised")
+}

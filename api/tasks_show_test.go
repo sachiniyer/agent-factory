@@ -186,6 +186,6 @@ func TestTasksShow_UnschedulableExpressionSaysSo(t *testing.T) {
 	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
 	got := out.String()
 
-	assert.Contains(t, got, "matches no date, so the task can never fire")
+	assert.Contains(t, got, "the scheduler cannot derive a next run from this expression")
 	assert.NotContains(t, got, "on schedule")
 }

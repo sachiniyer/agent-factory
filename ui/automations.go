@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	cron "github.com/robfig/cron/v3"
+
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -221,12 +223,18 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// expression. That fallback is what used to render a confident "next"
 			// for a task that had been dark for 18 days; the warning fragment below
 			// is what stops it being read as health.
-			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
-				if next := sched.Next(a.now()); next.IsZero() {
-					parts = append(parts, "No upcoming run")
-				} else {
-					parts = append(parts, "next "+next.Format("Jan 02 15:04"))
-				}
+			sched, err := task.ParseCron(tsk.CronExpr)
+			switch next := nextFireOrZero(sched, err, a.now()); {
+			case err != nil:
+				// The one unschedulable shape with no other explanation on this
+				// line. "No upcoming run" below is emitted only after a SUCCESSFUL
+				// parse, so without this a hand-edited or legacy row showed its raw
+				// expression and a [!] with nothing saying why (#3623 review).
+				parts = append(parts, "Invalid cron expression")
+			case next.IsZero():
+				parts = append(parts, "No upcoming run")
+			default:
+				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
 			}
 		}
 	}
@@ -315,6 +323,15 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	return strings.Join(parts, " · ")
 }
 
+// nextFireOrZero evaluates a parsed schedule once, so the branch that decides
+// what to say and the branch that formats it cannot disagree about the answer.
+func nextFireOrZero(sched cron.Schedule, err error, now time.Time) time.Time {
+	if err != nil {
+		return time.Time{}
+	}
+	return sched.Next(now)
+}
+
 // needsAttention reports whether the row carries a warning: the task has stopped
 // firing on its schedule, or its expression can never fire at all. Both are read
 // off the record, so the rail's disk-backed poll sees them without a daemon.
@@ -328,11 +345,13 @@ func needsAttention(tsk task.Task) bool {
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
 func attentionFragment(tsk task.Task) string {
-	// Deliberately silent for an unschedulable task: the next/last summary
-	// already says "No upcoming run" for it (#2596), and a second fragment saying
-	// the same thing would both repeat itself and push the line past the 36-column
-	// rail, clipping the half that names the expression. The glyph is what that
-	// case was missing — a collapsed row read as healthy — not more words.
+	// Deliberately silent for an unschedulable task: the next/last summary already
+	// diagnoses it — "No upcoming run" for an expression that parses (#2596),
+	// "Invalid cron expression" for one that does not — and a second fragment
+	// saying the same thing would both repeat itself and push the line past the
+	// 36-column rail, clipping the half that names the expression. The glyph is
+	// what that case was missing — a collapsed row read as healthy — not more
+	// words.
 	if !tsk.Overdue {
 		return ""
 	}

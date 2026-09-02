@@ -80,17 +80,30 @@ type ScheduleHealth struct {
 	// (MissedOccurrencesCapped): a consumer that reads "10000" and cannot tell it
 	// from an exact count has been handed a number that is quietly wrong.
 	Saturated bool
-	// Unschedulable reports an expression that can never produce a fire: it does
-	// not parse, or it parses and matches no date (the February 31st class).
+	// Unschedulable reports that THE SCHEDULER CANNOT DERIVE A NEXT FIRE from
+	// this expression: it does not parse, or nothing matches within the five-year
+	// horizon robfig's Next() searches before giving up.
 	//
-	// The two are ONE verdict on purpose. They differ in how they got there and
-	// in nothing a reader can act on — both mean the task is enabled and will
-	// never run — and splitting them left a gap: while the parse failure was
-	// treated as "reported by the arming state", a box whose daemon was down or
-	// warming up observed no arming at all and doctor called such a task healthy.
-	// A verdict derived from the record alone is available everywhere; one that
-	// depends on a live observation is not. `af tasks show` still names the parse
-	// error itself, because it has the expression in hand.
+	// That is deliberately a claim about the scheduler and not about the calendar,
+	// because the scheduler is what will or will not run the task, and it consults
+	// the same horizon. For February 31st the two agree — it can never fire. For a
+	// leap-day expression evaluated in the run-up to a skipped leap year they do
+	// not: "0 0 29 2 *" asked in 2096 finds nothing before 2104, so Next() returns
+	// zero, the cron entry sits with a zero next-fire time, and the daemon does not
+	// fire it — even though the calendar says 2104. Reporting that as healthy would
+	// be the false negative; reporting it as "can never fire" would be the false
+	// claim. It cannot be scheduled, which is both true and the thing to act on.
+	// (Measured against robfig directly: zero from 2096-03-01 through 2098,
+	// non-zero either side.)
+	//
+	// The parse failure and the no-match case are ONE verdict on purpose. They
+	// differ in how they got there and in nothing a reader can act on, and
+	// splitting them left a gap: while the parse failure was treated as "reported
+	// by the arming state", a box whose daemon was down or warming up observed no
+	// arming at all and doctor called such a task healthy. A verdict derived from
+	// the record alone is available everywhere; one that depends on a live
+	// observation is not. `af tasks show` still names the parse error itself,
+	// because it has the expression in hand.
 	Unschedulable bool
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
@@ -111,10 +124,10 @@ type ScheduleHealth struct {
 //   - A disabled task is not expected to fire. Whether disabling it was
 //     INTENDED is exactly what the audit trail answers (see task/audit.go); it
 //     is not something this derivation can know.
-//   - An expression that can never fire — one that does not parse, or that
-//     parses and matches no date — has no occurrences to be late against, so the
-//     answer is Unschedulable rather than a lateness verdict. It is emphatically
-//     not health: the task is enabled and will never run.
+//   - An expression the scheduler cannot fire — one that does not parse, or with
+//     no match inside its search horizon — has no occurrence to be late against,
+//     so the answer is Unschedulable rather than a lateness verdict. It is
+//     emphatically not health: the task is enabled and is not going to run.
 //
 // The verdict is one Next() call, not a scan. The task is overdue exactly when
 // some scheduled occurrence lands at or before now and more than slack after the
@@ -131,12 +144,15 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	if err != nil {
 		return ScheduleHealth{Unschedulable: true}
 	}
-	// "Can this ever fire?" is answered BEFORE "how late is it?", because the two
-	// need different things and only the second needs a reference point. Asking
-	// them the other way round meant a record with no timestamps at all — a
+	// "Can the scheduler fire this?" is answered BEFORE "how late is it?", because
+	// the two need different things and only the second needs a reference point.
+	// Asking them the other way round meant a record with no timestamps at all — a
 	// hand-edited or legacy row — declined to derive anything and reported an
-	// impossible expression as healthy, which is the one case where every input
+	// unschedulable expression as healthy, which is the one case where every input
 	// needed for the verdict was in hand (#3623 review).
+	//
+	// Probed from NOW rather than from the reference point, deliberately: the
+	// question is what the scheduler will do next, and that is what it asks too.
 	if sched.Next(now).IsZero() {
 		return ScheduleHealth{Unschedulable: true}
 	}
@@ -146,11 +162,15 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	}
 	slack, ok := slackFor(sched, ref)
 	if !ok {
-		// Belt and braces: the probe above rules this out for every expression
-		// whose occurrences are periodic, which is all of them, but a schedule that
-		// answers differently from `ref` than from `now` must not silently become
-		// "healthy" here either.
-		return ScheduleHealth{Unschedulable: true}
+		// NOT unschedulable — the probe above already proved a future fire exists,
+		// so this is only "no lateness can be measured from THIS reference". The
+		// two come apart when the reference is old enough that the schedule's next
+		// occurrences after it fall outside the search horizon: a leap-day task
+		// last run in 2096 asked in 2099 can be fired (2104 is inside the horizon
+		// from now) while nothing can be computed from 2096. Answering
+		// "unschedulable" there would be a false claim about a task the scheduler
+		// is going to run.
+		return ScheduleHealth{}
 	}
 	oldest := sched.Next(ref.Add(slack))
 	if oldest.IsZero() || oldest.After(now) {

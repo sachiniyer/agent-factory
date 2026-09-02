@@ -509,3 +509,38 @@ func TestOverdue_UnschedulableWithNoTimestampsAtAll(t *testing.T) {
 	assert.False(t, DeriveScheduleHealth(tsk, now).Unschedulable)
 	assert.False(t, DeriveScheduleHealth(tsk, now).Overdue)
 }
+
+// TestOverdue_UnschedulableIsAClaimAboutTheScheduler pins the case that decides
+// the wording, and guards against someone "correcting" it into a false negative.
+//
+// "0 0 29 2 *" is a perfectly valid leap-day expression, but asked in 2096 its
+// next match is 2104 — 2100 is not a leap year — which is past the five-year
+// horizon robfig's Next() searches before returning the zero time. The SCHEDULER
+// consults that same horizon, so during that window it holds a zero next-fire
+// time and does not run the task. Reporting health there would be the false
+// negative; reporting "can never fire" would be a false claim about the
+// calendar. Unschedulable means the scheduler cannot derive a next run, which is
+// true in both cases and is the thing to act on.
+func TestOverdue_UnschedulableIsAClaimAboutTheScheduler(t *testing.T) {
+	last := at(2096, time.February, 29, 0, 0, 0)
+	leapDay := cronTask("0 0 29 2 *", &last)
+
+	inTheGap := DeriveScheduleHealth(leapDay, at(2096, time.June, 1, 0, 0, 0))
+	assert.True(t, inTheGap.Unschedulable,
+		"the scheduler cannot derive a next run here, so neither can this")
+	assert.False(t, inTheGap.Overdue, "and nothing was due to be missed")
+
+	// Past the gap the same expression schedules normally — and note what that
+	// costs: from 2099 the schedule can be fired (2104 is inside the horizon from
+	// now) while nothing can be MEASURED from a 2096 last run, whose own next
+	// occurrences fall outside it. That is "no lateness verdict", not
+	// "unschedulable", and conflating the two would claim the scheduler cannot
+	// fire a task it is about to.
+	pastTheGap := DeriveScheduleHealth(leapDay, at(2099, time.June, 1, 0, 0, 0))
+	assert.False(t, pastTheGap.Unschedulable,
+		"2104 is inside the horizon from 2099, so the scheduler can fire it again")
+	assert.False(t, pastTheGap.Overdue, "and no lateness can be measured from 2096")
+	recent := at(2024, time.February, 29, 0, 0, 0)
+	ordinary := cronTask("0 0 29 2 *", &recent)
+	assert.False(t, DeriveScheduleHealth(ordinary, at(2026, time.June, 1, 0, 0, 0)).Unschedulable)
+}

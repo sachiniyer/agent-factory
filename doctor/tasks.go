@@ -119,14 +119,13 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		fixes = append(fixes, "check the daemon log for an arming refusal, then `af daemon restart`")
 	}
 	if len(unschedulable) > 0 {
-		// Enabled and incapable of ever firing: the expression does not parse, or
-		// it parses and matches no date (February 31st and friends). Nothing is
-		// late, because nothing was ever due — which is why this needs its own
-		// clause rather than folding into overdue. It is derived from the record,
-		// so a box whose daemon is down or still warming up gets it too; leaning on
-		// a live not-armed observation instead is what let doctor call such a task
-		// healthy.
-		details = append(details, fmt.Sprintf("%s a cron expression that can never fire — %s",
+		// Enabled, and the scheduler cannot derive a next fire: the expression does
+		// not parse, or nothing matches inside its search horizon. Nothing is late,
+		// because nothing was ever due — which is why this needs its own clause
+		// rather than folding into overdue. It is derived from the record, so a box
+		// whose daemon is down or still warming up gets it too; leaning on a live
+		// not-armed observation instead is what let doctor call such a task healthy.
+		details = append(details, fmt.Sprintf("%s a cron expression the scheduler cannot fire — %s",
 			countTasksHave(len(unschedulable)), describeTaskNames(unschedulable)))
 		fixes = append(fixes, "correct the expression with `af tasks update <id> --cron <expr>`")
 	}
