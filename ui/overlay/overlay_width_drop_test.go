@@ -352,3 +352,53 @@ func TestPlaceOverlayNeverSplitsAHyperlinkWhenClipping(t *testing.T) {
 		t.Fatalf("an atomic sequence must survive intact, not be shortened; got %q", out)
 	}
 }
+
+// #3433 review. A hyperlink escape occupies ZERO cells on every terminal — unlike
+// grapheme clustering, there is no emulator disagreement to defer here, so
+// measuring a row's URI as visible text is simply wrong. It left the compositor
+// computing a negative remaining width for such a row: no padding, no right-hand
+// background, four visible cells sitting in a ten-cell frame.
+func TestPlaceOverlayMeasuresAHyperlinkRowByItsVisibleCells(t *testing.T) {
+	const cols, rows = 10, 3
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	link := "\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\"
+	fg := strings.Join([]string{link, link}, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+	lines := strings.Split(out, "\n")
+
+	if len(lines) != rows {
+		t.Fatalf("got %d lines, want %d", len(lines), rows)
+	}
+	// The modal is 4 visible cells in a 10-cell frame, so the row must be completed
+	// — by background or by padding — not left short.
+	for i, line := range lines {
+		if w := lineWidth(line); w != cols {
+			t.Fatalf("line %d is %d visible cells, want exactly %d: %q", i, w, cols, line)
+		}
+	}
+}
+
+// lineWidth corrects OSC measurement WITHOUT changing the measure for anything
+// else. That distinction is the whole justification for making this correction
+// inside a PR that explicitly defers the measure question, so it is pinned: for
+// any content without an OSC sequence — emoji, CJK, SGR, plain — lineWidth must
+// agree with ansi.PrintableRuneWidth exactly. If someone later "simplifies" it to
+// xansi.StringWidth, this fails, because that WOULD be the deferred change.
+func TestLineWidthMatchesPrintableRuneWidthWithoutOSC(t *testing.T) {
+	for _, s := range []string{
+		"plain",
+		"",
+		"\x1b[31mred\x1b[0m",
+		strings.Repeat(joinedFamily, 5),
+		"你好世界",
+		"mixed 你 \x1b[1mbold\x1b[0m 👍",
+		strings.Repeat("x", 200),
+	} {
+		if got, want := lineWidth(s), ansi.PrintableRuneWidth(s); got != want {
+			t.Fatalf("lineWidth(%q) = %d, ansi.PrintableRuneWidth = %d: they must be identical "+
+				"for content with no OSC sequence, or this is a measure change and not a correction", s, got, want)
+		}
+	}
+}

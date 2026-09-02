@@ -129,6 +129,37 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
+// oscRegex matches any OSC sequence with either terminator, ST (ESC backslash) or
+// BEL, written with regex escapes rather than literal control bytes (see
+// osc8Regex).
+var oscRegex = regexp.MustCompile(`\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)`)
+
+// lineWidth is the compositor's single answer to "how many cells does this row
+// occupy", and every measurement in this file goes through it.
+//
+// It is ansi.PrintableRuneWidth with OSC sequences removed first. That is not a
+// change of measure — for anything without an OSC sequence the two are identical
+// by construction — it is a correction, and the distinction matters:
+//
+//   - Grapheme clustering IS a genuine disagreement. A joined-emoji family is 2
+//     cells to lipgloss, 8 to PrintableRuneWidth, and 4 to tmux 3.4 actually
+//     advancing its cursor. Which one is right depends on the emulator, so #3433
+//     defers it and getLines' note carries the measurements.
+//   - An OSC sequence is NOT. A hyperlink escape occupies zero cells on every
+//     terminal there is. PrintableRuneWidth reads a 4-cell hyperlink as 21 because
+//     it takes the first letter of the URI for the sequence terminator and counts
+//     the rest as text — a parsing bug, with no emulator on the other side of it.
+//
+// Left uncorrected it fed the placement arithmetic a width the row does not have:
+// pos overshot, remaining width went negative, and such a row rendered with
+// neither padding nor the background beside it.
+func lineWidth(s string) int {
+	if strings.Contains(s, "\x1b]") {
+		s = oscRegex.ReplaceAllString(s, "")
+	}
+	return ansi.PrintableRuneWidth(s)
+}
+
 // clipLine truncates one foreground row to width WITHOUT ever cutting through a
 // control sequence.
 //
@@ -149,9 +180,9 @@ func fadeSGR(match string) string {
 //
 // A mangled control sequence is the worse failure — it corrupts output past the
 // modal, not just inside it — so a row carrying one is clipped with the parser and
-// a plain row with the measure-consistent truncator. Rows with hyperlinks remain
-// mispositioned, because ansi.PrintableRuneWidth counts their URIs as text; that is
-// the measure problem #3433 defers, and it predates any clipping.
+// a plain row with the measure-consistent truncator. Both are then measured by
+// lineWidth, which discounts the OSC sequences either way, so the placement
+// arithmetic sees the cells the row actually occupies.
 func clipLine(line string, width int) string {
 	if strings.Contains(line, "\x1b]") {
 		return xansi.Truncate(line, width, "")
@@ -164,7 +195,7 @@ func clipLine(line string, width int) string {
 func widestLine(lines []string) int {
 	widest := 0
 	for _, l := range lines {
-		if w := ansi.PrintableRuneWidth(l); w > widest {
+		if w := lineWidth(l); w > widest {
 			widest = w
 		}
 	}
@@ -242,7 +273,7 @@ func getLines(s string) (lines []string, widest int) {
 	lines = strings.Split(s, "\n")
 
 	for _, l := range lines {
-		w := ansi.PrintableRuneWidth(l)
+		w := lineWidth(l)
 		if widest < w {
 			widest = w
 		}
@@ -318,7 +349,7 @@ func PlaceOverlay(
 	// happens to render. lipgloss-framed modals already pad their rows, so this
 	// is a no-op for them and only catches the ragged ones.
 	for i, line := range fgLines {
-		if w := ansi.PrintableRuneWidth(line); w < fgWidth {
+		if w := lineWidth(line); w < fgWidth {
 			fgLines[i] = line + strings.Repeat(" ", fgWidth-w)
 		}
 	}
@@ -369,7 +400,7 @@ func PlaceOverlay(
 		pos := 0
 		if placeX > 0 {
 			left := truncate.String(bgLine, uint(placeX))
-			pos = ansi.PrintableRuneWidth(left)
+			pos = lineWidth(left)
 			b.WriteString(left)
 			if pos < placeX {
 				b.WriteString(ws.render(placeX - pos))
@@ -379,12 +410,12 @@ func PlaceOverlay(
 
 		fgLine := fgLines[i-placeY]
 		b.WriteString(fgLine)
-		pos += ansi.PrintableRuneWidth(fgLine)
+		pos += lineWidth(fgLine)
 		b.WriteString(closeSequences(fgLine))
 
 		right := xansi.TruncateLeft(bgLine, pos, "")
-		bgLineWidth := ansi.PrintableRuneWidth(bgLine)
-		rightWidth := ansi.PrintableRuneWidth(right)
+		bgLineWidth := lineWidth(bgLine)
+		rightWidth := lineWidth(right)
 		remainingWidth := bgLineWidth - pos
 		if rightWidth > remainingWidth {
 			// TruncateLeft returned more than fits because pos landed in the
@@ -393,7 +424,7 @@ func PlaceOverlay(
 			// so we don't render past bgLineWidth. The dropped half-cell shows
 			// as the leading pad below. (#647)
 			right = xansi.Truncate(right, remainingWidth, "")
-			rightWidth = ansi.PrintableRuneWidth(right)
+			rightWidth = lineWidth(right)
 		}
 		if rightWidth < remainingWidth {
 			b.WriteString(ws.render(remainingWidth - rightWidth))
