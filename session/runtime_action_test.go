@@ -13,6 +13,7 @@ func TestRuntimeAction_EveryActionHasAnEligibleState(t *testing.T) {
 		RuntimeActionRestoreArchived:   {Title: "archived", Liveness: LiveArchived},
 		RuntimeActionRestoreLostOrDead: {Title: "dead", Liveness: LiveDead, Started: true},
 		RuntimeActionRecoverLost:       {Title: "lost", Liveness: LiveLost, Started: true},
+		RuntimeActionRecoverFenced:     {Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		RuntimeActionResumeLimit:       {Title: "limited", Liveness: LiveLimitReached, Started: true},
 		RuntimeActionHandoff:           {Title: "live", Liveness: LiveRunning, Started: true},
 	}
@@ -38,6 +39,7 @@ func TestRuntimeAction_PendingKillVetoesEveryAction(t *testing.T) {
 		{Title: "archived", Liveness: LiveArchived},
 		{Title: "dead", Liveness: LiveDead, Started: true},
 		{Title: "lost", Liveness: LiveLost, Started: true},
+		{Title: "fenced", Liveness: LiveLost, Started: true, InFlightOp: OpRestoring},
 		{Title: "limited", Liveness: LiveLimitReached, Started: true},
 		{Title: "live", Liveness: LiveRunning, Started: true},
 	}

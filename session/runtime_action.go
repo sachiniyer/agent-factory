@@ -11,7 +11,8 @@ import "fmt"
 // one of these actions before delegating to a backend:
 //   - RestoreArchivedWorktree / RestoreFromArchive: RuntimeActionRestoreArchived
 //   - the daemon's manual Lost/Dead router: RuntimeActionRestoreLostOrDead
-//   - Instance.Recover: RuntimeActionRecoverLost
+//   - Instance.Recover / BeginRecoverFence: RuntimeActionRecoverLost
+//   - Instance.RecoverHeldFencedWithLiveBoundary: RuntimeActionRecoverFenced
 //   - Instance.Respawn: RuntimeActionResumeLimit
 //   - SwapAgentProgram / Instance.SwapAgent: RuntimeActionHandoff
 //
@@ -23,6 +24,7 @@ const (
 	RuntimeActionRestoreArchived RuntimeAction = iota
 	RuntimeActionRestoreLostOrDead
 	RuntimeActionRecoverLost
+	RuntimeActionRecoverFenced
 	RuntimeActionResumeLimit
 	RuntimeActionHandoff
 	numRuntimeActions
@@ -66,6 +68,30 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		}
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
+		}
+	case RuntimeActionRecoverFenced:
+		// The SAME precondition as RuntimeActionRecoverLost on every axis but one:
+		// the restore fence is required to be UP rather than absent, because this
+		// action names the continuation of a recover whose fence the caller already
+		// holds (daemon/restore.go raises it for the whole manual restore, so the
+		// slow network phases in front of the backend call are covered too — #3586).
+		//
+		// It is a separate action rather than a relaxation of RuntimeActionRecoverLost
+		// for the reason that one still requires OpNone: that action is the PUBLIC
+		// "may this row be recovered" question, asked by the daemon's automatic loop
+		// (lostSessionWantsRestore) and by callers deciding whether to start one at
+		// all. Weakening it to accept OpRestoring would tell every one of them that a
+		// restore already in flight is a restore they may start, which is exactly the
+		// re-entrancy #3555 closed. Naming the two states separately keeps the
+		// admission question strict and makes the continuation explicit.
+		if v.Liveness != LiveLost {
+			return fmt.Errorf("session %q is not lost", v.Title)
+		}
+		if !v.Started {
+			return fmt.Errorf("session %q is not started", v.Title)
+		}
+		if v.InFlightOp != OpRestoring {
+			return fmt.Errorf("session %q is not under a restore fence (in-flight op is %s)", v.Title, opLabel(v.InFlightOp))
 		}
 	case RuntimeActionResumeLimit:
 		if v.Liveness != LiveLimitReached {
