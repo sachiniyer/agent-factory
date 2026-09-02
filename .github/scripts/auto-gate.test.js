@@ -257,10 +257,12 @@ test("a non-allowed author gets a passing manual decision without an automatic m
   assert.doesNotMatch(exactDecision.output.summary, /not an allowed maintainer/);
   assert.equal(github.updatedChecks.at(-1).conclusion, "success");
   assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  // The disable is the last thing before the aggregate PASS — the only green
+  // branch protection can consume.
   assert.deepEqual(github.operations.slice(0, 4), [
     "check:create",
-    "auto-merge:disable",
     "check:create",
+    "auto-merge:disable",
     "check:update",
   ]);
 });
@@ -286,11 +288,638 @@ test("a native auto-merge cancellation failure leaves the manual-only aggregate 
     /cannot disable native auto-merge/,
   );
 
-  assert.equal(github.createdChecks.length, 1);
   assert.equal(github.nativeAutoMergeDisableAttempts, 1);
+  // The aggregate — the only consumable green — was never published.
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
-  assert.equal(github.updatedChecks.length, 0);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published when the disable failed",
+  );
+});
+
+test("auto-merge armed after the PR read is still disabled before the green", async () => {
+  // #3381: nativeAutoMergeEnabled was captured once in getPullRequest, and the
+  // files, required-checks, comments, reviews and review-comment reads all ran
+  // before the guard consulted it. Auto-merge armed anywhere in that window was
+  // invisible, the disable was skipped, and a PASSING decision published on a PR
+  // the gate had just declared maintainer-review-only — which GitHub could then
+  // merge on that very green.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    nativeAutoMergeArmedAfterRead: true,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  assert.equal(github.nativeAutoMergeArmed, false);
+  // Disabled immediately BEFORE the aggregate PASS, which is the only green
+  // branch protection consumes. Ordering is the whole mechanism.
+  assert.deepEqual(github.operations.slice(0, 4), [
+    "check:create",
+    "check:create",
+    "auto-merge:disable",
+    "check:update",
+  ]);
+  assert.equal(
+    github.operations.indexOf("auto-merge:disable") + 1,
+    github.operations.lastIndexOf("check:update"),
+    "no other write may separate the disarm from the aggregate green",
+  );
+});
+
+test("the auto-merge state is read fresh rather than trusted from the snapshot", async () => {
+  const github = fakeGateGithub({ author: "detail-app", nativeAutoMergeEnabled: false });
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // Two reads for a PR that is not armed: the disarm pass finds nothing to do,
+  // and the publish precondition confirms it again immediately before the write.
+  // Nothing is disabled either way.
+  assert.equal(github.autoMergeStateReads, 2);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+});
+
+test("one batched read covers every manual PR sharing a head", async () => {
+  // Codex P1 (round 2): with several manual PRs on one head, a per-PR loop makes
+  // the first PR's observation N-1 reads stale by the time the green is
+  // published. One aliased query keeps the observation simultaneous.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  // The two shared-head reads are batched: one snapshot for the disarm pass and
+  // one for the publish precondition, each covering both PRs in a single query.
+  // The extra reads are the per-mutation revalidations, which are unavoidably
+  // per-PR — a stale head there would cancel a queue entry armed for a head this
+  // transaction never evaluated.
+  // The shape of the reads, stated exactly. The first and last queries each
+  // carry BOTH PRs — the disarm snapshot and the publish precondition — and the
+  // singles between them are the per-mutation revalidations, which are
+  // necessarily per-PR. Adding PRs widens the two snapshots rather than adding
+  // round trips; unbatched they would be two queries per PR.
+  assert.deepEqual(github.autoMergeStateBatchSizes, [2, 1, 1, 2]);
+  assert.equal(github.autoMergeStateBatchSizes.at(0), 2, "the disarm snapshot is batched");
+  assert.equal(github.autoMergeStateBatchSizes.at(-1), 2, "the publish precondition is batched");
+});
+
+test("a head that moves between the snapshot and its mutation is not disabled", async () => {
+  // Codex P2 (round 3): the batched read is one snapshot for the whole head and
+  // the disables that follow are sequential, so a PR can synchronize while an
+  // earlier one is being disabled. The mutation takes a stable node ID, so it
+  // would cancel a queue entry armed for a head this transaction never
+  // evaluated.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    // Reads 1..N report the evaluated head; the revalidation read sees the move.
+    autoMergeStateHeadAfterRead: { 1465: { after: 1, headSha: OTHER_SHA } },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0, "a moved head must not be mutated");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published for a head the PR has left",
+  );
+});
+
+test("a PR that moved to a new head has its auto-merge left alone", async () => {
+  // Codex P2 (round 2): the state read must be bound to the head this
+  // transaction owns. A PR that synchronized has an auto-merge request armed for
+  // the NEW head, and cancelling it would destroy a queue entry this transaction
+  // never evaluated and has no claim over.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    autoMergeStateHeadByNumber: { 1465: OTHER_SHA },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0, "a foreign head must not be mutated");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published for a head the PR has left",
+  );
+});
+
+test("auto-merge armed during a write retry blocks the retried green", async () => {
+  // Codex P1 (round 3): upsertAggregateCheck retries a transient write through
+  // retryCheckUpdate, which sleeps and reissues. A precondition checked once
+  // before that helper is stale for every attempt after the first, so auto-merge
+  // armed during the backoff was consumed by the green the retry published.
+  const transient = new Error("check update unavailable");
+  transient.status = 500;
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    checkUpdateErrors: [transient],
+    armNativeAutoMergeOnCheckUpdateFailure: true,
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /GitHub-native auto-merge is still armed/,
+  );
+
+  assert.equal(github.nativeAutoMergeArmed, true);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "the retried write must not publish a green over a freshly armed auto-merge",
+  );
+});
+
+test("a newer generation taken during a write retry stops the PASS", async () => {
+  // Codex P1 (round 4): the generation-ownership check runs once, before the
+  // write. Aggregate invalidation runs OUTSIDE this head's serialized lane, so a
+  // newer event can take ownership during the retry's backoff and the reissued
+  // write would publish PASS over it.
+  const transient = new Error("check update unavailable");
+  transient.status = 500;
+  const github = fakeGateGithub({
+    author: "detail-app",
+    checkUpdateErrors: [transient],
+    newerAggregateOnCheckUpdateFailure: true,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "a superseded transaction must not publish PASS on the retry",
+  );
+});
+
+test("ownership is re-established alongside the guard, not before it", async () => {
+  // Codex P1 (round 5): confirmNativeAutoMergeDisabled performs its own
+  // retrying read, so an ownership check sequenced BEFORE it is stale by that
+  // read's duration — including its backoff. An invalidation landing in that
+  // window was invisible and the transaction still published PASS to a
+  // superseded check run.
+  //
+  // Concurrency is the claim, so the test records start AND end of each read:
+  // issued together, the second read starts before the first finishes. Sequenced,
+  // it cannot.
+  const order = [];
+  const github = fakeGateGithub({ author: "detail-app" });
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    const ownership = fn === github.rest.checks.listForRef;
+    if (ownership) {
+      order.push("ownership:start");
+    }
+    const result = await realPaginate(fn, options);
+    // Yield twice, so a sequential implementation cannot appear interleaved.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (ownership) {
+      order.push("ownership:end");
+    }
+    return result;
+  };
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    const autoMerge = query.includes("query AutoMergeState");
+    if (autoMerge) {
+      order.push("auto-merge:start");
+    }
+    const result = await realGraphql(query, variables);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (autoMerge) {
+      order.push("auto-merge:end");
+    }
+    return result;
+  };
+  const realUpdate = github.rest.checks.update;
+  github.rest.checks.update = async (options) => {
+    if (options.output?.title?.startsWith("PASS: every open master PR")) {
+      order.push("publish");
+    }
+    return realUpdate(options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  const publish = order.lastIndexOf("publish");
+  assert.ok(publish > 0, "the aggregate PASS must have been published");
+  const guardWindow = order.slice(0, publish);
+  const ownershipStart = guardWindow.lastIndexOf("ownership:start");
+  const ownershipEnd = guardWindow.lastIndexOf("ownership:end");
+  const autoMergeStart = guardWindow.lastIndexOf("auto-merge:start");
+  const autoMergeEnd = guardWindow.lastIndexOf("auto-merge:end");
+  assert.ok(ownershipStart >= 0 && autoMergeStart >= 0, "both preconditions must run");
+  // Interleaved: each starts before the other ends. Neither is stale by the
+  // duration of the other's read — including that read's retry backoff.
+  assert.ok(
+    autoMergeStart < ownershipEnd && ownershipStart < autoMergeEnd,
+    `the preconditions must be issued together, not sequenced; got ${JSON.stringify(order.slice(-8))}`,
+  );
+  // …and both finish immediately before the write.
+  assert.ok(
+    Math.max(ownershipEnd, autoMergeEnd) === publish - 1,
+    `nothing may read between the preconditions and the green; got ${JSON.stringify(order.slice(-8))}`,
+  );
+});
+
+test("a transient precondition read discards the whole round", async () => {
+  // Codex P1 (round 6): issuing the two preconditions concurrently is not the
+  // same as observing them simultaneously. If one retries internally, the
+  // other's answer is already stale by that backoff when Promise.all resolves —
+  // long enough for a newer invalidation to land unseen.
+  //
+  // So the reads are single-shot and a transient failure discards the ROUND:
+  // every answer that counts comes from the same round. The oracle is that the
+  // ownership read is re-issued when only the auto-merge read failed.
+  const github = fakeGateGithub({ author: "detail-app" });
+  let autoMergeReads = 0;
+  let ownershipReads = 0;
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      autoMergeReads += 1;
+      // Fail only the first guard round; the disarm snapshot is read 1.
+      if (autoMergeReads === 2) {
+        throw new Error("fetch failed");
+      }
+    }
+    return realGraphql(query, variables);
+  };
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    // Only the check-run reads that happen after the disarm snapshot, which is
+    // where the guard rounds live. Earlier ones belong to the evaluation.
+    if (fn === github.rest.checks.listForRef && autoMergeReads >= 1) {
+      ownershipReads += 1;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual", "a transient guard read must not fail the transaction");
+  // Three auto-merge reads: the disarm snapshot, the round that failed, and the
+  // round that succeeded.
+  assert.equal(autoMergeReads, 3);
+  // Three check-run reads after the disarm snapshot: the aggregate's own
+  // evaluation, then ONE PER GUARD ROUND. Two rounds means two ownership reads —
+  // the first round's answer is discarded rather than carried across the other
+  // read's failure. Retrying inside the observations instead would leave two.
+  assert.equal(
+    ownershipReads,
+    3,
+    `ownership must be re-read for the retried round; saw ${ownershipReads} reads`,
+  );
+});
+
+test("a throttled precondition sets the round's retry delay", async () => {
+  // Codex P2 (round 7): every rejected precondition must succeed in the next
+  // round, so taking the delay from rejected[0] alone can retry the whole round
+  // inside another's throttle window — burning all three attempts on a condition
+  // that was only rate-limited.
+  const throttled = new Error("secondary rate limit");
+  throttled.status = 403;
+  throttled.response = { status: 403, headers: { "retry-after": "1" }, data: {} };
+  const plain = new Error("fetch failed");
+
+  const github = fakeGateGithub({ author: "detail-app" });
+  let autoMergeReads = 0;
+  let ownershipReads = 0;
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      autoMergeReads += 1;
+      // Throttle the auto-merge read of the first guard round only.
+      if (autoMergeReads === 2) {
+        throw throttled;
+      }
+    }
+    return realGraphql(query, variables);
+  };
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && autoMergeReads >= 1) {
+      ownershipReads += 1;
+      // …and fail the ownership read of that same round, without any throttle
+      // metadata. It is the first rejection, so a naive implementation reads its
+      // fallback delay and ignores the throttle entirely.
+      if (ownershipReads === 2) {
+        throw plain;
+      }
+    }
+    return realPaginate(fn, options);
+  };
+
+  const startedAt = Date.now();
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(transaction.state, "manual", "the round must recover after the throttle");
+  // The throttle asked for a second; the fallback for this attempt is 250ms.
+  assert.ok(
+    elapsed >= 900,
+    `the round must wait out the longest requested delay; waited ${elapsed}ms`,
+  );
+});
+
+test("a guard read failure blocks cleanly instead of being retried as a write", async () => {
+  // Codex P2 (round 4): a failing precondition is not a failing write. Left to
+  // the write's retry classifier it was reissued three more times — nine reads —
+  // and relabelled AutoGateCheckWriteError, losing the read-failure marker the
+  // caller needs to publish a clean BLOCKED aggregate.
+  // A transport failure on purpose: its message is what the write's retry
+  // classifier matches on, so without the guard marker the wrapped failure looks
+  // retryable to retryCheckUpdate and the whole three-attempt read is reissued
+  // per write attempt.
+  const unavailable = new Error("fetch failed");
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    autoMergeStateError: unavailable,
+    // The disarm snapshot succeeds; the publish precondition is what fails.
+    autoMergeStateErrorAfterRead: 1,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not establish the publish preconditions for .* after 3 attempts: fetch failed/,
+  );
+  // Bounded: one disarm snapshot plus the guard's own three rounds. Not three of
+  // those per write attempt, which is the nine-read behaviour this prevents.
+  assert.equal(github.autoMergeStateReads, 4, "the guard must not be retried by the write");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no green may be published when the guard could not be established",
+  );
+});
+
+test("a PR that joins the head after evaluation stops the PASS", async () => {
+  // Codex P1 (round 4): the guarded set is frozen from this transaction's own
+  // association snapshot, but reportAggregateDecision re-reads associations and
+  // can pass for a LARGER set. A PR reopened or retargeted onto this head,
+  // carrying a passing decision from an earlier transaction, would be inside the
+  // green this write publishes and was never guarded here.
+  const joined = {
+    ...checkRun({
+      id: 4242,
+      name: decisionName(2048, HEAD_SHA),
+      conclusion: "success",
+      externalId: decisionExternalId(2048, HEAD_SHA),
+    }),
+    created_at: "2026-07-09T01:12:00Z",
+    started_at: "2026-07-09T01:12:00Z",
+    completed_at: "2026-07-09T01:12:00Z",
+  };
+  const github = fakeGateGithub({
+    author: "detail-app",
+    checkRuns: [...happyCheckRuns(), joined],
+    // The transaction evaluates 1465 alone; the aggregate's own final read sees
+    // 2048 as well.
+    associatedPullRequestSnapshots: [
+      // The transaction's own snapshot, then the aggregate's final read.
+      [{ number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } }],
+      [
+        { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+        { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      ],
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no green may cover a PR this transaction never evaluated",
+  );
+});
+
+test("the publish precondition runs after the aggregate's own reads", async () => {
+  // Codex P1 (round 2): reportAggregateDecision reads associations and check runs
+  // BEFORE it writes, so a guard that ran before it was already stale. The
+  // confirmation is now a precondition of the write itself.
+  const github = fakeGateGithub({ author: "detail-app", nativeAutoMergeEnabled: true });
+  const order = [];
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    order.push(`read:${fn.name}`);
+    return realPaginate(fn, options);
+  };
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      order.push("auto-merge:read");
+    }
+    return realGraphql(query, variables);
+  };
+  const realUpdate = github.rest.checks.update;
+  github.rest.checks.update = async (options) => {
+    if (options.output?.title?.startsWith("PASS: every open master PR")) {
+      order.push("aggregate:publish");
+    }
+    return realUpdate(options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  const publish = order.lastIndexOf("aggregate:publish");
+  const lastConfirm = order.lastIndexOf("auto-merge:read");
+  assert.ok(publish > 0, "the aggregate PASS must have been published");
+  assert.equal(
+    lastConfirm + 1,
+    publish,
+    `nothing may read between the final auto-merge confirmation and the green; got ${JSON.stringify(order.slice(-6))}`,
+  );
+});
+
+test("a disable that leaves auto-merge armed refuses to publish the green", async () => {
+  // The mutation succeeding is a claim; the read is the evidence. Without the
+  // confirming read a disable that silently does nothing publishes a green on a
+  // PR GitHub is still free to merge.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    nativeAutoMergeStaysArmed: true,
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /GitHub-native auto-merge is still armed after disabling it/,
+  );
+
+  assert.equal(github.nativeAutoMergeDisableAttempts, 1);
+  // The aggregate stays on its WAITING failure; no consumable green exists.
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published while auto-merge is still armed",
+  );
+});
+
+test("an unreadable auto-merge state leaves the manual-only aggregate red", async () => {
+  // Fail closed. An unreadable state is not a disarmed one, and the decision
+  // this transaction is about to publish is a PASS.
+  const error = new Error("auto-merge state unavailable");
+  error.status = 500;
+  const github = fakeGateGithub({ author: "detail-app", autoMergeStateError: error });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // Retried, then reported as a read failure: a clean BLOCKED aggregate rather
+  // than an unhandled error, and no passing decision either way.
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.autoMergeStateReads, 3);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "failure");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not read auto-merge state for PR #1465 after 3 attempts/,
+  );
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published when the auto-merge state is unknown",
+  );
+});
+
+test("an auto-mergeable PR never reaches the auto-merge disable path", async () => {
+  // The precondition belongs to the manual-merge path only. A PR the gate will
+  // merge itself is not one GitHub must be stopped from merging.
+  const github = fakeGateGithub({ nativeAutoMergeEnabled: true });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "merged");
+  assert.equal(github.autoMergeStateReads, 0);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
 });
 
 test("a PR cannot read another PR's decision when both share one head", async () => {
@@ -2272,6 +2901,11 @@ function fakeGateGithub({
   headCommittedDate = "2026-07-09T01:00:00Z",
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
+  // Arms native auto-merge AFTER the PR read that used to snapshot it — the
+  // #3381 window. The snapshot says off, the live state says on.
+  nativeAutoMergeArmedAfterRead = false,
+  // The disable mutation reports success and leaves auto-merge armed anyway.
+  nativeAutoMergeStaysArmed = false,
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -2300,6 +2934,12 @@ function fakeGateGithub({
   checkUpdateErrors = [],
   workflowDispatchError = null,
   nativeAutoMergeDisableError = null,
+  autoMergeStateError = null,
+  autoMergeStateHeadByNumber = {},
+  autoMergeStateHeadAfterRead = {},
+  armNativeAutoMergeOnCheckUpdateFailure = false,
+  autoMergeStateErrorAfterRead = 0,
+  newerAggregateOnCheckUpdateFailure = false,
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
@@ -2343,6 +2983,26 @@ function fakeGateGithub({
     github.checkUpdateAttempts += 1;
     const attemptError = checkUpdateErrors[github.checkUpdateAttempts - 1] || checkWriteError;
     if (attemptError) {
+      // Someone arms native auto-merge during the write's backoff — the window a
+      // precondition checked once, outside the retry, cannot see.
+      if (armNativeAutoMergeOnCheckUpdateFailure) {
+        github.nativeAutoMergeArmed = true;
+      }
+      // A newer Auto Gate event invalidates the head during the write's backoff.
+      if (newerAggregateOnCheckUpdateFailure) {
+        github.injectedCheckRuns.push({
+          id: 99999,
+          name: "Auto Gate decision",
+          external_id: aggregateExternalId(headSha),
+          app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+          status: "completed",
+          conclusion: "failure",
+          created_at: "2026-07-09T09:00:00Z",
+          started_at: "2026-07-09T09:00:00Z",
+          completed_at: "2026-07-09T09:00:00Z",
+          output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+        });
+      }
       throw attemptError;
     }
     github.operations.push("check:update");
@@ -2370,6 +3030,11 @@ function fakeGateGithub({
     disabledAutoMergePullRequestIds: [],
     mergeAttempts: 0,
     nativeAutoMergeDisableAttempts: 0,
+    nativeAutoMergeArmed: nativeAutoMergeEnabled,
+    autoMergeStateReads: 0,
+    autoMergeStateReadsByNumber: {},
+    autoMergeStateBatchSizes: [],
+    injectedCheckRuns: [],
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -2415,10 +3080,47 @@ function fakeGateGithub({
         }
         github.operations.push("auto-merge:disable");
         github.disabledAutoMergePullRequestIds.push(variables.pullRequestId);
+        // A real disable takes effect, so the confirming read sees it.
+        github.nativeAutoMergeArmed = nativeAutoMergeStaysArmed;
         return { disablePullRequestAutoMerge: { pullRequest: { number: 1465 } } };
+      }
+      if (_query.includes("query AutoMergeState")) {
+        github.autoMergeStateReads += 1;
+        if (autoMergeStateError && github.autoMergeStateReads > autoMergeStateErrorAfterRead) {
+          throw autoMergeStateError;
+        }
+        // Aliased per PR, the way the batched read asks for it.
+        const repository = {};
+        github.autoMergeStateBatchSizes.push(
+          Object.keys(variables).filter((key) => /^n\d+$/.test(key)).length,
+        );
+        for (const [key, number] of Object.entries(variables)) {
+          const alias = /^n(\d+)$/.exec(key);
+          if (!alias) {
+            continue;
+          }
+          github.autoMergeStateReadsByNumber[number] =
+            (github.autoMergeStateReadsByNumber[number] || 0) + 1;
+          const reads = github.autoMergeStateReadsByNumber[number];
+          const movedAt = autoMergeStateHeadAfterRead[number];
+          repository[`pr${alias[1]}`] = {
+            number,
+            headRefOid:
+              movedAt && reads > movedAt.after
+                ? movedAt.headSha
+                : autoMergeStateHeadByNumber[number] || headSha,
+            autoMergeRequest: github.nativeAutoMergeArmed
+              ? { enabledAt: "2026-07-09T01:05:00Z" }
+              : null,
+          };
+        }
+        return { repository };
       }
       github.graphqlReadsByNumber[variables.number] =
         (github.graphqlReadsByNumber[variables.number] || 0) + 1;
+      if (nativeAutoMergeArmedAfterRead) {
+        github.nativeAutoMergeArmed = true;
+      }
       if (graphqlErrorsByNumber[variables.number]) {
         throw graphqlErrorsByNumber[variables.number];
       }
@@ -2467,6 +3169,7 @@ function fakeGateGithub({
         github.checkListReads += 1;
         return [
           ...checkRuns,
+          ...github.injectedCheckRuns,
           ...github.createdChecks.map((created, index) => ({
             id: 10000 + index,
             app: { id: ACTIONS_APP_ID, slug: "github-actions" },
