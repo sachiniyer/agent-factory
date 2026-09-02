@@ -1,7 +1,6 @@
 package bugreport
 
 import (
-	"bytes"
 	"encoding"
 	"encoding/json"
 	"fmt"
@@ -15,10 +14,10 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
-// guardSentinel is planted in every string-bearing field of InstanceData before
-// redaction runs. It is deliberately not a path, a title, or anything the text
-// scrub knows how to collapse: this guard asks only "did redactInstanceData
-// touch this field", never "would the scrub have saved it".
+// guardSentinel is the stem of the unique marker planted in each string-bearing
+// field before redaction runs. It is deliberately not a path, a title, or
+// anything the text scrub knows how to collapse: this guard asks only "did
+// redactInstanceData touch this field", never "would the scrub have saved it".
 const guardSentinel = "AF-REDACTION-FIELD-GUARD-SENTINEL"
 
 // guardMaxDepth bounds the reflective walk. Nothing in InstanceData is
@@ -26,20 +25,19 @@ const guardSentinel = "AF-REDACTION-FIELD-GUARD-SENTINEL"
 // cannot hang the suite instead of failing it.
 const guardMaxDepth = 12
 
-// verbatimInstanceFields are the InstanceData paths redactInstanceData
-// deliberately leaves alone, each with the reason it is safe to publish. The
-// bar for an entry here is that the value is machine-minted (a stable id, a
-// bounded enum, a git SHA) or an absolute system path the text scrub
-// demonstrably collapses via $HOME/username.
-//
-// A value whose TEXT THE USER CHOSE does not belong here, even when it looks
-// harmless. That is the judgement both #2419 and #3541 got wrong.
-//
-// Pipeline fact these justifications rest on: redactInstancesJSON runs
-// redactInstanceData, marshals, then applies r.scrub — credscrub, $HOME to "~",
-// username to "[user]". scrub does NOT remove session titles (scrubUnstructured
-// does, kept separate so a short title like "id" cannot rewrite JSON keys), and
-// it cannot reach bytes JSON has base64-encoded.
+// guardSliceSeed is how many elements every reflected slice and map is filled
+// with. TWO, not one: a redaction that touches only the first entry — the
+// natural shape of a hand-written x[0].Field = ... or a loop with a stray
+// break — passes a one-element probe while every later element still reaches
+// the bundle verbatim.
+const guardSliceSeed = 2
+
+// guardMinContainer is the shortest fixed array that can hold a marker
+// distinctive enough to trust. Below it, a truncated marker is too short to
+// tell a planted value from incidental data, so the field is reported rather
+// than silently probed with something meaningless.
+const guardMinContainer = 8
+
 var verbatimInstanceFields = map[string]string{
 	"ID":     "minted instance id, never derived from user text",
 	"TaskID": "minted task id (#1892), never derived from user text",
@@ -128,6 +126,286 @@ var knownUnredactedFields = map[string]string{
 	"ArchiveWarning": "#3588 — the bounded warning projection embeds the user-chosen skipped file names. #3554 (74e3b06f) closed the LOG path for exactly this text, but scrubArchiveWarningPaths is called only from scrubLog; redactInstancesJSON applies plain scrub, so the FIELD still carries them into the JSON section",
 }
 
+// ---------------------------------------------------------------------------
+// Which fields reach a bundle is decided by encoding/json, not by this file.
+//
+// Earlier revisions of this guard modelled json's field selection directly —
+// json:"-", ambiguous promoted names, tagged dominance — and review found a bug
+// in that model three rounds running (#3592). Each fix added another rule and
+// another corner to get wrong, and a partially-correct reimplementation of
+// encoding/json's typeFields is a worse liability than none: when it is wrong in
+// the skip direction it silently stops covering a field json really does emit.
+//
+// So the model is gone. The walk plants a UNIQUE marker per field and is
+// deliberately PERMISSIVE — over-planting is free, because a field json drops
+// simply never appears in the document. Redaction then runs, the record is
+// marshalled, and a field counts as leaked if and only if its marker survives
+// into that JSON. encoding/json answers the question it is the authority on, and
+// every rule above falls out for free: a json:"-" field is absent, an ambiguous
+// pair is absent, a tagged winner is present and its shadowed loser is not, a
+// tagged anonymous struct nests instead of promoting, an invalid tag falls back
+// to the Go field name.
+//
+// What the walk still owns is the part json cannot answer: whether a value could
+// be planted at all. Those cases are failures, never silent skips.
+// ---------------------------------------------------------------------------
+
+// plantedField records one planted marker and the exact JSON fragment it
+// produces, captured at plant time by marshalling the value itself. Searching
+// the finished document for that fragment is what makes []byte (base64),
+// [N]byte and []rune (integer lists) detectable without this file knowing how
+// json encodes any of them.
+type plantedField struct {
+	path string
+	form string
+}
+
+// mustVisit reports whether a struct field can carry text into a bundle and so
+// must be walked.
+//
+// The anonymous clause is the subtle half. encoding/json PROMOTES the exported
+// members of an anonymously embedded struct, even when the embedded TYPE is
+// unexported, so `struct{ inner }` with `inner{ Secret string }` serializes as
+// {"secret": ...}. A plain IsExported check skips that whole subtree while json
+// happily publishes it. A pointer embed promotes the same way.
+//
+// reflect agrees this is reachable: the embedded field itself reports
+// CanSet=false, but its promoted exported members report CanSet=true — measured,
+// not assumed — which is why fill can descend and plant in them.
+func mustVisit(f reflect.StructField) bool {
+	if f.IsExported() {
+		return true
+	}
+	if !f.Anonymous {
+		return false
+	}
+	t := f.Type
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t.Kind() == reflect.Struct
+}
+
+// jsonMarshalerType and textMarshalerType detect a type that renders itself.
+// Such a type can emit text this walk never sees — including text held in
+// UNEXPORTED fields, which the walk cannot plant into — so its output cannot be
+// reasoned about from Go fields alone.
+var (
+	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+)
+
+// reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
+// read and shown to emit only the exported fields this walk already covers.
+// Anything NOT listed here fails the guard rather than being trusted, because
+// "it probably just marshals its fields" is a claim to check once per type, not
+// to assume forever.
+var reviewedMarshalerTypes = map[reflect.Type]string{
+	reflect.TypeOf(time.Time{}):               "timestamp; carries no user text and is skipped by the walk",
+	reflect.TypeOf(git.ArchiveRetainedTree{}): "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
+	reflect.TypeOf(git.ArchiveSkippedEntry{}): "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
+}
+
+// isUnplantableScalar reports an element kind that json serializes but fill has
+// no way to plant readable text in. Refusing is the point: a numeric container
+// holding user text would otherwise sit in a zero-valued fixture no detection
+// pass can see.
+func isUnplantableScalar(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int64,
+		reflect.Uint, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return true
+	}
+	return false
+}
+
+// sentinelFiller plants a unique marker in every plantable field and records the
+// places it could NOT reach. Those records are failures, not diagnostics: a
+// subtree this walk skipped is a subtree the guard cannot speak for, and a guard
+// that stays green over a field it never visited is worse than no guard.
+type sentinelFiller struct {
+	tooDeep     []string
+	unsupported []string
+	planted     []plantedField
+	seq         int
+}
+
+func (f *sentinelFiller) nextMarker() string {
+	f.seq++
+	return fmt.Sprintf("%s-%d", guardSentinel, f.seq)
+}
+
+// record captures the JSON fragment the just-planted value produces.
+func (f *sentinelFiller) record(v reflect.Value, path string) {
+	if !v.CanInterface() {
+		f.unsupported = append(f.unsupported, path+" (value cannot be read back for encoding)")
+		return
+	}
+	form, err := json.Marshal(v.Interface())
+	if err != nil {
+		f.unsupported = append(f.unsupported, fmt.Sprintf("%s (cannot be marshalled: %v)", path, err))
+		return
+	}
+	f.planted = append(f.planted, plantedField{path: path, form: string(form)})
+}
+
+// fill plants markers throughout v, allocating pointers, slices and maps on the
+// way so nested shapes are actually visited.
+//
+// Unexported non-anonymous fields are skipped: reflect cannot set them, and they
+// reach a bundle only through a custom marshaler, which is refused above.
+// time.Time is skipped as opaque and text-free.
+func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
+	if depth > guardMaxDepth {
+		f.tooDeep = append(f.tooDeep, path)
+		return
+	}
+	if ty := v.Type(); ty != reflect.TypeOf(time.Time{}) &&
+		(ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
+			ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType)) {
+		if _, reviewed := reviewedMarshalerTypes[ty]; !reviewed {
+			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
+			return
+		}
+	}
+	// Structs are descended into even when the value itself is not settable:
+	// that is exactly an anonymous embedded unexported struct, whose promoted
+	// members ARE settable. Every other kind must be written to, so an
+	// unsettable one is a subtree this guard cannot speak for.
+	if !v.CanSet() && v.Kind() != reflect.Struct {
+		f.unsupported = append(f.unsupported, path+" ("+v.Kind().String()+" is not settable)")
+		return
+	}
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(f.nextMarker())
+		f.record(v, path)
+	case reflect.Ptr:
+		if v.IsNil() {
+			v.Set(reflect.New(v.Type().Elem()))
+		}
+		f.fill(v.Elem(), path, depth+1)
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			return
+		}
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Type().Field(i)
+			if !mustVisit(field) {
+				continue
+			}
+			f.fill(v.Field(i), join(path, field.Name), depth+1)
+		}
+	case reflect.Slice:
+		f.fillSequence(v, path, depth, true)
+	case reflect.Array:
+		f.fillSequence(v, path, depth, false)
+	case reflect.Map:
+		f.fillMap(v, path, depth)
+	case reflect.Interface:
+		// encoding/json serializes whatever concrete string, map or slice an
+		// interface field holds, so an unhandled interface is a hole in the
+		// guard rather than a field it may ignore. There is no correct marker
+		// to plant without knowing the concrete type.
+		f.unsupported = append(f.unsupported, path+" (interface)")
+	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		// Not serializable by encoding/json — it errors rather than emitting
+		// them — so they cannot reach a bundle and need no marker.
+	}
+}
+
+// fillSequence handles slices and arrays, including the byte and rune forms
+// whose JSON encodings differ from each other and from a plain list.
+func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, isSlice bool) {
+	elem := v.Type().Elem().Kind()
+	switch {
+	case elem == reflect.Uint8:
+		marker := f.nextMarker()
+		if isSlice {
+			v.SetBytes([]byte(marker))
+		} else {
+			if v.Len() < guardMinContainer {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]byte is too short to hold a distinctive marker)", path, v.Len()))
+				return
+			}
+			reflect.Copy(v, reflect.ValueOf([]byte(marker)))
+		}
+		f.record(v, path)
+	case elem == reflect.Int32:
+		// []rune is []int32, and json emits it as code points from which the
+		// exact text reconstructs.
+		marker := f.nextMarker()
+		runes := []rune(marker)
+		if isSlice {
+			rv := reflect.MakeSlice(v.Type(), len(runes), len(runes))
+			for i, r := range runes {
+				rv.Index(i).SetInt(int64(r))
+			}
+			v.Set(rv)
+		} else {
+			if v.Len() < guardMinContainer {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]rune is too short to hold a distinctive marker)", path, v.Len()))
+				return
+			}
+			for i, r := range runes {
+				if i >= v.Len() {
+					break
+				}
+				v.Index(i).SetInt(int64(r))
+			}
+		}
+		f.record(v, path)
+	case isUnplantableScalar(elem):
+		f.unsupported = append(f.unsupported,
+			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), elem))
+	default:
+		if isSlice {
+			v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
+		}
+		for i := 0; i < v.Len(); i++ {
+			f.fill(v.Index(i), path+"[]", depth+1)
+		}
+	}
+}
+
+// fillMap seeds guardSliceSeed entries under distinct keys, for the slice
+// reason: a redaction that processes one arbitrary entry and returns would
+// scrub every marker from a single-entry fixture and pass.
+func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
+	m := reflect.MakeMap(v.Type())
+	for i := 0; i < guardSliceSeed; i++ {
+		key := reflect.New(v.Type().Key()).Elem()
+		f.fill(key, path+"[key]", depth+1)
+		switch key.Kind() {
+		case reflect.String:
+			key.SetString(fmt.Sprintf("%s-key-%d", guardSentinel, i))
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			key.SetInt(int64(i))
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			key.SetUint(uint64(i))
+		default:
+			if i == 0 {
+				f.unsupported = append(f.unsupported,
+					path+" (map key kind "+key.Kind().String()+" cannot be seeded distinctly)")
+			}
+		}
+		val := reflect.New(v.Type().Elem()).Elem()
+		f.fill(val, path+"[]", depth+1)
+		m.SetMapIndex(key, val)
+	}
+	v.Set(m)
+}
+
+func join(path, field string) string {
+	if path == "" {
+		return field
+	}
+	return fmt.Sprintf("%s.%s", path, field)
+}
+
 // TestRedactInstanceDataCoversEveryStringField is the #3548 guard. Two fields
 // have already reached publicly shared bundles verbatim by being added to
 // InstanceData while redactInstanceData was never taught about them —
@@ -135,11 +413,11 @@ var knownUnredactedFields = map[string]string{
 // (#3541). Both were fixed by hand-adding the field, which fixes the instance
 // and not the class.
 //
-// This walks InstanceData reflectively, plants a sentinel in every string-bearing
-// field, runs the real redactInstanceData, and reports every field where the
-// sentinel survived. A survivor must be named in verbatimInstanceFields with a
-// reason, so a newly added field forces a deliberate redact-or-justify decision
-// instead of defaulting to leak.
+// This plants a unique marker in every plantable field, runs the real
+// redactInstanceData, marshals the result, and reports every field whose marker
+// survived into the JSON. A survivor must be classified — redacted, allowlisted
+// as safe with a reason, or recorded as a tracked leak — so a newly added field
+// forces a deliberate redact-or-justify decision instead of defaulting to leak.
 //
 // Deliberately NOT a test of the text scrub. The scrub collapses $HOME to "~"
 // and the username to "[user]"; a relative path like "private-work.txt" contains
@@ -148,58 +426,61 @@ var knownUnredactedFields = map[string]string{
 // guard never consults it.
 func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 	var data session.InstanceData
-	v := reflect.ValueOf(&data).Elem()
 	filler := &sentinelFiller{}
-	filler.fill(v, "", 0)
+	filler.fill(reflect.ValueOf(&data).Elem(), "", 0)
 
 	// A subtree the walk could not reach is a subtree this guard cannot speak
 	// for. Fail rather than quietly cover less than the name promises.
 	if len(filler.tooDeep) > 0 {
 		sort.Strings(filler.tooDeep)
 		t.Errorf("the reflective walk hit its depth limit (%d) and skipped %d subtree(s):\n  %s\n\n"+
-			"Those fields were never sentinel-planted, so this guard says nothing about them. "+
+			"Those fields were never marker-planted, so this guard says nothing about them. "+
 			"Raise guardMaxDepth, or flatten the shape.",
 			guardMaxDepth, len(filler.tooDeep), strings.Join(filler.tooDeep, "\n  "))
 	}
 	if len(filler.unsupported) > 0 {
 		sort.Strings(filler.unsupported)
-		t.Errorf("the reflective walk met %d field(s) of a kind it cannot plant a sentinel in:\n  %s\n\n"+
-			"encoding/json CAN serialize an interface's concrete value, so these are holes in the "+
-			"guard, not fields it may ignore. Extend sentinelFiller.fill to populate a concrete "+
-			"value for them.",
+		t.Errorf("the reflective walk met %d field(s) it cannot plant a marker in:\n  %s\n\n"+
+			"encoding/json can still serialize these, so they are holes in the guard, not "+
+			"fields it may ignore. Extend sentinelFiller to populate them.",
 			len(filler.unsupported), strings.Join(filler.unsupported, "\n  "))
 	}
-
-	// Prove the fill actually planted something, or an empty walk would make
-	// this test vacuously green forever.
-	planted := collectSentinelPaths(v, "", 0)
-	if len(planted) == 0 {
-		t.Fatal("the reflective fill planted no sentinel: the walk is broken, " +
+	if len(filler.planted) == 0 {
+		t.Fatal("the reflective fill planted no marker: the walk is broken, " +
 			"and this guard would pass no matter what redactInstanceData did")
 	}
 
 	redactInstanceData(&data)
-	leaked := collectSentinelPaths(reflect.ValueOf(&data).Elem(), "", 0)
 
-	leakedSet := make(map[string]struct{}, len(leaked))
-	for _, path := range leaked {
-		leakedSet[path] = struct{}{}
+	// encoding/json decides what reaches a bundle. Marshalling the redacted
+	// record and looking for each marker's own JSON fragment means this test
+	// never has to model json's field-selection rules — see the note above.
+	doc, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshalling the redacted record failed: %v", err)
+	}
+	rendered := string(doc)
+
+	leakedSet := make(map[string]struct{})
+	var leaked []string
+	for _, p := range filler.planted {
+		if !strings.Contains(rendered, p.form) {
+			continue
+		}
+		if _, dup := leakedSet[p.path]; dup {
+			continue
+		}
+		leakedSet[p.path] = struct{}{}
+		leaked = append(leaked, p.path)
 	}
 
 	var unjustified []string
-	seen := make(map[string]struct{}, len(leaked))
 	for _, path := range leaked {
 		_, safe := verbatimInstanceFields[path]
 		_, known := knownUnredactedFields[path]
-		if safe || known {
-			continue
+		if !safe && !known {
+			unjustified = append(unjustified, path)
 		}
-		// Seeded slices yield the same path once per element; report it once.
-		if _, dup := seen[path]; dup {
-			continue
-		}
-		seen[path] = struct{}{}
-		unjustified = append(unjustified, path)
 	}
 	if len(unjustified) > 0 {
 		sort.Strings(unjustified)
@@ -210,7 +491,7 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 			"Pick one, deliberately:\n"+
 			"  1. Redact it in bugreport/redact.go — the default for anything whose text a USER chose.\n"+
 			"  2. Add it to verbatimInstanceFields with the reason it is safe — only for a\n"+
-			"     machine-minted id/enum/SHA, or an absolute path the scrub collapses via $HOME.\n"+
+			"     machine-minted id/enum/SHA, or a value covered by a written, test-asserted policy.\n"+
 			"  3. Add it to knownUnredactedFields with a tracking issue, if it leaks and you are\n"+
 			"     not fixing it here.\n\n"+
 			"Do NOT reach for 2 to make this green. The scrub does not remove session titles and\n"+
@@ -243,551 +524,4 @@ func assertNoStaleEntries(t *testing.T, name string, classified map[string]strin
 	sort.Strings(stale)
 	t.Errorf("%d entr(y/ies) in %s no longer reach the bundle verbatim:\n  %s\n\n%s",
 		len(stale), name, strings.Join(stale, "\n  "), advice)
-}
-
-// sentinelFiller plants guardSentinel in every settable string-bearing field
-// reachable from a value, and records the places it could NOT reach. Those
-// records are failures, not diagnostics: a subtree this walk silently skipped is
-// a subtree the guard cannot speak for, and a guard that stays green over a
-// field it never visited is worse than no guard (#3592 review).
-// jsonMarshalerType and textMarshalerType detect a type that renders itself.
-// Such a type can emit text this reflective walk never sees — including text
-// held in UNEXPORTED fields, which the walk deliberately skips — so its output
-// cannot be reasoned about from Go fields alone (#3592 review).
-var (
-	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
-	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
-)
-
-// reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
-// read and shown to emit only the exported fields this walk already covers.
-// Anything NOT listed here fails the guard rather than being trusted, because
-// "it probably just marshals its fields" is the assumption that has to be
-// checked once per type, not assumed forever.
-var reviewedMarshalerTypes = map[reflect.Type]string{
-	reflect.TypeOf(time.Time{}):               "timestamp; carries no user text and is skipped by the walk",
-	reflect.TypeOf(git.ArchiveRetainedTree{}): "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
-	reflect.TypeOf(git.ArchiveSkippedEntry{}): "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
-}
-
-// jsonSkipped reports whether encoding/json will omit this field entirely. A
-// field tagged `json:"-"` can never reach a bundle, so planting a sentinel in it
-// would fail the guard and push the author toward an allowlist entry for a field
-// that is not even serialized — a misleading entry in a map whose whole value is
-// that its entries are true (#3592 review).
-func jsonSkipped(f reflect.StructField) bool {
-	return f.Tag.Get("json") == "-"
-}
-
-// mustVisit reports whether a struct field can carry text into a bundle and so
-// must be walked.
-//
-// The anonymous clause is the subtle half. encoding/json PROMOTES the exported
-// members of an anonymously embedded struct, even when the embedded TYPE is
-// unexported, so `struct{ inner }` with `inner{ Secret string }` serializes as
-// {"secret": …}. A plain IsExported check skips that whole subtree while json
-// happily publishes it (#3592 review).
-//
-// reflect agrees this is reachable: the embedded field itself reports
-// CanSet=false, but its promoted exported members report CanSet=true — measured,
-// not assumed — which is why fill can descend and plant in them.
-func mustVisit(f reflect.StructField) bool {
-	if jsonSkipped(f) {
-		return false
-	}
-	if f.IsExported() {
-		return true
-	}
-	if !f.Anonymous {
-		return false
-	}
-	// A pointer embed promotes too: json serializes *hidden's exported fields
-	// whenever the pointer is non-nil. Admitting it here does not make it
-	// fillable — an unexported field cannot be allocated through reflect — but
-	// it routes the shape to fill, which reports an unsettable non-struct as
-	// unsupported instead of passing over it in silence (#3592 review).
-	t := f.Type
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	return t.Kind() == reflect.Struct
-}
-
-// effectiveJSONName is the key encoding/json will use for a field.
-func effectiveJSONName(f reflect.StructField) string {
-	tag := f.Tag.Get("json")
-	if tag == "" {
-		return f.Name
-	}
-	if name := strings.Split(tag, ",")[0]; name != "" {
-		return name
-	}
-	return f.Name
-}
-
-// hasExplicitJSONName reports whether a field carries an explicit name in its
-// json tag. Go breaks a same-depth name tie in favour of the single tagged
-// field, so taggedness is part of the serialization decision, not decoration.
-func hasExplicitJSONName(f reflect.StructField) bool {
-	tag := f.Tag.Get("json")
-	return tag != "" && strings.Split(tag, ",")[0] != ""
-}
-
-// fieldCandidate is one field competing to own a JSON name.
-type fieldCandidate struct {
-	key    string
-	name   string
-	depth  int
-	tagged bool
-}
-
-// serializableFields returns the keys of the fields encoding/json will actually
-// emit for t, applying the two rules that decide whether a field reaches the
-// document at all:
-//
-//   - Shallower depth wins outright.
-//   - At the shallowest depth, a name owned by more than one field is resolved
-//     in favour of the single EXPLICITLY TAGGED field; with zero or several
-//     tagged candidates, json emits none of them.
-//
-// All three branches are measured, not read off the spec:
-//
-//	struct{ Foo string; Bar string `json:"Foo"` } -> {"Foo":"TAGGED-VAL"}
-//	struct{ A string `json:"dup"`; B string `json:"dup"` } -> {}
-//	struct{ ea; eb; Keep string } where both embeds export Dup -> {"keep":"k"}
-//
-// The first branch is why a count-only tie rule is unsafe: it would mark "Foo"
-// ambiguous and skip BOTH walks over a field json does serialize, turning a
-// false demand into a MISSED LEAK — the one direction this guard must never
-// fail in (#3592 review).
-func serializableFields(t reflect.Type) map[string]bool {
-	var cands []fieldCandidate
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if !mustVisit(f) {
-			continue
-		}
-		if !f.Anonymous {
-			cands = append(cands, fieldCandidate{
-				key: fmt.Sprintf("0:%d", i), name: effectiveJSONName(f),
-				depth: 0, tagged: hasExplicitJSONName(f),
-			})
-			continue
-		}
-		et := f.Type
-		if et.Kind() == reflect.Ptr {
-			et = et.Elem()
-		}
-		if et.Kind() != reflect.Struct {
-			continue
-		}
-		for j := 0; j < et.NumField(); j++ {
-			ef := et.Field(j)
-			if !mustVisit(ef) || ef.Anonymous {
-				continue
-			}
-			cands = append(cands, fieldCandidate{
-				key: fmt.Sprintf("1:%d:%d", i, j), name: effectiveJSONName(ef),
-				depth: 1, tagged: hasExplicitJSONName(ef),
-			})
-		}
-	}
-
-	byName := map[string][]fieldCandidate{}
-	for _, c := range cands {
-		byName[c.name] = append(byName[c.name], c)
-	}
-	allowed := map[string]bool{}
-	for _, group := range byName {
-		best := group[0].depth
-		for _, c := range group {
-			if c.depth < best {
-				best = c.depth
-			}
-		}
-		var shallow []fieldCandidate
-		for _, c := range group {
-			if c.depth == best {
-				shallow = append(shallow, c)
-			}
-		}
-		if len(shallow) == 1 {
-			allowed[shallow[0].key] = true
-			continue
-		}
-		var tagged []fieldCandidate
-		for _, c := range shallow {
-			if c.tagged {
-				tagged = append(tagged, c)
-			}
-		}
-		if len(tagged) == 1 {
-			allowed[tagged[0].key] = true
-		}
-		// zero or several tagged: json emits none of them.
-	}
-	return allowed
-}
-
-// guardMinByteArray is the shortest fixed byte array that can hold a marker
-// distinctive enough to trust. Below it, a truncated sentinel prefix is too
-// short to tell a planted value from incidental data, so the field is reported
-// rather than silently probed with something meaningless.
-const guardMinByteArray = 8
-
-// byteArrayContents reads a [N]byte without requiring addressability, which
-// Value.Bytes does require for arrays.
-func byteArrayContents(v reflect.Value) []byte {
-	out := make([]byte, v.Len())
-	for i := 0; i < v.Len(); i++ {
-		out[i] = byte(v.Index(i).Uint())
-	}
-	return out
-}
-
-// plantedByteArray is the marker expected in a [N]byte of this length: the
-// sentinel, truncated to fit.
-func plantedByteArray(n int) []byte {
-	b := []byte(guardSentinel)
-	if n < len(b) {
-		return b[:n]
-	}
-	return b
-}
-
-// isUnplantableScalar reports an element kind that json serializes but fill has
-// no way to plant readable text in. Refusing is the point: a numeric container
-// holding user text (the []rune case generalizes) would otherwise sit in a
-// zero-valued fixture the collect pass can never see.
-func isUnplantableScalar(k reflect.Kind) bool {
-	switch k {
-	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int64,
-		reflect.Uint, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
-		return true
-	}
-	return false
-}
-
-type sentinelFiller struct {
-	tooDeep     []string
-	unsupported []string
-}
-
-// guardSliceSeed is how many elements every reflected slice is filled with.
-// TWO, not one: a redaction that touches only index 0 — the natural shape of a
-// hand-written `x[0].Field = ...` or a loop with a stray break — passes a
-// one-element probe while every later element still reaches the bundle
-// verbatim. Two elements make the collection-wide contract observable.
-const guardSliceSeed = 2
-
-// fillEmbedded descends into an anonymous embed, skipping the promoted names
-// encoding/json drops as ambiguous at the parent level.
-func (f *sentinelFiller) fillEmbedded(v reflect.Value, path string, depth int, allowed map[string]bool, outer int) {
-	t := v.Type()
-	if t.Kind() != reflect.Struct {
-		// A pointer embed cannot be allocated through an unexported field;
-		// fill reports it rather than passing over it.
-		f.fill(v, path, depth)
-		return
-	}
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if !mustVisit(field) {
-			continue
-		}
-		if field.Anonymous {
-			f.fill(v.Field(i), join(path, field.Name), depth+1)
-			continue
-		}
-		if !allowed[fmt.Sprintf("1:%d:%d", outer, i)] {
-			continue
-		}
-		f.fill(v.Field(i), join(path, field.Name), depth+1)
-	}
-}
-
-// plantRunes writes the sentinel's code points into a rune slice.
-func (f *sentinelFiller) plantRunes(v reflect.Value) {
-	runes := []rune(guardSentinel)
-	rv := reflect.MakeSlice(v.Type(), len(runes), len(runes))
-	for i, r := range runes {
-		rv.Index(i).SetInt(int64(r))
-	}
-	v.Set(rv)
-}
-
-// fill plants guardSentinel throughout v, allocating pointers, slices and maps
-// on the way so nested shapes are actually visited.
-//
-// Unexported fields are skipped: reflect cannot set them, they carry no json
-// tag, and they never reach a bundle. time.Time is skipped for the mirror
-// reason — opaque, no user text, and recursing into its unexported internals
-// would panic.
-func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
-	if depth > guardMaxDepth {
-		f.tooDeep = append(f.tooDeep, path)
-		return
-	}
-	if ty := v.Type(); ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
-		ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType) {
-		if _, reviewed := reviewedMarshalerTypes[ty]; !reviewed {
-			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
-			return
-		}
-	}
-	// Structs are descended into even when the value itself is not settable:
-	// that is exactly an anonymous embedded unexported struct, whose promoted
-	// members ARE settable. Every other kind needs to be written to, so an
-	// unsettable one is a subtree this guard cannot speak for.
-	if !v.CanSet() && v.Kind() != reflect.Struct {
-		f.unsupported = append(f.unsupported, path+" ("+v.Kind().String()+" is not settable)")
-		return
-	}
-	switch v.Kind() {
-	case reflect.String:
-		v.SetString(guardSentinel)
-	case reflect.Ptr:
-		if v.IsNil() {
-			v.Set(reflect.New(v.Type().Elem()))
-		}
-		f.fill(v.Elem(), path, depth+1)
-	case reflect.Struct:
-		if v.Type() == reflect.TypeOf(time.Time{}) {
-			return
-		}
-		allowed := serializableFields(v.Type())
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Type().Field(i)
-			if !mustVisit(field) {
-				continue
-			}
-			if field.Anonymous {
-				f.fillEmbedded(v.Field(i), join(path, field.Name), depth+1, allowed, i)
-				continue
-			}
-			if !allowed[fmt.Sprintf("0:%d", i)] {
-				continue
-			}
-			f.fill(v.Field(i), join(path, field.Name), depth+1)
-		}
-	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			v.SetBytes([]byte(guardSentinel))
-			return
-		}
-		// []rune is []int32, and json emits it as the code points, from which
-		// the exact text reconstructs. It is a text container, so it gets a
-		// real sentinel rather than the element walk (which plants nothing,
-		// since fill has no numeric case) (#3592 review).
-		if v.Type().Elem().Kind() == reflect.Int32 {
-			f.plantRunes(v)
-			return
-		}
-		if isUnplantableScalar(v.Type().Elem().Kind()) {
-			f.unsupported = append(f.unsupported,
-				fmt.Sprintf("%s ([]%s cannot carry a text sentinel)", path, v.Type().Elem().Kind()))
-			return
-		}
-		v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
-		for i := 0; i < v.Len(); i++ {
-			f.fill(v.Index(i), path+"[]", depth+1)
-		}
-	case reflect.Array:
-		// A FIXED byte array is not the slice case. encoding/json emits []byte
-		// as base64 but [N]byte as a list of integers, which reconstructs the
-		// bytes exactly — and the element walk below never planted anything,
-		// because fill has no numeric case, so the array stayed zero and the
-		// collect pass could not see it (#3592 review).
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			if v.Len() < guardMinByteArray {
-				f.unsupported = append(f.unsupported,
-					fmt.Sprintf("%s ([%d]byte is too short to hold a distinctive sentinel)", path, v.Len()))
-				return
-			}
-			reflect.Copy(v, reflect.ValueOf([]byte(guardSentinel)))
-			return
-		}
-		if v.Type().Elem().Kind() == reflect.Int32 {
-			if v.Len() < guardMinByteArray {
-				f.unsupported = append(f.unsupported,
-					fmt.Sprintf("%s ([%d]rune is too short to hold a distinctive sentinel)", path, v.Len()))
-				return
-			}
-			for i, r := range []rune(guardSentinel) {
-				if i >= v.Len() {
-					break
-				}
-				v.Index(i).SetInt(int64(r))
-			}
-			return
-		}
-		if isUnplantableScalar(v.Type().Elem().Kind()) {
-			f.unsupported = append(f.unsupported,
-				fmt.Sprintf("%s ([%d]%s cannot carry a text sentinel)", path, v.Len(), v.Type().Elem().Kind()))
-			return
-		}
-		for i := 0; i < v.Len(); i++ {
-			f.fill(v.Index(i), path+"[]", depth+1)
-		}
-	case reflect.Map:
-		// guardSliceSeed entries under DISTINCT keys, for the slice reason: a
-		// redaction that processes one arbitrary entry and returns would scrub
-		// every planted sentinel from a single-entry fixture and pass.
-		m := reflect.MakeMap(v.Type())
-		for i := 0; i < guardSliceSeed; i++ {
-			key := reflect.New(v.Type().Key()).Elem()
-			f.fill(key, path+"[key]", depth+1)
-			switch key.Kind() {
-			case reflect.String:
-				key.SetString(fmt.Sprintf("%s-%d", guardSentinel, i))
-			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				key.SetInt(int64(i))
-			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-				key.SetUint(uint64(i))
-			default:
-				// Cannot mint distinct keys of this kind, so the second entry
-				// would overwrite the first and quietly halve the coverage.
-				if i == 0 {
-					f.unsupported = append(f.unsupported, path+" (map key kind "+key.Kind().String()+" cannot be seeded distinctly)")
-				}
-			}
-			val := reflect.New(v.Type().Elem()).Elem()
-			f.fill(val, path+"[]", depth+1)
-			m.SetMapIndex(key, val)
-		}
-		v.Set(m)
-	case reflect.Interface:
-		// encoding/json happily serializes whatever concrete string, map or
-		// slice an interface field holds, so an unhandled interface is a hole
-		// in the guard rather than a field it may ignore. There is no correct
-		// sentinel to plant without knowing the concrete type, so this fails
-		// loudly and asks the author to extend the walk (#3592 review).
-		f.unsupported = append(f.unsupported, path+" (interface)")
-	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
-		// Not serializable by encoding/json — it errors rather than emitting
-		// them — so they cannot reach a bundle and need no sentinel.
-	}
-}
-
-// collectSentinelPaths returns the field paths under v whose value still
-// contains guardSentinel, named the way a Go author would write them
-// ("PendingTabCleanup[].TmuxName") so a failure points straight at the field.
-func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
-	if depth > guardMaxDepth || !v.IsValid() {
-		return nil
-	}
-	var found []string
-	switch v.Kind() {
-	case reflect.String:
-		if strings.Contains(v.String(), guardSentinel) {
-			found = append(found, path)
-		}
-	case reflect.Ptr:
-		if !v.IsNil() {
-			found = append(found, collectSentinelPaths(v.Elem(), path, depth+1)...)
-		}
-	case reflect.Struct:
-		if v.Type() == reflect.TypeOf(time.Time{}) {
-			return nil
-		}
-		allowed := serializableFields(v.Type())
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Type().Field(i)
-			if !mustVisit(field) {
-				continue
-			}
-			if field.Anonymous {
-				found = append(found, collectEmbedded(v.Field(i), join(path, field.Name), depth+1, allowed, i)...)
-				continue
-			}
-			if !allowed[fmt.Sprintf("0:%d", i)] {
-				continue
-			}
-			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
-		}
-	case reflect.Slice:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			if bytes.Contains(v.Bytes(), []byte(guardSentinel)) {
-				found = append(found, path)
-			}
-			return found
-		}
-		if v.Type().Elem().Kind() == reflect.Int32 {
-			if strings.Contains(runeContents(v), guardSentinel) {
-				found = append(found, path)
-			}
-			return found
-		}
-		for i := 0; i < v.Len(); i++ {
-			found = append(found, collectSentinelPaths(v.Index(i), path+"[]", depth+1)...)
-		}
-	case reflect.Array:
-		if v.Type().Elem().Kind() == reflect.Uint8 {
-			if v.Len() >= guardMinByteArray && bytes.Contains(byteArrayContents(v), plantedByteArray(v.Len())) {
-				found = append(found, path)
-			}
-			return found
-		}
-		if v.Type().Elem().Kind() == reflect.Int32 {
-			marker := guardSentinel
-			if v.Len() < len([]rune(marker)) {
-				marker = string([]rune(marker)[:v.Len()])
-			}
-			if v.Len() >= guardMinByteArray && strings.Contains(runeContents(v), marker) {
-				found = append(found, path)
-			}
-			return found
-		}
-		for i := 0; i < v.Len(); i++ {
-			found = append(found, collectSentinelPaths(v.Index(i), path+"[]", depth+1)...)
-		}
-	case reflect.Map:
-		for _, key := range v.MapKeys() {
-			found = append(found, collectSentinelPaths(key, path+"[key]", depth+1)...)
-			found = append(found, collectSentinelPaths(v.MapIndex(key), path+"[]", depth+1)...)
-		}
-	}
-	return found
-}
-
-// collectEmbedded mirrors fillEmbedded so the two walks agree on which promoted
-// fields are in scope.
-func collectEmbedded(v reflect.Value, path string, depth int, allowed map[string]bool, outer int) []string {
-	t := v.Type()
-	if t.Kind() != reflect.Struct {
-		return collectSentinelPaths(v, path, depth)
-	}
-	var found []string
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		if !mustVisit(field) {
-			continue
-		}
-		if field.Anonymous {
-			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
-			continue
-		}
-		if !allowed[fmt.Sprintf("1:%d:%d", outer, i)] {
-			continue
-		}
-		found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
-	}
-	return found
-}
-
-// runeContents reads a rune slice or array back as text.
-func runeContents(v reflect.Value) string {
-	out := make([]rune, v.Len())
-	for i := 0; i < v.Len(); i++ {
-		out[i] = rune(v.Index(i).Int())
-	}
-	return string(out)
-}
-
-func join(path, field string) string {
-	if path == "" {
-		return field
-	}
-	return fmt.Sprintf("%s.%s", path, field)
 }
