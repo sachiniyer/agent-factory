@@ -240,7 +240,15 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 	restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
 		return m.persistInstanceErr(repoID, instance)
 	})
-	teardownErr := instance.Kill()
+	// Trusting: this retry sits inside killsInFlight + the per-session op-lock
+	// acquired above for the whole call, which rules out a same-name
+	// replacement appearing mid-teardown (#3413) — same guarantee as
+	// killSessionRequestedBy. Without this, a tombstoned kill whose survivor
+	// carries a newer generation than any captured predecessor would take the
+	// empty-cohort refusal on every automatic retry and never converge,
+	// leaving the tombstone stranded until the user manually kills again
+	// (Codex on #3583).
+	teardownErr := instance.KillTrustingOwnLifecycleLock()
 	restoreCheckpoint()
 	if !session.TeardownStateUnknown(teardownErr) {
 		// A settled live teardown may have consumed the only in-memory copy of a

@@ -8,6 +8,7 @@ const { __test } = autoGate;
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
+const CHECK_CREATED_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
 
 test("Auto Gate can be recovered manually by PR number", () => {
@@ -2178,7 +2179,14 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     prNumber: 1465,
   });
 
-  assert.deepEqual(github.operations, ["merge", "check:create", "docs:dispatch"]);
+  assert.deepEqual(github.operations, [
+    "merge",
+    "check:create",
+    "dispatch:build.yml",
+    "dispatch:docs.yml",
+    "dispatch:lint.yml",
+    "dispatch:web-selftest.yml",
+  ]);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
   assert.equal(github.associationReads, 2, "invalidation after merge must be write-only");
@@ -2201,11 +2209,14 @@ test("a post-merge invalidation error cannot suppress the docs dispatch attempt"
   );
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.ok(github.operations.includes("docs:dispatch"));
+  assert.ok(github.operations.includes("dispatch:docs.yml"));
 });
 
 test("a workflow dispatch failure remains single-shot after merge", async () => {
   const error = new Error("docs dispatch unavailable");
+  // Retryable by status on purpose: a dispatch is a write, so it must NOT be
+  // retried even when the classifier would call the failure transient. A second
+  // accepted dispatch is a duplicate run, and for docs.yml a duplicate deploy.
   error.status = 500;
   const github = fakeGateGithub({
     files: ["docs/auto-gate.md"],
@@ -2223,23 +2234,492 @@ test("a workflow dispatch failure remains single-shot after merge", async () => 
   );
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.equal(github.workflowDispatchAttempts, 1);
+  // One attempt per master-verify workflow and no more: a failing dispatch is
+  // never retried, and one unavailable workflow does not cost master the rest.
+  assert.equal(github.workflowDispatchAttempts, __test.MASTER_PUSH_WORKFLOWS.length);
 });
 
-// The exact wire shape from Auto Gate run 32044471684: GET
-// /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
-// body naming the PR's OWN node id, during a wider GitHub degradation.
-function selfContradictoryNotFound(nodeId = "PR_node_1465") {
-  const body = {
-    type: "NOT_FOUND",
-    path: ["node"],
-    message: `Could not resolve to a node with the global id of '${nodeId}'.`,
-  };
-  const error = new Error(`Not Found: ${JSON.stringify(body)}`);
-  error.status = 404;
-  error.response = { status: 404, data: body };
-  return error;
-}
+test("an auto-gate merge re-raises every gate its own push suppressed", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"] });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(
+    github.dispatchedWorkflows.map((dispatch) => dispatch.workflow_id),
+    __test.MASTER_PUSH_WORKFLOWS,
+  );
+  // A dispatch takes a branch ref, never a SHA. master is the commit the merge
+  // above just created.
+  for (const dispatch of github.dispatchedWorkflows) {
+    assert.equal(dispatch.ref, "master");
+  }
+  // Only docs.yml carries an input, and it is the merge COMMIT, never a path
+  // list: docs.yml still owns which paths mean "deploy". A copy of that list
+  // here would be a second source of truth, and it had already drifted.
+  for (const dispatch of github.dispatchedWorkflows) {
+    if (dispatch.workflow_id === "docs.yml") {
+      assert.deepEqual(dispatch.inputs, { verify_sha: "merge-sha" });
+    } else {
+      assert.equal(dispatch.inputs, undefined);
+    }
+  }
+});
+
+test("a merge that changes workflows warns that its own set may be stale", async () => {
+  // Codex P2: auto-gate.yml pins every checkout to the default branch, so this
+  // loop re-raises the set known to master's PRE-merge copy of the gate. A merge
+  // that ADDS a push-gated workflow cannot re-raise it for its own landing
+  // commit — the running copy's list predates it. Deriving the set from the
+  // merged tree would mean re-parsing triggers at merge time, where a misparse
+  // silently skips a dispatch or reds a merge that already landed; the gap is
+  // made visible instead.
+  const warnings = [];
+  const github = fakeGateGithub({ files: [".github/workflows/new-gate.yml"] });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: { ...fakeCore(), warning: (message) => warnings.push(message) },
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.ok(
+    warnings.some((warning) => /changed workflow definitions/.test(warning)),
+    `a workflow-changing merge must say its dispatch set may be stale; got ${JSON.stringify(warnings)}`,
+  );
+
+  // A merge that touches no workflow definition says nothing.
+  const quiet = [];
+  const other = fakeGateGithub({ files: ["session/storage.go"] });
+  await autoGate.merge({
+    github: other,
+    context: fakeContext(),
+    core: { ...fakeCore(), warning: (message) => quiet.push(message) },
+    prNumber: 1465,
+  });
+  assert.deepEqual(quiet, []);
+});
+
+test("the re-raised Docs run decides deployment from its own path list", () => {
+  // The gate must not carry a second copy of docs.yml's deploy paths. It had
+  // one, and it had drifted: gate.docsChanged knew only `docs/` and `mkdocs.yml`
+  // while docs.yml also deploys for README.md, commands/docs_gen.go,
+  // requirements-docs.txt and scripts/gen-docs.sh — so an auto-gate merge
+  // touching any of those left Pages stale.
+  // Comments may name the paths — explaining the drift is the point. Code may
+  // not carry them, so the scan is over the file with comments stripped.
+  const gate = fs
+    .readFileSync(path.join(__dirname, "auto-gate.js"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .join("\n");
+  const docs = fs.readFileSync(path.join(__dirname, "..", "workflows", "docs.yml"), "utf8");
+
+  // The gate names none of those paths, and passes no deploy input.
+  for (const deployPath of [
+    "mkdocs.yml",
+    "README.md",
+    "commands/docs_gen.go",
+    "requirements-docs.txt",
+    "scripts/gen-docs.sh",
+  ]) {
+    assert.doesNotMatch(
+      gate,
+      new RegExp(deployPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `${deployPath} is a docs.yml deploy path and must not be copied into the gate`,
+    );
+  }
+  assert.doesNotMatch(gate, /deploy_docs/);
+
+  // What the gate DOES name is the commit — publishing is not monotonic, so a
+  // run raised for this merge must decide on this merge's paths even if master
+  // advanced before it started.
+  assert.match(gate, /verify_sha: response\.data\.sha/);
+  assert.match(docs, /verify_sha:[\s\S]*?default: ''/);
+  // The sha reaches the script through the ENVIRONMENT and is validated as a
+  // full commit SHA. verify_sha is free-form input, and this step's run can
+  // publish Pages, so substituting it into the program text would be a script
+  // injection with a publish primitive on the end of it.
+  assert.match(docs, /env:\s+EVENT_NAME:[\s\S]*?VERIFY_SHA: \$\{\{ inputs\.verify_sha \}\}/);
+  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
+  assert.match(docs, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
+  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" \|\| -z "\$before"/);
+  // No ${{ }} expansion may remain inside the step's shell program.
+  const step = /- name: Check docs deploy paths[\s\S]*?\n      - name: /.exec(docs)[0];
+  const program = step.slice(step.indexOf("run: |"));
+  assert.doesNotMatch(program, /\$\{\{/, "no expression may be substituted into the shell program");
+
+  // docs.yml accepts a dispatch that defers to its own rule, and falls through
+  // to the same path diff a push uses when it does.
+  assert.match(docs, /deploy_docs:[\s\S]*?default: auto[\s\S]*?options: \[auto, 'true', 'false'\]/);
+  assert.match(docs, /"\$EVENT_NAME" == "workflow_dispatch" && "\$DEPLOY_DOCS" != "auto"/);
+  assert.match(docs, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
+});
+
+test("one unavailable master-verify workflow does not suppress the others", async () => {
+  const github = fakeGateGithub({
+    files: ["session/storage.go"],
+    workflowDispatchErrorsByWorkflow: { "build.yml": new Error("build dispatch unavailable") },
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    // The merge itself succeeded; the failure is reported as a post-merge error
+    // so the run goes red and a human re-raises the missing gate by hand.
+    /merged, but post-merge operation\(s\) failed[\s\S]*build dispatch unavailable/,
+  );
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(
+    github.dispatchedWorkflows.map((dispatch) => dispatch.workflow_id),
+    __test.MASTER_PUSH_WORKFLOWS.filter((workflow) => workflow !== "build.yml"),
+  );
+});
+
+test("the trigger scan asks a question no YAML spelling can hide", () => {
+  // Six review rounds of parsing these triggers by hand each found another valid
+  // spelling — shorthand, flow mappings, deeper indentation, comments in four
+  // positions, unclosed flow sequences — and every one failed the same way: it
+  // read as "no trigger here" rather than "cannot read this", so the workflow
+  // left the comparison and MASTER_PUSH_WORKFLOWS together, silently.
+  //
+  // The parser is gone. The question is now lexical — does this file's trigger
+  // section mention a push trigger? — which no indentation, flow style or
+  // comment can change the answer to. It over-includes a push trigger scoped to
+  // some other branch, and that is the point: over-inclusion is a test failure a
+  // human resolves with an explicit exception, under-inclusion is a master
+  // commit nothing verifies.
+  const forms = [
+    "on:\n  push:\n    branches: [master]\n\njobs:\n",
+    "on:\n  push:\n    branches: [ master ]\n\njobs:\n",
+    "on:\n  push:\n    branches:\n      - master\n\njobs:\n",
+    "on:\n    push:\n      branches: [master]\n\njobs:\n",
+    "on:\n  push:\n\njobs:\n",
+    "on:\n  push: {}\n\njobs:\n",
+    "on:\n  push: # every branch\n\njobs:\n",
+    "on: # workflow events\n  push:\n\njobs:\n",
+    "on:\n  pull_request:\n# master signal\n  push:\n\njobs:\n",
+    "on: push\njobs:\n",
+    "on: [push]\njobs:\n",
+    "on: [push, pull_request]\njobs:\n",
+    'on: {"push": {"branches": ["master"]}}\njobs:\n',
+    "on:\n  push:\n    branches: [\n      master,\n    ]\n\njobs:\n",
+    "on:\n  push:\n    branches: ['**']\n\njobs:\n",
+  ];
+  for (const form of forms) {
+    assert.equal(
+      mentionsPushTrigger(onSection(form)),
+      true,
+      `a push trigger must be seen in: ${JSON.stringify(form)}`,
+    );
+  }
+
+  // Negatives: no push trigger at all, and a push mentioned only in a comment or
+  // in a job — neither is a trigger, and comments are stripped before the scan.
+  for (const form of [
+    "on:\n  pull_request:\n    branches: [master]\n\njobs:\n",
+    "on:\n  workflow_dispatch:\n\njobs:\n",
+    "on:\n  # we deliberately do not run on push here\n  pull_request:\n\njobs:\n",
+    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-latest\n",
+  ]) {
+    assert.equal(
+      mentionsPushTrigger(onSection(form)),
+      false,
+      `no push trigger may be seen in: ${JSON.stringify(form)}`,
+    );
+  }
+
+  // A file with no readable `on:` section at all is null, which the anti-rot
+  // test turns into a failure naming the file rather than a silent exclusion.
+  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-latest\n"), null);
+});
+
+
+test("the dispatch contract survives the spellings that hid from the parser", () => {
+  // Flow mappings put `required:` mid-line, which the anchored check missed —
+  // the same blind spot the parser had, reintroduced lexically.
+  for (const flow of [
+    "    inputs: { token: { required: true, type: string } }",
+    "      token: { required: true }",
+    "      token:\n        required: true",
+  ]) {
+    assert.match(withoutComments(flow), /required:\s*true\b/, `a required input must be seen in: ${flow}`);
+  }
+  assert.doesNotMatch(withoutComments("      token:\n        required: false"), /required:\s*true\b/);
+
+  // A condition admits a dispatch only if it lets one through. Naming the event
+  // in order to EXCLUDE it is the opposite.
+  assert.equal(admitsDispatch("github.event_name == 'push' || github.event_name == 'workflow_dispatch'"), true);
+  assert.equal(admitsDispatch("'push' == github.event_name"), false);
+  assert.equal(admitsDispatch("github.event_name == 'push'"), false);
+  assert.equal(admitsDispatch("github.event_name != 'workflow_dispatch'"), false);
+  assert.equal(admitsDispatch("'workflow_dispatch' != github.event_name"), false);
+  // Admitted only when an input the gate does not supply happens to be set: the
+  // dispatch succeeds and the job it was raised for is skipped anyway.
+  assert.equal(
+    admitsDispatch(
+      "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_checks)",
+    ),
+    false,
+  );
+
+  // A push-payload predicate never names the event and is true only for a push:
+  // `github.event.head_commit` is absent on a dispatch, so the job is skipped.
+  assert.equal(admitsDispatch("github.event.head_commit != null"), false);
+  assert.equal(admitsDispatch("github.event.head_commit != null || github.event_name == 'workflow_dispatch'"), true);
+
+  // Admission must be UNCONDITIONAL: any extra predicate on the dispatch branch
+  // can make it false, whatever context it comes from. Enumerating `inputs.` was
+  // the wrong shape — `vars.`, `env.`, `needs.` and whatever GitHub adds next
+  // gate it just as well.
+  assert.equal(
+    admitsDispatch("github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && vars.RUN_CHECKS == 'true')"),
+    false,
+  );
+  assert.equal(
+    admitsDispatch("github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_checks)"),
+    false,
+  );
+  assert.equal(
+    admitsDispatch("(github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'"),
+    true,
+  );
+  assert.equal(admitsDispatch("'workflow_dispatch' == github.event_name"), true);
+  // A bare dispatch test nested inside a conjunction is not a top-level disjunct.
+  assert.equal(
+    admitsDispatch("(github.event_name == 'workflow_dispatch' || github.event_name == 'push') && vars.ENABLED"),
+    false,
+  );
+
+  // Indexed access is the same predicate as dotted access.
+  assert.equal(consultsEvent("github['event']['head_commit'] != null"), true);
+  assert.equal(consultsEvent("github[\"event_name\"] == 'push'"), true);
+  assert.equal(consultsEvent("github.event.head_commit != null"), true);
+  assert.equal(consultsEvent("github.event_name == 'push'"), true);
+  assert.equal(consultsEvent("github.ref == 'refs/heads/master'"), false);
+
+  // The type comes from the DIRECT property, never from prose that contains it.
+  const prose = [
+    "      verify_sha:",
+    "        description: 'Expected type: string SHA'",
+    "        type: boolean",
+  ].join("\n");
+  assert.equal(directProperties(prose).type, "boolean");
+  assert.equal(
+    directProperties("      verify_sha:\n        type: string").type,
+    "string",
+  );
+  // A block scalar's content is nested deeper and is not a direct property.
+  const scalar = [
+    "      verify_sha:",
+    "        description: |",
+    "          type: string",
+    "        type: boolean",
+  ].join("\n");
+  assert.equal(directProperties(scalar).type, "boolean");
+
+  // Quoted shorthand is as valid as the bare form.
+  for (const quoted of ["on: 'push'\njobs:\n", 'on: "push"\njobs:\n', "on: ['push']\njobs:\n", 'on: ["push", "pull_request"]\njobs:\n']) {
+    assert.equal(
+      mentionsPushTrigger(onSection(quoted)),
+      true,
+      `a quoted push trigger must be seen in: ${JSON.stringify(quoted)}`,
+    );
+  }
+  assert.equal(mentionsPushTrigger(onSection("on: ['pull_request']\njobs:\n")), false);
+
+  // A YAML alias resolves to a trigger GitHub honours and this scan cannot read,
+  // so it is reported unreadable rather than answering "no push".
+  assert.equal(usesUnresolvableYaml(onSection("on: *push_event\njobs:\n")), true);
+  assert.equal(usesUnresolvableYaml(onSection("on:\n  <<: *base\n  push:\n\njobs:\n")), true);
+  assert.equal(usesUnresolvableYaml(onSection("on:\n  push:\n    branches: [master]\n\njobs:\n")), false);
+  // A glob in a paths filter is not an alias.
+  assert.equal(
+    usesUnresolvableYaml(onSection("on:\n  push:\n    paths:\n      - '**.go'\n\njobs:\n")),
+    false,
+  );
+
+  // An expectation scoped to its own declaration cannot be satisfied by a LATER
+  // input's properties.
+  const twoInputs = [
+    "    inputs:",
+    "      verify_sha:",
+    "        type: boolean",
+    "      other:",
+    "        type: string",
+  ].join("\n");
+  assert.doesNotMatch(
+    declarationBlock(twoInputs, /^ *verify_sha:/) || "",
+    /type: string/,
+    "a later input's type must not satisfy verify_sha's expectation",
+  );
+  assert.match(
+    declarationBlock(twoInputs.replace("type: boolean", "type: string"), /^ *verify_sha:/) || "",
+    /type: string/,
+  );
+
+  // An exception holds only while the triggers it was justified against stand.
+  const recorded = "on:\n  push:\n    branches: [release]\n";
+  PUSH_TRIGGER_EXCEPTIONS["zz-probe.yml"] = { reason: "release-only", triggers: recorded };
+  try {
+    assert.equal(exemptedByRecordedTriggers("zz-probe.yml", onSection(recorded)), true);
+    // Widened to include master: the reason no longer describes it, so the
+    // exemption lapses and the workflow re-enters the comparison.
+    assert.equal(
+      exemptedByRecordedTriggers(
+        "zz-probe.yml",
+        onSection("on:\n  push:\n    branches: [release, master]\n"),
+      ),
+      false,
+    );
+    // Comment and whitespace churn alone does not lapse it.
+    assert.equal(
+      exemptedByRecordedTriggers(
+        "zz-probe.yml",
+        onSection("on:\n  push: # release train\n    branches: [release]   \n"),
+      ),
+      true,
+    );
+  } finally {
+    delete PUSH_TRIGGER_EXCEPTIONS["zz-probe.yml"];
+  }
+});
+
+test("the master-verify list names every workflow that gates master on push", () => {
+  // The anti-rot mechanism for MASTER_PUSH_WORKFLOWS. A `push:` trigger cannot
+  // be computed at runtime, so the gate carries a literal copy; this reads the
+  // workflow directory and fails if that copy stops describing it — the same
+  // arrangement web-selftest-scope.test.js uses for SELFTEST_PATHS.
+  const workflowDir = path.join(__dirname, "..", "workflows");
+  const workflowFiles = fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  const sections = new Map(
+    workflowFiles.map((name) => [
+      name,
+      onSection(fs.readFileSync(path.join(workflowDir, name), "utf8")),
+    ]),
+  );
+
+  // A trigger section this scan cannot read is a failure naming the file, never
+  // a silent exclusion — that confusion is what every missed spelling had in
+  // common.
+  for (const [name, section] of sections) {
+    assert.notEqual(
+      section,
+      null,
+      `${name}: no \`on:\` section could be located, so this scan cannot tell whether the ` +
+        "workflow runs on a master push",
+    );
+    assert.equal(
+      usesUnresolvableYaml(section),
+      false,
+      `${name}: its \`on:\` section uses a YAML alias or merge key, which GitHub resolves and ` +
+        "this scan cannot; inline the trigger or teach the scan to resolve it",
+    );
+  }
+
+  const mentionsPush = workflowFiles
+    .filter((name) => mentionsPushTrigger(sections.get(name)))
+    .filter((name) => !exemptedByRecordedTriggers(name, sections.get(name)))
+    .sort();
+
+  assert.deepEqual(
+    [...__test.MASTER_PUSH_WORKFLOWS].sort(),
+    mentionsPush,
+    "a workflow with a push trigger is missing from MASTER_PUSH_WORKFLOWS (or vice versa); " +
+      "an auto-gate merge would land on master without it ever running. If its push trigger " +
+      "genuinely cannot reach master, add it to PUSH_TRIGGER_EXCEPTIONS with the reason",
+  );
+
+  for (const name of __test.MASTER_PUSH_WORKFLOWS) {
+    const section = sections.get(name);
+    const file = fs.readFileSync(path.join(workflowDir, name), "utf8");
+
+    // A dispatch is how the gate re-raises them, so each has to accept one.
+    assert.match(
+      withoutComments(section),
+      /^ *workflow_dispatch:/m,
+      `${name} is re-raised by the gate but declares no workflow_dispatch trigger`,
+    );
+
+    // …and has to accept the call merge() actually makes. A required input with
+    // no value from the gate is a 422 AFTER the commit has landed, which is the
+    // verification lost silently again. Deliberately blunt: any required input
+    // at all must be one the gate supplies, so adding one forces the decision
+    // rather than passing on a parse this test got wrong.
+    // Anywhere in the section, not anchored to a line: a flow mapping such as
+    // `inputs: { token: { required: true } }` puts it mid-line, which is exactly
+    // the blind spot the previous anchored form had.
+    const required = withoutComments(section).match(/required:\s*true\b/);
+    assert.equal(
+      required,
+      null,
+      `${name} declares a required workflow_dispatch input, but the gate sends only ` +
+        `${JSON.stringify(SUPPLIED_DISPATCH_INPUTS[name] || [])}; either give it a default or ` +
+        "supply it from merge()",
+    );
+
+    // The dispatched run must reach the same jobs the suppressed push would
+    // have. Keyed on any `if:` condition that consults the EVENT at all — its
+    // name or its payload — rather than on one spelling of one comparison.
+    // `'push' == github.event_name` and `github.event_name != 'workflow_dispatch'`
+    // exclude a dispatch just as effectively as the canonical form, and a payload
+    // predicate like `github.event.head_commit != null` never mentions the name
+    // while being true only for a push. Non-conditions that read the event — an
+    // env passthrough, a concurrency `group:` — gate nothing and are not
+    // conditions.
+    const lines = file.split("\n");
+    for (const [index, line] of lines.entries()) {
+      if (!/^\s*if:/.test(line)) {
+        continue;
+      }
+      const condition = declarationBlock(lines.slice(index).join("\n"), /^\s*if:/);
+      if (!consultsEvent(condition)) {
+        continue;
+      }
+      assert.ok(
+        admitsDispatch(condition),
+        `${name} gates a job or step on the event without admitting workflow_dispatch, so ` +
+          `the re-raised run would skip it: ${condition.trim()}`,
+      );
+    }
+
+    // Every input the gate supplies must still be declared, and still take the
+    // kind of value the gate sends.
+    for (const [input, expectation] of Object.entries(SUPPLIED_DISPATCH_INPUTS[name] || {})) {
+      const declaration = new RegExp(`^ *${input}:[ \\t]*(?:#[^\\n]*)?$`, "m");
+      assert.match(
+        withoutComments(section),
+        declaration,
+        `the gate sends dispatch input "${input}" to ${name}, which no longer declares it; ` +
+          "GitHub would reject the dispatch after the merge has landed",
+      );
+      const properties = directProperties(declarationBlock(withoutComments(section), declaration) || "");
+      for (const [property, value] of Object.entries(expectation)) {
+        assert.equal(
+          properties[property],
+          value,
+          `${name}'s "${input}" input declares ${property}: ${properties[property]}, but merge() ` +
+            `sends a value that needs ${property}: ${value}`,
+        );
+      }
+    }
+  }
+});
+
 
 test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
   // #3396: this is not retryable by status (404), so before this change it went
@@ -2592,6 +3072,454 @@ test("the tolerated NOT_FOUND is exactly the one naming the resolved id", () => 
   assert.equal(isSelfContradictoryNotFound(plainNotFound, nodeId), false);
 });
 
+function mergeRefusal(message, status = 405) {
+  const error = new Error(message);
+  error.status = status;
+  error.response = { status, data: { message } };
+  return error;
+}
+
+test("a merge already in progress is conceded once the winner has landed", async () => {
+  // #3434 verbatim: the maintainer merged PR #3411 by hand while the gate was
+  // mid-evaluation on the same head. The gate's merge write lost, and the losing
+  // evaluation reddened an Auto Gate run on master for an outcome that had
+  // converged correctly.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a conceded merge race must not fail the run");
+  assert.ok(
+    notices.some((notice) =>
+      /Conceding merge-refused race for PR #1465: the winning outcome already merged winner-sha\./.test(
+        notice,
+      ),
+    ),
+    `the concession notice must name the winner; got ${JSON.stringify(notices)}`,
+  );
+});
+
+test("a merge already in progress is conceded after the winner settles", async () => {
+  // The refusal names a merge that has STARTED. A single confirming read can
+  // race ahead of it and see a PR that is still open, so this shape re-reads.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "settled-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null);
+  assert.ok(github.pullGetReads > 1, "a settling refusal must re-read before concluding");
+  assert.ok(notices.some((notice) => notice.includes("already merged settled-sha")));
+});
+
+test("the settlement window outlasts a slow in-flight merge", async () => {
+  // Codex P2: the settlement re-reads reused the generic read-retry delays, so
+  // the winner had 1.25s total to land. A merge GitHub has already STARTED can
+  // take longer than that, and the run then read back "nobody merged" and failed
+  // — refusing the concession this shape exists to grant.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    // Still open through the first three reads; merged only on the fourth, which
+    // the old 250ms + 1s window could never have reached.
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: false, merge_commit_sha: null },
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "slow-winner-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a merge that lands late is still a conceded race");
+  assert.ok(notices.some((notice) => notice.includes("already merged slow-winner-sha")));
+  assert.equal(github.pullGetReads, 4);
+});
+
+test("a merge already in progress on a head nobody merged still fails loudly", async () => {
+  // The loud path the concession must not swallow: a refusal with the PR still
+  // open and no winner is a genuinely unmergeable head.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Merge already in progress/);
+  assert.equal(error?.autoGateMergeConceded, undefined);
+  assert.ok(!notices.some((notice) => notice.includes("Conceding merge-refused race")));
+  // Bounded: exhausting the settlement window concludes "nobody merged" rather
+  // than holding the serialized lane open waiting for one. Four reads — the
+  // first plus one per MERGE_SETTLE_DELAYS_MS step.
+  assert.equal(github.pullGetReads, 4);
+});
+
+test("a transient read inside the settlement window does not abandon it", async () => {
+  // Codex P2: a raw read would replace the merge refusal with the read error AND
+  // skip the remaining confirmations — so the winning merge could land inside the
+  // very window this loop exists to wait through, and the run would still fail.
+  const unavailable = new Error("pulls.get unavailable");
+  unavailable.status = 500;
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetErrors: [unavailable],
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "settled-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a failed confirmation must not become the raised error");
+  assert.ok(notices.some((notice) => notice.includes("already merged settled-sha")));
+});
+
+test("a newer-owner concession does not steal the head back from its winner", async () => {
+  // Codex P1 (round 1): the generic merge-error catch invalidated the aggregate
+  // on the way out, creating a WAITING generation NEWER than the winner's. The
+  // winning transaction would then see itself superseded and refuse to publish,
+  // while nothing was left to finish the generation the losing run had created.
+  //
+  // The marker is the contract between the workflow's merge wrapper and this
+  // helper — `the apply-gate step delegates refusal classification to the
+  // helper` pins that the wrapper sets it — so the refusal is injected already
+  // carrying it. Injecting a newer check through the fake instead would also be
+  // seen by the aggregate evaluation, which would refuse to publish PASS and the
+  // merge would never be attempted at all.
+  const conceded = new Error("Conceding merge-refused race for PR #1465: newer owner");
+  conceded.autoGateMergeConceded = true;
+  conceded.autoGateConcessionReason = "newer-owner";
+  const github = fakeGateGithub({ mergeError: conceded });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "conceded");
+  assert.equal(github.mergeAttempts, 1);
+  // This transaction's own PASS is the last aggregate write. No WAITING
+  // generation follows it, so the winner keeps ownership of the head.
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "a newer-owner concession must not create a newer WAITING generation",
+  );
+});
+
+test("a merged-PR concession still turns the shared head non-green", async () => {
+  // Codex P1 (round 2): conceding because THIS PR merged says nothing about a
+  // second PR sharing the head, which would otherwise inherit the PASS this
+  // transaction just published — authorization built on a master that has since
+  // advanced. A token-authenticated winning merge raises no event, so nothing
+  // would come along to repair it.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "the race is still conceded rather than reddening the run");
+  assert.ok(notices.some((notice) => notice.includes("already merged winner-sha")));
+  // …and the head is left non-green, exactly as a successful merge leaves it.
+  assert.ok(
+    github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "a merged-PR concession must not leave a stale PASS for a shared head",
+  );
+});
+
+test("a genuinely failed merge still invalidates the aggregate before propagating", async () => {
+  // The concession skip must not weaken the loud path: an unconceded merge error
+  // still turns the published aggregate non-green on its way out.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Base branch was modified"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Base branch was modified/);
+  assert.ok(
+    github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an unconceded merge failure must still invalidate the aggregate",
+  );
+});
+
+test("every conceded refusal shape is conceded only against a proven winner", async () => {
+  // Guards the whole list at once, including the two shapes #3329 added that had
+  // no test at all — which is how a fourth shape reached the unhandled path.
+  for (const shape of __test.CONCEDED_MERGE_REFUSALS) {
+    const message = shape.pattern.source.replace(/\\b/g, "");
+
+    const winner = fakeGateGithub({
+      mergeError: mergeRefusal(message, shape.status),
+      pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+    });
+    const conceded = await runApplyGateStep({ github: winner });
+    assert.equal(conceded.error, null, `${message} must be conceded when the PR is merged`);
+
+    const nobody = fakeGateGithub({
+      mergeError: mergeRefusal(message, shape.status),
+      pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+    });
+    const loud = await runApplyGateStep({ github: nobody });
+    assert.match(
+      loud.error?.message || "",
+      new RegExp(message),
+      `${message} must stay loud when nothing won the head`,
+    );
+  }
+});
+
+test("a live newer owner outranks merged evidence on a shared head", async () => {
+  // Codex P1 (round 3): the two evidence paths are not mutually exclusive. A
+  // shared head can have THIS PR merged while a newer transaction is mid-flight
+  // on the same commit. Labelling that "merged" sends the caller down the
+  // invalidation path and supersedes the active winner — the ownership theft the
+  // newer-owner branch exists to avoid.
+  const github = fakeGateGithub();
+  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  github.rest.pulls.get = async () => ({
+    data: { merged: true, merge_commit_sha: "winner-sha" },
+  });
+  github.paginate = async () => [
+    {
+      id: 2,
+      created_at: "2026-07-09T01:30:00Z",
+      name: "Auto Gate decision",
+      external_id: aggregateExternalId(HEAD_SHA),
+      app: { id: ACTIONS_APP_ID },
+      conclusion: "failure",
+      output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+      html_url: "https://example.invalid/checks/2",
+    },
+  ];
+
+  const concession = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Merge already in progress"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+
+  assert.equal(
+    concession.reason,
+    "newer-owner",
+    "a live owner must outrank merged evidence, so the caller does not write over it",
+  );
+
+  // With no newer owner, the same merged read is still a "merged" concession.
+  github.paginate = async () => [];
+  const merged = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Merge already in progress"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+  assert.equal(merged.reason, "merged");
+});
+
+test("an unlisted merge refusal is never conceded, even on a merged PR", async () => {
+  // The concession is granted on shape AND evidence. A refusal shape nobody has
+  // audited must reach the loud path however healthy the PR looks.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Base branch was modified"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Base branch was modified/);
+  assert.equal(github.pullGetReads, 0, "an unlisted shape must not even be investigated");
+});
+
+test("a merged PR with an unreadable owner concedes without writing", async () => {
+  // Codex P1: the merged branch fell back with `||`, which discards the
+  // ownership-unknown marker and answers "merged" — sending the caller into the
+  // generic invalidation. Both facts have to survive: the race is conceded
+  // because the PR really did merge, AND the aggregate must not be written,
+  // because a newer generation created blind supersedes whoever owns the head.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && options?.filter === "all") {
+      throw new Error("fetch failed");
+    }
+    return realPaginate(fn, options);
+  };
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a merged PR is still a conceded race");
+  assert.ok(notices.some((notice) => notice.includes("already merged winner-sha")));
+  assert.ok(
+    notices.some((notice) => notice.includes("ownership could not be determined")),
+    "the notice must say why the aggregate was left alone",
+  );
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an undetermined owner must not be overwritten by a blind invalidation",
+  );
+});
+
+test("an unreadable ownership check never becomes 'nobody owns this head'", async () => {
+  // Codex P1: readOrNull turned a transient listForRef failure into an EMPTY
+  // list, which reads as "no newer owner" — and the caller acts on that by
+  // creating another invalidation, superseding the very transaction the failed
+  // read could not see. "No answer" and "no owner" must not be the same value.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+  const unavailable = new Error("fetch failed");
+  const realPaginate = github.paginate;
+  let checkReads = 0;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && options?.filter === "all") {
+      checkReads += 1;
+      throw unavailable;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const { error } = await runApplyGateStep({ github });
+
+  // The refusal stays LOUD: nothing proved another actor won, the PR is still
+  // open, and the merge did not happen — conceding would leave the aggregate's
+  // PASS standing for a merge that never occurred.
+  assert.match(error?.message || "", /Repository rule violations found/);
+  // Retried before giving up, then reported as unknown rather than as absent.
+  assert.equal(checkReads, 3);
+  // …and crucially, no new WAITING generation: a blind invalidation here is what
+  // supersedes whichever transaction actually owns the head.
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an undetermined owner must not be overwritten by a blind invalidation",
+  );
+});
+
+test("a newer transaction owning the head concedes a refused merge", async () => {
+  // The second evidence path: no merge happened, but a newer generation of the
+  // aggregate has taken ownership of this head, so this run no longer decides.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  const newer = {
+    id: 2,
+    created_at: "2026-07-09T01:30:00Z",
+    name: "Auto Gate decision",
+    external_id: aggregateExternalId(HEAD_SHA),
+    app: { id: ACTIONS_APP_ID },
+    conclusion: "failure",
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+    html_url: "https://example.invalid/checks/2",
+  };
+  github.paginate = async () => [newer];
+
+  const concession = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Repository rule violations found"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+
+  assert.equal(concession.reason, "newer-owner");
+  assert.match(concession.message, /is newer Auto Gate check https:\/\/example\.invalid\/checks\/2/);
+
+  // An OLDER check is not a winner: generation order is what makes this safe.
+  const older = { ...newer, id: 0, created_at: "2026-07-09T00:30:00Z" };
+  github.paginate = async () => [older];
+  assert.equal(
+    await autoGate.resolveMergeRefusal({
+      github,
+      error: mergeRefusal("Repository rule violations found"),
+      options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+      ownedAggregateCheck,
+    }),
+    null,
+  );
+});
+
+test("an unknown owned generation concedes nothing", async () => {
+  // Fail-closed on the unknown. Reading a missing created_at as generation zero
+  // would make every check on the head — this transaction's own included — look
+  // like a later owner, turning the safety check into a blanket concession.
+  const github = fakeGateGithub({});
+  github.paginate = async () => [
+    {
+      id: 10000,
+      created_at: CHECK_CREATED_AT,
+      name: "Auto Gate decision",
+      external_id: aggregateExternalId(HEAD_SHA),
+      app: { id: ACTIONS_APP_ID },
+      conclusion: "failure",
+      output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+    },
+  ];
+
+  for (const owned of [null, { id: 1 }, { created_at: "2026-07-09T01:00:00Z" }, { id: 1, created_at: "nonsense" }]) {
+    assert.equal(
+      await autoGate.resolveMergeRefusal({
+        github,
+        error: mergeRefusal("Repository rule violations found"),
+        options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+        ownedAggregateCheck: owned,
+      }),
+      null,
+      `an owned check of ${JSON.stringify(owned)} must not concede`,
+    );
+  }
+});
+
+test("the apply-gate step delegates refusal classification to the helper", () => {
+  // The shapes are auditable in one place only if the workflow has no second
+  // copy of them. Nothing in the step may name a refusal shape of its own.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+
+  assert.match(workflow, /await autoGate\.resolveMergeRefusal\(\{/);
+  assert.match(workflow, /if \(concession\) \{\s+concede\(concession\.message, error, concession\.reason\);/);
+  // The reason must reach processAggregateHead, which is what decides whether
+  // the transaction may still write to the aggregate on its way out.
+  assert.match(workflow, /concession\.autoGateConcessionReason = reason;/);
+  for (const shape of __test.CONCEDED_MERGE_REFUSALS) {
+    assert.doesNotMatch(
+      workflow,
+      new RegExp(shape.pattern.source, "i"),
+      "a conceded refusal shape is named in the workflow as well as the helper",
+    );
+  }
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -2896,6 +3824,68 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
   return { attempts, outputs, warnings, error };
 }
 
+// The apply-gate step's inline script, extracted from auto-gate.yml and made
+// callable — the same arrangement invalidateGateScript() uses. The merge-race
+// concession is wired up in that script, so a test that does not run it proves
+// nothing about whether a conceded refusal actually stops reddening the run.
+function applyGateScript() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const step = workflow.match(
+    // The `|$` alternative matters: this is the last step of the last job, so
+    // the block ends at end-of-file rather than at the next low-indent line.
+    /- name: Evaluate, report, and merge the serialized head[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S|$)/,
+  );
+  assert.ok(step, "the apply-gate step script is missing from auto-gate.yml");
+  const indent = step[1].match(/^( +)\S/m);
+  assert.ok(indent, "the apply-gate step script is empty");
+  const body = step[1]
+    .split("\n")
+    .map((line) => line.slice(indent[1].length))
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  return new AsyncFunction("github", "context", "core", "require", "process", body);
+}
+
+// runApplyGateStep executes that step against the REAL helper module, so the
+// verdict covers the workflow wrapper, the helper's refusal classifier, and the
+// step's decision to swallow a conceded error, as one unit.
+async function runApplyGateStep({
+  github,
+  headSha = HEAD_SHA,
+  targets = [{ pr_number: 1465, head_sha: HEAD_SHA }],
+  mergeEnabled = true,
+  readFailure = "",
+}) {
+  const script = applyGateScript();
+  const workspace = "/workspace";
+  const helperPath = path.join(workspace, ".github/scripts/auto-gate.js");
+  const requireStub = (id) => {
+    if (id === "path") {
+      return path;
+    }
+    if (id === helperPath) {
+      return autoGate;
+    }
+    throw new Error(`unexpected require(${JSON.stringify(id)}) in the apply-gate step`);
+  };
+  const notices = [];
+  const core = { ...fakeCore(), notice: (message) => notices.push(message) };
+  const env = {
+    GITHUB_WORKSPACE: workspace,
+    HEAD_SHA: headSha,
+    TARGETS_JSON: JSON.stringify(targets),
+    MERGE_ENABLED: mergeEnabled ? "true" : "false",
+    READ_FAILURE: readFailure,
+  };
+  let error = null;
+  try {
+    await script(github, fakeContext(), core, requireStub, { env });
+  } catch (stepError) {
+    error = stepError;
+  }
+  return { notices, error };
+}
+
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
@@ -2928,11 +3918,15 @@ function fakeGateGithub({
   pullRequestsByNumber = {},
   graphqlErrorsByNumber = {},
   mergeError = null,
+  mergeErrors = [],
+  pullGetSnapshots = null,
+  pullGetErrors = [],
   checkWriteError = null,
   checkCreateAcceptedErrors = [],
   checkCreateErrors = [],
   checkUpdateErrors = [],
   workflowDispatchError = null,
+  workflowDispatchErrorsByWorkflow = {},
   nativeAutoMergeDisableError = null,
   autoMergeStateError = null,
   autoMergeStateHeadByNumber = {},
@@ -2956,8 +3950,9 @@ function fakeGateGithub({
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
     github.mergeAttempts += 1;
-    if (mergeError) {
-      throw mergeError;
+    const attemptError = mergeErrors[github.mergeAttempts - 1] || mergeError;
+    if (attemptError) {
+      throw attemptError;
     }
     github.operations.push("merge");
     github.mergedWith = options;
@@ -2977,7 +3972,13 @@ function fakeGateGithub({
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
-    return { data: { id: 10000 + github.createdChecks.length - 1, ...options } };
+    // created_at matters: generation comparison reads it off the check the
+    // transaction owns, and a response without one makes every other check look
+    // newer. Same stamp paginate() synthesizes below, so a transaction's own
+    // check is not mistaken for a later transaction's.
+    return {
+      data: { id: 10000 + github.createdChecks.length - 1, created_at: CHECK_CREATED_AT, ...options },
+    };
   };
   const updateCheck = async function updateCheck(options) {
     github.checkUpdateAttempts += 1;
@@ -3007,7 +4008,11 @@ function fakeGateGithub({
     }
     github.operations.push("check:update");
     github.updatedChecks.push(options);
-    return { data: options };
+    // An update returns the whole check run, id and original created_at included
+    // — not a bare echo of the patch. Generation comparison reads both off it.
+    return {
+      data: { id: options.check_run_id, created_at: CHECK_CREATED_AT, ...options },
+    };
   };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
@@ -3028,7 +4033,9 @@ function fakeGateGithub({
     readAttemptsByFn: {},
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
+    dispatchedWorkflows: [],
     mergeAttempts: 0,
+    pullGetReads: 0,
     nativeAutoMergeDisableAttempts: 0,
     nativeAutoMergeArmed: nativeAutoMergeEnabled,
     autoMergeStateReads: 0,
@@ -3045,12 +4052,14 @@ function fakeGateGithub({
     workflowDispatchAttempts: 0,
     rest: {
       actions: {
-        createWorkflowDispatch: async () => {
+        createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;
-          if (workflowDispatchError) {
-            throw workflowDispatchError;
+          const perWorkflowError = workflowDispatchErrorsByWorkflow[options.workflow_id];
+          if (workflowDispatchError || perWorkflowError) {
+            throw workflowDispatchError || perWorkflowError;
           }
-          github.operations.push("docs:dispatch");
+          github.operations.push(`dispatch:${options.workflow_id}`);
+          github.dispatchedWorkflows.push(options);
         },
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
@@ -3061,14 +4070,20 @@ function fakeGateGithub({
         listReviews,
         listReviewComments,
         merge,
-        // The REST cross-check resolvedPullRequest() uses. It is deliberately a
-        // different code path from the GraphQL read that resolved the PR.
+        // The REST cross-check resolvedPullRequest() uses — deliberately a
+        // different code path from the GraphQL read that resolved the PR — and
+        // the settling re-read a conceded merge race walks through. Successive
+        // reads walk pullGetSnapshots then hold on the last, so a test can say
+        // "still open, then merged".
         get: async () => {
+          const scriptedError = pullGetError || pullGetErrors[github.pullGetReads];
+          const snapshots = pullGetSnapshots || [{ merged, merge_commit_sha: null }];
+          const index = Math.min(github.pullGetReads, snapshots.length - 1);
           github.pullGetReads += 1;
-          if (pullGetError) {
-            throw pullGetError;
+          if (scriptedError) {
+            throw scriptedError;
           }
-          return { data: { number: 1465, merged } };
+          return { data: { number: 1465, ...snapshots[index] } };
         },
       },
     },
@@ -3173,9 +4188,9 @@ function fakeGateGithub({
           ...github.createdChecks.map((created, index) => ({
             id: 10000 + index,
             app: { id: ACTIONS_APP_ID, slug: "github-actions" },
-            created_at: "2026-07-09T01:11:00Z",
-            started_at: "2026-07-09T01:11:00Z",
-            completed_at: "2026-07-09T01:11:00Z",
+            created_at: CHECK_CREATED_AT,
+            started_at: CHECK_CREATED_AT,
+            completed_at: CHECK_CREATED_AT,
             ...created,
           })),
         ];
@@ -3239,6 +4254,237 @@ function fakeGateGithub({
   };
 
   return github;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow trigger scan.
+//
+// Lexical, not a parser. Six review rounds of reading these triggers as YAML by
+// hand each turned up another valid spelling — shorthand, flow mappings, deeper
+// indentation, comments in four positions, an unclosed flow sequence — and every
+// one failed identically: it read as "no trigger here" rather than "cannot read
+// this", so the workflow dropped out of the comparison AND out of
+// MASTER_PUSH_WORKFLOWS at the same moment, silently. The repo has no YAML
+// library (no package.json; web-selftest-scope.test.js reads its workflow
+// textually too), so the answer was to stop needing one.
+//
+// The question is now "does this file's trigger section mention a push
+// trigger?", which no formatting can change the answer to. It over-includes a
+// push trigger scoped to a branch other than master; that is a visible test
+// failure resolved with an explicit exception below, which is the direction that
+// cannot cost master an unverified commit.
+// ---------------------------------------------------------------------------
+
+// Workflows whose trigger section mentions push but which genuinely cannot run
+// on a master push. Empty today; an entry needs a reason, because adding one
+// means the gate will NOT re-raise that workflow after a merge.
+const PUSH_TRIGGER_EXCEPTIONS = {
+  // "name.yml": { reason: "why its push trigger cannot reach master",
+  //               triggers: "<the on: section this reason was written against>" },
+};
+
+// An exception holds only while the triggers it was justified against are
+// unchanged. A name-keyed exemption is permanent, so a workflow later widened to
+// include master would stay exempt and its commits unverified — the exemption
+// outliving the reason for it.
+function exemptedByRecordedTriggers(name, section) {
+  const exception = PUSH_TRIGGER_EXCEPTIONS[name];
+  if (!exception) {
+    return false;
+  }
+  return normalizeTriggers(section) === normalizeTriggers(exception.triggers);
+}
+
+function normalizeTriggers(section) {
+  return withoutComments(section || "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .join("\n");
+}
+
+// The dispatch inputs merge() sends, and what each one's declaration must still
+// accept. A rename, a removal, or a type change on any of these is a 422 after
+// the commit has already landed.
+const SUPPLIED_DISPATCH_INPUTS = {
+  "docs.yml": { verify_sha: { type: "string" } },
+};
+
+// A declaration's DIRECT properties: the lines one level under it, excluding
+// anything nested deeper. A regex over the whole block is satisfied by prose —
+// `description: 'Expected type: string SHA'` inside the same declaration reads
+// as the type itself — so the value has to come from the property, not from the
+// text containing it.
+function directProperties(block) {
+  const [, ...rest] = block.split("\n");
+  const content = rest.filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"));
+  if (content.length === 0) {
+    return {};
+  }
+  const indent = Math.min(...content.map((line) => line.match(/^ */)[0].length));
+  const properties = {};
+  for (const line of content) {
+    if (line.match(/^ */)[0].length !== indent) {
+      continue;
+    }
+    const property = /^ *(?<key>[A-Za-z0-9_-]+):[ \t]*(?<value>.*)$/.exec(line);
+    if (property) {
+      properties[property.groups.key] = property.groups.value.trim().replace(/^["']|["']$/g, "");
+    }
+  }
+  return properties;
+}
+
+// A declaration and everything indented under it: the matched line plus every
+// following line indented deeper. One bounded extraction so an expectation
+// cannot drift into a LATER input's properties — a lazy match across the whole
+// section would accept `verify_sha: boolean` as long as some other input was a
+// string.
+function declarationBlock(text, pattern) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => pattern.test(line));
+  if (start < 0) {
+    return null;
+  }
+  const indent = lines[start].match(/^ */)[0].length;
+  const block = [lines[start]];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim().length === 0) {
+      block.push(line);
+      continue;
+    }
+    if (line.match(/^ */)[0].length <= indent) {
+      break;
+    }
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+// Whether a condition lets a dispatched run through UNCONDITIONALLY. Naming the
+// event is not enough in two different ways: `!= 'workflow_dispatch'` names it in
+// order to exclude it, and `… && inputs.run_checks` admits it only when an input
+// the gate does not supply happens to be set — the dispatch then succeeds and
+// the job it was raised for is skipped anyway.
+function admitsDispatch(condition) {
+  // Unconditional reachability, checked structurally rather than by listing the
+  // contexts that could gate it. Enumerating `inputs.` was the wrong shape:
+  // `vars.`, `env.`, `secrets.`, `needs.` and anything GitHub adds later gate a
+  // dispatch branch just as well. So the requirement is positive — one top-level
+  // disjunct must be the dispatch test AND NOTHING ELSE.
+  return topLevelDisjuncts(condition).some((disjunct) =>
+    /^github\.event_name\s*==\s*'workflow_dispatch'$|^'workflow_dispatch'\s*==\s*github\.event_name$/.test(
+      disjunct,
+    ),
+  );
+}
+
+// A condition's top-level `||` operands, with wrapping parentheses stripped.
+// Depth-aware so `(a || b) && c` is one operand, not two — reading it as two
+// would see a bare dispatch test inside a conjunction that can still exclude it.
+function topLevelDisjuncts(condition) {
+  const operands = [];
+  let depth = 0;
+  let current = "";
+  for (let index = 0; index < condition.length; index += 1) {
+    const character = condition[index];
+    if (character === "(") {
+      depth += 1;
+    } else if (character === ")") {
+      depth -= 1;
+    }
+    if (depth === 0 && character === "|" && condition[index + 1] === "|") {
+      operands.push(current);
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += character;
+  }
+  operands.push(current);
+  return operands.map((operand) => {
+    let text = operand.trim();
+    while (text.startsWith("(") && text.endsWith(")")) {
+      text = text.slice(1, -1).trim();
+    }
+    return text.replace(/\s+/g, " ");
+  });
+}
+
+// Whether a condition consults the event at all — its name or its payload, in
+// dotted or indexed form. `github['event']['head_commit']` is the same predicate
+// as `github.event.head_commit`, and a scan that reads only the dotted spelling
+// answers "this condition does not depend on the event".
+function consultsEvent(condition) {
+  return /github\s*(?:\.\s*event(?:_name|\s*\.)|\[\s*['"]event)/.test(condition);
+}
+
+// A YAML alias or merge key in the trigger section — `on: *push_event`,
+// `<<: *base`. GitHub resolves them; this scan cannot, and an unresolved alias
+// reads as "no push trigger", which is the silent direction. Anything aliased is
+// reported unreadable so it fails by name instead.
+function usesUnresolvableYaml(section) {
+  const triggers = withoutComments(section || "");
+  return /(?:^|[:\-[,{])\s*\*[A-Za-z_]/m.test(triggers) || /^\s*<<\s*:/m.test(triggers);
+}
+
+// The `on:` section: from the `on:` line to the next real top-level key. Comment
+// and blank lines stay inside it, since a standalone comment between events is
+// valid YAML and truncating there loses whatever follows.
+function onSection(text) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => /^on:/.test(line));
+  if (start < 0) {
+    return null;
+  }
+  const section = [lines[start]];
+  for (const line of lines.slice(start + 1)) {
+    if (/^[A-Za-z_]/.test(line)) {
+      break;
+    }
+    section.push(line);
+  }
+  return section.join("\n");
+}
+
+// Comments removed, so prose about push in a trigger section cannot be mistaken
+// for a trigger. Quoted `#` in a workflow trigger section does not occur, and a
+// false strip would only over-include, which fails visibly.
+function withoutComments(text) {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/(^|\s)#.*$/, "$1"))
+    .join("\n");
+}
+
+// Whether the trigger section mentions a push trigger, in any spelling.
+function mentionsPushTrigger(section) {
+  if (section == null) {
+    return false;
+  }
+  const triggers = withoutComments(section);
+  // `on: push`, `on: [push, …]`, `  push:` and `"push":` all contain the token;
+  // `pull_request` and `workflow_dispatch` do not, and a job named push lives
+  // outside this section.
+  // The closing quote is optional on BOTH sides: `on: 'push'` and `on: ['push']`
+  // are as valid as their bare forms, and a scan that requires the token to end
+  // the line answers "no push trigger" for them.
+  return /(?:^|[\s[{,"'])push["']?\s*(?::|,|\]|\}|$)/m.test(triggers);
+}
+
+// The exact wire shape from Auto Gate run 32044471684: GET
+// /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
+// body naming the PR's OWN node id, during a wider GitHub degradation.
+function selfContradictoryNotFound(nodeId = "PR_node_1465") {
+  const body = {
+    type: "NOT_FOUND",
+    path: ["node"],
+    message: `Could not resolve to a node with the global id of '${nodeId}'.`,
+  };
+  const error = new Error(`Not Found: ${JSON.stringify(body)}`);
+  error.status = 404;
+  error.response = { status: 404, data: body };
+  return error;
 }
 
 function fakeContext(payload = {}) {

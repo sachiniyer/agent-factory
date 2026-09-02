@@ -223,6 +223,14 @@ only needs the workspace tooling:
 - **`sh`** and **`sleep`** — the container is kept alive with `sleep`, and setup
   runs through `sh`.
 - **`dd`** — used to stream the live PTY (present in both busybox and coreutils).
+- **`cat`** — reads the agent-server's startup banner, and, for an
+  account-scoped session, the container's own `/proc/1/mountinfo` when af
+  verifies the account boundary (#3598).
+- **`stat`**, **`mkdir`** and **`chown`** — account-scoped sessions ONLY: af asks
+  the mounted account who owns it, then prepares a writable HOME for that same
+  uid. A session with no `--account` never runs these. Both these entries and
+  `cat` were already required and simply missing from this list (#3602 review);
+  busybox and coreutils each provide all of them.
 - The **agent CLIs** you intend to run (claude, codex, aider, gemini, …).
 - A libc/architecture compatible with the daemon's `af` binary. The copied-in
   binary is the **daemon's own executable**, and release builds are a plain

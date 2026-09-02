@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/rpc"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -434,19 +433,18 @@ func SetGlobalConfigValue(key, value string) (SetConfigValueResponse, error) {
 	}
 	resp = SetConfigValueResponse{Result: result}
 	applyResp, applyErr := RequestApplyConfig()
-	applied := applyErr == nil
-	if applied {
+	var outcome config.ApplyOutcome
+	if applyErr == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
+		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 	}
-	// Mirror the notice logic of controlServer.SetConfigValue: a socket key whose
-	// live rebind failed did not apply, so it reports deferred, not applied.
-	if applied && slices.Contains(applyResp.FailedListenerKeys, result.Key) {
-		resp.RestartNotice = config.ListenerRebindDeferredNotice(result.Key)
-	} else {
-		resp.RestartNotice = config.EffectNotice(result.Key, applied)
-	}
+	// The notice logic is no longer mirrored from controlServer.SetConfigValue — it
+	// is the same code, in config.EffectNotice (#3397). Mirroring is what let the
+	// unset surfaces be written without the socket-key branch at all; passing the
+	// whole apply outcome leaves this surface nothing to get wrong.
+	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil
 }
 
@@ -481,14 +479,18 @@ func UnsetGlobalConfigValue(key string) (UnsetConfigValueResponse, error) {
 		return UnsetConfigValueResponse{}, err
 	}
 	resp.Result = result
+	// The whole apply outcome, not just "the apply poke returned nil" (#3397): a
+	// network.listen_addr / network.preview_listen_addr rebind that failed left the
+	// OLD listener serving, and this surface used to report that as "Applied".
 	applyResp, applyErr := RequestApplyConfig()
-	applied := applyErr == nil
-	if applied {
+	var outcome config.ApplyOutcome
+	if applyErr == nil {
 		resp.Applied = applyResp.Applied
 		resp.Pending = applyResp.Pending
 		resp.Warnings = applyResp.Warnings
+		outcome = config.ApplyOutcome{DaemonApplied: true, FailedListenerKeys: applyResp.FailedListenerKeys}
 	}
-	resp.RestartNotice = config.EffectNotice(result.Key, applied)
+	resp.RestartNotice = config.EffectNotice(result.Key, outcome)
 	return resp, nil
 }
 

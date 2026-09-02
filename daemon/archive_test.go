@@ -229,10 +229,10 @@ func TestArchiveSessionRevalidatesInterruptedMoveBeforeOperatorHook(t *testing.T
 	writeOnArchiveCommand(t, `printf ran > "$AF_WORKTREE_PATH/foreign-hook-ran"`)
 	movedAside := srcPath + "-identity-owner"
 	originalTeardown := archiveTeardown
-	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
+	archiveTeardown = func(target *session.Instance, archiveDest string, claim sessiongit.RelocationClaim, beforeMove func() error, _ bool) (error, error) {
 		require.NoError(t, os.Rename(srcPath, movedAside))
 		require.NoError(t, os.Mkdir(srcPath, 0o755))
-		return originalTeardown(target, archiveDest, claim, beforeMove)
+		return originalTeardown(target, archiveDest, claim, beforeMove, true)
 	}
 	t.Cleanup(func() { archiveTeardown = originalTeardown })
 

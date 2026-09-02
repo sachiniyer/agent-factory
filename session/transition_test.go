@@ -75,6 +75,9 @@ func TestTransitionTable_RunEffectsAreTheAgreedTable(t *testing.T) {
 		tkBeginRestore:       runKeep,
 		tkAbortRestoreToLost: runKeep,
 		tkMarkRestoring:      runKeep,
+		// Same edge as tkBeginRestore, entered from a fence the caller already
+		// holds (#3596), so it answers the run question identically.
+		tkBeginRestoreFenced: runKeep,
 		// A handoff continues the same task run; begin/commit/abort only bracket
 		// which agent process owns it.
 		tkBeginHandoff:  runKeep,
@@ -138,6 +141,10 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		// MarkRestoring: optimistic restore overlay — OpRestoring, liveness KEPT
 		// Archived (unlike BeginRestore which flips to Lost), started untouched.
 		{"MarkRestoring keeps liveness", stateAxes{LiveArchived, OpNone}, false, false, MarkRestoring(), LiveArchived, OpRestoring, false},
+		// BeginRestoreUnderHeldFence is BeginRestore entered from the caller's own
+		// MarkRestoring fence (#3596): same {LiveLost, OpRestoring} target, same
+		// started=true, only the op it is legal FROM differs.
+		{"BeginRestoreUnderHeldFence from a held fence", stateAxes{LiveArchived, OpRestoring}, false, false, BeginRestoreUnderHeldFence(), LiveLost, OpRestoring, true},
 		{"BeginHandoff fences running agent", stateAxes{LiveRunning, OpNone}, true, false, BeginHandoff(), LiveRunning, OpReplacing, true},
 		{"CommitHandoff settles incoming agent", stateAxes{LiveReady, OpReplacing}, true, false, CommitHandoff(), LiveRunning, OpNone, true},
 		{"ParkHandoff settles incoming agent at limit", stateAxes{LiveRunning, OpReplacing}, true, false, ParkHandoff(time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)), LiveLimitReached, OpNone, true},

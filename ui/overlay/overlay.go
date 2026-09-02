@@ -6,9 +6,10 @@ import (
 	"strings"
 
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/muesli/ansi"
+
 	"github.com/muesli/reflow/truncate"
 	"github.com/muesli/termenv"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // Most of this code is modified from https://github.com/charmbracelet/lipgloss/pull/102
@@ -129,76 +130,20 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
-// lineWidth is the compositor's single answer to "how many cells does this row
-// occupy", and every line measurement in this file goes through it.
-//
-// It is ansi.PrintableRuneWidth over xansi.Strip's output. Stripping first is a
-// correction, not a change of measure — PrintableRuneWidth already ignores SGR, so
-// for anything without an OSC sequence the two are identical by construction, and
-// that equivalence is pinned by a test. The distinction matters:
-//
-//   - Grapheme clustering IS a genuine disagreement. A joined-emoji family is 2
-//     cells to lipgloss, 8 to PrintableRuneWidth, and 4 to tmux 3.4 actually
-//     advancing its cursor. Which is right depends on the emulator, so #3433 defers
-//     it and getLines' note carries the measurements. Stripping does not touch it.
-//   - An OSC sequence is NOT. A hyperlink escape occupies zero cells on every
-//     terminal. PrintableRuneWidth reads a 4-cell hyperlink as 21 because it takes
-//     the first letter of the URI for the sequence terminator and counts the rest as
-//     text — a parsing bug with no emulator on the other side of it.
-//
-// The parser is used rather than a regex of this file's own because it covers the
-// forms a regex keeps missing: 7-bit ST, BEL, and the 8-bit ST terminator are all
-// handled. Measured limitation: the 8-bit OSC INTRODUCER (0x9d) is not, by
-// xansi.Strip either — a row using it still measures as its URI. That form is
-// essentially unreachable from a UTF-8 terminal, and af emits only the 7-bit forms;
-// it is noted rather than hand-rolled around, because a bespoke parser here is what
-// this function exists to stop being.
+// lineWidth is the compositor's width measure. It is layout.Cells — the ONE width
+// answer shared with the panes and with app's overlayOrigin (#3585), so the
+// compositor can no longer disagree with the code that decides where a modal goes
+// or where its mouse zones are registered. See layout.Cells for the tmux
+// measurements that chose it.
 func lineWidth(s string) int {
-	return ansi.PrintableRuneWidth(xansi.Strip(s))
+	return layout.Cells(s)
 }
 
-// clipLine truncates one foreground row to width WITHOUT ever cutting through a
-// control sequence.
-//
-// Two truncators, because neither is right for both kinds of row and the failure
-// modes are not symmetric:
-//
-//   - reflow's truncator accounts per printable rune with runewidth, exactly as
-//     getLines and the placement arithmetic below do, so its result really is
-//     within width by this compositor's measure. But it is not OSC-aware: it takes
-//     the first letter of a hyperlink's URI for the sequence terminator, counts the
-//     rest of the URI as visible text, and will happily cut in the middle of it.
-//     Measured, truncating a 4-cell hyperlink to 10 yields "\x1b]8;;https://exa" —
-//     an unterminated OSC command, which swallows whatever the terminal is given
-//     next.
-//   - x/ansi parses OSC properly and keeps sequences atomic, but measures in cells
-//     rather than printable runes, so it does not bound the row by the measure the
-//     rest of this function uses.
-//
-// A mangled control sequence is the worse failure — it corrupts output past the
-// modal, not just inside it — so a row carrying one is clipped with the parser and
-// a plain row with the measure-consistent truncator. Both are then measured by
-// lineWidth, which discounts the OSC sequences either way, so the placement
-// arithmetic sees the cells the row actually occupies.
+// clipLine truncates one foreground row to width. layout.TruncateToCells is the
+// shared implementation — the compositor and the pane clamp had the same
+// measure-versus-truncator problem and now have one answer to it (#3585).
 func clipLine(line string, width int) string {
-	// ONE truncator, no routing. Choosing between them on whether the two measures
-	// disagree looked sound and is not: the OSC overcount can CANCEL the grapheme
-	// disagreement, so a row carrying a hyperlink can measure identically under both
-	// and take the branch that cuts through it. Any predicate of this file's own is
-	// the same bet in a different disguise, so the parser clips everything and the
-	// question does not arise.
-	//
-	// x/ansi truncates by CELLS, which is not the measure the arithmetic below uses,
-	// so it is asked for progressively less until the result fits by lineWidth. For
-	// a plain row the two agree and the first attempt is already the answer; only an
-	// over-wide row iterates, and only down to what fits.
-	for w := width; w >= 0; w-- {
-		out := xansi.Truncate(line, w, "")
-		if lineWidth(out) <= width {
-			return out
-		}
-	}
-	return ""
+	return layout.TruncateToCells(line, width)
 }
 
 // widestLine measures the widest of these rows with the same measure getLines
@@ -267,8 +212,9 @@ func closeSequences(line string) string {
 // Split a string into lines, additionally returning the size of the widest
 // line.
 //
-// The measure here is ansi.PrintableRuneWidth, and it is deliberately left alone
-// (#3433). Three width functions are in use in this tree and they disagree; for
+// The measure here is layout.Cells, the ONE width answer shared with the panes and
+// with app's overlayOrigin (#3585). It was ansi.PrintableRuneWidth alone until
+// then, and the disagreement that caused is why #3433 exists: Three width functions are in use in this tree and they disagree; for
 // one joined-emoji family ("\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466",
 // four emoji and three ZWJs) they were measured at:
 //
@@ -276,15 +222,11 @@ func closeSequences(line string) string {
 //	ansi.PrintableRuneWidth (this function)                      8 cells
 //	tmux 3.4, actually advancing the cursor                      4 cells
 //
-// The obvious repair — give the compositor the same measure the panes size
-// themselves with — is NOT obviously right, and the tmux number is why. The
-// compositor's job is to count the cells the terminal will advance, and af renders
-// into tmux; swapping 8 for 2 would trade an overestimate of 4 for an
-// underestimate of 2, still wrong and now wrong in the direction that writes past
-// the frame instead of stopping short of it. Picking correctly needs the same
-// measurement across the emulators af supports, which is its own change.
-//
-// What PlaceOverlay no longer does is turn that disagreement into a blank screen.
+// The obvious repair — adopt the measure the panes used — was not obviously right
+// either, and the tmux row is why: swapping 8 for 2 trades an overestimate for an
+// UNDERestimate, which writes past the frame instead of stopping short of it.
+// layout.Cells resolves it by never reporting fewer cells than tmux advances; its
+// doc carries the full corpus those numbers come from.
 func getLines(s string) (lines []string, widest int) {
 	lines = strings.Split(s, "\n")
 
@@ -326,10 +268,11 @@ func PlaceOverlay(
 	// merely MEASURED too wide blanked the whole TUI, silently, and only on the
 	// frames where the offending text was on screen. It is reachable without any
 	// modal actually being oversized, because the measures disagree: panes size and
-	// truncate themselves with lipgloss.Width, this compositor counts with
-	// ansi.PrintableRuneWidth, and for one joined-emoji family those read 2 cells
-	// and 8. A pane can therefore be certain it fits while the compositor is
-	// certain it does not.
+	// truncated themselves with lipgloss.Width while this compositor counted with
+	// ansi.PrintableRuneWidth — for one joined-emoji family, 2 cells against 8 — so
+	// a pane could be certain it fitted while the compositor was certain it did
+	// not. Both sides now measure with layout.Cells (#3585), but the clip stays:
+	// it is what makes an over-wide modal cost a few cells instead of the frame.
 	//
 	// Clipping is the right failure whichever measure is eventually agreed on: a
 	// modal one cell too wide loses a cell, which is visible and bounded, instead
@@ -492,12 +435,21 @@ func (w whitespace) render(width int) string {
 		if j >= len(r) {
 			j = 0
 		}
-		i += ansi.PrintableRuneWidth(string(writtenRune))
+		// layout.Cells, like every other measurement here, so the padding this
+		// emits is counted in the same cells the compositor budgeted for it. The
+		// max(…,1) is a hang guard, not a width decision: a zero-width rune in the
+		// pattern (a ZWJ, a combining mark) never advances i, and the loop would
+		// spin forever appending it.
+		if advance := layout.Cells(string(writtenRune)); advance > 0 {
+			i += advance
+		} else {
+			i++
+		}
 	}
 
 	// Fill any extra gaps white spaces. This might be necessary if any runes
 	// are more than one cell wide, which could leave a one-rune gap.
-	short := width - ansi.PrintableRuneWidth(b.String())
+	short := width - layout.Cells(b.String())
 	if short > 0 {
 		b.WriteString(strings.Repeat(" ", short))
 	}

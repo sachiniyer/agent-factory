@@ -97,7 +97,9 @@ func (b *FakeBackend) Launch(instance *Instance, _ bool) error {
 	return nil
 }
 
-func (b *FakeBackend) Kill(instance *Instance) error {
+// trustLiveGeneration is unused: the fake backend has no tmux/generation
+// concept (#3413).
+func (b *FakeBackend) Kill(instance *Instance, _ bool) error {
 	instance.SetStartedForTest(false)
 	return nil
 }

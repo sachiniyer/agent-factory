@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -350,7 +352,7 @@ func (s *SearchOverlay) Render() string {
 		lines = append(lines, "")
 	}
 	hint := "↑/↓ navigate · enter select · esc close"
-	if plan.compact || lipgloss.Width(hint) > plan.contentWidth {
+	if plan.compact || layout.Cells(hint) > plan.contentWidth {
 		hint = "↑/↓ nav · enter · esc close"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), plan.contentWidth))

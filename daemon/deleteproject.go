@@ -177,7 +177,7 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 // unknown project archives nothing, drops no opt-in or registration, and returns
 // a zero-count success; a registered project with no sessions is deregistered.
 func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, error) {
-	target, err := resolveDeleteProjectTarget(req)
+	target, err := m.resolveDeleteProjectTarget(req)
 	if err != nil {
 		return DeleteProjectResult{RepoID: target.repoID}, err
 	}
@@ -189,12 +189,73 @@ func (m *Manager) DeleteProject(req DeleteProjectRequest) (DeleteProjectResult, 
 type deleteProjectTarget struct {
 	repoID   string
 	repoPath string
+	// claimantProjectID names the registry record whose root is repoPath, so a
+	// suppression tombstone records WHOSE delete it was and a later proven
+	// mismatch releases it only for that claimant (#3299 review round 15). It
+	// is resolved here rather than at suppression time because finding it
+	// stats every recorded root, and #3361's whole point is that a stalled
+	// mount must not be walked while taskTargetMu is held. Best-effort: a
+	// registry read failure leaves it "" — an unreleasable tombstone, the
+	// conservative direction.
+	claimantProjectID string
+}
+
+// claimantForRecord decides whether a registry row may be recorded as the
+// claimant of the tombstone this delete is about to install, and answers with
+// POSITIVE evidence only (#3299 review id 3908667983).
+//
+// Matching a row by PATHNAME never made the checkout being deleted that row's
+// project, and an earlier version of this guard only excluded a mismatch the
+// snapshot had ALREADY proven. That is absence of evidence standing in for
+// evidence: an unrelated clone appearing and being path-deleted before its
+// probe published anything — or while its marker is unreadable — still claimed
+// the stale row. The retained probe then finishes with identityMismatch, which
+// rootDeletionTombstoneApplies reads as disproof of the tombstone this delete
+// just installed, and the immutable in-memory legacy entry recreates the root
+// it tore down. A delete that undoes itself.
+//
+// Two things count as evidence, and nothing else does:
+//
+//   - the checkout at the recorded root carries this record's marker, so it
+//     provably IS this project;
+//   - the recorded root is determinately ABSENT, so no checkout contradicts
+//     the record and it remains the only claimant of that path. This case is
+//     load-bearing rather than permissive: deleting a project while its path
+//     is unavailable is the ordinary shape here, and it is what lets a later
+//     occupant's proven mismatch release the tombstone (#3299 review round 15).
+//
+// A present path whose marker mismatches, cannot be read, or cannot be probed
+// leaves the claimant empty — an unreleasable tombstone, which is the
+// conservative direction.
+func claimantForRecord(p config.Project) string {
+	// Absence is checked FIRST, and the order is the point (#3299 review id
+	// 3911002415). Both observations can report "no marker here", but only one
+	// of them is evidence FOR the record: an absent root means nothing
+	// contradicts it, while a present checkout whose marker does not match
+	// positively DISPROVES it. Asking the marker first let a disproof be
+	// overturned by an occupant that vanished a moment later, and the claim
+	// that followed kept repoPath alive — so the delete could deregister the
+	// original project's row on the strength of a checkout already shown not
+	// to be it.
+	if absent, err := recordRootAbsent(p.Root); err == nil && absent {
+		return p.ID
+	}
+	if matches, err := config.ProjectCheckoutMatches(p.Root, p.CheckoutID); err == nil && matches {
+		return p.ID
+	}
+	return ""
 }
 
 // resolveDeleteProjectTarget performs every filesystem/Git selector probe
 // before DeleteProject takes taskTargetMu. A stale registry root must not hold
 // the cross-task lifecycle lock while Git waits on an unrelated mount.
-func resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
+//
+// It is a method because re-attribution aliasing (#3299) has to be resolved
+// with those probes rather than after them: the alias decides WHICH identity
+// the delete targets, and the occupant check that guards it is itself a Git
+// probe. m.rootAgentLayers is an atomic pointer, so reading the snapshot here
+// takes no lock and keeps #3361's pre-lock boundary intact.
+func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
 	if repoID == "" {
@@ -241,7 +302,36 @@ func resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, 
 			repoPath = registeredRoot
 		}
 	}
-	return deleteProjectTarget{repoID: repoID, repoPath: repoPath}, nil
+	claimantProjectID := ""
+	if repoPath != "" {
+		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
+			for _, p := range projects {
+				if filepath.Clean(p.Root) != filepath.Clean(repoPath) {
+					continue
+				}
+				claimantProjectID = claimantForRecord(p)
+				if claimantProjectID == "" {
+					// The row matches this path by NAME, but nothing proves the
+					// checkout being deleted is that row's project — an
+					// unrelated clone at an unresolved project's old path,
+					// deleted before attribution has a verdict. Deregistering
+					// on a pathname match alone would destroy the original
+					// project's registry directory and its personal config on
+					// behalf of a delete that never targeted it (#3299 review
+					// id 3910519845). Drop the path: the delete still tears
+					// down and suppresses the occupant, and the stale record
+					// stays for its own owner to resolve or remove.
+					repoPath = ""
+				}
+				break
+			}
+		}
+	}
+	return deleteProjectTarget{
+		repoID:            repoID,
+		repoPath:          repoPath,
+		claimantProjectID: claimantProjectID,
+	}, nil
 }
 
 // deleteProject performs DeleteProject while taskTargetMu is already held from
@@ -305,6 +395,11 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// in-memory change also keeps the failure ATOMIC: on error nothing is archived
 	// AND no in-memory suppression is left behind, so a failed delete leaves the
 	// project fully intact. A project with no opt-in is a nil, nil no-op.
+	// BOTH identities in ONE durable mutation (#3299 review rounds 6-7): a
+	// re-attributed project's legacy key spelled as the unavailable recorded
+	// path matches only its derived hash, and two separate writes could
+	// remove one opt-in and then fail — falsifying the nothing-was-changed
+	// guarantee below.
 	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
@@ -321,7 +416,18 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// after start). Doing it before the teardown guarantees no poll tick respawns
 	// the root we are about to tear down; doing it only AFTER the persist means a
 	// failed write above never leaves a dangling suppression (#1740 review).
-	m.suppressRootAgent(repoID)
+	// The tombstone records WHOSE delete this was, so a later proven
+	// mismatch can release it only for the deleted claimant itself (#3299
+	// review round 15). Resolved before the lock — see deleteProjectTarget.
+	m.suppressRootAgent(repoID, resolved.claimantProjectID)
+	// A re-attribution probe for the deleted project is deliberately LEFT
+	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
+	// is unfinished, the attribution-pending gate fails the candidate repo
+	// closed — which doubles as this delete's suppression — and its eventual
+	// completion publishes the reattributedFrom alias that carries the
+	// tombstones above to the real identity. Retiring or exempting the probe
+	// (both tried) opened a window where an in-memory legacy entry could
+	// resurrect the deleted root before the alias existed.
 
 	// Archive/kill every live session for the repo BEFORE removing its durable identity,
 	// so no session outlives the project's registry entry (#2549). The phase-1 gate above
@@ -505,7 +611,7 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 	// config becomes readable again — the exact hazard this preflight refuses.
 	if !hasRoot {
 		switch m.rootAgentMaterializeVerdictFor(repoID).reason {
-		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable:
+		case rootAgentWillMaterialize, rootAgentRegistryUnreadable, rootAgentPersonalUnreadable, rootAgentProjectUnresolved, rootAgentRecordsUnreadable, rootAgentAttributionPending:
 			titles = append(titles, session.RootSessionTitle)
 		}
 	}
@@ -537,9 +643,9 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 // and clears the kill-grace record so no stale grace window survives (#1735). The
 // ensure loop is keyed by config path, not repoID, so the deletedRootRepos check
 // (which resolves each path to its repoID) is where suppression takes effect.
-func (m *Manager) suppressRootAgent(repoID string) {
+func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.deletedRootRepos[repoID] = struct{}{}
+	m.deletedRootRepos[repoID] = claimantProjectID
 	delete(m.rootKilledAt, repoID)
 }

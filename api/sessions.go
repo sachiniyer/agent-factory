@@ -505,12 +505,11 @@ pointing at one).`,
 				// cleaning up after a failed create, which is when it most has to be
 				// pasteable (#3420). A safe title still prints unquoted.
 				//
-				// `--` because quoting cannot answer option parsing: `--name=-worker` is a
-				// valid title, and `af sessions kill '-worker'` still exits "unknown
-				// shorthand flag". shellsuggest quotes an argument and deliberately leaves
-				// option termination to the call site, which is the convention
-				// daemon/sandbox_preserve.go's kill suggestion already states.
-				shellsuggest.Command("af", "sessions", "kill", "--", data.Title)))
+				// PositionalCommand, not Command, because quoting cannot answer option
+				// parsing: `--name=-worker` is a valid title, and `af sessions kill
+				// '-worker'` still exits "unknown shorthand flag". The terminator lives in
+				// that helper so no call site has to remember it (#3432).
+				shellsuggest.PositionalCommand("af", []string{"sessions", "kill"}, data.Title)))
 		}
 
 		return jsonOut(data)

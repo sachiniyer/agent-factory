@@ -54,7 +54,7 @@ func TestArchiveTeardown_PaneAbortRestoresConsumedRecoveryClaim(t *testing.T) {
 
 	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 	inst.gitWorktree = gw
-	_, archiveErr := inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil)
+	_, archiveErr := inst.ArchiveTeardownWithClaim(t.TempDir(), claim, nil, false)
 	require.ErrorIs(t, archiveErr, ErrPaneMayBeLive)
 	recovery, retained := gw.GetRelocationRecovery()
 	require.True(t, retained,
@@ -97,12 +97,51 @@ func TestLocalBackendKill_PaneAbortRestoresConsumedCleanupClaim(t *testing.T) {
 
 	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 	inst.gitWorktree = gw
-	err = (&LocalBackend{}).Kill(inst)
+	err = (&LocalBackend{}).Kill(inst, false)
 	require.ErrorIs(t, err, ErrPaneMayBeLive)
 	recovery, retained := gw.GetRelocationRecovery()
 	require.True(t, retained, "pane abort must restore the consumed cleanup authorization")
 	assert.Equal(t, git.RelocationRecoveryCleanupReady, recovery.State)
 	assert.True(t, recovery.IdentityKnown)
+}
+
+// TestPrepareKillTeardown_PropagatesTrustThroughEveryBranch pins the #3413
+// completeness fix: prepareKillTeardown's caller-supplied trustLiveGeneration
+// must reach the teardownKill it returns on EVERY branch, not just the
+// cleanup-ready-claim one. Two of the four teardownKill{} constructions
+// (no-worktree, and the ordinary resolved-worktree case — the common path for
+// a live, non-archived session) were literal zero values that silently
+// dropped a caller's true back to false, which would have made the #3413 fix
+// inert for the exact scenario it targets: an ordinary kill/archive of a
+// flapping session almost always has a resolved worktree with nothing
+// pending, so it is THIS branch the daemon's trusted call actually needs.
+func TestPrepareKillTeardown_PropagatesTrustThroughEveryBranch(t *testing.T) {
+	root := t.TempDir()
+	worktree := filepath.Join(root, "wt")
+	require.NoError(t, os.Mkdir(worktree, 0o755))
+	gw, err := git.NewGitWorktreeFromStorage(
+		root, worktree, "ordinary", "af/ordinary", "", false, true,
+	)
+	require.NoError(t, err)
+	_, _, unresolved := gw.RelocationSnapshot()
+	require.False(t, unresolved, "test setup must land on the ordinary (no pending relocation) branch")
+
+	withWorktree := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	withWorktree.gitWorktree = gw
+
+	mode, _, err := withWorktree.prepareKillTeardown(false)
+	require.NoError(t, err)
+	require.False(t, mode.trustLiveGeneration, "the default call must not trust")
+
+	trusted, _, err := withWorktree.prepareKillTeardown(true)
+	require.NoError(t, err)
+	require.True(t, trusted.trustLiveGeneration, "the ordinary resolved-worktree branch must carry the caller's trust decision")
+
+	// No worktree at all: still must carry the caller's decision.
+	bare := instanceWithTmuxTab(t, &tmux.TmuxSession{})
+	bareTrusted, _, err := bare.prepareKillTeardown(true)
+	require.NoError(t, err)
+	require.True(t, bareTrusted.trustLiveGeneration, "the no-worktree branch must carry the caller's trust decision")
 }
 
 // The #1917 follow-up locks: bounding the teardown's tmux commands means they can

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/muesli/ansi"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // joinedFamily is one emoji ZWJ sequence: four emoji joined by three ZWJs.
@@ -34,9 +36,17 @@ func TestPlaceOverlayKeepsTheFrameWhenAModalMeasuresTooWide(t *testing.T) {
 	bgRow := strings.Repeat("x", cols)
 	bg := strings.TrimSuffix(strings.Repeat(bgRow+"\n", rows), "\n")
 
+	// Under the OLD split measures this row read 88 cells against an 80-column
+	// frame and tripped the drop. Since #3585 the compositor measures with
+	// layout.Cells, which puts it at 22 — so it now correctly FITS, and the false
+	// positive that started #3433 cannot arise. The frame assertions below still
+	// hold, and the genuinely-too-wide case is covered by the sibling test.
 	modalRow := strings.Repeat(joinedFamily, 11)
 	if w := ansi.PrintableRuneWidth(modalRow); w <= cols {
-		t.Fatalf("precondition: the modal row must read too wide under the compositor's measure; got %d for %d columns", w, cols)
+		t.Fatalf("precondition: this row is what the OLD measure over-read; got %d", w)
+	}
+	if w := lineWidth(modalRow); w > cols {
+		t.Fatalf("precondition: under the unified measure it must fit; got %d for %d columns", w, cols)
 	}
 	fg := strings.Join([]string{modalRow, modalRow, modalRow}, "\n")
 
@@ -53,9 +63,10 @@ func TestPlaceOverlayKeepsTheFrameWhenAModalMeasuresTooWide(t *testing.T) {
 	if !strings.Contains(out, "\U0001F468") {
 		t.Fatal("the modal must still be rendered (clipped), not omitted")
 	}
-	// And nothing may be written past the terminal's own width.
+	// And nothing may be written past the terminal's own width, by the measure the
+	// compositor actually uses.
 	for i, line := range lines {
-		if w := ansi.PrintableRuneWidth(line); w > cols {
+		if w := lineWidth(line); w > cols {
 			t.Fatalf("line %d overflows the background: width %d > %d", i, w, cols)
 		}
 	}
@@ -103,7 +114,7 @@ func TestPlaceOverlayClipsBeforeClamping(t *testing.T) {
 	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
 	// Oversize in BOTH dimensions at once, and centered, so a negative slack would
 	// reach the clamp from both directions.
-	fgRow := strings.Repeat(joinedFamily, 6) // 48 cells by the compositor's measure
+	fgRow := strings.Repeat(joinedFamily, 30) // 60 cells by the compositor's measure, over a 20-cell frame
 	fg := strings.TrimSuffix(strings.Repeat(fgRow+"\n", rows+3), "\n")
 
 	out := PlaceOverlay(0, 0, fg, bg, true)
@@ -113,7 +124,7 @@ func TestPlaceOverlayClipsBeforeClamping(t *testing.T) {
 		t.Fatalf("got %d lines, want %d", len(lines), rows)
 	}
 	for i, line := range lines {
-		if w := ansi.PrintableRuneWidth(line); w != cols {
+		if w := lineWidth(line); w != cols {
 			t.Fatalf("line %d width %d, want exactly %d: the frame must stay rectangular", i, w, cols)
 		}
 	}
@@ -380,25 +391,22 @@ func TestPlaceOverlayMeasuresAHyperlinkRowByItsVisibleCells(t *testing.T) {
 	}
 }
 
-// lineWidth corrects OSC measurement WITHOUT changing the measure for anything
-// else. That distinction is the whole justification for making this correction
-// inside a PR that explicitly defers the measure question, so it is pinned: for
-// any content without an OSC sequence — emoji, CJK, SGR, plain — lineWidth must
-// agree with ansi.PrintableRuneWidth exactly. If someone later "simplifies" it to
-// xansi.StringWidth, this fails, because that WOULD be the deferred change.
-func TestLineWidthMatchesPrintableRuneWidthWithoutOSC(t *testing.T) {
+// lineWidth is layout.Cells — the compositor shares the ONE measure with the panes,
+// app's overlayOrigin and the mouse zones (#3585). Pinned, because the whole point
+// of that issue is that these cannot be allowed to drift apart again.
+//
+// This replaces a guard that required lineWidth to equal ansi.PrintableRuneWidth for
+// non-OSC content. That guard existed to stop #3433's OSC correction from silently
+// becoming the deferred measure change; #3585 MAKES that change, deliberately and
+// from tmux measurements, so the guard's job has moved to layout's corpus test.
+func TestLineWidthIsTheSharedMeasure(t *testing.T) {
 	for _, s := range []string{
-		"plain",
-		"",
-		"\x1b[31mred\x1b[0m",
-		strings.Repeat(joinedFamily, 5),
-		"你好世界",
-		"mixed 你 \x1b[1mbold\x1b[0m 👍",
-		strings.Repeat("x", 200),
+		"plain", "", "\x1b[31mred\x1b[0m", strings.Repeat(joinedFamily, 5),
+		"你好世界", "mixed 你 \x1b[1mbold\x1b[0m 👍", strings.Repeat("x", 200),
+		"\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\",
 	} {
-		if got, want := lineWidth(s), ansi.PrintableRuneWidth(s); got != want {
-			t.Fatalf("lineWidth(%q) = %d, ansi.PrintableRuneWidth = %d: they must be identical "+
-				"for content with no OSC sequence, or this is a measure change and not a correction", s, got, want)
+		if got, want := lineWidth(s), layout.Cells(s); got != want {
+			t.Fatalf("lineWidth(%q) = %d, layout.Cells = %d: the compositor must not have its own measure", s, got, want)
 		}
 	}
 }
@@ -411,7 +419,7 @@ func TestPlaceOverlayClipsARowMixingAHyperlinkAndClusteredText(t *testing.T) {
 	const cols, rows = 10, 3
 	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
 
-	mixed := "\x1b]8;;https://example.com\x1b\\" + strings.Repeat(joinedFamily, 3) + "\x1b]8;;\x1b\\"
+	mixed := "\x1b]8;;https://example.com\x1b\\" + strings.Repeat(joinedFamily, 12) + "\x1b]8;;\x1b\\"
 	if lineWidth(mixed) <= cols {
 		t.Fatalf("precondition: the row must still read too wide after discounting the OSC; got %d", lineWidth(mixed))
 	}

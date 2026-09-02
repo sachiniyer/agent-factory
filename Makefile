@@ -75,8 +75,11 @@ remote-agent-server-roundtrip-container:
 # GitHub. Runs ON THE HOST (needs a real docker daemon); it is NOT inside the
 # testbox fence, which has no docker. SKIPS cleanly where docker is unavailable.
 # See docs/backends.md.
+# The #3598 account-alias case runs here too: a REAL image carrying
+# `ln -s /af-account /device-target` proves the runtime boundary check reads what
+# the kernel resolved rather than what run_args said.
 backend-docker-roundtrip:
-	go test ./integration -run 'TestDockerBackend(RoundTrip|ArchiveRestore)' -v -count=1 -timeout 20m
+	go test ./integration -run 'TestDockerBackend(RoundTrip|ArchiveRestore|AccountMountAliasRefused)' -v -count=1 -timeout 20m
 
 # SSH remote-machine backend round-trip (#1592 Phase 4 PR5/PR6): runs a session on
 # a REAL remote host over ssh to parity — stand up a throwaway sshd+git+tmux

@@ -194,7 +194,7 @@ func TestNewInertSandboxBackend(t *testing.T) {
 		assert.True(t, caps.Archive, "archive capability")
 		assert.True(t, caps.Recover, "recover capability")
 		// Nil-reap Kill must not panic (nothing live to tear down).
-		require.NoError(t, b.Kill(&Instance{}))
+		require.NoError(t, b.Kill(&Instance{}, false))
 	}
 }
 
@@ -265,7 +265,7 @@ type stubAgentServer struct {
 }
 
 func (s *stubAgentServer) Archive() (string, error) { return s.branch, nil }
-func (s *stubAgentServer) Kill() error              { s.killCalls++; return s.killErr }
+func (s *stubAgentServer) Kill(bool) error          { s.killCalls++; return s.killErr }
 
 func (s *stubAgentServer) Provision(bool) error            { return nil }
 func (s *stubAgentServer) Launch(bool) error               { return nil }

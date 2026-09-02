@@ -248,7 +248,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		restoreCheckpoint := instance.SetRepoGoneFinalizationCheckpoint(func() error {
 			return m.persistInstanceErr(repoID, instance)
 		})
-		teardownErr = instance.Kill()
+		// Trusting: this call sits inside killsInFlight + the per-session op-lock
+		// acquired above, which rules out a same-name replacement appearing
+		// mid-teardown (#3413) — see Instance.KillTrustingOwnLifecycleLock.
+		teardownErr = instance.KillTrustingOwnLifecycleLock()
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
 			log.WarningLog.Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
@@ -471,10 +474,11 @@ func promptTargetLivenessError(title string, liveness session.Liveness) error {
 		// Archived sessions have no live tmux to deliver into (#1529): without
 		// this case the prompt falls through to a confusing backend error. Point
 		// at the off-ramp, mirroring the TUI's interactiveGuard message. The
-		// restore command embeds the title, so shell-quote it — a title with
-		// spaces or shell metacharacters must not turn a copy-pasted
-		// `af sessions restore ...` into the wrong target or a second command.
-		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.Command("af", "sessions", "restore", title))
+		// restore command embeds the title, so it goes through shellsuggest — a title
+		// with spaces or shell metacharacters must not turn a copy-pasted
+		// `af sessions restore ...` into the wrong target or a second command, and a
+		// title beginning with "-" must not be parsed as a flag by af itself (#3432).
+		return fmt.Errorf("target session %q is Archived; prompt not delivered; restore it first (%s)", title, shellsuggest.PositionalCommand("af", []string{"sessions", "restore"}, title))
 	}
 	return nil
 }

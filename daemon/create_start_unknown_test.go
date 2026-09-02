@@ -28,7 +28,7 @@ func (b *unknownStartBackend) Start(*session.Instance, bool) error {
 	return fmt.Errorf("startup readiness timed out: %w", session.ErrPaneMayBeLive)
 }
 
-func (b *unknownStartBackend) Kill(*session.Instance) error {
+func (b *unknownStartBackend) Kill(*session.Instance, bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.killCalls++

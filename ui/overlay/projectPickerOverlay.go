@@ -273,7 +273,7 @@ func (p *ProjectPickerOverlay) Render() string {
 
 	lines = append(lines, "")
 	hint := "j/k navigate · enter switch · esc cancel"
-	if lipgloss.Width(hint) > cw {
+	if layout.Cells(hint) > cw {
 		hint = "j/k · enter · esc"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), cw))

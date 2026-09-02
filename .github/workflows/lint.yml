@@ -9,6 +9,12 @@ on:
       - 'go.sum'
       - '.github/workflows/lint.yml'
 
+  # A merge performed with GITHUB_TOKEN does not trigger `push`, so an auto-gate
+  # merge would land on master without this gate ever running (#3435). The gate
+  # re-raises it here by hand; `workflow_dispatch` is the documented exception to
+  # that suppression. No `paths:` filter applies to a dispatch, so it always runs.
+  workflow_dispatch:
+
 # Read-only: workflow only checks out source and runs golangci-lint + gofmt.
 permissions:
   contents: read

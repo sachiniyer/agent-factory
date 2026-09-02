@@ -8,10 +8,30 @@ on:
   workflow_dispatch:
     inputs:
       deploy_docs:
-        description: 'Deploy docs from master without a push event'
+        # Tri-state on purpose. 'auto' means "decide the same way a push would",
+        # by diffing this commit's own paths below — which is what the auto-gate
+        # merge dispatch uses (#3435), because a GITHUB_TOKEN push suppresses the
+        # push trigger and something has to re-raise this run. The caller passing
+        # nothing therefore gets the push behaviour rather than a second copy of
+        # the path list living in the caller, where it had already drifted.
+        # 'true'/'false' stay available for a manual deploy or a dry run.
+        description: 'Deploy docs: auto (same rule as a push), or force true/false'
         required: false
-        default: false
-        type: boolean
+        default: auto
+        type: choice
+        options: [auto, 'true', 'false']
+      verify_sha:
+        # The commit whose paths 'auto' should examine. A dispatch cannot name a
+        # commit — workflow_dispatch takes a branch ref — so a run raised for
+        # merge A can start after merge B has already advanced master. Verifying
+        # the newer tree is fine for a BUILD, which is monotonic. Publishing is
+        # not: diffing B's paths would report no docs change and A's docs would
+        # never publish, so the deploy decision is pinned to the commit that
+        # raised the run. Empty means "this commit", which is the push behaviour.
+        description: 'Commit whose paths decide the deploy (default: this commit)'
+        required: false
+        default: ''
+        type: string
 
 # GITHUB_TOKEN defaults to read-only; the deploy job needs to publish the Pages
 # artifact and mint the OIDC token actions/deploy-pages exchanges.
@@ -36,16 +56,41 @@ jobs:
         id: docs_changes
         if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'
         shell: bash
+        # Every ${{ }} value reaches the script through the environment, never by
+        # substitution into the program text. verify_sha is a free-form input, so
+        # substituting it would let anyone who can dispatch this workflow run
+        # `$(…)` in the build workspace — before upload-pages-artifact, on a run
+        # that can publish Pages.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DEPLOY_DOCS: ${{ inputs.deploy_docs }}
+          VERIFY_SHA: ${{ inputs.verify_sha }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "docs_changed=${{ inputs.deploy_docs }}" >> "$GITHUB_OUTPUT"
+          # …and it is validated as well as quoted: belt and braces, because the
+          # value also reaches `git`, and a full commit SHA is the only thing it
+          # is ever meant to be.
+          if [[ -n "$VERIFY_SHA" && ! "$VERIFY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::verify_sha must be a full 40-character commit SHA"
+            exit 1
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$DEPLOY_DOCS" != "auto" ]]; then
+            echo "docs_changed=$DEPLOY_DOCS" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          before="${{ github.event.before }}"
-          after="${{ github.sha }}"
+          # 'auto' and push share this path. On a dispatch there is no
+          # github.event.before, so the diff below falls to `git diff-tree` on
+          # the commit itself — the merge commit's own change set, which is
+          # exactly what the suppressed push run would have examined.
+          before="$EVENT_BEFORE"
+          after="${VERIFY_SHA:-$EVENT_SHA}"
 
-          if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+          # An explicitly named commit is always diffed on its own, never against
+          # a `before` that belongs to a different event.
+          if [[ -n "$VERIFY_SHA" || -z "$before" || "$before" =~ ^0+$ ]]; then
             changed="$(git diff-tree --no-commit-id --name-only -r "$after")"
           else
             changed="$(git diff --name-only "$before" "$after")"

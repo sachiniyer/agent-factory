@@ -5,7 +5,6 @@ import (
 	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/layout/zones"
@@ -23,7 +22,11 @@ import (
 // ANSI-stripped line (border glyphs are multibyte but one cell wide, so byte
 // offsets are not columns).
 func cellColumn(plain string, idx int) int {
-	return runewidth.StringWidth(plain[:idx])
+	// layout.Cells, not runewidth: this is the horizontal offset a mouse zone is
+	// registered at, so it has to count the same cells the compositor draws. A
+	// message carrying clustered text before the needle measured narrower here than
+	// it rendered, and the y/n zones landed left of the words (#3585).
+	return layout.Cells(plain[:idx])
 }
 
 // RegisterZones registers the confirmation dialog's clickable y/n words. The
@@ -66,13 +69,13 @@ func (c *ConfirmationOverlay) RegisterZones(reg *zones.Registry, origin layout.P
 		if yi >= 0 {
 			reg.Register(zones.OverlayConfirmYes, layout.Rect{
 				X: origin.X + cellColumn(plain, yi), Y: origin.Y + i,
-				W: runewidth.StringWidth(yesNeedle), H: 1,
+				W: layout.Cells(yesNeedle), H: 1,
 			})
 		}
 		if ni >= 0 {
 			reg.Register(zones.OverlayConfirmNo, layout.Rect{
 				X: origin.X + cellColumn(plain, ni), Y: origin.Y + i,
-				W: runewidth.StringWidth(noNeedle), H: 1,
+				W: layout.Cells(noNeedle), H: 1,
 			})
 		}
 		return
@@ -86,7 +89,7 @@ func (s *SelectionOverlay) RegisterZones(reg *zones.Registry, origin layout.Poin
 		return
 	}
 	rendered := s.Render()
-	width := lipglossWidth(rendered)
+	width := renderedWidth(rendered)
 	lines := strings.Split(rendered, "\n")
 	style := selectionOverlayStyle()
 	fit := fitOverlayContent(s.width, 0, s.maxWidth, s.maxHeight, style)
@@ -119,7 +122,7 @@ func (s *SearchOverlay) RegisterZones(reg *zones.Registry, origin layout.Point) 
 		return
 	}
 	rendered := s.Render()
-	width := lipglossWidth(rendered)
+	width := renderedWidth(rendered)
 	lines := strings.Split(rendered, "\n")
 	plan := s.renderPlan(searchOverlayStyle())
 	startIdx, endIdx := plan.startIdx, plan.endIdx
@@ -166,8 +169,10 @@ func (s *SearchOverlay) SetSelectedIndex(idx int) {
 	}
 }
 
-// lipglossWidth is the widest printable line width of a rendered block.
-func lipglossWidth(rendered string) int {
+// renderedWidth is the widest row of a rendered overlay, measured with the same
+// helper the compositor places it by. Named for what it does: it stopped being
+// lipgloss.Width when the measures were unified (#3585).
+func renderedWidth(rendered string) int {
 	_, w := getLines(rendered)
 	return w
 }

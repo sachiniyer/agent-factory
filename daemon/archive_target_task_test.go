@@ -489,7 +489,7 @@ func TestDeleteProject_FencesCreateAfterTaskPreflight(t *testing.T) {
 	mutationReached := make(chan struct{})
 	resumeDelete := make(chan struct{})
 	orig := deregisterRootAgents
-	deregisterRootAgents = func(string) ([]string, error) {
+	deregisterRootAgents = func(...string) ([]string, error) {
 		close(mutationReached)
 		<-resumeDelete
 		return nil, errors.New("forced stop before mutation")
@@ -585,7 +585,7 @@ func TestProjectDeleteAndRestoreAdmissionAreMutuallyExclusive(t *testing.T) {
 			mutationReached := make(chan struct{})
 			resumeDelete := make(chan struct{})
 			orig := deregisterRootAgents
-			deregisterRootAgents = func(string) ([]string, error) {
+			deregisterRootAgents = func(...string) ([]string, error) {
 				close(mutationReached)
 				<-resumeDelete
 				return nil, errors.New("forced stop before mutation")

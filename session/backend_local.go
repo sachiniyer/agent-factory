@@ -825,30 +825,6 @@ func (b *LocalBackend) setupTabs(i *Instance) (setupErr error) {
 	return nil
 }
 
-// Kill is best-effort: each cleanup step runs independently and a failure in
-// one (e.g. a broken git worktree) only logs a warning rather than aborting
-// the rest once destructive admission succeeds. Unknown recovery state is
-// returned before pane teardown so the daemon retains the persisted handle.
-// See issue #478.
-func (b *LocalBackend) Kill(i *Instance) error {
-	// The manager already checked the still-missing origin before committing the
-	// kill tombstone. prepareKillTeardown is the post-commit guard: it consumes
-	// and revalidates the exact directory identity before any pane is touched,
-	// without letting a later, separate origin directory revoke the transaction.
-	mode, preserveClaim, err := i.prepareKillTeardown()
-	if err != nil {
-		return err
-	}
-	defer preserveClaim()
-	// PR 2 of #930 gives an instance N tabs (agent + shell today), so Kill tears
-	// down each tab's session, not just the agent's. The kill mode kill-sessions
-	// every tab (waiting for each pane to exit before the worktree delete, #802),
-	// deletes the worktree, and clears the refs — see teardownTabs. Best-effort:
-	// a stuck tmux or a failed worktree cleanup only logs so the caller can still
-	// drop the record (#478/#802). Returns nil regardless.
-	return i.teardownTabs(mode)
-}
-
 // CloseAttachOnly releases this instance's hold on its tmux sessions — the
 // attach PTYs and the `tmux attach-session` child processes — WITHOUT running
 // `tmux kill-session`. The server-side tmux sessions and the git worktree

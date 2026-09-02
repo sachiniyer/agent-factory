@@ -10,6 +10,7 @@ import "fmt"
 // Keep this list exhaustive. Every production runtime-entry chokepoint validates
 // one of these actions before delegating to a backend:
 //   - RestoreArchivedWorktree / RestoreFromArchive: RuntimeActionRestoreArchived
+//   - their *HeldFenced twins: RuntimeActionRestoreArchivedFenced
 //   - the daemon's manual Lost/Dead router: RuntimeActionRestoreLostOrDead
 //   - Instance.Recover / BeginRecoverFence: RuntimeActionRecoverLost
 //   - Instance.RecoverHeldFencedWithLiveBoundary: RuntimeActionRecoverFenced
@@ -22,6 +23,7 @@ type RuntimeAction int
 
 const (
 	RuntimeActionRestoreArchived RuntimeAction = iota
+	RuntimeActionRestoreArchivedFenced
 	RuntimeActionRestoreLostOrDead
 	RuntimeActionRecoverLost
 	RuntimeActionRecoverFenced
@@ -48,6 +50,26 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		}
 		if v.InFlightOp != OpNone {
 			return runtimeActionBusyError(v)
+		}
+	case RuntimeActionRestoreArchivedFenced:
+		// RuntimeActionRestoreArchived with the fence required UP rather than absent:
+		// it names the continuation of an archived restore whose OpRestoring the
+		// caller already holds. The daemon's LOCAL archived route raises MarkRestoring
+		// at the top so the fence covers the relocation claim, the repo-gone guard,
+		// the destination derivation and the worktree relocate — every slow step in
+		// front of the re-spawn (#3596).
+		//
+		// Separate rather than a relaxation, for the reason RuntimeActionRestoreArchived
+		// still demands OpNone: that action is the PUBLIC "may a restore be started on
+		// this row" question, and accepting OpRestoring there would answer yes for a
+		// row whose restore is already running. Liveness stays LiveArchived because the
+		// fence this names is MarkRestoring, which moves the op axis alone — BeginRestore
+		// is still what flips the row live, and still only from OpNone.
+		if v.Liveness != LiveArchived {
+			return fmt.Errorf("session %q is not archived", v.Title)
+		}
+		if v.InFlightOp != OpRestoring {
+			return fmt.Errorf("session %q is not under a restore fence (in-flight op is %s)", v.Title, opLabel(v.InFlightOp))
 		}
 	case RuntimeActionRestoreLostOrDead:
 		if v.Liveness != LiveLost && v.Liveness != LiveDead {

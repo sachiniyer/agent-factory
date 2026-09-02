@@ -153,3 +153,55 @@ func Command(name string, args ...string) string {
 	}
 	return b.String()
 }
+
+// PositionalCommand renders a command whose TRAILING arguments are user-supplied
+// positional values, with the option terminator between them and everything else.
+//
+//	PositionalCommand("af", []string{"sessions", "kill"}, title)
+//	  ->  af sessions kill -- 'deploy; echo hi'
+//
+// Quoting does not answer option parsing, which is the gap this closes (#3432).
+// A value beginning with "-" survives the shell intact as one argument and is then
+// read by the COMMAND as a flag — and a session title may begin with "-", since
+// validation rejects only whitespace-only titles and control characters. Measured
+// against this repo's own cobra/pflag:
+//
+//	af sessions kill -worker       ->  unknown shorthand flag: 'w' in -worker
+//	af sessions kill -- -worker    ->  positional "-worker"
+//
+// Command stays correct for a suggestion whose user values all ride FLAGS, and
+// this is deliberately not the function for those: pflag accepts a dash-leading
+// value after `--name` as-is, while inserting a terminator makes `--` the flag's
+// value and breaks the very command being advertised.
+//
+//	af sessions create --name -worker      ->  name = "-worker"
+//	af sessions create --name -- -worker   ->  name = "--", then "-worker" parses as flags
+//
+// Both measured. That asymmetry is why this is a separate function rather than a
+// rule to remember: the seam exists because "quote correctly at each call site"
+// loses to the next contributor, and "terminate options, except after a flag"
+// loses faster.
+//
+// With no positionals it renders exactly what Command would: a bare trailing `--`
+// advertises nothing and invites a reader to paste it as a value.
+func PositionalCommand(name string, argv []string, positionals ...string) string {
+	if len(positionals) == 0 {
+		return Command(name, argv...)
+	}
+	// Copied, never appended in place: callers build argv with append (see
+	// daemon/sandbox_preserve.go's repo-scope flags), so writing through it would
+	// clobber whatever else shares that backing array. Appending to a nil slice
+	// allocates a fresh one, which is what makes the copy real.
+	//
+	// NO capacity hint, for the reason written out above Command: a summed-length
+	// expression inside make() raises CodeQL's go/allocation-size-overflow (high),
+	// which is a required check. This function shipped with
+	// `make([]string, 0, len(argv)+1+len(positionals))` and did exactly what that
+	// note says not to do — two high alerts on one line — to save an allocation on a
+	// path that formats one error message for a human.
+	var parts []string
+	parts = append(parts, argv...)
+	parts = append(parts, "--")
+	parts = append(parts, positionals...)
+	return Command(name, parts...)
+}

@@ -287,7 +287,7 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// tmux session or worktree is orphaned. Durability of in-progress work is the
 	// driving daemon's job (archive = push branch, epic §5), not the agent-server's.
 	_ = closeTCP()
-	if err := hs.as.Kill(); err != nil {
+	if err := hs.as.Kill(false); err != nil {
 		log.WarningLog.Printf("agent-server: workspace teardown on shutdown: %v", err)
 	}
 	return nil
@@ -493,7 +493,7 @@ func (hs *headlessServer) Archive(_ struct{}, resp *agentArchiveResponse) error 
 }
 
 func (hs *headlessServer) Kill(_ struct{}, resp *agentOKResponse) error {
-	if err := hs.as.Kill(); err != nil {
+	if err := hs.as.Kill(false); err != nil {
 		return err
 	}
 	resp.OK = true

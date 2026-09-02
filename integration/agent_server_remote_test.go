@@ -172,7 +172,7 @@ func TestRemoteAgentServerRoundTrip(t *testing.T) {
 	}
 
 	// --- Kill tears the remote workspace down; the stream ends --------------
-	if err := as.Kill(); err != nil {
+	if err := as.Kill(false); err != nil {
 		t.Fatalf("Kill over the wire: %v", err)
 	}
 	waitUntil(t, 10*time.Second, "remote workspace reports not-Alive after Kill", func() bool {

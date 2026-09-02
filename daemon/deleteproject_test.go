@@ -21,11 +21,11 @@ type killAnotherSessionBackend struct {
 	onKill func() error
 }
 
-func (b *killAnotherSessionBackend) Kill(instance *session.Instance) error {
+func (b *killAnotherSessionBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
 	if err := b.onKill(); err != nil {
 		return err
 	}
-	return b.FakeBackend.Kill(instance)
+	return b.FakeBackend.Kill(instance, trustLiveGeneration)
 }
 
 // liveProjectRoots mirrors the "active projects" derivation the TUI and web use
@@ -405,7 +405,7 @@ func TestDeleteProject_RootAgentsWriteFailureIsFatal(t *testing.T) {
 	inst, src := registerArchivable(t, manager, repoID, repoPath, "worker")
 
 	orig := deregisterRootAgents
-	deregisterRootAgents = func(string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
+	deregisterRootAgents = func(...string) ([]string, error) { return nil, fmt.Errorf("forced config write failure") }
 	t.Cleanup(func() { deregisterRootAgents = orig })
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})

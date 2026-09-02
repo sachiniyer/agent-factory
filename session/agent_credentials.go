@@ -328,6 +328,25 @@ func dockerAccountMount(accountName, source string, relabel bool) ([]string, err
 	return []string{"--mount", "type=bind,src=" + source + ",dst=" + dockerAccountHome}, nil
 }
 
+// accountMountSource is the host directory an account is bind-mounted FROM.
+//
+// ABSOLUTE, always. Docker reads a relative bind source by its own rules — it is
+// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
+// (a supported configuration) would bind something that is not the account, or
+// create a volume named after the path.
+//
+// One definition, shared by the code that BUILDS the mount and by the runtime
+// verification that later proves that mount is the one the kernel installed
+// (#3598). Two spellings of "where the account lives" is exactly how a check and
+// the thing it checks drift into disagreeing.
+func accountMountSource(account sessionenv.Account) (string, error) {
+	source, err := filepath.Abs(account.Dir)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
+	}
+	return source, nil
+}
+
 // accountMountAndEnv returns the bind mount that places an account's agent HOME
 // inside the container, and the `-e VAR=value` that points the agent at it
 // (#3082).
@@ -353,20 +372,16 @@ func accountMountAndEnv(account sessionenv.Account, relabel bool) (mount []strin
 	if !ok {
 		return nil, nil, nil
 	}
-	// ABSOLUTE, always. Docker reads a relative bind source by its own rules — it is
-	// not resolved against af's working directory — so a relative AGENT_FACTORY_HOME
-	// (a supported configuration) would bind something that is not the account, or
-	// create a volume named after the path. Abs failing means af cannot say where
-	// the account is, which must refuse rather than mount a guess.
-	// A failure here must REFUSE, not return an empty mount. Returning nothing was
-	// the shape of this function's first version and it is the exact failure this
-	// feature exists to prevent: the container would start with no account and no
-	// error, running on whatever identity it could find while the session reported
-	// the one the operator named. "af cannot say where the account is" has to reach
-	// the create as an error.
-	source, err := filepath.Abs(account.Dir)
+	// accountMountSource resolves it absolutely; its failure must REFUSE here
+	// rather than return an empty mount. Returning nothing was the shape of this
+	// function's first version and it is the exact failure this feature exists to
+	// prevent: the container would start with no account and no error, running on
+	// whatever identity it could find while the session reported the one the
+	// operator named. "af cannot say where the account is" has to reach the create
+	// as an error.
+	source, err := accountMountSource(account)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
+		return nil, nil, err
 	}
 	mount, err = dockerAccountMount(account.Name, source, relabel)
 	if err != nil {
