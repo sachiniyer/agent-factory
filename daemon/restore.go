@@ -80,6 +80,32 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	}
 
 	key := daemonInstanceKey(repoID, title)
+
+	// Registered BEFORE the claim so LIFO runs it LAST — after opLock.Unlock and
+	// after releaseRestoreOperation (Codex on #3597).
+	//
+	// Order matters because the claim is what actually refuses Kill. Lowering the
+	// fence while killsInFlight is still set publishes a row saying can_kill=true to
+	// every client while the admission gate would still answer "an operation is
+	// already in progress" — the same false affordance this change exists to remove,
+	// just narrower. Released last, the busy projection covers exactly the claim's
+	// interval, and the one event that says the row is killable is published when it
+	// genuinely is.
+	//
+	// fenceRaised is ownership, not bookkeeping: the early returns above the raise
+	// include a claim that FAILED because another restore holds it, and that restore
+	// may well have OpRestoring up. Releasing on the bare op value would lower a
+	// fence belonging to someone else's operation.
+	fenceRaised := false
+	defer func() {
+		if !fenceRaised {
+			return
+		}
+		if instance.EndRecoverFence() {
+			m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
+		}
+	}()
+
 	if err := m.claimRestoreOperation(repoID, key, title); err != nil {
 		return "", err
 	}
@@ -139,29 +165,25 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// snapshot tick would repair it eventually; the events plane is what makes it
 	// immediate, and it is the only repair a web client gets.
 	m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
-	// A DEFER rather than a statement on each arm, because every exit below has to
-	// lower this and a missed one is worse than the bug: the poll skips any session
-	// with an op in flight and every runtime action and lifecycle control refuses
-	// it, so the row would be permanently busy. The arms are the probe-alive heal
-	// (settled and settle-failed), the indeterminate refusal, the two
-	// durable-branch refusals, the failed pre-reap push, the two failed-Recover
-	// exits, and the successful restore — and the defer covers whatever is added
-	// next to that list, which an enumeration would not.
+	// The release registered above now owns this fence. A DEFER rather than a
+	// statement on each arm, because every exit below has to lower it and a missed
+	// one is worse than the bug: the poll skips any session with an op in flight and
+	// every runtime action and lifecycle control refuses it, so the row would be
+	// permanently busy. The arms are the probe-alive heal (settled and
+	// settle-failed), the indeterminate refusal, the two durable-branch refusals,
+	// the failed pre-reap push, the two failed-Recover exits, and the successful
+	// restore — and the defer covers whatever is added next to that list, which an
+	// enumeration would not.
 	//
 	// A no-op on the success path, where ConfirmLive has already cleared the op, and
 	// it never disturbs an op another owner raised.
 	//
-	// It ANNOUNCES an effective release, which is what EndRecoverFence's bool return
-	// is for. Having told clients the row is busy, this call owes them the release:
-	// they learn of state changes only from the events plane, and the status poll
-	// cannot repair the gap because it too skips a session with an op in flight.
-	// The heal arm lowers the fence BEFORE its own settlement publishes, so this
-	// stays a no-op there rather than a duplicate.
-	defer func() {
-		if instance.EndRecoverFence() {
-			m.publishEvent(agentproto.EventSessionUpdated, instance.ToInstanceData())
-		}
-	}()
+	// Nothing between here and there lowers the fence early, deliberately. Every
+	// snapshot published while the claim is held — preserveSandboxBeforeReap's
+	// settlement, the heal arm's — therefore reports the row as busy, which is what
+	// it is: Kill would be refused at the admission gate. The release announces the
+	// settled, killable row once, at the end, when that is true.
+	fenceRaised = true
 
 	// The same live recheck the automatic loop runs before re-provisioning
 	// (lostrestore.go), for the same reason: a remote Recover is not a reconnect
@@ -180,14 +202,6 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		log.InfoLog.Printf("not re-provisioning session %q: its sandbox answers as alive, so it was never lost — clearing the Lost mark instead (re-provisioning would orphan it and discard unpushed work)", title)
 		_ = instance.Transition(session.ObserveLiveness(session.LiveRunning))
 		instance.ClearLostRestoreFailure()
-		// Lower the fence HERE rather than leaving it to the deferred release: the
-		// settlement below is this arm's terminal announcement, and an event that
-		// carried {LiveRunning, OpRestoring} would tell every other client the row is
-		// still being restored — with Kill still hidden — until something else
-		// happened to republish it. Ordering only, not a second release: the heal
-		// transition above is already applied, and ObserveLiveness preserves the op
-		// axis, so clearing it after cannot clobber the liveness this arm just set.
-		_ = instance.EndRecoverFence()
 		// Both of these are per-runtime state and both are filed under the session's
 		// stable identity, never under the repo/title `key` above (#2868).
 		stateKey := stableSessionKey(repoID, instance)
@@ -269,9 +283,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 		// The fence stays up through the bookkeeping below and comes down in the
 		// deferred release, which is what announces it. Nothing here is distorted by
 		// that ordering — persistInstanceData scrubs the in-flight op before it
-		// writes, and recordLostRestoreFailure touches only the retry state — while
-		// lowering it early would silence the release for the one outcome a watching
-		// client most needs to see: the restore failed and the row is free again.
+		// writes, and recordLostRestoreFailure touches only the retry state.
 		//
 		// Error-returning, not the logging wrapper: the committed arm below must
 		// not claim "recorded" for a write that failed (#3353 review), so the

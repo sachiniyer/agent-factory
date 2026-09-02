@@ -138,16 +138,10 @@ func (i *Instance) recoverUnderHeldFence(beforeLive func()) error {
 //
 // ClearOp is unconditionally legal, so the OpRestoring check is not about legality:
 // it makes sure a kill or archive overlay that SUPERSEDED this fence is not cleared
-// out from under its own owner.
+// out from under its own owner — which is why the check and the clear share one
+// critical section in clearOpIfHeld rather than being read-then-write.
 func (i *Instance) EndRecoverFence() bool {
-	if i.GetInFlightOp() != OpRestoring {
-		return false
-	}
-	if err := i.Transition(ClearOp()); err != nil {
-		log.WarningLog.Printf("restore: clearing the in-flight fence for %q: %v", i.Title, err)
-		return false
-	}
-	return true
+	return i.clearOpIfHeld(OpRestoring, "restore")
 }
 
 // BeginRecoverFence validates the recover precondition and raises the restore
@@ -269,11 +263,30 @@ func (i *Instance) BeginLimitResume() error {
 // released state to its clients can tell an effective release from a no-op and not
 // publish a duplicate settled event on the path that already published one.
 func (i *Instance) EndLimitResume() bool {
-	if i.GetInFlightOp() != OpRespawning {
+	return i.clearOpIfHeld(OpRespawning, "limit resume")
+}
+
+// clearOpIfHeld lowers the in-flight fence ONLY while it is still the op the caller
+// raised, deciding and clearing in ONE critical section.
+//
+// The two halves cannot be split (Codex on #3597), and the reason is the very case
+// the comparison exists for. tkBeginKill is allowed-from-always — a kill supersedes
+// any in-flight op — so a BeginKill landing after a released read lock and before
+// the write lock would install OpKilling, and the fence owner's release would then
+// clear a teardown overlay it was supposed to leave alone: Kill and Archive back on
+// offer for a session whose teardown is already running. Read-then-write made that
+// window real; one write lock removes it.
+//
+// It is shared rather than written twice because both fence owners want the identical
+// rule, and a second copy is the one that would keep the split.
+func (i *Instance) clearOpIfHeld(held InFlightOp, operation string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != held {
 		return false
 	}
-	if err := i.Transition(ClearOp()); err != nil {
-		log.WarningLog.Printf("limit resume: clearing the in-flight fence for %q: %v", i.Title, err)
+	if err := i.transitionLocked(ClearOp()); err != nil {
+		log.WarningLog.Printf("%s: clearing the in-flight fence for %q: %v", operation, i.Title, err)
 		return false
 	}
 	return true

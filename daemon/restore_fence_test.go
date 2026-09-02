@@ -353,21 +353,10 @@ func TestRestoreSession_RecoverFailureLowersTheFence(t *testing.T) {
 		t.Fatal("RestoreSession reported success for a Recover that failed")
 	}
 	assertFenceLowered(t, inst, "a failed Recover")
-
-	if fenced := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated); fenced.InFlightOp != session.OpRestoring {
-		t.Fatalf("first session.updated in-flight op = %v, want OpRestoring", fenced.InFlightOp)
-	}
 	// The outcome a watching client most needs: the restore failed and the row is
-	// free again. Lowering the fence before the failure bookkeeping would have
-	// silenced this, since nothing in that bookkeeping publishes.
-	released := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
-	if released.InFlightOp != session.OpNone {
-		t.Fatalf("last session.updated in-flight op = %v, want OpNone: a failed restore ended without telling "+
-			"anyone, so every client keeps rendering it as in flight", released.InFlightOp)
-	}
-	if !released.CanKill {
-		t.Fatal("the release announcement carries can_kill=false, so the failed row stays unremovable on every client")
-	}
+	// free again. Nothing in the failure bookkeeping publishes, so the deferred
+	// release is the only thing that can say so.
+	assertBusyUntilTheClaimDrops(t, manager, drainSessionEvents(t, events), session.LiveLost)
 }
 
 type fenceObservingBackend struct {
@@ -404,12 +393,89 @@ func TestRestoreSession_LocalRestoreHidesKillForTheWholeOperation(t *testing.T) 
 	assertFenceLowered(t, inst, "a successful local restore")
 }
 
-// The two announcements. A fence the events plane never mentions is invisible to
-// every client that did not initiate the restore — an `af sessions restore` or a
-// web restore leaves an already-open TUI or browser offering Kill for the whole
-// operation, which is the bug seen from the client rather than from the row.
-// #2997 settled this contract for the sibling limit resume; the restore path owes
-// the same pair: busy, then released.
+// The two announcements, and the ORDER they stand in against the admission claim.
+//
+// A fence the events plane never mentions is invisible to every client that did
+// not initiate the restore — an `af sessions restore` or a web restore leaves an
+// already-open TUI or browser offering Kill for the whole operation, which is the
+// bug seen from the client rather than from the row. #2997 settled this contract
+// for the sibling limit resume; the restore path owes the same pair.
+//
+// The order is the second half, and it is the same invariant one level up
+// (Codex on #3597): killsInFlight is what actually refuses Kill, so no event may
+// say can_kill=true while it is still held. Every snapshot published under the
+// claim reports the row busy — which it is — and the single event that calls it
+// killable is published after the claim is gone.
+
+// drainSessionEvents collects the session.updated payloads published during one
+// operation. Safe to call after the operation returns: publishEvent is a
+// non-blocking fan-out into the subscriber's buffer, so the events are already
+// queued by the time the call completes.
+func drainSessionEvents(t *testing.T, ch <-chan agentproto.Event) []session.InstanceData {
+	t.Helper()
+	var out []session.InstanceData
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type != agentproto.EventSessionUpdated {
+				continue
+			}
+			var data session.InstanceData
+			if len(ev.Data) > 0 {
+				if err := json.Unmarshal(ev.Data, &data); err != nil {
+					t.Fatalf("unmarshal session.updated payload: %v", err)
+				}
+			}
+			out = append(out, data)
+		case <-time.After(500 * time.Millisecond):
+			return out
+		}
+	}
+}
+
+// assertBusyUntilTheClaimDrops is the shared verdict: the first event announces the
+// fence, every event published while the claim is held reports the row as busy, and
+// the last one — published after releaseRestoreOperation — announces the settled,
+// killable row.
+func assertBusyUntilTheClaimDrops(t *testing.T, m *Manager, events []session.InstanceData, wantLiveness session.Liveness) {
+	t.Helper()
+	if len(events) < 2 {
+		t.Fatalf("session.updated events = %d, want at least the fence announcement and its release: "+
+			"clients that did not initiate this restore learn of it only from the events plane", len(events))
+	}
+	if events[0].InFlightOp != session.OpRestoring {
+		t.Fatalf("first session.updated in-flight op = %v, want OpRestoring: clients must be told the row is "+
+			"busy BEFORE the network phases, or they keep offering a Kill that can only fail (#3586)", events[0].InFlightOp)
+	}
+	for i, ev := range events[:len(events)-1] {
+		if ev.CanKill {
+			t.Fatalf("session.updated #%d of %d carries can_kill=true while the restore claim is still held: the "+
+				"admission gate would refuse that Kill with \"an operation is already in progress\", which is the "+
+				"false affordance this change removes", i+1, len(events))
+		}
+	}
+
+	released := events[len(events)-1]
+	if released.InFlightOp != session.OpNone {
+		t.Fatalf("last session.updated in-flight op = %v, want OpNone: the operation ended without telling anyone, "+
+			"so every client keeps rendering it as in flight", released.InFlightOp)
+	}
+	if !released.CanKill {
+		t.Fatal("the release announcement carries can_kill=false, so no client can remove the row afterwards")
+	}
+	if released.Liveness != wantLiveness {
+		t.Fatalf("release announcement liveness = %v, want %v", released.Liveness, wantLiveness)
+	}
+
+	m.mu.Lock()
+	claims := len(m.killsInFlight)
+	m.mu.Unlock()
+	if claims != 0 {
+		t.Fatalf("the restore claim is still held after the operation returned (%d in flight): the release event "+
+			"promised a killable row that the admission gate would still refuse", claims)
+	}
+}
+
 func TestRestoreSession_HealArmAnnouncesTheFenceAndItsRelease(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, 5*time.Second)
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -422,34 +488,14 @@ func TestRestoreSession_HealArmAnnouncesTheFenceAndItsRelease(t *testing.T) {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 
-	fenced := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
-	if fenced.InFlightOp != session.OpRestoring {
-		t.Fatalf("first session.updated in-flight op = %v, want OpRestoring: clients must be told the row is busy "+
-			"BEFORE the network phases, or they keep offering a Kill that can only fail (#3586)", fenced.InFlightOp)
-	}
-	if fenced.CanKill {
-		t.Fatal("the busy announcement still carries can_kill=true, so the web client keeps its Kill control")
-	}
-
-	// The settled announcement must not carry the fence. The heal arm lowers before
-	// its settlement precisely so this payload reads as a finished restore rather
-	// than one still in flight.
-	settled := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
-	if settled.InFlightOp != session.OpNone {
-		t.Fatalf("settled session.updated in-flight op = %v, want OpNone: the heal arm published its terminal "+
-			"state with the fence still up, so every client shows a restore that is over", settled.InFlightOp)
-	}
-	if settled.Liveness != session.LiveRunning {
-		t.Fatalf("settled session.updated liveness = %v, want LiveRunning", settled.Liveness)
-	}
-	if !settled.CanKill {
-		t.Fatal("the settled announcement carries can_kill=false, so no client can remove the healed row")
-	}
+	// The heal arm's own settlement publishes in the middle of this, with the fence
+	// still up. That is correct rather than a wart: the claim is still held at that
+	// point, so a Kill really would be refused, and lowering the fence early to make
+	// that one payload prettier is what would publish the lie.
+	assertBusyUntilTheClaimDrops(t, manager, drainSessionEvents(t, events), session.LiveRunning)
 }
 
-// The refusal side of the same contract. preserveSandboxBeforeReap publishes a
-// FENCED settlement mid-flight, so a refusal that lowered the fence silently would
-// leave that as the last word every client has on the row.
+// The refusal side of the same contract.
 func TestRestoreSession_RefusalAnnouncesTheReleasedRow(t *testing.T) {
 	withRemoteLossThresholds(t, 3, time.Minute, 5*time.Second)
 	manager, repoID, repoPath := newStatusTestManager(t)
@@ -462,20 +508,5 @@ func TestRestoreSession_RefusalAnnouncesTheReleasedRow(t *testing.T) {
 		t.Fatal("manual restore reaped a reachable sandbox whose pre-reap push failed")
 	}
 
-	fenced := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
-	if fenced.InFlightOp != session.OpRestoring {
-		t.Fatalf("first session.updated in-flight op = %v, want OpRestoring", fenced.InFlightOp)
-	}
-
-	released := drainNextSessionEvent(t, events, agentproto.EventSessionUpdated)
-	if released.InFlightOp != session.OpNone {
-		t.Fatalf("last session.updated in-flight op = %v, want OpNone: the refusal ended the operation without "+
-			"telling anyone, so every client is left rendering a restore that is no longer running", released.InFlightOp)
-	}
-	if released.Liveness != session.LiveLost {
-		t.Fatalf("released session.updated liveness = %v, want LiveLost — a refused restore leaves the row lost", released.Liveness)
-	}
-	if !released.CanKill {
-		t.Fatal("the release announcement carries can_kill=false, so the row stays unremovable on every client")
-	}
+	assertBusyUntilTheClaimDrops(t, manager, drainSessionEvents(t, events), session.LiveLost)
 }
