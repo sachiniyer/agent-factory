@@ -28,17 +28,17 @@ import (
 // is specific without being brittle: unlike a line number it survives edits
 // above it, and renaming the function is exactly when someone should re-read
 // why the exemption exists.
-var writerConventionExemptions = map[string]string{
-	"config_load.go:convertJSONToTOML:os.Rename": "moves the LEGACY config.json aside after conversion; it renames the old file rather than writing config content",
-	"config_load.go:writeConfigIfMissing:os.OpenFile": "first-run materialization, deliberately O_CREATE|O_EXCL so two racing af starts cannot both claim it — " +
-		"exclusive create is the race guard, and it cannot meet an existing link because it fails if anything is already there",
-	"schema_migration.go:writeFileExclusive:os.OpenFile":  "schema-migration backup, same O_CREATE|O_EXCL contract: it must fail rather than overwrite an existing backup",
-	"filelock.go:TryWithFileLock:os.OpenFile":             "lock file, not config content",
-	"filelock.go:WithFileLockTimeout:os.OpenFile":         "lock file, not config content",
-	"filelock.go:WithFileLock:os.OpenFile":                "lock file, not config content",
-	"filelock.go:atomicWrite:os.CreateTemp":               "the shared writer's own temp file",
-	"filelock.go:atomicWrite:os.Rename":                   "the shared writer's own rename",
-	"project_registry.go:writeNewProjectRecord:os.Rename": "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with",
+var writerConventionExemptions = map[string]writerExemption{
+	"config_load.go:convertJSONToTOML:os.Rename": {calls: 1, reason: "moves the LEGACY config.json aside after conversion; it renames the old file rather than writing config content"},
+	"config_load.go:writeConfigIfMissing:os.OpenFile": {calls: 1, reason: "first-run materialization, deliberately O_CREATE|O_EXCL so two racing af starts cannot both claim it — " +
+		"exclusive create is the race guard, and it cannot meet an existing link because it fails if anything is already there"},
+	"schema_migration.go:writeFileExclusive:os.OpenFile":  {calls: 1, reason: "schema-migration backup, same O_CREATE|O_EXCL contract: it must fail rather than overwrite an existing backup"},
+	"filelock.go:TryWithFileLock:os.OpenFile":             {calls: 1, reason: "lock file, not config content"},
+	"filelock.go:WithFileLockTimeout:os.OpenFile":         {calls: 1, reason: "lock file, not config content"},
+	"filelock.go:WithFileLock:os.OpenFile":                {calls: 1, reason: "lock file, not config content"},
+	"filelock.go:atomicWrite:os.CreateTemp":               {calls: 1, reason: "the shared writer's own temp file"},
+	"filelock.go:atomicWrite:os.Rename":                   {calls: 1, reason: "the shared writer's own rename"},
+	"project_registry.go:writeNewProjectRecord:os.Rename": {calls: 1, reason: "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with"},
 	// The in-repo writer is the deliberate ASYMMETRY, not an oversight. A global
 	// config.toml is the user's own file and a link there is their arrangement,
 	// so AtomicWriteFile follows it (#3660). An in-repo .agent-factory/config is
@@ -47,8 +47,21 @@ var writerConventionExemptions = map[string]string{
 	// atomicWriteFileInDirNoFollow resolves the destination and then pins the
 	// directory with O_NOFOLLOW, rejecting a parent-dir link swapped in after the
 	// guard rather than following it. Do not "fix" it to use AtomicWriteFile.
-	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Renameat": "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent",
-	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Unlinkat": "the same writer's temp-file cleanup",
+	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent"},
+	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "the same writer's temp-file cleanup"},
+}
+
+// writerExemption records how many calls of that kind the function is allowed
+// and why. The COUNT is the point: keying by file, function and API alone let a
+// SECOND os.OpenFile in writeConfigIfMissing inherit the first one's permission,
+// so the guard would have accepted the exact bypass it exists to prevent
+// (#3660 review). A line number would be specific but brittle against edits
+// above it; a count is specific where it matters and fails closed — add a call
+// and the number stops matching, which is precisely when someone should have to
+// look.
+type writerExemption struct {
+	calls  int
+	reason string
 }
 
 // TestEveryConfigWriterGoesThroughAtomicWriteFile pins the convention that is
@@ -87,7 +100,7 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
-	used := map[string]bool{}
+	seen := map[string]int{}
 	var offenders []string
 	for _, entry := range entries {
 		name := entry.Name()
@@ -146,7 +159,7 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 				}
 				key := name + ":" + enclosing + ":" + qualified
 				if _, exempt := writerConventionExemptions[key]; exempt {
-					used[key] = true
+					seen[key]++
 					return true
 				}
 				offenders = append(offenders,
@@ -165,8 +178,12 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 
 	// A stale exemption is its own defect: it makes the list look considered
 	// while describing code that no longer exists, and the next reader trusts it.
-	for key := range writerConventionExemptions {
-		assert.True(t, used[key], "exemption %q no longer matches any call — remove it", key)
+	// A count that no longer matches is the same defect in the other direction —
+	// the function grew a call nobody re-examined.
+	for key, exempt := range writerConventionExemptions {
+		assert.Equal(t, exempt.calls, seen[key],
+			"exemption %q covers %d call(s) but the code has %d — a new one does not inherit the old one's reason (%s)",
+			key, exempt.calls, seen[key], exempt.reason)
 	}
 
 	// And the guard must actually be pointed at this package.

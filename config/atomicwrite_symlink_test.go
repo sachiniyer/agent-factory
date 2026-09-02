@@ -491,3 +491,32 @@ func TestBackupNameSkipsADanglingLink(t *testing.T) {
 	require.NoError(t, lerr)
 	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink, "and is left intact")
 }
+
+// TestMaterializeRefusesAContentlessLinkInstalledDuringTheRace is the sibling
+// of the dangling-link race. A link installed mid-materialize whose target is
+// contentless makes the exclusive create report EEXIST and the reread come back
+// effectively empty — which fell through to in-memory defaults, while the SAME
+// arrangement present before startup gives a loud error. One symlink cannot
+// mean two different things depending on when it appeared (#3660 review).
+func TestMaterializeRefusesAContentlessLinkInstalledDuringTheRace(t *testing.T) {
+	home, dotfiles := t.TempDir(), t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	real := filepath.Join(dotfiles, "af-config.toml")
+	link := filepath.Join(home, TomlConfigFileName)
+
+	prev := materializeRaceHookForTest
+	materializeRaceHookForTest = func() {
+		_ = os.WriteFile(real, []byte("# only a comment\n"), 0644)
+		_ = os.Symlink(real, link)
+	}
+	t.Cleanup(func() { materializeRaceHookForTest = prev })
+
+	_, err := LoadConfig()
+	require.Error(t, err, "a contentless target must not become silent defaults just because it arrived late")
+	assert.Contains(t, err.Error(), "empty")
+
+	info, lerr := os.Lstat(link)
+	require.NoError(t, lerr)
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink, "and the link is left alone")
+}

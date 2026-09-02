@@ -435,8 +435,18 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 	if !created {
 		// Lost the create race: a concurrent process wrote config.toml after
 		// our read. Treat its file as authoritative.
-		if data, err := os.ReadFile(tomlPath); err == nil && !isEffectivelyEmptyToml(data) {
-			return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+		if data, err := os.ReadFile(tomlPath); err == nil {
+			if !isEffectivelyEmptyToml(data) {
+				return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
+			}
+			// The winner's file is contentless. Through a SYMLINK that is the
+			// hand-made-stub case the steady-state path reports loudly, and the
+			// verdict must not depend on whether the link was installed before
+			// startup or during it — the same arrangement cannot mean "loud
+			// error" one moment and "silent defaults" the next (#3660 review).
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return parseConfigTOML(data, prettyTomlPath)
+			}
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
 		// defaults without another write attempt — UNLESS what actually
