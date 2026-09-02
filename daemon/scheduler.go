@@ -135,36 +135,54 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 	return nil
 }
 
-// armingFor reports the LIVE arming state of one cron task and, when it is
-// armed, the instant the scheduler will actually fire it next.
+// armingSnapshot returns ONE consistent view of what this scheduler is holding:
+// task ID → the instant its armed entry will next fire, plus whether arming has
+// been observed at all.
 //
-// The next-run time is READ OFF the armed entry rather than recomputed from the
+// Each next-run time is READ OFF the armed entry rather than recomputed from the
 // expression, which is the whole point of #3623: the two places that used to
-// show a next-fire time recomputed it for display, so a task that was not armed
-// at all still rendered a confident "next Sep 02 04:20". A number read from the
-// scheduler cannot say that about a task the scheduler does not hold.
+// show a next-fire time recomputed it for display, so a task the scheduler was
+// not holding at all still rendered a confident "next Sep 02 04:20". A number
+// read from the scheduler cannot say that about a task the scheduler does not
+// hold.
 //
-// The entry lookup happens OUTSIDE s.mu: cron.Entry round-trips through the run
-// loop while the cron is running, and no daemon lock should be held across
-// another goroutine's turn.
-func (s *taskScheduler) armingFor(taskID string) (string, time.Time) {
+// It is a SNAPSHOT rather than a per-task lookup for the reason doctor memoizes
+// its tmux listing: one response must not describe two different worlds. A
+// per-task query would round-trip through the cron's run loop once per task, and
+// a reload landing mid-list would leave some rows describing the schedule before
+// it and some after.
+//
+// The second return is false when no reload has completed yet. The control
+// socket answers reads during warm-up, and an empty entry map in that window
+// means "arming has not run", never "nothing is armed" — see taskScheduler.armed.
+//
+// The cron is queried OUTSIDE s.mu: cron.Entries round-trips through the run loop
+// while the cron is running, and no daemon lock should be held across another
+// goroutine's turn.
+func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
 	s.mu.Lock()
 	armed := s.armed
-	entryID, scheduled := s.entries[taskID]
+	registered := make(map[string]cron.EntryID, len(s.entries))
+	for id, entryID := range s.entries {
+		registered[id] = entryID
+	}
 	s.mu.Unlock()
 	if !armed {
-		return task.ArmingUnknown, time.Time{}
+		return nil, false
 	}
-	if !scheduled {
-		return task.ArmingNotArmed, time.Time{}
+	// The cron itself is authoritative: it is the thing that would have to fire.
+	// An ID registered here but absent there is reported as not armed.
+	live := make(map[cron.EntryID]time.Time, len(registered))
+	for _, entry := range s.cron.Entries() {
+		live[entry.ID] = entry.Next
 	}
-	entry := s.cron.Entry(entryID)
-	if entry.ID != entryID {
-		// Registered here but gone from the cron itself — treat the cron as
-		// authoritative; it is the thing that would have to fire.
-		return task.ArmingNotArmed, time.Time{}
+	next := make(map[string]time.Time, len(registered))
+	for id, entryID := range registered {
+		if at, ok := live[entryID]; ok {
+			next[id] = at
+		}
 	}
-	return task.ArmingArmed, entry.Next
+	return next, true
 }
 
 // scheduledTaskIDs returns the IDs of the tasks currently registered with the

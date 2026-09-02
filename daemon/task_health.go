@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -52,6 +53,13 @@ func (s *watcherSupervisor) armingFor(taskID string) string {
 // A server with no scheduler (the synthetic ones some tests build) leaves every
 // task at ArmingUnknown, which is the honest answer: nothing observed it.
 func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
+	// One snapshot for the whole response, so no two rows can describe the
+	// schedule on different sides of a reload.
+	var scheduled map[string]time.Time
+	observed := false
+	if s.scheduler != nil {
+		scheduled, observed = s.scheduler.armingSnapshot()
+	}
 	for i := range tasks {
 		if tasks[i].IsWatch() {
 			if s.watchers != nil {
@@ -59,12 +67,19 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 			}
 			continue
 		}
-		if s.scheduler == nil {
+		if !observed {
 			continue
 		}
-		arming, next := s.scheduler.armingFor(tasks[i].ID)
-		tasks[i].Arming = arming
-		if arming == task.ArmingArmed && !next.IsZero() {
+		next, armed := scheduled[tasks[i].ID]
+		if !armed {
+			tasks[i].Arming = task.ArmingNotArmed
+			continue
+		}
+		tasks[i].Arming = task.ArmingArmed
+		if !next.IsZero() {
+			// Zero only before the cron has started, which computes every entry's
+			// first fire; the task is armed either way, and inventing a time here
+			// would be the recomputation this feature exists to remove.
 			at := next
 			tasks[i].NextRunAt = &at
 		}

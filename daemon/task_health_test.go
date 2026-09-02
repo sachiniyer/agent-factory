@@ -38,6 +38,11 @@ func TestListTasks_NextRunComesFromTheArmedEntry(t *testing.T) {
 	entry := srv.scheduler.cron.Entry(srv.scheduler.entries["aaaa1001"])
 	assert.True(t, entry.Next.Equal(*resp.Tasks[0].NextRunAt),
 		"the reported time must be the entry's own, read off the scheduler")
+
+	// And the snapshot is what the response was built from, keyed by task ID.
+	snapshot, observed := srv.scheduler.armingSnapshot()
+	require.True(t, observed)
+	assert.True(t, entry.Next.Equal(snapshot["aaaa1001"]))
 }
 
 // TestListTasks_UnarmedEnabledTaskHasNoNextRun generalizes #2929: whatever the
