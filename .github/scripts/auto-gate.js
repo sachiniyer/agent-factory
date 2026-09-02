@@ -644,7 +644,14 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
   };
 }
 
-async function reportAggregateDecision({ github, context, core, headSha, checkRunId }) {
+async function reportAggregateDecision({
+  github,
+  context,
+  core,
+  headSha,
+  checkRunId,
+  beforePublish,
+}) {
   let aggregate;
   try {
     aggregate = await evaluateAggregateDecision({ github, context, headSha });
@@ -700,6 +707,13 @@ async function reportAggregateDecision({ github, context, core, headSha, checkRu
       summary: aggregate.summary,
     },
   };
+  // The last thing before the write, and deliberately AFTER the association and
+  // check-run reads above — those are round trips too, and a guard that runs
+  // before them is stale by the time the green is published. Only a PASS needs
+  // it: a red publish authorizes nothing.
+  if (aggregate.ok && typeof beforePublish === "function") {
+    await beforePublish();
+  }
   const write = await upsertAggregateCheck({
     github,
     context,
@@ -808,41 +822,59 @@ async function processAggregateHead({
     }
   }
 
-  // Disarm as late as the API allows. The fixed aggregate below is the ONLY
-  // green branch protection consumes — the per-PR decisions carry their own
-  // names and gate nothing — so this is the last observation before the
-  // consumable green, and the interval it leaves is the single write that
-  // follows it rather than the rest of the loop.
+  // Disarm, then re-confirm as the very last thing before the green. The fixed
+  // aggregate is the ONLY green branch protection consumes — the per-PR
+  // decisions carry their own names and gate nothing — so the confirmation is
+  // handed to reportAggregateDecision as a precondition rather than run here,
+  // where the aggregate's own association and check-run reads would still sit
+  // between it and the write.
   //
-  // That last write cannot be conditioned on the observation: GitHub has no
-  // compare-and-set for a check run. The residual is irreducible here, and the
-  // gate's auto_merge_enabled subscription is what covers it.
-  for (const result of manualMergeResults) {
-    try {
-      await ensureNativeAutoMergeDisabled({ github, context, core, result });
-    } catch (error) {
-      if (!isReadFailure(error)) {
-        throw error;
-      }
-      const aggregate = await blockAggregateEvaluation({
+  // That final write cannot itself be conditioned on the observation: GitHub has
+  // no compare-and-set for a check run. The residual is one write, which is the
+  // minimum the API permits, and the gate's auto_merge_enabled subscription is
+  // what covers it.
+  let aggregate;
+  try {
+    if (manualMergeResults.length > 0) {
+      const disarmed = await ensureNativeAutoMergeDisabled({
         github,
         context,
         core,
-        headSha: pending.headSha,
-        checkRunId: pending.checkRunId,
-        reason: formatError(error),
+        results: manualMergeResults,
       });
-      return { state: "evaluation-error", pending, aggregate };
+      if (disarmed.state === "head-changed") {
+        core.notice(
+          `Keeping aggregate ${pending.headSha} non-green because PR #${disarmed.prNumber} ` +
+            `now points at ${disarmed.headSha || "no head"}.`,
+        );
+        return { state: "association-changed", pending };
+      }
     }
+    aggregate = await reportAggregateDecision({
+      github,
+      context,
+      core,
+      headSha: pending.headSha,
+      checkRunId: pending.checkRunId,
+      beforePublish:
+        manualMergeResults.length > 0
+          ? () => confirmNativeAutoMergeDisabled({ github, context, results: manualMergeResults })
+          : undefined,
+    });
+  } catch (error) {
+    if (!isReadFailure(error)) {
+      throw error;
+    }
+    const blocked = await blockAggregateEvaluation({
+      github,
+      context,
+      core,
+      headSha: pending.headSha,
+      checkRunId: pending.checkRunId,
+      reason: formatError(error),
+    });
+    return { state: "evaluation-error", pending, aggregate: blocked };
   }
-
-  const aggregate = await reportAggregateDecision({
-    github,
-    context,
-    core,
-    headSha: pending.headSha,
-    checkRunId: pending.checkRunId,
-  });
   if (aggregate.writeState === "read-only" || !aggregate.ok || !mergeEnabled) {
     return { state: aggregate.state, pending, aggregate };
   }
@@ -1459,65 +1491,115 @@ async function getPullRequest({ github, context, number }) {
 // tell a benign error from a real one by its message, and getting that wrong
 // turns the safety mechanism into a silent no-op. Here a read distinguishes
 // "was never armed" from "failed to disarm", so no error text is interpreted.
-async function ensureNativeAutoMergeDisabled({ github, context, core, result }) {
-  const prNumber = Number(result.prNumber);
-  if (!(await readNativeAutoMergeEnabled({ github, context, number: prNumber }))) {
-    return { state: "not-armed" };
-  }
-  if (!result.pullRequestId) {
-    throw new Error(`Cannot disable native auto-merge for PR #${prNumber}: missing node ID`);
-  }
-  const mutation = `
-    mutation DisablePullRequestAutoMerge($pullRequestId: ID!) {
-      disablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId}) {
-        pullRequest {
-          number
-        }
-      }
+async function ensureNativeAutoMergeDisabled({ github, context, core, results }) {
+  const numbers = results.map((result) => Number(result.prNumber));
+  const states = await readNativeAutoMergeStates({ github, context, numbers });
+  for (const result of results) {
+    const prNumber = Number(result.prNumber);
+    const state = states.get(prNumber);
+    // The state belongs to a head this transaction does not own. Cancelling it
+    // would destroy an auto-merge request armed for the NEW head — one this
+    // transaction never evaluated and has no claim over. Stop instead; the
+    // synchronize event owns that head and will evaluate it.
+    if (normalizeHeadSha(state.headSha) !== normalizeHeadSha(result.headSha)) {
+      return { state: "head-changed", prNumber, headSha: state.headSha };
     }
-  `;
-  await github.graphql(mutation, { pullRequestId: result.pullRequestId });
-  // The mutation succeeding is a claim; the read is the evidence. A disable that
-  // reports success and leaves auto-merge armed must not publish a green.
-  if (await readNativeAutoMergeEnabled({ github, context, number: prNumber })) {
-    throw new Error(
-      `Refusing to publish a passing decision for manual-only PR #${prNumber}: ` +
-        "GitHub-native auto-merge is still armed after disabling it",
-    );
-  }
-  core.notice(
-    `Disabled GitHub-native auto-merge for manual-only PR #${prNumber} before ` +
-      "publishing its passing decision.",
-  );
-  return { state: "disabled" };
-}
-
-// A read of just the auto-merge state, taken as late as possible. Separate from
-// getPullRequest on purpose: the whole defect is that getPullRequest's answer is
-// many round trips old by the time the decision acts on it.
-async function readNativeAutoMergeEnabled({ github, context, number }) {
-  const { owner, repo } = context.repo;
-  const query = `
-    query AutoMergeState($owner: String!, $repo: String!, $number: Int!) {
-      repository(owner: $owner, name: $repo) {
-        pullRequest(number: $number) {
-          autoMergeRequest {
-            enabledAt
+    if (!state.armed) {
+      continue;
+    }
+    if (!result.pullRequestId) {
+      throw new Error(`Cannot disable native auto-merge for PR #${prNumber}: missing node ID`);
+    }
+    const mutation = `
+      mutation DisablePullRequestAutoMerge($pullRequestId: ID!) {
+        disablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId}) {
+          pullRequest {
+            number
           }
         }
       }
+    `;
+    await github.graphql(mutation, { pullRequestId: result.pullRequestId });
+    core.notice(
+      `Disabled GitHub-native auto-merge for manual-only PR #${prNumber} before ` +
+        "publishing its passing decision.",
+    );
+  }
+  return { state: "disarmed" };
+}
+
+// The final observation, run immediately before the aggregate write and after
+// every read that write depends on. The mutation succeeding is a claim; this is
+// the evidence. Anything still armed — or any state that cannot be read — throws,
+// so no consumable green is published.
+async function confirmNativeAutoMergeDisabled({ github, context, results }) {
+  const numbers = results.map((result) => Number(result.prNumber));
+  const states = await readNativeAutoMergeStates({ github, context, numbers });
+  const armed = [...states.entries()]
+    .filter(([, state]) => state.armed)
+    .map(([number]) => number);
+  if (armed.length > 0) {
+    throw new Error(
+      `Refusing to publish a passing decision for manual-only PR ${joinPullNumbers(armed)}: ` +
+        "GitHub-native auto-merge is still armed after disabling it",
+    );
+  }
+}
+
+// The auto-merge state of every manual-merge PR at this head, in ONE read.
+// Batched rather than looped on purpose: the guarantee this guard offers is
+// "nothing was armed as of the last observation before the write", and a loop of
+// N reads makes that claim N-1 reads stale for the first PR. One query keeps the
+// observation simultaneous across the whole head.
+//
+// headRefOid comes back with it because the state is only meaningful for the head
+// this transaction owns: a PR that synchronized to a new head has an auto-merge
+// request belonging to THAT head, and cancelling it would destroy a queue entry
+// this transaction has no claim over.
+//
+// Separate from getPullRequest on purpose: the whole defect is that
+// getPullRequest's answer is many round trips old by the time the decision acts.
+async function readNativeAutoMergeStates({ github, context, numbers }) {
+  const { owner, repo } = context.repo;
+  if (numbers.length === 0) {
+    return new Map();
+  }
+  const parameters = numbers.map((_, index) => `$n${index}: Int!`).join(", ");
+  const fields = numbers
+    .map(
+      (_, index) => `
+          pr${index}: pullRequest(number: $n${index}) {
+            number
+            headRefOid
+            autoMergeRequest {
+              enabledAt
+            }
+          }`,
+    )
+    .join("");
+  const query = `
+    query AutoMergeState($owner: String!, $repo: String!, ${parameters}) {
+      repository(owner: $owner, name: $repo) {${fields}
+      }
     }
   `;
-  const response = await retryRead(`could not read auto-merge state for PR #${number}`, () =>
-    github.graphql(query, { owner, repo, number }),
-  );
-  const pr = response?.repository?.pullRequest;
-  if (!pr) {
-    // An unreadable state is not a disarmed one. Fail closed: the caller turns
-    // this into a red aggregate rather than a published green.
-    throw new Error(`Could not read auto-merge state for PR #${number}`);
-  }
-  return Boolean(pr.autoMergeRequest);
+  const variables = { owner, repo };
+  numbers.forEach((number, index) => {
+    variables[`n${index}`] = number;
+  });
+  const label = `could not read auto-merge state for PR ${joinPullNumbers(numbers)}`;
+  const response = await retryRead(label, () => github.graphql(query, variables));
+  const states = new Map();
+  numbers.forEach((number, index) => {
+    const pr = response?.repository?.[`pr${index}`];
+    if (!pr) {
+      // An unreadable state is not a disarmed one. Fail closed: the caller turns
+      // this into a red aggregate rather than a published green.
+      throw new Error(`Could not read auto-merge state for PR #${number}`);
+    }
+    states.set(number, { armed: Boolean(pr.autoMergeRequest), headSha: pr.headRefOid });
+  });
+  return states;
 }
 
 async function listPullRequestFiles({ github, context, number }) {

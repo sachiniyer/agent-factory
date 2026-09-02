@@ -350,9 +350,113 @@ test("the auto-merge state is read fresh rather than trusted from the snapshot",
     mergeEnabled: true,
   });
 
-  // One read for a PR that is not armed: nothing to disable, nothing to confirm.
-  assert.equal(github.autoMergeStateReads, 1);
+  // Two reads for a PR that is not armed: the disarm pass finds nothing to do,
+  // and the publish precondition confirms it again immediately before the write.
+  // Nothing is disabled either way.
+  assert.equal(github.autoMergeStateReads, 2);
   assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+});
+
+test("one batched read covers every manual PR sharing a head", async () => {
+  // Codex P1 (round 2): with several manual PRs on one head, a per-PR loop makes
+  // the first PR's observation N-1 reads stale by the time the green is
+  // published. One aliased query keeps the observation simultaneous.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    associatedPullRequests: [
+      { number: 1465, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+      { number: 2048, state: "open", base: { ref: "master" }, head: { sha: HEAD_SHA } },
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  // Two PRs, still two reads: the disarm pass and the publish precondition.
+  assert.equal(github.autoMergeStateReads, 2);
+  assert.equal(github.autoMergeStateReadsByNumber[1465], 2);
+  assert.equal(github.autoMergeStateReadsByNumber[2048], 2);
+});
+
+test("a PR that moved to a new head has its auto-merge left alone", async () => {
+  // Codex P2 (round 2): the state read must be bound to the head this
+  // transaction owns. A PR that synchronized has an auto-merge request armed for
+  // the NEW head, and cancelling it would destroy a queue entry this transaction
+  // never evaluated and has no claim over.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    autoMergeStateHeadByNumber: { 1465: OTHER_SHA },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0, "a foreign head must not be mutated");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published for a head the PR has left",
+  );
+});
+
+test("the publish precondition runs after the aggregate's own reads", async () => {
+  // Codex P1 (round 2): reportAggregateDecision reads associations and check runs
+  // BEFORE it writes, so a guard that ran before it was already stale. The
+  // confirmation is now a precondition of the write itself.
+  const github = fakeGateGithub({ author: "detail-app", nativeAutoMergeEnabled: true });
+  const order = [];
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    order.push(`read:${fn.name}`);
+    return realPaginate(fn, options);
+  };
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      order.push("auto-merge:read");
+    }
+    return realGraphql(query, variables);
+  };
+  const realUpdate = github.rest.checks.update;
+  github.rest.checks.update = async (options) => {
+    if (options.output?.title?.startsWith("PASS: every open master PR")) {
+      order.push("aggregate:publish");
+    }
+    return realUpdate(options);
+  };
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  const publish = order.lastIndexOf("aggregate:publish");
+  const lastConfirm = order.lastIndexOf("auto-merge:read");
+  assert.ok(publish > 0, "the aggregate PASS must have been published");
+  assert.equal(
+    lastConfirm + 1,
+    publish,
+    `nothing may read between the final auto-merge confirmation and the green; got ${JSON.stringify(order.slice(-6))}`,
+  );
 });
 
 test("a disable that leaves auto-merge armed refuses to publish the green", async () => {
@@ -2084,6 +2188,7 @@ function fakeGateGithub({
   workflowDispatchError = null,
   nativeAutoMergeDisableError = null,
   autoMergeStateError = null,
+  autoMergeStateHeadByNumber = {},
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
@@ -2150,6 +2255,7 @@ function fakeGateGithub({
     nativeAutoMergeDisableAttempts: 0,
     nativeAutoMergeArmed: nativeAutoMergeEnabled,
     autoMergeStateReads: 0,
+    autoMergeStateReadsByNumber: {},
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -2190,15 +2296,24 @@ function fakeGateGithub({
         if (autoMergeStateError) {
           throw autoMergeStateError;
         }
-        return {
-          repository: {
-            pullRequest: {
-              autoMergeRequest: github.nativeAutoMergeArmed
-                ? { enabledAt: "2026-07-09T01:05:00Z" }
-                : null,
-            },
-          },
-        };
+        // Aliased per PR, the way the batched read asks for it.
+        const repository = {};
+        for (const [key, number] of Object.entries(variables)) {
+          const alias = /^n(\d+)$/.exec(key);
+          if (!alias) {
+            continue;
+          }
+          github.autoMergeStateReadsByNumber[number] =
+            (github.autoMergeStateReadsByNumber[number] || 0) + 1;
+          repository[`pr${alias[1]}`] = {
+            number,
+            headRefOid: autoMergeStateHeadByNumber[number] || headSha,
+            autoMergeRequest: github.nativeAutoMergeArmed
+              ? { enabledAt: "2026-07-09T01:05:00Z" }
+              : null,
+          };
+        }
+        return { repository };
       }
       github.graphqlReadsByNumber[variables.number] =
         (github.graphqlReadsByNumber[variables.number] || 0) + 1;
