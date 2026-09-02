@@ -492,12 +492,32 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 // The result is positionally aligned with tasks, so a caller that already
 // iterates the slice can index it.
 func DeriveScheduleHealthBatch(tasks []Task, now time.Time) []ScheduleHealth {
+	out, _ := deriveScheduleHealthBatch(tasks, now)
+	return out
+}
+
+// deriveScheduleHealthBatch is DeriveScheduleHealthBatch, also reporting how many
+// schedule steps the whole load spent out of the shared budget.
+//
+// The count exists so the sharing can be asserted as a PROPERTY rather than
+// inferred from how long the load took. It was a wall-clock ceiling first, and
+// that was the wrong oracle twice over: it measured the runner rather than the
+// code, and the margin it had to detect — about 0.5s shared against 2.4s
+// unbounded on a quiet machine — sits inside the noise band of a loaded macOS
+// runner, so it reddened unrelated PRs while the property it guarded still held
+// (#3674).
+//
+// Reporting the spend rather than only the remainder is what makes it hard to
+// satisfy vacuously: a caller that reset the budget per task would have to
+// report the sum of those resets to stay consistent with the counts on the
+// records, and the test checks that consistency as well as the bound.
+func deriveScheduleHealthBatch(tasks []Task, now time.Time) ([]ScheduleHealth, int) {
 	budget := MaxMissedOccurrences
 	out := make([]ScheduleHealth, len(tasks))
 	for i := range tasks {
 		out[i] = deriveScheduleHealth(tasks[i], now, &budget)
 	}
-	return out
+	return out, MaxMissedOccurrences - budget
 }
 
 // stripDerived clears every read-time field. saveTasks calls it on the way to

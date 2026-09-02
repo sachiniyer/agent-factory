@@ -649,15 +649,36 @@ func TestWithScheduleHealth_BoundsWorkAcrossTheWholeLoad(t *testing.T) {
 		tasks = append(tasks, tsk)
 	}
 
-	started := time.Now()
+	// The WORK is asserted directly, not timed. This was a wall-clock ceiling
+	// until #3674, and that oracle failed in both directions: it measured the
+	// runner rather than the code, and the gap it had to resolve — roughly 0.5s
+	// shared against 2.4s unbounded on a quiet machine — is inside the noise band
+	// of a loaded macOS runner, so it reddened PRs whose diffs touched nothing
+	// here while the property it guarded still held.
+	//
+	// Two assertions, and the pair is the point. The BOUND says the load spent one
+	// budget rather than one per task. The EQUALITY ties that reported spend to
+	// the counts on the records, so the bound cannot be satisfied by a batch that
+	// reset per task and reported only its last budget: it would have to
+	// under-report the work by exactly the amount the records show it did.
+	healths, spent := deriveScheduleHealthBatch(tasks, now)
+
+	assert.LessOrEqual(t, spent, MaxMissedOccurrences,
+		"a load of long-dark high-frequency tasks must not cost more than ONE derivation's budget; "+
+			"a per-task budget would spend up to %d", len(tasks)*MaxMissedOccurrences)
+
+	counted := 0
+	for i, h := range healths {
+		assert.True(t, h.Overdue, "dark%03d: the verdict survives the budget", i)
+		counted += h.MissedOccurrences
+	}
+	assert.Equal(t, spent, counted,
+		"every step the load reports spending must be one it can show on a record, "+
+			"or the bound above is measuring something other than the work")
+
+	// And the same load through the public entry point still annotates the
+	// records, which is what every read path actually calls.
 	got := WithScheduleHealth(tasks, now)
-	elapsed := time.Since(started)
-
-	// Generous next to the ~2.4s an unbounded load measured, and tight enough to
-	// fail loudly if the budget ever stops being shared.
-	assert.Less(t, elapsed, 500*time.Millisecond,
-		"a load of long-dark high-frequency tasks must not cost more than one derivation's budget")
-
 	total := 0
 	for _, tsk := range got {
 		assert.True(t, tsk.Overdue, "%s: the verdict survives the budget", tsk.ID)
