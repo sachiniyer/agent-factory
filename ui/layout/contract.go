@@ -45,20 +45,51 @@ import (
 // the available width functions are known to disagree about.
 //
 // The three of them (x/ansi, runewidth, PrintableRuneWidth) agree on plain text,
-// CJK, Hangul and fullwidth latin, and split on exactly this class:
+// CJK, Hangul and fullwidth latin, and split on the multi-code-point EMOJI
+// cluster:
 //
 //	U+200D          zero-width joiner — chained emoji (x/ansi 2, PRW 8, tmux 4)
 //	U+FE0F          variation selector 16 (x/ansi 2, PRW 1, tmux 2)
 //	U+1F3FB–U+1F3FF emoji skin-tone modifiers (x/ansi 2, PRW 4, tmux 2)
+//	U+E0020–U+E007F emoji TAG sequences — the subdivision flags
 //
 // It is a fact about the bytes, so it stays true whatever tmux version is on the
 // other end.
+//
+// # The tag range is an addition to #3614's literal list, and why
+//
+// The triage named the first three. The fourth was found by sweeping the same
+// question over a wider corpus: the England/Scotland/Wales flags are a base
+// U+1F3F4 followed by tag characters, carry NONE of the first three code points,
+// and measure 2 to x/ansi against 8 to PrintableRuneWidth — the identical shape
+// and the identical size of disagreement as the chained family this issue is
+// about. Leaving them out would be a silent overflow of exactly the kind being
+// fixed, on content a user can put in a session title. Tag characters appear in
+// nothing but emoji, so admitting them costs nothing anywhere else.
+//
+// # What is deliberately NOT here
+//
+// The same sweep found ordinary SCRIPT clusters where the measures also disagree
+// — Devanagari "\u0915\u094d\u0937" (x/ansi 1, PRW 3), Thai "\u0e01\u0e33"
+// (1 against 2), a Hangul jamo cluster (2 against 4). They are excluded on
+// purpose, and the exclusion is the same judgement #3610 made when it withdrew
+// the blanket overestimate: there PrintableRuneWidth OVER-counts ordinary text
+// badly, so bounding by it would shorten real titles in those scripts on every
+// row that carries them, to buy a rectangle guarantee against a disagreement
+// nobody has measured tmux on. Predicted harm on emoji is worth the blank cells;
+// measured harm on a user's own language is not.
+//
+// That is a gap, stated rather than hidden: if tmux is measured advancing more
+// than x/ansi reports for one of those clusters, the fix is to add the range here
+// with the measurement beside it, exactly as the emoji rows above carry theirs.
 func contentMeasuresDisagree(s string) bool {
 	for _, r := range s {
 		switch {
 		case r == '\u200d', r == '\ufe0f': // ZWJ, variation selector 16
 			return true
-		case r >= '\U0001F3FB' && r <= '\U0001F3FF':
+		case r >= '\U0001F3FB' && r <= '\U0001F3FF': // emoji skin-tone modifiers
+			return true
+		case r >= '\U000E0020' && r <= '\U000E007F': // emoji tag sequences
 			return true
 		}
 	}

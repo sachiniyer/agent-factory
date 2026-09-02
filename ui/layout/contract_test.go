@@ -276,3 +276,57 @@ func TestRowKeepingTailReservesTheTailAdjacent(t *testing.T) {
 		t.Errorf("RowKeepingTail = %q, want %q", got, want)
 	}
 }
+
+// The detection set was swept against a wider corpus than the triage named, and
+// this pins both halves of what came back.
+//
+// IN: the England flag is a base plus TAG characters — no ZWJ, no variation
+// selector, no modifier — and measures 2 to x/ansi against 8 to
+// PrintableRuneWidth. Identical shape and identical size of disagreement to the
+// chained family this issue is about, on content a user can put in a session
+// title, so leaving it out would be a silent overflow of the kind being fixed.
+//
+// OUT: ordinary script clusters where the measures also disagree. There
+// PrintableRuneWidth OVER-counts, so bounding by it shortens real titles in those
+// scripts on every row that carries them — the measured harm that made #3610
+// withdraw the blanket overestimate — to buy a guarantee against a disagreement
+// nobody has measured tmux on. If that measurement ever exists, this test is
+// where the decision changes.
+func TestDetectionCoversEmojiClustersAndNotOrdinaryScripts(t *testing.T) {
+	const englandFlag = "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"
+
+	if !contentMeasuresDisagree(englandFlag) {
+		t.Error("a tag-sequence flag carries no ZWJ, VS16 or modifier and still splits the " +
+			"measures 2-against-8; it must be bounded like the chained family")
+	}
+	if got, want := CellsUpperBound(englandFlag), 8; got != want {
+		t.Errorf("CellsUpperBound(england flag) = %d, was %d when measured", got, want)
+	}
+	for w := 1; w <= 10; w++ {
+		out := ClampToRect("ab"+englandFlag+"cd", Rect{W: w, H: 1})
+		if got := CellsUpperBound(out); got > w {
+			t.Errorf("w=%d: a row with a tag-sequence flag can occupy %d cells: %q", w, got, out)
+		}
+	}
+
+	// Excluded, each with the disagreement that makes it tempting, so removing it
+	// from this list is a deliberate act rather than an oversight.
+	for _, c := range []struct {
+		name       string
+		s          string
+		xansi, prw int
+	}{
+		{"devanagari", "\u0915\u094d\u0937", 1, 3},
+		{"thai", "\u0e01\u0e33", 1, 2},
+		{"hangul jamo", "\u1100\u1161\u11a8", 2, 4},
+	} {
+		if contentMeasuresDisagree(c.s) {
+			t.Errorf("%s is ordinary script text; bounding it by PrintableRuneWidth (%d against "+
+				"x/ansi's %d) shortens real titles in that script. Adding it needs a tmux "+
+				"measurement first", c.name, c.prw, c.xansi)
+		}
+		if got, want := contractCells(c.s), Cells(c.s); got != want {
+			t.Errorf("%s: contract measure %d must equal Cells %d", c.name, got, want)
+		}
+	}
+}
