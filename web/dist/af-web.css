@@ -2123,6 +2123,15 @@ button:disabled,
 .af-task-enabled.af-task-on {
   color: var(--af-dot-ready);
 }
+.af-task-enabled.af-task-warn {
+  color: var(--af-dot-lost);
+}
+.af-task-enabled.af-task-unknown {
+  color: var(--af-text-2);
+}
+.af-task-health {
+  color: var(--af-dot-lost);
+}
 .af-task-main {
   flex: 1;
   min-width: 0;

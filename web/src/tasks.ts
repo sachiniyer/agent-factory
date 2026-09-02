@@ -22,7 +22,7 @@
 
 import { h } from "./dom.js";
 import { asForm, field, modalChrome, type ModalHandle, projectLabel } from "./modals.js";
-import { icon } from "./icon.js";
+import { icon, type IconName } from "./icon.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, programChoices } from "./programs.js";
 import { SCHEDULE_TYPE_OPTIONS, type Schedule, type ScheduleType, cron as scheduleCron, describe as scheduleDescribe, parseCron, previewIsRedundant } from "./schedule.js";
 import type { TaskData } from "./types.js";
@@ -117,6 +117,84 @@ function lastRunSummary(t: TaskData): string {
 }
 
 /**
+ * Schedule health (#3623), rendered here for the first time (#3626).
+ *
+ * The daemon derives every one of these and puts them on the records ListTasks
+ * returns, so this file renders and never re-derives — which is the whole point:
+ * the CLI, the TUI and this list must not each reach a different verdict about
+ * the same task, and the way that happened before was three surfaces each
+ * computing it from the cron expression themselves.
+ *
+ * The copy and the ordering mirror ui/automations.go deliberately, so a person
+ * moving between the rail and the browser reads the same words in the same
+ * order about the same task.
+ */
+
+/** Whether the row carries a WARNING: it has stopped firing, or the scheduler
+ *  cannot fire it at all. An unknown is deliberately not one — see taskHealth. */
+export function taskNeedsAttention(t: TaskData): boolean {
+  return !!t.overdue || !!t.unschedulable;
+}
+
+/** The row's health mark: which static glyph it carries, and the modifier class
+ *  that colours it. No animation — state reads from a glyph here as in the TUI
+ *  (#1766). */
+export function taskHealthMark(t: TaskData): { icon: IconName; cls: string } | null {
+  if (taskNeedsAttention(t)) {
+    return { icon: "triangle-alert", cls: "af-task-warn" };
+  }
+  if (t.unassessable) {
+    // Its own mark rather than either neighbour's: a tick is the claim this
+    // whole feature exists to stop making, and the warning glyph would call an
+    // unestablished thing a failure.
+    return { icon: "circle-question", cls: "af-task-unknown" };
+  }
+  return null;
+}
+
+/** The leading health fragment, or "" when the row is healthy. It LEADS the meta
+ *  line for the reason the TUI's leads its detail line: these lines ellipsize
+ *  from the right, so a reason placed behind the configuration is the half that
+ *  gets cut, leaving a marked row with nothing explaining it. */
+export function taskHealthSummary(t: TaskData): string {
+  if (t.unassessable) {
+    return "Health unknown";
+  }
+  if (t.unschedulable) {
+    // Which shape, from the same three the daemon classifies (task.UnschedulableReason).
+    // Re-deriving it here is exactly what had the other surfaces calling an ABSENT
+    // expression invalid, so this reads the record instead.
+    if (!t.cron_expr || t.cron_expr.trim() === "") {
+      return "No trigger";
+    }
+    return "Cannot be scheduled";
+  }
+  if (!t.overdue) {
+    return "";
+  }
+  if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+    // A count nobody took is not a count of zero: the daemon's walk budget can be
+    // spent before it reaches a task, and it says so by capping a zero.
+    return "overdue";
+  }
+  const capped = t.missed_occurrences_capped ? "+" : "";
+  return `overdue · missed ${t.missed_occurrences}${capped}`;
+}
+
+/** The next-run fragment: what the LIVE scheduler entry will fire, or the fact
+ *  that nothing is holding this task. Absent arming says nothing at all — no
+ *  daemon has reported on it, which is not the same as "not armed". */
+export function taskArmingSummary(t: TaskData): string {
+  if (t.next_run_at) {
+    return `next run ${t.next_run_at}`;
+  }
+  if (t.arming === "not-armed" && t.enabled) {
+    return "enabled but not armed";
+  }
+  return "";
+}
+
+/**
  * The tasks pane: build once (its `el` mounts into the app body), then
  * update(tasks) re-renders on a change. A small stateful class like the projects
  * pane so a task.* event patches only this subtree.
@@ -183,21 +261,42 @@ export class TasksPane {
   }
 
   private taskRow(t: TaskData): HTMLElement {
+    // The health mark REPLACES the enabled tick rather than adding a column, as
+    // the rail's does: only an enabled task can carry one, so the two can never
+    // collide, and a marked row stays exactly as wide as an unmarked one.
+    const mark = taskHealthMark(t);
     const enabledDot = h(
       "span",
-      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
-      icon(t.enabled ? "square-check" : "square"),
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
+      icon(mark ? mark.icon : t.enabled ? "square-check" : "square"),
     );
-    enabledDot.setAttribute("aria-hidden", "true");
+    // The mark is the row's only sign that something is wrong when the meta line
+    // is ellipsized, so it carries a label for a screen reader rather than being
+    // hidden like the plain enabled tick.
+    if (mark) {
+      enabledDot.setAttribute("role", "img");
+      enabledDot.setAttribute("aria-label", taskHealthSummary(t));
+    } else {
+      enabledDot.setAttribute("aria-hidden", "true");
+    }
 
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts: (Node | string)[] = [];
+    // Health LEADS the line — see taskHealthSummary.
+    const health = taskHealthSummary(t);
+    if (health !== "") {
+      metaParts.push(h("span", { class: "af-task-health" }, health), " · ");
+    }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
         h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
         " · ",
       );
+    }
+    const arming = taskArmingSummary(t);
+    if (arming !== "") {
+      metaParts.push(arming, " · ");
     }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);

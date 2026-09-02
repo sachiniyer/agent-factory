@@ -60,6 +60,9 @@ const SESSION_C = process.env.AF_WEB_SESSION_C ?? "probe-c";
 // The name of the task the harness seeds (web-selftest-entry.sh) so the tasks list
 // is non-empty on load.
 const SEEDED_TASK = process.env.AF_WEB_TASK_NAME ?? "probe-task";
+// The task the harness seeds ALREADY OVERDUE (#3626): created a month back with an
+// hourly schedule and no run, so the daemon derives it as overdue on first read.
+const OVERDUE_TASK = process.env.AF_WEB_OVERDUE_TASK ?? "probe-overdue";
 // The task in the TASK-ONLY project (a third repo with a task but no session,
 // redesign PR2): proves a task-only repo lists in the switcher and its tasks scope.
 const TASK3_NAME = process.env.AF_WEB_TASK3_NAME ?? "mock3-task";
@@ -3109,6 +3112,48 @@ test("#2517: Escape interrupts the agent (forwards down the PTY) and never detac
   } finally {
     await ctx.close();
   }
+});
+
+test("#3626: the tasks list marks a task that has stopped firing, and says how far behind", REAL_FIXTURE, async () => {
+  // The web is the surface the #2212 owner — a box whose owner never opens the
+  // TUI — actually opens, and before this it was the one showing none of #3623:
+  // an enabled task dark for a month read exactly like a healthy one.
+  await page.locator('.af-viewtab[data-view="tasks"]').click();
+  const tasks = page.locator(".af-tasks");
+  await expect(tasks).toBeVisible();
+
+  const overdue = tasks.locator(".af-task-row", { hasText: OVERDUE_TASK });
+  await expect(overdue).toHaveCount(1);
+
+  // The MARK, on the row you are not scrolling to — the enabled tick is replaced
+  // rather than a column added, as the rail does it.
+  const mark = overdue.locator(".af-task-enabled.af-task-warn");
+  await expect(mark).toHaveCount(1);
+  await expect(mark).toHaveAttribute("aria-label", /overdue/);
+
+  // The DETAIL, in the row, in the rail's own words. The count is whatever the
+  // daemon derived from a month of an hourly schedule, so the assertion is on the
+  // shape rather than on a number the harness would have to keep in step.
+  await expect(overdue.locator(".af-task-health")).toHaveText(/^overdue · missed \d+\+?$/);
+
+  // A static glyph and nothing else: no animation anywhere on the marked row
+  // (#1766 — state reads from a glyph in this app).
+  const animated = await overdue.evaluate((row) =>
+    Array.from(row.querySelectorAll("*")).filter((el) => {
+      const s = getComputedStyle(el);
+      return s.animationName !== "none" || (s.transitionDuration !== "0s" && s.transitionProperty !== "none");
+    }).length,
+  );
+  expect(animated).toBe(0);
+
+  // And the healthy seeded task in the same list carries neither, which is what
+  // makes the mark mean something.
+  const healthy = tasks.locator(".af-task-row", { hasText: SEEDED_TASK });
+  await expect(healthy).toHaveCount(1);
+  await expect(healthy.locator(".af-task-enabled.af-task-warn")).toHaveCount(0);
+  await expect(healthy.locator(".af-task-health")).toHaveCount(0);
+
+  await page.locator('.af-viewtab[data-view="sessions"]').click();
 });
 
 test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {

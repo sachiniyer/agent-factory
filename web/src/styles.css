@@ -2804,6 +2804,27 @@ button:disabled,
   color: var(--af-dot-ready);
 }
 
+/* Schedule health (#3626). A colour and a static glyph and nothing else — no
+   spinner, no pulse (#1766) — and the unknown mark is muted rather than warning-
+   coloured, because colouring an unestablished thing like a failure is how people
+   learn to ignore the rows that are one.
+
+   --af-dot-lost is the theme's WARNING slot (theme.ts derives it from
+   DaemonTheme.warning), which is the same slot the rail's [!] paints with, so the
+   two surfaces mark a task in the same colour by construction rather than by two
+   hex values agreeing today. */
+.af-task-enabled.af-task-warn {
+  color: var(--af-dot-lost);
+}
+
+.af-task-enabled.af-task-unknown {
+  color: var(--af-text-2);
+}
+
+.af-task-health {
+  color: var(--af-dot-lost);
+}
+
 .af-task-main {
   flex: 1;
   min-width: 0;

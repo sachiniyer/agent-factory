@@ -315,6 +315,37 @@ export interface TaskData {
   last_run_at?: string;
   /** The outcome of the last run (scheduler-owned; absent until first run). */
   last_run_status?: string;
+
+  // Schedule health (#3623). Every field below is DERIVED BY THE DAEMON at read
+  // time and never stored, so a client renders them and never sends them —
+  // AddTask/UpdateTask ignore them, and the store strips them on both sides.
+  // They arrive on the records ListTasks returns, which is why showing them here
+  // is rendering rather than plumbing (#3626).
+
+  /** The task's last run precedes its most recent scheduled occurrence by more
+   *  than one slack window: it has stopped firing. */
+  overdue?: boolean;
+  /** How many scheduled fires it has missed since. */
+  missed_occurrences?: number;
+  /** The count above hit the derivation's cap and is a FLOOR, not an exact
+   *  number — render it as "N+" rather than as N. */
+  missed_occurrences_capped?: boolean;
+  /** The scheduler cannot derive a next run from this task's expression: it has
+   *  no trigger, the expression does not parse, or nothing matches inside the
+   *  scheduler's search horizon. Not overdue (nothing was ever due) and not
+   *  healthy either. */
+  unschedulable?: boolean;
+  /** No lateness verdict could be reached — nothing to measure from, or nothing
+   *  the schedule can be evaluated against. UNKNOWN, not healthy. */
+  unassessable?: boolean;
+  /** RFC3339 time the LIVE scheduler entry will next fire, read off what is
+   *  armed rather than recomputed from the expression. Absent when the task is
+   *  not armed, and that absence is itself the signal. */
+  next_run_at?: string;
+  /** The live arming observation: "armed", "not-armed", or ABSENT when no daemon
+   *  has reported on it (none running, or one still starting). Absent must never
+   *  be read as "not armed". */
+  arming?: string;
 }
 
 /**

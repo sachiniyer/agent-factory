@@ -9332,6 +9332,13 @@ var CircleDashed = [
   ["path", { d: "M6.391 20.279a10 10 0 0 1-2.69-2.7" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/circle-question-mark.mjs
+var CircleQuestionMark = [
+  ["circle", { cx: "12", cy: "12", r: "10" }],
+  ["path", { d: "M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
 // node_modules/lucide/dist/esm/icons/circle.mjs
 var Circle = [["circle", { cx: "12", cy: "12", r: "10" }]];
 
@@ -9454,6 +9461,13 @@ var Terminal2 = [
   ["path", { d: "m4 17 6-6-6-6" }]
 ];
 
+// node_modules/lucide/dist/esm/icons/triangle-alert.mjs
+var TriangleAlert = [
+  ["path", { d: "m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" }],
+  ["path", { d: "M12 9v4" }],
+  ["path", { d: "M12 17h.01" }]
+];
+
 // node_modules/lucide/dist/esm/icons/x.mjs
 var X = [
   ["path", { d: "M18 6 6 18" }],
@@ -9470,6 +9484,7 @@ var ICONS = {
   "chevron-down": ChevronDown,
   circle: Circle,
   "circle-dashed": CircleDashed,
+  "circle-question": CircleQuestionMark,
   diamond: Diamond,
   ellipsis: Ellipsis,
   "external-link": ExternalLink,
@@ -9485,6 +9500,7 @@ var ICONS = {
   square: Square,
   "square-check": SquareCheckBig,
   terminal: Terminal2,
+  "triangle-alert": TriangleAlert,
   x: X
 };
 function icon(name, className = "") {
@@ -12529,6 +12545,46 @@ function lastRunSummary(t) {
   const status = t.last_run_status ? ` (${t.last_run_status})` : "";
   return `last run ${t.last_run_at}${status}`;
 }
+function taskNeedsAttention(t) {
+  return !!t.overdue || !!t.unschedulable;
+}
+function taskHealthMark(t) {
+  if (taskNeedsAttention(t)) {
+    return { icon: "triangle-alert", cls: "af-task-warn" };
+  }
+  if (t.unassessable) {
+    return { icon: "circle-question", cls: "af-task-unknown" };
+  }
+  return null;
+}
+function taskHealthSummary(t) {
+  if (t.unassessable) {
+    return "Health unknown";
+  }
+  if (t.unschedulable) {
+    if (!t.cron_expr || t.cron_expr.trim() === "") {
+      return "No trigger";
+    }
+    return "Cannot be scheduled";
+  }
+  if (!t.overdue) {
+    return "";
+  }
+  if (!t.missed_occurrences || t.missed_occurrences <= 0) {
+    return "overdue";
+  }
+  const capped = t.missed_occurrences_capped ? "+" : "";
+  return `overdue \xB7 missed ${t.missed_occurrences}${capped}`;
+}
+function taskArmingSummary(t) {
+  if (t.next_run_at) {
+    return `next run ${t.next_run_at}`;
+  }
+  if (t.arming === "not-armed" && t.enabled) {
+    return "enabled but not armed";
+  }
+  return "";
+}
 var TasksPane = class {
   constructor(actions2) {
     this.actions = actions2;
@@ -12586,20 +12642,34 @@ var TasksPane = class {
     this.el.replaceChildren(head, h("ul", { class: "af-tasks-list" }, ...rows));
   }
   taskRow(t) {
+    const mark = taskHealthMark(t);
     const enabledDot = h(
       "span",
-      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}` },
-      icon(t.enabled ? "square-check" : "square")
+      { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
+      icon(mark ? mark.icon : t.enabled ? "square-check" : "square")
     );
-    enabledDot.setAttribute("aria-hidden", "true");
+    if (mark) {
+      enabledDot.setAttribute("role", "img");
+      enabledDot.setAttribute("aria-label", taskHealthSummary(t));
+    } else {
+      enabledDot.setAttribute("aria-hidden", "true");
+    }
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts = [];
+    const health = taskHealthSummary(t);
+    if (health !== "") {
+      metaParts.push(h("span", { class: "af-task-health" }, health), " \xB7 ");
+    }
     if (t.target_session && t.target_session.trim() !== "") {
       metaParts.push(
         h("span", { class: "af-task-target" }, icon("arrow-right"), t.target_session),
         " \xB7 "
       );
+    }
+    const arming = taskArmingSummary(t);
+    if (arming !== "") {
+      metaParts.push(arming, " \xB7 ");
     }
     metaParts.push(lastRunSummary(t));
     const meta = h("div", { class: "af-task-meta" }, ...metaParts);
@@ -16107,6 +16177,7 @@ lucide/dist/esm/icons/bot.mjs:
 lucide/dist/esm/icons/check.mjs:
 lucide/dist/esm/icons/chevron-down.mjs:
 lucide/dist/esm/icons/circle-dashed.mjs:
+lucide/dist/esm/icons/circle-question-mark.mjs:
 lucide/dist/esm/icons/circle.mjs:
 lucide/dist/esm/icons/diamond.mjs:
 lucide/dist/esm/icons/ellipsis.mjs:
@@ -16123,6 +16194,7 @@ lucide/dist/esm/icons/refresh-cw.mjs:
 lucide/dist/esm/icons/square-check-big.mjs:
 lucide/dist/esm/icons/square.mjs:
 lucide/dist/esm/icons/terminal.mjs:
+lucide/dist/esm/icons/triangle-alert.mjs:
 lucide/dist/esm/icons/x.mjs:
 lucide/dist/esm/lucide.mjs:
   (**
