@@ -6,6 +6,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sachiniyer/agent-factory/ui/layout"
+
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
@@ -160,7 +162,7 @@ func (s *SelectionOverlay) Render() string {
 		candidates = candidates[1:]
 	}
 	for _, candidate := range candidates {
-		if lipgloss.Width(candidate) <= textRect.W {
+		if layout.Cells(candidate) <= textRect.W {
 			hint = candidate
 			break
 		}

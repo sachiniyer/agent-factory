@@ -2,9 +2,6 @@ package layout
 
 import (
 	"strings"
-
-	"github.com/charmbracelet/lipgloss"
-	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // ClampToRect pads and truncates s to exactly r.W×r.H terminal cells: the
@@ -35,14 +32,18 @@ func ClampToRect(s string, r Rect) string {
 		if i < len(lines) {
 			line = lines[i]
 		}
-		width := lipgloss.Width(line)
-		if width > r.W {
-			line = xansi.Truncate(line, r.W, "")
+		if width := Cells(line); width > r.W {
+			// Truncate on the SAME measure the padding below uses. x/ansi's
+			// truncator counts differently wherever Cells takes the legacy
+			// overestimate, so asking it once for r.W can return a row that still
+			// measures over — and the pad is then skipped, leaving a row narrower
+			// than the rectangle this function promises (#3585 review).
+			line = TruncateToCells(line, r.W)
 			if strings.Contains(line, "\x1b") {
 				line += "\x1b[0m"
 			}
-			width = lipgloss.Width(line)
 		}
+		width := Cells(line)
 		if width < r.W {
 			line += strings.Repeat(" ", r.W-width)
 		}

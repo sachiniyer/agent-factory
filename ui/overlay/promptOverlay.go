@@ -7,6 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sachiniyer/agent-factory/ui/layout"
+
 	"github.com/sachiniyer/agent-factory/ui"
 )
 
@@ -152,7 +154,7 @@ func (p *PromptOverlay) Render() string {
 	lines = append(lines, "")
 
 	hint := "enter newline · tab done · ctrl+c cancel"
-	if lipgloss.Width(hint) > textRect.W {
+	if layout.Cells(hint) > textRect.W {
 		hint = "tab done · ctrl+c cancel"
 	}
 	lines = append(lines, truncateOverlayLine(hintStyle.Render(hint), textRect.W))
