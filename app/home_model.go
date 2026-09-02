@@ -339,10 +339,10 @@ type home struct {
 	// (attachHelpDismissPolicy) distinguishing Enter (proceed) from Esc/Ctrl+C
 	// (cancel).
 	textOverlayDismissAnyKey bool
-	// textOverlayScrollable limits viewport navigation to overlays whose
-	// content is intentionally browsable. First-run and attach overlays still
-	// treat navigation keys as dismissal or policy input.
-	textOverlayScrollable bool
+	// textOverlayPendingSeenMask holds the one-shot help mask of the overlay
+	// currently on screen. It is written to app state when the user DISMISSES
+	// the overlay, never when it is displayed (#3628).
+	textOverlayPendingSeenMask uint32
 	// textOverlayDismissPolicy, when set, decides whether a help overlay key
 	// closes the overlay and whether its OnDismiss callback should run.
 	textOverlayDismissPolicy func(tea.KeyMsg) (dismiss bool, runOnDismiss bool)

@@ -538,3 +538,244 @@ func TestGeneralHelpReadsInFarFewerPagesAt80x24(t *testing.T) {
 	require.LessOrEqualf(t, wide, 1,
 		"200x50 already read in one page and must not regress; got %d", wide)
 }
+
+// TestInstanceStartHelpScrollsRatherThanDismissingAt80x24 is the #3628
+// regression. The first-run "Session created" screen overflows 80x24, so
+// TextOverlay paints "↓ more" — and the overlay closed on ANY key, including
+// the ↓ it advertised. Being a once-per-home screen, that took the whole tail
+// with it permanently: the tab line, the kill key, and the "Actions:" section
+// whose "esc close" is the only instruction for getting out.
+func TestInstanceStartHelpScrollsRatherThanDismissingAt80x24(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state)
+	require.True(t, h.textOverlay.Scrollable(),
+		"precondition: the session-created screen overflows 80x24")
+	initial := xansi.Strip(h.View())
+	require.Contains(t, initial, "Session created")
+	require.Contains(t, initial, "↓ more", "precondition: the overlay advertises more content")
+	require.NotContains(t, initial, "esc close",
+		"precondition: the line naming the dismiss key starts below the fold")
+
+	// The advertised key must scroll, not close the screen out from under it.
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyDown},
+		{Type: tea.KeyRunes, Runes: []rune("j")},
+		{Type: tea.KeyPgDown},
+		{Type: tea.KeySpace},
+	} {
+		_, _ = h.handleHelpState(msg)
+		require.Equalf(t, stateHelp, h.state, "%v must scroll the session-created overlay, not dismiss it", msg)
+		require.Falsef(t, h.textOverlay.Dismissed, "%v must not mark the overlay dismissed", msg)
+	}
+	require.Contains(t, xansi.Strip(h.View()), "↑ more", "the viewport must have moved down")
+
+	// The tail is reachable, so the screen can actually be finished.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEnd})
+	bottom := xansi.Strip(h.View())
+	require.Contains(t, bottom, "Actions:", "End must reach the section that was unreachable")
+	require.Contains(t, bottom, "esc close", "the dismiss instruction must be readable")
+
+	// …and scrolling back up still works.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyHome})
+	require.Contains(t, xansi.Strip(h.View()), "Session created", "Home must return to the top")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc — the key the screen names — closes it")
+}
+
+// The other half of #3628: the seen bit is a record of the user DISMISSING the
+// screen, not of af painting it. Burning it on display is what made the lost
+// tail permanent — the screen never came back to be finished.
+func TestFirstRunHelpMarkedSeenOnDismissNotDisplay(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+	mask := helpTypeInstanceStart{}.mask()
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state)
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask,
+		"displaying the screen must not mark it seen")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state)
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask,
+		"scrolling is reading, not dismissing — the screen is still open")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state)
+	require.NotZero(t, h.appState.GetHelpScreensSeen()&mask,
+		"dismissing the screen is what records it as seen")
+
+	// And it stays a one-shot: a second creation does not re-open it.
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateDefault, h.state, "a dismissed one-shot screen must not come back")
+}
+
+// A screen the user never dismissed has not been seen: quitting with the
+// overlay open must leave it to be shown again (#3628).
+func TestFirstRunHelpAbandonedUndismissedIsNotSeen(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	local := newStartedInstance(t, "todo-notes")
+	mask := helpTypeInstanceStart{}.mask()
+
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+	require.Equal(t, stateHelp, h.state, "precondition: the user is still reading")
+
+	// The process ends here — nothing dismissed the overlay. The gate the next
+	// run evaluates is GetHelpScreensSeen()&mask, and it is still open.
+	require.Zero(t, h.appState.GetHelpScreensSeen()&mask)
+	h.state, h.textOverlay = stateDefault, nil
+	_, _ = h.showHelpScreen(helpStart(local), nil)
+	require.Equal(t, stateHelp, h.state,
+		"a screen abandoned mid-read must be offered again")
+}
+
+// The attach overlay keeps its enter/esc policy, and gains scrolling for free
+// when its content overflows — the class property #3628 asks for, not a
+// per-caller patch.
+func TestAttachHelpScrollsWhenItOverflowsAndKeepsItsPolicy(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{agent: tmux.ProgramClaude}, nil)
+	require.Equal(t, stateHelp, h.state)
+	// Squeeze the viewport so the screen overflows regardless of copy length.
+	h.textOverlay.SetHeight(8)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the attach screen overflows")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state, "↓ must scroll the attach overlay")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more")
+
+	// Esc still cancels, exactly as attachHelpDismissPolicy says.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc must still cancel the attach overlay")
+}
+
+// The general `?` help is unchanged except that enter and q now close it too:
+// it is the screen the dismiss-key set was designed around (#1290/#1399/#1447).
+func TestGeneralHelpClosesOnEnterAndQuitKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
+		{"quit key", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+			require.Equal(t, stateHelp, h.state)
+
+			_, _ = h.handleHelpState(tc.msg)
+			require.Equal(t, stateDefault, h.state)
+		})
+	}
+}
+
+// TestGeneralHelpHidesAliasShadowedByAQuitRebind answers the Codex review on
+// #3634. Adding q to the dismiss set means a user who configures
+// `[keys] quit = "pgdown"` has made pgdn a dismiss key — so the help must stop
+// advertising it as a paging control, exactly as it already does for a rebound
+// help key (TestGeneralHelpHidesPagingAliasShadowedByRebind). Dismissal keeps
+// precedence over paging; the copy is what has to follow.
+func TestGeneralHelpHidesAliasShadowedByAQuitRebind(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		prefix   string
+		hidden   string
+		msg      tea.KeyMsg
+	}{
+		{"paging alias", "pgdown", "Page:", "pgdn", tea.KeyMsg{Type: tea.KeyPgDown}},
+		{"jump alias", "home", "Line:", "home", tea.KeyMsg{Type: tea.KeyHome}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {tc.override}}))
+			t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+			var line string
+			for _, l := range strings.Split(xansi.Strip(helpTypeGeneral{}.toContent()), "\n") {
+				if strings.HasPrefix(l, tc.prefix) {
+					line = l
+					break
+				}
+			}
+			require.NotEmpty(t, line, "the help must still render its %s controls", tc.prefix)
+			require.NotContainsf(t, line, tc.hidden,
+				"a quit rebind made %q a dismiss key; the help must not advertise it as navigation", tc.hidden)
+
+			// …and the key really does dismiss, so the copy is telling the truth.
+			h := newTestHome(t)
+			resizeHome(h, 80, 24)
+			_, _ = h.showHelpScreen(helpTypeGeneral{}, nil)
+			require.Equal(t, stateHelp, h.state)
+			_, _ = h.handleHelpState(tc.msg)
+			require.Equal(t, stateDefault, h.state,
+				"the configured quit key must close the help, matching what the copy no longer promises")
+		})
+	}
+}
+
+// TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy answers the second
+// Codex finding on #3634. The attach overlay has its own dismiss policy —
+// enter attaches, esc cancels, everything else is a no-op. Gating the scroll
+// branch on the GENERIC dismiss set meant a key the generic set called a
+// dismissal (say `[keys] quit = "pgdown"`) skipped scrolling and was then
+// refused by the policy: dead in both branches, on the exact key the overflow
+// marker advertises.
+func TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"pgdown"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{agent: tmux.ProgramClaude}, nil)
+	require.Equal(t, stateHelp, h.state)
+	h.textOverlay.SetHeight(8)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the attach screen overflows")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+	require.Equal(t, stateHelp, h.state, "the attach overlay must not close on a paging key")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more",
+		"a key the attach policy refuses must still scroll the overflowing overlay")
+
+	// Its own policy is untouched.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc still cancels the attach overlay")
+}
+
+// TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows answers the
+// third Codex finding on #3634, and it is #2413's trap in reverse. The
+// interactive help is a press-any-key gate BY DESIGN: the dismiss keystroke is
+// the user's first pane input and gets replayed (#1576). Suspending that gate
+// whenever the content overflows made every non-scroll key inert at small
+// sizes — including ctrl+], the key the overlay's own last line names.
+func TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInteractive{}, nil)
+	require.Equal(t, stateHelp, h.state)
+	// Squeeze it the way a 40x10 terminal does.
+	h.textOverlay.SetHeight(7)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the interactive help overflows")
+
+	// The scroll affordance it now paints is honoured…
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state, "↓ must scroll an overflowing overlay")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more")
+
+	// …and every other key still dismisses, including the one it names.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	require.Equal(t, stateDefault, h.state,
+		"ctrl+] — the key this overlay tells the user to press — must still close it (#2413)")
+}
