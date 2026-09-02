@@ -207,43 +207,105 @@ func (a *AutomationsPane) ScrollDown() {
 // thoroughly plausible "next Jan 01 00:00"; name the absence instead of
 // promising a fire time the task will never reach. The schedule picker's
 // Custom preview guards the same trap (see renderPreviewLine).
+// watchSupervision is the watch branch's status fragment: what the supervisor is
+// LIVE-observed to be doing, falling back to persisted history only where
+// nothing observed it.
+//
+// watchTaskStatus infers supervision from LastRunStatus, which is history rather
+// than supervision, and the two disagree in both directions: a watcher whose
+// process died past its restart budget still read "watching", and one that has
+// been repaired and re-armed keeps rendering the "stopped"/"errored" its last
+// run wrote until some future run overwrites it. The live observation settles
+// both, so it is consulted across the whole tri-state rather than only for the
+// negative case (#3626 review).
+func watchSupervision(tsk task.Task) string {
+	if !tsk.Enabled {
+		// Not a supervision question: nobody asked for this watcher to run.
+		return watchTaskStatus(tsk)
+	}
+	switch tsk.Arming {
+	case task.ArmingArmed:
+		// Observed: the supervisor IS running a watcher for this exact definition,
+		// so a persisted "stopped" or "errored" describes a past run and must not
+		// be rendered as the current state of the watch.
+		return "watching"
+	case task.ArmingNotArmed:
+		// Nothing: attentionFragment leads the line with "not armed", and the rail
+		// says a thing once.
+		return ""
+	}
+	// Nothing observed — no daemon running, or one still starting. The persisted
+	// history is the only evidence there is, which is what this pane had before
+	// arming reached it at all.
+	return watchTaskStatus(tsk)
+}
+
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
-		parts = append(parts, watchTaskStatus(tsk))
-	} else if tsk.Enabled && tsk.CronExpr != "" {
+		if s := watchSupervision(tsk); s != "" {
+			parts = append(parts, s)
+		}
+	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
+		// An unschedulable record says nothing HERE, in any of the cases below.
+		// attentionFragment diagnoses every shape of it at the FRONT of the line,
+		// because the rail clips from the right and a reason behind the trigger is
+		// the half that gets cut. That was already true of the computed fallback;
+		// it became true of the arming cases the moment app/sync.go started
+		// feeding them (#3626), and "not armed" beside "No upcoming run" is not a
+		// second finding — an expression that matches no date will not fire
+		// whoever is holding it, so the expression is the only thing to fix.
+		//
+		// The record's verdict is what decides, not a second local evaluation: a
+		// record carrying no verdict (a caller that did not annotate) still falls
+		// through to the evaluation below, which is where "No upcoming run" came
+		// from before (#2596).
 		switch {
 		case tsk.NextRunAt != nil:
 			// The LIVE armed entry when the record carries one (#3623): a number
 			// read off the scheduler cannot promise a fire the scheduler is not
 			// holding.
 			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
-		case tsk.Arming == task.ArmingNotArmed:
-			parts = append(parts, "not armed")
+		case notArmed(tsk):
+			// Nothing: attentionFragment leads the line with "not armed", and the
+			// rail's rule is to say it once. Emphatically NOT falling through to the
+			// computed fallback below — a task nothing is holding gets no fire time,
+			// which is the whole lie #3623 was about.
+		case tsk.Arming == task.ArmingArmed:
+			// Armed, with no fire time on the entry yet — the daemon has taken the
+			// task but its cron has not computed first fires (see withLiveArming).
+			// Falling through to the expression here would label a LIVE observation
+			// as computed, which is the mislabel in the other direction; the
+			// observation is worth more than the number anyway.
+			parts = append(parts, "armed")
 		default:
-			// The rail reads tasks.json directly rather than through the daemon, so
-			// it usually has no live entry to read and falls back to evaluating the
-			// expression. That fallback is what used to render a confident "next"
-			// for a task that had been dark for 18 days; the warning fragment below
-			// is what stops it being read as health.
-			// An unschedulable expression says nothing here — neither shape of it.
-			// attentionFragment diagnoses both, and it LEADS the detail line so the
-			// reason survives the rail's clip; repeating it after the trigger would
-			// only push the line further past the width.
+			// Nothing has reported on this task, so the expression is all there is
+			// and the fragment SAYS so (#3626). The rail is a tasks.json reader on a
+			// 750ms poll; app/sync.go now fetches the daemon's arming observation
+			// beside that read, so in steady state one of the cases above answers
+			// and this is the daemon-down (or not-yet-answered) path.
 			//
-			// The record's verdict is what decides, not a second local evaluation:
-			// the two must not be able to disagree about the same task. A record
-			// with no verdict on it (a caller that did not annotate) still falls
-			// through to the evaluation below, which is where "No upcoming run"
-			// came from before (#2596).
-			if tsk.Unschedulable {
-				break
-			}
+			// The qualifier is the whole point of keeping the fallback. "What a
+			// running daemon will fire" and "what this expression would imply if
+			// something were holding it" are different claims that used to render
+			// as the same string — and a task can be enabled, correctly configured
+			// and held by nothing at all (#2929). It rides INSIDE the fragment
+			// rather than as another "·" part so the caveat cannot drift away from
+			// the number it qualifies when the line is joined.
 			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
 				if next := sched.Next(a.now()); next.IsZero() {
+					// No caveat on this one: an expression that matches no date will
+					// never fire whoever is holding it, so the absence is a property of
+					// the record and not of what was observed (#2596).
 					parts = append(parts, "No upcoming run")
 				} else {
-					parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+					// The caveat comes FIRST, inside the fragment. Trailing, it was the
+					// half a clip ate: this line is ellipsized from the right and the
+					// trigger sits ahead of it, so at intermediate widths the timestamp
+					// survived while "(from cron)" became the ellipsis — leaving an
+					// inference rendered exactly like an observation, which is the one
+					// ambiguity the qualifier exists to remove (#3626 review).
+					parts = append(parts, "from cron: next "+next.Format("Jan 02 15:04"))
 				}
 			}
 		}
@@ -340,10 +402,26 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 }
 
 // needsAttention reports whether the row carries a warning: the task has stopped
-// firing on its schedule, or its expression can never fire at all. Both are read
-// off the record, so the rail's disk-backed poll sees them without a daemon.
+// firing on its schedule, its expression can never fire at all, or the daemon
+// reports it is not holding it. The first two are read off the record, so the
+// rail's disk-backed poll sees them without a daemon; the third arrives on the
+// snapshot poll (#3626) and is simply absent when no daemon answered.
 func needsAttention(tsk task.Task) bool {
-	return tsk.Overdue || tsk.Unschedulable
+	return tsk.Overdue || tsk.Unschedulable || notArmed(tsk)
+}
+
+// notArmed reports an ENABLED task the running daemon says it is not holding. It
+// will not fire — that is #2929 — and af doctor already treats it as actionable.
+//
+// Gated on Enabled because the daemon reports arming for every task, and
+// "disabled and therefore not armed" is a true, unsurprising reading of the same
+// field; deciding that the enabled one is the interesting case is this surface's
+// job. And on ArmingNotArmed specifically, never on ArmingUnknown: nothing having
+// reported is not an observation that the task is unarmed, and treating it as one
+// would mark every row on the box while a daemon restarts — which is exactly what
+// the rail sees, since it polls straight through a restart.
+func notArmed(tsk task.Task) bool {
+	return tsk.Enabled && tsk.Arming == task.ArmingNotArmed
 }
 
 // attentionFragment is the detail line's warning text, or "" when the row is
@@ -351,12 +429,20 @@ func needsAttention(tsk task.Task) bool {
 // found none — an uncounted "missed 0" beside "overdue" reads as a
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
+// The order below is a PRECEDENCE CHAIN, and titleRow's glyph selection runs the
+// same one: each rung is a stronger statement about the same task than the rung
+// under it, and af doctor orders these facts identically for the same reason — a
+// row it has already named is not named again.
+//
+// Unassessable sits at the BOTTOM, which it did not before arming reached this
+// pane. The derivation's own verdicts are mutually exclusive, so while attention
+// meant "overdue or unschedulable" nothing could outrank an unknown and checking
+// it first was harmless. Arming is layered on separately, so a record with
+// nothing to measure from can ALSO be one the daemon refused to arm — and that
+// task took the "[!]" glyph from needsAttention while this function explained it
+// with "Health unknown", a marked row whose text is about something else. The web
+// hit the identical defect the moment its mark widened (#3626 review).
 func attentionFragment(tsk task.Task, now time.Time) string {
-	if tsk.Unassessable {
-		// Says what could not be done rather than what is wrong, and leads the line
-		// for the same reason the others do — the rail clips from the right.
-		return "Health unknown"
-	}
 	if tsk.Unschedulable {
 		// EVERY shape is diagnosed here, at the front, for the same reason the
 		// overdue fragment leads: at the 22-column rail minimum the line is clipped
@@ -378,16 +464,26 @@ func attentionFragment(tsk task.Task, now time.Time) string {
 			return "No upcoming run"
 		}
 	}
-	if !tsk.Overdue {
-		return ""
+	if tsk.Overdue {
+		if tsk.MissedOccurrences <= 0 {
+			return "overdue"
+		}
+		if tsk.MissedOccurrencesCapped {
+			return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+		}
+		return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
 	}
-	if tsk.MissedOccurrences <= 0 {
-		return "overdue"
+	if notArmed(tsk) {
+		// Below overdue deliberately: an overdue task is usually also unarmed, and
+		// "it has missed 432 fires" is the sentence worth the rail's width.
+		return "not armed"
 	}
-	if tsk.MissedOccurrencesCapped {
-		return fmt.Sprintf("overdue · missed %d+", tsk.MissedOccurrences)
+	if tsk.Unassessable {
+		// Says what could not be done rather than what is wrong, and leads the line
+		// for the same reason the others do — the rail clips from the right.
+		return "Health unknown"
 	}
-	return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
+	return ""
 }
 
 // detailRow renders the expanded row's detail as a dim line indented under the

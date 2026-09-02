@@ -85,7 +85,11 @@ func TestAutomationsExpandedRowRevealsDetail(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "▾[✓]  nightly-sweep", "the focused row is marked expanded")
 	assert.Contains(t, out, "0 3 * * *", "the expanded row reveals its cron trigger")
-	assert.Contains(t, out, "next Jul 02 03:00 · last Jul 01 03:00",
+	// "from cron:" because this fixture is a plain disk read with no arming
+	// observation on it, so the time is what the expression implies rather than
+	// what a daemon is holding (#3626). The pin keeps the whole joined fragment
+	// so a change to either half has to be deliberate.
+	assert.Contains(t, out, "from cron: next Jul 02 03:00 · last Jul 01 03:00",
 		"the expanded row reveals its next/last-run detail")
 	assert.NotContains(t, out, "watch: tail -f ci.log",
 		"a collapsed (unselected) row keeps its detail hidden")

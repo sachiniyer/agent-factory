@@ -1297,8 +1297,8 @@
       "id": "task.health",
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
-        "status": "partial",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue row) and nextRunSummary (\"overdue \u00b7 missed N\")"
+        "status": "yes",
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
@@ -1308,10 +1308,9 @@
         "status": "yes",
         "pointer": "api/tasks_show.go tasksShowCmd; the same fields ride af tasks list/get --json, and doctor/tasks.go raises the af doctor row"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#3626",
-      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. The TUI cell is partial for a structural reason rather than an oversight \u2014 the Automations rail loads tasks.json directly on its 750ms poll (app/sync.go -> task.LoadTasksForKnownRepo), so it gets the pure overdue derivation for free and can never observe arming, which only the daemon holding the scheduler can see; it shows neither arming nor the trail. The web half of #3626 closed the other one: the task list renders the same mark and the same words as the rail, re-deriving nothing. The TUI cell stays partial until the rail can see arming \u2014 tracked on #3626."
-    },
+      "notes": "Landed with #3623: overdue/missed_occurrences derived at read time, next_run_at and arming read off the live scheduler entry, and a bounded audit trail of who created, enabled, or disabled the task. #3626 closed both display gaps. The TUI one was structural rather than an oversight \u2014 the Automations rail reads tasks.json on its 750ms poll, and a disk read can never observe arming, which only the process holding the scheduler can see \u2014 so the poll that already reads the tasks now fetches the observation beside them and the rail keeps its single input. It still evaluates the expression when nothing has reported, but labels that number \"(from cron)\" so an inference cannot be read as an observation. Both surfaces mark an overdue, unschedulable or enabled-but-unarmed task, word the verdict from the daemon's own classifier rather than re-deriving it, and run the same precedence chain for the mark and the text. The audit trail stays CLI-only by design: it answers a forensic question (\"who turned this off, and when\") that belongs in `af tasks show`, not on a navigation rail or in a task list row."    },
     {
       "id": "task.list",
       "title": "List tasks",

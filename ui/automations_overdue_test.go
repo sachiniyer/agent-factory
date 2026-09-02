@@ -354,3 +354,254 @@ func TestAutomationsDiagnosesEveryUnschedulableShape(t *testing.T) {
 			"%q: the reason survives the rail minimum", tc.expr)
 	}
 }
+
+// TestAutomationsLabelsTheComputedNextRun: with no arming observation on the
+// record, the row still shows what the expression implies — but says that is
+// where the number came from (#3626).
+//
+// The rail is a disk reader, so before the daemon answers it has only the
+// expression, and evaluating it produces a time that looks exactly like one read
+// off the scheduler. Those are different claims: one is what a running daemon
+// will do, the other is what the file would imply if something were holding it.
+// A task can be enabled, correctly configured, and held by nothing at all — that
+// is #2929, and the identical rendering is what made it invisible.
+func TestAutomationsLabelsTheComputedNextRun(t *testing.T) {
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming, "the fixture is a plain disk read")
+
+	a := newTestAutomations([]task.Task{unobserved})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "from cron: next Jul 02 03:00",
+		"an unobserved next run says the expression is its source:\n%s", out)
+}
+
+// TestAutomationsDoesNotLabelTheLiveNextRun is the other half: a time read off
+// the armed entry is not qualified, because nothing about it is inferred.
+func TestAutomationsDoesNotLabelTheLiveNextRun(t *testing.T) {
+	armed := stripTasks()[0]
+	live := time.Date(2026, time.July, 2, 9, 30, 0, 0, time.UTC)
+	armed.Arming, armed.NextRunAt = task.ArmingArmed, &live
+
+	a := newTestAutomations([]task.Task{armed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	assert.NotContains(t, a.View(), "from cron",
+		"the scheduler's own answer needs no caveat")
+}
+
+// TestAutomationsSaysArmedWhenTheEntryHasNoTimeYet: a daemon that has armed the
+// task but not yet started its cron reports armed with no next fire. Falling
+// through to the expression there would label a LIVE observation as computed,
+// which is the mislabel in the opposite direction.
+func TestAutomationsSaysArmedWhenTheEntryHasNoTimeYet(t *testing.T) {
+	armed := stripTasks()[0]
+	armed.Arming, armed.NextRunAt = task.ArmingArmed, nil
+
+	a := newTestAutomations([]task.Task{armed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "armed", "the observation is what it is")
+	assert.NotContains(t, out, "from cron", "and it is not an inference")
+	assert.NotContains(t, out, "next Jul 02 03:00",
+		"nor is a fire time invented for it:\n%s", out)
+}
+
+// TestAutomationsSaysTheReasonOnceForAnUnschedulableTask: with arming plumbed
+// into the rail (#3626), a task whose expression can never fire is ALSO reported
+// not-armed by the daemon — truthfully, since a running cron drops a zero-next
+// entry. Both facts on one line would spend the rail's width saying the same
+// thing twice, and only one of them is actionable: fix the expression.
+func TestAutomationsSaysTheReasonOnceForAnUnschedulableTask(t *testing.T) {
+	impossible := stripTasks()[0]
+	impossible.CronExpr = "0 0 31 2 *" // February 31st
+	impossible.Unschedulable = true
+	impossible.Arming = task.ArmingNotArmed
+	impossible.LastRunAt = nil
+
+	a := newTestAutomations([]task.Task{impossible})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "No upcoming run · 0 0 31 2 *",
+		"the reason leads the line, ahead of the expression it is about:\n%s", out)
+	assert.NotContains(t, out, "not armed",
+		"and the arming observation adds no second finding:\n%s", out)
+	assert.NotContains(t, out, "from cron", "nor is a fire time computed for it")
+}
+
+// TestAutomationsMarksAnUnarmedTask: an enabled task the daemon says it is not
+// holding will not fire, and the rail could not say so before #3626 gave it the
+// arming observation. A green tick beside "not armed" in the detail line is the
+// clean bill #2929 was about — and the detail line only renders on the FOCUSED
+// row, so on every other row there was nothing at all.
+func TestAutomationsMarksAnUnarmedTask(t *testing.T) {
+	unarmed := stripTasks()[0]
+	unarmed.Arming = task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{unarmed})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "[!]", "the collapsed row carries the mark:\n%s", out)
+	assert.Contains(t, out, "not armed")
+	assert.NotContains(t, out, "next Jul 02 03:00",
+		"and no fire time is computed for a task nothing is holding")
+	assert.NotContains(t, out, "from cron")
+}
+
+// TestAutomationsDoesNotAccuseADisabledOrUnobservedTask: the two ways a row must
+// NOT be marked. The daemon reports arming for every task, so a disabled one is
+// not-armed as a matter of course; and an absent observation is not an
+// observation of absence — reporting it as one would mark every row on the box
+// while a daemon restarts, which the rail polls straight through.
+func TestAutomationsDoesNotAccuseADisabledOrUnobservedTask(t *testing.T) {
+	disabled := stripTasks()[0]
+	disabled.Enabled, disabled.Arming = false, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{disabled})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+	assert.NotContains(t, a.View(), "[!]", "a task nobody asked to run is not a finding")
+
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming)
+	b := newTestAutomations([]task.Task{unobserved})
+	b.SetRect(layout.Rect{W: 100, H: 4})
+	b.Focus()
+	out := b.View()
+	assert.NotContains(t, out, "[!]", "nothing reported is not a report of nothing:\n%s", out)
+	assert.NotContains(t, out, "not armed")
+}
+
+// TestAutomationsMarkAndDetailDescribeTheSameFact: titleRow's glyph and
+// attentionFragment's words run one precedence chain, so a marked row is always
+// explained by text about the thing that marked it.
+//
+// Unassessable is the case that proves it. The derivation's own verdicts are
+// mutually exclusive, but arming is layered on separately, so a record with
+// nothing to measure from can ALSO be one the daemon refused to arm — and that
+// task took "[!]" from needsAttention while the detail line said "Health
+// unknown", which explains a warning with a non-warning.
+func TestAutomationsMarkAndDetailDescribeTheSameFact(t *testing.T) {
+	both := stripTasks()[0]
+	both.Unassessable, both.Arming = true, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{both})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+	out := a.View()
+	assert.Contains(t, out, "[!]")
+	assert.Contains(t, out, "not armed", "the stronger fact wins BOTH the mark and the words:\n%s", out)
+	assert.NotContains(t, out, "Health unknown")
+
+	// With nothing stronger, the unknown keeps its own muted mark and its own words.
+	unknown := stripTasks()[0]
+	unknown.Unassessable = true
+	b := newTestAutomations([]task.Task{unknown})
+	b.SetRect(layout.Rect{W: 100, H: 4})
+	b.Focus()
+	out = b.View()
+	assert.Contains(t, out, "[?]")
+	assert.Contains(t, out, "Health unknown")
+}
+
+// TestAutomationsStopsClaimingADeadWatcherIsWatching: watchTaskStatus answers
+// "watching" for any enabled watch task, so a watcher whose process died past its
+// restart budget read as healthy forever. Its arming IS its signal — a watch task
+// is never overdue and never unschedulable, so this is the only mark it can carry.
+func TestAutomationsStopsClaimingADeadWatcherIsWatching(t *testing.T) {
+	dead := stripTasks()[1]
+	require.True(t, dead.IsWatch(), "the fixture's second task is the watch one")
+	dead.Enabled, dead.Arming = true, task.ArmingNotArmed
+
+	a := newTestAutomations([]task.Task{dead})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "[!]")
+	assert.Contains(t, out, "not armed")
+	assert.NotContains(t, out, "watching",
+		"the supervisor says it is not running this watcher:\n%s", out)
+}
+
+// TestAutomationsClipKeepsTheCaveatNotTheClaim: the detail line is ellipsized
+// from the RIGHT and the trigger sits ahead of the next-run fragment, so a
+// trailing qualifier is the half a narrow rail eats — leaving the timestamp
+// rendered exactly like one read off the live scheduler, which is the single
+// ambiguity the qualifier exists to remove (#3626 review).
+//
+// The property is ordering, so the test asserts the property: at a width that
+// cannot hold both, whatever survives must not be a bare fire time.
+func TestAutomationsClipKeepsTheCaveatNotTheClaim(t *testing.T) {
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming)
+
+	for _, w := range []int{22, 30, 36, 44} {
+		a := newTestAutomations([]task.Task{unobserved})
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		out := a.View()
+		if strings.Contains(out, "Jul 02 03:00") {
+			assert.Contains(t, out, "from cron", "at %d columns the fire time survived without its source:\n%s", w, out)
+		}
+	}
+}
+
+// TestAutomationsWatchSupervisionFollowsTheLiveObservation: watchTaskStatus
+// infers supervision from LastRunStatus, which is HISTORY, and the two disagree
+// in both directions. The live observation settles it across the whole
+// tri-state, not just the negative case (#3626 review).
+func TestAutomationsWatchSupervisionFollowsTheLiveObservation(t *testing.T) {
+	watch := stripTasks()[1]
+	require.True(t, watch.IsWatch())
+	watch.Enabled = true
+
+	t.Run("armed outranks a stale errored history", func(t *testing.T) {
+		// Repaired and re-armed, but nothing has overwritten the status its last
+		// failed run wrote — and nothing will until it fires again, which for a
+		// watch task may be never.
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingArmed, "errored: boom"
+		assert.Equal(t, "watching", watchSupervision(tsk))
+	})
+
+	t.Run("armed outranks a stale stopped history", func(t *testing.T) {
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingArmed, "stopped"
+		assert.Equal(t, "watching", watchSupervision(tsk))
+	})
+
+	t.Run("not armed says nothing; attentionFragment leads with it", func(t *testing.T) {
+		tsk := watch
+		tsk.Arming = task.ArmingNotArmed
+		assert.Equal(t, "", watchSupervision(tsk))
+		assert.Equal(t, "not armed", attentionFragment(tsk, time.Now()))
+	})
+
+	t.Run("unobserved falls back to the persisted history", func(t *testing.T) {
+		// No daemon answered, so the record is the only evidence there is — which
+		// is what this pane had before arming reached it at all.
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingUnknown, "errored: boom"
+		assert.Equal(t, "errored", watchSupervision(tsk))
+
+		healthy := watch
+		healthy.Arming, healthy.LastRunStatus = task.ArmingUnknown, ""
+		assert.Equal(t, "watching", watchSupervision(healthy))
+	})
+
+	t.Run("disabled is not a supervision question", func(t *testing.T) {
+		tsk := watch
+		tsk.Enabled, tsk.Arming = false, task.ArmingNotArmed
+		assert.Equal(t, "stopped", watchSupervision(tsk))
+	})
+}
