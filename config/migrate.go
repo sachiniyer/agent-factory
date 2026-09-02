@@ -242,7 +242,15 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 		return nil, fmt.Errorf("internal error: migrating %s would change %s (no changes written)", prettyPath, diff)
 	}
 
-	backup, err := availableBackupPath(tomlPath + ".bak")
+	// The backup belongs beside the file actually being rewritten. When
+	// config.toml is a symlink that is the target, not the link's directory:
+	// it is the copy a dotfiles `git status` will show, and putting it next to
+	// the link would scatter the two halves across two repositories (#3660).
+	realPath, err := resolveWriteTarget(tomlPath)
+	if err != nil {
+		return nil, err
+	}
+	backup, err := availableBackupPath(realPath + ".bak")
 	if err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -189,12 +190,32 @@ func lockFileIsCurrent(f *os.File, lockPath string) (bool, error) {
 // and atomically renames it to path. This prevents partial writes from being
 // visible to readers.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
+	// ensureStorageParent runs on the ORIGINAL path, before the link is
+	// resolved, and the order is load-bearing: secureAFHomeForPath hardens the
+	// AF home only when the write path is at or inside it, so resolving first
+	// would move the path outside the home and silently skip that hardening —
+	// for exactly the users who link their config into a dotfiles repo (#3660).
 	if err := ensureStorageParent(path); err != nil {
-		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		return fmt.Errorf("failed to create directory %s: %w", filepath.Dir(path), err)
 	}
 
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	// From here on the write targets the REAL file. A symlink is something the
+	// user set up deliberately and every editor writes through; af rewriting its
+	// own config at the place the user keeps it is af writing the file it was
+	// asked to write, not writing somewhere new.
+	target, err := resolveWriteTarget(path)
+	if err != nil {
+		return err
+	}
+	if target != path {
+		noticeSymlinkWrite(path, target)
+	}
+	// The temp file has to live in the REAL file's directory: os.Rename cannot
+	// cross filesystems, and a link into another mount is the whole point of the
+	// arrangement.
+	dir := filepath.Dir(target)
+
+	tmp, err := os.CreateTemp(dir, filepath.Base(target)+".tmp.*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -224,8 +245,8 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("failed to rename temp file to %s: %w", path, err)
+	if err := os.Rename(tmpPath, target); err != nil {
+		return fmt.Errorf("failed to rename temp file to %s: %w", target, err)
 	}
 
 	// Rename succeeded: data is visible on disk. The contract
@@ -244,10 +265,10 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return nil
 	}
 	if err := dirFd.Sync(); err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, path, err)
+		log.WarningLog.Printf("AtomicWriteFile: failed to fsync directory %s after rename of %s: %v", dir, target, err)
 	}
 	if err := dirFd.Close(); err != nil {
-		log.WarningLog.Printf("AtomicWriteFile: failed to close directory %s after post-rename sync of %s: %v", dir, path, err)
+		log.WarningLog.Printf("AtomicWriteFile: failed to close directory %s after post-rename sync of %s: %v", dir, target, err)
 	}
 	return nil
 }
@@ -373,3 +394,59 @@ func concreteDefaultAFHome(absHome string) string {
 	}
 	return absDefault
 }
+
+// resolveWriteTarget returns the file an atomic write should actually replace.
+//
+// os.Rename replaces a LINK rather than what it points at, so without this every
+// config write turned a symlinked config.toml into a regular file: the target
+// kept its old content, the link was gone, and nothing said so (#3660). A path
+// that is not a symlink — including one that does not exist yet, which is an
+// ordinary create — is returned unchanged.
+//
+// A DANGLING link is an error rather than a create. Following it would either
+// fail obscurely inside CreateTemp or quietly materialize a file at a path the
+// user believes already exists somewhere else; both hide the broken link, which
+// is the thing they need to know.
+func resolveWriteTarget(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return path, nil
+		}
+		return "", fmt.Errorf("failed to inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	resolved, evalErr := filepath.EvalSymlinks(path)
+	if evalErr == nil {
+		return resolved, nil
+	}
+	// Name BOTH ends. "no such file or directory" against the link's own path
+	// would send the reader looking at a link that is plainly there.
+	target, readErr := os.Readlink(path)
+	if readErr != nil {
+		return "", fmt.Errorf("failed to resolve the symlink %s: %w", path, evalErr)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return "", fmt.Errorf("%s is a symlink to %s, which cannot be resolved: %w; "+
+		"af will not create it — repair the link or remove it and let af write a real file there",
+		path, target, evalErr)
+}
+
+// symlinkWriteNotices keys the one-line notice by link path. Once per process,
+// not once per write: af rewrites its config many times in a session and the
+// fact does not change between them, so per-write would be the noise this
+// repository keeps having to clean up.
+var symlinkWriteNotices sync.Map
+
+func noticeSymlinkWrite(link, target string) {
+	if _, seen := symlinkWriteNotices.LoadOrStore(link, struct{}{}); seen {
+		return
+	}
+	log.InfoLog.Printf("%s is a symlink · writing through it to %s", link, target)
+}
+
+func resetSymlinkWriteNotices() { symlinkWriteNotices.Clear() }
