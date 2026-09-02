@@ -529,6 +529,19 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 		assert.Contains(t, caution, prettyHomePath(result.Backup))
 	})
 
+	t.Run("silent when the loopback listener never authenticated anyone", func(t *testing.T) {
+		// require_token gates NON-loopback peers. On the default loopback bind its
+		// only reachable peers are exempt unless require_loopback_token withdraws
+		// the exemption — so nothing was authenticated before the migration
+		// either, and a downgrade loses no protection (#3624 review).
+		migrateHome(t, "schema_version = 1\nrequire_token = true\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1)
+		assert.Empty(t, result.Cautions)
+	})
+
 	t.Run("silent when the listener merely narrows", func(t *testing.T) {
 		// A real address falling back to the loopback default is a NARROWING,
 		// which needs no warning.
@@ -669,4 +682,50 @@ func TestMigrateRelocatesAValueContainingItsOwnDestinationHeader(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ssh host\n[sandbox]\nrest", cfg.SandboxSSH,
 		"the value survives the move byte for byte, header-looking line included")
+}
+
+// TestMigratePreservesTheUTF8BOM pins that a migration keeps a byte-order mark
+// the loader explicitly supports. Edits run on the stripped text because every
+// surgical helper expects that, so without putting the prefix back the rewrite
+// would silently drop it — and the diff, comparing two stripped strings, would
+// not even show the loss (#3624 review).
+func TestMigratePreservesTheUTF8BOM(t *testing.T) {
+	const bom = "\xef\xbb\xbf"
+	path := migrateHome(t, bom+"schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	require.Len(t, result.Migrated, 1)
+
+	migrated := readFile(t, path)
+	assert.True(t, strings.HasPrefix(migrated, bom), "the byte-order mark survives the rewrite")
+	assert.Equal(t, bom, readFile(t, result.Backup)[:len(bom)], "and the backup is the original, BOM included")
+
+	cfg, err := parseConfigTOML([]byte(migrated), path)
+	require.NoError(t, err)
+	assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
+}
+
+// TestMigrateReportsAJSONConversionWithNoAliases covers a legacy config.json
+// carrying no deprecated key at all. af converts it on the way in and moves the
+// original aside, so reporting only "nothing to migrate" would describe a run
+// that changed nothing when it changed which file af reads (#3624 review).
+func TestMigrateReportsAJSONConversionWithNoAliases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	require.NoError(t, os.WriteFile(filepath.Join(home, ConfigFileName),
+		[]byte(`{"default_program":"codex"}`), 0644))
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	assert.True(t, result.ConvertedFromJSON, "the conversion is reported even with nothing to migrate")
+	assert.Empty(t, result.Migrated)
+	assert.FileExists(t, filepath.Join(home, TomlConfigFileName))
+	assert.NoFileExists(t, filepath.Join(home, ConfigFileName))
+
+	// An ordinary TOML run reports no conversion.
+	second, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+	assert.False(t, second.ConvertedFromJSON)
 }

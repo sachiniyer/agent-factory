@@ -84,6 +84,11 @@ Two things it will not do:
 // the exact bytes that changed, and what is still deprecated afterwards.
 func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 	path := prettyPath(result.Path)
+	if result.ConvertedFromJSON {
+		// This ran before any key migration and moved the original aside, so it
+		// is reported whether or not a deprecated key was found.
+		fmt.Fprintf(w, "converted the legacy config.json to %s · af kept the original beside it\n\n", path)
+	}
 	if !result.Changed() {
 		fmt.Fprintf(w, "nothing to migrate in %s\n", path)
 	} else {

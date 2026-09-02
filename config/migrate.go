@@ -45,17 +45,26 @@ import (
 // LoadConfig conversion), which is what makes the flat JSON spellings — the
 // permanent, correct spelling in that format — reachable by this at all.
 func MigrateGlobalConfig() (*MigrationResult, error) {
+	configDir, err := GetConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	tomlPath := filepath.Join(configDir, TomlConfigFileName)
+
+	// Whether the precondition below is about to CONVERT a legacy config.json
+	// has to be observed before it runs. Reporting "nothing to migrate" after
+	// silently rewriting the user's config into a different file and moving the
+	// original aside would be false in the way that matters most — it describes
+	// a run that changed nothing when the run changed which file af reads
+	// (#3624 review).
+	converting := !fileExists(tomlPath) && fileExists(filepath.Join(configDir, ConfigFileName))
+
 	// Precondition, exactly as `af config set` uses it: materialize or convert
 	// so config.toml exists, and prove the current file loads, so a later parse
 	// failure is unambiguously this migration's fault.
 	if _, err := LoadConfig(); err != nil {
 		return nil, fmt.Errorf("refusing to migrate: the current config does not load: %w", err)
 	}
-	configDir, err := GetConfigDir()
-	if err != nil {
-		return nil, err
-	}
-	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 
 	var result *MigrationResult
 	if err := WithFileLock(tomlPath, func() error {
@@ -65,6 +74,7 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	}); err != nil {
 		return nil, err
 	}
+	result.ConvertedFromJSON = converting && fileExists(tomlPath)
 	return result, nil
 }
 
@@ -82,6 +92,11 @@ type MigrationResult struct {
 	Left []UnmigratedKey `json:"left,omitempty"`
 	// Diff is the unified diff of the rewrite, empty when nothing changed.
 	Diff string `json:"diff,omitempty"`
+	// ConvertedFromJSON records that a legacy config.json was converted to
+	// config.toml on the way in — af's ordinary conversion, but it moves the
+	// user's original aside, so a run that reports no migrated keys still has
+	// something to say for itself.
+	ConvertedFromJSON bool `json:"converted_from_json,omitempty"`
 	// Cautions are consequences of THIS migration the reader has to know about,
 	// not general advice — today, the one downgrade that costs a security
 	// setting rather than a convenience one.
@@ -124,7 +139,12 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", prettyPath, err)
 	}
-	before := string(stripUTF8BOM(raw))
+	// The loader supports a leading BOM, so a migration must not quietly strip
+	// one. Edits run on the stripped text — every surgical helper expects that —
+	// and the prefix goes back on at the write (#3624 review).
+	stripped := stripUTF8BOM(raw)
+	bom := string(raw[:len(raw)-len(stripped)])
+	before := string(stripped)
 	metadata, err := metadataForSource(raw, tomlPath, FormatTOML)
 	if err != nil {
 		return nil, tomlParseError("config file "+prettyPath, err)
@@ -239,7 +259,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(content), mode); err != nil {
+	if err := AtomicWriteFile(tomlPath, []byte(bom+content), mode); err != nil {
 		return nil, err
 	}
 	result.Backup = backup
@@ -264,6 +284,22 @@ type downgradePosture struct {
 // reachable reports whether this posture serves the control plane. An empty
 // listen address is the documented way to turn the web server off.
 func (p downgradePosture) reachable() bool { return p.listen != "" }
+
+// authenticated reports whether reaching that control plane actually costs a
+// token. It mirrors daemon.webListenerPolicy rather than restating
+// require_token: that key gates NON-loopback peers, and a loopback bind exempts
+// its peers — which are then the only reachable ones — unless
+// require_loopback_token withdraws the exemption.
+//
+// Without this, `require_token = true` on the default loopback listener looks
+// like authentication when nothing is authenticated, and migrating it would
+// warn about losing a protection that was never in effect (#3624 review).
+func (p downgradePosture) authenticated() bool {
+	if !p.reachable() || !p.requireToken {
+		return false
+	}
+	return !IsLoopbackListenAddr(p.listen) || p.requireLoopbackToken
+}
 
 // downgradeCautions reports what THIS migration costs a reader who later runs an
 // af predating the grouped spellings (#3354, 2026-08-14).
@@ -317,11 +353,11 @@ func downgradeCautions(migrated []MigratedKey, cfg *Config, backup string) []str
 				"the control plane to every local user with no token · restore %s before downgrading past that release",
 			after.listen, backup)}
 
-	case before.requireToken && !after.requireToken:
-		// Enforcement was on AND readable by the older binary, and the listener is
-		// up in both worlds. network.require_loopback_token is only named when it
-		// travelled too: on its own it is inert, since it tightens a token that
-		// require_token must first turn on.
+	case before.authenticated() && !after.authenticated():
+		// Reaching the control plane cost a token before and does not after.
+		// network.require_loopback_token is only named when it travelled too: on
+		// its own it is inert, since it tightens a token that require_token must
+		// first turn on.
 		lost := []string{"network.require_token"}
 		if before.requireLoopbackToken {
 			lost = append(lost, "network.require_loopback_token")
