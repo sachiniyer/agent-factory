@@ -8,6 +8,7 @@ const { __test } = autoGate;
 const HEAD_SHA = "0a5393dd71ddbbf66486d31939728f9947c843bb";
 const OTHER_SHA = "da0a05ea3b9036a12f67a3b3877d16dd0dac893d";
 const ACTIONS_APP_ID = 15368;
+const CHECK_CREATED_AT = "2026-07-09T01:11:00Z";
 const AUTO_GATE_WORKFLOW = path.join(__dirname, "..", "workflows", "auto-gate.yml");
 
 test("Auto Gate can be recovered manually by PR number", () => {
@@ -1963,6 +1964,357 @@ test("the tolerated NOT_FOUND is exactly the one naming the resolved id", () => 
   assert.equal(isSelfContradictoryNotFound(plainNotFound, nodeId), false);
 });
 
+function mergeRefusal(message, status = 405) {
+  const error = new Error(message);
+  error.status = status;
+  error.response = { status, data: { message } };
+  return error;
+}
+
+test("a merge already in progress is conceded once the winner has landed", async () => {
+  // #3434 verbatim: the maintainer merged PR #3411 by hand while the gate was
+  // mid-evaluation on the same head. The gate's merge write lost, and the losing
+  // evaluation reddened an Auto Gate run on master for an outcome that had
+  // converged correctly.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a conceded merge race must not fail the run");
+  assert.ok(
+    notices.some((notice) =>
+      /Conceding merge-refused race for PR #1465: the winning outcome already merged winner-sha\./.test(
+        notice,
+      ),
+    ),
+    `the concession notice must name the winner; got ${JSON.stringify(notices)}`,
+  );
+});
+
+test("a merge already in progress is conceded after the winner settles", async () => {
+  // The refusal names a merge that has STARTED. A single confirming read can
+  // race ahead of it and see a PR that is still open, so this shape re-reads.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "settled-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null);
+  assert.ok(github.pullGetReads > 1, "a settling refusal must re-read before concluding");
+  assert.ok(notices.some((notice) => notice.includes("already merged settled-sha")));
+});
+
+test("a merge already in progress on a head nobody merged still fails loudly", async () => {
+  // The loud path the concession must not swallow: a refusal with the PR still
+  // open and no winner is a genuinely unmergeable head.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Merge already in progress/);
+  assert.equal(error?.autoGateMergeConceded, undefined);
+  assert.ok(!notices.some((notice) => notice.includes("Conceding merge-refused race")));
+  // Bounded: exhausting the re-reads concludes "nobody merged" rather than
+  // holding the serialized lane open waiting for one.
+  assert.equal(github.pullGetReads, 3);
+});
+
+test("a transient read inside the settlement window does not abandon it", async () => {
+  // Codex P2: a raw read would replace the merge refusal with the read error AND
+  // skip the remaining confirmations — so the winning merge could land inside the
+  // very window this loop exists to wait through, and the run would still fail.
+  const unavailable = new Error("pulls.get unavailable");
+  unavailable.status = 500;
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetErrors: [unavailable],
+    pullGetSnapshots: [
+      { merged: false, merge_commit_sha: null },
+      { merged: true, merge_commit_sha: "settled-sha" },
+    ],
+  });
+
+  const { notices, error } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "a failed confirmation must not become the raised error");
+  assert.ok(notices.some((notice) => notice.includes("already merged settled-sha")));
+});
+
+test("a newer-owner concession does not steal the head back from its winner", async () => {
+  // Codex P1 (round 1): the generic merge-error catch invalidated the aggregate
+  // on the way out, creating a WAITING generation NEWER than the winner's. The
+  // winning transaction would then see itself superseded and refuse to publish,
+  // while nothing was left to finish the generation the losing run had created.
+  //
+  // The marker is the contract between the workflow's merge wrapper and this
+  // helper — `the apply-gate step delegates refusal classification to the
+  // helper` pins that the wrapper sets it — so the refusal is injected already
+  // carrying it. Injecting a newer check through the fake instead would also be
+  // seen by the aggregate evaluation, which would refuse to publish PASS and the
+  // merge would never be attempted at all.
+  const conceded = new Error("Conceding merge-refused race for PR #1465: newer owner");
+  conceded.autoGateMergeConceded = true;
+  conceded.autoGateConcessionReason = "newer-owner";
+  const github = fakeGateGithub({ mergeError: conceded });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "conceded");
+  assert.equal(github.mergeAttempts, 1);
+  // This transaction's own PASS is the last aggregate write. No WAITING
+  // generation follows it, so the winner keeps ownership of the head.
+  assert.equal(github.updatedChecks.at(-1).conclusion, "success");
+  assert.ok(
+    !github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "a newer-owner concession must not create a newer WAITING generation",
+  );
+});
+
+test("a merged-PR concession still turns the shared head non-green", async () => {
+  // Codex P1 (round 2): conceding because THIS PR merged says nothing about a
+  // second PR sharing the head, which would otherwise inherit the PASS this
+  // transaction just published — authorization built on a master that has since
+  // advanced. A token-authenticated winning merge raises no event, so nothing
+  // would come along to repair it.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Merge already in progress"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { error, notices } = await runApplyGateStep({ github });
+
+  assert.equal(error, null, "the race is still conceded rather than reddening the run");
+  assert.ok(notices.some((notice) => notice.includes("already merged winner-sha")));
+  // …and the head is left non-green, exactly as a successful merge leaves it.
+  assert.ok(
+    github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "a merged-PR concession must not leave a stale PASS for a shared head",
+  );
+});
+
+test("a genuinely failed merge still invalidates the aggregate before propagating", async () => {
+  // The concession skip must not weaken the loud path: an unconceded merge error
+  // still turns the published aggregate non-green on its way out.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Base branch was modified"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Base branch was modified/);
+  assert.ok(
+    github.createdChecks
+      .slice(1)
+      .some((check) => check.output?.title?.startsWith("WAITING")),
+    "an unconceded merge failure must still invalidate the aggregate",
+  );
+});
+
+test("every conceded refusal shape is conceded only against a proven winner", async () => {
+  // Guards the whole list at once, including the two shapes #3329 added that had
+  // no test at all — which is how a fourth shape reached the unhandled path.
+  for (const shape of __test.CONCEDED_MERGE_REFUSALS) {
+    const message = shape.pattern.source.replace(/\\b/g, "");
+
+    const winner = fakeGateGithub({
+      mergeError: mergeRefusal(message, shape.status),
+      pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+    });
+    const conceded = await runApplyGateStep({ github: winner });
+    assert.equal(conceded.error, null, `${message} must be conceded when the PR is merged`);
+
+    const nobody = fakeGateGithub({
+      mergeError: mergeRefusal(message, shape.status),
+      pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+    });
+    const loud = await runApplyGateStep({ github: nobody });
+    assert.match(
+      loud.error?.message || "",
+      new RegExp(message),
+      `${message} must stay loud when nothing won the head`,
+    );
+  }
+});
+
+test("a live newer owner outranks merged evidence on a shared head", async () => {
+  // Codex P1 (round 3): the two evidence paths are not mutually exclusive. A
+  // shared head can have THIS PR merged while a newer transaction is mid-flight
+  // on the same commit. Labelling that "merged" sends the caller down the
+  // invalidation path and supersedes the active winner — the ownership theft the
+  // newer-owner branch exists to avoid.
+  const github = fakeGateGithub();
+  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  github.rest.pulls.get = async () => ({
+    data: { merged: true, merge_commit_sha: "winner-sha" },
+  });
+  github.paginate = async () => [
+    {
+      id: 2,
+      created_at: "2026-07-09T01:30:00Z",
+      name: "Auto Gate decision",
+      external_id: aggregateExternalId(HEAD_SHA),
+      app: { id: ACTIONS_APP_ID },
+      conclusion: "failure",
+      output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+      html_url: "https://example.invalid/checks/2",
+    },
+  ];
+
+  const concession = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Merge already in progress"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+
+  assert.equal(
+    concession.reason,
+    "newer-owner",
+    "a live owner must outrank merged evidence, so the caller does not write over it",
+  );
+
+  // With no newer owner, the same merged read is still a "merged" concession.
+  github.paginate = async () => [];
+  const merged = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Merge already in progress"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+  assert.equal(merged.reason, "merged");
+});
+
+test("an unlisted merge refusal is never conceded, even on a merged PR", async () => {
+  // The concession is granted on shape AND evidence. A refusal shape nobody has
+  // audited must reach the loud path however healthy the PR looks.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Base branch was modified"),
+    pullGetSnapshots: [{ merged: true, merge_commit_sha: "winner-sha" }],
+  });
+
+  const { error } = await runApplyGateStep({ github });
+
+  assert.match(error?.message || "", /Base branch was modified/);
+  assert.equal(github.pullGetReads, 0, "an unlisted shape must not even be investigated");
+});
+
+test("a newer transaction owning the head concedes a refused merge", async () => {
+  // The second evidence path: no merge happened, but a newer generation of the
+  // aggregate has taken ownership of this head, so this run no longer decides.
+  const github = fakeGateGithub({
+    mergeError: mergeRefusal("Repository rule violations found"),
+    pullGetSnapshots: [{ merged: false, merge_commit_sha: null }],
+  });
+  const ownedAggregateCheck = { id: 1, created_at: "2026-07-09T01:00:00Z" };
+  const newer = {
+    id: 2,
+    created_at: "2026-07-09T01:30:00Z",
+    name: "Auto Gate decision",
+    external_id: aggregateExternalId(HEAD_SHA),
+    app: { id: ACTIONS_APP_ID },
+    conclusion: "failure",
+    output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+    html_url: "https://example.invalid/checks/2",
+  };
+  github.paginate = async () => [newer];
+
+  const concession = await autoGate.resolveMergeRefusal({
+    github,
+    error: mergeRefusal("Repository rule violations found"),
+    options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+    ownedAggregateCheck,
+  });
+
+  assert.equal(concession.reason, "newer-owner");
+  assert.match(concession.message, /is newer Auto Gate check https:\/\/example\.invalid\/checks\/2/);
+
+  // An OLDER check is not a winner: generation order is what makes this safe.
+  const older = { ...newer, id: 0, created_at: "2026-07-09T00:30:00Z" };
+  github.paginate = async () => [older];
+  assert.equal(
+    await autoGate.resolveMergeRefusal({
+      github,
+      error: mergeRefusal("Repository rule violations found"),
+      options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+      ownedAggregateCheck,
+    }),
+    null,
+  );
+});
+
+test("an unknown owned generation concedes nothing", async () => {
+  // Fail-closed on the unknown. Reading a missing created_at as generation zero
+  // would make every check on the head — this transaction's own included — look
+  // like a later owner, turning the safety check into a blanket concession.
+  const github = fakeGateGithub({});
+  github.paginate = async () => [
+    {
+      id: 10000,
+      created_at: CHECK_CREATED_AT,
+      name: "Auto Gate decision",
+      external_id: aggregateExternalId(HEAD_SHA),
+      app: { id: ACTIONS_APP_ID },
+      conclusion: "failure",
+      output: { title: "WAITING: refreshing every PR/head decision at this commit" },
+    },
+  ];
+
+  for (const owned of [null, { id: 1 }, { created_at: "2026-07-09T01:00:00Z" }, { id: 1, created_at: "nonsense" }]) {
+    assert.equal(
+      await autoGate.resolveMergeRefusal({
+        github,
+        error: mergeRefusal("Repository rule violations found"),
+        options: { owner: "sachiniyer", repo: "agent-factory", pull_number: 1465, sha: HEAD_SHA },
+        ownedAggregateCheck: owned,
+      }),
+      null,
+      `an owned check of ${JSON.stringify(owned)} must not concede`,
+    );
+  }
+});
+
+test("the apply-gate step delegates refusal classification to the helper", () => {
+  // The shapes are auditable in one place only if the workflow has no second
+  // copy of them. Nothing in the step may name a refusal shape of its own.
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+
+  assert.match(workflow, /await autoGate\.resolveMergeRefusal\(\{/);
+  assert.match(workflow, /if \(concession\) \{\s+concede\(concession\.message, error, concession\.reason\);/);
+  // The reason must reach processAggregateHead, which is what decides whether
+  // the transaction may still write to the aggregate on its way out.
+  assert.match(workflow, /concession\.autoGateConcessionReason = reason;/);
+  for (const shape of __test.CONCEDED_MERGE_REFUSALS) {
+    assert.doesNotMatch(
+      workflow,
+      new RegExp(shape.pattern.source, "i"),
+      "a conceded refusal shape is named in the workflow as well as the helper",
+    );
+  }
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -2267,6 +2619,68 @@ async function runInvalidateGateStep({ aggregateHeads, invalidateResults }) {
   return { attempts, outputs, warnings, error };
 }
 
+// The apply-gate step's inline script, extracted from auto-gate.yml and made
+// callable — the same arrangement invalidateGateScript() uses. The merge-race
+// concession is wired up in that script, so a test that does not run it proves
+// nothing about whether a conceded refusal actually stops reddening the run.
+function applyGateScript() {
+  const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
+  const step = workflow.match(
+    // The `|$` alternative matters: this is the last step of the last job, so
+    // the block ends at end-of-file rather than at the next low-indent line.
+    /- name: Evaluate, report, and merge the serialized head[\s\S]*?script: \|\n([\s\S]*?)(?=\n {0,10}\S|$)/,
+  );
+  assert.ok(step, "the apply-gate step script is missing from auto-gate.yml");
+  const indent = step[1].match(/^( +)\S/m);
+  assert.ok(indent, "the apply-gate step script is empty");
+  const body = step[1]
+    .split("\n")
+    .map((line) => line.slice(indent[1].length))
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  return new AsyncFunction("github", "context", "core", "require", "process", body);
+}
+
+// runApplyGateStep executes that step against the REAL helper module, so the
+// verdict covers the workflow wrapper, the helper's refusal classifier, and the
+// step's decision to swallow a conceded error, as one unit.
+async function runApplyGateStep({
+  github,
+  headSha = HEAD_SHA,
+  targets = [{ pr_number: 1465, head_sha: HEAD_SHA }],
+  mergeEnabled = true,
+  readFailure = "",
+}) {
+  const script = applyGateScript();
+  const workspace = "/workspace";
+  const helperPath = path.join(workspace, ".github/scripts/auto-gate.js");
+  const requireStub = (id) => {
+    if (id === "path") {
+      return path;
+    }
+    if (id === helperPath) {
+      return autoGate;
+    }
+    throw new Error(`unexpected require(${JSON.stringify(id)}) in the apply-gate step`);
+  };
+  const notices = [];
+  const core = { ...fakeCore(), notice: (message) => notices.push(message) };
+  const env = {
+    GITHUB_WORKSPACE: workspace,
+    HEAD_SHA: headSha,
+    TARGETS_JSON: JSON.stringify(targets),
+    MERGE_ENABLED: mergeEnabled ? "true" : "false",
+    READ_FAILURE: readFailure,
+  };
+  let error = null;
+  try {
+    await script(github, fakeContext(), core, requireStub, { env });
+  } catch (stepError) {
+    error = stepError;
+  }
+  return { notices, error };
+}
+
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
@@ -2294,6 +2708,9 @@ function fakeGateGithub({
   pullRequestsByNumber = {},
   graphqlErrorsByNumber = {},
   mergeError = null,
+  mergeErrors = [],
+  pullGetSnapshots = null,
+  pullGetErrors = [],
   checkWriteError = null,
   checkCreateAcceptedErrors = [],
   checkCreateErrors = [],
@@ -2316,8 +2733,9 @@ function fakeGateGithub({
   const listPullRequestsAssociatedWithCommit = function listPullRequestsAssociatedWithCommit() {};
   const merge = async function merge(options) {
     github.mergeAttempts += 1;
-    if (mergeError) {
-      throw mergeError;
+    const attemptError = mergeErrors[github.mergeAttempts - 1] || mergeError;
+    if (attemptError) {
+      throw attemptError;
     }
     github.operations.push("merge");
     github.mergedWith = options;
@@ -2337,7 +2755,13 @@ function fakeGateGithub({
     }
     github.operations.push("check:create");
     github.createdChecks.push(options);
-    return { data: { id: 10000 + github.createdChecks.length - 1, ...options } };
+    // created_at matters: generation comparison reads it off the check the
+    // transaction owns, and a response without one makes every other check look
+    // newer. Same stamp paginate() synthesizes below, so a transaction's own
+    // check is not mistaken for a later transaction's.
+    return {
+      data: { id: 10000 + github.createdChecks.length - 1, created_at: CHECK_CREATED_AT, ...options },
+    };
   };
   const updateCheck = async function updateCheck(options) {
     github.checkUpdateAttempts += 1;
@@ -2347,7 +2771,11 @@ function fakeGateGithub({
     }
     github.operations.push("check:update");
     github.updatedChecks.push(options);
-    return { data: options };
+    // An update returns the whole check run, id and original created_at included
+    // — not a bare echo of the patch. Generation comparison reads both off it.
+    return {
+      data: { id: options.check_run_id, created_at: CHECK_CREATED_AT, ...options },
+    };
   };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
@@ -2369,6 +2797,7 @@ function fakeGateGithub({
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
     mergeAttempts: 0,
+    pullGetReads: 0,
     nativeAutoMergeDisableAttempts: 0,
     operations: [],
     mergedWith: null,
@@ -2396,14 +2825,20 @@ function fakeGateGithub({
         listReviews,
         listReviewComments,
         merge,
-        // The REST cross-check resolvedPullRequest() uses. It is deliberately a
-        // different code path from the GraphQL read that resolved the PR.
+        // The REST cross-check resolvedPullRequest() uses — deliberately a
+        // different code path from the GraphQL read that resolved the PR — and
+        // the settling re-read a conceded merge race walks through. Successive
+        // reads walk pullGetSnapshots then hold on the last, so a test can say
+        // "still open, then merged".
         get: async () => {
+          const scriptedError = pullGetError || pullGetErrors[github.pullGetReads];
+          const snapshots = pullGetSnapshots || [{ merged, merge_commit_sha: null }];
+          const index = Math.min(github.pullGetReads, snapshots.length - 1);
           github.pullGetReads += 1;
-          if (pullGetError) {
-            throw pullGetError;
+          if (scriptedError) {
+            throw scriptedError;
           }
-          return { data: { number: 1465, merged } };
+          return { data: { number: 1465, ...snapshots[index] } };
         },
       },
     },
@@ -2470,9 +2905,9 @@ function fakeGateGithub({
           ...github.createdChecks.map((created, index) => ({
             id: 10000 + index,
             app: { id: ACTIONS_APP_ID, slug: "github-actions" },
-            created_at: "2026-07-09T01:11:00Z",
-            started_at: "2026-07-09T01:11:00Z",
-            completed_at: "2026-07-09T01:11:00Z",
+            created_at: CHECK_CREATED_AT,
+            started_at: CHECK_CREATED_AT,
+            completed_at: CHECK_CREATED_AT,
             ...created,
           })),
         ];

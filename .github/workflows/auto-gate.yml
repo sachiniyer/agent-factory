@@ -324,10 +324,13 @@ jobs:
             let ownedAggregateCheck = null;
             // Keep the merge write single-shot. The wrappers only remember this
             // transaction's aggregate generation and classify a refused response.
-            const concede = (message, cause) => {
+            const concede = (message, cause, reason) => {
               core.notice(message);
               const concession = new Error(message, { cause });
               concession.autoGateMergeConceded = true;
+              // The helper's reason decides whether the transaction may still
+              // write to the aggregate on its way out (#3551).
+              concession.autoGateConcessionReason = reason;
               throw concession;
             };
             const createCheck = github.rest.checks.create.bind(github.rest.checks);
@@ -351,63 +354,20 @@ jobs:
               try {
                 return await mergePull(options);
               } catch (error) {
-                const status = Number(
-                  error?.status ?? error?.response?.status ?? error?.response?.data?.status,
-                );
-                const message = error?.response?.data?.message || error?.message || "";
-                if (
-                  status === 405 &&
-                  (/Repository rule violations found/i.test(message) || /not mergeable/i.test(message))
-                ) {
-                  const { owner, repo, pull_number: prNumber, sha } = options;
-                  const expectedHeadSha = String(sha || "").toLowerCase();
-                  const pull = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                  if (pull.data.merged) {
-                    concede(
-                      `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
-                        `already merged ${pull.data.merge_commit_sha || expectedHeadSha}.`,
-                      error,
-                    );
-                  }
-
-                  const ownedCreatedAt = Date.parse(ownedAggregateCheck?.created_at || "") || 0;
-                  const aggregateChecks = await github.paginate(
-                    github.rest.checks.listForRef,
-                    { owner, repo, ref: expectedHeadSha, filter: "all", per_page: 100 },
-                  );
-                  const newerOwner = aggregateChecks
-                    .filter((check) => {
-                      const createdAt = Date.parse(check.created_at || "") || 0;
-                      const newerGeneration =
-                        createdAt > ownedCreatedAt ||
-                        (createdAt === ownedCreatedAt &&
-                          Number(check.id) > Number(ownedAggregateCheck?.id));
-                      return (
-                        ownedAggregateCheck &&
-                        newerGeneration &&
-                        check.name === "Auto Gate decision" &&
-                        check.external_id === aggregateExternalId &&
-                        check.app?.id === 15368 &&
-                        check.conclusion === "failure" &&
-                        check.output?.title?.startsWith(
-                          "WAITING: refreshing every PR/head decision",
-                        )
-                      );
-                    })
-                    .sort((left, right) => {
-                      const createdDifference =
-                        (Date.parse(right.created_at || "") || 0) -
-                        (Date.parse(left.created_at || "") || 0);
-                      return createdDifference || Number(right.id) - Number(left.id);
-                    })[0];
-                  if (newerOwner) {
-                    concede(
-                      `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
-                        `is newer Auto Gate check ${newerOwner.html_url || `#${newerOwner.id}`} ` +
-                        `owning ${expectedHeadSha} (${newerOwner.output.title}).`,
-                      error,
-                    );
-                  }
+                // The conceded refusal shapes and the evidence each one demands
+                // live in the helper, where they are tested (#3434). A refusal
+                // with no proven winner returns "" and stays loud.
+                const concession =
+                  typeof autoGate.resolveMergeRefusal === "function"
+                    ? await autoGate.resolveMergeRefusal({
+                        github,
+                        error,
+                        options,
+                        ownedAggregateCheck,
+                      })
+                    : null;
+                if (concession) {
+                  concede(concession.message, error, concession.reason);
                 }
                 throw error;
               }
