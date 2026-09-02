@@ -59,7 +59,17 @@ async function retryCheckUpdate(label, operation) {
   });
 }
 
-async function createCheckRun({ github, owner, repo, headSha, name, externalId, decision, label }) {
+async function createCheckRun({
+  github,
+  owner,
+  repo,
+  headSha,
+  name,
+  externalId,
+  decision,
+  label,
+  beforeWrite,
+}) {
   const marker = `<!-- auto-gate-check-create:${randomUUID()} -->`;
   const markedDecision = {
     ...decision,
@@ -70,6 +80,12 @@ async function createCheckRun({ github, owner, repo, headSha, name, externalId, 
   };
   for (let attempt = 0; ; attempt += 1) {
     try {
+      // Re-established on every attempt, not once before the loop: a retried
+      // create sleeps between attempts, and a precondition checked before the
+      // loop is stale for each one after the first.
+      if (typeof beforeWrite === "function") {
+        await beforeWrite();
+      }
       return await github.rest.checks.create({
         owner,
         repo,
@@ -707,13 +723,6 @@ async function reportAggregateDecision({
       summary: aggregate.summary,
     },
   };
-  // The last thing before the write, and deliberately AFTER the association and
-  // check-run reads above — those are round trips too, and a guard that runs
-  // before them is stale by the time the green is published. Only a PASS needs
-  // it: a red publish authorizes nothing.
-  if (aggregate.ok && typeof beforePublish === "function") {
-    await beforePublish();
-  }
   const write = await upsertAggregateCheck({
     github,
     context,
@@ -722,6 +731,11 @@ async function reportAggregateDecision({
     checkRuns: aggregate.checkRuns,
     decision,
     checkRunId,
+    // Handed down rather than run here, and deliberately AFTER the association
+    // and check-run reads above: those are round trips too, and a guard that
+    // runs before them is stale by the time the green is published. Only a PASS
+    // carries it — a red publish authorizes nothing.
+    beforePublish: aggregate.ok ? beforePublish : undefined,
   });
   core.notice(`${aggregate.ok ? "PASS" : "BLOCKED"}: fixed Auto Gate aggregate on ${aggregate.headSha}.`);
   return { ...aggregate, ...write, state: aggregate.ok ? "pass" : "waiting" };
@@ -1062,6 +1076,7 @@ async function upsertAggregateCheck({
   checkRuns,
   decision,
   checkRunId,
+  beforePublish,
 }) {
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
@@ -1076,15 +1091,26 @@ async function upsertAggregateCheck({
         )
         .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
   try {
+    // Inside the retry, not outside it. A retried write sleeps and reissues, and
+    // a precondition checked once before the helper is stale for every attempt
+    // after the first — long enough for auto-merge to be armed during the
+    // backoff and consumed by the green the retry then publishes. Each attempt
+    // re-establishes it.
+    const guard = async () => {
+      if (typeof beforePublish === "function") {
+        await beforePublish();
+      }
+    };
     if (prior) {
-      await retryCheckUpdate(`could not update aggregate check at ${headSha}`, () =>
-        github.rest.checks.update({
+      await retryCheckUpdate(`could not update aggregate check at ${headSha}`, async () => {
+        await guard();
+        return github.rest.checks.update({
           owner,
           repo,
           check_run_id: prior.id,
           ...decision,
-        }),
-      );
+        });
+      });
     } else {
       await createCheckRun({
         github,
@@ -1095,6 +1121,7 @@ async function upsertAggregateCheck({
         externalId: identity.externalId,
         decision,
         label: `could not create aggregate check at ${headSha}`,
+        beforeWrite: guard,
       });
     }
   } catch (error) {
@@ -1509,6 +1536,21 @@ async function ensureNativeAutoMergeDisabled({ github, context, core, results })
     }
     if (!result.pullRequestId) {
       throw new Error(`Cannot disable native auto-merge for PR #${prNumber}: missing node ID`);
+    }
+    // Re-read this PR alone, immediately before its mutation. The batched read
+    // above is one snapshot for the whole head, and the disables that follow it
+    // are sequential: a PR can synchronize to a new head while an earlier PR is
+    // being disabled, and the mutation takes a stable node ID, so it would
+    // cancel a queue entry armed for a head this transaction never evaluated.
+    // Check-then-act cannot be made atomic here, but the window is one call.
+    const fresh = (await readNativeAutoMergeStates({ github, context, numbers: [prNumber] })).get(
+      prNumber,
+    );
+    if (normalizeHeadSha(fresh.headSha) !== normalizeHeadSha(result.headSha)) {
+      return { state: "head-changed", prNumber, headSha: fresh.headSha };
+    }
+    if (!fresh.armed) {
+      continue;
     }
     const mutation = `
       mutation DisablePullRequestAutoMerge($pullRequestId: ID!) {

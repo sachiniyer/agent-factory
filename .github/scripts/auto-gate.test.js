@@ -380,10 +380,49 @@ test("one batched read covers every manual PR sharing a head", async () => {
   });
 
   assert.equal(transaction.state, "manual");
-  // Two PRs, still two reads: the disarm pass and the publish precondition.
-  assert.equal(github.autoMergeStateReads, 2);
-  assert.equal(github.autoMergeStateReadsByNumber[1465], 2);
-  assert.equal(github.autoMergeStateReadsByNumber[2048], 2);
+  // The two shared-head reads are batched: one snapshot for the disarm pass and
+  // one for the publish precondition, each covering both PRs in a single query.
+  // The extra reads are the per-mutation revalidations, which are unavoidably
+  // per-PR — a stale head there would cancel a queue entry armed for a head this
+  // transaction never evaluated.
+  // The shape of the reads, stated exactly. The first and last queries each
+  // carry BOTH PRs — the disarm snapshot and the publish precondition — and the
+  // singles between them are the per-mutation revalidations, which are
+  // necessarily per-PR. Adding PRs widens the two snapshots rather than adding
+  // round trips; unbatched they would be two queries per PR.
+  assert.deepEqual(github.autoMergeStateBatchSizes, [2, 1, 1, 2]);
+  assert.equal(github.autoMergeStateBatchSizes.at(0), 2, "the disarm snapshot is batched");
+  assert.equal(github.autoMergeStateBatchSizes.at(-1), 2, "the publish precondition is batched");
+});
+
+test("a head that moves between the snapshot and its mutation is not disabled", async () => {
+  // Codex P2 (round 3): the batched read is one snapshot for the whole head and
+  // the disables that follow are sequential, so a PR can synchronize while an
+  // earlier one is being disabled. The mutation takes a stable node ID, so it
+  // would cancel a queue entry armed for a head this transaction never
+  // evaluated.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    // Reads 1..N report the evaluated head; the revalidation read sees the move.
+    autoMergeStateHeadAfterRead: { 1465: { after: 1, headSha: OTHER_SHA } },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0, "a moved head must not be mutated");
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published for a head the PR has left",
+  );
 });
 
 test("a PR that moved to a new head has its auto-merge left alone", async () => {
@@ -411,6 +450,39 @@ test("a PR that moved to a new head has its auto-merge left alone", async () => 
   assert.ok(
     !github.updatedChecks.some((check) => check.conclusion === "success"),
     "no passing aggregate may be published for a head the PR has left",
+  );
+});
+
+test("auto-merge armed during a write retry blocks the retried green", async () => {
+  // Codex P1 (round 3): upsertAggregateCheck retries a transient write through
+  // retryCheckUpdate, which sleeps and reissues. A precondition checked once
+  // before that helper is stale for every attempt after the first, so auto-merge
+  // armed during the backoff was consumed by the green the retry published.
+  const transient = new Error("check update unavailable");
+  transient.status = 500;
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    checkUpdateErrors: [transient],
+    armNativeAutoMergeOnCheckUpdateFailure: true,
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /GitHub-native auto-merge is still armed/,
+  );
+
+  assert.equal(github.nativeAutoMergeArmed, true);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "the retried write must not publish a green over a freshly armed auto-merge",
   );
 });
 
@@ -2189,6 +2261,8 @@ function fakeGateGithub({
   nativeAutoMergeDisableError = null,
   autoMergeStateError = null,
   autoMergeStateHeadByNumber = {},
+  autoMergeStateHeadAfterRead = {},
+  armNativeAutoMergeOnCheckUpdateFailure = false,
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
@@ -2229,6 +2303,11 @@ function fakeGateGithub({
     github.checkUpdateAttempts += 1;
     const attemptError = checkUpdateErrors[github.checkUpdateAttempts - 1] || checkWriteError;
     if (attemptError) {
+      // Someone arms native auto-merge during the write's backoff — the window a
+      // precondition checked once, outside the retry, cannot see.
+      if (armNativeAutoMergeOnCheckUpdateFailure) {
+        github.nativeAutoMergeArmed = true;
+      }
       throw attemptError;
     }
     github.operations.push("check:update");
@@ -2256,6 +2335,7 @@ function fakeGateGithub({
     nativeAutoMergeArmed: nativeAutoMergeEnabled,
     autoMergeStateReads: 0,
     autoMergeStateReadsByNumber: {},
+    autoMergeStateBatchSizes: [],
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -2298,6 +2378,9 @@ function fakeGateGithub({
         }
         // Aliased per PR, the way the batched read asks for it.
         const repository = {};
+        github.autoMergeStateBatchSizes.push(
+          Object.keys(variables).filter((key) => /^n\d+$/.test(key)).length,
+        );
         for (const [key, number] of Object.entries(variables)) {
           const alias = /^n(\d+)$/.exec(key);
           if (!alias) {
@@ -2305,9 +2388,14 @@ function fakeGateGithub({
           }
           github.autoMergeStateReadsByNumber[number] =
             (github.autoMergeStateReadsByNumber[number] || 0) + 1;
+          const reads = github.autoMergeStateReadsByNumber[number];
+          const movedAt = autoMergeStateHeadAfterRead[number];
           repository[`pr${alias[1]}`] = {
             number,
-            headRefOid: autoMergeStateHeadByNumber[number] || headSha,
+            headRefOid:
+              movedAt && reads > movedAt.after
+                ? movedAt.headSha
+                : autoMergeStateHeadByNumber[number] || headSha,
             autoMergeRequest: github.nativeAutoMergeArmed
               ? { enabledAt: "2026-07-09T01:05:00Z" }
               : null,
