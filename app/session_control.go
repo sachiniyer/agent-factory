@@ -439,12 +439,39 @@ func previewThroughDaemon(req daemon.PreviewRequest) (resp daemon.PreviewRespons
 // here is benign by construction — no observation leaves every record's arming
 // UNKNOWN, which is the honest answer, and never the not-armed that would accuse
 // every task on the box of being broken because one poll missed.
+// liveArmingTimeout bounds one arming read. ListTasks takes the task-control
+// lock, which every task mutation holds across its write AND its scheduler
+// reload — a watch edit waits out a SIGTERM-resistant watcher in there — and the
+// local socket carries no overall deadline (apiclient.callCtx). Unbounded, a
+// blocked read would pin the poll goroutine, and because the next tick is armed
+// only after this one's result is handled, it would stall the SESSION snapshot
+// behind a health field. Two seconds is long enough that an ordinary read never
+// trips it and short enough that the worst case is a couple of stale polls; a
+// trip leaves arming UNKNOWN, which the rail already renders honestly (#3626
+// review).
+const liveArmingTimeout = 2 * time.Second
+
 var liveTaskArmingFetcher = func() ([]task.Task, error) {
+	// Not in remote mode. The rail's task DEFINITIONS come from the local
+	// tasks.json (LoadTasksForKnownRepo) while NewTargeted would send this to the
+	// daemon named by --daemon-url / AF_DAEMON_URL, so the answer would be about a
+	// different machine's tasks. Mostly that yields UNKNOWN, which is true and
+	// harmless — but two stores that share a task id and a cron expression would
+	// copy a remote task's arming onto an unrelated local one, and a fabricated
+	// "armed" is exactly the false clean bill #3623 exists to remove. Observation
+	// and definition have to come from the same daemon; until the rail reads
+	// remote tasks too, the honest answer for a remote target is "nothing
+	// reported" (#3626 review).
+	if apiclient.IsRemoteTarget() {
+		return nil, nil
+	}
 	c, err := apiclient.NewTargeted()
 	if err != nil {
 		return nil, err
 	}
-	return c.ListTasks()
+	ctx, cancel := context.WithTimeout(context.Background(), liveArmingTimeout)
+	defer cancel()
+	return c.ListTasks(ctx)
 }
 
 // SetLiveTaskArmingFetcherForTest swaps the live arming fetcher and returns a

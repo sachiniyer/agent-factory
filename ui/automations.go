@@ -207,16 +207,44 @@ func (a *AutomationsPane) ScrollDown() {
 // thoroughly plausible "next Jan 01 00:00"; name the absence instead of
 // promising a fire time the task will never reach. The schedule picker's
 // Custom preview guards the same trap (see renderPreviewLine).
+// watchSupervision is the watch branch's status fragment: what the supervisor is
+// LIVE-observed to be doing, falling back to persisted history only where
+// nothing observed it.
+//
+// watchTaskStatus infers supervision from LastRunStatus, which is history rather
+// than supervision, and the two disagree in both directions: a watcher whose
+// process died past its restart budget still read "watching", and one that has
+// been repaired and re-armed keeps rendering the "stopped"/"errored" its last
+// run wrote until some future run overwrites it. The live observation settles
+// both, so it is consulted across the whole tri-state rather than only for the
+// negative case (#3626 review).
+func watchSupervision(tsk task.Task) string {
+	if !tsk.Enabled {
+		// Not a supervision question: nobody asked for this watcher to run.
+		return watchTaskStatus(tsk)
+	}
+	switch tsk.Arming {
+	case task.ArmingArmed:
+		// Observed: the supervisor IS running a watcher for this exact definition,
+		// so a persisted "stopped" or "errored" describes a past run and must not
+		// be rendered as the current state of the watch.
+		return "watching"
+	case task.ArmingNotArmed:
+		// Nothing: attentionFragment leads the line with "not armed", and the rail
+		// says a thing once.
+		return ""
+	}
+	// Nothing observed — no daemon running, or one still starting. The persisted
+	// history is the only evidence there is, which is what this pane had before
+	// arming reached it at all.
+	return watchTaskStatus(tsk)
+}
+
 func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	var parts []string
 	if tsk.IsWatch() {
-		// Nothing here when the supervisor says it is not running a watcher for
-		// this definition: attentionFragment already leads with "not armed", and
-		// watchTaskStatus would answer "watching" for the same task — the exact
-		// claim the observation contradicts. An enabled watch task whose process
-		// died past its restart budget used to read "watching" forever (#3626).
-		if !notArmed(tsk) {
-			parts = append(parts, watchTaskStatus(tsk))
+		if s := watchSupervision(tsk); s != "" {
+			parts = append(parts, s)
 		}
 	} else if tsk.Enabled && tsk.CronExpr != "" && !tsk.Unschedulable {
 		// An unschedulable record says nothing HERE, in any of the cases below.
@@ -271,7 +299,13 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 					// the record and not of what was observed (#2596).
 					parts = append(parts, "No upcoming run")
 				} else {
-					parts = append(parts, "next "+next.Format("Jan 02 15:04")+" (from cron)")
+					// The caveat comes FIRST, inside the fragment. Trailing, it was the
+					// half a clip ate: this line is ellipsized from the right and the
+					// trigger sits ahead of it, so at intermediate widths the timestamp
+					// survived while "(from cron)" became the ellipsis — leaving an
+					// inference rendered exactly like an observation, which is the one
+					// ambiguity the qualifier exists to remove (#3626 review).
+					parts = append(parts, "from cron: next "+next.Format("Jan 02 15:04"))
 				}
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/task"
@@ -113,4 +114,23 @@ func TestFetchSnapshotCmdCarriesNotArmed(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, msg.tasks, 1)
 	assert.Equal(t, task.ArmingNotArmed, msg.tasks[0].Arming)
+}
+
+func TestLiveTaskArmingFetcherSkipsARemoteTarget(t *testing.T) {
+	// The rail's task DEFINITIONS come from the local tasks.json, so an
+	// observation from the daemon named by --daemon-url / AF_DAEMON_URL is about a
+	// different machine's tasks. Mostly that would just read UNKNOWN — but two
+	// stores sharing a task id and a cron expression would copy a remote task's
+	// arming onto an unrelated local one, and a fabricated "armed" is the false
+	// clean bill this whole feature exists to remove (#3626 review).
+	//
+	// The address is deliberately one nothing is listening on: if the guard were
+	// removed, this would attempt a dial and come back with a transport error
+	// rather than the clean "nothing observed" below.
+	t.Setenv("AF_DAEMON_URL", "http://127.0.0.1:9")
+	require.True(t, apiclient.IsRemoteTarget(), "the fixture must actually select a remote target")
+
+	tasks, err := liveTaskArmingFetcher()
+	require.NoError(t, err, "a remote target is not an error, it is a question this fetch does not answer")
+	assert.Nil(t, tasks, "and no observation, which leaves every record ArmingUnknown")
 }

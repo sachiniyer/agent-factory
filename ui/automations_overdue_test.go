@@ -374,7 +374,7 @@ func TestAutomationsLabelsTheComputedNextRun(t *testing.T) {
 	a.Focus()
 
 	out := a.View()
-	assert.Contains(t, out, "next Jul 02 03:00 (from cron)",
+	assert.Contains(t, out, "from cron: next Jul 02 03:00",
 		"an unobserved next run says the expression is its source:\n%s", out)
 }
 
@@ -531,4 +531,77 @@ func TestAutomationsStopsClaimingADeadWatcherIsWatching(t *testing.T) {
 	assert.Contains(t, out, "not armed")
 	assert.NotContains(t, out, "watching",
 		"the supervisor says it is not running this watcher:\n%s", out)
+}
+
+// TestAutomationsClipKeepsTheCaveatNotTheClaim: the detail line is ellipsized
+// from the RIGHT and the trigger sits ahead of the next-run fragment, so a
+// trailing qualifier is the half a narrow rail eats — leaving the timestamp
+// rendered exactly like one read off the live scheduler, which is the single
+// ambiguity the qualifier exists to remove (#3626 review).
+//
+// The property is ordering, so the test asserts the property: at a width that
+// cannot hold both, whatever survives must not be a bare fire time.
+func TestAutomationsClipKeepsTheCaveatNotTheClaim(t *testing.T) {
+	unobserved := stripTasks()[0]
+	require.Equal(t, task.ArmingUnknown, unobserved.Arming)
+
+	for _, w := range []int{22, 30, 36, 44} {
+		a := newTestAutomations([]task.Task{unobserved})
+		a.SetRect(layout.Rect{W: w, H: 4})
+		a.Focus()
+		out := a.View()
+		if strings.Contains(out, "Jul 02 03:00") {
+			assert.Contains(t, out, "from cron", "at %d columns the fire time survived without its source:\n%s", w, out)
+		}
+	}
+}
+
+// TestAutomationsWatchSupervisionFollowsTheLiveObservation: watchTaskStatus
+// infers supervision from LastRunStatus, which is HISTORY, and the two disagree
+// in both directions. The live observation settles it across the whole
+// tri-state, not just the negative case (#3626 review).
+func TestAutomationsWatchSupervisionFollowsTheLiveObservation(t *testing.T) {
+	watch := stripTasks()[1]
+	require.True(t, watch.IsWatch())
+	watch.Enabled = true
+
+	t.Run("armed outranks a stale errored history", func(t *testing.T) {
+		// Repaired and re-armed, but nothing has overwritten the status its last
+		// failed run wrote — and nothing will until it fires again, which for a
+		// watch task may be never.
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingArmed, "errored: boom"
+		assert.Equal(t, "watching", watchSupervision(tsk))
+	})
+
+	t.Run("armed outranks a stale stopped history", func(t *testing.T) {
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingArmed, "stopped"
+		assert.Equal(t, "watching", watchSupervision(tsk))
+	})
+
+	t.Run("not armed says nothing; attentionFragment leads with it", func(t *testing.T) {
+		tsk := watch
+		tsk.Arming = task.ArmingNotArmed
+		assert.Equal(t, "", watchSupervision(tsk))
+		assert.Equal(t, "not armed", attentionFragment(tsk, time.Now()))
+	})
+
+	t.Run("unobserved falls back to the persisted history", func(t *testing.T) {
+		// No daemon answered, so the record is the only evidence there is — which
+		// is what this pane had before arming reached it at all.
+		tsk := watch
+		tsk.Arming, tsk.LastRunStatus = task.ArmingUnknown, "errored: boom"
+		assert.Equal(t, "errored", watchSupervision(tsk))
+
+		healthy := watch
+		healthy.Arming, healthy.LastRunStatus = task.ArmingUnknown, ""
+		assert.Equal(t, "watching", watchSupervision(healthy))
+	})
+
+	t.Run("disabled is not a supervision question", func(t *testing.T) {
+		tsk := watch
+		tsk.Enabled, tsk.Arming = false, task.ArmingNotArmed
+		assert.Equal(t, "stopped", watchSupervision(tsk))
+	})
 }

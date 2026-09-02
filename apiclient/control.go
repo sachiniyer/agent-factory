@@ -193,9 +193,15 @@ func (c *Client) UpdateTask(id string, update task.TaskUpdate, expect task.Proje
 // tasks.json itself — the TUI's automations rail does, every 750ms — keeps its
 // own repo-scoped records as the definition and adopts only the observation,
 // through task.ApplyLiveArming (#3626).
-func (c *Client) ListTasks() ([]task.Task, error) {
+func (c *Client) ListTasks(ctx context.Context) ([]task.Task, error) {
 	var resp daemon.ListTasksResponse
-	if err := c.call("ListTasks", daemon.ListTasksRequest{}, &resp); err != nil {
+	// Context-bound, and that is not optional for this one. ListTasks takes the
+	// task-control lock — the same lock every task mutation holds across its write
+	// AND its scheduler reload — so it can legitimately block for seconds behind a
+	// watch edit waiting out a SIGTERM-resistant watcher. The local socket carries
+	// no overall deadline by design (see callCtx), so an unbounded call here would
+	// wedge whatever goroutine is waiting on it (#3626 review).
+	if err := c.callCtx(ctx, "ListTasks", daemon.ListTasksRequest{}, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Tasks, nil
