@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/task"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
@@ -37,9 +36,12 @@ func readRailHeaderFacts(line, noun, count, hint string) railHeaderFacts {
 		hint:  strings.Contains(line, hint),
 	}
 	// The noun, if present at all, is the longest of its prefixes the line
-	// renders — " Projects", " Proj…", or nothing.
-	for n := len(noun); n > 0; n-- {
-		if strings.Contains(line, " "+noun[:n]) {
+	// renders — " Projects", " Proj…", or nothing. Sliced by RUNE, so a noun
+	// that ever carries a multibyte character measures its prefixes rather than
+	// its bytes.
+	runes := []rune(noun)
+	for n := len(runes); n > 0; n-- {
+		if strings.Contains(line, " "+string(runes[:n])) {
 			f.noun = n
 			break
 		}
@@ -97,8 +99,6 @@ func railHeaderCases() []railHeaderCase {
 	}
 }
 
-func nSimpleTasksForHeader(n int) []task.Task { return nSimpleTasks(n) }
-
 // TestRailHeaderLadderIsMonotonic is #3642. The Projects header shed its count
 // at 25 columns and brought it back at 29 — its fallback kept the whole name and
 // dropped the hint, while the rung above it did the reverse, so a WIDER rail said
@@ -152,7 +152,7 @@ func TestRailHeaderKeepsItsSeparatorCountAndAffordance(t *testing.T) {
 						"width %d: the affordance is the last thing cut: %q", w, line)
 				}
 				if w >= tc.minNounWidth {
-					require.Truef(t, strings.Contains(line, " "+tc.noun[:1]),
+					require.Truef(t, strings.Contains(line, " "+string([]rune(tc.noun)[:1])),
 						"width %d: the noun must be present: %q", w, line)
 				}
 				if w >= tc.fullNounWidth {
@@ -170,7 +170,7 @@ func TestRailHeaderDistinguishesEmptyFromPopulated(t *testing.T) {
 	for w := 19; w <= 40; w++ {
 		empty := newTestAutomations(nil)
 		empty.SetRect(layout.Rect{W: w, H: 4})
-		busy := newTestAutomations(nSimpleTasksForHeader(2))
+		busy := newTestAutomations(nSimpleTasks(2))
 		busy.SetRect(layout.Rect{W: w, H: 4})
 		require.NotEqualf(t, stripANSI(empty.View()), stripANSI(busy.View()),
 			"automations, width %d: two tasks must not render the same header as none", w)
