@@ -11,6 +11,33 @@ const DOCS_DEPLOY_PATHS = ["docs/", "mkdocs.yml"];
 const AUTO_GATE_DECISION_CHECK = "Auto Gate decision";
 const AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX = "auto-gate:aggregate:head:";
 const GITHUB_ACTIONS_APP_ID = 15368;
+// The title the aggregate carries while a transaction is refreshing it. Also the
+// marker resolveMergeRefusal matches to recognize a newer transaction that has
+// taken ownership of the same head, so it is a constant rather than two copies.
+const AGGREGATE_WAITING_TITLE = "WAITING: refreshing every PR/head decision at this commit";
+// Every merge refusal Auto Gate concedes instead of failing on. Each one means
+// "another actor won this head", not "this head cannot merge": the losing
+// evaluation would otherwise paint a red Auto Gate run on master, the repo's
+// highest-priority alarm, for an outcome that converged correctly.
+//
+// THIS LIST IS THE ONE PLACE the conceded shapes are named. Matching a shape is
+// never sufficient on its own — resolveMergeRefusal concedes only against a
+// second read proving another actor actually won — so a genuinely unmergeable
+// head still fails loudly.
+const CONCEDED_MERGE_REFUSALS = [
+  // #3324: the ruleset refuses the write because a competing merge advanced
+  // master past the required up-to-date check between evaluation and merge.
+  { status: 405, pattern: /Repository rule violations found/i },
+  { status: 405, pattern: /not mergeable/i },
+  // #3434: a merge for this PR is already in flight. #3379 made the maintainer
+  // merge path a normal outcome rather than a rarity, so "a human merges while
+  // the gate is mid-evaluation on the same head" is the designed flow now.
+  //
+  // `settling` because this refusal names a merge that has STARTED, not one that
+  // has finished: the confirming read can race ahead of the winner and see a PR
+  // that is still open. It is the one shape that re-reads before concluding.
+  { status: 405, pattern: /Merge already in progress/i, settling: true },
+];
 const CODEX_REVIEWER = "chatgpt-codex-connector[bot]";
 const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
@@ -35,6 +62,10 @@ const MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON =
   "degraded to maintainer review. This PR has NOT been reviewed — a maintainer must review " +
   "and merge it manually.";
 const RETRY_DELAYS_MS = [250, 1000];
+// A merge that has already STARTED needs longer than a read retry to land.
+// Reusing RETRY_DELAYS_MS gave the winner 1.25s total, and a slower merge then
+// read back as "nobody merged" — refusing the concession this exists to grant.
+const MERGE_SETTLE_DELAYS_MS = [1000, 2000, 4000];
 const MAX_RATE_LIMIT_DELAY_MS = 10000;
 
 // GitHub reads are side-effect-free, and check-run updates are idempotent when
@@ -675,7 +706,7 @@ async function invalidateAggregateDecision({ github, context, core, headSha }) {
     status: "completed",
     conclusion: "failure",
     output: {
-      title: "WAITING: refreshing every PR/head decision at this commit",
+      title: AGGREGATE_WAITING_TITLE,
       summary:
         "This fixed-name check is commit-scoped. Auto Gate is refreshing every open " +
         "master PR and exact (PR, head) decision at this commit.",
@@ -1180,6 +1211,44 @@ async function processAggregateHead({
       };
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
+      // A newer-owner concession is the ONE case that must not write. It is
+      // reached only because a live transaction already made this aggregate
+      // non-green, so invalidating again would create a WAITING generation newer
+      // than the winner's: the winner then sees itself superseded and refuses to
+      // publish, while nothing is left to finish the generation this run just
+      // created, and the head stays red and unmerged until an unrelated event.
+      //
+      // A "merged" concession is NOT that case. Nothing has invalidated the head,
+      // and the PASS this transaction published a moment ago is still standing —
+      // which any OTHER PR sharing this head inherits as authorization built on
+      // a master that has since advanced. Worse, a token-authenticated winning
+      // merge raises no event, so nothing would come along to repair it. That
+      // one falls through to the ordinary invalidation below, exactly as a
+      // successful merge does, and for the same reason.
+      // Both reasons mean the same thing to this catch: another actor's outcome
+      // stands and this run must not write to the aggregate — one because a live
+      // transaction owns it, one because the read that would have proved
+      // otherwise failed.
+      if (
+        error?.autoGateConcessionReason === "newer-owner" ||
+        error?.autoGateConcessionReason === "merged-owner-unknown"
+      ) {
+        core.notice(message);
+        return { state: "conceded", pending, aggregate };
+      }
+      // Ownership could not be read. Skip the write — a blind invalidation would
+      // supersede whichever transaction owns this head — but do NOT swallow the
+      // failure: nothing proved another actor won, the PR is still open, and the
+      // merge did not happen. Conceding here would leave the aggregate's PASS
+      // standing for a merge that never occurred.
+      if (error?.autoGateOwnershipUnknown) {
+        core.warning(
+          `Not invalidating ${pending.headSha}: ownership could not be determined ` +
+            `(${error.autoGateOwnershipUnknown}), so this run will not overwrite whichever ` +
+            "transaction owns it. The merge refusal below stands.",
+        );
+        throw error;
+      }
       let invalidated;
       try {
         invalidated = await invalidateAggregateDecision({
@@ -1624,6 +1693,177 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
     );
   }
   return { mergeSha: response.data.sha, invalidated };
+}
+
+// Decide whether a refused merge is a lost race the gate concedes, or a real
+// refusal it must fail on. Returns { reason, message } to concede with, or null
+// to rethrow.
+//
+// The reason is load-bearing, not a label. A "newer-owner" concession means a
+// live transaction already owns this head and this run must not write to the
+// aggregate at all; a "merged" concession means the PR is gone and any OTHER PR
+// still sharing the head must not keep the PASS this transaction published.
+//
+// This lived inline in auto-gate.yml, where it could not be tested — which is
+// how "Merge already in progress" reached the generic unhandled path and reddened
+// a master run for a merge that had converged correctly (#3434). It is here so
+// the conceded shapes and the evidence each one demands are one tested unit.
+// A read whose failure means "no evidence", never "a new error". Every caller
+// here is looking for proof that another actor won; without proof the original
+// refusal is rethrown, which is the loud path and the correct default.
+async function readOrNull(operation) {
+  try {
+    return await operation();
+  } catch {
+    return null;
+  }
+}
+
+async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck }) {
+  const status = Number(
+    error?.status ?? error?.response?.status ?? error?.response?.data?.status,
+  );
+  const message = error?.response?.data?.message || error?.message || "";
+  const refusal = CONCEDED_MERGE_REFUSALS.find(
+    (shape) => status === shape.status && shape.pattern.test(message),
+  );
+  if (!refusal) {
+    return null;
+  }
+
+  const { owner, repo, pull_number: prNumber, sha } = options;
+  const expectedHeadSha = String(sha || "").toLowerCase();
+
+  // A live transaction owning this head OUTRANKS merged evidence, and the two
+  // are not mutually exclusive: a shared head can have this PR merged AND a
+  // newer transaction mid-flight. Labelling that "merged" would send the caller
+  // down the invalidation path and supersede the active winner, which is the
+  // ownership theft the newer-owner branch exists to avoid. So the merged branch
+  // asks this question before it answers.
+  const newerOwnerConcession = async () => {
+    // Both halves of this run's own generation must be known first. Without them
+    // there is no "newer" to establish, and treating the unknown as generation
+    // zero makes every check on the head — including the ones this very
+    // transaction created — look like a later owner, i.e. concedes everything.
+    // An unknown generation is not a proven loss.
+    const ownedCreatedAt = Date.parse(ownedAggregateCheck?.created_at || "");
+    if (!Number.isFinite(ownedCreatedAt) || !Number.isFinite(Number(ownedAggregateCheck?.id))) {
+      return null;
+    }
+    const aggregateExternalId = `${AUTO_GATE_AGGREGATE_EXTERNAL_ID_PREFIX}${expectedHeadSha}`;
+    // NOT readOrNull: an empty list here reads as "nobody owns this head", and
+    // the caller acts on that by creating another invalidation — which supersedes
+    // the very transaction this read failed to see. "No answer" and "no owner"
+    // must not be the same value, so this retries and then reports the unknown.
+    let aggregateChecks;
+    try {
+      aggregateChecks = await retryRead(`could not read aggregate checks at ${expectedHeadSha}`, () =>
+        github.paginate(github.rest.checks.listForRef, {
+          owner,
+          repo,
+          ref: expectedHeadSha,
+          filter: "all",
+          per_page: 100,
+        }),
+      );
+    } catch (readError) {
+      // NOT a concession. Nothing here proved another actor won: the PR is still
+      // open and the merge did not happen, so exiting successfully would leave
+      // the aggregate's PASS standing for a merge that never occurred. The
+      // refusal must stay loud.
+      //
+      // What the unknown DOES change is the invalidation: creating a newer
+      // generation blind would supersede whichever transaction owns this head,
+      // which is the damage the ownership read exists to avoid. So the original
+      // error is marked and rethrown, and the caller skips the write only.
+      error.autoGateOwnershipUnknown = formatError(readError);
+      return null;
+    }
+    const newerOwner = aggregateChecks
+      .filter((check) => {
+        const createdAt = Date.parse(check.created_at || "") || 0;
+        const newerGeneration =
+          createdAt > ownedCreatedAt ||
+          (createdAt === ownedCreatedAt && Number(check.id) > Number(ownedAggregateCheck.id));
+        return (
+          newerGeneration &&
+          check.name === AUTO_GATE_DECISION_CHECK &&
+          check.external_id === aggregateExternalId &&
+          check.app?.id === GITHUB_ACTIONS_APP_ID &&
+          check.conclusion === "failure" &&
+          check.output?.title?.startsWith(AGGREGATE_WAITING_TITLE)
+        );
+      })
+      .sort((left, right) => {
+        const createdDifference =
+          (Date.parse(right.created_at || "") || 0) - (Date.parse(left.created_at || "") || 0);
+        return createdDifference || Number(right.id) - Number(left.id);
+      })[0];
+    if (!newerOwner) {
+      return null;
+    }
+    return {
+      reason: "newer-owner",
+      message:
+        `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
+        `is newer Auto Gate check ${newerOwner.html_url || `#${newerOwner.id}`} ` +
+        `owning ${expectedHeadSha} (${newerOwner.output.title}).`,
+    };
+  };
+
+  // The PR is merged, so the outcome this run wanted already happened. A settling
+  // refusal gets a bounded re-read because the winning merge may still be in
+  // flight; exhausting it concludes "nobody merged", which is a refusal to
+  // concede rather than a reason to wait longer.
+  //
+  // A failed confirmation is "no evidence yet", not a new error to raise. If it
+  // threw, a 500 on the first read would replace the merge refusal with a read
+  // error AND abandon the remaining settlement window — so the winning merge
+  // could land inside the window this loop exists to wait through, and the run
+  // would still fail with the red master alarm this is meant to prevent.
+  const settleDelays = refusal.settling ? MERGE_SETTLE_DELAYS_MS : [];
+  for (let attempt = 0; attempt <= settleDelays.length; attempt += 1) {
+    if (attempt > 0) {
+      await delay(settleDelays[attempt - 1]);
+    }
+    const pull = await readOrNull(() =>
+      github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+    );
+    if (pull?.data?.merged) {
+      const owned = await newerOwnerConcession();
+      if (owned) {
+        return owned;
+      }
+      const winner =
+        `Conceding merge-refused race for PR #${prNumber}: the winning outcome ` +
+        `already merged ${pull.data.merge_commit_sha || expectedHeadSha}.`;
+      // Merged, but the ownership read failed — and a `||` fallback here would
+      // discard that, answering "merged" and sending the caller into the generic
+      // invalidation. Both facts have to survive: the race IS conceded (the PR is
+      // merged, so the outcome converged), and the aggregate must NOT be written,
+      // because a newer generation created blind would supersede whichever
+      // transaction owns this shared head.
+      if (error.autoGateOwnershipUnknown) {
+        return {
+          reason: "merged-owner-unknown",
+          message:
+            `${winner} Not invalidating ${expectedHeadSha}: ownership could not be determined ` +
+            `(${error.autoGateOwnershipUnknown}), so this run will not overwrite whichever ` +
+            "transaction owns it.",
+        };
+      }
+      return { reason: "merged", message: winner };
+    }
+  }
+
+  // Not merged. A newer transaction may still own the head.
+  const newerOwner = await newerOwnerConcession();
+  if (newerOwner) {
+    return newerOwner;
+  }
+
+  // No winner. The head is genuinely unmergeable and the run must stay loud.
+  return null;
 }
 
 async function resolveTargets({ github, context, core, prNumber }) {
@@ -2469,8 +2709,10 @@ module.exports = {
   reportAggregateDecision,
   reportDecision,
   resolveAggregateHeads,
+  resolveMergeRefusal,
   resolveTargets,
   __test: {
+    CONCEDED_MERGE_REFUSALS,
     isSelfContradictoryNotFound,
     evaluateCodex,
     evaluateRequiredChecks,
