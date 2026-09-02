@@ -138,6 +138,7 @@ nav:
           - CLI reference: reference/cli.md
           - HTTP API reference: reference/api.md
       - Maintainers:
+          - Daemon memory: daemon-memory.md
           - Container testing: container-testing.md
           - Lifecycle testing: lifecycle-testing.md
           - Web client selftest: web-selftest.md
