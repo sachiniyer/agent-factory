@@ -198,9 +198,12 @@ func TestCreateSessionCheckpointKeepsFirstWriteBareIdentity(t *testing.T) {
 	}
 }
 
-// TestEnsureRootAgentsCreatesRootAtBareCloneWorktree flips PR #3334's parity
-// anchor: the registered checkout remains the root agent's in-place workspace,
-// while its row and daemon key use the bare repository's identity.
+// TestEnsureRootAgentsCreatesRootAtBareCloneWorktree is the BOOT-time half of
+// the #3361 identity rule: the registered checkout remains the root agent's
+// in-place workspace, while its row and daemon key use the bare repository's
+// identity. TestEnsureRootAgentsReattributesBareCloneWorktreeCreate
+// (rootagent_reattribution_test.go) is its ensure-cadence twin; the two must
+// agree on both halves, which is the parity #3299 owns.
 func TestEnsureRootAgentsCreatesRootAtBareCloneWorktree(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)

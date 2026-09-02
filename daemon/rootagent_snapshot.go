@@ -42,7 +42,7 @@ type rootAgentSnapshot struct {
 	// their layers sit in personal/personalUnreadable — so consumer verdicts
 	// must not call them unconfigured and advise adding config that already
 	// exists (#3264 review).
-	unresolvedRoots    map[string]string
+	unresolvedRoots    map[string]unresolvedProjectRecord
 	legacyRepoIDs      map[string]bool
 	registryUnreadable bool
 }
@@ -61,7 +61,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 		personal:           map[string]*config.RootAgentLayer{},
 		personalUnreadable: map[string]string{},
 		projectRoots:       map[string]string{},
-		unresolvedRoots:    map[string]string{},
+		unresolvedRoots:    map[string]unresolvedProjectRecord{},
 		legacyRepoIDs:      map[string]bool{},
 	}
 
@@ -150,11 +150,39 @@ func logRegistryRecordProblems(failures []config.ProjectRecordFailure, strays []
 // do not load. Shared by the start-of-day builder and the safe-direction heal
 // (#3264), so a healed registry read produces exactly the snapshot a daemon
 // start would have.
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots, unresolvedRoots map[string]string) {
+// unresolvedProjectRecord retains what re-attribution needs from a project
+// whose recorded root did not resolve: the recorded path, and the identity
+// evidence (#3299 review) — the project ID and the checkout marker id that
+// proves a returning path holds the SAME clone, not a different checkout
+// reusing it.
+type unresolvedProjectRecord struct {
+	root       string
+	projectID  string
+	checkoutID string
+	// identityMismatch records that the recorded path RESOLVES, the marker
+	// READ SUCCEEDED, and the checkout there does not carry the project's
+	// marker — a different clone occupying the path. Consumers word the
+	// remedy differently: an absent path needs bringing back, a mismatched
+	// one needs a rebind and a daemon restart (#3299 review round 4).
+	identityMismatch bool
+	// markerUnreadable records that the recorded path RESOLVES but the
+	// marker could not be READ (permissions, I/O): identity is unknowable,
+	// which is neither absence nor a proven mismatch — prescribing a rebind
+	// there could destroy a transiently unreadable original (#3299 review
+	// round 5).
+	markerUnreadable bool
+	// pathVanished narrows markerUnreadable further: the path itself
+	// disappeared mid-verification, so renderers prescribe restoring the
+	// path rather than fixing marker readability (#3299 review round 12).
+	// The fail-closed gating is markerUnreadable's; this only words it.
+	pathVanished bool
+}
+
+func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]string{}
-	unresolvedRoots = map[string]string{}
+	unresolvedRoots = map[string]unresolvedProjectRecord{}
 	for _, p := range projects {
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
@@ -162,7 +190,10 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// Repo identity comes from repo.ID, but an in-place root agent runs
 			// at the registered checkout. Keep that recorded root explicit: the
 			// pre-#3358 resolver substituted the non-repository parent of a bare
-			// common directory here. This flips PR #3334's deliberate parity pin.
+			// common directory here (#3361). The ensure-cadence re-attribution
+			// path publishes the same recorded root on acceptance, so a project
+			// that resolves mid-run gets the create a boot resolution would
+			// have (#3299) — reattributeUnresolvedRoots states that parity.
 			projectRoots[repoID] = p.Root
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a
@@ -176,21 +207,26 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// retry (#1122) resolves the repo the moment the path returns and
 			// would ensure it with no personal layer, starting a root whose
 			// enabled=false sat readable in the AF home the whole time. The
-			// residue is a recorded root that is not the main worktree's
-			// toplevel — a linked worktree of a bare clone, a subdirectory
-			// registration, or a spelling that later re-resolves through a
-			// symlink: there the derived ID cannot match what the sweep
-			// resolves, and the layer applies only at a daemon start after the
-			// path returns.
+			// derived ID cannot match what the sweep resolves when the
+			// recorded root is not the main worktree's toplevel — a linked
+			// worktree of a bare clone (the shape resolveProjectBinding
+			// records, and #3361 identifies by its bare common dir), a
+			// subdirectory registration, or a spelling that later re-resolves
+			// through a symlink. That residue is why the record is KEPT here:
+			// reattributeUnresolvedRoots re-attempts these on the ensure
+			// cadence and moves the layers onto the repo's real identity as
+			// soon as the path resolves and its checkout marker still matches,
+			// so none of the three waits for a daemon restart any more (#3299).
 			repoID = config.RepoIDForRecordedRoot(p.Root)
 			repoRoot = p.Root
-			unresolvedRoots[repoID] = p.Root
+			unresolvedRoots[repoID] = unresolvedProjectRecord{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
 			// The claim is split at the resolution boundary (#3500): a probe
 			// git never answered is a subprocess outcome, not a verdict on the
-			// recorded root. The handling is deliberately the same either way —
-			// the path is unusable for THIS run whichever it was, and the
-			// per-tick retry is what settles it — so only the wording changes.
-			log.WarningLog.Printf("root agent snapshot: %s; the [root_agent] singleton alone starts nothing for it this run, but its personal layer still applies to that path — a legacy root_agents entry for the same repo picks the layer up the moment the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
+			// recorded root. The HANDLING is the same either way — the path is
+			// unusable for this pass whichever it was — and what settles it is
+			// the ensure-cadence re-check below (#3299), so only the wording
+			// comes from the classifier.
+			log.WarningLog.Printf("root agent snapshot: %s; its personal layer still applies to that path, a legacy root_agents entry for the same repo keeps its per-tick retry, and the daemon re-checks the recorded path on its ensure cadence — the project resumes fully, under its real repo identity, once the path resolves: %v", repoResolveClaim(fmt.Sprintf("project %s root", p.ID), p.Root, repoErr), repoErr)
 		}
 		pc, err := config.LoadProjectConfig(p.ID)
 		if err != nil {
