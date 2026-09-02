@@ -145,15 +145,23 @@ func boundedOutputExcerpt(raw []byte) string {
 	return fmt.Sprintf("%q", trimmed)
 }
 
-// configuredContainerPaths lists every container path Docker recorded, other
-// than af's own account mount, in a stable order.
+// configuredMountPaths lists every container path Docker was asked to install a
+// FILESYSTEM at, other than af's own account mount, in a stable order.
 //
 // For an account-scoped session af configures exactly ONE mount — the account
 // bind — because an account replaces the ambient credential mounts entirely
 // (#3082). So everything this returns came from docker.run_args or from the
-// image, which is what makes it the right candidate list to name when the
-// kernel lands something inside the boundary that af never asked for.
-func configuredContainerPaths(c dockerInspectContainer) []string {
+// image, which is what makes it the candidate list to name when the kernel lands
+// a filesystem inside the boundary that af never asked for.
+//
+// --device destinations are deliberately NOT in it, and that is the point of the
+// name. A --device makes a NODE, by mknod: it installs no filesystem, appears in
+// no mount table, and therefore cannot be what an aliased mount resolved through.
+// Offering one as a candidate for a mount would send the operator to delete a
+// valid device argument that had nothing to do with the finding (#3602 review).
+// The device diagnosis gets its own list, from HostConfig.Devices, for the
+// mirror-image reason: an ordinary bind cannot make a node.
+func configuredMountPaths(c dockerInspectContainer) []string {
 	var paths []string
 	for _, mount := range c.Mounts {
 		if path.Clean(mount.Destination) == dockerAccountHome {
@@ -163,9 +171,6 @@ func configuredContainerPaths(c dockerInspectContainer) []string {
 	}
 	for target := range c.HostConfig.Tmpfs {
 		paths = append(paths, target)
-	}
-	for _, device := range c.HostConfig.Devices {
-		paths = append(paths, device.PathInContainer)
 	}
 	sort.Strings(paths)
 	return paths
@@ -697,7 +702,7 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 	if err != nil {
 		return refuse(err)
 	}
-	configured := configuredContainerPaths(inspected)
+	configured := configuredMountPaths(inspected)
 	findings := []error{verifyConfiguredAccountBoundary(inspected, source, log.WarningLog.Printf)}
 
 	out, err = p.docker(dockerShortStepTimeout,

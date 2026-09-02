@@ -66,7 +66,7 @@ func TestAccountRuntimeVerify_CleanContainerPasses(t *testing.T) {
 
 	targets, err := parseMountinfoTargets([]byte(cleanMountinfo))
 	require.NoError(t, err)
-	require.NoError(t, verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected), verifyAccountSource))
+	require.NoError(t, verifyResolvedAccountBoundary(targets, configuredMountPaths(inspected), verifyAccountSource))
 
 	require.NoError(t, verifyAccountDeviceResidue(os.DirFS(t.TempDir()), verifyAccountSource, inspected.HostConfig.Devices))
 }
@@ -168,7 +168,7 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 			// outside the boundary, which is exactly why a lexical check fails.
 			require.NoError(t, verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil),
 				"the configured set is lexically clean — that is the defect")
-			configured := configuredContainerPaths(inspected)
+			configured := configuredMountPaths(inspected)
 
 			targets, err := parseMountinfoTargets([]byte(cleanMountinfo + tt.extraMountinfo))
 			require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestAccountRuntimeVerify_RefusesAnAliasedImageVolume(t *testing.T) {
 	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
 		"2683 2674 8:1 /var/lib/docker/volumes/anon/_data /af-account rw,relatime - ext4 /dev/root rw,discard\n"))
 	require.NoError(t, err)
-	err = verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected), verifyAccountSource)
+	err = verifyResolvedAccountBoundary(targets, configuredMountPaths(inspected), verifyAccountSource)
 	require.Error(t, err, "an image VOLUME aliased onto the account must refuse; run_args is not the only source of a mount")
 	assert.Contains(t, err.Error(), "/device-target")
 }
@@ -216,7 +216,7 @@ func TestAccountRuntimeVerify_RefusesAnAliasedImageVolume(t *testing.T) {
 func TestAccountRuntimeVerify_WithNothingConfiguredDoesNotBlameRunArgs(t *testing.T) {
 	inspected, err := parseDockerInspectContainer([]byte(cleanInspect(verifyAccountSource)))
 	require.NoError(t, err)
-	configured := configuredContainerPaths(inspected)
+	configured := configuredMountPaths(inspected)
 	require.Empty(t, configured, "the fixture must configure nothing but the account mount")
 
 	t.Run("a nested mount", func(t *testing.T) {
@@ -251,7 +251,7 @@ func TestAccountRuntimeVerify_DoesNotAssertWhichCauseItWas(t *testing.T) {
 		"HostConfig":{}}]`
 	inspected, err := parseDockerInspectContainer([]byte(inspect))
 	require.NoError(t, err)
-	configured := configuredContainerPaths(inspected)
+	configured := configuredMountPaths(inspected)
 	require.Equal(t, []string{"/repo.git"}, configured)
 
 	// …and a mount inside the boundary that the clone source cannot explain.
@@ -678,6 +678,46 @@ func TestAccountRuntimeVerify_ReadsBothSources(t *testing.T) {
 		"and the kernel's resolved view second — the half a symlink cannot survive")
 	assert.NotContains(t, strings.Join(calls[1], " "), "/proc/1/mountinfo",
 		"SELF, never PID 1: --pid=host makes PID 1 the host's init, whose mount table has no /af-account at all")
+}
+
+// A --device destination is not a candidate for an aliased MOUNT, and an
+// ordinary bind is not a candidate for a planted NODE (#3602 review).
+//
+// The two diagnoses draw from different lists because the two options do
+// different things: a --device makes a node by mknod and installs no filesystem
+// at all, so it cannot be what a mount resolved through; a bind or tmpfs cannot
+// make a node. Crossing them sends the operator to delete a valid argument that
+// had nothing to do with the finding.
+func TestAccountRuntimeVerify_CandidateListsDoNotCrossOptionKinds(t *testing.T) {
+	inspect := `[{"Mounts":[
+		{"Type":"bind","Source":"` + verifyAccountSource + `","Destination":"/af-account","Mode":"z","RW":true},
+		{"Type":"bind","Source":"/host/repo.git","Destination":"/repo.git","RW":false}],
+		"HostConfig":{"Tmpfs":{"/scratch":""},
+		"Devices":[{"PathOnHost":"/dev/fuse","PathInContainer":"/dev/fuse"}]}}]`
+	inspected, err := parseDockerInspectContainer([]byte(inspect))
+	require.NoError(t, err)
+
+	configured := configuredMountPaths(inspected)
+	require.Equal(t, []string{"/repo.git", "/scratch"}, configured,
+		"a --device installs no filesystem, so it is not a candidate for an aliased mount")
+
+	targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+		"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"))
+	require.NoError(t, err)
+	err = verifyResolvedAccountBoundary(targets, configured, verifyAccountSource)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/repo.git")
+	assert.NotContains(t, err.Error(), "/dev/fuse",
+		"telling an operator their GPU or FUSE passthrough installed a filesystem sends them to remove a valid argument")
+
+	// And the mirror: the device diagnosis names only what was asked for a NODE.
+	err = verifyAccountDeviceResidue(fstest.MapFS{
+		"planted": &fstest.MapFile{Mode: fs.ModeDevice | fs.ModeCharDevice},
+	}, verifyAccountSource, inspected.HostConfig.Devices)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/dev/fuse")
+	assert.NotContains(t, err.Error(), "/repo.git",
+		"an ordinary bind cannot mknod, so it is not a candidate for a planted node")
 }
 
 // The residue walk runs on EVERY account provision, not only when this container
