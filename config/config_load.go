@@ -207,6 +207,19 @@ func fileExists(path string) bool {
 	return err == nil || !os.IsNotExist(err)
 }
 
+// pathOccupied is fileExists for choosing a name NOBODY else holds. It uses
+// Lstat, so a symlink counts as occupied even when it dangles.
+//
+// fileExists follows links, which is right where the question is "can af read a
+// config here" but wrong where the question is "is this name free". A dangling
+// <config>.bak link reports ENOENT through Stat, so the backup would be written
+// straight over the link — destroying a filesystem entry the user made, and
+// breaking the one promise this function exists to keep (#3660 review).
+func pathOccupied(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil || !os.IsNotExist(err)
+}
+
 // availableBackupPath returns the first backup path that does not yet exist:
 // base, then base.1, base.2, … so an existing backup is never overwritten.
 // The original backup (base) is left untouched, preserving the oldest — and
@@ -214,12 +227,12 @@ func fileExists(path string) bool {
 // error only if an absurd number of backups already exist, in which case the
 // caller leaves config.json in place with a warning rather than clobbering.
 func availableBackupPath(base string) (string, error) {
-	if !fileExists(base) {
+	if !pathOccupied(base) {
 		return base, nil
 	}
 	for i := 1; i < 1000; i++ {
 		candidate := fmt.Sprintf("%s.%d", base, i)
-		if !fileExists(candidate) {
+		if !pathOccupied(candidate) {
 			return candidate, nil
 		}
 	}
@@ -426,7 +439,16 @@ func materializeDefaultConfig(configDir, tomlPath, prettyTomlPath string) (*Conf
 			return parseLoadedConfigTOML(data, prettyTomlPath, tomlPath)
 		}
 		// The concurrent file vanished or is empty; fall back to in-memory
-		// defaults without another write attempt.
+		// defaults without another write attempt — UNLESS what actually
+		// occupies the path is a broken link. The earlier check cannot cover
+		// this: check-then-act is not atomic, and materializeRaceHookForTest
+		// exists because another process really can install one in this window.
+		// The exclusive create then reports EEXIST on the link and the reread
+		// fails, which would land right back on silent defaults — the exact
+		// outcome refuseDanglingConfigLink was added to stop (#3660 review).
+		if err := refuseDanglingConfigLink(tomlPath); err != nil {
+			return nil, err
+		}
 	}
 	if created {
 		data, err := marshalGlobalConfigTOML(defaultCfg, nil)

@@ -445,3 +445,49 @@ func TestReadOnlyLoadRefusesADanglingLink(t *testing.T) {
 	_, startupErr := LoadConfig()
 	require.Error(t, startupErr)
 }
+
+// TestMaterializeRefusesADanglingLinkInstalledDuringTheRace covers the window
+// the earlier check cannot: check-then-act is not atomic, and
+// materializeRaceHookForTest exists because another process really can install
+// a config.toml between the check and the exclusive create. When that arrival
+// is a broken link, the create reports EEXIST on it, the reread fails, and the
+// old code returned in-memory defaults with no error — the same silent-defaults
+// outcome refuseDanglingConfigLink was added to stop (#3660 review).
+func TestMaterializeRefusesADanglingLinkInstalledDuringTheRace(t *testing.T) {
+	home, dotfiles := t.TempDir(), t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	missing := filepath.Join(dotfiles, "gone.toml")
+	link := filepath.Join(home, TomlConfigFileName)
+
+	// The racing process installs the broken link after the pre-read check.
+	prev := materializeRaceHookForTest
+	materializeRaceHookForTest = func() {
+		_ = os.Symlink(missing, link)
+	}
+	t.Cleanup(func() { materializeRaceHookForTest = prev })
+
+	_, err := LoadConfig()
+	require.Error(t, err, "losing the create race to a broken link must not yield silent defaults")
+	assert.Contains(t, err.Error(), link)
+	assert.Contains(t, err.Error(), missing)
+}
+
+// TestBackupNameSkipsADanglingLink pins that a symlink occupies the name even
+// when it dangles. availableBackupPath promises never to overwrite an existing
+// backup, and fileExists follows links — so a dangling <config>.bak link
+// reported ENOENT and the backup was written straight over it, destroying an
+// entry the user made (#3660 review).
+func TestBackupNameSkipsADanglingLink(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "config.toml.bak")
+	require.NoError(t, os.Symlink(filepath.Join(dir, "nowhere"), base))
+
+	got, err := availableBackupPath(base)
+	require.NoError(t, err)
+	assert.Equal(t, base+".1", got, "a dangling link holds the name")
+
+	info, lerr := os.Lstat(base)
+	require.NoError(t, lerr)
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink, "and is left intact")
+}

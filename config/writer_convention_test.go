@@ -47,8 +47,8 @@ var writerConventionExemptions = map[string]string{
 	// atomicWriteFileInDirNoFollow resolves the destination and then pins the
 	// directory with O_NOFOLLOW, rejecting a parent-dir link swapped in after the
 	// guard rather than following it. Do not "fix" it to use AtomicWriteFile.
-	"inrepo.go:atomicWriteFileInDirNoFollow:unix.Renameat": "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent",
-	"inrepo.go:atomicWriteFileInDirNoFollow:unix.Unlinkat": "the same writer's temp-file cleanup",
+	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Renameat": "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent",
+	"inrepo.go:atomicWriteFileInDirNoFollow:golang.org/x/sys/unix.Unlinkat": "the same writer's temp-file cleanup",
 }
 
 // TestEveryConfigWriterGoesThroughAtomicWriteFile pins the convention that is
@@ -79,8 +79,9 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 		"os.Symlink": true, "os.Link": true,
 		// The *at syscalls too, or the in-repo writer's shape would be a way to
 		// add an unguarded writer that the os.* list never sees.
-		"unix.Renameat": true, "unix.Unlinkat": true, "unix.Linkat": true,
-		"unix.Symlinkat": true, "unix.Mkdirat": true,
+		"golang.org/x/sys/unix.Renameat": true, "golang.org/x/sys/unix.Unlinkat": true,
+		"golang.org/x/sys/unix.Linkat": true, "golang.org/x/sys/unix.Symlinkat": true,
+		"golang.org/x/sys/unix.Mkdirat": true,
 	}
 
 	entries, err := os.ReadDir(".")
@@ -96,6 +97,21 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 		fset := token.NewFileSet()
 		file, err := parser.ParseFile(fset, name, nil, 0)
 		require.NoError(t, err, "parse %s", name)
+
+		// Local qualifier -> import path, so an alias cannot hide a writer.
+		// A dot-import would put os.WriteFile in scope unqualified; it is
+		// rejected outright rather than silently unmatched.
+		imports := map[string]string{}
+		for _, spec := range file.Imports {
+			path := strings.Trim(spec.Path.Value, `"`)
+			name := path[strings.LastIndex(path, "/")+1:]
+			if spec.Name != nil {
+				require.NotEqual(t, ".", spec.Name.Name,
+					"%s dot-imports %q; this scan cannot see unqualified writer calls", name, path)
+				name = spec.Name.Name
+			}
+			imports[name] = path
+		}
 
 		// Walk per top-level declaration so every call carries the function it
 		// sits in; a call outside any function body gets "" and can never match
@@ -118,7 +134,13 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 				if !ok {
 					return true
 				}
-				qualified := pkg.Name + "." + sel.Sel.Name
+				// Resolve the qualifier through the file's IMPORTS rather than
+				// trusting the identifier text. `import stdos "os"` makes an
+				// ordinary os.WriteFile read as stdos.WriteFile, which matched
+				// nothing and slipped through a guard whose whole claim is that
+				// it cannot be slipped through (#3660 review). Valid Go, and no
+				// compiler error to catch it.
+				qualified := imports[pkg.Name] + "." + sel.Sel.Name
 				if !writingCalls[qualified] {
 					return true
 				}
