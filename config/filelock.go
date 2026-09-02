@@ -34,19 +34,16 @@ import (
 // and resolving would drop a .lock file into whatever directory the link points
 // at, which for a dotfiles repository is somebody's tracked working tree.
 func WithFollowedFileLock(path string, fn func() error) error {
-	return WithFileLock(lockTargetPath(path), fn)
-}
-
-// lockTargetPath is the file whose .lock guards a followed write.
-//
-// A path that cannot be resolved falls back to itself. The lock is advisory and
-// a failure to resolve is reported by the write that follows, so refusing here
-// would replace a real error message with a confusing one.
-func lockTargetPath(path string) string {
-	if resolved, err := resolveWriteTarget(path); err == nil {
-		return resolved
+	// Surface a broken link HERE rather than locking the unresolved path and
+	// letting the callback discover it. Callbacks read the file before they
+	// reach the writer, so a silent fallback turned the both-ends error this
+	// change promises into a bare ENOENT naming only config.toml
+	// (#3660 review).
+	target, err := resolveWriteTarget(path)
+	if err != nil {
+		return err
 	}
-	return path
+	return WithFileLock(target, fn)
 }
 
 func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
@@ -509,3 +506,21 @@ func noticeSymlinkWrite(link, target string) {
 }
 
 func resetSymlinkWriteNotices() { symlinkWriteNotices.Clear() }
+
+// refuseDanglingConfigLink reports the both-ends error when path is a symlink
+// that does not resolve, and nil for anything else — including a path that is
+// simply absent, which is an ordinary first run.
+//
+// The read paths need this separately from the write paths: a dangling link
+// makes os.ReadFile return ENOENT, which is indistinguishable from "no config
+// yet" unless somebody looks with Lstat (#3660 review).
+func refuseDanglingConfigLink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if _, err := resolveWriteTarget(path); err != nil {
+		return err
+	}
+	return nil
+}

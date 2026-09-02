@@ -60,6 +60,19 @@ func LoadConfig() (*Config, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// A DANGLING symlink reads as ENOENT, which would send this straight past
+	// the JSON branch into materializeDefaultConfig — whose exclusive create then
+	// fails EEXIST on the link itself, and whose failed reread falls through to
+	// an in-memory DefaultConfig with no error at all. af would start on defaults
+	// while the operator believes it is reading their dotfiles config, silently
+	// changing every setting including the listener (#3660 review).
+	//
+	// It is the same broken link AtomicWriteFileFollowingLink refuses, so it is
+	// refused the same way, naming both ends.
+	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		return nil, err
+	}
+
 	// 1. config.toml is canonical whenever it exists.
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
@@ -74,6 +87,15 @@ func LoadConfig() (*Config, error) {
 			// re-materialize, exactly as the JSON path does for an empty
 			// config.json.
 			if jsonExists {
+				return parseConfigTOML(tomlData, prettyTomlPath)
+			}
+			// A SYMLINK is never a failed first-run write — that path creates a
+			// regular file — so the #864 ambiguity this branch disambiguates does
+			// not arise, and removing it would unlink the operator's dotfiles
+			// arrangement just for starting af (#3660 review). Contentless through
+			// a link is a hand-made stub by construction: report it loudly and
+			// leave the link alone.
+			if info, lerr := os.Lstat(tomlPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 				return parseConfigTOML(tomlData, prettyTomlPath)
 			}
 			if rmErr := os.Remove(tomlPath); rmErr != nil && !os.IsNotExist(rmErr) {

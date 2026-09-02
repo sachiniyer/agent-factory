@@ -343,3 +343,74 @@ func TestAtomicWriteFileDoesNotFollowLinksByDefault(t *testing.T) {
 	assert.Equal(t, "original\n", string(untouched),
 		"and leaves what the link pointed at alone")
 }
+
+// TestStartupDoesNotDestroyOrIgnoreASymlinkedConfig covers the two load paths
+// that reached past the write-side guarantee. Both are reachable by doing
+// nothing but starting af, which is what made them worth fixing here rather
+// than filing: this PR documents that a symlinked global config is followed,
+// not replaced, and these two made that false (#3660 review).
+func TestStartupDoesNotDestroyOrIgnoreASymlinkedConfig(t *testing.T) {
+	t.Run("a contentless target keeps the link", func(t *testing.T) {
+		// The contentless recovery exists to clean up a failed first-run write
+		// (#864). A symlink is never that — first run creates a regular file —
+		// so removing it would unlink the operator's dotfiles arrangement for
+		// nothing. Before the fix, merely calling LoadConfig did exactly that.
+		home, dotfiles := t.TempDir(), t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		t.Setenv("SHELL", "/bin/sh")
+		real := filepath.Join(dotfiles, "af-config.toml")
+		require.NoError(t, os.WriteFile(real, []byte("\n"), 0644))
+		link := filepath.Join(home, TomlConfigFileName)
+		require.NoError(t, os.Symlink(real, link))
+
+		_, err := LoadConfig()
+		require.Error(t, err, "a contentless config is a loud error, not a silent re-materialize")
+		assert.Contains(t, err.Error(), "empty")
+
+		info, lerr := os.Lstat(link)
+		require.NoError(t, lerr)
+		assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
+			"starting af must not unlink the operator's dotfiles arrangement")
+		assert.FileExists(t, real)
+	})
+
+	t.Run("a dangling link is refused, not silently defaulted", func(t *testing.T) {
+		// os.ReadFile on a dangling link returns ENOENT, which read as "no
+		// config yet": materializeDefaultConfig's exclusive create then failed
+		// EEXIST on the link, and the failed reread fell through to an in-memory
+		// DefaultConfig with NO error. af started on defaults — a different
+		// default_program and a different listener — while the operator believed
+		// it was reading their config.
+		home, dotfiles := t.TempDir(), t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", home)
+		t.Setenv("SHELL", "/bin/sh")
+		missing := filepath.Join(dotfiles, "gone.toml")
+		link := filepath.Join(home, TomlConfigFileName)
+		require.NoError(t, os.Symlink(missing, link))
+
+		_, err := LoadConfig()
+		require.Error(t, err, "a broken link must not read as 'no config yet'")
+		assert.Contains(t, err.Error(), link, "the error names the link")
+		assert.Contains(t, err.Error(), missing, "and the target it points at")
+	})
+
+	t.Run("the followed lock refuses before the callback runs", func(t *testing.T) {
+		// Callbacks read the file before reaching the writer, so falling back to
+		// the unresolved path turned the both-ends error into a bare ENOENT
+		// naming only config.toml.
+		dir, dotfiles := t.TempDir(), t.TempDir()
+		missing := filepath.Join(dotfiles, "gone.toml")
+		link := filepath.Join(dir, TomlConfigFileName)
+		require.NoError(t, os.Symlink(missing, link))
+
+		ran := false
+		err := WithFollowedFileLock(link, func() error {
+			ran = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, ran, "the callback must not run under a lock on a path that will not resolve")
+		assert.Contains(t, err.Error(), link)
+		assert.Contains(t, err.Error(), missing)
+	})
+}
