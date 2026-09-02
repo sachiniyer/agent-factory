@@ -117,10 +117,16 @@ func TestPreviewChannelNamesWhichConditionFailed(t *testing.T) {
 		notWant  string
 	}{
 		{
-			name:     "empty list is transient and says so",
+			// An unauthenticated list hides drafts, so [] cannot be called
+			// transient: a drafts-only repository is byte-identical to a blip
+			// and needs the opposite response (#3392 review).
+			name:     "empty list is reported as ambiguous, not as transient",
 			releases: []Release{},
-			want:     []string{"empty release list", "0 releases", "retry"},
-			notWant:  "parseable",
+			want: []string{
+				"no VISIBLE release", "unauthenticated",
+				"nothing is published yet", "transient blip",
+			},
+			notWant: "",
 		},
 		{
 			name: "all drafts is named as drafts, with the count",
@@ -144,6 +150,17 @@ func TestPreviewChannelNamesWhichConditionFailed(t *testing.T) {
 			},
 			want:    []string{"all 2 release(s)", "drafts", "parseable version tag", "tag has to be fixed too"},
 			notWant: "empty release list",
+		},
+		{
+			// #3392 review: "publish one" permits publishing `nightly`, which
+			// PickLatestReleaseTag rejects just as firmly once published.
+			name: "mixed drafts must say WHICH draft to publish",
+			releases: []Release{
+				{TagName: "v1.9.10-preview-1", Draft: true},
+				{TagName: "nightly", Draft: true},
+			},
+			want:    []string{"all 2 release(s)", "publish one of the 1", "NOT one of the other 1"},
+			notWant: "tag has to be fixed too",
 		},
 		{
 			name: "unparseable tags are called malformed, not missing",
@@ -175,7 +192,7 @@ func TestPreviewChannelNamesWhichConditionFailed(t *testing.T) {
 					t.Errorf("message must identify the condition.\n got: %q\nwant it to contain: %q", err.Error(), want)
 				}
 			}
-			if strings.Contains(err.Error(), tc.notWant) {
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
 				t.Errorf("message must not blame the wrong condition %q: %q", tc.notWant, err.Error())
 			}
 		})

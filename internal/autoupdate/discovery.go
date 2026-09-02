@@ -89,9 +89,24 @@ func (d Discovery) latestPreviewTag(timeout time.Duration) (string, error) {
 // two ends of that range and read identically today.
 func unusablePreviewReleases(releases []Release) error {
 	if len(releases) == 0 {
-		return fmt.Errorf("the preview channel returned an empty release list (0 releases); " +
-			"no candidate could be compared at all, which is usually a transient API blip or a " +
-			"rate-limit shape rather than a missing release — retry before treating it as a real absence")
+		// AMBIGUOUS, and saying so is the point. getJSON sends no
+		// Authorization header, and GitHub does not show draft releases to an
+		// unauthenticated caller — so a repository holding nothing but drafts
+		// returns [] here and is byte-identical to a transient blip. Claiming
+		// "transient, retry" would misdiagnose precisely the state that needs
+		// a release published, and the two remedies are opposites: wait,
+		// versus publish something (#3392 review).
+		//
+		// The same asymmetry is why the all-draft branch below is unreachable
+		// against the production endpoint: drafts never arrive to be counted.
+		// It stays because an authenticated client or an injected list can
+		// reach it, and because being wrong there would be silent.
+		return fmt.Errorf("the preview channel returned no VISIBLE release (an empty, unauthenticated " +
+			"list); af cannot tell which of two causes this is, and they need opposite responses — " +
+			"either nothing is published yet (drafts are invisible to an unauthenticated caller, so a " +
+			"drafts-only repository looks exactly like this, and a release must be published), or the " +
+			"call was a transient blip or rate-limit response and a retry will do. Check whether a " +
+			"published preview release exists before assuming a retry is enough")
 	}
 	published := 0
 	for _, release := range releases {
@@ -112,13 +127,24 @@ func unusablePreviewReleases(releases []Release) error {
 				parseable++
 			}
 		}
-		if parseable == 0 {
+		switch {
+		case parseable == 0:
 			return fmt.Errorf("all %d release(s) on the preview channel are drafts, and none carries a "+
-				"parseable version tag; publishing one would not be enough — the tag has to be fixed too", len(releases))
+				"parseable version tag; publishing one would not be enough — the tag has to be fixed too",
+				len(releases))
+		case parseable < len(releases):
+			// Tie the remedy to the condition just computed: "publish one"
+			// would permit publishing a `nightly` draft, which
+			// PickLatestReleaseTag rejects just as firmly once published, so
+			// the operator would do the work and see no change (#3392 review).
+			return fmt.Errorf("all %d release(s) on the preview channel are drafts; publish one of the %d "+
+				"whose tag parses, NOT one of the other %d — an unparseable tag is rejected whether or "+
+				"not the release is a draft, so publishing one of those leaves the channel just as unusable",
+				len(releases), parseable, len(releases)-parseable)
+		default:
+			return fmt.Errorf("all %d release(s) on the preview channel are drafts; a draft is never an "+
+				"update candidate, so one has to be published before af can move to it", len(releases))
 		}
-		return fmt.Errorf("all %d release(s) on the preview channel are drafts (%d with a parseable tag); "+
-			"a draft is never an update candidate, so one has to be published before af can move to it",
-			len(releases), parseable)
 	}
 	return fmt.Errorf("none of the %d published release(s) on the preview channel (%d returned in total) "+
 		"carries a parseable version tag; the tagging is malformed rather than the release missing, so "+
