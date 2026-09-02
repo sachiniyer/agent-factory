@@ -1748,6 +1748,64 @@ test("a vanished PR ends its aggregate transaction without throwing", async () =
   assert.equal(github.mergedWith, null);
 });
 
+test("an unreadable ruleset never becomes an absent one", async () => {
+  // Codex P1 (round 3): the 404 handler reads "this repository does not use
+  // rulesets" and falls back to classic branch protection. A retry-exhausted
+  // self-contradictory 404 carries status 404 too, so it was swallowed the same
+  // way — and with neither mechanism readable the gate reports NO required
+  // checks, which is a fail-open a merge can walk through.
+  const notFound = selfContradictoryNotFound();
+  const github = fakeGateGithub({ requestErrors: [notFound, notFound, notFound] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.mergedWith, null, "nothing may merge while required checks are unknown");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not read branch rules for master after 3 attempts/,
+  );
+});
+
+test("a PR that vanishes before its decision write concludes cleanly", async () => {
+  // Codex P2 (round 3): the gone marker was converted only inside evaluate(),
+  // so a deletion landing on reportDecision's reads still rethrew and reddened
+  // the run.
+  const gone = new Error("Not Found");
+  gone.status = 404;
+  const github = fakeGateGithub({ pullGetError: gone });
+  let thrown = 0;
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    // Let the evaluation finish, then fail the decision-reporting read.
+    if (fn === github.rest.checks.listForRef && github.reviewCommentReads > 0 && thrown === 0) {
+      thrown += 1;
+      throw selfContradictoryNotFound();
+    }
+    return realPaginate(fn, options);
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(thrown, 1);
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.mergedWith, null);
+});
+
 test("an unclear cross-check answer is never read as a vanished PR", async () => {
   // Fail-closed on the unknown: only a definite 404 is evidence of absence. A
   // 500 during a degradation would otherwise conclude the PR was deleted.
@@ -2247,6 +2305,7 @@ function fakeGateGithub({
   associationErrorEveryRead = false,
   readErrorsByFn = {},
   pullGetError = null,
+  requestErrors = [],
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -2305,6 +2364,7 @@ function fakeGateGithub({
     checkCreateAttempts: 0,
     checkListReads: 0,
     pullGetReads: 0,
+    requestReads: 0,
     readAttemptsByFn: {},
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
@@ -2454,6 +2514,11 @@ function fakeGateGithub({
       return responses.get(fn) || [];
     },
     request: async (route) => {
+      github.requestReads += 1;
+      const scriptedError = requestErrors[github.requestReads - 1];
+      if (scriptedError) {
+        throw scriptedError;
+      }
       if (route.includes("/rules/branches/")) {
         return {
           data: [

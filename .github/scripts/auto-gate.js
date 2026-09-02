@@ -910,6 +910,17 @@ async function processAggregateHead({
       manualMergeRequired ||= Boolean(result.manualMergeRequired);
       write = await reportDecision({ github, context, core, result, manual });
     } catch (error) {
+      // The PR vanished between its evaluation and its decision write. evaluate()
+      // converts this marker into a clean conclusion, but reportDecision's reads
+      // are outside it, so without this the same deletion reddens the run from a
+      // few lines further down (#3396).
+      if (error?.autoGatePullRequestGone) {
+        core.notice(
+          `Keeping aggregate ${pending.headSha} non-green because PR #${prNumber} ` +
+            "no longer exists.",
+        );
+        return { state: "association-changed", pending };
+      }
       if (!isReadFailure(error)) {
         throw error;
       }
@@ -1572,7 +1583,7 @@ async function listPullRequestFiles({ github, context, number, subject = null })
 }
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core, subject = null }) {
-  const required = await getRequiredCheckSpecs({ github, context, branch, core });
+  const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
     (spec) =>
       isSyntheticDecisionContext(spec.context) &&
@@ -1644,18 +1655,21 @@ function isSyntheticDecisionContext(contextName) {
   );
 }
 
-async function getRequiredCheckSpecs({ github, context, branch, core }) {
+async function getRequiredCheckSpecs({ github, context, branch, core, subject = null }) {
   const { owner, repo } = context.repo;
   const specs = new Map();
   const errors = [];
 
   try {
-    const response = await retryRead(`could not read branch rules for ${branch}`, () =>
-      github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
-        owner,
-        repo,
-        branch,
-      }),
+    const response = await retryRead(
+      `could not read branch rules for ${branch}`,
+      () =>
+        github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
+          owner,
+          repo,
+          branch,
+        }),
+      subject,
     );
 
     for (const rule of response.data || []) {
@@ -1669,6 +1683,14 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
       }
     }
   } catch (error) {
+    // A 404 here normally means "this repository does not use that mechanism",
+    // which is why it is swallowed. A retry-exhausted read failure carries status
+    // 404 too, and swallowing THAT is a fail-open: with neither mechanism
+    // readable the gate reports no required checks at all, and a PR with nothing
+    // green can pass. An unreadable ruleset is not an absent one.
+    if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+      throw error;
+    }
     if (error.status !== 404) {
       const message = `could not read branch rules for ${branch}: ${formatError(error)}`;
       core.warning(message);
@@ -1688,6 +1710,7 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
           "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks",
           { owner, repo, branch },
         ),
+      subject,
     );
 
     for (const contextName of response.data.contexts || []) {
@@ -1699,6 +1722,14 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
       }
     }
   } catch (error) {
+    // A 404 here normally means "this repository does not use that mechanism",
+    // which is why it is swallowed. A retry-exhausted read failure carries status
+    // 404 too, and swallowing THAT is a fail-open: with neither mechanism
+    // readable the gate reports no required checks at all, and a PR with nothing
+    // green can pass. An unreadable ruleset is not an absent one.
+    if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+      throw error;
+    }
     if (error.status !== 404) {
       const message = `could not read branch protection checks for ${branch}: ${formatError(error)}`;
       core.warning(message);
