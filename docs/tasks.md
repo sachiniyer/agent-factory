@@ -193,7 +193,7 @@ Lateness is measured from the **latest** of the last run, the last time the sche
 
 Those times come from the audit trail below, so they are bounded too: a restart old enough to have fallen out of the window leaves the reference at the last run, which can only make the verdict more eager, never hide a task that has genuinely stopped.
 
-An expression that **can never fire** is reported in its own right, as `unschedulable`. That covers both an expression that does not parse (a hand-edited or legacy row the scheduler refuses) and one that is legal but matches no date — `0 0 31 2 *` is February 31st, which the scheduler happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `never fires`, and `af tasks show` and the `af doctor` row say exactly that instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
+An expression that **can never fire** is reported in its own right, as `unschedulable`. That covers both an expression that does not parse (a hand-edited or legacy row the scheduler refuses) and one that is legal but matches no date — `0 0 31 2 *` is February 31st, which the scheduler happily arms with a next-fire time of never. Nothing is ever late because nothing was ever due, so the rail marks the row `[!]` (its detail already reads `No upcoming run`), and `af tasks show` and the `af doctor` row say exactly that instead of reporting health. It is derived from the record, so a box whose daemon is down gets the verdict too.
 
 Watch tasks are never overdue: they fire when their command emits a line, which may legitimately be never. Neither is a disabled task — whether disabling it was *intended* is what the audit trail answers.
 
@@ -203,7 +203,7 @@ Watch tasks are never overdue: they fire when their command emits a line, which 
 
 ```bash
 af tasks show <id>              # trigger, arming, next run, overdue verdict, audit trail
-af tasks list --json | jq '.[] | select(.overdue)'
+af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error}: use .data[]
 af doctor                       # WARN row naming overdue and unarmed tasks
 ```
 

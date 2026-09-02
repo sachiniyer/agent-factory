@@ -172,7 +172,8 @@ func TestAutomationsMarksATaskThatCanNeverFire(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "▾[!]  nightly-sweep",
 		"a task that can never fire carries the same warning glyph as one that stopped:\n%s", out)
-	assert.Contains(t, out, "never fires")
+	assert.Contains(t, out, "No upcoming run",
+		"and the detail line keeps #2596's wording rather than repeating itself:\n%s", out)
 	assert.NotContains(t, out, "overdue", "it was never due, so it is not late")
 }
 

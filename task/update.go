@@ -293,8 +293,17 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 					if err != nil {
 						return err
 					}
-					if validatedRepoID != "" {
+					if validatedRepoID != "" && validatedRepoID != merged.RepoID {
 						merged.RepoID = validatedRepoID
+						// The daemon resolved a legacy row's binding as a side effect of
+						// someone else's patch, and that write is durable. Recorded here or
+						// nowhere: changedFields covers only patchable fields, and once
+						// RepoID is set the stable-binding loader — which writes this same
+						// daemon-upgrade entry on the path it owns — skips the row forever.
+						// A no-op patch that backfills would otherwise leave no trace at all
+						// (#3623 review). Attributed to the daemon rather than to the caller,
+						// because nobody asked for it.
+						appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
 					}
 				}
 				// Diffed against the record just loaded under this lock, and

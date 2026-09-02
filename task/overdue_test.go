@@ -482,3 +482,30 @@ func TestOverdue_UnschedulableRidesTheRecord(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(encoded), "unschedulable", "and it is absent when it does not apply")
 }
+
+// TestOverdue_UnschedulableWithNoTimestampsAtAll: "can this ever fire?" needs no
+// reference point, so it must be answered before "how late is it?", which does.
+// Asked the other way round, a hand-edited row with neither a run nor a creation
+// time declined to derive anything and an impossible expression reported healthy
+// — the one case where every input the verdict needs was already in hand.
+func TestOverdue_UnschedulableWithNoTimestampsAtAll(t *testing.T) {
+	now := at(2026, time.September, 1, 12, 0, 0)
+	for _, expr := range []string{"0 0 31 2 *", "not a cron"} {
+		tsk := cronTask(expr, nil)
+		tsk.CreatedAt = time.Time{}
+		require.False(t, func() bool { _, ok := scheduleReference(tsk); return ok }(),
+			"precondition: %q has no reference point at all", expr)
+
+		health := DeriveScheduleHealth(tsk, now)
+		assert.True(t, health.Unschedulable, "expression %q can never fire, timestamps or not", expr)
+		assert.False(t, health.Overdue, "and it was never due")
+	}
+
+	// A schedulable expression with no timestamps still derives nothing: there is
+	// genuinely nothing to measure from, and inventing one would report every such
+	// row as millions of occurrences behind.
+	tsk := cronTask("20 * * * *", nil)
+	tsk.CreatedAt = time.Time{}
+	assert.False(t, DeriveScheduleHealth(tsk, now).Unschedulable)
+	assert.False(t, DeriveScheduleHealth(tsk, now).Overdue)
+}

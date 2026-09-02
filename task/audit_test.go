@@ -362,3 +362,43 @@ func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
 	assert.Empty(t, created.Arming)
 	assert.Nil(t, created.NextRunAt)
 }
+
+// TestAudit_ValidatorBackfilledRepoIDIsRecorded: the daemon resolves a legacy
+// row's binding as a side effect of someone else's patch, and that write is
+// durable. It is recorded here or nowhere — changedFields covers only patchable
+// fields, and once RepoID is set the stable-binding loader (which writes this
+// same daemon-upgrade entry on the path it owns) skips the row forever.
+func TestAudit_ValidatorBackfilledRepoIDIsRecorded(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+
+	// A no-op patch: the caller changed nothing, and the backfill still happens.
+	_, err := UpdateTaskChecked(id, TaskUpdate{}, ProjectExpectation{}, ActorCLI,
+		func(Task) (string, error) { return "resolved-repo-id", nil })
+	require.NoError(t, err)
+
+	stored, err := GetTask(id)
+	require.NoError(t, err)
+	assert.Equal(t, "resolved-repo-id", stored.RepoID)
+	require.Len(t, stored.Audit, 2, "the create, and the daemon's own backfill")
+	assert.Equal(t, ActorDaemonUpgrade, stored.Audit[1].Actor,
+		"nobody asked for it, so it is not attributed to the caller")
+	assert.Equal(t, []string{"repo_id"}, stored.Audit[1].Fields)
+}
+
+// TestAudit_ValidatorRepoIDThatChangesNothingRecordsNothing keeps the entry
+// meaning "a binding was resolved" rather than "a validator ran".
+func TestAudit_ValidatorRepoIDThatChangesNothingRecordsNothing(t *testing.T) {
+	id := seedAuditTask(t, ActorCLI)
+	resolve := func(Task) (string, error) { return "resolved-repo-id", nil }
+
+	// The first patch backfills and records. The second sees the SAME resolved id
+	// on a row that already carries it — a validator running, not a binding being
+	// resolved — and must add nothing.
+	_, err := UpdateTaskChecked(id, TaskUpdate{}, ProjectExpectation{}, ActorCLI, resolve)
+	require.NoError(t, err)
+	require.Len(t, auditOf(t, id), 2)
+
+	_, err = UpdateTaskChecked(id, TaskUpdate{}, ProjectExpectation{}, ActorCLI, resolve)
+	require.NoError(t, err)
+	assert.Len(t, auditOf(t, id), 2, "a validator that changed nothing recorded nothing")
+}

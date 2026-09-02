@@ -328,11 +328,11 @@ func needsAttention(tsk task.Task) bool {
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
 func attentionFragment(tsk task.Task) string {
-	if tsk.Unschedulable {
-		// Ahead of overdue, and mutually exclusive with it: a task with no
-		// occurrences at all is never late, because nothing was ever due.
-		return "never fires"
-	}
+	// Deliberately silent for an unschedulable task: the next/last summary
+	// already says "No upcoming run" for it (#2596), and a second fragment saying
+	// the same thing would both repeat itself and push the line past the 36-column
+	// rail, clipping the half that names the expression. The glyph is what that
+	// case was missing — a collapsed row read as healthy — not more words.
 	if !tsk.Overdue {
 		return ""
 	}

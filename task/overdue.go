@@ -131,14 +131,25 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	if err != nil {
 		return ScheduleHealth{Unschedulable: true}
 	}
+	// "Can this ever fire?" is answered BEFORE "how late is it?", because the two
+	// need different things and only the second needs a reference point. Asking
+	// them the other way round meant a record with no timestamps at all — a
+	// hand-edited or legacy row — declined to derive anything and reported an
+	// impossible expression as healthy, which is the one case where every input
+	// needed for the verdict was in hand (#3623 review).
+	if sched.Next(now).IsZero() {
+		return ScheduleHealth{Unschedulable: true}
+	}
 	ref, ok := scheduleReference(t)
 	if !ok {
 		return ScheduleHealth{}
 	}
 	slack, ok := slackFor(sched, ref)
 	if !ok {
-		// The expression parses but has no occurrences within robfig's five-year
-		// horizon: it can never fire, which is a report, not a silence.
+		// Belt and braces: the probe above rules this out for every expression
+		// whose occurrences are periodic, which is all of them, but a schedule that
+		// answers differently from `ref` than from `now` must not silently become
+		// "healthy" here either.
 		return ScheduleHealth{Unschedulable: true}
 	}
 	oldest := sched.Next(ref.Add(slack))

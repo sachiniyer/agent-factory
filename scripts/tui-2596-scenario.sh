@@ -81,7 +81,13 @@ af_close_tasks
 # focus from the instances tree onto the automations rail (#1706).
 af_ensure_nav
 af_send ']'
-af_wait_for '▾\[✓\]  yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
+# [!], not [✓]: an expression that matches no date can never fire, and #3623
+# marks such a task on its COLLAPSED row — the row you are not looking at, which
+# is where "enabled and permanently silent" used to read as healthy. The detail
+# line below is unchanged, and deliberately so: "No upcoming run" already names
+# the absence, so the mark adds the signal without adding words to a 36-column
+# rail.
+af_wait_for '▾\[!\]  yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
 af_wait_for '0 0 31 2 \* · No upcoming run' "$AF_DRIVER_TIMEOUT" \
     'the automations rail names the absence instead of a zero-time next run'
 # Refute the PREFIX, not the whole timestamp: a clipped "next Jan 0…" would slip
