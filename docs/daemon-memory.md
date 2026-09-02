@@ -145,7 +145,11 @@ single RSS reading for neither.
 - its **direct children that are not rerouted into another scope** — everything
   spawned with a plain `exec`, including anything that outlives a stop under
   `KillMode=process`;
-- **page cache** for every file anything in the cgroup read or wrote;
+- **file-backed memory charged to this cgroup** — page cache is charged to
+  whichever cgroup first instantiates a page, so this covers what these
+  processes brought in, not everything they read: pages another cgroup had
+  already cached stay charged there, and pages a child brought in stay charged
+  here after that child has exited;
 - kernel slab.
 
 Not everything the daemon starts lands there. af deliberately puts two classes
