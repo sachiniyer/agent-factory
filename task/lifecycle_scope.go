@@ -104,6 +104,7 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 
 	var authoritative []Task
 	var updated []Task
+	var updatedRows []int
 	unresolved := make(map[string]repoResolution)
 	lockErr := config.WithFileLock(path, func() error {
 		current, err := loadTasksLocked(path)
@@ -126,7 +127,13 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 				// rather than through changedFields, which covers only the fields a
 				// surface can patch; repo_id is derived and patchable by no one.
 				appendAudit(&current[i], ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
-				updated = append(updated, current[i])
+				// The ROW is recorded, not the record. These are published as
+				// EventTaskUpdated, and a copy taken here would carry the identity
+				// loadTasksLocked stamped against the PRE-write bytes — a version of
+				// the store that stops existing the moment this backfill saves, and
+				// so pairs with no later read (#3684 review). They are materialized
+				// after the write, off the re-identified slice.
+				updatedRows = append(updatedRows, i)
 				changed = true
 				continue
 			}
@@ -137,9 +144,17 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 			}
 		}
 		if changed {
-			if err := saveTasks(current); err != nil {
+			generation, err := writeTasks(current)
+			if err != nil {
 				return err
 			}
+			// Every record this transaction hands back — the authoritative list and
+			// the published binding updates alike — is re-identified against the file
+			// the write produced. See stampRowIdentity.
+			stampRowIdentity(current, generation)
+		}
+		for _, i := range updatedRows {
+			updated = append(updated, current[i])
 		}
 		authoritative = current
 		return nil

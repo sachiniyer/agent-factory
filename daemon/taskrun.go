@@ -297,7 +297,7 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 			return
 		}
 		now := time.Now()
-		if uerr := task.UpdateTaskStatus(taskID, &now, "errored: "+err.Error()); uerr != nil {
+		if _, uerr := task.UpdateTaskStatus(taskID, &now, "errored: "+err.Error()); uerr != nil {
 			log.ErrorLog.Printf("failed to record errored status for task %s: %v", taskID, uerr)
 		}
 	}()
@@ -325,7 +325,7 @@ func RunTask(taskID string, expect task.ProjectExpectation) (err error) {
 	// — the task already ran via deliverTaskPrompt, and the stored Program
 	// value may predate current enum validation (see #664).
 	now := time.Now()
-	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil

@@ -940,7 +940,7 @@ func deliverWatchEvent(taskID, line string) error {
 		return errTargetBusy
 	}
 	now := time.Now()
-	if err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, &now, status); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	return nil
@@ -956,7 +956,7 @@ func deliverWatchEvent(taskID, line string) error {
 // Program enum validation so legacy task records still receive status bumps
 // (#664).
 func persistWatcherStatus(taskID, status string) {
-	if err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
+	if _, err := task.UpdateTaskStatus(taskID, nil, status); err != nil {
 		log.WarningLog.Printf("failed to record watcher status %q on task %s: %v", status, taskID, err)
 	}
 }

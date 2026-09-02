@@ -25,7 +25,7 @@ import (
 // The fix is here rather than in the rail: the poll that already reads the tasks
 // also asks the daemon what it has armed, so the rail keeps its single input.
 
-func armingPollHome(t *testing.T) (*home, *config.RepoContext) {
+func armingPollHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
@@ -38,17 +38,38 @@ func armingPollHome(t *testing.T) (*home, *config.RepoContext) {
 		ProjectPath: root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
 	}))
 	h.switchProject(repo)
-	return h, repo
+	return h
+}
+
+// observedFromStore models what controlServer.ListTasks returns: the store's own
+// rows, read through the same loader the rail reads through and NUMBERED as that
+// loader numbers them (task.Task.Ordinal), with the live arming layered on top
+// exactly as daemon/task_health.go's withLiveArming layers it.
+//
+// Built from the store rather than by hand on purpose. A hand-written
+// observation is free to omit the row number, and an observation with no row
+// identifies nothing — every answer would come back UNKNOWN and the assertions
+// below would pass or fail for reasons that have nothing to do with what they
+// claim to pin (#3680). Returning what the real read returns is what keeps this
+// fake honest.
+func observedFromStore(t *testing.T, layer func(row int, o *task.Task)) []task.Task {
+	t.Helper()
+	tasks, err := task.LoadTasks()
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks, "the fake must answer about a store that actually holds rows")
+	for i := range tasks {
+		layer(i+1, &tasks[i])
+	}
+	return tasks
 }
 
 func TestFetchSnapshotCmdCarriesLiveArmingOntoTheDiskRecord(t *testing.T) {
-	h, repo := armingPollHome(t)
+	h := armingPollHome(t)
 	next := time.Date(2026, time.March, 4, 9, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {
-		return []task.Task{{
-			ID: "t1", Name: "nightly", CronExpr: "0 3 * * *", ProjectPath: repo.Root,
-			Enabled: true, Arming: task.ArmingArmed, NextRunAt: &next,
-		}}, nil
+		return observedFromStore(t, func(_ int, o *task.Task) {
+			o.Arming, o.NextRunAt = task.ArmingArmed, &next
+		}), nil
 	}))
 
 	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
@@ -66,7 +87,7 @@ func TestFetchSnapshotCmdLeavesArmingUnknownWhenTheDaemonCannotAnswer(t *testing
 	// every task on the box of being broken because one poll missed — and the rail
 	// renders not-armed as "will not fire", which is the alarm this whole feature
 	// exists to make trustworthy.
-	h, _ := armingPollHome(t)
+	h := armingPollHome(t)
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {
 		return nil, errors.New("dial unix daemon-http.sock: connect: no such file or directory")
 	}))
@@ -83,13 +104,13 @@ func TestFetchSnapshotCmdRefusesArmingForAStaleDefinition(t *testing.T) {
 	// The two reads straddle an edit: the daemon answered about the expression it
 	// armed, the disk already holds the new one. Adopting the observation would
 	// promise a fire time for a schedule that is no longer the schedule.
-	h, repo := armingPollHome(t)
+	h := armingPollHome(t)
 	next := time.Date(2026, time.March, 4, 9, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {
-		return []task.Task{{
-			ID: "t1", Name: "nightly", CronExpr: "0 21 * * *", ProjectPath: repo.Root,
-			Enabled: true, Arming: task.ArmingArmed, NextRunAt: &next,
-		}}, nil
+		return observedFromStore(t, func(_ int, o *task.Task) {
+			o.CronExpr = "0 21 * * *" // what the daemon armed; the disk already moved on
+			o.Arming, o.NextRunAt = task.ArmingArmed, &next
+		}), nil
 	}))
 
 	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
@@ -102,18 +123,63 @@ func TestFetchSnapshotCmdRefusesArmingForAStaleDefinition(t *testing.T) {
 func TestFetchSnapshotCmdCarriesNotArmed(t *testing.T) {
 	// The negative observation is the whole of #2929: an enabled task the daemon
 	// refused to arm looks identical to a healthy one from disk alone.
-	h, repo := armingPollHome(t)
+	h := armingPollHome(t)
 	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {
-		return []task.Task{{
-			ID: "t1", Name: "nightly", CronExpr: "0 3 * * *", ProjectPath: repo.Root,
-			Enabled: true, Arming: task.ArmingNotArmed,
-		}}, nil
+		return observedFromStore(t, func(_ int, o *task.Task) {
+			o.Arming = task.ArmingNotArmed
+		}), nil
 	}))
 
 	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
 	require.True(t, ok)
 	require.Len(t, msg.tasks, 1)
 	assert.Equal(t, task.ArmingNotArmed, msg.tasks[0].Arming)
+}
+
+func TestFetchSnapshotCmdPairsAScopedRowWithItsOwnRowInTheAnswer(t *testing.T) {
+	// The production shape, end to end. The rail loads ONE project's rows; the
+	// daemon answers about every project. The two lists therefore have different
+	// lengths and different indexes, so what pairs them has to travel ON the
+	// record — the row each one occupies in tasks.json (#3680).
+	//
+	// A duplicated id across two projects is the case that makes it matter. The
+	// daemon skips a duplicate GLOBALLY, first row wins (#855), so it arms row 1
+	// and answers not-armed for row 2 — and row 2 is the only row this rail
+	// displays, first in its own list and second in the store. Its warning is
+	// exactly the one worth keeping: that task will never fire.
+	h := newTestHome(t)
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	rootA, rootB := t.TempDir(), t.TempDir()
+	for _, root := range []string{rootA, rootB} {
+		require.NoError(t, task.AddTask(task.Task{
+			ID: "dup00001", Name: "nightly", Prompt: "p", CronExpr: "0 3 * * *",
+			ProjectPath: root, Program: "claude", Enabled: true, CreatedAt: time.Now(),
+		}))
+	}
+	h.switchProject(&config.RepoContext{Root: rootB, ID: config.RepoIDFromRoot(rootB)})
+
+	next := time.Date(2026, time.March, 4, 9, 0, 0, 0, time.UTC)
+	t.Cleanup(SetLiveTaskArmingFetcherForTest(func() ([]task.Task, error) {
+		return observedFromStore(t, func(row int, o *task.Task) {
+			if row == 1 {
+				o.Arming, o.NextRunAt = task.ArmingArmed, &next
+				return
+			}
+			o.Arming = task.ArmingNotArmed
+		}), nil
+	}))
+
+	msg, ok := h.fetchSnapshotCmd()().(snapshotFetchedMsg)
+	require.True(t, ok)
+	require.NoError(t, msg.tasksErr)
+	require.Len(t, msg.tasks, 1, "the rail holds project B's row and nothing else")
+	assert.Equal(t, 2, msg.tasks[0].Ordinal,
+		"and it is still row 2 of the store, though it is item 0 of this list")
+	assert.Equal(t, task.ArmingNotArmed, msg.tasks[0].Arming,
+		"so it takes the answer about ITS row, not the armed one about the other project's")
+	assert.Nil(t, msg.tasks[0].NextRunAt, "with no fire time, because nothing is holding it")
 }
 
 func TestLiveTaskArmingFetcherSkipsARemoteTarget(t *testing.T) {

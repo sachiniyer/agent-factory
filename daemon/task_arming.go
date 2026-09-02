@@ -135,12 +135,18 @@ func (m *Manager) recordArmingStatus(t task.Task, status string) {
 	if t.LastRunStatus == status {
 		return
 	}
-	if err := task.UpdateTaskStatus(t.ID, nil, status); err != nil {
+	updated, err := task.UpdateTaskStatus(t.ID, nil, status)
+	if err != nil {
 		log.WarningLog.Printf("could not record the arming status for task %q: %v", t.ID, err)
 		return
 	}
-	t.LastRunStatus = status
-	m.publishEvent(agentproto.EventTaskUpdated, t)
+	// The record the WRITE produced, not the copy this walked in with. That copy
+	// was identified against the pre-write bytes, so publishing it would announce
+	// a version of the store this call had just retired — unpairable with every
+	// later read, and a client merging it would quietly lose that row's arming
+	// (#3684 review). It is also simply more current: it carries whatever else the
+	// store holds for this task, not one patched field.
+	m.publishEvent(agentproto.EventTaskUpdated, updated)
 }
 
 // clearStaleNotArmedStatus removes a not-armed status from a task that is armed

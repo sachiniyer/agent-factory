@@ -2,6 +2,7 @@ package task
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -123,7 +124,7 @@ type Task struct {
 	// locked operation that commits the change; see task/audit.go.
 	Audit []AuditEntry `json:"audit,omitempty"`
 
-	// The four fields below are DERIVED AT READ TIME and never persisted — see
+	// The fields below are DERIVED AT READ TIME and never persisted — see
 	// task/overdue.go for the derivation and saveTasks for the strip that
 	// enforces it. They are ordinary fields on the record rather than a side
 	// channel because every surface that reads a task needs them, and a health
@@ -165,7 +166,83 @@ type Task struct {
 	// Arming is the live arming observation: ArmingArmed, ArmingNotArmed, or
 	// ArmingUnknown (the zero value) when no daemon answered.
 	Arming string `json:"arming,omitempty"`
+
+	// Ordinal is this record's row number in tasks.json — 1-based, derived by
+	// the read that produced it (stampOrdinals) and stripped on the way to disk
+	// like the health fields above.
+	//
+	// It is the row's IDENTITY, which is the one thing the record itself does
+	// not carry. ID is the natural key and a hand-edited store can duplicate
+	// it — the daemon already handles that case explicitly — so a reader pairing
+	// two reads of this file by CONTENT is reconstructing an identity it does
+	// not have, and content is not unique: each mispairing is fixed by comparing
+	// one more field, and the next case finds a pair that agrees on all of them
+	// (#3680, off #3626's review). The ordinal is not stored, so the file cannot
+	// lie about it, and it cannot collide within one read: row N is the Nth row,
+	// once. A stamped per-row id would buy neither — it is exactly as duplicable
+	// as ID, because copying a row in an editor copies its stamp too.
+	//
+	// It identifies a row within ONE tasks.json, and two lists may be paired on
+	// it only when both were read from the same file. Two unrelated stores both
+	// have a row 3, so pairing across them would hand one machine's "armed" to
+	// another machine's task. That is why the observation ApplyLiveArming
+	// consumes is a LOCAL one only — app/session_control.go's
+	// liveTaskArmingFetcher declines to fetch arming for a remote target,
+	// because the definitions beside it are local — and why a future remote read
+	// must carry the store's own identity alongside the ordinal rather than
+	// compare ordinals from two files.
+	//
+	// Zero means NOT STAMPED, and nothing pairs on it. That is what lets the
+	// field say "unknown" rather than fail open: a record built in memory
+	// occupies no row, and an older daemon's response carries no ordinal at all,
+	// which JSON decodes to zero. Numbered from zero, every such record would
+	// claim to be row 0 and collect the first observation going — a fabricated
+	// answer produced by a MISSING field. Numbered from one, that skew degrades
+	// to unknown, which is what the rail already renders honestly.
+	Ordinal int `json:"ordinal,omitempty"`
+
+	// StoreGeneration identifies the VERSION of tasks.json this record was read
+	// from — a digest of the bytes the read decoded, stamped beside the ordinal by
+	// the same helper and stripped with it.
+	//
+	// A row number alone is not an identity, because the file is mutable. Two
+	// reads that straddle a write disagree about which task row N is: a removal
+	// shifts every row below it up, and if the rows involved are duplicates — same
+	// id, same project, same expression, which is exactly the store this feature
+	// exists for — nothing about the two records differs, so no comparison of
+	// their CONTENT can tell that the reads came from different generations. It
+	// took a review round to find that case (#3684), and it is the same shape as
+	// the heuristic this change replaced: a guard that needs one more field.
+	//
+	// So the row is qualified by the generation it was read in, and the two are
+	// only ever used together (see ApplyLiveArming's key). Two lists pair only
+	// when they saw the same bytes; when they did not, every answer is UNKNOWN,
+	// which costs a poll or two of the labelled cron fallback after a task edit
+	// and is the honest reading in between.
+	//
+	// It also settles the remote question by construction rather than by comment:
+	// two stores on two machines are two different files, so their rows can never
+	// pair. Empty means the record came from no read — see Ordinal for why that
+	// has to fail closed.
+	//
+	// The contract it implies, stated once so a caller cannot get it wrong
+	// quietly: a row identity belongs to ONE LIST FROM ONE READ. It is file-wide,
+	// so any write retires every row's identity at once, not just the row that
+	// changed — which means a list assembled from more than one read (a cached
+	// list patched with single records from mutation events, say) is a mixture of
+	// generations and pairs only where the generations happen to line up. That
+	// degrades to UNKNOWN per row rather than to a wrong answer, which is the
+	// right direction, but it is still less than the caller wanted: a consumer
+	// that pairs arming should re-read the list, which is what app/sync.go does on
+	// every poll. A record delivered on its own — an EventTaskUpdated payload, a
+	// mutation response — carries the identity of the write that produced it and
+	// is not a member of anyone else's list (#3684 review).
+	StoreGeneration string `json:"store_generation,omitempty"`
 }
+
+// unstampedOrdinal is the Ordinal of a record no read has numbered. See
+// Task.Ordinal for why the zero value has to mean "unknown" rather than "row 0".
+const unstampedOrdinal = 0
 
 // IsWatch reports whether the task is event-triggered (WatchCmd) rather than
 // time-triggered (CronExpr).
@@ -288,7 +365,54 @@ func LoadTasks() ([]Task, error) {
 	// rather than in each surface is what stops the next surface from being the
 	// one that renders a dark task as healthy. loadTasksLocked — the WRITE path's
 	// loader — deliberately does not, so nothing derived can reach disk.
-	return WithScheduleHealth(tasks, nowFn()), nil
+	return stampRowIdentity(WithScheduleHealth(tasks, nowFn()), storeGeneration(data)), nil
+}
+
+// stampRowIdentity gives every record the two halves of its row identity: the
+// generation of the bytes this read decoded, and its 1-based position within
+// them. See Task.Ordinal and Task.StoreGeneration.
+//
+// One helper for both halves on purpose. They are meaningless apart — a row
+// number without the version it was read in is the bug #3684 found — so nothing
+// should be able to stamp one and forget the other.
+//
+// It runs LAST on each read path — after WithScheduleHealth here, and after the
+// strip in loadTasksLocked — so a record's identity always describes the read
+// that produced it and never a value the file supplied. A hand-typed "ordinal"
+// or "store_generation" is therefore overwritten rather than believed, which is
+// the rule the health fields follow and for the same reason.
+//
+// WRITE paths call it too, with the generation writeTasks reports, and they have
+// to. A write loads under the lock, and loadTasksLocked stamps what it READ —
+// the pre-write bytes. Mutate and save, and every record the path hands back
+// names a version of the store that no longer exists, so it can never pair with
+// a later read and a consumer merging a mutation response or an EventTaskUpdated
+// record into its list would silently lose that row's arming (#3684 review).
+//
+// Re-derived over the whole written slice rather than patched onto one record,
+// because a write can move rows: replacing the generation while leaving a stale
+// ordinal would produce an identity that MATCHES and is wrong, which is the one
+// failure direction worth spending code to avoid.
+func stampRowIdentity(tasks []Task, generation string) []Task {
+	for i := range tasks {
+		tasks[i].Ordinal = i + 1
+		tasks[i].StoreGeneration = generation
+	}
+	return tasks
+}
+
+// storeGeneration tags one version of the store, so two reads can tell whether
+// they saw the same bytes.
+//
+// Truncated deliberately. This is an EQUALITY TAG for two reads taken seconds
+// apart, not a security primitive: the only question asked of it is "are these
+// the same file contents", and anyone who could aim a collision at it can edit
+// tasks.json directly and skip the trouble. Sixty-four bits puts an accidental
+// match between two specific stores at about one in 1.8e19, and keeps the tag
+// short enough to ride every record of every ListTasks response.
+func storeGeneration(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:8])
 }
 
 // nowFn is the clock the read-time derivation reads. A package variable so tests
@@ -329,7 +453,14 @@ func loadTasksLocked(path string) ([]Task, error) {
 	for i := range tasks {
 		tasks[i].stripDerived()
 	}
-	return tasks, nil
+	// Identified after the strip, not before it: stripDerived clears the row
+	// identity along with the rest, and this path's records do not only go back to
+	// disk either. LoadTasksWithStableRepoBindingUpdates returns exactly this
+	// slice as its authoritative list, so leaving it unstamped would hand a future
+	// caller a set of rows that all claim to be unidentified — the one shape
+	// ApplyLiveArming reads as "nothing to pair on" and refuses. Every read path
+	// returns identified rows; only the write path carries none (#3680).
+	return stampRowIdentity(tasks, storeGeneration(migrated)), nil
 }
 
 func ensureTasksSchemaMigrated(path string) error {
@@ -355,9 +486,22 @@ func ensureTasksSchemaMigrated(path string) error {
 // caller is what makes "derived, never persisted" a property instead of a
 // convention.
 func saveTasks(tasks []Task) error {
+	_, err := writeTasks(tasks)
+	return err
+}
+
+// writeTasks is saveTasks, also reporting the generation of the bytes it wrote.
+//
+// Only the create path needs it, and it needs it for a reason worth stating: the
+// record AddTaskChecked hands back is published as EventTaskCreated, and a
+// generation is a property of the file as a whole, so the appended row cannot
+// know its own until the write that produces it has been marshalled. Reading it
+// off the write is exact and costs nothing; re-reading the file afterwards would
+// be a second read that a concurrent writer could make disagree.
+func writeTasks(tasks []Task) (string, error) {
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return "", err
 	}
 	stored := make([]Task, len(tasks))
 	copy(stored, tasks)
@@ -366,13 +510,16 @@ func saveTasks(tasks []Task) error {
 	}
 	data, err := json.MarshalIndent(stored, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks: %w", err)
 	}
 	enveloped, err := marshalTasksEnvelope(data)
 	if err != nil {
-		return fmt.Errorf("failed to marshal tasks envelope: %w", err)
+		return "", fmt.Errorf("failed to marshal tasks envelope: %w", err)
 	}
-	return config.AtomicWriteFile(path, enveloped, 0644)
+	if err := config.AtomicWriteFile(path, enveloped, 0644); err != nil {
+		return "", err
+	}
+	return storeGeneration(enveloped), nil
 }
 
 // AddTask appends a task with no declared actor, recording the create in the
@@ -444,7 +591,19 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 		// that a validator or a failed write rolled back.
 		appendAudit(&t, actor, AuditCreated, nil, nowFn())
 		tasks = append(tasks, t)
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		// Identified from the write, which is the only thing that knows both
+		// halves: the append happens under the tasks-file lock, so this slice IS
+		// the file that was just written. Without it a create publishes "no row"
+		// for a record the very next read identifies, so EventTaskCreated and
+		// GetTask disagree about the same task in fields a client can see — the
+		// same reason RepoID is derived and returned rather than echoed back from
+		// the request. saveTasks strips both halves, so neither reaches disk.
+		t = stampRowIdentity(tasks, generation)[len(tasks)-1]
+		return nil
 	})
 	if lockErr != nil {
 		return Task{}, lockErr
@@ -618,24 +777,32 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // written. Callers that record a supervision-status change (not an event
 // delivery) pass nil so a concurrent writer's newer LastRunAt is never reverted
 // by a value the caller read outside the file lock (#1215).
-func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) error {
+// It returns the record as committed, identified against the file the write
+// produced. Returning it rather than only an error is what stops the next caller
+// that PUBLISHES a status change from announcing the copy it walked in with:
+// that copy was identified against the pre-write bytes, so it names a version of
+// the store that this very call retired (#3684 review). Callers that only need
+// the error discard it.
+func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return err
+		return Task{}, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return Task{}, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return err
+		return Task{}, err
 	}
-	return config.WithFileLock(path, func() error {
+	var updated Task
+	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
 
 		found := false
+		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
 				// nil means "preserve the on-disk LastRunAt": a status-only
@@ -646,6 +813,7 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 					tasks[i].LastRunAt = lastRunAt
 				}
 				tasks[i].LastRunStatus = lastRunStatus
+				row = i
 				found = true
 				break
 			}
@@ -655,8 +823,17 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 			return fmt.Errorf("task with id %q not found", taskID)
 		}
 
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		updated = stampRowIdentity(tasks, generation)[row]
+		return nil
 	})
+	if lockErr != nil {
+		return Task{}, lockErr
+	}
+	return updated, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it

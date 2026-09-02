@@ -534,4 +534,12 @@ func (t *Task) stripDerived() {
 	t.Unassessable = false
 	t.NextRunAt = nil
 	t.Arming = ""
+	// The row identity is derived by the READ that produced this record
+	// (stampRowIdentity), so it must not reach disk: the file's own row order
+	// already carries it, and a stored copy would go stale the moment a row is
+	// inserted or removed above it — a record asserting an identity that is no
+	// longer its own. Cleared in the one writer for the same reason as the rest
+	// (#3680).
+	t.Ordinal = unstampedOrdinal
+	t.StoreGeneration = ""
 }

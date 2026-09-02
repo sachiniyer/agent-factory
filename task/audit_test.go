@@ -168,7 +168,8 @@ func TestAudit_StatusUpdatesAreNotAudited(t *testing.T) {
 
 	ran := time.Now()
 	for i := 0; i < 30; i++ {
-		require.NoError(t, UpdateTaskStatus(id, &ran, "started"))
+		_, err := UpdateTaskStatus(id, &ran, "started")
+		require.NoError(t, err)
 	}
 
 	assert.Len(t, auditOf(t, id), 1)

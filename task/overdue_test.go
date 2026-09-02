@@ -238,7 +238,8 @@ func TestScheduleHealthIsNeverPersisted(t *testing.T) {
 	// The run history comes from its own writer, not from the create: a create
 	// supplies the task's definition and the store supplies its history (see
 	// resetStoreOwnedFields).
-	require.NoError(t, UpdateTaskStatus("persist1", &last, "started"))
+	_, statusErr := UpdateTaskStatus("persist1", &last, "started")
+	require.NoError(t, statusErr)
 
 	raw, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
 	require.NoError(t, err)
