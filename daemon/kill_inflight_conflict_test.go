@@ -19,10 +19,10 @@ type slowKillBackend struct {
 	killBlock   chan struct{}
 }
 
-func (b *slowKillBackend) Kill(inst *session.Instance) error {
+func (b *slowKillBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
 	close(b.killStarted)
 	<-b.killBlock
-	return b.readyFakeBackend.Kill(inst)
+	return b.readyFakeBackend.Kill(inst, trustLiveGeneration)
 }
 
 // TestKillSessionBlocksTitleReuseDuringTeardown pins the title-reservation

@@ -196,12 +196,11 @@ type AgentServer interface {
 	Resize(tab int, rows, cols uint16) error
 
 	// Kill terminates the session and releases its backing resources.
-	Kill() error
-
-	// KillTrustingOwnLifecycleLock is Kill for a caller that holds this
-	// session's exclusive lifecycle lock for its entire call (#3413) — see
-	// Backend.KillTrustingOwnLifecycleLock, which this delegates to.
-	KillTrustingOwnLifecycleLock() error
+	//
+	// trustLiveGeneration is a parameter, not a second method name, for the
+	// reason Backend.Kill documents: a second name is a promise Go embedding
+	// does not enforce overriding.
+	Kill(trustLiveGeneration bool) error
 
 	// Archive makes the workspace durable before its sandbox is torn down (#1592
 	// Phase 4 PR6): it commits any uncommitted work and pushes the session branch

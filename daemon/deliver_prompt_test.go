@@ -198,10 +198,10 @@ type slowRecordingKillBackend struct {
 	killBlock   chan struct{}
 }
 
-func (b *slowRecordingKillBackend) Kill(inst *session.Instance) error {
+func (b *slowRecordingKillBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
 	close(b.killStarted)
 	<-b.killBlock
-	return b.recordingBackend.Kill(inst)
+	return b.recordingBackend.Kill(inst, trustLiveGeneration)
 }
 
 // blockingSendKillBackend blocks SendPromptCommand and records when Kill
@@ -225,10 +225,10 @@ func (b *blockingSendKillBackend) SendPromptCommand(_ *session.Instance, prompt 
 	return nil
 }
 
-func (b *blockingSendKillBackend) Kill(inst *session.Instance) error {
+func (b *blockingSendKillBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
 	close(b.killStarted)
 	<-b.killBlock
-	return b.readyFakeBackend.Kill(inst)
+	return b.readyFakeBackend.Kill(inst, trustLiveGeneration)
 }
 
 // installRecordingBackend wires a backend factory whose Start completes

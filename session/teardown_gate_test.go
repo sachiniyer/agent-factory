@@ -97,7 +97,7 @@ func TestLocalBackendKill_PaneAbortRestoresConsumedCleanupClaim(t *testing.T) {
 
 	inst := instanceWithTmuxTab(t, &tmux.TmuxSession{})
 	inst.gitWorktree = gw
-	err = (&LocalBackend{}).Kill(inst)
+	err = (&LocalBackend{}).Kill(inst, false)
 	require.ErrorIs(t, err, ErrPaneMayBeLive)
 	recovery, retained := gw.GetRelocationRecovery()
 	require.True(t, retained, "pane abort must restore the consumed cleanup authorization")

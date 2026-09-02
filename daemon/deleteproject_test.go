@@ -21,11 +21,11 @@ type killAnotherSessionBackend struct {
 	onKill func() error
 }
 
-func (b *killAnotherSessionBackend) Kill(instance *session.Instance) error {
+func (b *killAnotherSessionBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
 	if err := b.onKill(); err != nil {
 		return err
 	}
-	return b.FakeBackend.Kill(instance)
+	return b.FakeBackend.Kill(instance, trustLiveGeneration)
 }
 
 // liveProjectRoots mirrors the "active projects" derivation the TUI and web use

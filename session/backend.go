@@ -185,14 +185,20 @@ type Backend interface {
 	Launch(instance *Instance, firstTimeSetup bool) error
 
 	// Kill terminates the session and cleans up all associated resources.
-	Kill(instance *Instance) error
-
-	// KillTrustingOwnLifecycleLock is Kill for a caller that holds this
-	// instance's exclusive lifecycle lock for its entire call (#3413) — only
-	// the local tmux backend's generation-cohort guard cares about the
-	// distinction; every other backend implements this as a plain alias to
-	// Kill.
-	KillTrustingOwnLifecycleLock(instance *Instance) error
+	//
+	// trustLiveGeneration is true only when the caller holds this instance's
+	// exclusive lifecycle lock for its ENTIRE call (#3413) — only the local tmux
+	// backend's generation-cohort guard cares about the distinction; every other
+	// backend ignores it. It is a parameter on this ONE method rather than a
+	// second method name on purpose: a second name is a promise every override
+	// must remember to also provide, and Go embedding does not enforce that — a
+	// test double that embeds a base Backend and overrides only Kill would have
+	// silently kept the base's un-overridden second method, running the base's
+	// behavior instead of the override's (measured: this is exactly how the
+	// first cut of #3413 deadlocked TestKillSession_RejectsConcurrentDuplicate).
+	// A parameter on the existing method makes the compiler catch every
+	// override's signature instead.
+	Kill(instance *Instance, trustLiveGeneration bool) error
 
 	// CloseAttachOnly releases resources this Instance opened to view or drive the
 	// session WITHOUT destroying the underlying session, worktree, or off-box

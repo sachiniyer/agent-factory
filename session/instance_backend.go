@@ -43,7 +43,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // leaking the capture goroutine when a session is killed with a live stream open
 // (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
-	return i.AgentServer().Kill()
+	return i.AgentServer().Kill(false)
 }
 
 // KillTrustingOwnLifecycleLock is Kill for the ONE caller that holds this
@@ -52,8 +52,12 @@ func (i *Instance) Kill() error {
 // root-kill, rootagent teardown, and any future one) must keep calling Kill
 // and get the strict #3309 default: none of them can make the same claim. See
 // tmux.TmuxSession.CloseAndWaitForPaneExitTrustingOwnGeneration.
+//
+// This stays a second method (rather than exposing the bool on Instance
+// itself) because Instance has no subtypes to lose an override on — the
+// Go-embedding hazard Backend.Kill's doc explains does not apply here.
 func (i *Instance) KillTrustingOwnLifecycleLock() error {
-	return i.AgentServer().KillTrustingOwnLifecycleLock()
+	return i.AgentServer().Kill(true)
 }
 
 // runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the

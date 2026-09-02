@@ -69,17 +69,12 @@ func (b *remoteAgentBackend) Launch(i *Instance, firstTimeSetup bool) error {
 	return nil
 }
 
-func (b *remoteAgentBackend) Kill(i *Instance) error {
+// trustLiveGeneration is unused: no tmux, no generation cohort (#3413).
+func (b *remoteAgentBackend) Kill(i *Instance, _ bool) error {
 	i.mu.Lock()
 	i.started = false
 	i.mu.Unlock()
 	return nil
-}
-
-// KillTrustingOwnLifecycleLock: no tmux, no generation cohort — a plain alias
-// (#3413).
-func (b *remoteAgentBackend) KillTrustingOwnLifecycleLock(i *Instance) error {
-	return b.Kill(i)
 }
 
 // CloseAttachOnly discards a duplicate instance's local view without reaping

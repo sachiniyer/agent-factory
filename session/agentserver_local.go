@@ -462,18 +462,8 @@ func (s *localAgentServer) Archive() (string, error) {
 	return s.inst.pushBranchForArchive()
 }
 
-func (s *localAgentServer) Kill() error {
-	return s.kill(false)
-}
-
-// KillTrustingOwnLifecycleLock is Kill for a caller that holds this session's
-// exclusive lifecycle lock for its entire call (#3413) — see
-// Backend.KillTrustingOwnLifecycleLock.
-func (s *localAgentServer) KillTrustingOwnLifecycleLock() error {
-	return s.kill(true)
-}
-
-func (s *localAgentServer) kill(trustLiveGeneration bool) error {
+// trustLiveGeneration is threaded straight to Backend.Kill (#3413).
+func (s *localAgentServer) Kill(trustLiveGeneration bool) error {
 	// Tear every tab's data plane down first so the clientless captures stop and
 	// each subscriber's NextEvent returns io.EOF, then kill the underlying session.
 	// Latch closed under the same lock that snapshots the brokers so a Subscribe
@@ -488,8 +478,5 @@ func (s *localAgentServer) kill(trustLiveGeneration bool) error {
 	for _, br := range brokers {
 		br.close()
 	}
-	if trustLiveGeneration {
-		return s.inst.currentBackend().KillTrustingOwnLifecycleLock(s.inst)
-	}
-	return s.inst.currentBackend().Kill(s.inst)
+	return s.inst.currentBackend().Kill(s.inst, trustLiveGeneration)
 }

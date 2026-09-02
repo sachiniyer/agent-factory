@@ -35,13 +35,9 @@ func (b *startBackend) Launch(instance *session.Instance, _ bool) error {
 	return nil
 }
 
-func (b *startBackend) Kill(instance *session.Instance) error {
+func (b *startBackend) Kill(instance *session.Instance, _ bool) error {
 	instance.SetStartedForTest(false)
 	return nil
-}
-
-func (b *startBackend) KillTrustingOwnLifecycleLock(instance *session.Instance) error {
-	return b.Kill(instance)
 }
 
 func (b *startBackend) CloseAttachOnly(*session.Instance) error { return nil }

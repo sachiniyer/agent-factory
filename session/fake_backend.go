@@ -97,15 +97,11 @@ func (b *FakeBackend) Launch(instance *Instance, _ bool) error {
 	return nil
 }
 
-func (b *FakeBackend) Kill(instance *Instance) error {
+// trustLiveGeneration is unused: the fake backend has no tmux/generation
+// concept (#3413).
+func (b *FakeBackend) Kill(instance *Instance, _ bool) error {
 	instance.SetStartedForTest(false)
 	return nil
-}
-
-// KillTrustingOwnLifecycleLock: the fake backend has no tmux/generation
-// concept — a plain alias (#3413).
-func (b *FakeBackend) KillTrustingOwnLifecycleLock(instance *Instance) error {
-	return b.Kill(instance)
 }
 
 // CloseAttachOnly is a no-op for the fake backend: it holds no real PTY to

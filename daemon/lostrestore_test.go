@@ -535,7 +535,7 @@ func (b *raceBackend) Recover(inst *session.Instance) error {
 	return nil
 }
 
-func (b *raceBackend) Kill(inst *session.Instance) error {
+func (b *raceBackend) Kill(inst *session.Instance, trustLiveGeneration bool) error {
 	b.mu.Lock()
 	b.kills++
 	b.mu.Unlock()
@@ -546,7 +546,7 @@ func (b *raceBackend) Kill(inst *session.Instance) error {
 	if b.killBlock != nil {
 		<-b.killBlock
 	}
-	return b.readyFakeBackend.Kill(inst)
+	return b.readyFakeBackend.Kill(inst, trustLiveGeneration)
 }
 
 func (b *raceBackend) counts() (kills, recovers int) {

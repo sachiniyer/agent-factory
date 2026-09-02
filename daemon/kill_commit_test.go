@@ -23,7 +23,7 @@ import (
 // so a double that returns a plain error would no longer model this case at all.
 type unsafeTeardownBackend struct{ readyFakeBackend }
 
-func (b unsafeTeardownBackend) Kill(*session.Instance) error {
+func (b unsafeTeardownBackend) Kill(*session.Instance, bool) error {
 	return fmt.Errorf("kill: tab %q: %w", "agent", session.ErrPaneMayBeLive)
 }
 
@@ -379,7 +379,7 @@ func (b unsafeKillBackend) Start(*session.Instance, bool) error {
 	return fmt.Errorf("agent program exited immediately")
 }
 
-func (b unsafeKillBackend) Kill(*session.Instance) error {
+func (b unsafeKillBackend) Kill(*session.Instance, bool) error {
 	return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
 }
 
@@ -396,7 +396,7 @@ func (b *retryFailedCreateBackend) Start(*session.Instance, bool) error {
 	return fmt.Errorf("agent program exited immediately")
 }
 
-func (b *retryFailedCreateBackend) Kill(instance *session.Instance) error {
+func (b *retryFailedCreateBackend) Kill(instance *session.Instance, trustLiveGeneration bool) error {
 	b.mu.Lock()
 	b.killCalls++
 	call := b.killCalls
@@ -404,7 +404,7 @@ func (b *retryFailedCreateBackend) Kill(instance *session.Instance) error {
 	if call == 1 {
 		return fmt.Errorf("%w: leaving the workspace untouched", session.ErrPaneMayBeLive)
 	}
-	return b.readyFakeBackend.Kill(instance)
+	return b.readyFakeBackend.Kill(instance, trustLiveGeneration)
 }
 
 // TestCreateSession_UnsafeCleanup_KeepsTheRecordAndTheTitle is round-3 finding (3).

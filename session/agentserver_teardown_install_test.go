@@ -44,7 +44,7 @@ func TestSetRuntimeTeardownForTest_IsInstalledOnAWarmAgentServerCache(t *testing
 	// Kill's REST call fails (nothing listens on port 1); the teardown must run
 	// anyway — that is remoteAgentServer.Kill's documented contract, "the container
 	// must not leak because its agent-server was already down".
-	_ = i.AgentServer().Kill()
+	_ = i.AgentServer().Kill(false)
 
 	assert.Equal(t, 1, reaps,
 		"the installed reap never ran: AgentServer() returned a cache built before it, so a daemon "+
@@ -87,7 +87,7 @@ func TestSetRuntimeTeardownForTest_ClearingIsAlsoVisible(t *testing.T) {
 	SetRuntimeTeardownForTest(i, func() error { reaps++; return nil })
 	_ = i.AgentServer() // warm the cache with the reap installed
 	SetRuntimeTeardownForTest(i, nil)
-	_ = i.AgentServer().Kill()
+	_ = i.AgentServer().Kill(false)
 
 	assert.Zero(t, reaps, "a cleared teardown must not keep running from a stale cached server")
 }
