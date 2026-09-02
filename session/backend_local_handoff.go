@@ -13,7 +13,7 @@ import (
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
 	resolved := resolveProgramForAgent(i, target)
-	program := injectSystemPrompt(resolved)
+	program := injectSystemPrompt(resolved, resolveSkillTarget(i, resolved))
 	program, conversation := planLaunchConversation(i.ID, program)
 	workDir := i.GetWorktreePath()
 	if workDir == "" {

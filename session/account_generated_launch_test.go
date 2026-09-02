@@ -24,7 +24,7 @@ func TestAccountScopesAfsRealGeneratedClaudeLaunch(t *testing.T) {
 
 	const base = "claude"
 	withConversation, conversation := planLaunchConversation("11111111-2222-3333-4444-555555555555", base)
-	command := injectSystemPrompt(withConversation)
+	command := injectSystemPrompt(withConversation, skillTarget{})
 
 	// The fixture must be the REWRITTEN command, not a bare invocation that would
 	// have passed before #3083 existed. Asserted rather than assumed: if either
@@ -108,7 +108,7 @@ func TestSetLaunchProgram_DeclaresWhatTheAccountBoundaryNeeds(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	base := "claude"
-	final := injectSystemPrompt(base)
+	final := injectSystemPrompt(base, skillTarget{})
 	require.NotEqual(t, base, final, "precondition: claude's launch is rewritten, or this proves nothing")
 
 	generated, ok := sessionenv.GeneratedArgsBetween(base, final)

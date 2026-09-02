@@ -20,7 +20,7 @@ import (
 func TestInjectSystemPrompt_LegacyClaudePath(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	result := injectSystemPrompt("/home/foo/bin/claude")
+	result := injectSystemPrompt("/home/foo/bin/claude", skillTarget{})
 
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir for legacy claude path, got %q", result)
@@ -34,7 +34,7 @@ func TestInjectSystemPrompt_LegacyCodexPath(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", "")
 
-	result := injectSystemPrompt("/usr/local/bin/codex")
+	result := injectSystemPrompt("/usr/local/bin/codex", skillTarget{})
 
 	if result != "/usr/local/bin/codex" {
 		t.Errorf("expected legacy codex path unchanged (file seam), got %q", result)
@@ -51,7 +51,7 @@ func TestInjectSystemPrompt_UnknownProgramNoInjection(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	program := "/usr/bin/some-other-tool"
-	result := injectSystemPrompt(program)
+	result := injectSystemPrompt(program, skillTarget{})
 
 	if result != program {
 		t.Errorf("expected unknown program left unchanged, got %q", result)
@@ -63,7 +63,7 @@ func TestInjectSystemPrompt_UnknownProgramNoInjection(t *testing.T) {
 func TestInjectSystemPrompt_BareEnumStillInjects(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	result := injectSystemPrompt("claude")
+	result := injectSystemPrompt("claude", skillTarget{})
 	if !strings.Contains(result, "--plugin-dir") {
 		t.Errorf("expected --plugin-dir for bare claude enum, got %q", result)
 	}

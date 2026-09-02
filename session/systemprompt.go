@@ -199,7 +199,11 @@ func shellQuote(s string) string {
 // dormant af-owned skill dir). For the flag seams (claude, aider) it carries the
 // same pre-existing #1116/#1131 exposure claude already has; we do NOT re-derive
 // agent-ness with a second heuristic — the #1132 rule is one detection choke-point.
-func injectSystemPrompt(resolved string) string {
+// injectSystemPrompt adds af's guidance to the resolved command, and for the two
+// agents that DISCOVER it from a config root, places it where the launch will
+// actually look: target carries the account boundary's config root for a scoped
+// session, and the zero value means unscoped (#3645).
+func injectSystemPrompt(resolved string, target skillTarget) string {
 	switch tmux.DetectAgentFromCommand(resolved) {
 	case tmux.ProgramClaude:
 		pluginDir, err := ensurePluginDir()
@@ -214,12 +218,12 @@ func injectSystemPrompt(resolved string) string {
 		// program_overrides is additive rather than a conflict.
 		return resolved + " --plugin-dir " + shellQuote(pluginDir)
 	case tmux.ProgramCodex:
-		if _, err := ensureCodexSkillDir(); err != nil {
+		if _, err := ensureCodexSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up codex af skill, af guidance unavailable to codex: %v", err)
 		}
 		return resolved
 	case tmux.ProgramGemini:
-		if _, err := ensureGeminiSkillDir(); err != nil {
+		if _, err := ensureGeminiSkillDir(target); err != nil {
 			log.WarningLog.Printf("failed to set up gemini af skill, af guidance unavailable to gemini: %v", err)
 		}
 		return resolved
