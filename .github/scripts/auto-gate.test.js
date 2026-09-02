@@ -2217,48 +2217,97 @@ test("a finding artifact naming another head is stale, not unclassifiable", asyn
   assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
 });
 
-test("an unclassifiable finding clears only by an allowed author answering it", async () => {
+test("an unclassifiable finding clears only by an answer that names it", async () => {
   // The block has to terminate, and nothing mechanical can end this one: no push
   // changes the fact that the artifact names no commit, and there is no thread to
-  // reply on. The exit is the explicit one — an allowed author says on the PR
-  // that they read it — so the gate never decides for itself that what it could
-  // not classify was clean.
+  // reply on. So the exit is explicit — an allowed author answers it on the PR —
+  // and the answer must NAME the artifact.
+  //
+  // Maintainer review on #3676: a marker alone is not an answer. Lanes post
+  // top-level round comments like "head moved to <sha>, findings RESOLVED
+  // in-thread", written about that round's INLINE findings, and one of those
+  // would silently clear an unbound artifact nobody read — reopening the hole
+  // through its own exit.
   const stripped = codexIssueCommentFinding(HEAD_SHA, {
     ref: "master",
     timestamp: "2026-07-09T01:20:00Z",
   });
+  const anchor = `#issuecomment-${stripped.id}`;
   const summary = codexSummaryTable(HEAD_SHA, {
     rowTime: "2026-07-09T01:20:01Z",
     commentTime: "2026-07-09T01:20:06Z",
   });
+  const clears = async (comment) =>
+    (await evaluateGate({ issueComments: [stripped, summary, comment] })).shouldMerge;
 
-  const outsider = await evaluateGate({
-    issueComments: [stripped, summary, prComment("outside-contributor", "ACCEPTED — ignore it.")],
-  });
-  assert.equal(outsider.shouldMerge, false, "only an allowed author's answer counts");
+  // The lane round comment, verbatim in shape: allowed author, later, carries
+  // RESOLVED, and is about something else entirely.
+  assert.equal(
+    await clears(
+      prComment(
+        "sachiniyer",
+        `head moved to ${OTHER_SHA.slice(0, 7)}, findings RESOLVED in-thread — @codex review`,
+      ),
+    ),
+    false,
+    "a round comment about other findings is not an answer to this artifact",
+  );
+  assert.equal(
+    await clears(prComment("outside-contributor", `ACCEPTED — ignore ${anchor}.`)),
+    false,
+    "only an allowed author's answer counts",
+  );
+  assert.equal(
+    await clears(prComment("sachiniyer", `Looking at ${anchor} now.`)),
+    false,
+    "naming it without a marker is discussion, not an answer",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`, "2026-07-09T01:19:00Z"),
+    ),
+    false,
+    "an answer cannot precede the finding it answers",
+  );
 
-  const discussion = await evaluateGate({
-    issueComments: [stripped, summary, prComment("sachiniyer", "Looking at these now.")],
-  });
-  assert.equal(discussion.shouldMerge, false, "discussion is not an answer without a marker");
+  // …and the two spellings that DO clear it: the anchor, and the full permalink
+  // GitHub's own "Copy link" produces.
+  assert.equal(
+    await clears(prComment("sachiniyer", `All eight read — [gate-ack] ${anchor}.`)),
+    true,
+    "the anchor names the artifact",
+  );
+  assert.equal(
+    await clears(
+      prComment("sachiniyer", `Read every one of these: ${stripped.html_url} — ACCEPTED.`),
+    ),
+    true,
+    "so does the permalink it ends in",
+  );
+});
 
-  const predating = await evaluateGate({
-    issueComments: [
-      stripped,
-      summary,
-      prComment("sachiniyer", "All eight read — [gate-ack].", "2026-07-09T01:19:00Z"),
+test("an artifact is referenced by its permalink or the anchor it ends in", () => {
+  const { artifactReferences } = __test;
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual(artifactReferences(finding), [finding.html_url, `#issuecomment-${finding.id}`]);
+
+  // A review spells its anchor differently, so the anchor is read OFF the URL
+  // rather than assembled from a guessed kind — assembling `#issuecomment-` for
+  // a review would make a real answer unrecognisable.
+  assert.deepEqual(
+    artifactReferences({
+      id: 77,
+      html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+    }),
+    [
+      "https://github.com/sachiniyer/agent-factory/pull/1465#pullrequestreview-77",
+      "#pullrequestreview-77",
     ],
-  });
-  assert.equal(predating.shouldMerge, false, "an answer cannot precede the finding it answers");
+  );
 
-  const answered = await evaluateGate({
-    issueComments: [
-      stripped,
-      summary,
-      prComment("sachiniyer", "All eight read — [gate-ack].", "2026-07-09T01:25:00Z"),
-    ],
-  });
-  assert.equal(answered.shouldMerge, true, `blocked on: ${answered.reasons.join("; ")}`);
+  // Only with no URL at all does it fall back to both spellings of the id.
+  assert.deepEqual(artifactReferences({ id: 77 }), ["#issuecomment-77", "#pullrequestreview-77"]);
+  assert.deepEqual(artifactReferences({}), []);
 });
 
 test("only a URL-form commit binds an artifact body to a head", () => {
@@ -5992,7 +6041,10 @@ function codexSummaryTable(
 //
 // `ref` substitutes what those permalinks point at. A branch name is how the
 // SHA-stripped variant is built: the same body, naming no commit anywhere.
-function codexIssueCommentFinding(sha, { timestamp = "2026-07-09T01:20:00Z", ref = null } = {}) {
+function codexIssueCommentFinding(
+  sha,
+  { timestamp = "2026-07-09T01:20:00Z", ref = null, id = 5514996957 } = {},
+) {
   const target = ref ?? sha;
   const finding = (anchor, title, prose) =>
     [
@@ -6002,6 +6054,8 @@ function codexIssueCommentFinding(sha, { timestamp = "2026-07-09T01:20:00Z", ref
       prose,
     ].join("\n");
   return {
+    id,
+    html_url: `https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-${id}`,
     user: { login: "chatgpt-codex-connector[bot]" },
     body: [
       "",

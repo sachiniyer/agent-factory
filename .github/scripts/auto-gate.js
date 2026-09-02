@@ -2829,14 +2829,20 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // that they read it. That is a human acknowledgement, not a heuristic: the
   // gate never decides for itself that an artifact it could not classify is
   // clean.
-  const acknowledgementTimes = [...comments, ...reviews]
-    .filter(
-      (artifact) =>
-        ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
-        hasResolutionMarker(artifact.body || ""),
-    )
-    .map((artifact) => reviewArtifactTime(artifact))
-    .filter((time) => time > 0);
+  //
+  // …and the answer must NAME the artifact, by its comment URL or its
+  // `#issuecomment-<id>` anchor. A marker alone is not specific enough to be an
+  // answer: lanes routinely post top-level round comments like "head moved to
+  // <sha>, findings RESOLVED in-thread — @codex review", written about that
+  // round's INLINE findings, and one of those would silently clear an unbound
+  // artifact nobody had read — reopening this very hole through its own exit.
+  // Requiring the reference makes an acknowledgement per-artifact and impossible
+  // to trip in passing: it can only be written by someone who went and looked at
+  // the thing the gate could not classify.
+  const acknowledgements = [...comments, ...reviews].filter(
+    (artifact) =>
+      ALLOWED_AUTHORS.has(artifact.user?.login || "") && hasResolutionMarker(artifact.body || ""),
+  );
   const unboundFindingArtifacts = codexReviewArtifacts.filter((artifact) => {
     if (!CODEX_BODY_FINDING_RE.test(artifact.body || "") || isCodexSummaryArtifact(artifact)) {
       return false;
@@ -2846,9 +2852,18 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     }
     // Fails closed on an unknown order, like every other timestamp comparison in
     // this file: an artifact whose own time will not parse is never acknowledged.
+    // An edit that adds the reference moves the acknowledging comment's own time
+    // with it, so this stays satisfiable; an edit to the FINDING moves the
+    // artifact past its answer, which is right — the answer was to other text.
     const artifactTime = reviewArtifactTime(artifact);
-    return (
-      artifactTime === 0 || !acknowledgementTimes.some((ackTime) => ackTime > artifactTime)
+    if (artifactTime === 0) {
+      return true;
+    }
+    const references = artifactReferences(artifact);
+    return !acknowledgements.some(
+      (ack) =>
+        reviewArtifactTime(ack) > artifactTime &&
+        references.some((reference) => (ack.body || "").includes(reference)),
     );
   });
   if (unboundFindingArtifacts.length > 0) {
@@ -2859,8 +2874,9 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     findingBlockers.push({
       reason: unboundReason,
       remedy:
-        "read the finding on the PR and answer it with RESOLVED, ACCEPTED or [gate-ack] in a " +
-        "PR comment — no push can clear an artifact that names no commit",
+        "read the finding and answer it in a PR comment that LINKS it (its comment URL or " +
+        "`#issuecomment-<id>`) and carries RESOLVED, ACCEPTED or [gate-ack] — no push can clear " +
+        "an artifact that names no commit, and a marker that names no artifact is not an answer",
     });
   }
 
@@ -3109,6 +3125,38 @@ function codexArtifactBindsToHead(artifact, headSha) {
   return parseBodyCommits(artifact.body).has(String(headSha || "").toLowerCase());
 }
 
+// The strings that count as naming THIS artifact: its own permalink, and the
+// anchor that permalink ends in — which is what someone pastes when they link a
+// comment, and what GitHub's own "Copy link" produces.
+//
+// The anchor is read off html_url when the API supplied one rather than being
+// assembled from a guessed artifact kind, because the two kinds spell it
+// differently (`#issuecomment-` for a comment, `#pullrequestreview-` for a
+// review) and getting that wrong would make a real answer unrecognisable. Only
+// when html_url is absent does it fall back to both spellings of the id: a
+// reference is a substring test, so offering both costs nothing that matters —
+// no body carries a bare `#issuecomment-<n>` it does not mean. Every artifact
+// the REST API returns carries an id, so the empty case below is not a shape
+// this reads back from GitHub — it is what an artifact with no identity would
+// be, and it stays blocked because nothing can be written that answers it.
+function artifactReferences(artifact) {
+  const references = [];
+  const htmlUrl = String(artifact?.html_url || "");
+  if (htmlUrl !== "") {
+    references.push(htmlUrl);
+    const hash = htmlUrl.indexOf("#");
+    if (hash !== -1 && hash < htmlUrl.length - 1) {
+      references.push(htmlUrl.slice(hash));
+    }
+    return references;
+  }
+  const id = artifact?.id;
+  if (id != null && String(id) !== "") {
+    references.push(`#issuecomment-${id}`, `#pullrequestreview-${id}`);
+  }
+  return references;
+}
+
 // Whether the artifact names any commit at all, by any of the spellings above
 // plus the summary table's own cells. The question the blocking rule asks is not
 // "is this about the head" but "can this be placed against a head at all" — an
@@ -3241,6 +3289,7 @@ module.exports = {
     latestRequiredState,
     parseReviewedCommit,
     parseBodyCommits,
+    artifactReferences,
     codexArtifactBindsToHead,
     codexArtifactNamesAnyCommit,
     isCodexSummaryArtifact,
