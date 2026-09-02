@@ -380,6 +380,30 @@ func PlaceOverlay(
 			// closed, whereas blanking the cells a straddling grapheme would have
 			// occupied is the honest rendering of "this cell is half under an
 			// opaque overlay". The blanking is bounded by one cluster's width.
+			//
+			// # Which space this is exact in, and why it is that one
+			//
+			// Cells, deliberately — NOT the rectangle contract's bounding measure
+			// (ui/layout/contract.go). So the prefix is exact in APP space, and on a
+			// terminal that draws a cluster wider than Cells reports (tmux 3.4
+			// advances 4 for a chained family where Cells says 2) the overlay's
+			// drawn edge on that one row sits right of placeX by the disagreement.
+			//
+			// Budgeting the prefix by the bound instead would make the drawn edge
+			// land at or LEFT of placeX rather than at it — no more exact, just
+			// wrong in the other direction — and it would be exact in a space
+			// nothing else on the row uses. overlayOrigin measures with Cells,
+			// RegisterZones registers with Cells, and every pane on that row was
+			// laid out with Cells, so a clustered row is displaced by the same
+			// amount everywhere; the overlay and its zones stay together, which is
+			// the property #3585 is about. Moving the prefix alone onto a second
+			// measure would displace it by a DIFFERENT amount than its own zones.
+			//
+			// The rail makes the opposite trade (contract.go) because a rectangle
+			// that overflows WRAPS, and a wrapped row is not a few cells of
+			// displacement — it is every height budget above it becoming a lie
+			// (#3430). Nothing wraps here: the compositor writes one row per screen
+			// row and clips.
 			left := layout.TruncateToCells(bgLine, placeX)
 			pos = lineWidth(left)
 			b.WriteString(left)

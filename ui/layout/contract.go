@@ -44,8 +44,16 @@ import (
 // contentMeasuresDisagree reports whether s contains a code point from the class
 // the available width functions are known to disagree about.
 //
-// The three of them (x/ansi, runewidth, PrintableRuneWidth) agree on plain text,
-// CJK, Hangul and fullwidth latin, and split on the multi-code-point EMOJI
+// Every entry below is a carrier #3610's corpus MEASURED a disagreement on, with
+// the numbers beside it. That is the admission test, and it is not "this code
+// point is in an interesting Unicode category": a new range belongs here when
+// someone has measured the width functions splitting on it, not when a table
+// suggests they might. Completing the list from General_Category would pull in
+// ordinary script text and cost real title cells for nothing — see what is
+// deliberately excluded, below.
+//
+// The three functions (x/ansi, runewidth, PrintableRuneWidth) agree on plain
+// text, CJK, Hangul and fullwidth latin, and split on the multi-code-point EMOJI
 // cluster:
 //
 //	U+200D          zero-width joiner — chained emoji (x/ansi 2, PRW 8, tmux 4)
