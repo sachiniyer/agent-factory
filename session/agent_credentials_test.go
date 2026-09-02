@@ -215,13 +215,13 @@ func TestAgentCredentialMounts_PassTheAccountRunArgsGuard(t *testing.T) {
 	}
 }
 
-// TestCredentialMountRelabel_FollowsTheEnforceFile pins the gate itself: the
+// TestSelinuxRelabelForHost_FollowsTheEnforceFile pins the gate itself: the
 // relabel is applied on an SELinux-ENFORCING host and omitted elsewhere.
 //
 // Permissive (enforce=0) deliberately reads as "no relabel": SELinux logs the
 // denial there rather than acting on it, so the credential reads fine unlabeled
 // and the operator's host file is left untouched.
-func TestCredentialMountRelabel_FollowsTheEnforceFile(t *testing.T) {
+func TestSelinuxRelabelForHost_FollowsTheEnforceFile(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
 	}
@@ -241,27 +241,27 @@ func TestCredentialMountRelabel_FollowsTheEnforceFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			setSELinuxEnforcePaths(t, enforce)
-			if got := credentialMountRelabel(); got != tt.want {
-				t.Errorf("credentialMountRelabel() with enforce=%q = %v, want %v", tt.content, got, tt.want)
+			if got := selinuxRelabelForHost(); got != tt.want {
+				t.Errorf("selinuxRelabelForHost() with enforce=%q = %v, want %v", tt.content, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestCredentialMountRelabel_AbsentSELinuxDoesNotRelabel covers the ordinary
+// TestSelinuxRelabelForHost_AbsentSELinuxDoesNotRelabel covers the ordinary
 // non-SELinux host — no enforce file anywhere, no relabel, and no error.
-func TestCredentialMountRelabel_AbsentSELinuxDoesNotRelabel(t *testing.T) {
+func TestSelinuxRelabelForHost_AbsentSELinuxDoesNotRelabel(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
 	}
 	setSELinuxEnforcePaths(t, filepath.Join(t.TempDir(), "absent"))
-	if credentialMountRelabel() {
+	if selinuxRelabelForHost() {
 		t.Error("a host with no SELinux enforce file must not relabel")
 	}
 }
 
-// TestCredentialMountRelabel_ProbeFailureStillRelabels is the load-bearing one,
-// and the reason the gate goes through credentialMountRelabel rather than
+// TestSelinuxRelabelForHost_ProbeFailureStillRelabels is the load-bearing one,
+// and the reason the gate goes through selinuxRelabelForHost rather than
 // calling hostSELinuxEnforcing inline.
 //
 // The two failure directions are NOT symmetric. Applying z where SELinux is off
@@ -270,7 +270,7 @@ func TestCredentialMountRelabel_AbsentSELinuxDoesNotRelabel(t *testing.T) {
 // that is deliberately fail-open, so the session starts silently
 // unauthenticated. An unreadable or nonsense /sys must therefore resolve to
 // "relabel", never to "skip it".
-func TestCredentialMountRelabel_ProbeFailureStillRelabels(t *testing.T) {
+func TestSelinuxRelabelForHost_ProbeFailureStillRelabels(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("hostSELinuxEnforcing short-circuits to false off linux")
 	}
@@ -286,7 +286,7 @@ func TestCredentialMountRelabel_ProbeFailureStillRelabels(t *testing.T) {
 		if _, err := hostSELinuxEnforcing(); err == nil {
 			t.Fatal("expected the probe to fail on a directory; the test fixture proves nothing otherwise")
 		}
-		if !credentialMountRelabel() {
+		if !selinuxRelabelForHost() {
 			t.Error("a FAILED SELinux probe dropped the relabel; on an enforcing host that is #3451 all over again")
 		}
 	})
@@ -300,7 +300,7 @@ func TestCredentialMountRelabel_ProbeFailureStillRelabels(t *testing.T) {
 		if _, err := hostSELinuxEnforcing(); err == nil {
 			t.Fatal("expected the probe to reject a nonsense value")
 		}
-		if !credentialMountRelabel() {
+		if !selinuxRelabelForHost() {
 			t.Error("an unreadable SELinux mode dropped the relabel; it must fail toward relabeling")
 		}
 	})
@@ -328,7 +328,7 @@ func forceCredentialMountMode(t *testing.T) string {
 		t.Fatal(err)
 	}
 	setSELinuxEnforcePaths(t, enforce)
-	if credentialMountRelabel() {
+	if selinuxRelabelForHost() {
 		return dockerCredentialMountModeRelabeled
 	}
 	return dockerCredentialMountMode

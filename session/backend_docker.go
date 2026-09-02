@@ -291,13 +291,13 @@ func (dockerRuntime) Provision(spec ProvisionSpec) (ProvisionResult, error) {
 	// resolved from the daemon user's home is mounted, so the container cannot hold
 	// two identities.
 	if spec.Account.Dir != "" {
-		mount, env, aerr := accountMountAndEnv(spec.Account)
+		mount, env, aerr := accountMountAndEnv(spec.Account, p.bindMountRelabel())
 		if aerr != nil {
 			return ProvisionResult{}, fmt.Errorf("backend=docker: %w", aerr)
 		}
 		p.accountMount, p.accountEnv = mount, env
 	} else if cfg.DockerMountAgentCredentials {
-		p.credentialMounts = resolveAgentCredentialMounts(p.agentName())
+		p.credentialMounts = resolveAgentCredentialMounts(p.agentName(), p.bindMountRelabel())
 	}
 	res, err := p.provision()
 	if err != nil {
@@ -336,7 +336,7 @@ type dockerProvisioner struct {
 	// the container. On rootful Docker that is the host af user; on rootless Docker
 	// it is commonly 0:0, which maps back to that same host user.
 	containerUser string
-	// credentialMounts are the read-only `-v host:container:ro` agent-credential
+	// credentialMounts are the read-only `-v host:container:<mode>` agent-credential
 	// bind mounts (docker.mount_agent_credentials, #2194), resolved once in
 	// Provision and appended to the `docker run` argv before runArgs.
 	credentialMounts []string

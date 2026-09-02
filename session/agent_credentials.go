@@ -60,8 +60,8 @@ var agentCredentialFiles = map[string][]string{
 // The two volume modes an agent-credential bind mount can carry. Both are
 // read-only: the container authenticates with the credential, it never rewrites
 // it. They differ only in the SHARED SELinux relabel, which is applied on a host
-// where SELinux is ENFORCING and omitted everywhere else (credentialMountRelabel
-// decides).
+// where the relabel is called for and omitted everywhere else (bindMountRelabel
+// decides, for these mounts and the account mount alike).
 //
 // The relabel is not cosmetic. Without it, on an enforcing host — the
 // Fedora/RHEL/CentOS default — the mount is not a broken mount but a DENIED
@@ -80,35 +80,66 @@ const (
 	dockerCredentialMountModeRelabeled = "ro,z"
 )
 
-// credentialMountRelabel reports whether agent-credential mounts should carry
-// the SELinux relabel on this host.
+// selinuxRelabelForHost reports whether THIS host's SELinux mode calls for the
+// shared relabel on af's docker bind mounts. It is the local half of the
+// decision; bindMountRelabel is what callers use, because a bind source is
+// labeled on the ENGINE host and this probe can only see the af process's own.
 //
 // A PROBE FAILURE RELABELS ANYWAY, and that direction is the whole reason this
-// function exists rather than an inline call. Applying z where SELinux is off is
-// a verified no-op — Docker ignores the flag, and a `-v …:ro,z` mount reads back
-// identically to `:ro` on a host with no SELinux at all — while omitting it on an
-// enforcing host reinstates #3451 exactly: a silently unauthenticated session.
-// The two failure directions are not symmetric, so an unreadable /sys must not
-// resolve to "no relabel".
+// is a named function rather than an inline call. Applying z where SELinux is
+// off is a verified no-op — Docker ignores the flag, and a `-v …:ro,z` mount
+// reads back identically to `:ro` on a host with no SELinux at all — while
+// omitting it on an enforcing host reinstates #3451 exactly: a silently
+// unauthenticated session. The two failure directions are not symmetric, so an
+// unreadable /sys must not resolve to "no relabel".
 //
 // Permissive (enforce=0) deliberately does NOT relabel: SELinux logs the denial
 // there rather than acting on it, so the read succeeds unlabeled and the host
 // file is left untouched. The residual case is a host switched to enforcing
 // mid-session, which needs the session restarted to pick the label up; that is
 // inherent to deciding a mount mode at `docker run` time.
-func credentialMountRelabel() bool {
+func selinuxRelabelForHost() bool {
 	enforcing, err := hostSELinuxEnforcing()
 	if err != nil {
-		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is disabled", err)
+		log.WarningLog.Printf("backend=docker: cannot establish the host SELinux state (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is disabled", err)
 		return true
 	}
 	return enforcing
 }
 
+// bindMountRelabel decides the SELinux relabel for every bind mount af installs
+// itself — the agent-credential mounts and the account mount alike, which is why
+// it lives above both rather than inside either (#3589).
+//
+// It relabels unless it can PROVE the relabel is unnecessary, and the engine
+// check is the load-bearing half of that. Docker resolves and labels a bind
+// source on the DAEMON host, not the CLI host, so with DOCKER_HOST /
+// DOCKER_CONTEXT pointing elsewhere — or af itself running in a container against
+// a mounted engine socket — selinuxRelabelForHost() measures the wrong machine. A
+// non-SELinux client in front of an enforcing engine would then emit plain :ro
+// and the engine would deny the read, which is #3451 with an extra hop. Unless
+// the endpoint is proven local, af keeps the relabel.
+//
+// Costs nothing where it is unnecessary, by construction: every branch that
+// cannot prove "no relabel needed" resolves to z, and z is inert wherever SELinux
+// is not enforcing.
+func (p *dockerProvisioner) bindMountRelabel() bool {
+	endpoint, local, err := p.dockerEngineEndpoint()
+	if err != nil {
+		log.WarningLog.Printf("backend=docker: cannot establish whether the Docker engine is local (%v); applying the SELinux relabel anyway, which is a no-op where SELinux is not enforcing", err)
+		return true
+	}
+	if !local {
+		log.InfoLog.Printf("backend=docker: Docker endpoint %q is not local, so this host's SELinux mode does not describe where bind mounts are labeled; applying the SELinux relabel", endpoint)
+		return true
+	}
+	return selinuxRelabelForHost()
+}
+
 // agentCredentialMounts returns the `-v host:container:<mode>` docker run
 // arguments that bind-mount the credential file(s) for the single agent `agent`
 // that exist under homeDir. relabel selects the volume mode (see
-// credentialMountRelabel); exists is injected for testability (os.Stat in
+// bindMountRelabel); exists is injected for testability (os.Stat in
 // production). The container target is dockerContainerHome + "/" + rel —
 // matching where the container's agent, running with a clean env, reads it. Host
 // paths are absolute (homeDir is), so the config never has to carry a per-box
@@ -140,13 +171,13 @@ func agentCredentialMounts(agent, homeDir string, relabel bool, exists func(stri
 // unauthenticated session is a better failure than aborting provisioning — and
 // logs what it found so an operator can tell "mounted the codex credential" from
 // "found none" when a session starts unauthenticated.
-func resolveAgentCredentialMounts(agent string) []string {
+func resolveAgentCredentialMounts(agent string, relabel bool) []string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.WarningLog.Printf("backend=docker: docker.mount_agent_credentials: cannot resolve the home dir; mounting no credential for %q: %v", agent, err)
 		return nil
 	}
-	mounts := agentCredentialMounts(agent, home, credentialMountRelabel(), func(p string) bool {
+	mounts := agentCredentialMounts(agent, home, relabel, func(p string) bool {
 		_, statErr := os.Stat(p)
 		return statErr == nil
 	})
@@ -192,15 +223,24 @@ func hostSELinuxEnforcing() (bool, error) {
 	return false, nil
 }
 
-func dockerAccountMount(accountName, source string, selinuxEnforcing bool) ([]string, error) {
+// dockerAccountMount builds the account bind mount. relabel comes from
+// bindMountRelabel, the SAME decision the credential mounts use (#3589) — the two
+// mounts are installed by af into the same container on the same engine, so a
+// host that needs the relabel needs it for both.
+func dockerAccountMount(accountName, source string, relabel bool) ([]string, error) {
 	if !strings.Contains(source, ":") {
-		// z is the shared SELinux label: the same account may be used by more than
-		// one live session. Docker accepts it when SELinux is disabled as well.
-		return []string{"-v", source + ":" + dockerAccountHome + ":z"}, nil
+		mount := source + ":" + dockerAccountHome
+		if relabel {
+			// z is the SHARED label: the same account may be used by more than one
+			// live session, and the private Z would relabel it out from under the
+			// others.
+			mount += ":z"
+		}
+		return []string{"-v", mount}, nil
 	}
-	if selinuxEnforcing {
+	if relabel {
 		return nil, fmt.Errorf(
-			"account %q path %q contains a colon and cannot be relabeled for an SELinux-enforcing Docker host; move AGENT_FACTORY_HOME to a path without ':'",
+			"account %q path %q contains a colon, so Docker needs its --mount form, which cannot carry the SELinux relabel this host requires; move AGENT_FACTORY_HOME to a path without ':'",
 			accountName, source)
 	}
 	// --volume uses ':' as a field delimiter. --mount keeps ':' ordinary, but its
@@ -228,7 +268,7 @@ func dockerAccountMount(accountName, source string, selinuxEnforcing bool) ([]st
 //
 // Returns nothing for an agent that does not support accounts; the create path
 // refuses that case earlier, so this is defence rather than a branch anyone takes.
-func accountMountAndEnv(account sessionenv.Account) (mount []string, env []string, err error) {
+func accountMountAndEnv(account sessionenv.Account, relabel bool) (mount []string, env []string, err error) {
 	if account.Dir == "" {
 		return nil, nil, nil
 	}
@@ -251,14 +291,7 @@ func accountMountAndEnv(account sessionenv.Account) (mount []string, env []strin
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot resolve an absolute path for account %q (%s): %w", account.Name, account.Dir, err)
 	}
-	selinuxEnforcing := false
-	if strings.Contains(source, ":") {
-		selinuxEnforcing, err = hostSELinuxEnforcing()
-		if err != nil {
-			return nil, nil, fmt.Errorf("cannot establish SELinux state for account %q mount: %w", account.Name, err)
-		}
-	}
-	mount, err = dockerAccountMount(account.Name, source, selinuxEnforcing)
+	mount, err = dockerAccountMount(account.Name, source, relabel)
 	if err != nil {
 		return nil, nil, err
 	}

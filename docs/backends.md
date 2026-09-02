@@ -161,12 +161,27 @@ user's real home and mounts it only if it exists, so:
 
     af reads `/sys/fs/selinux/enforce` to decide. **Permissive** mode is treated
     as not needing it — SELinux logs the denial there rather than acting on it,
-    so the read succeeds and your file is left untouched. If af cannot read the
-    SELinux mode at all it **applies the relabel anyway**: `z` is a no-op where
-    SELinux is disabled, while skipping it on an enforcing host costs you a
-    silently unauthenticated session, so the two directions are not worth
-    treating alike. A host switched to enforcing *while* sessions are running
-    needs those sessions restarted to pick the label up.
+    so the read succeeds and your file is left untouched. A host switched to
+    enforcing *while* sessions are running needs those sessions restarted to pick
+    the label up.
+
+    **The rule is: af relabels unless it can prove the relabel is unnecessary.**
+    `z` is inert wherever SELinux is not enforcing, while skipping it on an
+    enforcing host costs you a silently unauthenticated session — so the two
+    directions are not worth treating alike, and every uncertain case resolves to
+    relabeling. That covers a `/sys` af cannot read, and it also covers a
+    **remote Docker engine**: with `DOCKER_HOST` or `DOCKER_CONTEXT` pointing off
+    this machine (or af itself running against a mounted engine socket), Docker
+    resolves *and labels* the bind source on the daemon host, so this host's
+    SELinux mode describes the wrong machine. Unless the endpoint is a local
+    socket, af keeps the relabel.
+
+    The **account** mount (below) takes the same decision, for the same reasons —
+    af installs both mounts into the same container on the same engine, so they
+    never disagree. One consequence to know about: an account path containing a
+    `:` needs Docker's `--mount` form, which cannot carry a relabel, so af
+    refuses that combination on a host that needs one. Move `AGENT_FACTORY_HOME`
+    to a path without a colon.
 
 !!! warning "A global, operator-owned grant — and a deliberate partial hole"
     `docker.mount_agent_credentials` is **global-only**: a repository selects the
