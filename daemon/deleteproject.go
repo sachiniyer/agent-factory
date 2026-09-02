@@ -228,10 +228,19 @@ type deleteProjectTarget struct {
 // leaves the claimant empty — an unreleasable tombstone, which is the
 // conservative direction.
 func claimantForRecord(p config.Project) string {
-	if matches, err := config.ProjectCheckoutMatches(p.Root, p.CheckoutID); err == nil && matches {
+	// Absence is checked FIRST, and the order is the point (#3299 review id
+	// 3911002415). Both observations can report "no marker here", but only one
+	// of them is evidence FOR the record: an absent root means nothing
+	// contradicts it, while a present checkout whose marker does not match
+	// positively DISPROVES it. Asking the marker first let a disproof be
+	// overturned by an occupant that vanished a moment later, and the claim
+	// that followed kept repoPath alive — so the delete could deregister the
+	// original project's row on the strength of a checkout already shown not
+	// to be it.
+	if absent, err := recordRootAbsent(p.Root); err == nil && absent {
 		return p.ID
 	}
-	if absent, err := recordRootAbsent(p.Root); err == nil && absent {
+	if matches, err := config.ProjectCheckoutMatches(p.Root, p.CheckoutID); err == nil && matches {
 		return p.ID
 	}
 	return ""

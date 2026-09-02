@@ -27,7 +27,12 @@ import (
 // contradict. This one contradicts nothing, so it may not release anything
 // either (#3299 review ids 3884576551, 3908517185).
 func (p *rootReattributionProbe) inconclusive() bool {
-	return p.repo == nil && !p.mismatch && !p.markerUnreadable && !p.vanished && !p.foreignIdentity
+	// "Established no identity verdict" — which is the question every consumer
+	// actually asks. It used to be spelled `p.repo == nil`, a proxy that broke
+	// once a probe could resolve the path and still learn nothing from it: an
+	// unanswered RE-resolution leaves repo set while proving nothing (#3299
+	// review id 3911002406).
+	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished && !p.foreignIdentity
 }
 
 // runRootReattributionProbe performs the blocking half of one re-attribution
@@ -42,6 +47,18 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	}()
 	repo, err := config.RepoFromPath(record.root)
 	if err != nil {
+		return
+	}
+	// SCOPE GATE FIRST (#3299 review id 3911002404). A foreign identity is
+	// deferred to #3530, so this probe has no business publishing it as a
+	// candidate or reading its marker: publishing gates that REAL repository
+	// through rootAttributionPendingFor, and the marker read below is an
+	// unbounded filesystem/Git operation — so a stalled foreign worktree could
+	// indefinitely block a legitimate legacy or singleton root reached through
+	// another path in that same repository. Classify and leave.
+	if repo.ID != config.RepoIDForRecordedRoot(record.root) {
+		probe.foreignIdentity = true
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, whose identity root is not that path, so its layers cannot be attributed without a second identity; project %s stays unresolved until #3530 namespaces the derived fallback", record.root, repo.ID, record.projectID)
 		return
 	}
 	probe.repo = repo
@@ -66,6 +83,16 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	// alone, which is the fail-open this whole pass exists to close.
 	verify, verr := config.RepoFromPath(record.root)
 	switch {
+	case verr != nil && errors.Is(verr, config.ErrRepoProbeUnanswered):
+		// git never answered the RE-resolution, so this pass established
+		// nothing at all — not even that the marker is unreadable (#3299
+		// review id 3911002406). Recording a concrete verdict here would
+		// overwrite a previously PROVEN same-path mismatch with
+		// markerUnreadable and fail the occupant's own legitimate root closed
+		// for the backoff, on a probe that observed nothing. Leaving every
+		// flag unset makes this inconclusive, and the standing verdict holds.
+		log.WarningLog.Printf("root agent snapshot: recorded project root %s could not be re-checked — git never answered the probe — so project %s's previous identity verdict stands (re-checked on the ensure cadence): %v", record.root, record.projectID, verr)
+		return
 	case verr != nil:
 		probe.markerUnreadable = true
 		// THREE states, not two (review id 3787021890, sharpened by #3500).
