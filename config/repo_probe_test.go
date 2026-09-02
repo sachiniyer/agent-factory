@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,16 +30,29 @@ func installFakeGit(t *testing.T, script string) {
 
 // TestRepoFromPathClassifiesAbandonedProbeAsUnanswered reproduces the shape
 // reported in #3500: a helper outliving git holds the output pipe open, the
-// 100ms WaitDelay expires, and the read is abandoned. Nothing about the path
-// was learned, and the error must say so.
+// WaitDelay expires, and the read is abandoned. Nothing about the path was
+// learned, and the error must say so.
+//
+// The allowance is driven explicitly and the helper holds the pipe far past it
+// (#3503). This test is about the CLASSIFICATION of an abandoned read, so it
+// must not also depend on the production value — when that value rose to 2s the
+// original `sleep 2` fake became a race against the very bound it was meant to
+// trip.
 func TestRepoFromPathClassifiesAbandonedProbeAsUnanswered(t *testing.T) {
-	installFakeGit(t, `#!/bin/sh
+	withRepoGitWaitDelay(t, 100*time.Millisecond)
+	// The helper's pid is recorded and reaped: exec kills the shim shell, never
+	// the shell's own children, so an unreaped helper outlives the test on a
+	// shared machine (#3594 review).
+	pidFile := filepath.Join(t.TempDir(), "helper.pids")
+	reapShimChildren(t, pidFile)
+	installFakeGit(t, fmt.Sprintf(`#!/bin/sh
 # A background helper inherits git's stdout and outlives it, so the pipe never
 # reaches EOF and the parent's WaitDelay expires before the read completes.
-sleep 2 &
-printf '%s\n' "/not/read"
+sleep 30 &
+echo $! >> '%s'
+printf '%%s\n' "/not/read"
 exit 0
-`)
+`, pidFile))
 
 	_, err := RepoFromPath(t.TempDir())
 	require.Error(t, err)
@@ -229,9 +243,15 @@ kill -9 $$
 // any other death (#3517). Classification still comes from the command outcome
 // — the deadline only supplies the CAUSE once that outcome is unanswered.
 func TestRepoFromPathContextNamesTheCallersDeadline(t *testing.T) {
-	installFakeGit(t, `#!/bin/sh
-sleep 5
-`)
+	// Backgrounded and reaped for the same reason as above: a foreground child
+	// survives the shim shell exec kills at the deadline (#3594 review).
+	deadlinePids := filepath.Join(t.TempDir(), "deadline.pids")
+	reapShimChildren(t, deadlinePids)
+	installFakeGit(t, fmt.Sprintf(`#!/bin/sh
+sleep 5 &
+echo $! >> '%s'
+wait
+`, deadlinePids))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
