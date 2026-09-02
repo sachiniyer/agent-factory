@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -31,8 +33,10 @@ import (
 //	                     record, so it also covers an option af's argv parse
 //	                     misread, and an image VOLUME that appears in no argv.
 //	/proc/1/mountinfo  — what the kernel actually MOUNTED, symlinks resolved.
-//	a device-node scan — what --device created. A device is a mknod, so it lands
-//	                     in no mount table at all and needs its own look.
+//	the account dir    — read on the HOST, and only when Docker recorded a
+//	                     --device. A device is a mknod, so it lands in no mount
+//	                     table at all; one aliased onto the account is written
+//	                     through the bind, so it is visible from this side.
 //
 // The verdict is #3402's policy, unchanged: exactly af's own bind covers
 // dockerAccountHome, and nothing else lands at or under it or
@@ -45,14 +49,24 @@ import (
 // see is not a check that passed.
 //
 // The residual trust, stated plainly rather than left for a reader to find: the
-// mountinfo read and the device scan run binaries from the repository-selected
-// image, so an image that actively forges its own /proc view can still defeat
-// them. That is a strictly higher bar than shipping a symlink, which is the
-// attack this closes, and the `docker inspect` half is answered by the daemon
-// and cannot be forged at all. Closing the forged-view case needs a host-side
-// read of the container's mount namespace, which is not available on every
-// supported engine — rootless Docker's container PID is not a host PID — so it
-// is deliberately out of scope here rather than half-done.
+// mountinfo read runs a binary from the repository-selected image, so an image
+// that actively forges its own /proc view can still defeat that one source. That
+// is a strictly higher bar than shipping a symlink, which is the attack this
+// closes, and the other two sources — the daemon's own record and af's own read
+// of the account directory — cannot be forged from inside the container at all.
+// Closing the forged-view case needs a host-side read of the container's mount
+// namespace, which is not available on every supported engine (rootless Docker's
+// container PID is not a host PID, and reading an unrelated host process's
+// mountinfo would fail OPEN), so it is deliberately out of scope rather than
+// half-done.
+//
+// One thing no runtime check can do is PREVENT what Docker did before it ran. A
+// --device is a mknod the daemon performs at container start, and a bind whose
+// destination does not exist yet makes its own mountpoint; both land through the
+// account bind onto the host before af can look. So this refuses and names the
+// residue rather than promising it never happened. #3595's lexical --device
+// check is what stops the non-aliased case BEFORE the container exists, which is
+// why this backs it up rather than replacing it.
 
 // accountBoundaryRoots are the container paths #3402 protects: the account's own
 // mount and the writable runtime HOME af creates beside it.
@@ -81,15 +95,6 @@ func accountBoundaryRoot(target string) string {
 	}
 	return ""
 }
-
-// accountDeviceScanSentinel is printed by the device scan only after every
-// protected root has been walked. Its absence is what distinguishes "found
-// nothing" from "the scan never finished", which are the same empty output
-// otherwise — and one of them is a refusal.
-//
-// It can never collide with a finding: find prints absolute paths, and this is
-// not one.
-const accountDeviceScanSentinel = "af-boundary-device-scan-complete"
 
 // dockerInspectMount is the subset of an inspected container's .Mounts entry
 // this check reads. Destination is the CONFIGURED container path — Docker
@@ -332,66 +337,85 @@ func verifyResolvedAccountBoundary(targets, configured []string) error {
 	return nil
 }
 
-// verifyAccountDeviceScan reads the device-node scan run inside the container.
-// A --device lands by mknod rather than by mount, so it is invisible to
-// mountinfo and needs this separate look.
+// verifyAccountDeviceResidue looks for device nodes af never put in the account
+// directory, reading it HERE on the host rather than inside the container.
 //
-// The scan is trusted only when it says it finished. Output that is not exactly
-// the sentinel is a refusal either way — a finding names a node inside the
-// boundary, and anything else means the scan did not run to completion — so a
-// silent partial result cannot read as a clean one.
-func verifyAccountDeviceScan(raw []byte, configured []string, accountSource string) error {
-	var lines []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		if trimmed := strings.TrimSpace(line); trimmed != "" {
-			lines = append(lines, trimmed)
-		}
+// A --device lands by mknod rather than by mount, so it is invisible to
+// mountinfo and needs its own look — and one aliased onto the account is written
+// straight through the bind, which means the host side can see it. Reading from
+// this side costs the image nothing: no `find`, no tool the documented image
+// contract does not already require, and nothing the container could forge.
+//
+// The account directory arrives as an fs.FS, which production fills with
+// os.DirFS: no unprivileged process can mknod a character device, so that is
+// what lets a test present a real device MODE to the walk that production runs.
+//
+// It runs ONLY when `docker inspect` recorded at least one --device, and that
+// gate is a proof rather than an optimisation: every device node Docker creates
+// comes from .HostConfig.Devices, so a container configured with none created
+// none, and walking an account home — which internal/sessionenv defines as the
+// agent's WHOLE home, history included — on every provision would be work with
+// no question behind it (#3602 review).
+func verifyAccountDeviceResidue(accountFS fs.FS, accountSource string, devices []dockerInspectDevice, configured []string) error {
+	if len(devices) == 0 {
+		return nil
 	}
-	if len(lines) == 0 || lines[len(lines)-1] != accountDeviceScanSentinel {
-		reported := "no output"
-		if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
-			reported = fmt.Sprintf("%q", trimmed)
-		}
+	found, err := accountDeviceResidue(accountFS)
+	if err != nil {
 		return fmt.Errorf(
-			"the device-node scan inside the container did not report completion (%s), so af cannot establish that %s holds no planted device",
-			reported, strings.Join(accountBoundaryRoots(), " or "))
+			"cannot read account directory %q to establish that docker.run_args planted no device node in it: %w",
+			accountSource, err)
 	}
-	if found := lines[:len(lines)-1]; len(found) > 0 {
-		return aliasRefusal(fmt.Sprintf(
-			"the kernel created the device node(s) %s inside af's account boundary, which af did not configure",
-			quotedPathList(found)), configured, deviceResidueNote(found, accountSource))
+	if len(found) == 0 {
+		return nil
 	}
-	return nil
+	inContainer := make([]string, 0, len(found))
+	for _, node := range found {
+		inContainer = append(inContainer, path.Join(dockerAccountHome, node))
+	}
+	return aliasRefusal(fmt.Sprintf(
+		"the Docker daemon created the device node(s) %s inside af's account boundary, which af did not configure",
+		quotedPathList(inContainer)), configured, deviceResidueNote(found, accountSource))
+}
+
+// accountDeviceResidue walks an account directory and returns the paths of every
+// character or block device in it, relative to its root.
+//
+// An fs.FS rather than a path so a test can present a real device MODE, which no
+// unprivileged process can mknod. Symlinks are never followed: fs.WalkDir reads
+// directory entries, so a symlink is an entry rather than a door.
+func accountDeviceResidue(fsys fs.FS) ([]string, error) {
+	var found []string
+	err := fs.WalkDir(fsys, ".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&fs.ModeDevice != 0 {
+			found = append(found, name)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(found)
+	return found, nil
 }
 
 // deviceResidueNote names where a planted node ended up ON THE HOST.
 //
-// A --device is a mknod the Docker daemon performs as root at container start,
-// so by the time any runtime check can look the node already exists — and one
-// under dockerAccountHome was written straight through the bind mount into the
-// operator's account directory, where it outlives the container this refusal
+// The mknod happens as root at container start, so by the time any runtime check
+// can look the node already exists, and it outlives the container this refusal
 // tears down. af does not delete it: removing files from the operator's
 // credential directory on a repository's say-so is not a thing this boundary
 // should do. It names the path instead.
-//
-// A node under dockerAccountRuntimeHome stays inside the container's own
-// filesystem and goes away with it, so it earns no note.
 func deviceResidueNote(found []string, accountSource string) string {
-	if accountSource == "" {
-		return ""
-	}
-	var residue []string
+	residue := make([]string, 0, len(found))
 	for _, node := range found {
-		if !strings.HasPrefix(node, dockerAccountHome+"/") {
-			continue
-		}
-		residue = append(residue, path.Join(accountSource, strings.TrimPrefix(node, dockerAccountHome+"/")))
-	}
-	if len(residue) == 0 {
-		return ""
+		residue = append(residue, path.Join(accountSource, node))
 	}
 	return fmt.Sprintf(
-		"The Docker daemon created that node as root through the account bind, so it is now on this host at %s and outlives the container; remove it there by hand",
+		"The Docker daemon created it as root through the account bind, so it is now on this host at %s and outlives the container; remove it there by hand",
 		quotedPathList(residue))
 }
 
@@ -403,12 +427,10 @@ func deviceResidueNote(found []string, accountSource string) string {
 // The two branches are not decoration. When Docker recorded no container path
 // but af's own account mount, NOTHING could have been aliased — there was no
 // entry to resolve — and blaming the image would send the operator hunting for a
-// symlink that is not there. The reachable causes then are a device node left in
-// the account directory by an EARLIER session (the daemon plants those as root
-// at container start, before any check can run, so they outlive the refusal that
-// found them) or a nested mount point inside the account directory on this host,
-// which af cannot tell apart from an aliased one. Both need a different remedy
-// than "edit run_args", so they get a different sentence.
+// symlink that is not there. What remains reachable is a nested mount point
+// inside the account directory on this host, which a recursive bind carries into
+// the container and af cannot tell apart from an aliased mount. That needs a
+// different remedy than "edit run_args", so it gets a different sentence.
 func aliasRefusal(found string, configured []string, note string) error {
 	var message strings.Builder
 	if len(configured) > 0 {
@@ -420,30 +442,13 @@ func aliasRefusal(found string, configured []string, note string) error {
 	} else {
 		message.WriteString("af's account boundary does not hold — ")
 		message.WriteString(found)
-		message.WriteString(". Docker records no container path here but af's own account mount, so nothing in docker.run_args aliased onto it: this is residue left in the account directory by an earlier session, or a nested mount point inside the account directory on this host. af cannot tell either apart from an aliased mount, and will not run the session on a boundary it cannot account for")
+		message.WriteString(". Docker records no container path here but af's own account mount, so nothing in docker.run_args aliased onto it — the likely cause is a nested mount point inside the account directory on this host, which the account's recursive bind carries in. af cannot tell that apart from an aliased mount, and will not run the session on a boundary it cannot account for. Move it out of the account directory")
 	}
 	if note != "" {
 		message.WriteString(". ")
 		message.WriteString(note)
 	}
 	return errors.New(message.String())
-}
-
-// accountDeviceScanScript walks each protected root for character and block
-// device nodes and prints the sentinel only once every walk has succeeded.
-//
-// A root that does not exist is skipped rather than failed: this runs before
-// prepareAccountUser creates dockerAccountRuntimeHome, so its absence is the
-// ordinary case. A find that FAILS still ends the script without the sentinel,
-// which refuses.
-func accountDeviceScanScript() string {
-	roots := make([]string, 0, len(accountBoundaryRoots()))
-	for _, root := range accountBoundaryRoots() {
-		roots = append(roots, shellQuote(root))
-	}
-	return fmt.Sprintf(
-		`for d in %s; do if [ -e "$d" ]; then find "$d" -xdev \( -type b -o -type c \) -print || exit 3; fi; done; echo %s`,
-		strings.Join(roots, " "), shellQuote(accountDeviceScanSentinel))
 }
 
 // verifyAccountRuntimeBoundary is the whole check, run against the started
@@ -489,12 +494,7 @@ func (p *dockerProvisioner) verifyAccountRuntimeBoundary() error {
 		return refuse(err)
 	}
 
-	out, err = p.docker(dockerShortStepTimeout,
-		"exec", "--user", "0:0", p.containerID, "sh", "-c", accountDeviceScanScript())
-	if err != nil {
-		return refuse(fmt.Errorf("cannot scan the account boundary for device nodes: %s: %w", strings.TrimSpace(string(out)), err))
-	}
-	if err := verifyAccountDeviceScan(out, configured, source); err != nil {
+	if err := verifyAccountDeviceResidue(os.DirFS(source), source, inspected.HostConfig.Devices, configured); err != nil {
 		return refuse(err)
 	}
 	return nil

@@ -3,10 +3,12 @@ package session
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,10 +54,6 @@ const cleanMountinfo = `2421 268 0:67 / / rw,relatime - overlay overlay rw,lower
 2445 2421 8:1 /var/lib/docker/containers/cb5a/hosts /etc/hosts rw,relatime - ext4 /dev/root rw,discard,errors=remount-ro,commit=30
 `
 
-// cleanDeviceScan is the scan's output when the boundary holds no device node:
-// the completion sentinel and nothing else.
-const cleanDeviceScan = accountDeviceScanSentinel + "\n"
-
 // A container af provisioned and nobody tampered with must PASS all three
 // checks. Without this the refusals below would be satisfied by a check that
 // refuses everything.
@@ -68,7 +66,7 @@ func TestAccountRuntimeVerify_CleanContainerPasses(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, verifyResolvedAccountBoundary(targets, configuredContainerPaths(inspected)))
 
-	require.NoError(t, verifyAccountDeviceScan([]byte(cleanDeviceScan), nil, ""))
+	require.NoError(t, verifyAccountDeviceResidue(os.DirFS(t.TempDir()), verifyAccountSource, inspected.HostConfig.Devices, nil))
 }
 
 // The four aliased options from the issue's acceptance criteria. Each row is a
@@ -84,7 +82,9 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 		inspect string
 		// mountinfo lines the kernel reported IN ADDITION to the clean set.
 		extraMountinfo string
-		deviceScan     string
+		// residue is what af finds in the account directory ON THE HOST — a
+		// --device is a mknod, so it lands in no mount table at all.
+		residue        fstest.MapFS
 		wantResolved   string
 		wantConfigured string
 	}{
@@ -96,7 +96,6 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 				{"Type":"bind","Source":"/repo/evil","Destination":"/device-target/.config","Mode":"","RW":true}],
 				"HostConfig":{"Tmpfs":null,"Devices":null}}]`,
 			extraMountinfo: "2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw,discard\n",
-			deviceScan:     cleanDeviceScan,
 			wantResolved:   "/af-account/.config",
 			wantConfigured: "/device-target/.config",
 		},
@@ -108,7 +107,6 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 				{"Type":"bind","Source":"/repo/evil","Destination":"/device-target/.config","Mode":"","RW":true}],
 				"HostConfig":{"Tmpfs":null,"Devices":null}}]`,
 			extraMountinfo: "2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw,discard\n",
-			deviceScan:     cleanDeviceScan,
 			wantResolved:   "/af-account/.config",
 			wantConfigured: "/device-target/.config",
 		},
@@ -119,7 +117,6 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 				{"Type":"bind","Source":"` + verifyAccountSource + `","Destination":"/af-account","Mode":"z","RW":true}],
 				"HostConfig":{"Tmpfs":{"/device-target/tmp":""},"Devices":null}}]`,
 			extraMountinfo: "2441 2440 0:90 / /af-account/tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,inode64\n",
-			deviceScan:     cleanDeviceScan,
 			wantResolved:   "/af-account/tmp",
 			wantConfigured: "/device-target/tmp",
 		},
@@ -133,7 +130,6 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 			// Docker installs both; the account bind lands as a child of the
 			// alias, so TWO filesystems sit at /af-account (measured).
 			extraMountinfo: "2683 2674 8:1 /repo/evil /af-account rw,relatime - ext4 /dev/root rw,discard\n",
-			deviceScan:     cleanDeviceScan,
 			wantResolved:   "2 filesystems at /af-account",
 			wantConfigured: "/device-target",
 		},
@@ -144,10 +140,13 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 				{"Type":"bind","Source":"` + verifyAccountSource + `","Destination":"/af-account","Mode":"z","RW":true}],
 				"HostConfig":{"Tmpfs":null,
 				"Devices":[{"PathOnHost":"/dev/zero","PathInContainer":"/device-target/planted","CgroupPermissions":"rwm"}]}}]`,
-			// A device is a mknod, so it appears in NO mount table — the scan is
-			// the only thing that can see it.
+			// A device is a mknod, so it appears in NO mount table. It DOES
+			// appear in the operator's account directory on the host, written
+			// through the account bind, which is where af looks for it.
 			extraMountinfo: "",
-			deviceScan:     "/af-account/planted\n" + accountDeviceScanSentinel + "\n",
+			residue: fstest.MapFS{
+				"planted": &fstest.MapFile{Mode: fs.ModeDevice | fs.ModeCharDevice},
+			},
 			wantResolved:   "/af-account/planted",
 			wantConfigured: "/device-target/planted",
 		},
@@ -171,12 +170,9 @@ func TestAccountRuntimeVerify_RefusesEveryAliasedOption(t *testing.T) {
 
 			targets, err := parseMountinfoTargets([]byte(cleanMountinfo + tt.extraMountinfo))
 			require.NoError(t, err)
-			resolvedErr := verifyResolvedAccountBoundary(targets, configured)
-			deviceErr := verifyAccountDeviceScan([]byte(tt.deviceScan), configured, verifyAccountSource)
-
-			err = resolvedErr
+			err = verifyResolvedAccountBoundary(targets, configured)
 			if err == nil {
-				err = deviceErr
+				err = verifyAccountDeviceResidue(tt.residue, verifyAccountSource, inspected.HostConfig.Devices, configured)
 			}
 			require.Errorf(t, err, "an aliased %s must refuse", tt.name)
 			assert.Containsf(t, err.Error(), tt.wantResolved,
@@ -235,27 +231,6 @@ func TestAccountRuntimeVerify_WithNothingConfiguredDoesNotBlameRunArgs(t *testin
 			"nothing was configured, so nothing could have been aliased")
 	})
 
-	t.Run("residue from an earlier session", func(t *testing.T) {
-		err := verifyAccountDeviceScan(
-			[]byte("/af-account/planted\n"+accountDeviceScanSentinel+"\n"), configured, verifyAccountSource)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "residue left in the account directory by an earlier session")
-		assert.Contains(t, err.Error(), verifyAccountSource+"/planted",
-			"the operator has to remove it on the HOST, so name the host path")
-		assert.NotContains(t, err.Error(), "Remove that entry from docker.run_args")
-	})
-}
-
-// A node under the runtime home stays inside the container's own filesystem and
-// goes away with it, so the refusal must not send the operator looking for it on
-// the host.
-func TestAccountRuntimeVerify_RuntimeHomeDeviceLeavesNoHostResidue(t *testing.T) {
-	err := verifyAccountDeviceScan(
-		[]byte("/af-home/planted\n"+accountDeviceScanSentinel+"\n"), []string{"/device-target/planted"}, verifyAccountSource)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "/af-home/planted")
-	assert.NotContains(t, err.Error(), verifyAccountSource,
-		"/af-home is created inside the container, so nothing was written through the bind mount")
 }
 
 // The configured half is the backstop for what no resolution is needed to see:
@@ -332,15 +307,13 @@ func TestAccountRuntimeVerify_UnreadableSourceRefuses(t *testing.T) {
 			require.Errorf(t, err, "unreadable mountinfo %q must not read as a clean mount table", raw)
 		}
 	})
-	t.Run("device scan", func(t *testing.T) {
-		for _, raw := range []string{
-			"",                                       // the scan never ran
-			"\n",                                     // and an empty line is not a completion
-			"find: /af-account: Permission denied\n", // it ran and failed
-			"/af-account/planted\n",                  // it found something and then died
-		} {
-			require.Errorf(t, verifyAccountDeviceScan([]byte(raw), nil, ""), "an incomplete device scan %q must refuse", raw)
-		}
+	t.Run("the account directory", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "gone")
+		err := verifyAccountDeviceResidue(os.DirFS(missing), missing,
+			[]dockerInspectDevice{{PathOnHost: "/dev/zero", PathInContainer: "/device-target/planted"}}, nil)
+		require.Error(t, err,
+			"an account directory af cannot read is not an account directory it proved holds no planted device")
+		require.Contains(t, err.Error(), "cannot read account directory")
 	})
 }
 
@@ -380,9 +353,9 @@ func TestAccountRuntimeVerify_NonAccountSessionIsUntouched(t *testing.T) {
 	require.Empty(t, calls, "a session with no account must not reach docker at all")
 }
 
-// The whole check, wired: the provisioner reads both sources and the scan, in
-// that order, and refuses on the aliased one.
-func TestAccountRuntimeVerify_ReadsBothSourcesAndTheScan(t *testing.T) {
+// The whole check, wired: the provisioner reads both container sources, in that
+// order, and refuses on the aliased one.
+func TestAccountRuntimeVerify_ReadsBothSources(t *testing.T) {
 	dir := t.TempDir()
 	var calls [][]string
 	defer SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
@@ -396,8 +369,6 @@ func TestAccountRuntimeVerify_ReadsBothSourcesAndTheScan(t *testing.T) {
 		case args[0] == "exec" && args[len(args)-1] == "/proc/1/mountinfo":
 			return []byte(cleanMountinfoFor(dir) +
 				"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"), nil
-		case args[0] == "exec":
-			return []byte(cleanDeviceScan), nil
 		}
 		return nil, fmt.Errorf("unexpected docker call: %v", args)
 	})()
@@ -418,6 +389,41 @@ func TestAccountRuntimeVerify_ReadsBothSourcesAndTheScan(t *testing.T) {
 		"and the kernel's resolved view second — the half a symlink cannot survive")
 }
 
+// The residue walk runs ONLY when Docker recorded a --device, and that gate is a
+// proof rather than an optimisation: every device node Docker creates comes from
+// .HostConfig.Devices, so a container configured with none created none. An
+// account home is the agent's WHOLE home, history included, and walking it on
+// every provision would be work with no question behind it (#3602 review).
+func TestAccountRuntimeVerify_ResidueWalkOnlyRunsForAConfiguredDevice(t *testing.T) {
+	planted := fstest.MapFS{
+		"planted": &fstest.MapFile{Mode: fs.ModeDevice | fs.ModeCharDevice},
+	}
+	device := []dockerInspectDevice{{PathOnHost: "/dev/zero", PathInContainer: "/device-target/planted"}}
+
+	require.NoError(t, verifyAccountDeviceResidue(planted, verifyAccountSource, nil, nil),
+		"no --device was configured, so nothing Docker did could have planted a node; do not walk the account home")
+
+	err := verifyAccountDeviceResidue(planted, verifyAccountSource, device, []string{"/device-target/planted"})
+	require.Error(t, err, "a configured --device is the question that makes the walk worth running")
+	assert.Contains(t, err.Error(), "/af-account/planted", "named as the container path the operator asked about")
+	assert.Contains(t, err.Error(), verifyAccountSource+"/planted", "and as the HOST path they must remove it from")
+}
+
+// The walk classifies by mode, not by name, and does not follow symlinks — an
+// entry is an entry, never a door.
+func TestAccountDeviceResidue_ClassifiesByMode(t *testing.T) {
+	found, err := accountDeviceResidue(fstest.MapFS{
+		"auth.json":             &fstest.MapFile{Data: []byte("{}")},
+		".config/settings.json": &fstest.MapFile{Data: []byte("{}")},
+		".config/block":         &fstest.MapFile{Mode: fs.ModeDevice},
+		"nested/deep/char":      &fstest.MapFile{Mode: fs.ModeDevice | fs.ModeCharDevice},
+		"link":                  &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("/dev/zero")},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{".config/block", "nested/deep/char"}, found,
+		"both character and block nodes at any depth, and nothing that merely points at one")
+}
+
 // A read that FAILS is a refusal on every one of the three sources.
 //
 // Each source is broken in the way that a check ignoring exit status would sail
@@ -427,7 +433,7 @@ func TestAccountRuntimeVerify_ReadsBothSourcesAndTheScan(t *testing.T) {
 // about whether the error itself is honoured.
 func TestAccountRuntimeVerify_EveryFailedReadRefuses(t *testing.T) {
 	dir := t.TempDir()
-	for _, broken := range []string{"inspect", "mountinfo", "scan"} {
+	for _, broken := range []string{"inspect", "mountinfo"} {
 		t.Run(broken, func(t *testing.T) {
 			fail := func(out string) ([]byte, error) {
 				return []byte(out), fmt.Errorf("exit status 125")
@@ -444,12 +450,8 @@ func TestAccountRuntimeVerify_EveryFailedReadRefuses(t *testing.T) {
 						return fail(cleanMountinfoFor(dir))
 					}
 					return []byte(cleanMountinfoFor(dir)), nil
-				default:
-					if broken == "scan" {
-						return fail(cleanDeviceScan)
-					}
-					return []byte(cleanDeviceScan), nil
 				}
+				return nil, fmt.Errorf("unexpected docker call: %v", args)
 			})()
 			p := &dockerProvisioner{
 				spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -471,9 +473,8 @@ func TestAccountRuntimeVerify_WiredCleanContainerPasses(t *testing.T) {
 			return []byte(cleanInspect(dir)), nil
 		case args[len(args)-1] == "/proc/1/mountinfo":
 			return []byte(cleanMountinfoFor(dir)), nil
-		default:
-			return []byte(cleanDeviceScan), nil
 		}
+		return nil, fmt.Errorf("unexpected docker call: %v", args)
 	})()
 	p := &dockerProvisioner{
 		spec:        ProvisionSpec{Title: "scoped", Account: sessionenv.Account{Agent: "codex", Name: "work", Dir: dir}},
@@ -545,8 +546,6 @@ func TestAccountRuntimeVerify_RefusalReapsTheContainer(t *testing.T) {
 		case args[0] == "exec" && args[len(args)-1] == "/proc/1/mountinfo":
 			return []byte(cleanMountinfoFor(accountDir) +
 				"2442 2440 8:1 /repo/evil /af-account/.config rw,relatime - ext4 /dev/root rw\n"), nil
-		case args[0] == "exec":
-			return []byte(cleanDeviceScan), nil
 		case args[0] == "rm":
 			return []byte(dockerCreatedID + "\n"), nil
 		}
@@ -591,14 +590,8 @@ func fakeAccountBoundaryDockerResponse(args []string, accountDir string) ([]byte
 	if args[0] == "inspect" {
 		return []byte(cleanInspect(accountDir)), nil
 	}
-	if args[0] == "exec" {
-		joined := strings.Join(args, " ")
-		switch {
-		case strings.HasSuffix(joined, "/proc/1/mountinfo"):
-			return []byte(cleanMountinfoFor(accountDir)), nil
-		case strings.Contains(joined, accountDeviceScanSentinel):
-			return []byte(cleanDeviceScan), nil
-		}
+	if args[0] == "exec" && strings.HasSuffix(strings.Join(args, " "), "/proc/1/mountinfo") {
+		return []byte(cleanMountinfoFor(accountDir)), nil
 	}
 	return nil, nil
 }
