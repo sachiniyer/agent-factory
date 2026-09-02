@@ -158,12 +158,22 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 	// works from the spelling the registry uses.
 	target := pathutil.ResolveForCompare(root)
 	for _, project := range projects {
-		if project.RepoID == "" {
+		if pathutil.ResolveForCompare(filepath.Clean(project.Root)) != target {
 			continue
 		}
-		if pathutil.ResolveForCompare(filepath.Clean(project.Root)) == target {
-			return filepath.Clean(project.Root), project.RepoID, nil
+		// The record's OWN spelling, whether or not it has recorded an
+		// identity yet (#3530 review id 3918379019). A schema-v1 row has no
+		// RepoID, and skipping it here dropped the match too: the delete fell
+		// through to an id invented from the REQUEST's spelling, which
+		// DeregisterProject then cannot reconcile with the stored one — two
+		// missing paths cannot be SameFile — so the durable registration
+		// survived a delete that reported success. Its provisional id is
+		// derived from the stored root for the same reason.
+		recorded := filepath.Clean(project.Root)
+		if project.RepoID != "" {
+			return recorded, project.RepoID, nil
 		}
+		return recorded, config.DerivedRepoIDForUnresolvedRoot(recorded), nil
 	}
 	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
 }
@@ -539,7 +549,12 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	optInIDs := []string{repoID}
 	if repoPath != "" {
 		if pathID := config.RepoIDFromRoot(filepath.Clean(repoPath)); pathID != repoID {
-			if _, err := config.RepoFromPath(repoPath); err != nil {
+			// An ANSWER is required, not merely a failure (#3530 review id
+			// 3918379027, #3500's rule). A killed or unstartable git says
+			// nothing about what occupies the path, and a repository that is
+			// there OWNS this hash — so acting on an unanswered probe would
+			// delete a live occupant's own opt-in on behalf of this project.
+			if _, err := config.RepoFromPath(repoPath); err != nil && !config.RepoProbeUnanswered(err) {
 				optInIDs = append(optInIDs, pathID)
 			}
 		}

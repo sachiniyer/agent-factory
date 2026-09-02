@@ -139,7 +139,12 @@ func LegacyRootAgentForRecordedRoot(global *Config, recordedRoot string) (*RootA
 	if matched == "" {
 		return nil, ""
 	}
-	if _, err := RepoFromPath(cleaned); err == nil {
+	// The probe must ANSWER before its outcome may be acted on (#3530 review id
+	// 3918379034, #3500's rule): a killed or unstartable git establishes
+	// nothing, and a repository occupying this path owns the key — reporting
+	// the stale project's opt-in then promises a root the ensure sweep will
+	// only ever create for the occupant. Uncertainty withholds the fallback.
+	if _, err := RepoFromPath(cleaned); err == nil || RepoProbeUnanswered(err) {
 		return nil, ""
 	}
 	entry := global.RootAgents[matched]

@@ -870,6 +870,58 @@ func TestDeleteBySymlinkSpelledPathFindsTheRecord(t *testing.T) {
 	}
 }
 
+// TestDeleteBySymlinkSpelledPathFindsALegacyRecord pins #3530 review id
+// 3918379019 — the same symlink match, for a row that has recorded no identity
+// yet.
+//
+// Such a row was skipped before it could be matched, so the delete fell through
+// to an id invented from the REQUEST's spelling. DeregisterProject cannot
+// reconcile that with the stored one — two missing paths cannot be SameFile —
+// so the durable registration survives a delete that reported success.
+func TestDeleteBySymlinkSpelledPathFindsALegacyRecord(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	base := testguard.CanonicalTempDir(t)
+	real := filepath.Join(base, "real")
+	link := filepath.Join(base, "link")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	repoPath := filepath.Join(real, "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	// A record written before Project.RepoID existed.
+	clearRecordedRepoID(t, project.ID)
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	spelled := filepath.Join(link, "repo")
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: spelled})
+	if err != nil {
+		t.Fatalf("DeleteProject by a symlink-spelled recorded path: %v", err)
+	}
+	if want := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath)); result.RepoID != want {
+		t.Fatalf("a legacy row's provisional identity must come from its STORED root: got %s, want %s", result.RepoID, want)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("the durable record survived a delete that reported success")
+	}
+}
+
 // TestUnreadableMarkerKeepsTheCandidateRepoClosed pins #3530 review id
 // 3918120753.
 //
@@ -922,5 +974,115 @@ func TestUnreadableMarkerKeepsTheCandidateRepoClosed(t *testing.T) {
 
 	if !manager.rootAttributionPendingFor(realID) {
 		t.Fatalf("an unreadable marker establishes nothing, so repository %s must stay attribution-pending: its project's personal disable sits under %s where resolution cannot see it", realID, recordedID)
+	}
+}
+
+// TestReconcileRetryIsPacedByTheHealBackoff pins #3530 review id 3918379041.
+//
+// A reconciliation that keeps failing — an unrelated corrupt record makes the
+// registry's strict load fail — would otherwise reacquire the registry lock and
+// reread every record on every poll tick. Re-attribution may run unconditionally
+// because its pacing is per entry; this is a whole-registry read, so it belongs
+// on the healer's backoff clock.
+func TestReconcileRetryIsPacedByTheHealBackoff(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	corrupt := filepath.Join(dir, "prj_ffffffffffffffffffffffffffffffff")
+	if err := os.MkdirAll(corrupt, 0o755); err != nil {
+		t.Fatalf("mkdir corrupt record: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "project.json"), []byte("{ not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt record: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if len(manager.rootAgentLayers.Load().reconcileOwed) != 1 {
+		t.Fatalf("fixture must latch the failed backfill")
+	}
+
+	// The first pass attempts it and fails, which moves the retry clock out.
+	manager.EnsureRootAgents()
+	manager.mu.Lock()
+	next := manager.rootHealNextAttempt
+	manager.mu.Unlock()
+	if !next.After(nowFunc()) {
+		t.Fatalf("a failed reconciliation must advance the healer's backoff, got next attempt %v", next)
+	}
+
+	// A second pass on the same tick must not touch the registry again. The
+	// repair proves it: with the backoff still out, the retry does not run.
+	if err := os.RemoveAll(corrupt); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("the retry ran inside its own backoff window: recorded %q", recorded)
+	}
+}
+
+// TestUnansweredProbeWithholdsTheRecordedPathSweep pins #3530 review id
+// 3918379027. The sweep supplies the recorded path's hash only while that path
+// does not resolve — but a FAILED probe is not the same as an answered one. A
+// killed or unstartable git says nothing about what occupies the path, and a
+// repository that is there owns that hash, so acting on the failure alone would
+// delete a live occupant's own opt-in on behalf of this project.
+func TestUnansweredProbeWithholdsTheRecordedPathSweep(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded workspace: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	var swept []string
+	original := deregisterRootAgents
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
+		swept = append(swept, ids...)
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = original })
+
+	// Every git from here on dies on a signal: nothing it is asked can be
+	// said to have been answered.
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	binDir := t.TempDir()
+	shim := "#!/bin/sh\nkill -9 $$\nexec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID}); err != nil {
+		t.Fatalf("DeleteProject by the recorded identity: %v", err)
+	}
+	if len(swept) == 0 {
+		t.Fatalf("fixture must reach the durable sweep, or it pins nothing")
+	}
+	for _, id := range swept {
+		if id == pathID {
+			t.Fatalf("the sweep supplied %s on an UNANSWERED probe: a repository occupying that path owns the id, so this deletes a live occupant's opt-in", pathID)
+		}
 	}
 }

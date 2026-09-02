@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -113,5 +115,44 @@ func TestDeregisterRootAgentsMatchesASymlinkSpelledKey(t *testing.T) {
 	}
 	if len(removed) != 1 || removed[0] != spelled {
 		t.Fatalf("a key spelled through a symlink must still be swept for the identity its resolved path derives: removed %v", removed)
+	}
+}
+
+// TestRecordedRootOptInWithheldWhenGitNeverAnswers pins #3530 review id
+// 3918379034. A killed or unstartable git establishes nothing about what
+// occupies the recorded path, and a repository that IS there owns the key — so
+// reporting the stale project's opt-in would promise a root the ensure sweep
+// creates only for the occupant. Uncertainty withholds the fallback.
+func TestRecordedRootOptInWithheldWhenGitNeverAnswers(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	recorded := filepath.Join(base, "recorded")
+	if err := os.MkdirAll(recorded, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.RootAgents = map[string]RootAgentConfig{recorded: {}}
+
+	// With git answering, the entry is this project's: the fixture proves the
+	// lookup fires at all before the unanswerable probe is installed.
+	if entry, key := LegacyRootAgentForRecordedRoot(cfg, recorded); entry == nil || key != recorded {
+		t.Fatalf("fixture precondition: an answered negative must yield the entry, got key %q", key)
+	}
+
+	// A git shim that kills itself: the process dies on a signal, so nothing
+	// proves it ever answered — the #3500 shape, deterministically.
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	binDir := t.TempDir()
+	shim := fmt.Sprintf("#!/bin/sh\nkill -9 $$\nexec %q \"$@\"\n", realGit)
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if entry, key := LegacyRootAgentForRecordedRoot(cfg, recorded); entry != nil {
+		t.Fatalf("an unanswered probe is not evidence that the path is free, but the opt-in was returned under key %q", key)
 	}
 }

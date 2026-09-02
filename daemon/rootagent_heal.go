@@ -117,8 +117,20 @@ func (m *Manager) healRootAgentLayers() {
 				rpChanged = true
 			}
 		}
-		if retryReconcileOwed(&healed) {
-			changed = true
+		// Paced on the SAME backoff as the other retried reads (#3530 review id
+		// 3918379041). A reconciliation that keeps failing — an unrelated
+		// corrupt record makes the registry's strict load fail — would
+		// otherwise reacquire the registry lock and reread every record on
+		// every poll tick, which is exactly the contention this healer's
+		// backoff contract exists to prevent. Re-attribution keeps its
+		// unconditional cadence because its pacing is per entry; this is a
+		// whole-registry read, so it belongs on the clock.
+		if due && len(layers.reconcileOwed) > 0 {
+			rpAttempted = true
+			if retryReconcileOwed(&healed) {
+				changed = true
+				rpChanged = true
+			}
 		}
 		reattrChanged, settles := m.reattributeUnresolvedRoots(&healed)
 		if reattrChanged {
