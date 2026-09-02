@@ -293,6 +293,138 @@ test("a native auto-merge cancellation failure leaves the manual-only aggregate 
   assert.equal(github.updatedChecks.length, 0);
 });
 
+test("auto-merge armed after the PR read is still disabled before the green", async () => {
+  // #3381: nativeAutoMergeEnabled was captured once in getPullRequest, and the
+  // files, required-checks, comments, reviews and review-comment reads all ran
+  // before the guard consulted it. Auto-merge armed anywhere in that window was
+  // invisible, the disable was skipped, and a PASSING decision published on a PR
+  // the gate had just declared maintainer-review-only — which GitHub could then
+  // merge on that very green.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: false,
+    nativeAutoMergeArmedAfterRead: true,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual");
+  assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  assert.equal(github.nativeAutoMergeArmed, false);
+  // Disabled BEFORE the decision is published, not after: the ordering is what
+  // stops GitHub merging on the green this transaction is about to write.
+  assert.deepEqual(github.operations.slice(0, 4), [
+    "check:create",
+    "auto-merge:disable",
+    "check:create",
+    "check:update",
+  ]);
+});
+
+test("the auto-merge state is read fresh rather than trusted from the snapshot", async () => {
+  const github = fakeGateGithub({ author: "detail-app", nativeAutoMergeEnabled: false });
+
+  await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // One read for a PR that is not armed: nothing to disable, nothing to confirm.
+  assert.equal(github.autoMergeStateReads, 1);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+});
+
+test("a disable that leaves auto-merge armed refuses to publish the green", async () => {
+  // The mutation succeeding is a claim; the read is the evidence. Without the
+  // confirming read a disable that silently does nothing publishes a green on a
+  // PR GitHub is still free to merge.
+  const github = fakeGateGithub({
+    author: "detail-app",
+    nativeAutoMergeEnabled: true,
+    nativeAutoMergeStaysArmed: true,
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: true,
+    }),
+    /GitHub-native auto-merge is still armed after disabling it/,
+  );
+
+  assert.equal(github.nativeAutoMergeDisableAttempts, 1);
+  // Only the invalidation check exists; no passing decision was written.
+  assert.equal(github.createdChecks.length, 1);
+  assert.equal(github.createdChecks[0].conclusion, "failure");
+  assert.equal(github.updatedChecks.length, 0);
+});
+
+test("an unreadable auto-merge state leaves the manual-only aggregate red", async () => {
+  // Fail closed. An unreadable state is not a disarmed one, and the decision
+  // this transaction is about to publish is a PASS.
+  const error = new Error("auto-merge state unavailable");
+  error.status = 500;
+  const github = fakeGateGithub({ author: "detail-app", autoMergeStateError: error });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // Retried, then reported as a read failure: a clean BLOCKED aggregate rather
+  // than an unhandled error, and no passing decision either way.
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.autoMergeStateReads, 3);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+  assert.equal(github.updatedChecks.at(-1).conclusion, "failure");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not read auto-merge state for PR #1465 after 3 attempts/,
+  );
+  assert.ok(
+    !github.createdChecks.some((check) => check.conclusion === "success"),
+    "no passing decision may be published when the auto-merge state is unknown",
+  );
+});
+
+test("an auto-mergeable PR never reaches the auto-merge disable path", async () => {
+  // The precondition belongs to the manual-merge path only. A PR the gate will
+  // merge itself is not one GitHub must be stopped from merging.
+  const github = fakeGateGithub({ nativeAutoMergeEnabled: true });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "merged");
+  assert.equal(github.autoMergeStateReads, 0);
+  assert.equal(github.nativeAutoMergeDisableAttempts, 0);
+});
+
 test("a PR cannot read another PR's decision when both share one head", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -1906,6 +2038,11 @@ function fakeGateGithub({
   headCommittedDate = "2026-07-09T01:00:00Z",
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
+  // Arms native auto-merge AFTER the PR read that used to snapshot it — the
+  // #3381 window. The snapshot says off, the live state says on.
+  nativeAutoMergeArmedAfterRead = false,
+  // The disable mutation reports success and leaves auto-merge armed anyway.
+  nativeAutoMergeStaysArmed = false,
   isDraft = false,
   state = "OPEN",
   merged = false,
@@ -1934,6 +2071,7 @@ function fakeGateGithub({
   checkUpdateErrors = [],
   workflowDispatchError = null,
   nativeAutoMergeDisableError = null,
+  autoMergeStateError = null,
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
@@ -1998,6 +2136,8 @@ function fakeGateGithub({
     disabledAutoMergePullRequestIds: [],
     mergeAttempts: 0,
     nativeAutoMergeDisableAttempts: 0,
+    nativeAutoMergeArmed: nativeAutoMergeEnabled,
+    autoMergeStateReads: 0,
     operations: [],
     mergedWith: null,
     reviewCommentReads: 0,
@@ -2029,10 +2169,30 @@ function fakeGateGithub({
         }
         github.operations.push("auto-merge:disable");
         github.disabledAutoMergePullRequestIds.push(variables.pullRequestId);
+        // A real disable takes effect, so the confirming read sees it.
+        github.nativeAutoMergeArmed = nativeAutoMergeStaysArmed;
         return { disablePullRequestAutoMerge: { pullRequest: { number: 1465 } } };
+      }
+      if (_query.includes("query AutoMergeState")) {
+        github.autoMergeStateReads += 1;
+        if (autoMergeStateError) {
+          throw autoMergeStateError;
+        }
+        return {
+          repository: {
+            pullRequest: {
+              autoMergeRequest: github.nativeAutoMergeArmed
+                ? { enabledAt: "2026-07-09T01:05:00Z" }
+                : null,
+            },
+          },
+        };
       }
       github.graphqlReadsByNumber[variables.number] =
         (github.graphqlReadsByNumber[variables.number] || 0) + 1;
+      if (nativeAutoMergeArmedAfterRead) {
+        github.nativeAutoMergeArmed = true;
+      }
       if (graphqlErrorsByNumber[variables.number]) {
         throw graphqlErrorsByNumber[variables.number];
       }

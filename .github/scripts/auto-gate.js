@@ -392,7 +392,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     manualMergeRequired,
     manualMergeReasons,
     degradedForUnavailableReviewer,
-    nativeAutoMergeEnabled: pr.nativeAutoMergeEnabled,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
     headSha: pr.headRefOid,
@@ -784,8 +783,9 @@ async function processAggregateHead({
     }
     let write;
     try {
-      if (result.manualMergeRequired && result.nativeAutoMergeEnabled) {
-        await disableNativeAutoMerge({ github, core, result });
+      if (result.manualMergeRequired) {
+        // Unconditional on the snapshot: a stale "not armed" is exactly the bug.
+        await ensureNativeAutoMergeDisabled({ github, context, core, result });
       }
       manualMergeRequired ||= Boolean(result.manualMergeRequired);
       write = await reportDecision({ github, context, core, result, manual });
@@ -1367,9 +1367,6 @@ async function getPullRequest({ github, context, number }) {
           author {
             login
           }
-          autoMergeRequest {
-            enabledAt
-          }
           labels(first: 100) {
             nodes {
               name
@@ -1409,15 +1406,38 @@ async function getPullRequest({ github, context, number }) {
     mergeable: pr.mergeable,
     mergeStateStatus: pr.mergeStateStatus,
     author: pr.author?.login || "",
-    nativeAutoMergeEnabled: Boolean(pr.autoMergeRequest),
     labels: pr.labels.nodes.map((label) => label.name),
     lastCommitDate: pr.commits.nodes[0]?.commit?.committedDate,
   };
 }
 
-async function disableNativeAutoMerge({ github, core, result }) {
+// Make "GitHub-native auto-merge is off" a PRECONDITION of publishing a
+// manual-merge PR's passing decision, rather than a best-effort side effect.
+//
+// manualMergeRequired publishes a PASSING decision while refusing to auto-merge,
+// so if native auto-merge is armed GitHub can merge on that green — a PR the gate
+// has just declared maintainer-review-only. The guard used to be keyed on
+// nativeAutoMergeEnabled, captured once in getPullRequest, with the PR files,
+// required checks, issue comments, reviews and review comments all read in
+// between. Auto-merge armed anywhere in that window was invisible, the disable
+// was skipped, and the decision published green (#3381).
+//
+// The freshness fix is a re-read, and the safety fix is confirming the result:
+// this returns normally only when a read taken moments before the publish says
+// auto-merge is off. Anything else throws, which leaves the aggregate red.
+//
+// Note what this deliberately does NOT do: attempt the disable unconditionally
+// and tolerate the "not in the auto-merge queue" rejection. That would have to
+// tell a benign error from a real one by its message, and getting that wrong
+// turns the safety mechanism into a silent no-op. Here a read distinguishes
+// "was never armed" from "failed to disarm", so no error text is interpreted.
+async function ensureNativeAutoMergeDisabled({ github, context, core, result }) {
+  const prNumber = Number(result.prNumber);
+  if (!(await readNativeAutoMergeEnabled({ github, context, number: prNumber }))) {
+    return { state: "not-armed" };
+  }
   if (!result.pullRequestId) {
-    throw new Error(`Cannot disable native auto-merge for PR #${result.prNumber}: missing node ID`);
+    throw new Error(`Cannot disable native auto-merge for PR #${prNumber}: missing node ID`);
   }
   const mutation = `
     mutation DisablePullRequestAutoMerge($pullRequestId: ID!) {
@@ -1429,10 +1449,47 @@ async function disableNativeAutoMerge({ github, core, result }) {
     }
   `;
   await github.graphql(mutation, { pullRequestId: result.pullRequestId });
+  // The mutation succeeding is a claim; the read is the evidence. A disable that
+  // reports success and leaves auto-merge armed must not publish a green.
+  if (await readNativeAutoMergeEnabled({ github, context, number: prNumber })) {
+    throw new Error(
+      `Refusing to publish a passing decision for manual-only PR #${prNumber}: ` +
+        "GitHub-native auto-merge is still armed after disabling it",
+    );
+  }
   core.notice(
-    `Disabled GitHub-native auto-merge for manual-only PR #${result.prNumber} before ` +
+    `Disabled GitHub-native auto-merge for manual-only PR #${prNumber} before ` +
       "publishing its passing decision.",
   );
+  return { state: "disabled" };
+}
+
+// A read of just the auto-merge state, taken as late as possible. Separate from
+// getPullRequest on purpose: the whole defect is that getPullRequest's answer is
+// many round trips old by the time the decision acts on it.
+async function readNativeAutoMergeEnabled({ github, context, number }) {
+  const { owner, repo } = context.repo;
+  const query = `
+    query AutoMergeState($owner: String!, $repo: String!, $number: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          autoMergeRequest {
+            enabledAt
+          }
+        }
+      }
+    }
+  `;
+  const response = await retryRead(`could not read auto-merge state for PR #${number}`, () =>
+    github.graphql(query, { owner, repo, number }),
+  );
+  const pr = response?.repository?.pullRequest;
+  if (!pr) {
+    // An unreadable state is not a disarmed one. Fail closed: the caller turns
+    // this into a red aggregate rather than a published green.
+    throw new Error(`Could not read auto-merge state for PR #${number}`);
+  }
+  return Boolean(pr.autoMergeRequest);
 }
 
 async function listPullRequestFiles({ github, context, number }) {
