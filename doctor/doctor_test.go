@@ -377,12 +377,38 @@ func TestLiveSessionTransientChildIsNotReportedAsEscaped(t *testing.T) {
 		return scanErr == nil && transientPID > 1
 	}, 5*time.Second, 10*time.Millisecond, "tmux pane never published its transient child pid")
 
+	// Wait for the child to become READABLE before asserting anything about it.
+	//
+	// The pane shell publishes the pid the instant fork(2) returns, so the pid
+	// in that file can name a process still inside execve(2), whose environment
+	// is not yet reliably readable — on darwin especially, where the read is a
+	// KERN_PROCARGS2 copy out of the target's user stack, which is the very
+	// thing an exec is in the middle of replacing.
+	//
+	// spawnWithEnv already waits for exactly this on every other child in this
+	// suite ("the fork-exec window would otherwise race the scan"). This is the
+	// one child staged by hand — it has to be a pane GRANDCHILD, which
+	// spawnWithEnv cannot produce — so it is the one child that has to wait for
+	// itself. Without the wait, the marker assertion below fails as a
+	// PRECONDITION on macOS CI and reports an escaped-process classification
+	// that the test never reached (#3515).
+	require.Eventually(t, func() bool {
+		_, st := proctree.LookupEnv(transientPID, tmux.EnvMarkerSession)
+		return st == proctree.EnvFound
+	}, 10*time.Second, 10*time.Millisecond,
+		"transient pane child %d never published a readable %s marker", transientPID, tmux.EnvMarkerSession)
+
 	full, err := proctree.Snapshot()
 	require.NoError(t, err)
 	transient, ok := full[transientPID]
 	require.True(t, ok, "transient pane child %d missing from snapshot", transientPID)
+	// Staging, not the property under test: this pins that the scenario really
+	// is a marked child of the live session, so the escaped-process assertion at
+	// the bottom is about the classification and not about an unreadable pid.
 	marker, markerStatus := proctree.LookupEnv(transientPID, tmux.EnvMarkerSession)
-	require.Equal(t, proctree.EnvFound, markerStatus)
+	require.Equal(t, proctree.EnvFound, markerStatus,
+		"precondition, NOT the classification this test is named for: the staged child's marker "+
+			"must be readable before doctor is asked to classify it")
 	require.Equal(t, name, marker)
 
 	realExec := cmd.MakeExecutor()
