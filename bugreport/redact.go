@@ -15,6 +15,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -69,6 +70,13 @@ type redactor struct {
 	// structured sections don't reach.
 	tmuxNames map[string]struct{}
 	titles    map[string]struct{}
+	// archivePaths are the user-chosen file names an incomplete archive skipped,
+	// gathered while redacting instances so scrubLog can take them out of the
+	// bundled daemon log too. The structured field is blanked by
+	// redactInstanceData; without this the log tail beside it still printed every
+	// name, because they are RELATIVE to the retained worktree root and so carry
+	// neither $HOME nor a username for scrub() to collapse (#3541).
+	archivePaths map[string]struct{}
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
@@ -173,6 +181,9 @@ func (r *redactor) scrubLog(s string) string {
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
 	s = r.scrubSessionTitles(s)
+	// Same ordering rule, same reason: remove the full known representation
+	// before any shape-based pass can consume part of it.
+	s = r.scrubArchiveSkippedPaths(s)
 	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
 	// so it catches current AND historical (archived/killed) sessions the live
 	// instance set no longer references.
@@ -190,6 +201,28 @@ func (r *redactor) scrubLog(s string) string {
 	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
 	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
 	return r.scrub(s)
+}
+
+// scrubArchiveSkippedPaths removes the Go-quoted form of every skipped archive
+// file name from the log tail. Quoted-only is the whole design, not a shortcut:
+// the single emitter of these names formats each one with %q
+// (ArchiveReport.warningSuffix), so strconv.Quote reproduces it byte-for-byte —
+// including the \xff escapes an invalid-UTF-8 name gets, which no plain
+// substring match of the raw bytes would ever find. The bare form is
+// deliberately NOT replaced: a relative file name is routinely a short common
+// word ("old", "key", "src"), and replacing those globally would corrupt
+// unrelated diagnostics for no gain, since nothing emits them unquoted.
+func (r *redactor) scrubArchiveSkippedPaths(s string) string {
+	paths := make([]string, 0, len(r.archivePaths))
+	for path := range r.archivePaths {
+		paths = append(paths, path)
+	}
+	// Deterministic output from a map, matching scrubSessionTitles.
+	sortLongestFirst(paths)
+	for _, path := range paths {
+		s = strings.ReplaceAll(s, strconv.Quote(path), strconv.Quote(redactedMarker))
+	}
+	return s
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -369,6 +402,39 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	for _, cleanup := range d.PendingTabCleanup {
 		r.noteTmuxName(cleanup.TmuxName)
 	}
+	r.noteArchiveSkippedPaths(d.ArchiveReport)
+}
+
+// noteArchiveSkippedPaths records the file names an incomplete archive skipped,
+// so scrubLog can remove them from the bundled log tail the way noteTmuxName
+// does for session names. BOTH representations are recorded: the warning
+// renderer resolves each entry through its filesystem path, which is the raw
+// PathBytes when the name is not valid UTF-8 and the display Path otherwise, so
+// recording only one of them leaves the other in the log (#3541).
+func (r *redactor) noteArchiveSkippedPaths(report *git.ArchiveReport) {
+	if report == nil {
+		return
+	}
+	for _, tree := range report.RetainedTrees {
+		for _, entry := range tree.Skipped {
+			r.noteArchivePath(entry.Path)
+			if len(entry.PathBytes) > 0 {
+				r.noteArchivePath(string(entry.PathBytes))
+			}
+		}
+	}
+}
+
+// noteArchivePath records one skipped archive file name for scrubLog, skipping
+// blanks and the marker a re-redacted record already carries.
+func (r *redactor) noteArchivePath(path string) {
+	if path == "" || path == redactedMarker {
+		return
+	}
+	if r.archivePaths == nil {
+		r.archivePaths = make(map[string]struct{})
+	}
+	r.archivePaths[path] = struct{}{}
 }
 
 // noteTitle records one raw session title for structured-string and log
@@ -499,6 +565,14 @@ var sensitiveJSONKeys = map[string]bool{
 	"auth": true, "authorization": true, "bearer": true,
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
+	// path_bytes is the DURABLE form of a path that is not valid UTF-8 — the
+	// archive report carries one beside every `path` it records, marshaled as
+	// base64. Blanking only `path` therefore redacted the display name and
+	// shipped the real one encoded, which the text scrub below cannot see: there
+	// is no $HOME to collapse and no username to blank inside base64. The typed
+	// path learned this in #3546; the fallback, which by definition runs on a
+	// record af could not parse, kept leaking it (#3541).
+	"path_bytes":  true,
 	"remote_meta": true,
 	// A typed record drops this storage-only teardown union in
 	// redactInstanceData. Drop the whole object on the generic fallback too: a
@@ -645,6 +719,16 @@ func redactInstanceData(d *session.InstanceData) {
 	// diagnostic ("permission denied on N files").
 	if d.ArchiveReport != nil {
 		for i := range d.ArchiveReport.RetainedTrees {
+			// The tree's display Path survives (see above), but its PathBytes
+			// cannot: when the root is not valid UTF-8 that field holds the
+			// complete raw ABSOLUTE path and marshals as base64, so the $HOME and
+			// username collapse the display form relies on has nothing to match
+			// and the bundle ships the operator's home directory encoded (#3541).
+			// Clearing rather than marking it is what the wire format expects —
+			// MarshalJSON re-derives the field from Path, and the surviving Path
+			// is valid UTF-8 by construction (archivePathFields replaced the bad
+			// bytes with U+FFFD), so the derivation yields nil and stays nil.
+			d.ArchiveReport.RetainedTrees[i].PathBytes = nil
 			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker
 				d.ArchiveReport.RetainedTrees[i].Skipped[j].PathBytes = nil
