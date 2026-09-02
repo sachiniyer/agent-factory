@@ -63,16 +63,31 @@ func collapseDetail(raw string) string {
 	return truncateDetail(strings.Join(parts, "; "))
 }
 
-// truncateDetail caps s at maxStderrDetail, cutting on a rune boundary so a
-// multi-byte character split by the limit cannot emit a replacement character
-// into the log.
+// truncateDetail caps s at maxStderrDetail, keeping BOTH ends and cutting on
+// rune boundaries so a multi-byte character split by the limit cannot emit a
+// replacement character into the log.
+//
+// Keeping the tail is the point, not a refinement. For git and gh the
+// actionable line is usually LAST: a push prints whatever the remote hooks
+// emitted and only then its rejection reason, and gh prints progress before
+// its error. A head-only cut therefore keeps the noise and discards the
+// diagnosis — the exact opposite of what this whole change exists to do, and a
+// regression for runGitCommandContextWithEnvironment, which surfaced the full
+// stderr before this helper existed.
+//
+// The head is still worth its half: it carries the command's FIRST complaint,
+// which is often the root cause that later lines only echo.
 func truncateDetail(s string) string {
 	if len(s) <= maxStderrDetail {
 		return s
 	}
-	cut := maxStderrDetail
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
+	head := maxStderrDetail / 2
+	for head > 0 && !utf8.RuneStart(s[head]) {
+		head--
 	}
-	return s[:cut] + "… (truncated)"
+	tail := len(s) - (maxStderrDetail - maxStderrDetail/2)
+	for tail < len(s) && !utf8.RuneStart(s[tail]) {
+		tail++
+	}
+	return s[:head] + "… (truncated) …" + s[tail:]
 }

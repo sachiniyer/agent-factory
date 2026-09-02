@@ -128,8 +128,22 @@ func TestPreviewChannelNamesWhichConditionFailed(t *testing.T) {
 				{TagName: "v1.9.10-preview-1", Draft: true},
 				{TagName: "v1.9.11-preview-1", Draft: true},
 			},
-			want:    []string{"all 2 release(s)", "drafts"},
-			notWant: "parseable",
+			want: []string{"all 2 release(s)", "drafts", "published"},
+			// It must not claim the TAGS are broken: these parse fine, so
+			// publishing one really is the whole remedy here.
+			notWant: "tag has to be fixed too",
+		},
+		{
+			// The review case (#3392 review): drafts whose tags would STILL
+			// not parse after publication. Recommending "publish one" there
+			// sends the operator after a fix that cannot work.
+			name: "all drafts with unparseable tags must not promise publication is enough",
+			releases: []Release{
+				{TagName: "nightly", Draft: true},
+				{TagName: "latest", Draft: true},
+			},
+			want:    []string{"all 2 release(s)", "drafts", "parseable version tag", "tag has to be fixed too"},
+			notWant: "empty release list",
 		},
 		{
 			name: "unparseable tags are called malformed, not missing",

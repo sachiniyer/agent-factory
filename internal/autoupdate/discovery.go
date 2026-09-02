@@ -100,8 +100,25 @@ func unusablePreviewReleases(releases []Release) error {
 		}
 	}
 	if published == 0 {
-		return fmt.Errorf("all %d release(s) on the preview channel are drafts; a draft is never an "+
-			"update candidate, so one has to be published before af can move to it", len(releases))
+		// "Publish one" is only a real remedy if some draft's tag would
+		// actually parse once published. A draft tagged `nightly` stays
+		// unusable afterwards, so recommending publication there sends the
+		// operator after a fix that cannot work and hides the malformed tag
+		// (#3392 review). Preview accepts prereleases, so parseability is the
+		// only other gate PickLatestReleaseTag applies.
+		parseable := 0
+		for _, release := range releases {
+			if parseVersion(strings.TrimPrefix(release.TagName, "v")) != nil {
+				parseable++
+			}
+		}
+		if parseable == 0 {
+			return fmt.Errorf("all %d release(s) on the preview channel are drafts, and none carries a "+
+				"parseable version tag; publishing one would not be enough — the tag has to be fixed too", len(releases))
+		}
+		return fmt.Errorf("all %d release(s) on the preview channel are drafts (%d with a parseable tag); "+
+			"a draft is never an update candidate, so one has to be published before af can move to it",
+			len(releases), parseable)
 	}
 	return fmt.Errorf("none of the %d published release(s) on the preview channel (%d returned in total) "+
 		"carries a parseable version tag; the tagging is malformed rather than the release missing, so "+

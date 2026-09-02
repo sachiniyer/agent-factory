@@ -111,16 +111,39 @@ func TestTruncateDetail_BoundsAndKeepsRunesIntact(t *testing.T) {
 
 	flood := strings.Repeat("x", maxStderrDetail*3)
 	got := truncateDetail(flood)
-	if len(got) > maxStderrDetail+len("… (truncated)") {
+	if len(got) > maxStderrDetail+len("… (truncated) …") {
 		t.Errorf("truncated length %d exceeds the bound", len(got))
 	}
-	if !strings.HasSuffix(got, "… (truncated)") {
-		t.Errorf("a truncated detail must say so, got suffix %q", got[max(0, len(got)-20):])
+	if !strings.Contains(got, "… (truncated) …") {
+		t.Errorf("a truncated detail must say so, got %q", got)
 	}
 
 	// A 3-byte rune straddling the limit must be dropped whole, not split.
 	straddling := strings.Repeat("a", maxStderrDetail-1) + "☃" + strings.Repeat("b", 100)
 	if cut := truncateDetail(straddling); strings.Contains(cut, "�") {
 		t.Errorf("truncation split a multi-byte rune: %q", cut[max(0, len(cut)-20):])
+	}
+}
+
+// TestTruncateDetail_KeepsTheTail is the review regression (#3392 review): a
+// head-only bound discards exactly the line worth reading. git prints whatever
+// the remote hooks emitted and only THEN its rejection reason, so truncating
+// from the front keeps the noise and drops the diagnosis — and for
+// runGitCommandContextWithEnvironment, which surfaced full stderr before this
+// helper existed, that would have been a straight regression.
+func TestTruncateDetail_KeepsTheTail(t *testing.T) {
+	const diagnosis = "error: failed to push some refs — remote rejected (pre-receive hook declined)"
+	noise := strings.Repeat("remote: building... ", 400)
+	got := truncateDetail(noise + diagnosis)
+
+	if !strings.HasSuffix(got, diagnosis) {
+		t.Errorf("the final diagnosis must survive truncation.\n got tail: %q\nwant suffix: %q",
+			got[max(0, len(got)-120):], diagnosis)
+	}
+	if !strings.HasPrefix(got, "remote: building") {
+		t.Errorf("the head must survive too, got prefix %q", got[:min(40, len(got))])
+	}
+	if len(got) > maxStderrDetail+len("… (truncated) …") {
+		t.Errorf("truncated length %d exceeds the bound", len(got))
 	}
 }
