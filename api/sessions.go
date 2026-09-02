@@ -104,7 +104,10 @@ func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, er
 // Titles are unique per-repo, so this unscoped lookup resolves only when exactly
 // one session matches; several matches return ErrAmbiguousTitle. Callers with a
 // repo in hand should use getSessionByTitleInScope instead.
-func getSessionByTitle(title string) (*session.InstanceData, error) {
+//
+// The second return is the ambiguity-widening notice (empty when clean); see
+// warnIncompleteTitleWidening and #3511.
+func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 	data, fallBack, err := snapshotRead(daemon.SnapshotRequest{})
 	if err == nil {
 		var matches []session.InstanceData
@@ -117,7 +120,7 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 		// repoID, and only a title held by two distinct PROJECTS is ambiguous.
 		paths := session.DedupeSorted(repoPathsOf(matches))
 		if len(paths) > 1 {
-			return nil, session.AmbiguousTitleError(title, repoPathsOf(matches))
+			return nil, "", session.AmbiguousTitleError(title, repoPathsOf(matches))
 		}
 		if len(matches) > 0 {
 			// One snapshot match is not proof of uniqueness: the snapshot mirrors
@@ -135,28 +138,29 @@ func getSessionByTitle(title string) (*session.InstanceData, error) {
 			// it needs the guard on the daemon's side of the wire (a resolve-by-title
 			// RPC that runs findSession, or a Snapshot that carries unrestorable
 			// rows); the destructive paths already resolve through findSession.
+			var notice string
 			if !apiclient.IsRemoteTarget() {
 				extra, gaps, err := diskRepoPathsForTitle(title, paths)
 				if err == nil && len(extra) > 1 {
-					return nil, session.AmbiguousTitleError(title, extra)
+					return nil, "", session.AmbiguousTitleError(title, extra)
 				}
-				warnIncompleteTitleWidening(title, gaps, err)
+				notice = warnIncompleteTitleWidening(title, gaps, err)
 			}
-			return &matches[0], nil
+			return &matches[0], notice, nil
 		}
 		// Mirror findInstanceByTitle's clean-miss error so output is unchanged.
-		return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
+		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}
 	// Remote target: no local disk fallback; surface the error (see snapshotRead).
 	if !fallBack {
-		return nil, err
+		return nil, "", err
 	}
 	got, _, err := findInstanceByTitle(title)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	view := got.ForClientRead()
-	return &view, nil
+	return &view, "", nil
 }
 
 // whoamiSession returns the session whose TmuxName matches tmuxName, preferring
@@ -303,9 +307,13 @@ those projects instead of guessing between them.`,
 		if err != nil {
 			return jsonError(err)
 		}
-		data, err := getSessionByTitleInScope(repoID, args[0])
+		data, notice, err := getSessionByTitleInScope(repoID, args[0])
 		if err != nil {
 			return jsonError(err)
+		}
+		// Bare payload stays byte-identical to before #1029 (#3511).
+		if envelopeOutput {
+			return jsonOut(sessionGetPayload(data, notice))
 		}
 		return jsonOut(data)
 	},

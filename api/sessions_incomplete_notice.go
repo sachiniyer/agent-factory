@@ -9,9 +9,11 @@ package api
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // notedIncompleteAnswers dedupes incomplete-answer notices within one command
@@ -24,7 +26,10 @@ import (
 // whatever else the command says (#3479 review). Said once, it is still true.
 var notedIncompleteAnswers sync.Map
 
-// noteOnce writes msg to warnWriter the first time it is seen in this process.
+// noteOnce writes msg to warnWriter the first time it is seen in this process,
+// in text-output mode. Under --json this is not the only channel the notice
+// travels through: warnIncompleteTitleWidening also returns it, so a JSON
+// caller can carry it in its own payload instead (#3511).
 func noteOnce(msg string) {
 	if envelopeOutput {
 		return
@@ -37,7 +42,8 @@ func noteOnce(msg string) {
 
 // warnIncompleteTitleWidening reports that the cross-project ambiguity widening
 // behind an unscoped `sessions get` could not check every project, so the
-// project it named may be the wrong one.
+// project it named may be the wrong one, and returns that same notice as a
+// trimmed one-line string — empty when there is nothing to report.
 //
 // Both ways that check can come up short are reported, because both leave the
 // same hole: per-repo records it could not read (gaps), and a failure to
@@ -50,20 +56,54 @@ func noteOnce(msg string) {
 // backstops a read, where breaking a working lookup costs more than the wrong
 // project name it would prevent (#3479).
 //
-// Silent under --json, which promises stderr carries the {data,error} envelope —
-// a free-form line there hands automation invalid JSON on a successful command
-// (#3169). That leaves the mode most likely to be scripted without the caveat;
-// closing it needs a structural channel in the envelope, which is a public API
-// contract change and is tracked in #3511.
-func warnIncompleteTitleWidening(title string, gaps []config.RepoInstancesSkip, err error) {
+// Text-output mode prints it once via noteOnce, deduped exactly as documented
+// there. Under --json, stderr carries only the {data,error} envelope — a
+// free-form line there hands automation invalid JSON on a successful command
+// (#3169) — so noteOnce is a no-op there and the returned string is the only
+// channel left. #3511 asked whether closing that hole needs a structural field
+// on the shared apiproto.Envelope; for THIS notice it doesn't; the one caller
+// that needs it (sessionsGetCmd) carries the returned string into its own
+// command's `data` payload instead, which is additive to one command's JSON
+// shape and needs no contract sign-off. That leaves #3511's broader question —
+// other commands, and the envelope itself — open for Sachin.
+func warnIncompleteTitleWidening(title string, gaps []config.RepoInstancesSkip, err error) string {
+	var msg string
 	switch {
 	case err != nil:
-		noteOnce(fmt.Sprintf(
+		msg = fmt.Sprintf(
 			"warning: could not check any project for another session titled %q, so this result may name the wrong project: %v; pass --repo <path> to scope the lookup\n",
-			title, err))
+			title, err)
 	case len(gaps) > 0:
-		noteOnce(fmt.Sprintf(
+		msg = fmt.Sprintf(
 			"warning: could not check every project for another session titled %q, so this result may name the wrong project: %s; pass --repo <path> to scope the lookup, or %s\n",
-			title, config.DescribeRepoInstancesSkips(gaps), config.RepoInstancesSkipRemedy(gaps)))
+			title, config.DescribeRepoInstancesSkips(gaps), config.RepoInstancesSkipRemedy(gaps))
+	default:
+		return ""
 	}
+	noteOnce(msg)
+	return strings.TrimRight(msg, "\n")
+}
+
+// sessionGetResult is `sessions get`'s --json payload shape when the
+// cross-project ambiguity widening behind it came up short (#3511). Embedding
+// InstanceData keeps every field an existing --json consumer decodes at the
+// same top level; Warnings is new and omitempty, so decoding only the fields a
+// client already knows is unaffected. In text-output mode the same notice
+// prints to stderr instead (see warnIncompleteTitleWidening above) — stderr
+// under --json is reserved for the {data,error} envelope alone (#3169), which
+// is the hole this type closes without touching that envelope.
+type sessionGetResult struct {
+	session.InstanceData
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// sessionGetPayload builds sessionsGetCmd's --json payload for a resolved
+// session and its ambiguity-widening notice (empty when there is nothing to
+// report). Split out so the embedding decision is testable without cobra's
+// RunE plumbing.
+func sessionGetPayload(data *session.InstanceData, notice string) any {
+	if notice == "" {
+		return data
+	}
+	return sessionGetResult{InstanceData: *data, Warnings: []string{notice}}
 }

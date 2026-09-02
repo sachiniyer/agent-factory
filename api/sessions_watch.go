@@ -172,7 +172,11 @@ func validateWatchFlags(interval, timeout time.Duration) error {
 // same-titled session in a different repo is never watched by mistake. It
 // prefers the daemon's live snapshot and falls back to a scoped disk scan when
 // no daemon is reachable, mirroring getSessionByTitle (#1029 PR 2).
-func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, error) {
+//
+// The second return is getSessionByTitle's ambiguity-widening notice, passed
+// through unchanged; a scoped lookup never runs that check (a single repo
+// cannot be cross-project ambiguous), so it always returns empty.
+func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, string, error) {
 	if repoID == "" {
 		return getSessionByTitle(title)
 	}
@@ -182,19 +186,19 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, erro
 		// 401 from a bad token) instead of masking it as "instance not found" via a
 		// same-machine disk scan (#1679).
 		if !fallBack {
-			return nil, err
+			return nil, "", err
 		}
 		data, err = diskListSessions(repoID)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 	}
 	for i := range data {
 		if data[i].Title == title {
-			return &data[i], nil
+			return &data[i], "", nil
 		}
 	}
-	return nil, fmt.Errorf("session %q %w", title, errTitleNotFound)
+	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 }
 
 var sessionsWatchCmd = &cobra.Command{
@@ -257,7 +261,15 @@ idle, because an idle report tells a driver to act.`,
 		}
 
 		data, err := watchForReady(watchDeps{
-			get:      func(t string) (*session.InstanceData, error) { return getSessionByTitleInScope(repoID, t) },
+			// The ambiguity-widening notice is discarded here on purpose: #3511
+			// closed this hole for `sessions get`'s payload, not `watch`'s — an
+			// unscoped watch re-resolves the title every poll (up to ~900 times at
+			// the default timeout), and folding a per-poll notice into a single
+			// final JSON record needs its own design, not a drive-by here.
+			get: func(t string) (*session.InstanceData, error) {
+				data, _, err := getSessionByTitleInScope(repoID, t)
+				return data, err
+			},
 			interval: watchIntervalFlag,
 			timeout:  watchTimeoutFlag,
 			now:      time.Now,
