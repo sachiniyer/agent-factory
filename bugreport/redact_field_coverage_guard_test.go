@@ -469,6 +469,77 @@ type marshalerFixture struct {
 	unwalked []string
 }
 
+// marshalerReport collects everything one reviewed type's contract found, so
+// the per-state readings and the named archived readings report through the
+// same path and with the same wording.
+type marshalerReport struct {
+	added   []string
+	changed []string
+	dropped []string
+}
+
+// diffFixture is the contract itself, applied to one fixture: the member diff
+// against the plain twin, the declared extras, and the search for text planted
+// where encoding/json could never reach it.
+func diffFixture(t *testing.T, report *marshalerReport, typ reflect.Type, entry reviewedMarshaler, where string, fixture marshalerFixture, pinExtras bool) {
+	t.Helper()
+	note := func(into *[]string, format string, args ...any) {
+		*into = append(*into, fmt.Sprintf(format, args...))
+	}
+	customMembers := decodeMembers(t, typ.String()+".MarshalJSON", fixture.custom)
+	baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), fixture.baseline)
+	for name, got := range customMembers {
+		want, isField := baselineMembers[name]
+		switch {
+		case !isField:
+			declared, ok := entry.extra[name]
+			if !ok {
+				note(&report.added, "%s: %s = %s", where, name, got)
+			} else if pinExtras && string(got) != declared {
+				note(&report.changed, "%s: %s emits %s, the entry declares %s", where, name, got, declared)
+			}
+		case string(got) != string(want):
+			note(&report.changed, "%s: %s emits %s, the field holds %s", where, name, got, want)
+		}
+	}
+	for name := range baselineMembers {
+		if _, ok := customMembers[name]; !ok {
+			note(&report.dropped, "%s: %s", where, name)
+		}
+	}
+	for name := range entry.extra {
+		if _, ok := customMembers[name]; !ok {
+			note(&report.dropped, "%s: %s (declared as an extra, not emitted)", where, name)
+		}
+	}
+	for _, form := range fixture.unwalked {
+		if strings.Contains(string(fixture.custom), form) {
+			note(&report.added, "%s: text planted where encoding/json would never reach it "+
+				"(an unexported or json:\"-\" field): %s", where, form)
+		}
+	}
+}
+
+// reportTo turns what was collected into failures, grouped by what went wrong.
+func (r *marshalerReport) reportTo(t *testing.T, typ reflect.Type, entry reviewedMarshaler) {
+	t.Helper()
+	for label, found := range map[string][]string{
+		"emits member(s) the entry does not declare":        r.added,
+		"renders member(s) differently from what it claims": r.changed,
+		"no longer emits member(s)":                         r.dropped,
+	} {
+		if len(found) == 0 {
+			continue
+		}
+		t.Errorf("%s is exempted as %q, but its MarshalJSON %s:\n  %s\n\n"+
+			"The exemption describes code that no longer runs. Re-read the marshaler, then "+
+			"update the entry or delete it — an entry that overstates what a marshaler emits "+
+			"lets the walk record evidence the bundle never shows, and understates what it "+
+			"adds beside it.",
+			typ, entry.why, label, strings.Join(dedupeSorted(found), "\n  "))
+	}
+}
+
 // newMarshalerFixture builds a FRESH record and marshals it.
 //
 // Fresh every time on purpose. A marshaler that mutates what it renders — hidden
@@ -554,43 +625,12 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				t.Fatalf("planted nothing in %s, so this contract check would pass vacuously", typ)
 			}
 
-			var added, changed, dropped []string
+			report := &marshalerReport{}
 			note := func(into *[]string, format string, args ...any) {
 				*into = append(*into, fmt.Sprintf(format, args...))
 			}
 			diff := func(where string, fixture marshalerFixture, pinExtras bool) {
-				customMembers := decodeMembers(t, typ.String()+".MarshalJSON", fixture.custom)
-				baselineMembers := decodeMembers(t, "the plain twin of "+typ.String(), fixture.baseline)
-				for name, got := range customMembers {
-					want, isField := baselineMembers[name]
-					switch {
-					case !isField:
-						declared, ok := entry.extra[name]
-						if !ok {
-							note(&added, "%s: %s = %s", where, name, got)
-						} else if pinExtras && string(got) != declared {
-							note(&changed, "%s: %s emits %s, the entry declares %s", where, name, got, declared)
-						}
-					case string(got) != string(want):
-						note(&changed, "%s: %s emits %s, the field holds %s", where, name, got, want)
-					}
-				}
-				for name := range baselineMembers {
-					if _, ok := customMembers[name]; !ok {
-						note(&dropped, "%s: %s", where, name)
-					}
-				}
-				for name := range entry.extra {
-					if _, ok := customMembers[name]; !ok {
-						note(&dropped, "%s: %s (declared as an extra, not emitted)", where, name)
-					}
-				}
-				for _, form := range fixture.unwalked {
-					if strings.Contains(string(fixture.custom), form) {
-						note(&added, "%s: text planted where encoding/json would never reach it "+
-							"(an unexported or json:\"-\" field): %s", where, form)
-					}
-				}
+				diffFixture(t, report, typ, entry, where, fixture, pinExtras)
 			}
 
 			// The state the walk leaves behind is the one the declared extra
@@ -611,7 +651,7 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					secondMembers := decodeMembers(t, typ.String()+".MarshalJSON", second.custom)
 					for name := range entry.extra {
 						if string(firstMembers[name]) != string(secondMembers[name]) {
-							note(&changed, "%s: %s emits %s for one record and %s for another whose "+
+							note(&report.changed, "%s: %s emits %s for one record and %s for another whose "+
 								"only difference is the text planted in it — the entry claims it is "+
 								"derived from the enum beside it, never from user text",
 								where, name, firstMembers[name], secondMembers[name])
@@ -622,7 +662,7 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					// output must not move at all.
 					bare := newMarshalerFixture(t, typ, seq, spread, state, false)
 					if !bytes.Equal(first.custom, bare.custom) {
-						note(&added, "%s: the output depends on state encoding/json cannot reach — "+
+						note(&report.added, "%s: the output depends on state encoding/json cannot reach — "+
 							"with the unexported and json:\"-\" fields populated it emits %s, with "+
 							"them empty %s", where, first.custom, bare.custom)
 					}
@@ -630,21 +670,7 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				}
 			}
 
-			for label, found := range map[string][]string{
-				"emits member(s) the entry does not declare":        added,
-				"renders member(s) differently from what it claims": changed,
-				"no longer emits member(s)":                         dropped,
-			} {
-				if len(found) == 0 {
-					continue
-				}
-				t.Errorf("%s is exempted as %q, but its MarshalJSON %s:\n  %s\n\n"+
-					"The exemption describes code that no longer runs. Re-read the marshaler, then "+
-					"update the entry or delete it — an entry that overstates what a marshaler emits "+
-					"lets the walk record evidence the bundle never shows, and understates what it "+
-					"adds beside it.",
-					typ, entry.why, label, strings.Join(dedupeSorted(found), "\n  "))
-			}
+			report.reportTo(t, typ, entry)
 		})
 	}
 }
@@ -653,25 +679,61 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 // exported fields and tags and NO methods, so encoding/json renders it by its
 // own field rules instead of through the type's MarshalJSON.
 //
-// Unexported fields are left out: json never emits them, so their absence cannot
-// change the baseline — which is exactly what makes an unexported field's text
-// show up as an undeclared member above rather than as a matching one.
+// Ordinary unexported fields are left out: json never emits them, so their
+// absence cannot change the baseline — which is exactly what makes an unexported
+// field's text show up as an undeclared member in the diff rather than as a
+// matching one.
+//
+// An anonymously embedded unexported STRUCT is the exception, and skipping it
+// was a false positive waiting to happen: json PROMOTES its exported members, so
+// a twin without them makes a faithful alias marshaler look like it adds every
+// one of those members (#3592 review). They are promoted into the twin instead,
+// carrying their own tags — which is what json does with them, and the same
+// shape mustVisit already handles in the main walk.
 func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 	t.Helper()
 	typ := value.Type()
 	var fields []reflect.StructField
-	var sources []int
+	var sources []func(reflect.Value) reflect.Value
 	for i := 0; i < typ.NumField(); i++ {
-		f := typ.Field(i)
-		if f.PkgPath != "" {
+		field := typ.Field(i)
+		at := i
+		if field.PkgPath == "" {
+			fields = append(fields, reflect.StructField{
+				Name: field.Name, Type: field.Type, Tag: field.Tag, Anonymous: field.Anonymous,
+			})
+			sources = append(sources, func(v reflect.Value) reflect.Value { return v.Field(at) })
 			continue
 		}
-		fields = append(fields, reflect.StructField{Name: f.Name, Type: f.Type, Tag: f.Tag, Anonymous: f.Anonymous})
-		sources = append(sources, i)
+		embedded := baseType(field.Type)
+		if !field.Anonymous || embedded.Kind() != reflect.Struct {
+			continue
+		}
+		for j := 0; j < embedded.NumField(); j++ {
+			promoted := embedded.Field(j)
+			if promoted.PkgPath != "" {
+				continue
+			}
+			member := j
+			fields = append(fields, reflect.StructField{
+				Name: promoted.Name, Type: promoted.Type, Tag: promoted.Tag,
+			})
+			sources = append(sources, func(v reflect.Value) reflect.Value {
+				held := v.Field(at)
+				held = reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem()
+				for held.Kind() == reflect.Pointer {
+					if held.IsNil() {
+						return reflect.Zero(promoted.Type)
+					}
+					held = held.Elem()
+				}
+				return held.Field(member)
+			})
+		}
 	}
 	twin := reflect.New(reflect.StructOf(fields)).Elem()
-	for i, src := range sources {
-		twin.Field(i).Set(value.Field(src))
+	for i, source := range sources {
+		twin.Field(i).Set(source(value))
 	}
 	if rendersItself(twin.Type()) {
 		t.Fatalf("the plain twin of %s still renders itself, so it is no baseline", typ)
@@ -723,6 +785,22 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 		for i := 0; i < value.Len(); i++ {
 			plantUnwalkedInto(filler, value.Index(i), path+"[]", depth+1)
 		}
+	case reflect.Map:
+		// A map element is not addressable, so it is planted in a copy and
+		// written back. Without this arm the hidden fields of a map's element
+		// struct stay empty and raise nothing — neither a marker nor a register
+		// entry — so a parent that exposes them would pass (#3592 review).
+		if value.IsNil() || !value.CanSet() {
+			return
+		}
+		rebuilt := reflect.MakeMap(value.Type())
+		for _, key := range value.MapKeys() {
+			elem := reflect.New(value.Type().Elem()).Elem()
+			elem.Set(value.MapIndex(key))
+			plantUnwalkedInto(filler, elem, path+"[]", depth+1)
+			rebuilt.SetMapIndex(key, elem)
+		}
+		value.Set(rebuilt)
 	case reflect.Struct:
 		if value.Type() == reflect.TypeOf(time.Time{}) {
 			return
@@ -735,6 +813,16 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			case field.PkgPath != "":
 				hidden := value.Field(i)
 				settable := reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem()
+				if field.Anonymous && baseType(field.Type).Kind() == reflect.Struct {
+					// NOT unwalked state: json PROMOTES an anonymous unexported
+					// struct's exported members and mustVisit already plants
+					// them, so planting them again here makes the two fixtures
+					// differ in walked text and the independence check blames
+					// the marshaler for it. Only what is hidden DEEPER inside
+					// is unwalked (#3592 review).
+					plantUnwalkedInto(filler, settable, at, depth+1)
+					continue
+				}
 				filler.fill(settable, at, 0, false)
 				plantUnwalkedInto(filler, settable, at, depth+1)
 			case field.Tag.Get("json") == "-":
@@ -888,8 +976,16 @@ func marshalOrFail(t *testing.T, what string, value reflect.Value) []byte {
 // Both spellings of archived are read: the composed Status with its matching
 // Liveness, and the legacy row a pre-#1195 daemon wrote, whose Liveness is unset
 // and whose archived-ness lives in the Status integer alone.
+//
+// The gate itself is ARMED. Production sets snapshotTabsProjected alongside the
+// roster, and the walk leaves a bool at its zero value — so a marshaler that
+// exposed the roster only while that flag is true would have sailed through a
+// fixture that never set it (#3592 review). And these fixtures go through the
+// whole contract, not just the hidden-state comparison: a member replaced or
+// added only in an archived row is caught here too.
 func TestGuardInstanceDataMarshalerIgnoresHiddenStateWhenArchived(t *testing.T) {
 	typ := reflect.TypeOf(session.InstanceData{})
+	entry := reviewedMarshalerTypes[typ]
 	for _, tc := range []struct {
 		name     string
 		status   session.Status
@@ -900,17 +996,23 @@ func TestGuardInstanceDataMarshalerIgnoresHiddenStateWhenArchived(t *testing.T) 
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			archived := func(value reflect.Value) {
+				// Every bool on, so any flag a marshaler might gate on is open,
+				// and the two enums then set to the archived pair under test.
+				seedScalars(value, func(int, int) int { return 1 }, 1, "")
 				record := value.Addr().Interface().(*session.InstanceData)
 				record.Status = tc.status
 				record.Liveness = tc.liveness
 			}
+			report := &marshalerReport{}
 			withHidden := archivedFixture(t, typ, 7000, true, archived)
 			without := archivedFixture(t, typ, 7000, false, archived)
+			diffFixture(t, report, typ, entry, "archived "+tc.name, withHidden, false)
 			if !bytes.Equal(withHidden.custom, without.custom) {
-				t.Errorf("session.InstanceData.MarshalJSON reads state encoding/json cannot see, "+
-					"in the state production populates it:\n  with it: %s\n  without: %s",
-					withHidden.custom, without.custom)
+				report.added = append(report.added, fmt.Sprintf(
+					"archived %s: the output depends on state encoding/json cannot reach — "+
+						"with it: %s\n  without: %s", tc.name, withHidden.custom, without.custom))
 			}
+			report.reportTo(t, typ, entry)
 		})
 	}
 }
