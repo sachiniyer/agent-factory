@@ -291,7 +291,7 @@ func RegisterProject(path string) (Project, error) {
 						return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 					}
 					if !oldRootHasMarker {
-						if err := verifyBindingStillCurrent(binding, "rediscovering its moved checkout for"); err != nil {
+						if err := verifyBindingStillCurrent(binding, checkoutID, "rediscovering its moved checkout for"); err != nil {
 							return err
 						}
 						record.Root = binding.root
@@ -316,7 +316,7 @@ func RegisterProject(path string) (Project, error) {
 				// invented id — a rebind is the only thing that moves it, and
 				// it moves it to another REAL id.
 				if record.RepoID == "" && binding.repoID != "" {
-					if err := verifyBindingStillCurrent(binding, "recording the identity of"); err != nil {
+					if err := verifyBindingStillCurrent(binding, record.CheckoutID, "recording the identity of"); err != nil {
 						return err
 					}
 					record.RepoID = binding.repoID
@@ -335,7 +335,7 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
-		if err := verifyBindingStillCurrent(binding, "registering"); err != nil {
+		if err := verifyBindingStillCurrent(binding, checkoutID, "registering"); err != nil {
 			return err
 		}
 		record := projectRecord{
@@ -427,7 +427,7 @@ func RebindProject(id, path string) (Project, error) {
 				return fmt.Errorf("checkout marker %s appears at both %s and %s — move or remove one copy; af will not choose between them", checkoutID, record.Root, binding.root)
 			}
 		}
-		if err := verifyBindingStillCurrent(binding, "rebinding"); err != nil {
+		if err := verifyBindingStillCurrent(binding, checkoutID, "rebinding"); err != nil {
 			return err
 		}
 		record.CheckoutID = checkoutID
@@ -465,7 +465,7 @@ func RebindProject(id, path string) (Project, error) {
 //
 // It narrows the window to the write itself; check-then-act cannot close it,
 // and a refusal costs only a retry.
-func verifyBindingStillCurrent(binding projectBinding, verb string) error {
+func verifyBindingStillCurrent(binding projectBinding, checkoutID, verb string) error {
 	if projectRegistryCommitRaceHookForTest != nil {
 		projectRegistryCommitRaceHookForTest()
 	}
@@ -475,6 +475,20 @@ func verifyBindingStillCurrent(binding projectBinding, verb string) error {
 	}
 	if current.ID != binding.repoID {
 		return fmt.Errorf("project path %q changed repositories while af was %s it: it resolved to %s and now resolves to %s — nothing was changed; retry once the path is stable", binding.root, verb, binding.repoID, current.ID)
+	}
+	// The identity alone is not enough (#3530 review id 3919490138). A repo ID
+	// is derived from the identity ROOT, so another clone at the same root
+	// produces the same one — and a record pairing the live checkout with the
+	// previous clone's CheckoutID fails its own marker proof immediately,
+	// leaving the project unresolved until someone rebinds it by hand. The
+	// marker is the only thing that distinguishes the two, so it is what this
+	// re-reads.
+	recorded, present, err := readCheckoutID(binding.checkoutMarkerPath)
+	if err != nil {
+		return fmt.Errorf("re-check the checkout marker for %q before %s: %w", binding.root, verb, err)
+	}
+	if !present || recorded != checkoutID {
+		return fmt.Errorf("the checkout at %q changed while af was %s it: its marker read %s and now reads %q — nothing was changed; retry once the path is stable", binding.root, verb, checkoutID, recorded)
 	}
 	return nil
 }

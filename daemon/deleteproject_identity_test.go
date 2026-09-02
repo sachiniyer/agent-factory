@@ -421,62 +421,6 @@ func TestDeleteBySymlinkSpelledPathFindsALegacyRecord(t *testing.T) {
 	}
 }
 
-// TestUnansweredProbeWithholdsTheRecordedPathSweep pins #3530 review id
-// 3918379027. The sweep supplies the recorded path's hash only while that path
-// does not resolve — but a FAILED probe is not the same as an answered one. A
-// killed or unstartable git says nothing about what occupies the path, and a
-// repository that is there owns that hash, so acting on the failure alone would
-// delete a live occupant's own opt-in on behalf of this project.
-func TestUnansweredProbeWithholdsTheRecordedPathSweep(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	installOptionsRecordingBackend(t)
-	worktree, project, realID := worktreeRecordedProject(t)
-	pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
-	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
-		t.Fatalf("record the resolved identity: %v", err)
-	}
-	if err := os.RemoveAll(worktree); err != nil {
-		t.Fatalf("remove the recorded workspace: %v", err)
-	}
-	manager, err := NewManager(config.DefaultConfig())
-	if err != nil {
-		t.Fatalf("NewManager: %v", err)
-	}
-
-	var swept []string
-	original := deregisterRootAgents
-	deregisterRootAgents = func(ids ...string) ([]string, error) {
-		swept = append(swept, ids...)
-		return nil, nil
-	}
-	t.Cleanup(func() { deregisterRootAgents = original })
-
-	// Every git from here on dies on a signal: nothing it is asked can be
-	// said to have been answered.
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatalf("LookPath(git): %v", err)
-	}
-	binDir := t.TempDir()
-	shim := "#!/bin/sh\nkill -9 $$\nexec " + realGit + " \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
-		t.Fatalf("write git shim: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: realID}); err != nil {
-		t.Fatalf("DeleteProject by the recorded identity: %v", err)
-	}
-	if len(swept) == 0 {
-		t.Fatalf("fixture must reach the durable sweep, or it pins nothing")
-	}
-	for _, id := range swept {
-		if id == pathID {
-			t.Fatalf("the sweep supplied %s on an UNANSWERED probe: a repository occupying that path owns the id, so this deletes a live occupant's opt-in", pathID)
-		}
-	}
-}
-
 // TestProvisionalDeleteRefusesWhileSessionsRemainUnderTheOldHash pins #3530
 // review id 3918535480.
 //
@@ -713,5 +657,79 @@ func TestUnregisteredMissingProjectDeletesByItsHistoricalID(t *testing.T) {
 	}
 	if result.RepoID != historical {
 		t.Fatalf("and under the identity the user is looking at: got %s, want %s", result.RepoID, historical)
+	}
+}
+
+// TestSweepRequiresADeterminateVerdictAboutTheRecordedPath pins #3530 review
+// ids 3918379027 and 3919490145 together, because they are one rule: the
+// recorded path's hash may be swept only when it is ESTABLISHED that no
+// repository owns it.
+//
+// Absence establishes that, and TestReconciledDeleteSweepsTheRecordedPathOptIn
+// covers it. A failed probe does not: a repository sitting at that path owns
+// the hash whether git was killed (nothing was asked) or exited with an
+// operational error (something else was answered), and sweeping on either
+// deletes that repository's own opt-in on behalf of this project.
+func TestSweepRequiresADeterminateVerdictAboutTheRecordedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		shim string
+	}{
+		{"git never answers", "#!/bin/sh\nkill -9 $$\n"},
+		{"git exits with an operational error", "#!/bin/sh\necho 'fatal: detected dubious ownership in repository' >&2\nexit 128\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			installOptionsRecordingBackend(t)
+			worktree, project, realID := worktreeRecordedProject(t)
+			pathID := config.RepoIDFromRoot(filepath.Clean(worktree))
+			if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+				t.Fatalf("record the resolved identity: %v", err)
+			}
+			if err := os.RemoveAll(worktree); err != nil {
+				t.Fatalf("remove the recorded workspace: %v", err)
+			}
+			manager, err := NewManager(config.DefaultConfig())
+			if err != nil {
+				t.Fatalf("NewManager: %v", err)
+			}
+
+			var swept []string
+			original := deregisterRootAgents
+			deregisterRootAgents = func(ids ...string) ([]string, error) {
+				swept = append(swept, ids...)
+				return nil, nil
+			}
+			t.Cleanup(func() { deregisterRootAgents = original })
+
+			// A repository appears at the recorded root, and git will not give
+			// a verdict about it — the window the sweep reads.
+			binDir := t.TempDir()
+			deleteProjectPreSweepHookForTest = func() {
+				if _, statErr := os.Stat(worktree); statErr == nil {
+					return
+				}
+				if err := exec.Command("git", "init", worktree).Run(); err != nil {
+					t.Fatalf("git init occupant: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(tc.shim), 0o755); err != nil {
+					t.Fatalf("write git shim: %v", err)
+				}
+				t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			t.Cleanup(func() { deleteProjectPreSweepHookForTest = nil })
+
+			if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: worktree}); err != nil {
+				t.Fatalf("DeleteProject by the recorded path: %v", err)
+			}
+			if len(swept) == 0 {
+				t.Fatalf("fixture must reach the durable sweep, or it pins nothing")
+			}
+			for _, id := range swept {
+				if id == pathID {
+					t.Fatalf("the sweep supplied %s without a verdict about the path: a repository is there and owns that id, so this deletes its own opt-in", pathID)
+				}
+			}
+		})
 	}
 }

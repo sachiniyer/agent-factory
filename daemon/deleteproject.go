@@ -661,7 +661,11 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 			// nothing about what occupies the path, and a repository that is
 			// there OWNS this hash — so acting on an unanswered probe would
 			// delete a live occupant's own opt-in on behalf of this project.
-			if _, err := config.RepoFromPath(repoPath); err != nil && !config.RepoProbeUnanswered(err) {
+			// A DETERMINATE verdict, not merely an answered failure (#3530
+			// review id 3919490145): dubious ownership or unreadable metadata
+			// exits normally, and a replacement checkout that owns this hash
+			// would have its own opt-in swept on behalf of the stale project.
+			if _, err := config.RepoFromPath(repoPath); err != nil && config.PathIsDeterminatelyFree(repoPath, err) {
 				optInIDs = append(optInIDs, pathID)
 			}
 		}

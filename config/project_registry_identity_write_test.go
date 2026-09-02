@@ -313,3 +313,52 @@ func TestRegistrationRefusesARepointedPathAtCommitTime(t *testing.T) {
 		t.Fatalf("registration committed root %s (repository %s) with identity %s", project.Root, rootRepo.ID, project.RepoID)
 	}
 }
+
+// TestRegistrationRefusesAReplacedCheckoutAtCommitTime pins #3530 review id
+// 3919490138.
+//
+// A repo ID is derived from the identity ROOT, so another clone at the same
+// root produces the same one — the identity re-check passes while the checkout
+// underneath is a different one. A record pairing the live checkout with the
+// previous clone's CheckoutID fails its own marker proof immediately, leaving
+// the project unresolved until someone rebinds it by hand.
+func TestRegistrationRefusesAReplacedCheckoutAtCommitTime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	initRepoWithCommit(t, repo)
+
+	replaced := false
+	projectRegistryCommitRaceHookForTest = func() {
+		if replaced {
+			return
+		}
+		replaced = true
+		// A different clone at the SAME root: same identity, different
+		// checkout, and the marker af just wrote goes with the old one.
+		if err := os.RemoveAll(filepath.Join(repo, ".git")); err != nil {
+			t.Fatalf("remove the original checkout: %v", err)
+		}
+		initRepoWithCommit(t, repo)
+	}
+	t.Cleanup(func() { projectRegistryCommitRaceHookForTest = nil })
+
+	project, err := RegisterProject(repo)
+	if !replaced {
+		t.Fatalf("fixture never ran the replacement; the seam is not on the path to the commit")
+	}
+	if err != nil {
+		if !strings.Contains(err.Error(), "checkout at") {
+			t.Fatalf("refusing is correct, but the message must say what happened: %v", err)
+		}
+		return
+	}
+	// It committed, so the record must at least prove against the checkout
+	// that is actually there.
+	matches, matchErr := ProjectCheckoutMatches(project.Root, project.CheckoutID)
+	if matchErr != nil {
+		t.Fatalf("ProjectCheckoutMatches: %v", matchErr)
+	}
+	if !matches {
+		t.Fatalf("registration committed checkout id %s against a checkout that does not carry it: the record fails its own marker proof from the moment it is written", project.CheckoutID)
+	}
+}
