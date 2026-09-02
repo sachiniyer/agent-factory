@@ -210,3 +210,26 @@ func TestTasksShow_UnassessableRecordSaysSo(t *testing.T) {
 	assert.Contains(t, got, "cannot be assessed — no lateness could be measured")
 	assert.NotContains(t, got, "on schedule")
 }
+
+// TestTasksShow_DisabledTaskHasNoScheduleVerdict: a disabled task is excluded
+// from schedule health, and the exclusion has to come BEFORE the parse — a
+// disabled draft with a malformed expression was reporting "nothing is
+// scheduled", which reads as a live scheduling failure, while a disabled task
+// with a valid expression reported nothing at all. The scheduler skips a
+// disabled task before parsing it too.
+func TestTasksShow_DisabledTaskHasNoScheduleVerdict(t *testing.T) {
+	for _, expr := range []string{"20 * * * *", "99 * * * *"} {
+		tsk := showFixture()
+		tsk.Enabled = false
+		tsk.CronExpr = expr
+		tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+		var out bytes.Buffer
+		renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+		got := out.String()
+
+		assert.NotContains(t, got, "Schedule", "%q: no schedule verdict for a disabled task:\n%s", expr, got)
+		assert.Contains(t, got, "Enabled        no")
+		assert.Contains(t, got, "cron · "+expr, "the expression is still on screen for anyone about to enable it")
+	}
+}

@@ -178,6 +178,16 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	if t.IsWatch() {
 		return ""
 	}
+	// A disabled task is excluded from schedule health, and the exclusion has to
+	// come BEFORE the parse. Otherwise a disabled draft with a malformed
+	// expression reports "nothing is scheduled" — true, but it reads as a live
+	// scheduling failure — while a disabled task with a VALID one reports nothing
+	// at all. The scheduler skips a disabled task before parsing it too, and the
+	// expression stays on screen under Trigger for anyone about to enable it
+	// (#3623 review).
+	if !t.Enabled || t.CronExpr == "" {
+		return ""
+	}
 	if t.CronExpr != "" {
 		if _, err := task.ParseCron(t.CronExpr); err != nil {
 			// Say so rather than falling through to "on schedule". Nothing can be
@@ -206,9 +216,6 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 		return "cannot be assessed — no lateness could be measured from this record's history against its schedule"
 	}
 	if !health.Overdue {
-		if !t.Enabled || t.CronExpr == "" {
-			return ""
-		}
 		return "on schedule"
 	}
 	missed := fmt.Sprintf("%d", health.MissedOccurrences)

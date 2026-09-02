@@ -45,6 +45,11 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	}
 
 	now := time.Now()
+	// ONE budget across the whole inventory. Deriving per record here would
+	// reintroduce the task-count × cap cost that the load path had just been
+	// fixed to avoid — the cap bounds one derivation, and doctor performs as many
+	// as the store has tasks (#3623 review).
+	healths := task.DeriveScheduleHealthBatch(tasks, now)
 	var overdue []task.Task
 	var health []task.ScheduleHealth
 	var unarmed []task.Task
@@ -53,7 +58,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	enabled := 0
 	scheduled := 0
 	armingUnobserved := 0
-	for _, t := range tasks {
+	for i, t := range tasks {
 		if !t.Enabled {
 			continue
 		}
@@ -67,7 +72,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 			// covers it.
 			scheduled++
 		}
-		h := task.DeriveScheduleHealth(t, now)
+		h := healths[i]
 		classified := true
 		switch {
 		case h.Overdue:

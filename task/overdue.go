@@ -397,12 +397,7 @@ func countOccurrences(sched cron.Schedule, from, now time.Time, budget *int) (in
 // Callers on a write path must not use it: derived fields never reach disk, and
 // saveTasks strips them precisely so a mistake here cannot persist one.
 func WithScheduleHealth(tasks []Task, now time.Time) []Task {
-	// ONE budget for the whole load — see MaxMissedOccurrences. Per task it would
-	// bound nothing: this runs on the rail's 750ms poll over however many tasks
-	// the store holds.
-	budget := MaxMissedOccurrences
-	for i := range tasks {
-		health := deriveScheduleHealth(tasks[i], now, &budget)
+	for i, health := range DeriveScheduleHealthBatch(tasks, now) {
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated
@@ -410,6 +405,29 @@ func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 		tasks[i].Unassessable = health.Unassessable
 	}
 	return tasks
+}
+
+// DeriveScheduleHealthBatch derives the full verdict for a whole list against
+// ONE shared walk budget, and is what every caller deriving more than one task
+// must use.
+//
+// The budget is the reason this exists rather than a loop over
+// DeriveScheduleHealth. Per task it bounds nothing in aggregate — the store
+// holds an unbounded number of tasks — so a caller that resets the budget per
+// record reintroduces the cost this cap exists to remove, however carefully the
+// cap itself is written (#3623 review: the doctor pass did exactly that after
+// the load path had been fixed). Handing out the batch is what makes the shared
+// budget the easy thing to do.
+//
+// The result is positionally aligned with tasks, so a caller that already
+// iterates the slice can index it.
+func DeriveScheduleHealthBatch(tasks []Task, now time.Time) []ScheduleHealth {
+	budget := MaxMissedOccurrences
+	out := make([]ScheduleHealth, len(tasks))
+	for i := range tasks {
+		out[i] = deriveScheduleHealth(tasks[i], now, &budget)
+	}
+	return out
 }
 
 // stripDerived clears every read-time field. saveTasks calls it on the way to

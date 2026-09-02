@@ -679,3 +679,31 @@ func TestDeriveScheduleHealth_KeepsItsOwnBudget(t *testing.T) {
 	assert.Equal(t, MaxMissedOccurrences, health.MissedOccurrences)
 	assert.True(t, health.Saturated)
 }
+
+// TestDeriveScheduleHealthBatch_SharesOneBudget: the batch exists so that a
+// caller deriving many tasks cannot accidentally reset the cap per record — the
+// doctor pass did exactly that after the load path had been fixed, which is how
+// a per-task cap keeps quietly becoming a task-count × cap cost.
+func TestDeriveScheduleHealthBatch_SharesOneBudget(t *testing.T) {
+	now := at(2026, time.September, 1, 12, 0, 0)
+	last := now.AddDate(-1, 0, 0)
+	var tasks []Task
+	for i := 0; i < 50; i++ {
+		tsk := cronTask("* * * * *", &last)
+		tsk.ID = fmt.Sprintf("dark%03d", i)
+		tasks = append(tasks, tsk)
+	}
+
+	started := time.Now()
+	healths := DeriveScheduleHealthBatch(tasks, now)
+	elapsed := time.Since(started)
+
+	require.Len(t, healths, len(tasks), "positionally aligned with its input")
+	assert.Less(t, elapsed, 500*time.Millisecond)
+	total := 0
+	for i, h := range healths {
+		assert.True(t, h.Overdue, "task %d keeps its verdict", i)
+		total += h.MissedOccurrences
+	}
+	assert.LessOrEqual(t, total, MaxMissedOccurrences, "one budget between all of them")
+}

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -454,4 +455,32 @@ func TestDoctor_AnUnarmedWatchTaskIsStillReported(t *testing.T) {
 	assert.Contains(t, row.Detail, "enabled but not armed")
 	assert.Contains(t, row.Detail, `watch003 "CI tail"`)
 	assert.Positive(t, report.UnresolvedCount())
+}
+
+// TestDoctor_BoundsMissedRunWorkAcrossTheInventory: doctor derives once per
+// record, so resetting the walk budget per call reintroduces the task-count ×
+// cap cost that the load path was fixed to avoid — `af doctor` becoming
+// arbitrarily slow on a large store. It consumes one batch derivation now.
+func TestDoctor_BoundsMissedRunWorkAcrossTheInventory(t *testing.T) {
+	opts := testOptions(t, false)
+	last := time.Now().AddDate(-1, 0, 0)
+	var tasks []task.Task
+	for i := 0; i < 50; i++ {
+		tsk := darkTask(fmt.Sprintf("dark%04d", i), "Dark")
+		tsk.CronExpr = "* * * * *"
+		tsk.LastRunAt = &last
+		tasks = append(tasks, tsk)
+	}
+	opts.taskInventory = func() ([]task.Task, error) { return tasks, nil }
+
+	started := time.Now()
+	report, err := Run(opts)
+	require.NoError(t, err)
+	elapsed := time.Since(started)
+
+	assert.Less(t, elapsed, 5*time.Second,
+		"fifty year-old per-minute tasks must not cost fifty budgets")
+	row := taskRow(t, report)
+	assert.Equal(t, StatusWarn, row.Status, "and every one of them is still reported")
+	assert.Contains(t, row.Detail, "50 enabled tasks have not fired on schedule")
 }
