@@ -848,3 +848,67 @@ func rewriteRecordRootForDeferral(t *testing.T, projectID, newRoot string) {
 		t.Fatalf("write record: %v", err)
 	}
 }
+
+// TestInconclusiveRetryKeepsAProvenMismatch pins review finding 3910519842
+// (P1). For a main-root recording the derived ID IS any occupant's real ID, so
+// the record's identityMismatch is the only thing keeping a dead project's
+// personal layer from governing the different clone now at its path. Clearing
+// it on a retry that established nothing let a stale enabled=true start an
+// autonomous root in an already-disproven checkout as soon as the legacy sweep
+// resolved again.
+func TestInconclusiveRetryKeepsAProvenMismatch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/dead\"")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// An unrelated clone takes the path; the probe proves the mismatch.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	occupantID := repoID(t, repoPath)
+	record, ok := manager.rootAgentLayers.Load().unresolvedRoots[occupantID]
+	if !ok || !record.identityMismatch {
+		t.Fatalf("fixture must first PROVE the mismatch at %s, got %+v (present=%v)", occupantID, record, ok)
+	}
+	createsAfterProof := len(*seen)
+
+	// A retry that establishes nothing: the path is unreadable this pass.
+	if err := os.Rename(repoPath, hidden+".again"); err != nil {
+		t.Fatalf("hide occupant: %v", err)
+	}
+	blank := &rootReattributionProbe{done: make(chan struct{})}
+	blank.completedAt = nowFunc()
+	close(blank.done)
+	manager.mu.Lock()
+	manager.rootHealProbes[occupantID] = blank
+	manager.rootHealProbeFailures[occupantID] = 0
+	manager.mu.Unlock()
+
+	manager.EnsureRootAgents()
+
+	after, ok := manager.rootAgentLayers.Load().unresolvedRoots[occupantID]
+	if !ok || !after.identityMismatch {
+		t.Fatalf("an evidence-free retry must not clear a PROVEN mismatch; it is the only thing keeping the dead project's layer off that checkout: %+v (present=%v)", after, ok)
+	}
+
+	// And the clone coming back must still not inherit the dead layer.
+	if err := os.Rename(hidden+".again", repoPath); err != nil {
+		t.Fatalf("restore occupant: %v", err)
+	}
+	manager.EnsureRootAgents()
+	if len(*seen) != createsAfterProof {
+		t.Fatalf("the disproven checkout must not get the dead project's root, got %d creates (was %d)", len(*seen), createsAfterProof)
+	}
+}

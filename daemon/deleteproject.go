@@ -301,6 +301,19 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 					continue
 				}
 				claimantProjectID = claimantForRecord(p)
+				if claimantProjectID == "" {
+					// The row matches this path by NAME, but nothing proves the
+					// checkout being deleted is that row's project — an
+					// unrelated clone at an unresolved project's old path,
+					// deleted before attribution has a verdict. Deregistering
+					// on a pathname match alone would destroy the original
+					// project's registry directory and its personal config on
+					// behalf of a delete that never targeted it (#3299 review
+					// id 3910519845). Drop the path: the delete still tears
+					// down and suppresses the occupant, and the stale record
+					// stays for its own owner to resolve or remove.
+					repoPath = ""
+				}
 				break
 			}
 		}

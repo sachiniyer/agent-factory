@@ -571,44 +571,21 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			})
 		}
 		if !probe.matches {
-			// A retry that resolved NOTHING is not evidence (review id
-			// 3884576551) — but WHOSE state it fails to disprove decides what
-			// happens to it, and the two answers are opposite. The bridge does
-			// two jobs at once: it routes a remedy to whoever asks about the
-			// bridged repo, and it holds that repo's decision fail-closed.
+			// A retry that resolved NOTHING is not evidence (#3299 review ids
+			// 3884576551, 3910519842). An unavailable recorded path disproves
+			// neither the last candidate nor the last marker verdict, so the
+			// standing verdict stands until a CONCRETE identity result
+			// supersedes it.
 			//
-			//   - The standing verdict is an UNKNOWABLE marker. The bridged
-			//     repo may well BE this project's own — that is precisely what
-			//     could not be established — so an unavailable path disproves
-			//     nothing and clearing it would un-gate the real repository
-			//     while the personal enabled=false still sits under the
-			//     derived ID. A legacy entry reaching that repository through
-			//     another still-accessible path would then start its root off
-			//     the lower-precedence layers. Retain.
-			//   - The standing verdict is a PROVEN mismatch. Then the bridge
-			//     names a STRANGER's repository, and it was never gating this
-			//     project's own. Once the occupant is gone that statement is
-			//     no longer about anything, and keeping it would leave an
-			//     unrelated repo answering with this project's remedies
-			//     forever — the round-6 harm TestStaleBridgeRetired pins.
-			//     Release it by falling through.
-			//
-			// One map serving both jobs is why these two reviews prescribed
-			// opposite things for the same event; the standing verdict is the
-			// discriminator that satisfies both.
-			if probe.inconclusive() && !record.identityMismatch {
-				continue
-			}
+			// That matters most for a proven mismatch, which is the only thing
+			// stopping a dead project's personal layer from governing the
+			// different clone now at its path: clearing it on an evidence-free
+			// retry would let a stale enabled=true start an autonomous root in
+			// an already-disproven checkout the moment the legacy sweep
+			// resolved again. The entry's backoff is unaffected — the settle
+			// above is queued before this returns.
 			if probe.inconclusive() {
-				// Reached only because the standing verdict was a PROVEN
-				// mismatch, which this pass is retiring. The inherited
-				// candidate named that stranger's repository, so it retires
-				// with the verdict — otherwise the departed occupant's repo
-				// stays attribution-pending forever, which is the round-6 harm
-				// TestStaleBridgeRetired pins. The 3908517185 case does not
-				// reach here: an unknowable standing verdict takes the
-				// continue above and keeps its candidate.
-				probe.candidate.Store(nil)
+				continue
 			}
 			// The probe logged the specifics; a fresh probe next pass keeps
 			// re-checking. Record the failure shape for verdict consumers — a

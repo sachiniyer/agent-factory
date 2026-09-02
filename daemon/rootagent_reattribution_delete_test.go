@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -165,5 +166,52 @@ func TestUnprovenOccupantIsNotClaimed(t *testing.T) {
 	manager.mu.Unlock()
 	if !applies {
 		t.Fatalf("the occupant's deletion must survive the stale record's mismatch; otherwise the in-memory legacy entry recreates the root the delete removed")
+	}
+}
+
+// TestUnprovenOccupantDeleteKeepsTheStaleRecord pins review finding 3910519845
+// (P1). A path delete of an unrelated clone at an unresolved project's old path
+// matches that stale registry row by PATHNAME. The claimant is correctly
+// refused — nothing proves ownership — but repoPath still carried the row's
+// path into DeregisterProject, which removed the ORIGINAL project's registry
+// directory and its personal configuration on behalf of a delete that never
+// targeted it.
+func TestUnprovenOccupantDeleteKeepsTheStaleRecord(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// An unrelated clone takes the path, and is deleted by that path.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	occupantID := repoID(t, repoPath)
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject of the occupant: %v", err)
+	}
+
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr != nil {
+		t.Fatalf("deleting an unproven occupant must not destroy the original project's registry record and personal config: %v", statErr)
+	}
+	manager.mu.Lock()
+	_, tombstoned := manager.deletedRootRepos[occupantID]
+	manager.mu.Unlock()
+	if !tombstoned {
+		t.Fatalf("the occupant's own deletion must still take effect at %s", occupantID)
 	}
 }
