@@ -2003,6 +2003,130 @@ test("summary rows are read positionally, and only when complete", () => {
   assert.equal(parseVerdictArtifact(codexSummaryTable(HEAD_SHA), HEAD_SHA).kind, "summary-row");
 });
 
+test("a table-looking body without the summary marker is not a verdict", async () => {
+  // Codex P1: parseSummaryRows ran on ANY Codex body, so a review that merely
+  // QUOTES this table format — which reviewing this gate does — parsed as a
+  // `summary-row` artifact. The P0-P3 check reads bound artifacts, and a body
+  // misclassified this way could carry a finding past it.
+  const quoting = {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "Codex Review: P1 this is wrong.",
+      "",
+      "It should look like:",
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** <relative-time datetime="2026-07-09T01:30:00Z">x</relative-time> | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+    ].join("\n"),
+    created_at: "2026-07-09T01:30:00Z",
+    updated_at: "2026-07-09T01:30:00Z",
+    commit_id: HEAD_SHA,
+  };
+  const github = fakeGateGithub({ issueComments: [quoting] });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.equal(__test.parseVerdictArtifact(quoting, HEAD_SHA), null, "no marker, no verdict");
+  // …and because it is bound to the head by commit_id, its finding is caught.
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a finding in an automatic review body blocks even with a Completed row", async () => {
+  // Codex P1: an automatic review can carry a P0-P3 with NO `Reviewed commit:`
+  // line — the very artifact shape this PR exists to support. It was filtered out
+  // of the verdict set, so the Completed row passed while the finding beside it
+  // was never inspected. Reviews are bound to the head by commit_id.
+  const github = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:30:00Z" })],
+    reviews: [
+      {
+        user: { login: "chatgpt-codex-connector[bot]" },
+        body: "Codex Review\n\nP1: this is wrong.",
+        commit_id: HEAD_SHA,
+        submitted_at: "2026-07-09T01:40:00Z",
+      },
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false);
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("an abbreviated commit must resolve to this head, not merely prefix it", async () => {
+  // Codex P1: the row's cell is seven hex characters — 28 bits — so a ground
+  // collision lets a row about an older head read as a verdict for a new one,
+  // and the attacker also controls the new commit's committer timestamp, which
+  // is the only other thing the freshness rule consults. GitHub answers 422 for
+  // an ambiguous short SHA, which is exactly this case.
+  const ambiguous = new Error("Ambiguous match for SHA");
+  ambiguous.status = 422;
+  const github = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA)],
+    commitResolutions: { [HEAD_SHA.slice(0, 7)]: ambiguous },
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "an unresolvable abbreviation is not a verdict");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("carried no parseable verdict")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+
+  // Resolving to a DIFFERENT commit is the collision itself, and is refused.
+  const collided = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA)],
+    commitResolutions: { [HEAD_SHA.slice(0, 7)]: OTHER_SHA },
+  });
+  const collision = await autoGate.evaluate({
+    github: collided,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(collision.shouldMerge, false);
+
+  // The honest case still resolves and still passes.
+  const honest = fakeGateGithub({ issueComments: [codexSummaryTable(HEAD_SHA)] });
+  const clean = await autoGate.evaluate({
+    github: honest,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(clean.shouldMerge, true, `blocked on: ${clean.reasons.join("; ")}`);
+  assert.ok(honest.commitResolutionReads > 0, "the abbreviation must actually be resolved");
+});
+
 test("a Codex rate-limit message never becomes a verdict", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
@@ -4287,6 +4411,9 @@ function fakeGateGithub({
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
+  // abbreviation -> full sha it resolves to, or an Error to throw (GitHub answers
+  // 422 for a short SHA that matches more than one object).
+  commitResolutions = {},
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -4375,6 +4502,7 @@ function fakeGateGithub({
     associationReads: 0,
     checkCreateAttempts: 0,
     checkListReads: 0,
+    commitResolutionReads: 0,
     pullGetReads: 0,
     requestReads: 0,
     readAttemptsByFn: {},
@@ -4411,7 +4539,30 @@ function fakeGateGithub({
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
-      repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
+      repos: {
+        listCommitStatusesForRef,
+        listPullRequestsAssociatedWithCommit,
+        // Resolves an abbreviated SHA the way GitHub does: to the one object it
+        // names, or an error when it names none or several.
+        getCommit: async ({ ref }) => {
+          github.commitResolutionReads += 1;
+          const scripted = commitResolutions[ref];
+          if (scripted instanceof Error) {
+            throw scripted;
+          }
+          if (typeof scripted === "string") {
+            return { data: { sha: scripted } };
+          }
+          for (const candidate of [headSha, HEAD_SHA, OTHER_SHA]) {
+            if (candidate.startsWith(ref)) {
+              return { data: { sha: candidate } };
+            }
+          }
+          const missing = new Error("No commit found for SHA: " + ref);
+          missing.status = 404;
+          throw missing;
+        },
+      },
       pulls: {
         listFiles,
         listReviews,

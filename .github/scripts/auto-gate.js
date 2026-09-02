@@ -77,6 +77,11 @@ const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0
 //
 // A row is a verdict only when it is Completed AND names a commit AND carries a
 // parseable time. `Running` is progress, not a verdict.
+// The marker GitHub's Codex integration writes into its own persistent summary
+// comment. Requiring it is what stops any body that merely CONTAINS a
+// table-looking line — a review quoting this very format, which reviewing this
+// gate does — from being read as a verdict artifact.
+const CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->";
 const CODEX_SUMMARY_ROW_LABEL_RE = /\bCode Review\b/i;
 const CODEX_SUMMARY_ROW_COMPLETED_RE = /\bCompleted\b/i;
 const CODEX_SUMMARY_ROW_COMMIT_RE = /`([0-9a-f]{7,40})`/i;
@@ -2576,10 +2581,27 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // comment's, the summary row's is the row's. Sorted by that rather than by
   // comment order, because the summary comment is edited on every review
   // activity and its comment time says nothing about when this review completed.
-  const matchingReviewArtifacts = codexReviewArtifacts
+  const parsedVerdicts = codexReviewArtifacts
     .map((artifact) => parseVerdictArtifact(artifact, sha))
     .filter(Boolean)
     .sort((left, right) => right.time - left.time);
+  // Prefix-matched above, resolved here: an abbreviation has to name THIS head
+  // uniquely, not merely start like it.
+  const abbreviationCache = new Map();
+  const matchingReviewArtifacts = [];
+  for (const candidate of parsedVerdicts) {
+    if (
+      await abbreviationNamesHead({
+        github,
+        context,
+        abbreviation: candidate.commit,
+        headSha: sha,
+        cache: abbreviationCache,
+      })
+    ) {
+      matchingReviewArtifacts.push(candidate);
+    }
+  }
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
@@ -2641,14 +2663,29 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     }
   }
 
-  // Checked against the newest PROSE artifact for this head, not the newest
-  // artifact of any kind. A summary row records that a review completed; it is
-  // not evidence that the review was clean, and its body never carries findings.
-  // Letting a row supersede a finding-carrying review body would clear a finding
-  // by the mere fact that Codex touched the table afterwards — which it does on
-  // every review activity, including posting that very finding.
-  const latestProseVerdict = matchingReviewArtifacts.find((artifact) => artifact.kind === "prose");
-  if (latestProseVerdict && CODEX_BODY_FINDING_RE.test(latestProseVerdict.body || "")) {
+  // Findings are read from artifacts BOUND to this head, which is a wider set
+  // than the verdict artifacts: an automatic review can carry a P0-P3 in its body
+  // with no `Reviewed commit:` line at all, and it is bound to the head by its
+  // own commit_id. Leaving those out let a Completed summary row pass while the
+  // finding beside it was never inspected.
+  //
+  // A summary row is deliberately NOT in this set. It records that a review
+  // completed, not that it was clean, and its body never carries findings — so
+  // letting it be the newest finding-capable artifact would clear a finding by
+  // the mere fact that Codex rewrote the table afterwards, which it does on every
+  // review activity including posting that finding.
+  //
+  // Newest-wins is preserved among the bound artifacts, so a newer clean verdict
+  // still supersedes an older body-only finding.
+  const headBoundArtifacts = codexReviewArtifacts.filter((artifact) => {
+    const reviewedCommit = parseReviewedCommit(artifact.body || "");
+    if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha)) {
+      return true;
+    }
+    return String(artifact.commit_id || "").toLowerCase() === String(sha || "").toLowerCase();
+  });
+  const latestBoundArtifact = headBoundArtifacts[0];
+  if (latestBoundArtifact && CODEX_BODY_FINDING_RE.test(latestBoundArtifact.body || "")) {
     reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
   }
 
@@ -2781,8 +2818,15 @@ function parseReviewedCommit(body) {
 // commit in its own cell — and the header and separator rows fall out for free
 // because neither names a Code Review.
 function parseSummaryRows(body) {
+  const text = String(body || "");
+  // Authenticated first. Without this, a finding-bearing review body that quotes
+  // the table format parses as a `summary-row` artifact, and the P0-P3 check —
+  // which deliberately reads only prose — skips its finding.
+  if (!text.includes(CODEX_SUMMARY_MARKER)) {
+    return [];
+  }
   const rows = [];
-  for (const line of String(body || "").split("\n")) {
+  for (const line of text.split("\n")) {
     if (!line.trim().startsWith("|")) {
       continue;
     }
@@ -2809,7 +2853,7 @@ function parseVerdictArtifact(artifact, headSha) {
   const body = artifact.body || "";
   const reviewedCommit = parseReviewedCommit(body);
   if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
-    return { kind: "prose", time: reviewArtifactTime(artifact), body };
+    return { kind: "prose", commit: reviewedCommit, time: reviewArtifactTime(artifact), body };
   }
   const row = parseSummaryRows(body).find(
     (candidate) =>
@@ -2818,7 +2862,42 @@ function parseVerdictArtifact(artifact, headSha) {
       candidate.time != null &&
       reviewedCommitMatchesHead(candidate.commit, headSha),
   );
-  return row ? { kind: "summary-row", time: row.time, body } : null;
+  return row ? { kind: "summary-row", commit: row.commit, time: row.time, body } : null;
+}
+
+// An abbreviation is a claim about which commit was reviewed, and a prefix match
+// is not proof of it: a summary row's cell is seven hex characters, so a
+// deliberately ground collision lets a row about an older head read as a verdict
+// for a new one — and an attacker controls the new commit's committer timestamp,
+// which is the only other thing the freshness rule consults.
+//
+// So the abbreviation is RESOLVED. GitHub answers ambiguously (422) when a short
+// SHA matches more than one object, which is exactly the collision case, and any
+// answer that is not "this exact head" leaves the artifact a non-verdict.
+async function abbreviationNamesHead({ github, context, abbreviation, headSha, cache }) {
+  const head = String(headSha || "").toLowerCase();
+  const short = String(abbreviation || "").toLowerCase();
+  if (short.length === 40) {
+    return short === head;
+  }
+  if (cache.has(short)) {
+    return cache.get(short);
+  }
+  const { owner, repo } = context.repo;
+  let resolved = false;
+  try {
+    const commit = await retryRead(`could not resolve commit ${short} for head ${head}`, () =>
+      github.rest.repos.getCommit({ owner, repo, ref: short }),
+    );
+    resolved = String(commit?.data?.sha || "").toLowerCase() === head;
+  } catch {
+    // Ambiguous, missing, or unreadable. None of those prove the artifact names
+    // this head, and an unproven verdict is not one. The caller's message says a
+    // review exists but carried no parseable verdict, which is accurate.
+    resolved = false;
+  }
+  cache.set(short, resolved);
+  return resolved;
 }
 
 // Whether any artifact's summary table names this head at all, whatever its
