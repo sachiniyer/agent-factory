@@ -649,6 +649,63 @@ test("a transient precondition read discards the whole round", async () => {
   );
 });
 
+test("a throttled precondition sets the round's retry delay", async () => {
+  // Codex P2 (round 7): every rejected precondition must succeed in the next
+  // round, so taking the delay from rejected[0] alone can retry the whole round
+  // inside another's throttle window — burning all three attempts on a condition
+  // that was only rate-limited.
+  const throttled = new Error("secondary rate limit");
+  throttled.status = 403;
+  throttled.response = { status: 403, headers: { "retry-after": "1" }, data: {} };
+  const plain = new Error("fetch failed");
+
+  const github = fakeGateGithub({ author: "detail-app" });
+  let autoMergeReads = 0;
+  let ownershipReads = 0;
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      autoMergeReads += 1;
+      // Throttle the auto-merge read of the first guard round only.
+      if (autoMergeReads === 2) {
+        throw throttled;
+      }
+    }
+    return realGraphql(query, variables);
+  };
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && autoMergeReads >= 1) {
+      ownershipReads += 1;
+      // …and fail the ownership read of that same round, without any throttle
+      // metadata. It is the first rejection, so a naive implementation reads its
+      // fallback delay and ignores the throttle entirely.
+      if (ownershipReads === 2) {
+        throw plain;
+      }
+    }
+    return realPaginate(fn, options);
+  };
+
+  const startedAt = Date.now();
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(transaction.state, "manual", "the round must recover after the throttle");
+  // The throttle asked for a second; the fallback for this attempt is 250ms.
+  assert.ok(
+    elapsed >= 900,
+    `the round must wait out the longest requested delay; waited ${elapsed}ms`,
+  );
+});
+
 test("a guard read failure blocks cleanly instead of being retried as a write", async () => {
   // Codex P2 (round 4): a failing precondition is not a failing write. Left to
   // the write's retry classifier it was reissued three more times — nine reads —

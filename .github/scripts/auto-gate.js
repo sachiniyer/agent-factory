@@ -692,7 +692,17 @@ async function establishPublishPreconditions(label, preconditions) {
     if (attempt >= RETRY_DELAYS_MS.length) {
       throw retryFailure(label, attempt + 1, rejected[0].reason, "AutoGateReadError", true);
     }
-    await delay(retryDelayMilliseconds(rejected[0].reason, RETRY_DELAYS_MS[attempt]));
+    // The longest delay any rejection asked for, not the first one's. Every
+    // rejected precondition has to succeed in the next round, so honouring only
+    // rejected[0] can retry the whole round inside another's throttle window and
+    // burn all three attempts on a condition that was merely rate-limited.
+    await delay(
+      Math.max(
+        ...rejected.map((outcome) =>
+          retryDelayMilliseconds(outcome.reason, RETRY_DELAYS_MS[attempt]),
+        ),
+      ),
+    );
   }
 }
 
