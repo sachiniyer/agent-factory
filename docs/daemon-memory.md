@@ -191,8 +191,9 @@ Two shorter lifetimes earlier the same day sit outside that timeline and outside
 that range: 24 and 74 minutes long, before the fleet warmed up, with **unit**
 peaks of **73.5 MB** and **131.5 MB**. They are the nearest thing on that box to
 a control — a daemon with almost nothing running underneath it — and they are
-three orders of magnitude below the warmed-up lifetimes. The two sets are quoted
-apart deliberately: one range spanning both would say only that a cgroup figure
+far below the warmed-up lifetimes: the *smallest* of those thirteen peaked at
+5.9 GB, 45 times the larger of these two. The two sets are quoted apart
+deliberately: one range spanning both would say only that a cgroup figure
 depends on what is in the cgroup, which is the point of this section.
 
 One of the thirteen had the daemon process itself sampled through `/proc`: it
