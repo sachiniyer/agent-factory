@@ -94,6 +94,50 @@ func tomlAssignmentEqual(line string) int {
 	return -1
 }
 
+// tomlStringContentLines marks, for every line of ls, whether that line BEGINS
+// inside an open multiline string — that is, whether it is a string's CONTENT
+// rather than TOML syntax.
+//
+// This is the whole of #3662. Every surgical scanner in this package decides
+// what a line is by looking at that line alone: tomlHeaderName for `[section]`,
+// tomlScalarLineMatches and the keyRe regexes for `key = value`. None of them
+// tracked string state, so a line inside an open tomlMultilineLiteral or
+// tomlMultilineBasic block — an ordinary thing to find in a shell script stored
+// in on_archive_command — read as syntax and got edited. `af config set
+// branch_prefix new/` rewrote the decoy line inside the string, left the real
+// branch_prefix untouched, and exited 0.
+//
+// Callers scan this mask alongside their own loop rather than each carrying the
+// state themselves, so a fifth scanner cannot be added with the blindness back
+// in it.
+func tomlStringContentLines(ls []string) []bool {
+	content := make([]bool, len(ls))
+	open := ""
+	for i, line := range ls {
+		content[i] = open != ""
+		open = tomlMultilineCarry(line, open)
+	}
+	return content
+}
+
+// tomlMultilineCarry reports the multiline-string delimiter still open when line
+// ends, given the one open when it began ("" outside every string). It reuses
+// scanTrailingComment's open-delimiter carry — the state machine
+// preservedTOMLAssignmentComments has driven line by line since #3455 — rather
+// than growing a second string parser here.
+//
+// Only the two MULTILINE delimiters carry. A single-line "…" or '…' cannot span
+// a newline in TOML, so an unterminated one is a syntax error, not state worth
+// keeping: carrying it would make a scanner read the whole rest of the file as
+// string content and miss the very key it was sent to find.
+func tomlMultilineCarry(line, open string) string {
+	_, _, stillOpen := scanTrailingComment(line, open)
+	if len(stillOpen) != len(tomlMultilineBasic) {
+		return ""
+	}
+	return stillOpen
+}
+
 func tomlHeaderName(line string) (string, bool) {
 	var parser unstable.Parser
 	parser.Reset([]byte(line))
@@ -360,8 +404,12 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 // only ever live there.
 func tomlRootScalarRawValue(content, leaf string) (string, bool) {
 	ls := strings.Split(content, "\n")
+	stringContent := tomlStringContentLines(ls)
 	curSection := ""
 	for i, line := range ls {
+		if stringContent[i] {
+			continue
+		}
 		if name, ok := tomlHeaderName(line); ok {
 			curSection = name
 			continue
@@ -396,8 +444,13 @@ func tomlRootScalarRawValue(content, leaf string) (string, bool) {
 // catches, but only by refusing a perfectly valid config with an internal
 // error (#3624 review).
 func tomlRootDottedTable(content, section string) bool {
+	ls := strings.Split(content, "\n")
+	stringContent := tomlStringContentLines(ls)
 	curSection := ""
-	for _, line := range strings.Split(content, "\n") {
+	for i, line := range ls {
+		if stringContent[i] {
+			continue
+		}
 		if name, ok := tomlHeaderName(line); ok {
 			curSection = name
 			continue
