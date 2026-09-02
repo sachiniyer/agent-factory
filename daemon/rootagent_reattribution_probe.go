@@ -32,7 +32,7 @@ func (p *rootReattributionProbe) inconclusive() bool {
 	// once a probe could resolve the path and still learn nothing from it: an
 	// unanswered RE-resolution leaves repo set while proving nothing (#3299
 	// review id 3911002406).
-	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished && !p.foreignIdentity
+	return !p.matches && !p.mismatch && !p.markerUnreadable && !p.vanished
 }
 
 // runRootReattributionProbe performs the blocking half of one re-attribution
@@ -47,18 +47,6 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	}()
 	repo, err := config.RepoFromPath(record.root)
 	if err != nil {
-		return
-	}
-	// SCOPE GATE FIRST (#3299 review id 3911002404). A foreign identity is
-	// deferred to #3530, so this probe has no business publishing it as a
-	// candidate or reading its marker: publishing gates that REAL repository
-	// through rootAttributionPendingFor, and the marker read below is an
-	// unbounded filesystem/Git operation — so a stalled foreign worktree could
-	// indefinitely block a legitimate legacy or singleton root reached through
-	// another path in that same repository. Classify and leave.
-	if repo.ID != config.RepoIDForRecordedRoot(record.root) {
-		probe.foreignIdentity = true
-		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, whose identity root is not that path, so its layers cannot be attributed without a second identity; project %s stays unresolved until #3530 namespaces the derived fallback", record.root, repo.ID, record.projectID)
 		return
 	}
 	probe.repo = repo
@@ -154,25 +142,6 @@ func runRootReattributionProbe(probe *rootReattributionProbe, record unresolvedP
 	if recheckErr != nil || recheck != matches {
 		probe.markerUnreadable = true
 		log.WarningLog.Printf("root agent snapshot: recorded project root %s changed under verification — its checkout marker did not read the same twice; leaving project %s unresolved (re-checked on the ensure cadence): %v", record.root, record.projectID, recheckErr)
-		return
-	}
-	// SCOPE GATE (#3299, residue deferred to #3530). Only a recorded root that
-	// IS its repository's identity root is re-attributed here. When the two
-	// differ — a linked worktree of a bare clone, a subdirectory registration,
-	// or a spelling that re-resolves through a symlink — attributing the record
-	// would give the project a SECOND identity, and a derived recorded-path
-	// hash is equal BY CONSTRUCTION to the real identity of any repository
-	// later main-rooted at that path. Every consumer of that alias then needs
-	// its own collision guard, which is the class #3530 removes by namespacing
-	// the derived fallback. Until it lands, these records stay unresolved
-	// exactly as they are on master today: this defers the residue, it does not
-	// regress anything.
-	//
-	// A concrete verdict rather than an inconclusive one, so the entry settles
-	// onto its backoff instead of re-forking git every pass.
-	if verify.ID != config.RepoIDForRecordedRoot(record.root) {
-		probe.foreignIdentity = true
-		log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, whose identity root is not that path, so its layers cannot be attributed without a second identity; project %s stays unresolved until #3530 namespaces the derived fallback", record.root, verify.ID, record.projectID)
 		return
 	}
 	if !matches {

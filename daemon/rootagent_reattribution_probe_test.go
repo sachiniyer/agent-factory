@@ -97,7 +97,7 @@ func TestFencedVerifiedProbeSurvivesFreshnessTTL(t *testing.T) {
 	repoPath := setupControlRepo(t)
 	registerTestProject(t, repoPath)
 	realID := repoID(t, repoPath)
-	derivedID := config.RepoIDForRecordedRoot(repoPath)
+	derivedID := config.RepoIDFromRoot(filepath.Clean(repoPath))
 
 	hidden := repoPath + ".hidden"
 	if err := os.Rename(repoPath, hidden); err != nil {
@@ -253,63 +253,5 @@ func TestRecordRootAbsentAcceptsEveryDeterminateAbsence(t *testing.T) {
 				t.Fatalf("recordRootAbsent(%q) = %v, want %v — an unclassified absence leaves a tombstone unclaimed and unreleasable", tc.root, absent, tc.wantAbsent)
 			}
 		})
-	}
-}
-
-// TestForeignIdentityClassifiedBeforePublishing pins review finding 3911002404
-// (P1). A foreign identity is deferred, so the probe must not publish it as a
-// candidate or read its marker: publishing gates that REAL repository through
-// rootAttributionPendingFor, and the marker read is an unbounded
-// filesystem/Git operation — so a stalled foreign worktree could indefinitely
-// block a legitimate root reached through another path in the same repository.
-func TestForeignIdentityClassifiedBeforePublishing(t *testing.T) {
-	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
-	parent := testguard.CanonicalTempDir(t)
-	main := filepath.Join(parent, "main")
-	if err := exec.Command("git", "init", main).Run(); err != nil {
-		t.Fatalf("git init: %v", err)
-	}
-	for _, args := range [][]string{
-		{"-C", main, "config", "user.email", "t@t"},
-		{"-C", main, "config", "user.name", "t"},
-		{"-C", main, "commit", "--allow-empty", "-m", "init"},
-	} {
-		if err := exec.Command("git", args...).Run(); err != nil {
-			t.Fatalf("git %v: %v", args, err)
-		}
-	}
-	// A linked worktree: its identity is the main repo's, so the recorded path
-	// hash cannot equal it.
-	recorded := filepath.Join(parent, "wt")
-	if err := exec.Command("git", "-C", main, "worktree", "add", recorded).Run(); err != nil {
-		t.Fatalf("git worktree add: %v", err)
-	}
-	mainID := repoID(t, main)
-	if mainID == config.RepoIDForRecordedRoot(recorded) {
-		t.Fatalf("fixture must produce a FOREIGN identity, both %s", mainID)
-	}
-
-	// If the marker were read at all, this hook would fire.
-	markerRead := false
-	rootReattributionProbeHookForTest = func(string) { markerRead = true }
-	t.Cleanup(func() { rootReattributionProbeHookForTest = nil })
-
-	probe := &rootReattributionProbe{done: make(chan struct{})}
-	runRootReattributionProbe(probe, unresolvedProjectRecord{
-		root: recorded, projectID: "prj_test", checkoutID: "chk_test",
-	})
-	<-probe.done
-
-	if !probe.foreignIdentity {
-		t.Fatalf("a recorded root that is not its repository's identity root must classify as foreign: %+v", probe)
-	}
-	if markerRead {
-		t.Fatalf("a deferred identity must not have its marker read — that read is unbounded and would gate a repository this scope does not attribute")
-	}
-	if c := probe.candidate.Load(); c != nil {
-		t.Fatalf("a deferred identity must not be published as a candidate (%s would then be gated through another path)", c.ID)
-	}
-	if probe.repo != nil {
-		t.Fatalf("a deferred identity must not be bound as this probe's repo: %+v", probe.repo)
 	}
 }

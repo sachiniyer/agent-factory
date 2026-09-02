@@ -121,8 +121,8 @@ func TestReattributionBoundsStalledProbes(t *testing.T) {
 	// Both probes are permanently stalled (their done channels never close),
 	// standing in for recorded roots on unresponsive mounts.
 	manager.mu.Lock()
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoA)] = &rootReattributionProbe{done: make(chan struct{})}
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoB)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoA))] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoB))] = &rootReattributionProbe{done: make(chan struct{})}
 	manager.mu.Unlock()
 
 	finished := make(chan struct{})
@@ -172,7 +172,7 @@ func TestReattributionDiscardsStaleProbeResult(t *testing.T) {
 	}
 	close(stale.done)
 	manager.mu.Lock()
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = stale
+	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))] = stale
 	manager.mu.Unlock()
 
 	manager.EnsureRootAgents()
@@ -314,7 +314,7 @@ func TestInflightProbeLeavesPersonalCadenceAlone(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	manager.mu.Lock()
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(unresolvedRepo)] = &rootReattributionProbe{done: make(chan struct{})}
+	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(unresolvedRepo))] = &rootReattributionProbe{done: make(chan struct{})}
 	manager.mu.Unlock()
 
 	// Pass 1 attempts the still-broken personal config and must land its
@@ -396,7 +396,7 @@ func TestNegativeProbeFeedsBackoffNotHotLoop(t *testing.T) {
 	manager.EnsureRootAgents()
 
 	manager.mu.Lock()
-	probe := manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)]
+	probe := manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))]
 	manager.mu.Unlock()
 	if probe == nil || !probe.settled {
 		t.Fatalf("a completed negative probe must settle in place under its own backoff, got %+v", probe)
@@ -507,8 +507,8 @@ func TestStalledSiblingDoesNotHotLoopNegatives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	stalledID := config.RepoIDForRecordedRoot(stalledRepo)
-	absentID := config.RepoIDForRecordedRoot(absentRepo)
+	stalledID := config.RepoIDFromRoot(filepath.Clean(stalledRepo))
+	absentID := config.RepoIDFromRoot(filepath.Clean(absentRepo))
 	manager.mu.Lock()
 	manager.rootHealProbes[stalledID] = &rootReattributionProbe{done: make(chan struct{})}
 	manager.mu.Unlock()
@@ -604,7 +604,7 @@ func TestVanishedMidVerificationReportsPathRemedy(t *testing.T) {
 	}
 	close(vanished.done)
 	manager.mu.Lock()
-	manager.rootHealProbes[config.RepoIDForRecordedRoot(repoPath)] = vanished
+	manager.rootHealProbes[config.RepoIDFromRoot(filepath.Clean(repoPath))] = vanished
 	manager.mu.Unlock()
 
 	manager.EnsureRootAgents()
@@ -749,19 +749,16 @@ func TestSameIDUnreadableMarkerFailsClosed(t *testing.T) {
 	}
 }
 
-// TestForeignIdentityRootStaysDeferred pins the SCOPE of this change. A
-// recorded root that is not its repository's identity root — here a linked
-// worktree, and equally a subdirectory registration or a spelling that
-// re-resolves through a symlink — is NOT re-attributed. Attributing it would
-// give the project a second identity, and a derived recorded-path hash is
-// equal by construction to the real identity of anything later main-rooted at
-// that path, so every consumer of that alias needs a collision guard. #3530
-// removes the collision; until it lands these records behave exactly as they
-// do on master.
+// TestForeignIdentityRootIsReattributed is the inverse of the boundary #3334
+// had to pin: a recorded root that is NOT its repository's identity root — here
+// a linked worktree, and equally a subdirectory registration or a spelling that
+// re-resolves through a symlink — is now re-attributed like any other.
 //
-// This test exists so the boundary is a decision with a name on it rather than
-// an accident of which shapes happened to get tests.
-func TestForeignIdentityRootStaysDeferred(t *testing.T) {
+// It works because the project's identity is written down rather than derived
+// from its path (#3530), so the layer was never keyed under something a
+// stranger at that path could also hold. No alias, no second identity, nothing
+// to disambiguate afterwards.
+func TestForeignIdentityRootIsReattributed(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	seen := installOptionsRecordingBackend(t)
 	parent := testguard.CanonicalTempDir(t)
@@ -783,13 +780,12 @@ func TestForeignIdentityRootStaysDeferred(t *testing.T) {
 		t.Fatalf("git worktree add: %v", err)
 	}
 	project := registerTestProject(t, repoPath)
-	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/deferred\"")
+	writePersonalRootAgent(t, project.ID, "enabled = true\nprogram = \"/opt/reattributed\"")
 	rewriteRecordRootForDeferral(t, project.ID, worktree)
 
-	derivedID := config.RepoIDForRecordedRoot(worktree)
 	realID := repoID(t, repoPath)
-	if derivedID == realID {
-		t.Fatalf("fixture must produce a recorded root whose hash differs from the repo identity, both %s", derivedID)
+	if realID == config.RepoIDFromRoot(filepath.Clean(worktree)) {
+		t.Fatalf("fixture must use a recorded root whose hash differs from the repo identity, both %s", realID)
 	}
 
 	aside := parent + ".aside"
@@ -805,17 +801,19 @@ func TestForeignIdentityRootStaysDeferred(t *testing.T) {
 	}
 
 	manager.EnsureRootAgents()
-	manager.EnsureRootAgents()
 
+	if len(*seen) != 1 {
+		t.Fatalf("a foreign-identity recorded root must now be re-attributed and ensured this run, got %d creates", len(*seen))
+	}
+	if got := (*seen)[0].Program; got != "/opt/reattributed" {
+		t.Fatalf("the personal program must reach the create verbatim, got %q", got)
+	}
 	layers := manager.rootAgentLayers.Load()
-	if _, stillUnresolved := layers.unresolvedRoots[derivedID]; !stillUnresolved {
-		t.Fatalf("a foreign-identity recorded root must stay unresolved until #3530, but %s left unresolvedRoots", derivedID)
+	if root, ok := layers.projectRoots[realID]; !ok || root != worktree {
+		t.Fatalf("the project must join projectRoots under its REAL identity %s at the recorded root %s, got %q (present=%v)", realID, worktree, root, ok)
 	}
-	if root, attributed := layers.projectRoots[realID]; attributed {
-		t.Fatalf("it must not be attributed to the repo's real identity %s (got root %q) — that is the second identity #3530 has to make safe first", realID, root)
-	}
-	if len(*seen) != 0 {
-		t.Fatalf("nothing may be created for a deferred record, got %d creates", len(*seen))
+	if _, stillUnresolved := layers.unresolvedRoots[config.RepoIDFromRoot(filepath.Clean(worktree))]; stillUnresolved {
+		t.Fatalf("nothing may remain keyed by the recorded path's hash")
 	}
 }
 

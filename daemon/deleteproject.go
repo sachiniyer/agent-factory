@@ -104,16 +104,33 @@ func deleteProjectFailure(result DeleteProjectResult, err error) error {
 		err, strings.Join(result.Warnings, "\n"))
 }
 
-// normalizeDeleteProjectPath resolves an existing path to its canonical main
-// repo root and identity. A stale/missing path falls back to its cleaned spelling
-// so deleting an unknown or moved project remains an idempotent no-op.
+// normalizeDeleteProjectPath resolves a delete's path selector to the root and
+// identity it addresses.
+//
+// A path that RESOLVES is its repository's, plainly. A path that does not is
+// the case #3363 was about, and the answer is now written down rather than
+// guessed: if a registered project last resolved from that path, the delete
+// addresses THAT project's own identity — the one its sessions and root agent
+// are keyed under — and never whatever repository may occupy the path later.
+// Hashing the path was what made those two indistinguishable (#3530).
+//
+// With no such record, the identity is invented and can match nothing, which is
+// the clean idempotent no-op deleting an unknown project must be. That comment
+// used to be aspirational; the namespace split makes it true.
 func normalizeDeleteProjectPath(path string) (string, string) {
 	root := config.ExpandTilde(strings.TrimSpace(path))
 	if repo, err := config.RepoFromPath(root); err == nil {
 		return repo.Root, repo.ID
 	}
 	root = filepath.Clean(root)
-	return root, config.RepoIDForRecordedRoot(root)
+	if projects, err := config.ListProjects(); err == nil {
+		for _, project := range projects {
+			if filepath.Clean(project.Root) == root && project.RepoID != "" {
+				return root, project.RepoID
+			}
+		}
+	}
+	return root, config.DerivedRepoIDForUnresolvedRoot(root)
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -136,10 +153,14 @@ func registeredProjectRootForRepoID(repoID string) (string, error) {
 		if resolvedID, ok := config.ResolveRegisteredProjectRepoID(context.Background(), project); ok {
 			candidateID = resolvedID
 		} else if !project.PathExists {
-			// Only a determinately absent path keeps the recorded-root fallback.
-			// A present replacement without this record's checkout marker is
-			// positive evidence that it is not the registered checkout.
-			candidateID = config.RepoIDForRecordedRoot(project.Root)
+			// Only a determinately absent path falls back. It falls back to the
+			// identity the record WROTE DOWN, so an absent project is still
+			// addressable as itself (#3530/#3363); a record predating that
+			// field gets an invented id that matches nothing rather than
+			// matching a stranger. A present replacement without this record's
+			// checkout marker is positive evidence that it is not the
+			// registered checkout, so it does not fall back at all.
+			candidateID = config.ReconciledRepoIDForProject(project)
 		}
 		if candidateID != repoID {
 			continue

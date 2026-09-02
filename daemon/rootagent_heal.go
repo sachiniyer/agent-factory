@@ -345,15 +345,6 @@ type rootReattributionProbe struct {
 	// disappeared between git resolution and the marker read, so the remedy
 	// is the path, not marker readability (#3299 review round 12).
 	vanished bool
-	// foreignIdentity means the recorded root RESOLVED, but to a repository
-	// whose identity root is not that path — a linked worktree of a bare
-	// clone, a subdirectory registration, or a spelling that re-resolves
-	// through a symlink. Attributing it needs a second identity per project,
-	// and a derived recorded-path hash collides by construction with the real
-	// identity of anything later main-rooted there, so that residue is
-	// deferred to #3530. A concrete verdict, not an inconclusive one: the
-	// entry settles onto its backoff rather than re-probing every pass.
-	foreignIdentity bool
 	// settled marks a consumed NEGATIVE result held in place until retryAt:
 	// per-entry pacing, so a stalled sibling's hot pass cadence cannot make
 	// this entry respawn a git probe every poll tick (#3299 review round 7).
@@ -671,6 +662,19 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// boot: identity comes from repo.ID, but an in-place root agent runs
 		// at the checkout the user registered (#3361's identity/workspace
 		// boundary). Parity between the two paths is the contract.
+		// Write the reconciliation DOWN, once (#3530). A record keyed by an
+		// invented id has just been proven to belong to repo.ID, and the next
+		// time this project's path is unavailable that fact cannot be
+		// recomputed — it is what lets a delete-by-recorded-path or the TUI
+		// reach the project's real state after the path is gone. One-way: the
+		// writer never overwrites an identity already recorded.
+		if config.IsDerivedRepoID(derivedID) {
+			if wrote, err := config.ReconcileProjectRepoID(record.projectID, repo.ID); err != nil {
+				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; it will be re-derived next pass: %v", record.root, repo.ID, record.projectID, err)
+			} else if wrote {
+				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
+			}
+		}
 		healed.projectRoots[repo.ID] = record.root
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)

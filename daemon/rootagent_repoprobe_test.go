@@ -218,10 +218,17 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 	// The fail-open handling itself is unchanged: the root is still recorded as
 	// unresolved for this run, and the singleton sweep still starts nothing for
 	// it. Only the claim the log makes about WHY changes.
-	if _, ok := projectRoots[config.RepoIDForRecordedRoot(project.Root)]; ok {
+	// This record carries no recorded identity (#3530), so it is keyed by an
+	// INVENTED id — one no repository can hold — rather than by a hash of its
+	// path, which is what a stranger arriving at that path would also produce.
+	key := config.ReconciledRepoIDForProject(project)
+	if !config.IsDerivedRepoID(key) {
+		t.Fatalf("a project with no recorded identity must be keyed by an invented id, got %s", key)
+	}
+	if _, ok := projectRoots[key]; ok {
 		t.Fatalf("an unresolved root must stay out of projectRoots")
 	}
-	if _, ok := unresolvedRoots[config.RepoIDForRecordedRoot(project.Root)]; !ok {
+	if _, ok := unresolvedRoots[key]; !ok {
 		t.Fatalf("an unresolved root must still be recorded as unresolved")
 	}
 }

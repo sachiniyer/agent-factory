@@ -141,7 +141,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		// by an enclosing, unrelated repository merely because its old parent
 		// path now resolves there.
 		identity := projectPathResolution{
-			id: config.RepoIDForRecordedRoot(identityPath), root: filepath.Clean(identityPath),
+			id: config.RepoIDFromRoot(filepath.Clean(identityPath)), root: filepath.Clean(identityPath),
 		}
 		// Path is the requested operational workspace. Prefer it only when Git
 		// proves it belongs to the session's recorded identity; this collapses a
@@ -189,9 +189,9 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		switch {
 		case proven:
 			resolved.id = provenID
-		case resolved.id != config.RepoIDForRecordedRoot(project.Root):
+		case resolved.id != config.RepoIDFromRoot(filepath.Clean(project.Root)):
 			resolved = projectPathResolution{
-				id: config.RepoIDForRecordedRoot(project.Root), root: filepath.Clean(project.Root),
+				id: config.RepoIDFromRoot(filepath.Clean(project.Root)), root: filepath.Clean(project.Root),
 			}
 		}
 		ensure(resolved, 2)

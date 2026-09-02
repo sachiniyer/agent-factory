@@ -51,6 +51,23 @@ type Project struct {
 	CheckoutID   string `json:"checkout_id"`
 	Root         string `json:"root"`
 	RelativeRoot string `json:"relative_root"`
+	// RepoID is the repository identity this project RESOLVED to, written down
+	// the first time it was seen to resolve and never rewritten back to an
+	// invented one (#3530).
+	//
+	// It is durable because the moment it is needed is the moment it cannot be
+	// computed: a recorded root that has stopped resolving cannot be hashed
+	// canonically, yet the project's sessions were keyed by the real id when
+	// they were created. Without this written down, a delete by that recorded
+	// path or a TUI grouping has nothing to reach the real id with — and
+	// hashing the path instead reaches whatever repository is there NOW, which
+	// is the collision #3530 removes and the missed match #3363 describes.
+	//
+	// Empty only for a record written before this field existed; the daemon
+	// backfills it on the first successful resolution, and until then that
+	// project is addressed by DerivedRepoIDForUnresolvedRoot, which cannot
+	// collide with anything real.
+	RepoID string `json:"repo_id,omitempty"`
 	// PathExists is availability, not identity proof. The registry deliberately
 	// does not infer that a new checkout appearing at the same path is the old
 	// one; only the checkout marker provides that evidence.
@@ -64,9 +81,17 @@ type projectRecord struct {
 	Root          string `json:"root"`
 	CheckoutRoot  string `json:"checkout_root"`
 	RelativeRoot  string `json:"relative_root"`
+	// RepoID is the resolved repository identity — see Project.RepoID. An
+	// older record simply omits it; nothing reads it as "no identity", only as
+	// "not written down yet".
+	RepoID string `json:"repo_id,omitempty"`
 }
 
 type projectBinding struct {
+	// repoID is the repository identity this path resolved to. Binding always
+	// resolves through git, so it is always known here — which is what lets a
+	// record write it down for the times it cannot be recomputed (#3530).
+	repoID             string
 	root               string
 	checkoutRoot       string
 	relativeRoot       string
@@ -266,6 +291,17 @@ func RegisterProject(path string) (Project, error) {
 						}
 					}
 				}
+				// One-way backfill (#3530): a record written before RepoID
+				// existed learns its identity the first time it is seen to
+				// resolve. Never rewritten once set, and never back to an
+				// invented id — a rebind is the only thing that moves it, and
+				// it moves it to another REAL id.
+				if record.RepoID == "" && binding.repoID != "" {
+					record.RepoID = binding.repoID
+					if err := writeProjectRecord(dir, record); err != nil {
+						return err
+					}
+				}
 				registered = projectFromRecord(record)
 				return nil
 			}
@@ -284,6 +320,7 @@ func RegisterProject(path string) (Project, error) {
 			Root:          binding.root,
 			CheckoutRoot:  binding.checkoutRoot,
 			RelativeRoot:  binding.relativeRoot,
+			RepoID:        binding.repoID,
 		}
 		if err := writeNewProjectRecord(dir, record); err != nil {
 			return err
@@ -369,6 +406,12 @@ func RebindProject(id, path string) (Project, error) {
 		record.Root = binding.root
 		record.CheckoutRoot = binding.checkoutRoot
 		record.RelativeRoot = binding.relativeRoot
+		// A rebind is the one thing that legitimately moves a project's
+		// identity, and it moves it to another RESOLVED one — never back to an
+		// invented id, which is what "one-way" means here (#3530).
+		if binding.repoID != "" {
+			record.RepoID = binding.repoID
+		}
 		if err := writeProjectRecord(dir, record); err != nil {
 			return err
 		}
@@ -483,7 +526,12 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 			return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
 		}
 	}
+	identity := ""
+	if repo, repoErr := RepoFromPath(resolved); repoErr == nil {
+		identity = repo.ID
+	}
 	return projectBinding{
+		repoID:             identity,
 		root:               filepath.Clean(checkoutRoot),
 		checkoutRoot:       filepath.Clean(checkoutRoot),
 		relativeRoot:       ".",
@@ -701,6 +749,7 @@ func projectFromRecord(record projectRecord) Project {
 		CheckoutID:   record.CheckoutID,
 		Root:         record.Root,
 		RelativeRoot: record.RelativeRoot,
+		RepoID:       record.RepoID,
 		PathExists:   projectPathExists(record.Root),
 	}
 }

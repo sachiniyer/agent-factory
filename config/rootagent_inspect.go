@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -314,7 +315,7 @@ func LegacyRootAgentForRepo(global *Config, repoID string) (*RootAgentConfig, st
 		// root the moment the path returns. Dropping it instead told
 		// consumers "no layer enables this repo" about a repo whose opt-in
 		// sat in root_agents the whole time (#3264 review).
-		if RepoIDForRecordedRoot(expanded) == repoID {
+		if RepoIDFromRoot(filepath.Clean(expanded)) == repoID {
 			entry := global.RootAgents[key]
 			return &entry, key
 		}

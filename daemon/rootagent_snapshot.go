@@ -206,18 +206,22 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// project instead is fail-open (#3247): the legacy sweep's per-tick
 			// retry (#1122) resolves the repo the moment the path returns and
 			// would ensure it with no personal layer, starting a root whose
-			// enabled=false sat readable in the AF home the whole time. The
-			// derived ID cannot match what the sweep resolves when the
-			// recorded root is not the main worktree's toplevel — a linked
-			// worktree of a bare clone (the shape resolveProjectBinding
-			// records, and #3361 identifies by its bare common dir), a
-			// subdirectory registration, or a spelling that later re-resolves
-			// through a symlink. That residue is why the record is KEPT here:
-			// reattributeUnresolvedRoots re-attempts these on the ensure
-			// cadence and moves the layers onto the repo's real identity as
-			// soon as the path resolves and its checkout marker still matches,
-			// so none of the three waits for a daemon restart any more (#3299).
-			repoID = config.RepoIDForRecordedRoot(p.Root)
+			// enabled=false sat readable in the AF home the whole time.
+			//
+			// The identity comes from the RECORD, not from hashing the path
+			// (#3530). A project writes down the repository it resolved to
+			// (Project.RepoID), so an absent path is still attributed to its
+			// own repository — including when the recorded root is not the
+			// repository's identity root, which is the residue #3334 had to
+			// defer. Hashing the path instead would attribute the layer to
+			// whatever repository turns up there, which is the collision this
+			// namespace split removes.
+			//
+			// Only a record written before RepoID existed falls back, and it
+			// falls back to a value NO repository can hold, so it reaches
+			// nothing until the ensure cadence resolves it and writes the real
+			// identity down.
+			repoID = config.ReconciledRepoIDForProject(p)
 			repoRoot = p.Root
 			unresolvedRoots[repoID] = unresolvedProjectRecord{root: p.Root, projectID: p.ID, checkoutID: p.CheckoutID}
 			// The claim is split at the resolution boundary (#3500): a probe

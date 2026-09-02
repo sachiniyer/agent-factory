@@ -277,3 +277,61 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 func ProjectCheckoutMatches(root, checkoutID string) (bool, error) {
 	return projectRootHasCheckoutID(root, checkoutID)
 }
+
+// ReconciledRepoIDForProject is the identity to address a project by when its
+// recorded root may not resolve — the one place that decision is made (#3530).
+//
+// A project that has been seen to resolve carries its repository's real id, so
+// an absent path still reaches the state its sessions were keyed under at
+// creation. That is what makes a delete by an unresolvable recorded path
+// address the recorded project rather than whatever repository now occupies
+// that path (#3363), and it is why the id has to be written down: at the moment
+// it is needed it can no longer be computed.
+//
+// A record predating that field gets an INVENTED id instead, which by
+// construction no repository can hold. It therefore reaches nothing rather than
+// something wrong, until the first successful resolution writes the real one.
+func ReconciledRepoIDForProject(p Project) string {
+	if p.RepoID != "" {
+		return p.RepoID
+	}
+	return DerivedRepoIDForUnresolvedRoot(p.Root)
+}
+
+// ReconcileProjectRepoID writes down the repository identity a project has been
+// seen to resolve to, once. It is the ONE-WAY move #3530 requires: a record
+// keyed by an invented id learns its real one and never goes back.
+//
+// Idempotent and non-destructive by design — an already-recorded identity is
+// left alone, so this can run on every successful resolution without racing
+// itself, and it never overwrites what a rebind deliberately set. Reports
+// whether it wrote.
+func ReconcileProjectRepoID(projectID, repoID string) (bool, error) {
+	if projectID == "" || repoID == "" || IsDerivedRepoID(repoID) {
+		return false, nil
+	}
+	dir, err := projectRegistryDir()
+	if err != nil {
+		return false, err
+	}
+	wrote := false
+	err = WithFileLock(projectRegistryLockPath(dir), func() error {
+		records, err := loadProjectRecords(dir)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if record.ID != projectID || record.RepoID != "" {
+				continue
+			}
+			record.RepoID = repoID
+			if err := writeProjectRecord(dir, record); err != nil {
+				return err
+			}
+			wrote = true
+			return nil
+		}
+		return nil
+	})
+	return wrote, err
+}

@@ -63,7 +63,7 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 		}
 		delete(m.projectPathResolutions, path)
 		resolvedPaths[path] = projectPathResolution{
-			id: config.RepoIDForRecordedRoot(path), root: filepath.Clean(path),
+			id: config.RepoIDFromRoot(filepath.Clean(path)), root: filepath.Clean(path),
 		}
 		uncached = append(uncached, path)
 	}

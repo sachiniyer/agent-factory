@@ -1,5 +1,7 @@
 package config
 
+import "path/filepath"
+
 // DeregisterRootAgentsForRepo removes every root_agents opt-in that resolves to
 // ANY of repoIDs and persists the result, returning the config keys it removed.
 // It is the durable half of "delete a project" (#1735), so an emptied project
@@ -62,5 +64,9 @@ func rootAgentKeyMatchesRepo(key, repoID string) bool {
 	if repo, err := RepoFromPath(expanded); err == nil {
 		return repo.ID == repoID
 	}
-	return RepoIDForRecordedRoot(expanded) == repoID
+	// CANONICAL role (#3530): the question is "does this key name that
+	// repository", so an unresolvable key is compared by hashing the path the
+	// same way a real identity is derived. Inventing a namespaced id here would
+	// make a stale entry for a gone repo unsweepable.
+	return RepoIDFromRoot(filepath.Clean(expanded)) == repoID
 }

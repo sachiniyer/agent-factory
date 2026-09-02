@@ -157,12 +157,12 @@ func TestLegacyRootAgentForRepoMatchesUnresolvableKeyByRecordedRoot(t *testing.T
 	cfg := DefaultConfig()
 	cfg.RootAgents = map[string]RootAgentConfig{missing: {Program: "custom"}}
 
-	entry, key := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(missing))
+	entry, key := LegacyRootAgentForRepo(cfg, RepoIDFromRoot(filepath.Clean(missing)))
 	require.NotNil(t, entry, "an unresolvable key must match by recorded-root identity")
 	assert.Equal(t, missing, key)
 	assert.Equal(t, "custom", entry.Program)
 
-	other, _ := LegacyRootAgentForRepo(cfg, RepoIDForRecordedRoot(filepath.Join(t.TempDir(), "elsewhere")))
+	other, _ := LegacyRootAgentForRepo(cfg, RepoIDFromRoot(filepath.Clean(filepath.Join(t.TempDir(), "elsewhere"))))
 	assert.Nil(t, other, "the fallback matches only the recorded spelling's own identity")
 }
 

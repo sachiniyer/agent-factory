@@ -282,7 +282,7 @@ func TestBuildProjectListRetainsMismatchedRecordedIdentity(t *testing.T) {
 	ancestor := initTestGitRepo(t)
 	legacyRoot := filepath.Join(ancestor, "recorded-parent")
 	require.NoError(t, os.Mkdir(legacyRoot, 0o755))
-	require.NotEqual(t, config.RepoIDForRecordedRoot(legacyRoot), config.RepoIDForPath(legacyRoot),
+	require.NotEqual(t, config.RepoIDFromRoot(filepath.Clean(legacyRoot)), config.RepoIDForPath(legacyRoot),
 		"fixture must place the retained root inside another repository")
 
 	projects, degraded := h.buildProjectListFrom([]session.InstanceData{{
@@ -1003,6 +1003,6 @@ func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) 
 	}
 	assert.NotContains(t, ids, outerRepo.ID,
 		"an unproven registration must not lend the enclosing repository a Projects row")
-	assert.Contains(t, ids, config.RepoIDForRecordedRoot(project.Root),
+	assert.Contains(t, ids, config.RepoIDFromRoot(filepath.Clean(project.Root)),
 		"the registration keeps its own recorded-root identity rather than vanishing")
 }
