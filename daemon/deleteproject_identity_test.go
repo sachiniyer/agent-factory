@@ -785,3 +785,54 @@ func TestAbandonedRowClearsTheSelectionFlag(t *testing.T) {
 		t.Fatalf("the refusal must state that nothing was mutated: %v", err)
 	}
 }
+
+// TestAbsentPathDeletesEvenWhenGitCannotRun pins #3530 review id 3919749878.
+//
+// Absence is independent evidence: a path that provably holds nothing cannot be
+// hiding a checkout, whichever way git failed. Asking the unanswered-probe
+// question first made a sessionless missing project undeletable for as long as
+// the git executable was unavailable.
+func TestAbsentPathDeletesEvenWhenGitCannotRun(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Every git from here on dies on a signal: nothing it is asked is answered.
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("LookPath(git): %v", err)
+	}
+	binDir := t.TempDir()
+	shim := "#!/bin/sh\nkill -9 $$\nexec " + realGit + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write git shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath})
+	if err != nil {
+		t.Fatalf("a provably absent path is evidence in its own right; the delete must proceed on the record's identity: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("and under the identity the record wrote down: got %s, want %s", result.RepoID, realID)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("and the durable record must be removed")
+	}
+}

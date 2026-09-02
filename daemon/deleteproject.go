@@ -139,7 +139,21 @@ func normalizeDeleteProjectPath(path string) (root string, repoID string, matche
 	if err == nil {
 		return repo.Root, repo.ID, false, nil
 	}
+	// Absence is INDEPENDENT evidence, so it is asked first (#3530 review id
+	// 3919749878). A path that provably holds nothing cannot be hiding a
+	// checkout whichever way git failed, and refusing there would make a
+	// sessionless missing project undeletable for as long as the git
+	// executable is unavailable.
 	if !config.PathIsDeterminatelyFree(root, err) {
+		if errors.Is(err, config.ErrRepoProbeUnanswered) {
+			// git never answered, so this is not evidence that the path is
+			// unresolved — and choosing EITHER identity here picks a project.
+			// A stale record's id would archive and suppress the old project
+			// while the user selected the checkout occupying its path (#3530
+			// review id 3914971755). Refuse; nothing has been mutated
+			// (#3500's rule).
+			return "", "", false, fmt.Errorf("delete project: could not determine what is at %q — git never answered the probe, so which project this names is unknown; nothing was changed — retry once the path is readable: %w", root, err)
+		}
 		// "git failed" is not "nothing is there" (#3530 review id 3919346198).
 		// A live checkout whose metadata git will not read — dubious
 		// ownership, an unreadable .git, a permission error — exits normally,
@@ -148,14 +162,6 @@ func normalizeDeleteProjectPath(path string) (root string, repoID string, matche
 		// instead of the checkout the user selected. Refuse; nothing has been
 		// mutated.
 		return "", "", false, fmt.Errorf("delete project: could not determine what is at %q — git could not read it, so which project this names is unknown; nothing was changed — repair the checkout's access or metadata and retry: %w", root, err)
-	}
-	if errors.Is(err, config.ErrRepoProbeUnanswered) {
-		// git never answered, so this is not evidence that the path is
-		// unresolved — and choosing EITHER identity here picks a project. A
-		// stale record's id would archive and suppress the old project while
-		// the user selected the checkout occupying its path (#3530 review id
-		// 3914971755). Refuse; nothing has been mutated (#3500's rule).
-		return "", "", false, fmt.Errorf("delete project: could not determine what is at %q — git never answered the probe, so which project this names is unknown; nothing was changed — retry once the path is readable: %w", root, err)
 	}
 	root = filepath.Clean(root)
 	projects, listErr := config.ListProjects()
