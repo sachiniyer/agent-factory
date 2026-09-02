@@ -189,9 +189,15 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		switch {
 		case proven:
 			resolved.id = provenID
-		case resolved.id != config.RepoIDFromRoot(filepath.Clean(project.Root)):
+		case resolved.id != config.ReconciledRepoIDForProject(project):
+			// A registry ROW is addressed by the identity it recorded, not by
+			// hashing its path (#3530). Hashing splits the row from sessions
+			// stored under the real id — most visibly once a bare repository's
+			// linked worktree disappears — and for a legacy row with nothing
+			// recorded it recreates the very real/invented collision this
+			// change removes.
 			resolved = projectPathResolution{
-				id: config.RepoIDFromRoot(filepath.Clean(project.Root)), root: filepath.Clean(project.Root),
+				id: config.ReconciledRepoIDForProject(project), root: filepath.Clean(project.Root),
 			}
 		}
 		ensure(resolved, 2)

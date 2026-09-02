@@ -117,20 +117,35 @@ func deleteProjectFailure(result DeleteProjectResult, err error) error {
 // With no such record, the identity is invented and can match nothing, which is
 // the clean idempotent no-op deleting an unknown project must be. That comment
 // used to be aspirational; the namespace split makes it true.
-func normalizeDeleteProjectPath(path string) (string, string) {
+func normalizeDeleteProjectPath(path string) (string, string, error) {
 	root := config.ExpandTilde(strings.TrimSpace(path))
-	if repo, err := config.RepoFromPath(root); err == nil {
-		return repo.Root, repo.ID
+	repo, err := config.RepoFromPath(root)
+	if err == nil {
+		return repo.Root, repo.ID, nil
+	}
+	if errors.Is(err, config.ErrRepoProbeUnanswered) {
+		// git never answered, so this is not evidence that the path is
+		// unresolved — and choosing EITHER identity here picks a project. A
+		// stale record's id would archive and suppress the old project while
+		// the user selected the checkout occupying its path (#3530 review id
+		// 3914971755). Refuse; nothing has been mutated (#3500's rule).
+		return "", "", fmt.Errorf("delete project: could not determine what is at %q — git never answered the probe, so which project this names is unknown; nothing was changed — retry once the path is readable: %w", root, err)
 	}
 	root = filepath.Clean(root)
-	if projects, err := config.ListProjects(); err == nil {
-		for _, project := range projects {
-			if filepath.Clean(project.Root) == root && project.RepoID != "" {
-				return root, project.RepoID
-			}
+	projects, listErr := config.ListProjects()
+	if listErr != nil {
+		// Unknown, not "no such record" (#3530 review id 3914971766). Falling
+		// through would invent an id that matches nothing and report a
+		// successful no-op while the project's sessions and registration are
+		// untouched.
+		return "", "", fmt.Errorf("delete project: could not read the durable project registry to identify %q; nothing was changed: %w", root, listErr)
+	}
+	for _, project := range projects {
+		if filepath.Clean(project.Root) == root && project.RepoID != "" {
+			return root, project.RepoID, nil
 		}
 	}
-	return root, config.DerivedRepoIDForUnresolvedRoot(root)
+	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
 }
 
 // registeredProjectRootForRepoID resolves the path needed by
@@ -295,7 +310,11 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		// typo'd project) fall back to hashing the cleaned path: that yields no
 		// match, which is the clean idempotent no-op deleting an unknown project
 		// must be (Sachin's locked semantics), not a wrong-project hit.
-		repoPath, repoID = normalizeDeleteProjectPath(repoPath)
+		var normErr error
+		repoPath, repoID, normErr = normalizeDeleteProjectPath(repoPath)
+		if normErr != nil {
+			return deleteProjectTarget{}, normErr
+		}
 	} else if repoPath == "" {
 		var err error
 		repoPath, err = registeredProjectRootForRepoID(repoID)
@@ -307,7 +326,11 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		// sessions/root-agent state while RepoPath chooses a potentially different
 		// registry row — a split-target partial delete hidden behind success.
 		var pathRepoID string
-		repoPath, pathRepoID = normalizeDeleteProjectPath(repoPath)
+		var normErr error
+		repoPath, pathRepoID, normErr = normalizeDeleteProjectPath(repoPath)
+		if normErr != nil {
+			return deleteProjectTarget{repoID: repoID}, normErr
+		}
 		if pathRepoID != repoID {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}
@@ -421,7 +444,16 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// path matches only its derived hash, and two separate writes could
 	// remove one opt-in and then fail — falsifying the nothing-was-changed
 	// guarantee below.
-	if removed, cfgErr := deregisterRootAgents(repoID); cfgErr != nil {
+	// root_agents keys are PATHS, and the matcher resolves them to a canonical
+	// identity — so a delete targeting a provisional id would sweep nothing and
+	// leave the durable opt-in to start the root again on the next daemon run
+	// (#3530 review id 3914971851). Supply the recorded path's canonical id
+	// alongside it; both name this one project, and neither can name another.
+	optInIDs := []string{repoID}
+	if config.IsDerivedRepoID(repoID) && repoPath != "" {
+		optInIDs = append(optInIDs, config.RepoIDFromRoot(filepath.Clean(repoPath)))
+	}
+	if removed, cfgErr := deregisterRootAgents(optInIDs...); cfgErr != nil {
 		return result, fmt.Errorf("delete project %s: could not durably remove its root_agents opt-in — the project would reappear on daemon restart, so nothing was changed; retry: %w", repoID, cfgErr)
 	} else if len(removed) > 0 {
 		log.InfoLog.Printf("delete project %s: removed %d root_agents opt-in(s): %v", repoID, len(removed), removed)

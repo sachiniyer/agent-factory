@@ -182,7 +182,13 @@ func sameRootHealRegistryProjects(left, right []config.Project) bool {
 		if left[i].ID != right[i].ID ||
 			left[i].CheckoutID != right[i].CheckoutID ||
 			left[i].Root != right[i].Root ||
-			left[i].RelativeRoot != right[i].RelativeRoot {
+			left[i].RelativeRoot != right[i].RelativeRoot ||
+			// The recorded identity too (#3530 review id 3914971866): a
+			// reconciliation landing between the two reads changes which id a
+			// project is attributed under, and calling those snapshots
+			// identical would freeze layers built from the provisional one
+			// until restart.
+			left[i].RepoID != right[i].RepoID {
 			return false
 		}
 	}
@@ -670,14 +676,73 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// writer never overwrites an identity already recorded.
 		if config.IsDerivedRepoID(derivedID) {
 			if wrote, err := config.ReconcileProjectRepoID(record.projectID, repo.ID); err != nil {
-				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; it will be re-derived next pass: %v", record.root, repo.ID, record.projectID, err)
+				// The durable write is what makes the promotion survive a
+				// restart, so a failure must NOT be followed by an in-memory
+				// promotion: the snapshot would move the project to repo.ID
+				// while the record still says nothing, and the next daemon
+				// start would put it back under the invented id with its
+				// layers left behind. Leave everything where it is and let the
+				// next pass retry (#3530 review id 3914971915).
+				log.WarningLog.Printf("root agent snapshot: recorded project root %s resolves to repo %s, but its identity could not be written to the registry record for project %s; leaving the project under its provisional identity and retrying on the ensure cadence: %v", record.root, repo.ID, record.projectID, err)
+				continue
 			} else if wrote {
 				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
 			}
+			// An invented identity is provisional, and EVERYTHING keyed under
+			// it has to come with the project when it is promoted (#3530
+			// review ids 3914971803, 3914971837). Leaving any of it behind
+			// reproduces the fail-open this whole mechanism exists to close:
+			// resolution under the real id would miss a personal disable, miss
+			// a fail-closed latch, or miss a deletion, and start a root from
+			// the lower-precedence layers.
+			promoteDerivedIdentity(m, healed, derivedID, repo.ID)
 		}
 		healed.projectRoots[repo.ID] = record.root
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
 	}
 	return changed, settles
+}
+
+// promoteDerivedIdentity moves every piece of state a provisional identity was
+// holding onto the real one, at the moment the two are proven to be the same
+// project (#3530).
+//
+// It exists only for a record written before Project.RepoID: such a record is
+// keyed by an invented id until its path first resolves, and that id is what
+// the snapshot's layers, latches and any deletion tombstone were filed under.
+// A promotion that moved only the project root would leave a personal
+// enabled=false, an unreadable-config latch, or a delete invisible to
+// resolution under the real id — each of which starts a root the user did not
+// ask for.
+//
+// Deliberately NOT an alias. The old design kept both identities alive and
+// taught every consumer to check the other one, which is the collision class
+// this change removes; this moves the state once and leaves nothing behind to
+// reconcile later.
+func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, realID string) {
+	if derivedID == realID {
+		return
+	}
+	if layer, ok := healed.personal[derivedID]; ok {
+		healed.personal[realID] = layer
+		delete(healed.personal, derivedID)
+	}
+	if projectID, ok := healed.personalUnreadable[derivedID]; ok {
+		healed.personalUnreadable[realID] = projectID
+		delete(healed.personalUnreadable, derivedID)
+	}
+	// A deletion recorded against the provisional identity is a deletion of
+	// this project, so it has to reach the identity the project now has.
+	m.mu.Lock()
+	if claimant, ok := m.deletedRootRepos[derivedID]; ok {
+		if _, already := m.deletedRootRepos[realID]; !already {
+			m.deletedRootRepos[realID] = claimant
+		}
+		delete(m.deletedRootRepos, derivedID)
+	}
+	if _, ok := m.projectDeletes[derivedID]; ok {
+		m.projectDeletes[realID] = struct{}{}
+	}
+	m.mu.Unlock()
 }

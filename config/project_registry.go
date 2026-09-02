@@ -27,13 +27,20 @@ import (
 const ProjectRegistryDirName = ".agent-factory-projects"
 
 const (
-	projectRegistrySchemaVersion = 1
-	projectMetadataFileName      = "project.json"
-	checkoutMarkerDirName        = "agent-factory"
-	checkoutMarkerFilePrefix     = "checkout-id-"
-	projectIDPrefix              = "prj_"
-	checkoutIDPrefix             = "chk_"
-	opaqueIDBytes                = 16
+	// 2 adds repo_id (#3530). The bump is the compatibility mechanism, not
+	// bookkeeping: an older af rejects a version it does not know
+	// ("upgrade af"), whereas at v1 it would have unmarshalled the unknown
+	// field away and silently erased a durable identity on its next rebind.
+	// v1 records are still READ — they are exactly the legacy records the
+	// reconciliation backfills — and are rewritten as v2.
+	projectRegistrySchemaVersion    = 2
+	projectRegistryMinSchemaVersion = 1
+	projectMetadataFileName         = "project.json"
+	checkoutMarkerDirName           = "agent-factory"
+	checkoutMarkerFilePrefix        = "checkout-id-"
+	projectIDPrefix                 = "prj_"
+	checkoutIDPrefix                = "chk_"
+	opaqueIDBytes                   = 16
 )
 
 var (
@@ -286,6 +293,15 @@ func RegisterProject(path string) (Project, error) {
 					if !oldRootHasMarker {
 						record.Root = binding.root
 						record.CheckoutRoot = binding.checkoutRoot
+						// A whole-checkout move changes the identity root, so
+						// it changes the real id. Leaving the old one recorded
+						// would make an absent path resolve to the
+						// repository's FORMER state (#3530). Same rule
+						// RebindProject applies: a verified move is a
+						// real→real transition, which "one-way" permits.
+						if binding.repoID != "" {
+							record.RepoID = binding.repoID
+						}
 						if err := writeProjectRecord(dir, record); err != nil {
 							return err
 						}
@@ -526,10 +542,17 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 			return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
 		}
 	}
-	identity := ""
-	if repo, repoErr := RepoFromPath(resolved); repoErr == nil {
-		identity = repo.ID
+	// A binding that cannot state its identity must not be committed: the
+	// record would be written legacy-shaped, and if the path disappeared
+	// before anything re-resolved it, the project would be addressed by a
+	// provisional id and miss state already stored under the real one (#3530
+	// review id 3914971775). Every other probe here has already succeeded, so
+	// a failure at this one is transient — surface it and let the caller retry.
+	identityRepo, identityErr := RepoFromPath(resolved)
+	if identityErr != nil {
+		return projectBinding{}, fmt.Errorf("resolve repository identity for %q: %w", resolved, identityErr)
 	}
+	identity := identityRepo.ID
 	return projectBinding{
 		repoID:             identity,
 		root:               filepath.Clean(checkoutRoot),

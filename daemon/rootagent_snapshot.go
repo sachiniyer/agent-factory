@@ -194,6 +194,19 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			// path publishes the same recorded root on acceptance, so a project
 			// that resolves mid-run gets the create a boot resolution would
 			// have (#3299) — reattributeUnresolvedRoots states that parity.
+			// Write the identity down the FIRST time this record is seen to
+			// resolve, not only when re-attribution runs (#3530 review id
+			// 3914971739). A record written before RepoID existed whose path
+			// resolves at daemon start never enters unresolvedRoots, so the
+			// re-attribution path never reaches it — and it would switch to a
+			// provisional identity the moment its path went away, losing
+			// sessions and policy keyed under the real one. Idempotent: the
+			// writer is a no-op once the identity is recorded.
+			if p.RepoID == "" {
+				if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
+					log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; if its path goes away before this succeeds it will fall back to a provisional identity: %v", p.ID, repoID, err)
+				}
+			}
 			projectRoots[repoID] = p.Root
 		} else {
 			// The recorded root does not resolve right now — an absent mount, a

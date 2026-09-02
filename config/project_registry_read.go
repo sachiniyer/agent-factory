@@ -230,10 +230,10 @@ func loadProjectRecordsDetailed(dir string) (records []projectRecord, failures [
 }
 
 func validateProjectRecord(directoryID string, record projectRecord) error {
-	if record.SchemaVersion != projectRegistrySchemaVersion {
-		if record.SchemaVersion > projectRegistrySchemaVersion {
-			return fmt.Errorf("project %s uses schema version %d, but this af supports up to %d — upgrade af", directoryID, record.SchemaVersion, projectRegistrySchemaVersion)
-		}
+	if record.SchemaVersion > projectRegistrySchemaVersion {
+		return fmt.Errorf("project %s uses schema version %d, but this af supports up to %d — upgrade af", directoryID, record.SchemaVersion, projectRegistrySchemaVersion)
+	}
+	if record.SchemaVersion < projectRegistryMinSchemaVersion {
 		return fmt.Errorf("project %s has unsupported schema version %d", directoryID, record.SchemaVersion)
 	}
 	if err := ValidateProjectID(record.ID); err != nil {
@@ -250,6 +250,20 @@ func validateProjectRecord(directoryID string, record projectRecord) error {
 	}
 	if err := validateStoredProjectPath("checkout root", record.CheckoutRoot); err != nil {
 		return fmt.Errorf("project %s: %w", record.ID, err)
+	}
+	if record.RepoID != "" {
+		// It is the authoritative key for personal policy, deletion and UI
+		// requests, so a malformed value would attribute a project's layer to
+		// an arbitrary identity. And an INVENTED value must never be stored:
+		// the one-way writer refuses to replace a non-empty field, so a
+		// persisted d-… id would be immune to reconciliation forever — only a
+		// resolved identity is legal here (#3530 review id 3914971883).
+		if err := ValidateRepoID(record.RepoID); err != nil {
+			return fmt.Errorf("project %s: repo id: %w", record.ID, err)
+		}
+		if IsDerivedRepoID(record.RepoID) {
+			return fmt.Errorf("project %s has a provisional repo id %q recorded; only a resolved repository identity may be stored", record.ID, record.RepoID)
+		}
 	}
 	if record.RelativeRoot == "" || filepath.IsAbs(record.RelativeRoot) {
 		return fmt.Errorf("project %s has invalid relative root %q", record.ID, record.RelativeRoot)
