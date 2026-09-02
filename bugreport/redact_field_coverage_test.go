@@ -325,37 +325,53 @@ func effectiveJSONName(f reflect.StructField) string {
 	return f.Name
 }
 
-// droppedJSONNames returns the names encoding/json will emit for NEITHER of the
-// fields claiming them. When two anonymously embedded types export the same
-// JSON name at the same depth, json resolves the tie by dropping both — measured:
-// `struct{ aa; bb }` where each has `Dup string \`json:"dup"\“ marshals to
-// {"fine":"ok"}, with no "dup" key at all.
+// hasExplicitJSONName reports whether a field carries an explicit name in its
+// json tag. Go breaks a same-depth name tie in favour of the single tagged
+// field, so taggedness is part of the serialization decision, not decoration.
+func hasExplicitJSONName(f reflect.StructField) bool {
+	tag := f.Tag.Get("json")
+	return tag != "" && strings.Split(tag, ",")[0] != ""
+}
+
+// fieldCandidate is one field competing to own a JSON name.
+type fieldCandidate struct {
+	key    string
+	name   string
+	depth  int
+	tagged bool
+}
+
+// serializableFields returns the keys of the fields encoding/json will actually
+// emit for t, applying the two rules that decide whether a field reaches the
+// document at all:
 //
-// The guard must honour that, or it demands redaction for a value which cannot
-// enter the bundle — the same misleading classification jsonSkipped exists to
-// prevent (#3592 review).
+//   - Shallower depth wins outright.
+//   - At the shallowest depth, a name owned by more than one field is resolved
+//     in favour of the single EXPLICITLY TAGGED field; with zero or several
+//     tagged candidates, json emits none of them.
 //
-// This implements the SAME-DEPTH TIE only, not json's full dominance algorithm
-// (shallower-wins, tagged-beats-untagged). Those other rules choose WHICH field
-// is emitted; both candidates are still real fields the guard should visit, so
-// getting them wrong costs a redundant visit rather than a missed leak. A tie is
-// the only rule that makes a field unserializable, so it is the only one whose
-// absence can produce a false demand.
-func droppedJSONNames(t reflect.Type) map[string]bool {
-	byDepth := map[string]map[int]int{}
-	note := func(name string, depth int) {
-		if byDepth[name] == nil {
-			byDepth[name] = map[int]int{}
-		}
-		byDepth[name][depth]++
-	}
+// All three branches are measured, not read off the spec:
+//
+//	struct{ Foo string; Bar string `json:"Foo"` } -> {"Foo":"TAGGED-VAL"}
+//	struct{ A string `json:"dup"`; B string `json:"dup"` } -> {}
+//	struct{ ea; eb; Keep string } where both embeds export Dup -> {"keep":"k"}
+//
+// The first branch is why a count-only tie rule is unsafe: it would mark "Foo"
+// ambiguous and skip BOTH walks over a field json does serialize, turning a
+// false demand into a MISSED LEAK — the one direction this guard must never
+// fail in (#3592 review).
+func serializableFields(t reflect.Type) map[string]bool {
+	var cands []fieldCandidate
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !mustVisit(f) {
 			continue
 		}
 		if !f.Anonymous {
-			note(effectiveJSONName(f), 0)
+			cands = append(cands, fieldCandidate{
+				key: fmt.Sprintf("0:%d", i), name: effectiveJSONName(f),
+				depth: 0, tagged: hasExplicitJSONName(f),
+			})
 			continue
 		}
 		et := f.Type
@@ -366,24 +382,51 @@ func droppedJSONNames(t reflect.Type) map[string]bool {
 			continue
 		}
 		for j := 0; j < et.NumField(); j++ {
-			if ef := et.Field(j); mustVisit(ef) && !ef.Anonymous {
-				note(effectiveJSONName(ef), 1)
+			ef := et.Field(j)
+			if !mustVisit(ef) || ef.Anonymous {
+				continue
 			}
+			cands = append(cands, fieldCandidate{
+				key: fmt.Sprintf("1:%d:%d", i, j), name: effectiveJSONName(ef),
+				depth: 1, tagged: hasExplicitJSONName(ef),
+			})
 		}
 	}
-	dropped := map[string]bool{}
-	for name, depths := range byDepth {
-		best := -1
-		for d := range depths {
-			if best == -1 || d < best {
-				best = d
+
+	byName := map[string][]fieldCandidate{}
+	for _, c := range cands {
+		byName[c.name] = append(byName[c.name], c)
+	}
+	allowed := map[string]bool{}
+	for _, group := range byName {
+		best := group[0].depth
+		for _, c := range group {
+			if c.depth < best {
+				best = c.depth
 			}
 		}
-		if best >= 0 && depths[best] > 1 {
-			dropped[name] = true
+		var shallow []fieldCandidate
+		for _, c := range group {
+			if c.depth == best {
+				shallow = append(shallow, c)
+			}
 		}
+		if len(shallow) == 1 {
+			allowed[shallow[0].key] = true
+			continue
+		}
+		var tagged []fieldCandidate
+		for _, c := range shallow {
+			if c.tagged {
+				tagged = append(tagged, c)
+			}
+		}
+		if len(tagged) == 1 {
+			allowed[tagged[0].key] = true
+		}
+		// zero or several tagged: json emits none of them.
 	}
-	return dropped
+	return allowed
 }
 
 // guardMinByteArray is the shortest fixed byte array that can hold a marker
@@ -440,21 +483,24 @@ const guardSliceSeed = 2
 
 // fillEmbedded descends into an anonymous embed, skipping the promoted names
 // encoding/json drops as ambiguous at the parent level.
-func (f *sentinelFiller) fillEmbedded(v reflect.Value, path string, depth int, dropped map[string]bool) {
+func (f *sentinelFiller) fillEmbedded(v reflect.Value, path string, depth int, allowed map[string]bool, outer int) {
 	t := v.Type()
-	if t.Kind() == reflect.Ptr {
-		// An unexported pointer embed cannot be allocated through reflect;
-		// fill reports it rather than passing over it.
-		f.fill(v, path, depth)
-		return
-	}
 	if t.Kind() != reflect.Struct {
+		// A pointer embed cannot be allocated through an unexported field;
+		// fill reports it rather than passing over it.
 		f.fill(v, path, depth)
 		return
 	}
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		if !mustVisit(field) || dropped[effectiveJSONName(field)] {
+		if !mustVisit(field) {
+			continue
+		}
+		if field.Anonymous {
+			f.fill(v.Field(i), join(path, field.Name), depth+1)
+			continue
+		}
+		if !allowed[fmt.Sprintf("1:%d:%d", outer, i)] {
 			continue
 		}
 		f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -510,17 +556,17 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return
 		}
-		dropped := droppedJSONNames(v.Type())
+		allowed := serializableFields(v.Type())
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
 			if !mustVisit(field) {
 				continue
 			}
 			if field.Anonymous {
-				f.fillEmbedded(v.Field(i), join(path, field.Name), depth+1, dropped)
+				f.fillEmbedded(v.Field(i), join(path, field.Name), depth+1, allowed, i)
 				continue
 			}
-			if dropped[effectiveJSONName(field)] {
+			if !allowed[fmt.Sprintf("0:%d", i)] {
 				continue
 			}
 			f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -645,17 +691,17 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return nil
 		}
-		dropped := droppedJSONNames(v.Type())
+		allowed := serializableFields(v.Type())
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
 			if !mustVisit(field) {
 				continue
 			}
 			if field.Anonymous {
-				found = append(found, collectEmbedded(v.Field(i), join(path, field.Name), depth+1, dropped)...)
+				found = append(found, collectEmbedded(v.Field(i), join(path, field.Name), depth+1, allowed, i)...)
 				continue
 			}
-			if dropped[effectiveJSONName(field)] {
+			if !allowed[fmt.Sprintf("0:%d", i)] {
 				continue
 			}
 			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
@@ -707,7 +753,7 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 
 // collectEmbedded mirrors fillEmbedded so the two walks agree on which promoted
 // fields are in scope.
-func collectEmbedded(v reflect.Value, path string, depth int, dropped map[string]bool) []string {
+func collectEmbedded(v reflect.Value, path string, depth int, allowed map[string]bool, outer int) []string {
 	t := v.Type()
 	if t.Kind() != reflect.Struct {
 		return collectSentinelPaths(v, path, depth)
@@ -715,7 +761,14 @@ func collectEmbedded(v reflect.Value, path string, depth int, dropped map[string
 	var found []string
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		if !mustVisit(field) || dropped[effectiveJSONName(field)] {
+		if !mustVisit(field) {
+			continue
+		}
+		if field.Anonymous {
+			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
+			continue
+		}
+		if !allowed[fmt.Sprintf("1:%d:%d", outer, i)] {
 			continue
 		}
 		found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
