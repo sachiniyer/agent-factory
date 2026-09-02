@@ -801,18 +801,21 @@ func ListTasksNoSpawn() ([]task.Task, error) {
 // every callDaemon path it ensures the daemon is running first, so adding a task
 // also brings the scheduler up — a task is not schedulable without a running
 // daemon.
-func AddTask(t task.Task) error {
+// actor names the calling surface for the task's audit trail (#3623); pass
+// task.ActorUnknown from a caller that has no surface to name.
+func AddTask(t task.Task, actor task.Actor) error {
 	var resp AddTaskResponse
-	return callDaemon("AddTask", AddTaskRequest{Task: t}, &resp)
+	return callDaemon("AddTask", AddTaskRequest{Task: t, Actor: string(actor)}, &resp)
 }
 
 // UpdateTask asks the daemon to apply a field-level patch to the task with the
 // given id and re-arm its schedule, returning the merged record (#1700). Only
 // the patch's non-nil fields are written, so a single-field edit never clobbers
 // a concurrent edit another client made to a different field.
-func UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+// actor names the calling surface for the task's audit trail (#3623).
+func UpdateTask(id string, update task.TaskUpdate, expect task.ProjectExpectation, actor task.Actor) (task.Task, error) {
 	var resp UpdateTaskResponse
-	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update, Expect: expect}, &resp); err != nil {
+	if err := callDaemon("UpdateTask", UpdateTaskRequest{ID: id, Update: update, Expect: expect, Actor: string(actor)}, &resp); err != nil {
 		return task.Task{}, err
 	}
 	return resp.Task, nil

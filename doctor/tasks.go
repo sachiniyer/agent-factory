@@ -1,0 +1,191 @@
+package doctor
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/task"
+)
+
+// The automations check (#3623): does every enabled task actually fire?
+//
+// Two enabled hourly tasks went dark for 18 days on a healthy daemon and no
+// surface could say so. Doctor is the surface that is supposed to notice — it
+// already sweeps for orphaned processes, leaked tmux sessions and stale homes on
+// a box whose owner never opens the TUI — and a scheduled task that silently
+// stopped belongs in exactly that list.
+//
+// Two conditions are reported, both from the same row because they are the same
+// question asked twice:
+//
+//   - OVERDUE: the schedule has moved on without the task. Derived here from the
+//     record and the cron expression, so it needs no daemon and catches every
+//     cause, including the ones nobody has thought of.
+//   - ENABLED BUT NOT ARMED: the task is enabled on disk and the running daemon
+//     is not holding it, so it will not fire at all. This one can only be
+//     observed by the daemon, which is why it is reported only when a daemon
+//     actually answered — an unreachable daemon leaves arming UNKNOWN, and
+//     "unknown" must never be rendered as "broken" (a stopped daemon would
+//     otherwise report every task on the box as unarmed).
+
+// checkTaskSchedules reports enabled tasks that are not firing.
+func checkTaskSchedules(ctx *scanContext, report *Report) {
+	tasks, live, err := ctx.opts.taskInventory()
+	if err != nil {
+		// A failed read is not an empty result. Say doctor could not look rather
+		// than reporting the clean bill an empty list would produce — advisory,
+		// because failing to observe is not proof of an unhealthy condition.
+		report.Warn(sectionAutomations, "task schedules",
+			fmt.Sprintf("could not read the task store: %v", err),
+			"check that the agent-factory home is readable, then rerun `af doctor`", false)
+		return
+	}
+
+	now := time.Now()
+	var overdue []task.Task
+	var health []task.ScheduleHealth
+	var unarmed []task.Task
+	enabled := 0
+	for _, t := range tasks {
+		if !t.Enabled {
+			continue
+		}
+		enabled++
+		if h := task.DeriveScheduleHealth(t, now); h.Overdue {
+			overdue = append(overdue, t)
+			health = append(health, h)
+		}
+		// Only a daemon's own answer counts here. ArmingUnknown means nobody
+		// looked, and a task that IS overdue is already reported above — listing
+		// it twice would double-count one silence.
+		if live && t.Arming == task.ArmingNotArmed {
+			unarmed = append(unarmed, t)
+		}
+	}
+
+	if enabled == 0 {
+		report.Pass(sectionAutomations, "task schedules", "no enabled tasks")
+		return
+	}
+	if len(overdue) == 0 && len(unarmed) == 0 {
+		detail := fmt.Sprintf("%s firing on schedule", countTasks(enabled))
+		if !live {
+			// Whether they are ARMED was not checked, and saying so is the
+			// difference between "healthy" and "healthy as far as I could see".
+			detail += "; arming not checked (no running daemon answered)"
+		}
+		report.Pass(sectionAutomations, "task schedules", detail)
+		return
+	}
+
+	var details, fixes []string
+	if len(overdue) > 0 {
+		oldest := health[0].OldestMissedAt
+		for _, h := range health[1:] {
+			if h.OldestMissedAt.Before(oldest) {
+				oldest = h.OldestMissedAt
+			}
+		}
+		details = append(details, fmt.Sprintf("%s not fired on schedule; oldest missed %s — %s",
+			countTasksHave(len(overdue)), oldest.Format(taskTimeFormat), describeOverdue(overdue, health)))
+		fixes = append(fixes, "inspect one with `af tasks show <id>`; fire it now with `af tasks trigger <id>`")
+	}
+	if len(unarmed) > 0 {
+		details = append(details, fmt.Sprintf("%s enabled but not armed by the running daemon — %s",
+			countTasksAre(len(unarmed)), describeTaskNames(unarmed)))
+		fixes = append(fixes, "check the daemon log for an arming refusal, then `af daemon restart`")
+	}
+	report.Warn(sectionAutomations, "task schedules",
+		strings.Join(details, " · "), strings.Join(fixes, "; "), true)
+}
+
+// taskTimeFormat is the doctor row's timestamp layout — local, sortable, and
+// short enough to sit inside a one-line detail.
+const taskTimeFormat = "2006-01-02 15:04"
+
+// maxNamedTasks bounds how many tasks one row names before collapsing the rest,
+// following the process checks' summary convention: the actionable fact is the
+// count, and naming a few makes it possible to act without `--verbose`.
+const maxNamedTasks = 5
+
+func countTasks(n int) string {
+	if n == 1 {
+		return "1 enabled task is"
+	}
+	return fmt.Sprintf("%d enabled tasks are", n)
+}
+
+func countTasksHave(n int) string {
+	if n == 1 {
+		return "1 enabled task has"
+	}
+	return fmt.Sprintf("%d enabled tasks have", n)
+}
+
+func countTasksAre(n int) string {
+	if n == 1 {
+		return "1 enabled task is"
+	}
+	return fmt.Sprintf("%d enabled tasks are", n)
+}
+
+// describeOverdue names the overdue tasks with their missed counts, so the row
+// is actionable without a second command.
+func describeOverdue(tasks []task.Task, health []task.ScheduleHealth) string {
+	parts := make([]string, 0, len(tasks))
+	for i, t := range tasks {
+		missed := fmt.Sprintf("%d", health[i].MissedOccurrences)
+		if health[i].Saturated {
+			missed += "+"
+		}
+		parts = append(parts, fmt.Sprintf("%s (missed %s)", taskLabel(t), missed))
+	}
+	return collapseTaskList(parts)
+}
+
+func describeTaskNames(tasks []task.Task) string {
+	parts := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		parts = append(parts, taskLabel(t))
+	}
+	return collapseTaskList(parts)
+}
+
+// taskLabel identifies a task by id AND name: the id is what every fix command
+// takes, and the name is what the person recognizes.
+func taskLabel(t task.Task) string {
+	if strings.TrimSpace(t.Name) == "" {
+		return t.ID
+	}
+	return fmt.Sprintf("%s %q", t.ID, t.Name)
+}
+
+func collapseTaskList(parts []string) string {
+	sort.Strings(parts)
+	if len(parts) <= maxNamedTasks {
+		return strings.Join(parts, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(parts[:maxNamedTasks], ", "), len(parts)-maxNamedTasks)
+}
+
+// daemonTaskInventory reads the task list, preferring the running daemon's
+// answer because it is the only one that carries the LIVE arming state.
+//
+// The second return says whether that live answer is what came back. A disk read
+// is a complete and current view of every task and its schedule — overdue is
+// derived from the record — but it knows nothing about arming, and the caller
+// must not present its silence as an observation. Mirrors `af tasks list`: never
+// spawn a daemon for a read.
+func daemonTaskInventory() ([]task.Task, bool, error) {
+	if tasks, err := daemon.ListTasksNoSpawn(); err == nil {
+		return tasks, true, nil
+	}
+	tasks, err := task.LoadTasks()
+	if err != nil {
+		return nil, false, err
+	}
+	return tasks, false, nil
+}

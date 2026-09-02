@@ -118,6 +118,14 @@ func loadTasksWithStableRepoBindings() ([]Task, map[string]repoResolution, []Tas
 			resolved, ok := resolvedPaths[current[i].ProjectPath]
 			if ok && resolved.known {
 				current[i].RepoID = resolved.id
+				// The daemon rewrote a row nobody asked it to touch, which is
+				// exactly the class of change a user cannot otherwise tell apart
+				// from one they made themselves (#3623). It happens at most once
+				// per legacy row — the backfill is skipped once RepoID is set — so
+				// it cannot crowd the bounded trail. The field is named directly
+				// rather than through changedFields, which covers only the fields a
+				// surface can patch; repo_id is derived and patchable by no one.
+				appendAudit(&current[i], ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
 				updated = append(updated, current[i])
 				changed = true
 				continue

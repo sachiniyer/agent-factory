@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"sync"
+	"time"
 
 	cron "github.com/robfig/cron/v3"
 
@@ -24,6 +25,12 @@ type taskScheduler struct {
 	mu        sync.Mutex
 	cron      *cron.Cron
 	entries   map[string]cron.EntryID // task ID → scheduled entry
+	// armed latches on the first completed reload. Before it, an empty entry set
+	// means "arming has not run yet", not "nothing is armed" — the daemon accepts
+	// control RPCs while it is still warming up, and reporting every task as
+	// unarmed in that window would be the fabricated negative this whole feature
+	// exists to remove (#3623).
+	armed bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// parse allows a seconds-granularity parser so firing tests don't wait a
@@ -124,7 +131,40 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 			s.runTask(taskID)
 		}))
 	}
+	s.armed = true
 	return nil
+}
+
+// armingFor reports the LIVE arming state of one cron task and, when it is
+// armed, the instant the scheduler will actually fire it next.
+//
+// The next-run time is READ OFF the armed entry rather than recomputed from the
+// expression, which is the whole point of #3623: the two places that used to
+// show a next-fire time recomputed it for display, so a task that was not armed
+// at all still rendered a confident "next Sep 02 04:20". A number read from the
+// scheduler cannot say that about a task the scheduler does not hold.
+//
+// The entry lookup happens OUTSIDE s.mu: cron.Entry round-trips through the run
+// loop while the cron is running, and no daemon lock should be held across
+// another goroutine's turn.
+func (s *taskScheduler) armingFor(taskID string) (string, time.Time) {
+	s.mu.Lock()
+	armed := s.armed
+	entryID, scheduled := s.entries[taskID]
+	s.mu.Unlock()
+	if !armed {
+		return task.ArmingUnknown, time.Time{}
+	}
+	if !scheduled {
+		return task.ArmingNotArmed, time.Time{}
+	}
+	entry := s.cron.Entry(entryID)
+	if entry.ID != entryID {
+		// Registered here but gone from the cron itself — treat the cron as
+		// authoritative; it is the thing that would have to fire.
+		return task.ArmingNotArmed, time.Time{}
+	}
+	return task.ArmingArmed, entry.Next
 }
 
 // scheduledTaskIDs returns the IDs of the tasks currently registered with the

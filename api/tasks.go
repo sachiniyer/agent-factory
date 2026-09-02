@@ -252,7 +252,7 @@ var tasksAddCmd = &cobra.Command{
 		// Route the write through the daemon: it owns scheduling and reloads its
 		// own scheduler/watchers in-process, so no separate reload poke is needed
 		// (#1029 PR 3). The on-disk tasks.json format is unchanged.
-		if err := daemonAddTask(s); err != nil {
+		if err := daemonAddTask(s, task.ActorCLI); err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to add task: %w", err))
 			}
@@ -608,7 +608,7 @@ var tasksUpdateCmd = &cobra.Command{
 			patch.Program = strPtr(taskUpdateProgramFlag)
 		}
 
-		updated, err := daemonUpdateTask(args[0], patch, expect)
+		updated, err := daemonUpdateTask(args[0], patch, expect, task.ActorCLI)
 		if err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				return jsonError(fmt.Errorf("failed to update task: %w", err))

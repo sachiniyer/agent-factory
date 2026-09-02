@@ -31,6 +31,12 @@ var automationsEnabledStyle = lipgloss.NewStyle().
 var automationsDisabledStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.ForegroundMuted)
 
+// automationsOverdueStyle paints the overdue marker and its detail text in the
+// theme's warning color. It is a color and a static glyph and nothing else — no
+// spinner, no blink (#1766): state reads from a glyph in this app.
+var automationsOverdueStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.Warning)
+
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
 // color the instances tree uses for instance titles (tree.InstanceTitleColor),
 // so the automations rail and the instance list above it read as one stacked
@@ -201,16 +207,38 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	if tsk.IsWatch() {
 		parts = append(parts, watchTaskStatus(tsk))
 	} else if tsk.Enabled && tsk.CronExpr != "" {
-		if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
-			if next := sched.Next(a.now()); next.IsZero() {
-				parts = append(parts, "No upcoming run")
-			} else {
-				parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+		switch {
+		case tsk.NextRunAt != nil:
+			// The LIVE armed entry when the record carries one (#3623): a number
+			// read off the scheduler cannot promise a fire the scheduler is not
+			// holding.
+			parts = append(parts, "next "+tsk.NextRunAt.Format("Jan 02 15:04"))
+		case tsk.Arming == task.ArmingNotArmed:
+			parts = append(parts, "not armed")
+		default:
+			// The rail reads tasks.json directly rather than through the daemon, so
+			// it usually has no live entry to read and falls back to evaluating the
+			// expression. That fallback is what used to render a confident "next"
+			// for a task that had been dark for 18 days; the warning fragment below
+			// is what stops it being read as health.
+			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
+				if next := sched.Next(a.now()); next.IsZero() {
+					parts = append(parts, "No upcoming run")
+				} else {
+					parts = append(parts, "next "+next.Format("Jan 02 15:04"))
+				}
 			}
 		}
 	}
 	if tsk.LastRunAt != nil {
 		parts = append(parts, "last "+tsk.LastRunAt.Format("Jan 02 15:04"))
+	}
+	if tsk.Overdue {
+		overdue := "overdue"
+		if tsk.MissedOccurrences > 0 {
+			overdue = fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
+		}
+		parts = append(parts, overdue)
 	}
 	// An errored task says so even with no LastRunAt. A task refused at arming
 	// has never run, so gating this on a timestamp would hide the one thing it
@@ -239,6 +267,15 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	glyph, glyphStyle := "[✓]", automationsEnabledStyle
 	if !tsk.Enabled {
 		glyph, glyphStyle = "[✗]", automationsDisabledStyle
+	}
+	// An overdue task takes over the enabled glyph rather than adding a column
+	// (#3623). It can only ever BE enabled — the derivation says nothing about a
+	// disabled task — so the two can never collide, and replacing the mark keeps
+	// the row exactly as wide as it was at the 22-column rail minimum. Collapsed
+	// rows are the point: a warning you have to focus a row to see is one nobody
+	// sees.
+	if tsk.Overdue {
+		glyph, glyphStyle = "[!]", automationsOverdueStyle
 	}
 	marker := " "
 	nameStyle := automationItemTitleStyle
@@ -287,6 +324,18 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	}
 	indent := strings.Repeat(" ", itemPrefixWidth)
 	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
+}
+
+// overdueCount returns how many of the projection's tasks have missed their
+// schedule. Only enabled cron tasks can be overdue (see task.DeriveScheduleHealth).
+func (a *AutomationsPane) overdueCount() int {
+	n := 0
+	for _, tsk := range a.proj.GetTasks() {
+		if tsk.Overdue {
+			n++
+		}
+	}
+	return n
 }
 
 // enabledCount returns how many of the projection's tasks are enabled.
@@ -445,6 +494,29 @@ func (a *AutomationsPane) String() string {
 			noun:    "Automations:",
 			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
 			primary: fmt.Sprintf("%d", len(tasks)),
+		}
+		if overdue := a.overdueCount(); overdue > 0 {
+			// The degraded one-line mode has no rows, so this line IS the section —
+			// and it is the narrowest thing the rail draws. A task that has stopped
+			// firing is easiest to miss exactly here, so the count rides the header
+			// (#3623).
+			//
+			// It becomes the PRIMARY as well as riding the counts, which is what
+			// #3641's ladder is for: when the width sheds everything but one number,
+			// the number that must survive is the one saying something is wrong, not
+			// the total.
+			//
+			// The primary carries the ROW GLYPH rather than the word, and that is a
+			// width decision rather than a style one. #3641's last rung exists to
+			// keep the manage affordance from being clipped at the 22-column rail
+			// minimum, and " 100 overdue" needs 12 of the 11 cells that rung has —
+			// measured, it fell straight through to the clip and truncated the
+			// affordance, which is the contract that rung was added to protect. A
+			// spelling picked by digit count would be no better: rebinding the
+			// manager key changes the budget. "[!] 100" fits at any count, and it is
+			// the mark the rows above carry at wider widths.
+			header.counts = fmt.Sprintf("%d (%d on · %d overdue)", len(tasks), a.enabledCount(), overdue)
+			header.primary = fmt.Sprintf("[!] %d", overdue)
 		}
 		style := automationsTitleDimStyle
 		if a.focused {

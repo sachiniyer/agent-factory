@@ -22,6 +22,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Every test here is hermetic by construction (#1104 hard rules): the AF
@@ -92,6 +93,10 @@ func testOptionsWithHome(t *testing.T, home string, fix bool, pids ...int) Optio
 		// opt back into the production grace period explicitly.
 		minProcessLeakAge: time.Nanosecond,
 		snapshot:          snapshotOf(t, pids...),
+		// No tasks by default, for the same reason: the automations check (#3623)
+		// would otherwise read whatever task store answers on the box. The tasks
+		// tests inject their own inventory.
+		taskInventory: func() ([]task.Task, bool, error) { return nil, false, nil },
 		// Default to "no remote configured" so the non-remote suite stays
 		// hermetic (no git shell-out, no reading the real repo's in-repo
 		// config). The remote tests below inject their own resolver.

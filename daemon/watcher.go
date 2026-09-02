@@ -112,6 +112,10 @@ type watcherSupervisor struct {
 	// stays available while Stop joins in-flight deliveries, so a concurrent
 	// ReloadTasks RPC must not repopulate the map after Stop snapshots it.
 	stopped bool
+	// armed latches on the first completed reload, for the same reason the cron
+	// scheduler's does: before arming has run, an empty watcher map means "not
+	// observed yet", never "this watch task is not armed" (#3623).
+	armed bool
 
 	// Injection points for tests: loadTasks substitutes fixture task lists,
 	// deliver observes events without spawning sessions, setStatus observes
@@ -218,6 +222,7 @@ func (s *watcherSupervisor) reloadSnapshot(armed, allTasks []task.Task) error {
 		s.watchers[id] = w
 		go w.run()
 	}
+	s.armed = true
 
 	// Queue files for tasks that no longer exist at all are removed — a
 	// deleted task's backlog must not replay into a recreated namesake. A

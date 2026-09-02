@@ -357,14 +357,14 @@ var httpRoutes = []HTTPRoute{
 		Path:        "/v1/AddTask",
 		Description: "Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit.",
 		requestType: reflect.TypeOf(AddTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AddTask) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.addTask) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UpdateTask",
 		Description: "Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit.",
 		requestType: reflect.TypeOf(UpdateTaskRequest{}),
-		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UpdateTask) },
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.updateTask) },
 	},
 	{
 		Method:      http.MethodPost,

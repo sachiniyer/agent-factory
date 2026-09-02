@@ -135,7 +135,7 @@ func TestAddTaskStoresKeepAsAbsent(t *testing.T) {
 				Program:     "claude",
 				Enabled:     false,
 				OnComplete:  in,
-			}, nil)
+			}, ActorCLI, nil)
 			require.NoError(t, err)
 			assert.Empty(t, created.OnComplete, "keep must be stored as the zero value")
 
@@ -161,7 +161,7 @@ func TestAddTaskStoresAnExplicitVerbCanonically(t *testing.T) {
 		Program:     "claude",
 		Enabled:     false,
 		OnComplete:  "  Archive ",
-	}, nil)
+	}, ActorCLI, nil)
 	require.NoError(t, err)
 	assert.Equal(t, OnCompleteArchive, created.OnComplete)
 

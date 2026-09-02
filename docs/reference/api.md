@@ -40,8 +40,8 @@ Request fields are the JSON keys of each route's request body; a `—` means the
 | `POST` | `/v1/GetTheme` | — | Return the daemon's resolved semantic color palette for renderer clients. |
 | `POST` | `/v1/SetConfigValue` | `key`, `value` | Set one global config key, exactly as `af config set` does (validated, locked, atomic). |
 | `POST` | `/v1/ListTasks` | — | List every task across all repos. |
-| `POST` | `/v1/AddTask` | `task` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
-| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/AddTask` | `task`, `actor` | Append a new task and re-arm the scheduler; an enabled archived/archiving target_session is refused before commit. |
+| `POST` | `/v1/UpdateTask` | `id`, `update`, `expect`, `actor` | Apply a field-level patch to a task (only the fields in `update` are changed), preserving every unspecified field and the scheduler-owned fields; an enabled archived/archiving target_session is refused before commit. |
 | `POST` | `/v1/RemoveTask` | `id`, `expect` | Remove a task by ID. |
 | `POST` | `/v1/RestartTask` | `id`, `expect` | Stop and replace one enabled watch task without overlapping its process tree. |
 | `POST` | `/v1/TriggerTask` | `id`, `expect` | Fire a cron task now through the daemon's scheduler path (refuses disabled and watch tasks). |
@@ -53,7 +53,7 @@ The `Request fields` column above lists each body's TOP-LEVEL keys. Where one of
 | Path | Nested fields |
 |------|---------------|
 | `/v1/SetPRInfo` | `pr_info.number`, `pr_info.title`, `pr_info.url`, `pr_info.state`, `pr_info.branch` |
-| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.project_path`, `task.repo_id`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status` |
+| `/v1/AddTask` | `task.id`, `task.name`, `task.prompt`, `task.cron_expr`, `task.watch_cmd`, `task.target_session`, `task.max_concurrent_runs`, `task.on_complete`, `task.project_path`, `task.repo_id`, `task.program`, `task.enabled`, `task.created_at`, `task.last_run_at`, `task.last_run_status`, `task.audit`, `task.overdue`, `task.missed_occurrences`, `task.next_run_at`, `task.arming` |
 | `/v1/UpdateTask` | `update.name`, `update.prompt`, `update.cron_expr`, `update.watch_cmd`, `update.target_session`, `update.max_concurrent_runs`, `update.on_complete`, `update.project_path`, `update.program`, `update.enabled`, `expect.enforce`, `expect.project_path` |
 | `/v1/RemoveTask` | `expect.enforce`, `expect.project_path` |
 | `/v1/RestartTask` | `expect.enforce`, `expect.project_path` |

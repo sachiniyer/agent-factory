@@ -64,7 +64,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 	origTrigger := daemonTriggerTask
 	origList := daemonListTasksNoSpawn
 
-	daemonAddTask = func(tk task.Task) error {
+	daemonAddTask = func(tk task.Task, _ task.Actor) error {
 		if calls.addErr != nil {
 			return calls.addErr
 		}
@@ -74,7 +74,7 @@ func stubDaemon(t *testing.T) *daemonCalls {
 		calls.writes++
 		return nil
 	}
-	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation, _ task.Actor) (task.Task, error) {
 		calls.lastExpect = expect
 		if calls.updateErr != nil {
 			return task.Task{}, calls.updateErr
@@ -290,7 +290,7 @@ func TestTasksAdd_CommittedReloadFailureIsNotRetryable(t *testing.T) {
 	stubDaemon(t)
 	repo := setupAddRepo(t)
 
-	daemonAddTask = func(tk task.Task) error {
+	daemonAddTask = func(tk task.Task, _ task.Actor) error {
 		require.NoError(t, task.AddTask(tk))
 		return committedTaskMutationTestError{}
 	}
@@ -427,7 +427,7 @@ func TestTasksUpdate_CommittedReadbackFailureIsNotRetryable(t *testing.T) {
 
 	seedTask(t, task.Task{ID: "committed-update", Name: "before", Prompt: "p", CronExpr: "0 9 * * *", Enabled: true})
 	taskUpdateNameFlag = "after"
-	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation) (task.Task, error) {
+	daemonUpdateTask = func(id string, update task.TaskUpdate, expect task.ProjectExpectation, _ task.Actor) (task.Task, error) {
 		_, err := task.UpdateTask(id, update, expect)
 		require.NoError(t, err)
 		// Model another client removing the task after this update committed but
