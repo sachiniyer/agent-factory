@@ -58,6 +58,28 @@ var (
 // probe succeeds and nowhere else. That scales with the real poll interval and the
 // real grace, because it waits for the thing itself rather than for a duration
 // someone guessed.
+//
+// It takes SEVERAL answers, not one (#3412). One answer proves the agent came up;
+// it does not prove it stayed up, and an agent that answers a poll and exits a beat
+// later was being declared restored — which cleared the retry counter, so the next
+// loss re-entered as "attempt 1" and #3347's terminal give-up could never
+// accumulate. Observed in the field: 15 respawns and 7 "restored" claims in 95
+// seconds for a session that was never restored in any durable sense.
+//
+// The count stays in observations rather than becoming a settle duration, for the
+// reason directly above: a clock proves nothing at either end. What changes is only
+// how many answers "alive" takes.
+
+// lostRestoreConfirmObservations is how many separate poll ANSWERS a replacement
+// runtime must produce before its restore counts as restored.
+//
+// Three, because one is a coin flip and the failure it must catch is an agent that
+// answers once and exits 1-2 seconds later (a codex whose credits are exhausted, in
+// the report). At the default 1s daemon_poll_interval that is ~3 seconds of
+// sustained liveness before a session is called healed — short enough that a real
+// recovery is still reported promptly, long enough that "it came up" and "it stayed
+// up" stop being the same claim.
+const lostRestoreConfirmObservations = 3
 
 // errRestoreDiedBeforeConfirm is the synthetic failure recorded when a restore's
 // spawn succeeded but its runtime was Lost again before it could be confirmed
@@ -66,6 +88,18 @@ var (
 // here (the spawn worked), and the actionable fact is that the agent command
 // itself is not surviving.
 var errRestoreDiedBeforeConfirm = errors.New("the re-spawned agent exited before it could be confirmed alive (its program is most likely failing at startup)")
+
+// errRestoreFlapped is the same failure one step further along: the replacement
+// runtime DID answer at least one liveness poll and then exited before it had
+// stayed alive long enough to count as restored (#3412).
+//
+// A separate sentinel because it is a different fact for the user, and this text is
+// the one place they are told why a session keeps coming back Lost. "Failing at
+// startup" would be wrong here — the agent starts fine, which is exactly why the
+// old code kept declaring victory — and "exited before it could be confirmed" reads
+// as though nothing ever came up. What is actionable is that it comes up and does
+// not stay.
+var errRestoreFlapped = errors.New("the re-spawned agent answered a liveness poll and then exited before it stayed alive (it starts, then dies a beat later)")
 
 // lostRestoreState is the per-session retry state. Guarded by Manager.mu (the
 // loop runs on the daemon poll goroutine; tests drive RestoreLostSessions
@@ -176,7 +210,7 @@ func (m *Manager) RestoreLostSessions() {
 		if st == nil || inst.GetStatus() == session.Lost {
 			continue
 		}
-		if st.awaitingConfirm && !m.observedAliveSinceSpawnLocked(repoID, inst, st) {
+		if st.awaitingConfirm && !m.confirmedAliveSinceSpawnLocked(repoID, inst, st) {
 			// Not Lost, but nothing has ANSWERED yet either. A row can read non-Lost
 			// for reasons that are not proof of life — a poll that has not run at this
 			// interval, or a remote inside its 60s loss grace — so keep the history
@@ -315,12 +349,21 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// elapsed, which a long poll interval or the 60s remote grace can outlast while
 	// the runtime was dead the whole time (#1917 round 6).
 	confirmedPriorAttempts := 0
-	if st.awaitingConfirm && m.observedAliveSinceSpawnLocked(repoID, inst, st) {
+	if st.awaitingConfirm && m.confirmedAliveSinceSpawnLocked(repoID, inst, st) {
 		confirmedPriorAttempts = st.consecutiveFailures + 1
 		st = &lostRestoreState{}
 		m.lostRestoreStates[stateKey] = st
 	}
 	diedBeforeConfirm := st.awaitingConfirm
+	// WHICH failure this is depends on whether the runtime ever answered. An agent
+	// that never came up and one that came up and died a beat later are different
+	// facts for the user, and the escalation log is the one place either is reported
+	// (#3412). Read before the flag is cleared, while the spawn boundary still
+	// describes this attempt.
+	deathErr := errRestoreDiedBeforeConfirm
+	if diedBeforeConfirm && m.observationsSinceSpawnLocked(repoID, inst, st) > 0 {
+		deathErr = errRestoreFlapped
+	}
 	if diedBeforeConfirm {
 		st.awaitingConfirm = false
 	}
@@ -334,7 +377,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 		logLostRestoreSuccess(inst.Title, repoID, confirmedPriorAttempts)
 	}
 	if diedBeforeConfirm {
-		m.lostRestoreFailed(key, repoID, st, inst, errRestoreDiedBeforeConfirm)
+		m.lostRestoreFailed(key, repoID, st, inst, deathErr)
 		return
 	}
 	if skip {
@@ -556,11 +599,23 @@ func (m *Manager) armRestoreConfirmation(repoID string, inst *session.Instance) 
 	return st.consecutiveFailures + 1
 }
 
-// observedAliveSinceSpawnLocked reports whether a poll has gotten an ANSWER out of
-// this session's runtime since its last respawn — the definition of "confirmed
-// alive" (#1917 round 6). Caller holds m.mu.
-func (m *Manager) observedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
-	return m.aliveObservations[stableSessionKey(repoID, inst)] > st.observedAtSpawn
+// observationsSinceSpawnLocked reports how many ANSWERS polls have gotten out of
+// this session's runtime since its last respawn. Caller holds m.mu.
+func (m *Manager) observationsSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) uint64 {
+	observed := m.aliveObservations[stableSessionKey(repoID, inst)]
+	if observed < st.observedAtSpawn {
+		// The counter only moves forward, but a state rebuilt against a different
+		// runtime must never read as confirmed through unsigned arithmetic.
+		return 0
+	}
+	return observed - st.observedAtSpawn
+}
+
+// confirmedAliveSinceSpawnLocked reports whether the replacement runtime has
+// answered enough polls to count as restored — the definition of "confirmed alive"
+// (#1917 round 6), sustained rather than single-shot (#3412). Caller holds m.mu.
+func (m *Manager) confirmedAliveSinceSpawnLocked(repoID string, inst *session.Instance, st *lostRestoreState) bool {
+	return m.observationsSinceSpawnLocked(repoID, inst, st) >= lostRestoreConfirmObservations
 }
 
 // lostRestoreFailed records a failed restore attempt, backing off until the

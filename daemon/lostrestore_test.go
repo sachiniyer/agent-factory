@@ -100,7 +100,7 @@ func TestRestoreLostSessions_RecoversLostInstance(t *testing.T) {
 	// require the state to be gone the instant the spawn returned — which is exactly
 	// the #1910 bug, since a spawn returning proves nothing about whether the runtime
 	// survives. Nor does elapsed time (#1917 round 6): only an observation does.
-	observeAlive(manager, repoID, inst)
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[stableSessionKey(repoID, inst)]
@@ -155,9 +155,9 @@ func TestRestoreSession_RecoversLostInstanceOnDemand(t *testing.T) {
 			"backoff history (#1976)", st.consecutiveFailures)
 	}
 
-	// A poll then ANSWERS: the runtime is confirmed alive, and only now is the
-	// episode forgotten.
-	observeAlive(manager, repoID, inst)
+	// Polls then ANSWER, enough of them to be sustained: the runtime is confirmed
+	// alive, and only now is the episode forgotten.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, hasState := manager.lostRestoreStates[key]

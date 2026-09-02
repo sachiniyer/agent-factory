@@ -192,8 +192,8 @@ func TestRestoreLostSessions_ObservedAliveThenDied_StartsFreshEpisode(t *testing
 		t.Fatalf("recover calls = %d, want 1", got)
 	}
 
-	// A poll ANSWERS: the runtime is confirmed alive. It dies much later.
-	observeAlive(manager, repoID, inst)
+	// Polls ANSWER, sustained: the runtime is confirmed alive. It dies much later.
+	confirmAlive(manager, repoID, inst)
 	inst.SetStatusForTest(session.Lost)
 
 	manager.RestoreLostSessions()

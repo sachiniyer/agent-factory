@@ -101,8 +101,9 @@ func TestRestoreSession_LongLivedThenDied_ResetsBackoff(t *testing.T) {
 		t.Fatalf("RestoreSession: %v", err)
 	}
 
-	// A poll ANSWERS: the runtime is confirmed alive, so the episode is forgotten.
-	observeAlive(manager, repoID, inst)
+	// Polls ANSWER, sustained: the runtime is confirmed alive, so the episode is
+	// forgotten.
+	confirmAlive(manager, repoID, inst)
 	manager.RestoreLostSessions()
 	manager.mu.Lock()
 	_, tracked := manager.lostRestoreStates[key]
