@@ -469,14 +469,30 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// could afford), refuse immediately and name the session: the create settles on its
 	// own and a retry then removes the project cleanly. Because this runs before the
 	// durable removals below, "nothing was changed" is literally true.
+	// BOTH identities are fenced while this delete runs (#3530). The heal
+	// pass asks whether the RECORDED id is mid-delete — that is the id its
+	// unresolved entry, its probe and its tombstone are keyed by — so a delete
+	// that fenced only the identity it acts under would let the same pass
+	// promote the project out from under it and let the singleton sweep
+	// recreate the root it is tearing down. Nothing is ever created or
+	// restored under a provisional id, so the extra fence refuses nothing that
+	// could otherwise have proceeded; the defer below removes exactly the ids
+	// this delete installed, which is what keeps a fence from outliving its
+	// owner (#3530 review id 3915518792).
+	fenced := []string{repoID}
+	if resolved.recordedRepoID != "" && resolved.recordedRepoID != repoID {
+		fenced = append(fenced, resolved.recordedRepoID)
+	}
 	m.mu.Lock()
 	starting := m.repoSessionTitlesLocked(repoID, true)
 	if len(starting) == 0 {
 		if m.projectDeletes == nil {
 			m.projectDeletes = make(map[string]struct{})
 		}
-		m.projectDeletes[repoID] = struct{}{}
-		m.stampProjectDeleteLocked(repoID)
+		for _, id := range fenced {
+			m.projectDeletes[id] = struct{}{}
+			m.stampProjectDeleteLocked(id)
+		}
 	}
 	m.mu.Unlock()
 	if len(starting) > 0 {
@@ -485,7 +501,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	}
 	defer func() {
 		m.mu.Lock()
-		delete(m.projectDeletes, repoID)
+		for _, id := range fenced {
+			delete(m.projectDeletes, id)
+		}
 		// Stamp the REMOVE too, not only the install above. A create that began
 		// before this delete did samples a counter value below the install's stamp,
 		// so the install alone already covers it — but a create that began while
@@ -493,7 +511,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// nothing move. Stamping here puts the transition after that sample, which
 		// is what makes an in-progress delete visible to a create that could not
 		// have seen its start (#2947).
-		m.stampProjectDeleteLocked(repoID)
+		for _, id := range fenced {
+			m.stampProjectDeleteLocked(id)
+		}
 		m.mu.Unlock()
 	}()
 

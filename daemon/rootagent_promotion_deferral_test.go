@@ -258,10 +258,18 @@ func TestRedirectedDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 	}
 	installVerifiedProbe(t, manager, derivedID, worktreeRepo)
 
+	// The durable sweep runs while the delete's fences are installed, which
+	// makes it the one place a test can observe them.
 	var swept []string
+	fencedMidDelete := map[string]bool{}
 	original := deregisterRootAgents
 	deregisterRootAgents = func(ids ...string) ([]string, error) {
 		swept = append(swept, ids...)
+		manager.mu.Lock()
+		for id := range manager.projectDeletes {
+			fencedMidDelete[id] = true
+		}
+		manager.mu.Unlock()
 		return nil, nil
 	}
 	t.Cleanup(func() { deregisterRootAgents = original })
@@ -281,6 +289,19 @@ func TestRedirectedDeleteSweepsTheRecordedPathOptIn(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the durable root_agents sweep got %v, without the recorded path's own identity %s — a stale key spelled %q resolves to nothing else, so the opt-in survives to recreate the root when the checkout returns", swept, pathID, worktree)
+	}
+	// And the same split applies to the admission fence: the heal pass asks
+	// about the RECORDED identity, so a delete that fenced only the identity it
+	// acts under lets that pass promote the project mid-delete and the
+	// singleton sweep recreate the root this is tearing down.
+	if !fencedMidDelete[derivedID] || !fencedMidDelete[realID] {
+		t.Fatalf("a redirected delete must fence BOTH identities while it runs; fenced %v (recorded %s, acting %s)", fencedMidDelete, derivedID, realID)
+	}
+	manager.mu.Lock()
+	stillFenced := len(manager.projectDeletes)
+	manager.mu.Unlock()
+	if stillFenced != 0 {
+		t.Fatalf("and it must remove exactly the fences it installed; %d left behind", stillFenced)
 	}
 }
 
