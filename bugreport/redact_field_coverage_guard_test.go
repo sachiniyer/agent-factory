@@ -450,7 +450,7 @@ func TestGuardFixtureGapRegisterIsCurrent(t *testing.T) {
 		value := reflect.New(typ).Elem()
 		filler.fill(value, "", 0, false)
 		filler.unsupported, filler.tooDeep = nil, nil
-		plantUnwalkedState(filler, value)
+		plantUnwalkedState(filler, value, false)
 		for _, gap := range append(dedupeSorted(filler.unsupported), dedupeSorted(filler.tooDeep)...) {
 			met[typ.String()+": "+gap] = struct{}{}
 		}
@@ -540,6 +540,23 @@ func (r *marshalerReport) reportTo(t *testing.T, typ reflect.Type, entry reviewe
 	}
 }
 
+// fixtureSpec is one reading of a reviewed type: which markers, which scalar
+// state, and which of the structural conditions a marshaler might gate on.
+type fixtureSpec struct {
+	seq     int
+	pattern func(index, state int) int
+	state   int
+	// withUnwalked populates the state encoding/json cannot reach.
+	withUnwalked bool
+	// closeChans reads the other meaningful channel state — production closes
+	// hooksDone when hooks finish.
+	closeChans bool
+	// nilPointers leaves the optional pointers nil. fill allocates every
+	// pointer, so without this no fixture ever reads the branch a marshaler
+	// takes when an optional field is ABSENT (#3592 review).
+	nilPointers bool
+}
+
 // newMarshalerFixture builds a FRESH record and marshals it.
 //
 // Fresh every time on purpose. A marshaler that mutates what it renders — hidden
@@ -547,17 +564,17 @@ func (r *marshalerReport) reportTo(t *testing.T, typ reflect.Type, entry reviewe
 // and the state that would have leaked then sees only what the previous call
 // left behind (#3592 review).
 //
-// seq fixes the marker sequence, so two fixtures built with the same seq carry
-// IDENTICAL planted text and differ only in whatever else the caller varies.
-// That is what makes the independence checks possible.
-func newMarshalerFixture(t *testing.T, typ reflect.Type, seq int, pattern func(int, int) int, state int, withUnwalked bool) marshalerFixture {
+// spec.seq fixes the marker sequence, so two fixtures built with the same seq
+// carry IDENTICAL planted text and differ only in whatever else the spec varies.
+// That is what makes the independence checks below possible.
+func newMarshalerFixture(t *testing.T, typ reflect.Type, spec fixtureSpec) marshalerFixture {
 	t.Helper()
-	filler := &sentinelFiller{seq: seq}
+	filler := &sentinelFiller{seq: spec.seq}
 	value := reflect.New(typ).Elem()
 	filler.fill(value, "", 0, false)
 	var unwalked []string
-	if withUnwalked {
-		unwalked = plantUnwalkedState(filler, value)
+	if spec.withUnwalked {
+		unwalked = plantUnwalkedState(filler, value, spec.closeChans)
 		// An unwalked field the walk could not populate stays at its zero value,
 		// and a marshaler that emits it only when it is set would then pass on
 		// an empty fixture (#3592 review). Each one is written down by name.
@@ -569,8 +586,11 @@ func newMarshalerFixture(t *testing.T, typ reflect.Type, seq int, pattern func(i
 				typ, gap)
 		}
 	}
-	if pattern != nil {
-		seedScalars(value, pattern, state, "")
+	if spec.pattern != nil {
+		seedScalars(value, spec.pattern, spec.state, "")
+	}
+	if spec.nilPointers {
+		nilOptionalPointers(value, 0)
 	}
 	// The baseline is captured FIRST. The twin shares the planted slices and
 	// maps, so a value-receiver marshaler that rewrites what it renders would
@@ -579,6 +599,42 @@ func newMarshalerFixture(t *testing.T, typ reflect.Type, seq int, pattern func(i
 		baseline: marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value)),
 		custom:   marshalReviewed(t, typ, value),
 		unwalked: unwalked,
+	}
+}
+
+// nilOptionalPointers clears every pointer the walk allocated, so the record
+// reads the way an ordinary one with nothing optional set does.
+//
+// fill allocates unconditionally — it has to, or it could not plant inside an
+// optional subtree — which means the absent case was never read at all, and a
+// marshaler that exposes hidden state only while a pointer is nil would keep
+// that branch shut in every fixture (#3592 review).
+func nilOptionalPointers(value reflect.Value, depth int) {
+	if depth > guardMaxDepth {
+		return
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.CanSet() {
+			value.Set(reflect.Zero(value.Type()))
+		}
+	case reflect.Struct:
+		if value.Type() == reflect.TypeOf(time.Time{}) {
+			return
+		}
+		for i := 0; i < value.NumField(); i++ {
+			if value.Type().Field(i).PkgPath != "" {
+				continue
+			}
+			nilOptionalPointers(value.Field(i), depth+1)
+		}
+	case reflect.Slice, reflect.Array:
+		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
+			return
+		}
+		for i := 0; i < value.Len(); i++ {
+			nilOptionalPointers(value.Index(i), depth+1)
+		}
 	}
 }
 
@@ -635,18 +691,29 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 
 			// The state the walk leaves behind is the one the declared extra
 			// VALUES describe, so it is the only place they are pinned.
-			diff("unseeded", newMarshalerFixture(t, typ, 0, nil, 0, true), true)
+			diff("unseeded", newMarshalerFixture(t, typ, fixtureSpec{withUnwalked: true}), true)
 
 			seq := 1000
 			for pattern, spread := range guardScalarPatterns {
 				for _, state := range guardMarshalerStates {
 					where := fmt.Sprintf("pattern %d state %d", pattern, state)
-					first := newMarshalerFixture(t, typ, seq, spread, state, true)
+					base := fixtureSpec{seq: seq, pattern: spread, state: state, withUnwalked: true}
+					first := newMarshalerFixture(t, typ, base)
 					diff(where, first, false)
+
+					// The absent-optional reading. Same state, same markers, but
+					// the pointers the walk allocated are cleared, so the branch
+					// a marshaler takes when an optional field is missing is read
+					// too.
+					bareSpec := base
+					bareSpec.nilPointers = true
+					diff(where+" (nil pointers)", newMarshalerFixture(t, typ, bareSpec), false)
 
 					// Same state, DIFFERENT planted text: an extra derived from
 					// any of it differs, however it was encoded on the way out.
-					second := newMarshalerFixture(t, typ, seq+500, spread, state, true)
+					secondSpec := base
+					secondSpec.seq = seq + 500
+					second := newMarshalerFixture(t, typ, secondSpec)
 					firstMembers := decodeMembers(t, typ.String()+".MarshalJSON", first.custom)
 					secondMembers := decodeMembers(t, typ.String()+".MarshalJSON", second.custom)
 					for name := range entry.extra {
@@ -660,11 +727,23 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 
 					// Same state, same planted text, unwalked state EMPTY: the
 					// output must not move at all.
-					bare := newMarshalerFixture(t, typ, seq, spread, state, false)
-					if !bytes.Equal(first.custom, bare.custom) {
-						note(&report.added, "%s: the output depends on state encoding/json cannot reach — "+
-							"with the unexported and json:\"-\" fields populated it emits %s, with "+
-							"them empty %s", where, first.custom, bare.custom)
+					emptySpec := base
+					emptySpec.withUnwalked = false
+					empty := newMarshalerFixture(t, typ, emptySpec)
+					// Both meaningful channel states, against the same empty
+					// reading: an OPEN channel opens a `!= nil` gate, a CLOSED
+					// one opens a completed-work gate, and neither is the other.
+					closedSpec := base
+					closedSpec.closeChans = true
+					for label, populated := range map[string]marshalerFixture{
+						"":         first,
+						", closed": newMarshalerFixture(t, typ, closedSpec),
+					} {
+						if !bytes.Equal(populated.custom, empty.custom) {
+							note(&report.added, "%s%s: the output depends on state encoding/json cannot "+
+								"reach — with the unexported and json:\"-\" fields populated it emits "+
+								"%s, with them empty %s", where, label, populated.custom, empty.custom)
+						}
 					}
 					seq += 1000
 				}
@@ -710,6 +789,18 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 		// the twin must not promote its members either — json does not.
 		if !field.Anonymous || embedded.Kind() != reflect.Struct || field.Tag.Get("json") == "-" {
 			continue
+		}
+		// A NAMED tag stops it being a promotion at all: json nests the embedded
+		// value under that member instead of lifting its children, so flattening
+		// them makes a faithful marshaler look like it added the member and
+		// dropped the children (#3592 review). The twin cannot express the
+		// nesting, so it refuses, as it does for a colliding name.
+		if name := jsonMemberName(field); name != field.Name {
+			t.Fatalf("the plain twin of %s cannot represent it: %s is an anonymous unexported "+
+				"embedding tagged %q, which json NESTS under that member rather than promoting "+
+				"its children.\n\nTeach plainTwinOf to keep the nesting, or drop the exemption "+
+				"for this type — a twin that answers differently from encoding/json is no "+
+				"baseline.", typ, field.Name, name)
 		}
 		for j := 0; j < embedded.NumField(); j++ {
 			promoted := embedded.Field(j)
@@ -784,9 +875,9 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 //
 // It runs after the exported checks, on the same filler, so its markers continue
 // the same sequence and cannot collide with theirs.
-func plantUnwalkedState(filler *sentinelFiller, value reflect.Value) []string {
+func plantUnwalkedState(filler *sentinelFiller, value reflect.Value, closeChans bool) []string {
 	first := len(filler.planted)
-	plantUnwalkedInto(filler, value, "", 0)
+	plantUnwalkedInto(filler, value, "", 0, false, closeChans)
 	var forms []string
 	for _, planted := range filler.planted[first:] {
 		forms = append(forms, planted.forms...)
@@ -794,7 +885,13 @@ func plantUnwalkedState(filler *sentinelFiller, value reflect.Value) []string {
 	return forms
 }
 
-func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string, depth int) {
+// hidden says whether this value is already INSIDE unwalked state. It is what
+// separates "populate it so a gate opens" from "leave it alone": a timestamp or
+// a channel reached through a hidden field is state only a marshaler can see, so
+// filling it is free — while the same shapes on the walked side are part of what
+// the with/without fixtures must hold identical, and touching one there would
+// make them differ and blame the marshaler (#3592 review).
+func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string, depth int, hidden, closeChans bool) {
 	if depth > guardMaxDepth {
 		// Reported, not skipped. A hidden leaf beyond the bound stays empty,
 		// and a silent return keeps it out of unclassifiedFixtureGaps too — so
@@ -806,14 +903,14 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 	switch value.Kind() {
 	case reflect.Pointer:
 		if !value.IsNil() {
-			plantUnwalkedInto(filler, value.Elem(), path, depth+1)
+			plantUnwalkedInto(filler, value.Elem(), path, depth+1, hidden, closeChans)
 		}
 	case reflect.Slice, reflect.Array:
 		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
 			return
 		}
 		for i := 0; i < value.Len(); i++ {
-			plantUnwalkedInto(filler, value.Index(i), path+"[]", depth+1)
+			plantUnwalkedInto(filler, value.Index(i), path+"[]", depth+1, hidden, closeChans)
 		}
 	case reflect.Map:
 		// A map element is not addressable, so it is planted in a copy and
@@ -827,12 +924,20 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 		for _, key := range value.MapKeys() {
 			elem := reflect.New(value.Type().Elem()).Elem()
 			elem.Set(value.MapIndex(key))
-			plantUnwalkedInto(filler, elem, path+"[]", depth+1)
+			plantUnwalkedInto(filler, elem, path+"[]", depth+1, hidden, closeChans)
 			rebuilt.SetMapIndex(key, elem)
 		}
 		value.Set(rebuilt)
 	case reflect.Struct:
 		if value.Type() == reflect.TypeOf(time.Time{}) {
+			// A HIDDEN timestamp is set. fill exempts time.Time as text-free and
+			// seedScalars steps over it, which is right for what json emits and
+			// wrong for what a marshaler can read: one gated on
+			// `hiddenTime.IsZero()` would find it zero in every fixture
+			// (#3592 review).
+			if hidden && value.CanSet() {
+				value.Set(reflect.ValueOf(guardHiddenInstant))
+			}
 			return
 		}
 		typ := value.Type()
@@ -841,8 +946,8 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			at := join(path, field.Name)
 			switch {
 			case field.PkgPath != "":
-				hidden := value.Field(i)
-				settable := reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem()
+				held := value.Field(i)
+				settable := reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem()
 				if field.Anonymous && baseType(field.Type).Kind() == reflect.Struct &&
 					field.Tag.Get("json") != "-" {
 					// NOT unwalked state: json PROMOTES an anonymous unexported
@@ -857,28 +962,37 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 					// anonymous clause, so an ignored embedding is not walked at
 					// all and its members are as unplanted as any other hidden
 					// field (#3592 review).
-					plantUnwalkedInto(filler, settable, at, depth+1)
+					plantUnwalkedInto(filler, settable, at, depth+1, hidden, closeChans)
 					continue
 				}
 				filler.fill(settable, at, 0, false)
-				populateOpaque(filler, settable, at)
-				plantUnwalkedInto(filler, settable, at, depth+1)
+				plantUnwalkedInto(filler, settable, at, depth+1, true, closeChans)
 			case field.Tag.Get("json") == "-":
+				// Same treatment as an unexported field, opaque state included:
+				// the tag hides it from the DEFAULT encoder and from nothing
+				// else, so an ignored channel or function is a gate a marshaler
+				// can still read (#3592 review). Both branches hand the value to
+				// the recursion with hidden=true, and its default arm is the ONE
+				// place opaque state is populated — an explicit call here as
+				// well was redundant, and a probe that removed it stayed red
+				// because the recursion had already done the work.
 				filler.fill(value.Field(i), at, 0, false)
-				plantUnwalkedInto(filler, value.Field(i), at, depth+1)
+				plantUnwalkedInto(filler, value.Field(i), at, depth+1, true, closeChans)
 			default:
-				plantUnwalkedInto(filler, value.Field(i), at, depth+1)
+				plantUnwalkedInto(filler, value.Field(i), at, depth+1, hidden, closeChans)
 			}
+		}
+	default:
+		if hidden {
+			populateOpaque(filler, value, path, closeChans)
 		}
 	}
 }
 
-// marshalReviewed marshals through the form that actually implements the
-// reviewed interface. A MarshalJSON declared on *T is not invoked for a
-// non-addressable T, so marshalling the value would compare json's DEFAULT
-// encoding against the plain twin and agree every time, whatever *T emits
-// (#3592 review). fill already accepts a reviewed type through a pointer, so
-// this is a shape the walk admits.
+// guardHiddenInstant is the value a hidden timestamp is set to: fixed, so two
+// fixtures of the same shape stay comparable, and unmistakably non-zero.
+var guardHiddenInstant = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+
 // populateOpaque gives a hidden channel or function a non-nil value.
 //
 // encoding/json cannot serialize either, so the main walk rightly ignores them —
@@ -888,19 +1002,34 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 // nil (#3592 review). Nothing is planted IN them; they are made non-nil so the
 // gate opens.
 //
+// closeChans reads the OTHER meaningful channel state. hooksDone is closed when
+// hooks finish, so a marshaler using a non-blocking receive to act "once hooks
+// are done" is silent for an open channel and for a nil one alike — the contract
+// reads both modes (#3592 review).
+//
 // A directional channel is made bidirectionally and converted, since MakeChan
 // refuses a receive-only type. Anything that cannot be populated is recorded as
 // a fixture gap rather than left silently zero.
-func populateOpaque(filler *sentinelFiller, value reflect.Value, path string) {
+func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, closeChans bool) {
 	switch value.Kind() {
 	case reflect.Chan:
-		if !value.IsNil() {
+		if !value.CanSet() || !value.IsNil() {
 			return
 		}
+		// Made bidirectionally and CLOSED BEFORE the conversion. MakeChan
+		// refuses a receive-only type, and the conversion is precisely what
+		// takes away the ability to close it — hooksDone is declared
+		// `<-chan struct{}`, so a close attempted after converting is not
+		// allowed and a guard that skipped it left the closed mode inert.
+		// Measured: the probe for it passed until this order was fixed
+		// (#3592 review).
 		made := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, value.Type().Elem()), 0)
+		if closeChans {
+			made.Close()
+		}
 		value.Set(made.Convert(value.Type()))
 	case reflect.Func:
-		if !value.IsNil() {
+		if !value.CanSet() || !value.IsNil() {
 			return
 		}
 		typ := value.Type()
@@ -1041,6 +1170,11 @@ func seedScalars(value reflect.Value, pattern func(index, state int) int, state 
 		value.SetUint(uint64(pattern(pathIndex(path), state)))
 	case reflect.Float32, reflect.Float64:
 		value.SetFloat(float64(pattern(pathIndex(path), state)))
+	case reflect.Complex64, reflect.Complex128:
+		// isScalarNumeric counts both complex kinds, so fill exempts them as
+		// fixed-position scalars — and a gate on one would then read zero in
+		// every varied fixture (#3592 review).
+		value.SetComplex(complex(float64(pattern(pathIndex(path), state)), 0))
 	}
 }
 
@@ -1149,7 +1283,7 @@ func archivedFixture(t *testing.T, typ reflect.Type, seq int, withUnwalked bool,
 	filler.fill(value, "", 0, false)
 	var unwalked []string
 	if withUnwalked {
-		unwalked = plantUnwalkedState(filler, value)
+		unwalked = plantUnwalkedState(filler, value, false)
 	}
 	set(value)
 	return marshalerFixture{
