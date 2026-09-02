@@ -2862,8 +2862,16 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     const references = artifactReferences(artifact);
     return !acknowledgements.some(
       (ack) =>
-        reviewArtifactTime(ack) > artifactTime &&
-        references.some((reference) => bodyNamesReference(ack.body || "", reference)),
+        // Equal seconds count (Codex P2 on #3676). GitHub serialises two events
+        // into the same whole second often enough that a bot answering
+        // immediately was rejected, leaving the finding stuck until someone
+        // reposted the answer a second later. Equality cannot smuggle in an
+        // ordinary earlier comment here, because an answer has to name the
+        // artifact's server-generated id — which does not exist until the
+        // artifact does.
+        reviewArtifactTime(ack) >= artifactTime &&
+        references.some((reference) => bodyNamesReference(ack.body || "", reference)) &&
+        acknowledgementIsAnswerable(ack, artifactTime, lastPushTime),
     );
   });
   if (unboundFindingArtifacts.length > 0) {
@@ -3165,6 +3173,27 @@ function artifactReferences(artifact) {
   return references;
 }
 
+// Whether an acknowledgement can answer an artifact filed at this time.
+//
+// ACCEPTED and [gate-ack] assert that no code change is owed, so nothing has to
+// have been pushed. A bare RESOLVED claims the opposite — that a change WAS made
+// — and a fix for a finding filed at T cannot exist in a commit made before T
+// (#2878). Without this, "RESOLVED <link>" posted before the fix merges the
+// unchanged head, which is exactly the premature merge unpushedFixClaims already
+// prevents for inline findings (Codex P1 on #3676); the two paths now hold the
+// same claim to the same evidence.
+//
+// Strict `>` on the push, unlike the acknowledgement's own comparison above: a
+// commit made in the same second as the finding cannot contain its fix, while an
+// answer written in the same second can name it.
+function acknowledgementIsAnswerable(ack, artifactTime, lastPushTime) {
+  const body = ack.body || "";
+  if (NO_CHANGE_CLAIM_RE.test(body) || body.includes("[gate-ack]")) {
+    return true;
+  }
+  return lastPushTime != null && lastPushTime > artifactTime;
+}
+
 // Whether an acknowledgement's body names this reference. Both reference forms
 // END in the artifact's numeric id, so a plain substring test would let an
 // answer to `#issuecomment-1234` also clear `#issuecomment-123` — a fail-open in
@@ -3184,10 +3213,14 @@ function codexArtifactNamesAnyCommit(artifact) {
   if (parseReviewedCommit(body) != null || String(artifact?.commit_id || "") !== "") {
     return true;
   }
-  if (parseBodyCommits(body).size > 0) {
-    return true;
-  }
-  return parseSummaryRows(body).some((row) => row.commit != null);
+  // Body permalinks only. A summary table's cells are deliberately NOT read here
+  // (Codex P1 on #3676): parseSummaryRows accepts a marker anywhere in the body,
+  // so a finding artifact that QUOTES this script's table — which reviewing this
+  // very file produces — would count as naming a commit, bind to no head, and be
+  // dropped: the exact fail-open this rule exists to close. Genuine summary
+  // comments never reach here; the caller excludes them first, on the leading
+  // marker, which is the check that can tell the two apart.
+  return parseBodyCommits(body).size > 0;
 }
 
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {
@@ -3308,6 +3341,7 @@ module.exports = {
     parseReviewedCommit,
     parseBodyCommits,
     artifactReferences,
+    acknowledgementIsAnswerable,
     bodyNamesReference,
     codexArtifactBindsToHead,
     codexArtifactNamesAnyCommit,

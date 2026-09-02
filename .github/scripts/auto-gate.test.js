@@ -2338,6 +2338,127 @@ test("an answer to a longer id does not clear the artifact whose id it prefixes"
   );
 });
 
+test("a RESOLVED answer owes a commit; ACCEPTED and gate-ack do not", async () => {
+  // Codex P1 on #3676: RESOLVED claims a code change was MADE, and a fix for a
+  // finding filed at T cannot exist in a commit made before T (#2878). The
+  // unbound path accepted it on recency alone, so "RESOLVED <link>" posted
+  // before the fix merged the unchanged head — the premature merge
+  // unpushedFixClaims already prevents for inline findings.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const anchor = `#issuecomment-${stripped.id}`;
+  const withHead = (headCommittedDate, comment) => ({
+    headCommittedDate,
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:23:00Z",
+        commentTime: "2026-07-09T01:23:00Z",
+      }),
+      comment,
+    ],
+  });
+  const claim = prComment("sachiniyer", `Fixed — RESOLVED ${anchor}.`, "2026-07-09T01:24:00Z");
+
+  // Head predates the finding: the commit cannot contain the fix it claims.
+  const unpushed = await evaluateGate(withHead("2026-07-09T01:00:00Z", claim));
+  assert.equal(unpushed.shouldMerge, false, "a fix claim the head cannot contain is not an answer");
+
+  // A commit landed after the finding, so the claim is at least possible.
+  const pushed = await evaluateGate(withHead("2026-07-09T01:22:00Z", claim));
+  assert.equal(pushed.shouldMerge, true, `blocked on: ${pushed.reasons.join("; ")}`);
+
+  // …and the claims that owe no commit are unaffected by the head's age.
+  for (const body of [`Not a defect — ACCEPTED ${anchor}.`, `Read it — [gate-ack] ${anchor}.`]) {
+    const noChange = await evaluateGate(
+      withHead("2026-07-09T01:00:00Z", prComment("sachiniyer", body, "2026-07-09T01:24:00Z")),
+    );
+    assert.equal(noChange.shouldMerge, true, `blocked on: ${noChange.reasons.join("; ")}`);
+  }
+});
+
+test("a finding that quotes the summary table is not thereby named to a commit", async () => {
+  // Codex P1 on #3676: parseSummaryRows accepts the marker ANYWHERE in a body, so
+  // reading summary cells here let a finding artifact that merely QUOTES this
+  // script's table — which reviewing this very file produces — count as naming a
+  // commit. It bound to no head and was dropped: the exact fail-open the rule
+  // exists to close. Genuine summaries never reach that test; the caller excludes
+  // them first, on the LEADING marker.
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    id: 4242,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-4242",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the marker test has to be anchored, or this body classifies itself:",
+      "",
+      // Fenced, the way a review quotes code — so the table lines start with `|`
+      // and parseSummaryRows really does read them. Blockquoting them instead
+      // would make this test pass without exercising the defect at all.
+      "```",
+      marker,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(__test.isCodexSummaryArtifact(quoting), false, "the marker is quoted, not leading");
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false, "…and it binds to nothing");
+  // The premise of the defect, asserted rather than assumed: the quoted rows DO
+  // parse as summary rows naming a commit. Without this the test would go green
+  // on a body whose table was never read.
+  const rows = __test.parseSummaryRows(quoting.body);
+  assert.equal(rows.length, 1, "the quoted table must actually parse");
+  assert.equal(rows[0].commit, HEAD_SHA.slice(0, 7));
+
+  const result = await evaluateGate({ issueComments: [quoting, summary] });
+
+  assert.equal(result.shouldMerge, false, "an artifact that binds to nothing is not clean");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("an answer in the same second as the finding still answers it", async () => {
+  // Codex P2 on #3676: GitHub serialises two events into one whole second often
+  // enough that a bot answering immediately was rejected, leaving the finding
+  // stuck until someone reposted a second later. Equality is safe here precisely
+  // because an answer must name the artifact's server-generated id, which does
+  // not exist until the artifact does.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+      prComment(
+        "app-detail-app[bot]",
+        `Read it — [gate-ack] #issuecomment-${stripped.id}.`,
+        "2026-07-09T01:20:00Z",
+      ),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
 test("an artifact is referenced by its permalink or the anchor it ends in", () => {
   const { artifactReferences } = __test;
   const finding = codexIssueCommentFinding(HEAD_SHA);
