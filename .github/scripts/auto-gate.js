@@ -2791,8 +2791,23 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
     codexArtifactBindsToHead(artifact, sha),
   );
-  const latestBoundArtifact = headBoundArtifacts[0];
-  if (latestBoundArtifact && CODEX_BODY_FINDING_RE.test(latestBoundArtifact.body || "")) {
+  // Newest-wins, with ties broken toward the finding (Codex P1 on #3676). The
+  // sort is by timestamp alone and is stable, so two artifacts stamped in the
+  // same whole second keep their API order — and if the clean one happens to
+  // come first, a finding for this head sitting beside it is never inspected and
+  // the clean verdict merges. Whole-second collisions are ordinary: Codex posts
+  // a finding and rewrites its summary in the same second, which is exactly what
+  // #3656 did. So every artifact tied for newest is inspected, not just the one
+  // that sorted first: a tie is not evidence that the clean artifact came later.
+  const latestBoundTime = headBoundArtifacts.length > 0
+    ? reviewArtifactTime(headBoundArtifacts[0])
+    : 0;
+  const latestBoundArtifact = headBoundArtifacts.find(
+    (artifact) =>
+      reviewArtifactTime(artifact) === latestBoundTime &&
+      CODEX_BODY_FINDING_RE.test(artifact.body || ""),
+  );
+  if (latestBoundArtifact) {
     const bodyFindingReason = "latest exact-head Codex review body contains a P0-P3 finding";
     reasons.push(bodyFindingReason);
     // The remedy has to be one that terminates. A body finding has no thread, so
@@ -3230,22 +3245,27 @@ function bodyNamesReference(body, reference) {
   return new RegExp(`${escaped}(?![0-9])`).test(String(body || ""));
 }
 
-// Whether the artifact STATES the revision it reviewed, in one of the two
-// spellings that are GitHub's or Codex's own assertion rather than prose: the
-// `Reviewed commit:` line, and a review's commit_id.
+// Whether the artifact STATES the revision it reviewed — which, for the purpose
+// of calling a finding STALE, means one thing: GitHub's own commit_id on a
+// review. Nothing read out of a body qualifies.
 //
-// Body permalinks are deliberately not read here. They are prose, and prose can
-// cite a commit for any reason (Codex P1 on #3676) — the caller decides whether
-// a linked commit places the artifact, by asking whether it is one this PR
-// actually had. Nor are a summary table's cells read, by either caller: a body
-// that merely QUOTES this script's table, which reviewing this very file
-// produces, would otherwise classify itself. Genuine summary comments never
-// reach here — they are excluded first, on the LEADING marker, which is the
-// check that can tell a real summary from a quoted one.
+// Not the `Reviewed commit:` line, which looks like the obvious second
+// spelling and is not one (Codex P1 on #3676). REVIEWED_COMMIT_RE is unanchored,
+// so an artifact that QUOTES another artifact's footer — which reviewing this
+// very parser produces — claims that other artifact's revision as its own. Name
+// a commit that is not the head and the finding is stale by its own quotation:
+// out of headBoundArtifacts, out of the unbound set, dropped. Every other
+// body-read signal was already rejected here for the same reason — permalinks
+// because prose cites commits for any purpose, summary cells because a quoted
+// table classifies itself — and this one is no different for being the artifact
+// format's own footer. commit_id is the only claim a body cannot forge.
+//
+// The cost is nil in practice and fail-closed where it is not: Codex's prose
+// verdict arrives as a REVIEW, which carries commit_id, so it still classifies;
+// an issue comment claiming an older head in prose now needs an acknowledgement
+// naming it, like any other artifact this gate cannot place.
 function codexArtifactStatesItsCommit(artifact) {
-  return (
-    parseReviewedCommit(artifact?.body || "") != null || String(artifact?.commit_id || "") !== ""
-  );
+  return String(artifact?.commit_id || "") !== "";
 }
 
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {

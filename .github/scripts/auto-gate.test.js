@@ -2271,6 +2271,83 @@ test("a supporting commit link does not place a finding", async () => {
   }
 });
 
+test("a quoted Reviewed-commit footer does not classify the artifact quoting it", async () => {
+  // Codex P1 on #3676: REVIEWED_COMMIT_RE is unanchored, so a finding that
+  // QUOTES another artifact's footer — which reviewing this very parser produces
+  // — claimed that artifact's revision as its own. Naming a commit that is not
+  // the head made it stale by its own quotation: out of headBoundArtifacts, out
+  // of the unbound set, dropped.
+  const quoting = {
+    id: 606060,
+    html_url: "https://github.com/sachiniyer/agent-factory/pull/1465#issuecomment-606060",
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "### 💡 Codex Review",
+      "",
+      "P1: the footer match is unanchored, so this very comment claims a commit:",
+      "",
+      "```",
+      `**Reviewed commit:** \`${OTHER_SHA.slice(0, 10)}\``,
+      "```",
+    ].join("\n"),
+    created_at: "2026-07-09T01:20:00Z",
+    updated_at: "2026-07-09T01:20:00Z",
+  };
+  // The premise, asserted rather than assumed: the quoted footer really does
+  // parse, and really does name something other than this head.
+  assert.equal(__test.parseReviewedCommit(quoting.body), OTHER_SHA.slice(0, 10));
+  assert.equal(__test.codexArtifactBindsToHead(quoting, HEAD_SHA), false);
+
+  const result = await evaluateGate({
+    issueComments: [
+      quoting,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "a quotation is not a statement about this artifact");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a tie for newest bound artifact is broken toward the finding", async () => {
+  // Codex P1 on #3676: the sort is by timestamp alone and is stable, so two
+  // artifacts stamped in the same whole second keep their API order. With the
+  // clean one first, a finding for this head sitting beside it was never
+  // inspected. Whole-second collisions are ordinary — #3656's finding and its
+  // summary rewrite were one second apart.
+  const tied = "2026-07-09T01:20:00Z";
+  const cleanFirst = await evaluateGate({
+    issueComments: [
+      // Clean, and first in API order.
+      codexVerdict(HEAD_SHA, tied),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(cleanFirst.shouldMerge, false, "a tie is not evidence the clean artifact came later");
+  assert.ok(
+    cleanFirst.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${cleanFirst.reasons.join("; ")}`,
+  );
+
+  // …and a genuinely newer clean verdict still supersedes, so this does not turn
+  // every answered finding into a permanent block.
+  const newerClean = await evaluateGate({
+    issueComments: [
+      codexVerdict(HEAD_SHA, "2026-07-09T01:21:00Z"),
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: tied }),
+      codexSummaryTable(HEAD_SHA, { rowTime: tied, commentTime: "2026-07-09T01:20:06Z" }),
+    ],
+  });
+  assert.equal(newerClean.shouldMerge, true, `blocked on: ${newerClean.reasons.join("; ")}`);
+});
+
 test("an unclassifiable finding clears only by an answer that names it", async () => {
   // The block has to terminate, and nothing mechanical can end this one: no push
   // changes the fact that the artifact names no commit, and there is no thread to
@@ -2570,11 +2647,17 @@ test("only a URL-form commit binds an artifact body to a head", () => {
   assert.deepEqual([...parseBodyCommits(finding.body)], [HEAD_SHA]);
   assert.equal(codexArtifactBindsToHead(finding, HEAD_SHA), true);
   assert.equal(codexArtifactBindsToHead(finding, OTHER_SHA), false);
-  // A permalink is prose, so it does NOT state the reviewed revision on its own
-  // (Codex P1): whether it places the artifact is the caller's question, asked
-  // against this PR's own commits. Only the two assertions do.
+  // Nothing read out of a BODY states the reviewed revision (Codex P1, twice):
+  // not a permalink, because prose cites commits for any purpose, and not the
+  // `Reviewed commit:` footer, because REVIEWED_COMMIT_RE is unanchored and an
+  // artifact quoting another's footer would claim that revision as its own.
+  // Only GitHub's commit_id, which a body cannot forge.
   assert.equal(__test.codexArtifactStatesItsCommit(finding), false, "a link is not a statement");
-  assert.equal(__test.codexArtifactStatesItsCommit(codexVerdict(HEAD_SHA)), true);
+  assert.equal(
+    __test.codexArtifactStatesItsCommit(codexVerdict(HEAD_SHA)),
+    false,
+    "an issue comment's own footer is still only prose",
+  );
   assert.equal(__test.codexArtifactStatesItsCommit({ commit_id: HEAD_SHA, body: "P1" }), true);
 });
 
@@ -6333,6 +6416,9 @@ function codexReview(sha, summary = "Here are some suggestions.", timestamp = "2
   return {
     user: { login: "chatgpt-codex-connector[bot]" },
     body: `### Codex Review\n\n${summary}\n\n**Reviewed commit:** \`${sha.slice(0, 10)}\``,
+    // A review always carries commit_id; a fake that omitted it would hide the
+    // difference between what GitHub asserts and what a body merely says.
+    commit_id: sha,
     submitted_at: timestamp,
   };
 }
