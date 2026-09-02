@@ -480,6 +480,12 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 // whose JSON encodings differ from each other and from a plain list.
 func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, isSlice bool) {
 	elem := v.Type().Elem().Kind()
+	// The scalar rejection reads through pointers. `[]*int32` presents as
+	// reflect.Ptr, slipped past the check, and recursed to an int32 leaf fill
+	// has no case for — planting nothing while json still emits [83,69],
+	// which reconstructs text (#3592 review). The uint8/int32 PLANTING branches
+	// deliberately keep using the direct kind: []*byte is not a byte container.
+	baseElem := baseType(v.Type().Elem()).Kind()
 	switch {
 	case elem == reflect.Uint8:
 		// Written element by element rather than with SetBytes/reflect.Copy:
@@ -533,9 +539,15 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 			}
 		}
 		f.recordContainer(v, path, marker)
-	case isUnplantableScalar(elem):
+	// Reached only after the byte/rune PLANTING branches above declined, so the
+	// full scalar predicate applies here — not isUnplantableScalar, which
+	// deliberately exempts uint8/int32 because sequences of them ARE the text
+	// containers this guard plants. `[]*int32` is not one of those: it presents
+	// as Ptr, so it never took the rune branch, and exempting int32 here let it
+	// fall through to a silent recursion (#3592 review).
+	case isScalarNumeric(baseElem):
 		f.unsupported = append(f.unsupported,
-			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), elem))
+			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), v.Type().Elem()))
 	default:
 		if isSlice {
 			v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
@@ -561,12 +573,30 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	// json calls MarshalText on a key type that defines it, BEFORE any numeric
 	// conversion, so a named integer key can carry text this walk never plants
 	// and never searches for (#3592 review).
-	if kt := v.Type().Key(); rendersItself(kt) {
+	// json resolves a STRING-kind key from its underlying string and never
+	// calls MarshalText; only other kinds go through the marshaler. Measured:
+	//
+	//	map[StrKey]string{"rawkey": "v"} -> {"rawkey":"v"}
+	//	map[IntKey]string{7: "v"}        -> {"INTMARSHALED":"v"}
+	//
+	// So rejecting every self-rendering key type — as an earlier revision of
+	// this file did — needlessly failed on `map[NamedString]T`, which this walk
+	// can plant and search perfectly well (#3592 review).
+	if kt := v.Type().Key(); kt.Kind() != reflect.String && rendersItself(kt) {
 		if _, reviewed := reviewedMarshalerTypes[baseType(kt)]; !reviewed {
 			f.unsupported = append(f.unsupported,
 				fmt.Sprintf("%s (map key %s renders itself)", path, kt.String()))
 			return
 		}
+	}
+	// (3) A numeric key is seeded with an ordinal for distinctness and carries
+	// no marker, so nothing about it is searchable — yet json emits it verbatim
+	// ({"69":"w","83":"v"}, which is "E" and "S"). Note the hole, but keep
+	// seeding: the VALUES are still plantable, and returning here would trade a
+	// key-shaped blind spot for a value-shaped one.
+	if kk := v.Type().Key().Kind(); kk != reflect.String && isScalarNumeric(kk) {
+		f.unsupported = append(f.unsupported,
+			fmt.Sprintf("%s (map key kind %s cannot carry a text marker)", path, kk))
 	}
 	valueScalar := isScalarNumeric(v.Type().Elem().Kind())
 	if valueScalar {
