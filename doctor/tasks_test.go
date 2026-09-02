@@ -484,3 +484,30 @@ func TestDoctor_BoundsMissedRunWorkAcrossTheInventory(t *testing.T) {
 	assert.Equal(t, StatusWarn, row.Status, "and every one of them is still reported")
 	assert.Contains(t, row.Detail, "50 enabled tasks have not fired on schedule")
 }
+
+// TestDoctor_NoCountWhenTheBudgetWasSpent: a saturated ZERO means the shared
+// walk budget was gone before this task was reached, so no count was taken —
+// "missed 0+" would be arithmetic on a measurement nobody made, about a task
+// already proven to have missed at least one occurrence. The task is still
+// named; only the number is absent.
+func TestDoctor_NoCountWhenTheBudgetWasSpent(t *testing.T) {
+	opts := testOptions(t, false)
+	last := time.Now().AddDate(-1, 0, 0)
+	var tasks []task.Task
+	for i := 0; i < 40; i++ {
+		tsk := darkTask(fmt.Sprintf("spent%03d", i), "Dark")
+		tsk.CronExpr = "* * * * *"
+		tsk.LastRunAt = &last
+		tasks = append(tasks, tsk)
+	}
+	opts.taskInventory = func() ([]task.Task, error) { return tasks, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.NotContains(t, row.Detail, "missed 0",
+		"a count nobody took is not a lower bound of zero:\n%s", row.Detail)
+	assert.Contains(t, row.Detail, "40 enabled tasks have not fired on schedule",
+		"and every one is still reported")
+}

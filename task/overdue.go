@@ -398,6 +398,16 @@ func countOccurrences(sched cron.Schedule, from, now time.Time, budget *int) (in
 // saveTasks strips them precisely so a mistake here cannot persist one.
 func WithScheduleHealth(tasks []Task, now time.Time) []Task {
 	for i, health := range DeriveScheduleHealthBatch(tasks, now) {
+		// The LIVE fields are cleared first, and this is the read-side twin of
+		// stripDerived. af never writes them, but a hand-edited or externally
+		// generated tasks.json can carry them, and they decode like any other
+		// field — so without this a disk read with no daemon anywhere could report
+		// a task as armed, with a next run someone typed. Clearing here also means
+		// a not-armed answer from the daemon cannot leave an inherited NextRunAt
+		// behind it: the live layer always starts from nothing observed (#3623
+		// review).
+		tasks[i].Arming = ArmingUnknown
+		tasks[i].NextRunAt = nil
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated

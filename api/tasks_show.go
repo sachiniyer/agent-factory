@@ -218,6 +218,13 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	if !health.Overdue {
 		return "on schedule"
 	}
+	// A saturated ZERO means the shared walk budget was spent before this task was
+	// reached, so no count was taken — "missed 0 or more" would be arithmetic on a
+	// measurement nobody made, about a task already proven to have missed at least
+	// one (#3623 review). Report the silence without a number.
+	if health.MissedOccurrences <= 0 {
+		return fmt.Sprintf("overdue · oldest missed %s", health.OldestMissedAt.Format(showTimeFormat))
+	}
 	missed := fmt.Sprintf("%d", health.MissedOccurrences)
 	if health.Saturated {
 		missed = fmt.Sprintf("%d or more", health.MissedOccurrences)

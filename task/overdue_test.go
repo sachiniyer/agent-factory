@@ -707,3 +707,22 @@ func TestDeriveScheduleHealthBatch_SharesOneBudget(t *testing.T) {
 	}
 	assert.LessOrEqual(t, total, MaxMissedOccurrences, "one budget between all of them")
 }
+
+// TestWithScheduleHealth_ClearsDiskSourcedLiveFields: af never writes the live
+// fields — saveTasks strips them — but a hand-edited or externally generated
+// tasks.json can carry them, and they decode like any other field. Without
+// clearing, a disk read with no daemon anywhere would report a task as armed
+// with a next run someone typed: an observation nobody made, which is the one
+// thing the arming tri-state exists to prevent.
+func TestWithScheduleHealth_ClearsDiskSourcedLiveFields(t *testing.T) {
+	typed := at(2030, time.January, 1, 0, 0, 0)
+	tsk := cronTask("20 * * * *", nil)
+	tsk.CreatedAt = at(2026, time.September, 1, 11, 0, 0)
+	tsk.Arming, tsk.NextRunAt = ArmingArmed, &typed
+
+	got := WithScheduleHealth([]Task{tsk}, at(2026, time.September, 1, 11, 30, 0))
+
+	assert.Equal(t, ArmingUnknown, got[0].Arming,
+		"a read has observed nothing live, whatever the file said")
+	assert.Nil(t, got[0].NextRunAt, "and promises no fire time it did not read off a scheduler")
+}

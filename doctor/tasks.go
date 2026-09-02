@@ -222,13 +222,26 @@ func countTasksHave(n int) string {
 func describeOverdue(tasks []task.Task, health []task.ScheduleHealth) string {
 	parts := make([]string, 0, len(tasks))
 	for i, t := range tasks {
-		missed := fmt.Sprintf("%d", health[i].MissedOccurrences)
-		if health[i].Saturated {
-			missed += "+"
-		}
-		parts = append(parts, fmt.Sprintf("%s (missed %s)", taskLabel(t), missed))
+		parts = append(parts, taskLabel(t)+describeMissed(health[i]))
 	}
 	return collapseTaskList(parts)
+}
+
+// describeMissed renders the count, or nothing when there is no count to
+// render. A saturated ZERO is the shared walk budget having been spent by
+// earlier tasks before this one was reached, so no walk happened — printing
+// "missed 0+" as a lower bound would be arithmetic on a measurement nobody took,
+// and about a task already proven to have missed at least one occurrence
+// (#3623 review). The task is still named; only the number is absent.
+func describeMissed(health task.ScheduleHealth) string {
+	switch {
+	case health.MissedOccurrences <= 0:
+		return ""
+	case health.Saturated:
+		return fmt.Sprintf(" (missed %d+)", health.MissedOccurrences)
+	default:
+		return fmt.Sprintf(" (missed %d)", health.MissedOccurrences)
+	}
 }
 
 func describeTaskNames(tasks []task.Task) string {

@@ -24,7 +24,7 @@ type taskScheduler struct {
 	controlMu sync.Mutex
 	mu        sync.Mutex
 	cron      *cron.Cron
-	entries   map[string]cron.EntryID // task ID → scheduled entry
+	entries   map[string]scheduledEntry // task ID → what the cron is holding for it
 	// armed latches on the first completed reload. Before it, an empty entry set
 	// means "arming has not run yet", not "nothing is armed" — the daemon accepts
 	// control RPCs while it is still warming up, and reporting every task as
@@ -49,10 +49,26 @@ type taskScheduler struct {
 	runTask    func(taskID string)
 }
 
+// scheduledEntry pairs a live cron entry with the DEFINITION it was built from.
+//
+// The expression is what makes an ID-keyed lookup honest. A task write commits
+// durably and then reloads the scheduler as a separate, non-transactional step
+// (see reloadTaskSchedulesLocked and the committed-outcome error every task RPC
+// can return), so the two can disagree: the record on disk carries a new cron
+// expression while the cron still holds an entry built from the old one. Keyed
+// on the ID alone, that reads as "armed" with the previous schedule's next-fire
+// time — a confident, wrong answer about the exact thing this feature exists to
+// report, and one doctor would call healthy while the task fired at its former
+// times (#3623 review).
+type scheduledEntry struct {
+	id   cron.EntryID
+	expr string
+}
+
 func newTaskScheduler() *taskScheduler {
 	return &taskScheduler{
 		cron:      cron.New(),
-		entries:   make(map[string]cron.EntryID),
+		entries:   make(map[string]scheduledEntry),
 		loadTasks: task.LoadTasks,
 		parse:     task.ParseCron,
 		runTask: func(taskID string) {
@@ -118,8 +134,8 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for id, entryID := range s.entries {
-		s.cron.Remove(entryID)
+	for id, entry := range s.entries {
+		s.cron.Remove(entry.id)
 		delete(s.entries, id)
 	}
 
@@ -148,9 +164,12 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 			continue
 		}
 		taskID := t.ID
-		s.entries[taskID] = s.cron.Schedule(schedule, cron.FuncJob(func() {
-			s.runTask(taskID)
-		}))
+		s.entries[taskID] = scheduledEntry{
+			id: s.cron.Schedule(schedule, cron.FuncJob(func() {
+				s.runTask(taskID)
+			})),
+			expr: t.CronExpr,
+		}
 	}
 	s.armed = true
 	return nil
@@ -188,7 +207,7 @@ func (s *taskScheduler) reloadTasks(tasks []task.Task) error {
 // the cron's run loop, which is exactly what reloadTasks already does with
 // cron.Remove and cron.Schedule. The run loop never takes s.mu — its job closure
 // calls RunTask, which touches no scheduler state — so there is no cycle.
-func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
+func (s *taskScheduler) armingSnapshot() (map[string]armedEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.armed {
@@ -200,9 +219,9 @@ func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
 	for _, entry := range s.cron.Entries() {
 		live[entry.ID] = entry.Next
 	}
-	next := make(map[string]time.Time, len(s.entries))
-	for id, entryID := range s.entries {
-		at, ok := live[entryID]
+	next := make(map[string]armedEntry, len(s.entries))
+	for id, entry := range s.entries {
+		at, ok := live[entry.id]
 		if !ok {
 			continue
 		}
@@ -224,9 +243,17 @@ func (s *taskScheduler) armingSnapshot() (map[string]time.Time, bool) {
 		if s.started && at.IsZero() {
 			continue
 		}
-		next[id] = at
+		next[id] = armedEntry{next: at, expr: entry.expr}
 	}
 	return next, true
+}
+
+// armedEntry is one task's live scheduling, as the caller sees it: when the cron
+// will fire it, and the expression that entry was built from so a stale one can
+// be told from a current one.
+type armedEntry struct {
+	next time.Time
+	expr string
 }
 
 // scheduledTaskIDs returns the IDs of the tasks currently registered with the

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -55,7 +54,7 @@ func (s *watcherSupervisor) armingFor(taskID string) string {
 func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 	// One snapshot for the whole response, so no two rows can describe the
 	// schedule on different sides of a reload.
-	var scheduled map[string]time.Time
+	var scheduled map[string]armedEntry
 	observed := false
 	if s.scheduler != nil {
 		scheduled, observed = s.scheduler.armingSnapshot()
@@ -88,13 +87,20 @@ func (s *controlServer) withLiveArming(tasks []task.Task) []task.Task {
 			tasks[i].Arming = task.ArmingNotArmed
 			continue
 		}
-		next, armed := scheduled[tasks[i].ID]
-		if !armed {
+		entry, armed := scheduled[tasks[i].ID]
+		// The entry has to be for THIS definition. A task write commits durably and
+		// reloads the scheduler as a separate step, so a post-commit reload failure
+		// leaves the cron holding an entry built from the PREVIOUS expression while
+		// the record carries the new one — armed by id, stale in fact, and reported
+		// with the old schedule's next-fire time (#3623 review). A mismatch is
+		// not-armed, which is true of the definition on disk and points at the
+		// reload that fixes it.
+		if !armed || entry.expr != tasks[i].CronExpr {
 			tasks[i].Arming = task.ArmingNotArmed
 			continue
 		}
 		tasks[i].Arming = task.ArmingArmed
-		if !next.IsZero() {
+		if next := entry.next; !next.IsZero() {
 			// Zero reaches here only before the cron has started, which computes
 			// every entry's first fire; the task is armed either way, and inventing
 			// a time would be the recomputation this feature exists to remove. A

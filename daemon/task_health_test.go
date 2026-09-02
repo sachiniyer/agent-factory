@@ -36,14 +36,16 @@ func TestListTasks_NextRunComesFromTheArmedEntry(t *testing.T) {
 
 	assert.Equal(t, task.ArmingArmed, resp.Tasks[0].Arming)
 	require.NotNil(t, resp.Tasks[0].NextRunAt, "an armed task reports when it will fire")
-	entry := srv.scheduler.cron.Entry(srv.scheduler.entries["aaaa1001"])
+	entry := srv.scheduler.cron.Entry(srv.scheduler.entries["aaaa1001"].id)
 	assert.True(t, entry.Next.Equal(*resp.Tasks[0].NextRunAt),
 		"the reported time must be the entry's own, read off the scheduler")
 
 	// And the snapshot is what the response was built from, keyed by task ID.
 	snapshot, observed := srv.scheduler.armingSnapshot()
 	require.True(t, observed)
-	assert.True(t, entry.Next.Equal(snapshot["aaaa1001"]))
+	assert.True(t, entry.Next.Equal(snapshot["aaaa1001"].next))
+	assert.Equal(t, "0 3 * * *", snapshot["aaaa1001"].expr,
+		"the entry carries the definition it was built from, so a stale one can be told apart")
 }
 
 // TestListTasks_UnarmedEnabledTaskHasNoNextRun generalizes #2929: whatever the
@@ -356,10 +358,42 @@ func TestArmingSnapshot_BeforeStartAZeroNextIsNotAVerdict(t *testing.T) {
 	snapshot, observed := srv.scheduler.armingSnapshot()
 	require.True(t, observed, "arming has run, so the state is observed")
 	require.Contains(t, snapshot, "fires002")
-	assert.True(t, snapshot["fires002"].IsZero(), "precondition: nothing has computed a fire time yet")
+	assert.True(t, snapshot["fires002"].next.IsZero(), "precondition: nothing has computed a fire time yet")
 
 	got := srv.withLiveArming([]task.Task{fires})
 	assert.Equal(t, task.ArmingArmed, got[0].Arming,
 		"the scheduler holds it; only a RUNNING cron's zero is a verdict")
 	assert.Nil(t, got[0].NextRunAt, "and no time is invented for it")
+}
+
+// TestWithLiveArming_StaleEntryAfterAFailedReloadIsNotArmed: a task write
+// commits durably and reloads the scheduler as a SEPARATE step, so a
+// post-commit reload failure — a supported outcome every task RPC can return —
+// leaves the cron holding an entry built from the previous expression while the
+// record carries the new one.
+//
+// Keyed on the id alone that reads as "armed", with the OLD schedule's next-fire
+// time attached: a confident wrong answer about the one thing this feature
+// reports, and one doctor would call healthy while the task fired at its former
+// times.
+func TestWithLiveArming_StaleEntryAfterAFailedReloadIsNotArmed(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	before := enabledCronTask("stale001", "")
+
+	srv := &controlServer{scheduler: newTaskScheduler()}
+	require.NoError(t, srv.scheduler.reloadTasks([]task.Task{before}))
+	srv.scheduler.Start()
+	t.Cleanup(srv.scheduler.Stop)
+	require.Equal(t, task.ArmingArmed, srv.withLiveArming([]task.Task{before})[0].Arming,
+		"precondition: the entry matches the definition it was built from")
+
+	// The record's expression moved; the reload that would re-arm it failed.
+	after := before
+	after.CronExpr = "45 4 * * *"
+
+	got := srv.withLiveArming([]task.Task{after})
+	assert.Equal(t, task.ArmingNotArmed, got[0].Arming,
+		"the cron is not holding THIS definition, whatever it is holding under this id")
+	assert.Nil(t, got[0].NextRunAt,
+		"and the previous schedule's fire time is not attached to the new one")
 }

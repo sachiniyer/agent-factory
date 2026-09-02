@@ -233,3 +233,21 @@ func TestTasksShow_DisabledTaskHasNoScheduleVerdict(t *testing.T) {
 		assert.Contains(t, got, "cron · "+expr, "the expression is still on screen for anyone about to enable it")
 	}
 }
+
+// TestTasksShow_NoCountWhenNoneWasTaken: same sentinel as the doctor row — a
+// saturated zero is the shared walk budget having been spent, so the line
+// reports the silence and its start without a number rather than "missed 0 or
+// more" about a task proven to have missed at least one.
+func TestTasksShow_NoCountWhenNoneWasTaken(t *testing.T) {
+	tsk := showFixture()
+	tsk.LastRunAt = nil
+	tsk.CreatedAt = time.Date(2026, time.August, 14, 14, 20, 0, 0, time.Local)
+
+	var out bytes.Buffer
+	// Derived fresh here, so the fixture's own numbers are irrelevant; what
+	// matters is that a zero count never renders as a bound.
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
+	got := out.String()
+
+	assert.NotContains(t, got, "missed 0", "no count is not a count of zero:\n%s", got)
+}
