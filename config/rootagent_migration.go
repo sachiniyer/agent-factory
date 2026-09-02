@@ -1,6 +1,7 @@
 package config
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -19,8 +20,25 @@ const legacyRootAgentsAdvice = "root_agents is the legacy path map; use [root_ag
 // path map. An empty table is not one, so the presence test and the migration's
 // are the same test.
 func legacyRootAgentsInShape(shape map[string]any) bool {
+	_, ok := legacyRootAgentsPaths(shape)
+	return ok
+}
+
+// legacyRootAgentsPaths is this deprecation's presence test for the shared
+// table: the configured legacy paths, sorted, or false when the map is absent
+// or empty. The warning and `af config migrate` both read it, so neither can
+// find a legacy entry the other does not.
+func legacyRootAgentsPaths(shape map[string]any) ([]string, bool) {
 	rootAgents, ok := shape[LegacyRootAgentsKey].(map[string]any)
-	return ok && len(rootAgents) > 0
+	if !ok || len(rootAgents) == 0 {
+		return nil, false
+	}
+	paths := make([]string, 0, len(rootAgents))
+	for path := range rootAgents {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, true
 }
 
 // legacyRootAgentsDeprecation is this key's entry in the shared deprecation

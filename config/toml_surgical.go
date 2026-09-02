@@ -384,3 +384,30 @@ func tomlRootScalarRawValue(content, leaf string) (string, bool) {
 	}
 	return "", false
 }
+
+// tomlRootDottedTable reports whether the root block already defines section
+// through a dotted key (`network.future_option = 'x'`) rather than a [section]
+// header.
+//
+// TOML forbids re-opening such a table with a header — "table network already
+// exists as defined by a dotted key" — so a leaf being moved into that section
+// has to join it in the same dotted form. Without this check the rewrite
+// produces a file that will not parse, which the migration's pre-write gate
+// catches, but only by refusing a perfectly valid config with an internal
+// error (#3624 review).
+func tomlRootDottedTable(content, section string) bool {
+	curSection := ""
+	for _, line := range strings.Split(content, "\n") {
+		if name, ok := tomlHeaderName(line); ok {
+			curSection = name
+			continue
+		}
+		if curSection != "" {
+			continue
+		}
+		if path, _, ok := tomlAssignmentPath(line); ok && len(path) > 1 && path[0] == section {
+			return true
+		}
+	}
+	return false
+}

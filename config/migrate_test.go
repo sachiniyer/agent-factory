@@ -430,12 +430,15 @@ func TestDeprecatedKeysAreGlobalOnlySoMigrateNeedsNoScope(t *testing.T) {
 	}
 }
 
-// TestMigrateBackupKeepsTheOriginalMode pins the backup's permissions. The
-// .bak exists to be copied back over config.toml, so a restore must not
-// silently change the file's mode. The fixture chmods explicitly rather than
-// trusting t.TempDir(), whose mode follows the process umask.
-func TestMigrateBackupKeepsTheOriginalMode(t *testing.T) {
-	for _, mode := range []os.FileMode{0600, 0644} {
+// TestMigrateKeepsTheOriginalMode pins the permissions of BOTH files it
+// writes. An operator who deliberately made config.toml owner-only must not
+// find it world-readable because they took a migration — widening a live
+// file's permissions is not something a spelling rewrite gets to do — and the
+// .bak exists to be copied back over it, so a restore must not change them
+// either. The fixture chmods explicitly rather than trusting t.TempDir(),
+// whose mode follows the process umask.
+func TestMigrateKeepsTheOriginalMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0600, 0640, 0644} {
 		t.Run(mode.String(), func(t *testing.T) {
 			path := migrateHome(t, everyFlatAliasConfig)
 			require.NoError(t, os.Chmod(path, mode))
@@ -444,10 +447,39 @@ func TestMigrateBackupKeepsTheOriginalMode(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEmpty(t, result.Backup)
 
-			info, err := os.Stat(result.Backup)
+			migratedInfo, err := os.Stat(path)
 			require.NoError(t, err)
-			assert.Equal(t, mode, info.Mode().Perm(),
+			assert.Equal(t, mode, migratedInfo.Mode().Perm(),
+				"the migrated config must keep the mode it had, never widen it")
+
+			backupInfo, err := os.Stat(result.Backup)
+			require.NoError(t, err)
+			assert.Equal(t, mode, backupInfo.Mode().Perm(),
 				"the backup must carry the mode the original had")
 		})
 	}
+}
+
+// TestMigrateJoinsATableAlreadyOpenedByADottedKey covers a valid config TOML
+// will not let the migration reshape: when the destination table is already
+// open as a dotted key, appending a [section] header is a parse error ("table
+// network already exists as defined by a dotted key"). The migrated leaf has to
+// join it in the same form. Before the fix this refused the whole run with an
+// internal error, on a file that was never malformed (#3624 review).
+func TestMigrateJoinsATableAlreadyOpenedByADottedKey(t *testing.T) {
+	path := migrateHome(t, "schema_version = 1\nlisten_addr = '0.0.0.0:8443'\nnetwork.require_token = true\n")
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err, "a config TOML accepts must not fail to migrate")
+	require.Len(t, result.Migrated, 1)
+	assert.Equal(t, "listen_addr", result.Migrated[0].From)
+
+	content := readFile(t, path)
+	assert.NotContains(t, content, "[network]", "a header would re-open the dotted table")
+	assert.Contains(t, content, "network.listen_addr = '0.0.0.0:8443'")
+
+	cfg, err := parseConfigTOML([]byte(content), path)
+	require.NoError(t, err)
+	assert.Equal(t, "0.0.0.0:8443", cfg.ListenAddr)
+	assert.True(t, cfg.RequireToken, "the unrelated dotted leaf survives")
 }

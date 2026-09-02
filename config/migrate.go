@@ -5,8 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
+
+	"github.com/aymanbagabas/go-udiff"
 )
 
 // MigrateGlobalConfig rewrites the deprecated spellings in the global config
@@ -149,7 +150,11 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 			// the grouped one does not, so dropping it changes nothing at all.
 			updated, removed := deleteTOMLScalar(content, "", alias.legacy)
 			if !removed {
-				continue
+				// The decoded shape says the key is there, so a delete that finds
+				// no line means the two disagree about the file. Reporting success
+				// here would tell the reader the warning is over while the key —
+				// and the warning — are still in the file.
+				return nil, unremovableKeyError(alias.legacy, prettyPath)
 			}
 			content = updated
 			value, _ := CurrentValue(beforeCfg, alias.canonical)
@@ -166,10 +171,16 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 				return nil, err
 			}
 		}
-		content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
+		if tomlRootDottedTable(content, alias.section) {
+			// The destination table is already open as a dotted key, and TOML will
+			// not let a [header] re-open it. Join it in the same form.
+			content = setTOMLScalar(content, "", alias.section+"."+alias.leaf, encoded)
+		} else {
+			content = setTOMLScalar(content, alias.section, alias.leaf, encoded)
+		}
 		updated, removed := deleteTOMLScalar(content, "", alias.legacy)
 		if !removed {
-			return nil, fmt.Errorf("internal error: %s could not be removed from %s (no changes written)", alias.legacy, prettyPath)
+			return nil, unremovableKeyError(alias.legacy, prettyPath)
 		}
 		content = updated
 		result.Migrated = append(result.Migrated, MigratedKey{From: alias.legacy, To: alias.canonical, Value: encoded})
@@ -193,9 +204,12 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The backup carries the ORIGINAL's mode, not a fresh default: it exists to
-	// be copied back over config.toml, and a restore that silently changed the
-	// file's permissions would be a second surprise on top of the first.
+	// Both writes carry the ORIGINAL file's mode rather than a fresh default.
+	// An operator who deliberately made config.toml owner-only must not find it
+	// world-readable because they took a migration — widening a live file's
+	// permissions is not something a spelling rewrite gets to do — and the
+	// backup exists to be copied back over it, so a restore must not change
+	// them either (#3624 review).
 	mode := os.FileMode(0644)
 	if info, statErr := os.Stat(tomlPath); statErr == nil {
 		mode = info.Mode().Perm()
@@ -203,32 +217,31 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(content), 0644); err != nil {
+	if err := AtomicWriteFile(tomlPath, []byte(content), mode); err != nil {
 		return nil, err
 	}
 	result.Backup = backup
-	result.Diff = unifiedLineDiff(prettyPath, before, content)
+	// go-udiff is x/tools' diff implementation, already in this module's graph.
+	// The reader is being shown a rewrite of their own file, so the rendering
+	// should be the ordinary unified diff they already know how to read — and one
+	// this repo does not have to own a differ to produce.
+	result.Diff = udiff.Unified(prettyPath, prettyPath, before, content)
 	return result, nil
 }
 
 // unmigratedKey builds the report for a deprecation with no in-file migration,
-// or reports false when the file does not carry it.
+// or reports false when the file does not carry it. The presence test comes off
+// the table entry, so it is by construction the same test the warning uses —
+// migrate cannot stay silent about a key the loader just warned on.
 func unmigratedKey(deprecation configDeprecation, shape map[string]any) (UnmigratedKey, bool) {
-	if deprecation.key != LegacyRootAgentsKey {
-		// Every manual entry needs a presence test that matches the warning's,
-		// or migrate would report a key the loader stays silent about. Only
-		// root_agents is manual today; a new one must be given its test here.
+	if deprecation.present == nil {
 		return UnmigratedKey{}, false
 	}
-	if !legacyRootAgentsInShape(shape) {
+	detail, ok := deprecation.present(shape)
+	if !ok {
 		return UnmigratedKey{}, false
 	}
-	paths := make([]string, 0)
-	for path := range shape[LegacyRootAgentsKey].(map[string]any) {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	return UnmigratedKey{Key: deprecation.key, Step: deprecation.migrationRemedy(), Detail: paths}, true
+	return UnmigratedKey{Key: deprecation.key, Step: deprecation.migrationRemedy(), Detail: detail}, true
 }
 
 // ambiguousSpellingError refuses a run whose file writes one setting twice with
@@ -242,6 +255,14 @@ func ambiguousSpellingError(prettyPath string, alias configKeyAlias, cfg *Config
 		"af currently uses the grouped value (%s), and no migration should make that tie-break permanent for you; "+
 		"delete whichever line is wrong, then run `af config migrate` again. Nothing was rewritten",
 		prettyPath, alias.legacy, alias.canonical, echoMigrationValue(effective))
+}
+
+// unremovableKeyError reports a key the decoder found but the surgical edit
+// could not locate. Both callers use it: an unusual spelling must never be
+// reported as migrated, and must never be silently skipped either.
+func unremovableKeyError(key, prettyPath string) error {
+	return fmt.Errorf("internal error: %q is present in %s but could not be removed from the root block, "+
+		"so nothing was rewritten; move it under its current spelling by hand, or open an issue with the file's shape", key, prettyPath)
 }
 
 func echoMigrationValue(v string) string {

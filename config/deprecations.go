@@ -45,6 +45,18 @@ type configDeprecation struct {
 	// The sentence names the step the reader must take instead. Mutually
 	// exclusive with alias.
 	manual string
+
+	// present reports whether a decoded config carries this deprecation, and
+	// names the specific instances the manual step applies to. It is REQUIRED
+	// on a manual entry and nil on a rewrite entry, whose presence is simply
+	// the flat key in the shape.
+	//
+	// It lives in the table rather than in a switch inside the migration for
+	// the same reason the remedy does: a manual entry whose detection is
+	// written somewhere else can warn while the migration silently never
+	// reports it. TestConfigDeprecationsDeclareExactlyOneRemedy fails on a
+	// manual entry that leaves this nil.
+	present func(shape map[string]any) (detail []string, ok bool)
 }
 
 // legacyRootAgentsManualStep is why root_agents has no mechanical migration.
@@ -63,7 +75,11 @@ func configDeprecations() []configDeprecation {
 	for i := range configKeyAliases {
 		out = append(out, configDeprecation{key: configKeyAliases[i].legacy, alias: &configKeyAliases[i]})
 	}
-	out = append(out, configDeprecation{key: LegacyRootAgentsKey, manual: legacyRootAgentsManualStep})
+	out = append(out, configDeprecation{
+		key:     LegacyRootAgentsKey,
+		manual:  legacyRootAgentsManualStep,
+		present: legacyRootAgentsPaths,
+	})
 	return out
 }
 
