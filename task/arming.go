@@ -50,13 +50,17 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 	for _, o := range observed {
 		live[o.ID] = append(live[o.ID], o)
 	}
-	seen := make(map[string]bool, len(tasks))
+	// An observation describes ONE row, so it is adopted by at most one — each is
+	// consumed when it is taken. That is what lets a duplicated id be reported
+	// row by row: the daemon returns an observation per row and marks every one
+	// after the first not-armed, so the later rows have an authoritative negative
+	// waiting for them. Skipping them wholesale left them UNKNOWN, which hides the
+	// "[!] not armed" mark behind a computed fire time for a task the scheduler
+	// will never run — the same false clean bill as adopting the wrong row, in the
+	// other direction (#3626 review).
+	used := make(map[string][]bool, len(live))
 	for i := range tasks {
-		if seen[tasks[i].ID] {
-			continue
-		}
-		seen[tasks[i].ID] = true
-		o, ok := firstMatching(live[tasks[i].ID], tasks[i])
+		o, ok := takeMatching(live, used, tasks[i])
 		if !ok {
 			continue
 		}
@@ -70,21 +74,34 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 	return tasks
 }
 
-// firstMatching picks the observation that is about t, preferring the EARLIEST
-// when several are — which is first-wins, applied where it belongs.
+// takeMatching claims the earliest unclaimed observation that is about t, and
+// marks it claimed. Reports false when none is.
 //
-// First-wins is the daemon's rule for a duplicated id and it is a rule about
-// which row gets ARMED, so it has to be resolved among the rows that are
-// candidates for this record, not among every row sharing the id. Applied to the
-// id alone it threw away the only observation that described the record in hand
-// as soon as another repo held the same id. Applied here it still gives a
-// same-repo duplicate the first row's answer, which is what the scheduler, the
-// watch supervisor and `af tasks list` all report (#855).
-func firstMatching(observed []Task, t Task) (Task, bool) {
-	for _, o := range observed {
-		if sameTrigger(o, t) {
-			return o, true
+// Earliest-first is the daemon's first-wins rule for a duplicated id, resolved
+// where it belongs: among the observations that are CANDIDATES for this record,
+// not among every row that happens to share its id. Keyed on the id alone it
+// threw away the only observation describing the record in hand as soon as
+// another repo held the same id.
+//
+// Claiming is what makes the rule hold for a run of local duplicates. Two rows
+// in one repo with the same trigger are both candidates for the same
+// observation; without consuming it, the second would take the first's "armed"
+// and report a row the scheduler skipped as scheduled. With it, the second falls
+// to the daemon's own observation of that second row — which is not-armed, and
+// is the answer worth having (#855, and #3626 review).
+func takeMatching(live map[string][]Task, used map[string][]bool, t Task) (Task, bool) {
+	observed := live[t.ID]
+	claimed, ok := used[t.ID]
+	if !ok {
+		claimed = make([]bool, len(observed))
+		used[t.ID] = claimed
+	}
+	for j, o := range observed {
+		if claimed[j] || !sameTrigger(o, t) {
+			continue
 		}
+		claimed[j] = true
+		return o, true
 	}
 	return Task{}, false
 }

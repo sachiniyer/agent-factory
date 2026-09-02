@@ -101,9 +101,18 @@ func TestApplyLiveArmingRefusesAcrossTriggerKinds(t *testing.T) {
 	assert.Equal(t, ArmingUnknown, got[0].Arming)
 }
 
-func TestApplyLiveArmingResolvesDuplicateIDsFirstWins(t *testing.T) {
-	// Only the FIRST row for an id is ever armed (#855), on both sides: the
-	// daemon arms the first, and a second local row must not inherit its answer.
+func TestApplyLiveArmingReportsEachDuplicateRowFromItsOwnObservation(t *testing.T) {
+	// Only the FIRST row for an id is ever armed (#855) — and the daemon returns
+	// an observation for EVERY row, marking each one after the first not-armed. So
+	// the later duplicate has an authoritative negative waiting for it, and the
+	// row that will never run is exactly the one worth marking.
+	//
+	// Both observations describe both rows equally here (same repo, same
+	// expression), so what keeps them apart is that an observation describes ONE
+	// row: taken, it is spent. Without that the second row would take the first's
+	// "armed" and report a task the scheduler skipped as scheduled; with a blanket
+	// skip instead it stayed UNKNOWN, which hides the mark behind a computed fire
+	// time — the same false clean bill in the other direction.
 	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
 	first := armingFixture("a", "0 9 * * *")
 	first.Arming = ArmingArmed
@@ -113,11 +122,44 @@ func TestApplyLiveArmingResolvesDuplicateIDsFirstWins(t *testing.T) {
 
 	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *"), armingFixture("a", "0 9 * * *")}, []Task{first, second})
 
-	// Both observations describe this record equally (same repo, same expression),
-	// so first-wins decides — which is what the scheduler, the watch supervisor
-	// and `af tasks list` all report for a duplicated id (#855).
-	assert.Equal(t, ArmingArmed, got[0].Arming, "the first observation wins over the duplicate behind it")
-	assert.Equal(t, ArmingUnknown, got[1].Arming, "the duplicate row claims nothing")
+	assert.Equal(t, ArmingArmed, got[0].Arming, "the first row is the one the daemon armed")
+	require.NotNil(t, got[0].NextRunAt)
+	assert.Equal(t, ArmingNotArmed, got[1].Arming, "and the second is told it will not fire")
+	assert.Nil(t, got[1].NextRunAt, "with no fire time, because nothing is holding it")
+}
+
+func TestApplyLiveArmingReportsADuplicateWithItsOwnTrigger(t *testing.T) {
+	// The sharpest shape of the same thing: a later duplicate carrying a DIFFERENT
+	// expression. It has its own observation, it is unambiguously not the row the
+	// daemon armed, and leaving it unknown would render a computed next run off an
+	// expression the scheduler is not holding at all.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	armed := armingFixture("a", "0 9 * * *")
+	armed.Arming, armed.NextRunAt = ArmingArmed, &next
+	skipped := armingFixture("a", "0 21 * * *")
+	skipped.Arming = ArmingNotArmed
+
+	got := ApplyLiveArming(
+		[]Task{armingFixture("a", "0 9 * * *"), armingFixture("a", "0 21 * * *")},
+		[]Task{armed, skipped},
+	)
+
+	assert.Equal(t, ArmingArmed, got[0].Arming)
+	assert.Equal(t, ArmingNotArmed, got[1].Arming)
+	assert.Nil(t, got[1].NextRunAt)
+}
+
+func TestApplyLiveArmingLeavesAnUnmatchedDuplicateUnknown(t *testing.T) {
+	// One observation, two local rows that both fit it. The first claims it; the
+	// second has nothing describing it and must say so rather than borrow.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	only := armingFixture("a", "0 9 * * *")
+	only.Arming, only.NextRunAt = ArmingArmed, &next
+
+	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *"), armingFixture("a", "0 9 * * *")}, []Task{only})
+
+	assert.Equal(t, ArmingArmed, got[0].Arming)
+	assert.Equal(t, ArmingUnknown, got[1].Arming, "an observation is spent when it is taken")
 	assert.Nil(t, got[1].NextRunAt)
 }
 
