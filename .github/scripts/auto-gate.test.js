@@ -2227,6 +2227,63 @@ test("a usage-limited reviewer does not waive an unrelated blocker", async () =>
   assert.match(result.reasons.join("\n"), /usage-limited/);
 });
 
+// The TUI path gate asks whether a user could SEE the change, and answered it by
+// prefix alone — so a diff whose only file under app/, ui/ or session/tmux/ was
+// a `_test.go` file demanded a play-test of nothing (#3607). #3601 paid for one.
+test("a test-only change under a TUI prefix does not demand the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane_test.go", "session/tmux/pty_test.go", "app/app_test.go"],
+  });
+
+  assert.doesNotMatch(
+    result.reasons.join("\n"),
+    /play-tested/,
+    "a Go test file is not compiled into the binary, so it changes nothing a play-test could see",
+  );
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+});
+
+// The subtraction is per FILE. Excluding tests must not exempt a PR that merely
+// contains one, which is how "skip the gate when any test file is present" would
+// read — the same diff with one production file in it is still a visible change.
+test("a TUI change shipped alongside its test still demands the play-tested label", async () => {
+  const result = await evaluateGate({
+    files: ["ui/config_pane.go", "ui/config_pane_test.go"],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// Renaming a production file INTO a test file removes it from the shipped
+// binary, which is a visible change spelled as one `_test.go` path. The gate
+// only ever saw the API's `filename`, so the subtraction above read the rename
+// as a test-only diff; the old path is now listed too, and it is the one that
+// still demands the label.
+test("renaming a TUI production file into a test file still demands the label", async () => {
+  const result = await evaluateGate({
+    files: [{ filename: "ui/config_pane_test.go", previous_filename: "ui/config_pane.go", status: "renamed" }],
+  });
+
+  assert.match(result.reasons.join("\n"), /missing the play-tested label/);
+  assert.equal(result.shouldMerge, false);
+  assert.match(result.summary, /^BLOCKED:/);
+});
+
+// …and the reverse rename is still test-only: a test file moving to another test
+// path adds no production code, so neither of its two paths demands a play-test.
+test("renaming one test file to another stays outside the TUI gate", async () => {
+  const result = await evaluateGate({
+    files: [{ filename: "ui/pane_test.go", previous_filename: "ui/config_pane_test.go", status: "renamed" }],
+  });
+
+  assert.doesNotMatch(result.reasons.join("\n"), /play-tested/);
+  assert.equal(result.shouldMerge, true);
+  assert.match(result.summary, /^PASS:/);
+});
+
 test("a usage-limited reviewer does not waive unresolved inline findings", async () => {
   const result = await evaluateGate({
     issueComments: [codexRateLimit()],
@@ -3007,6 +3064,169 @@ test("the master-verify list names every workflow that gates master on push", ()
   }
 });
 
+test("every workflow is spelled the way the scans above read it", () => {
+  // #3617. The conformance half of the arrangement: the scans above stay lexical
+  // and this makes their assumptions TRUE, rather than each of them growing a
+  // regex per valid YAML spelling — a series #3550 established has no end.
+  //
+  // What it protects is not the workflow, which GitHub runs either way. It is
+  // the reading: `if : …` is skipped before `consultsEvent()` sees it, a quoted
+  // `"required": true` slips past the dispatch-contract check, a flow-style job
+  // hides every key it contains, a trailing comment on an `if:` line becomes
+  // part of the expression `topLevelDisjuncts()` splits, and a `push` token in
+  // an input's `options:` list keeps answering "this workflow gates master"
+  // after the real trigger is gone. Every one of those is silent.
+  const workflowDir = path.join(__dirname, "..", "workflows");
+  const workflowFiles = fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  assert.ok(workflowFiles.length > 0, "no workflow files were found, so this test proved nothing");
+
+  const violations = [];
+  for (const name of workflowFiles) {
+    const text = fs.readFileSync(path.join(workflowDir, name), "utf8");
+    for (const { number, source, reason } of nonCanonicalSpellings(text)) {
+      violations.push(`${name}:${number}: ${reason}\n    ${source.trim()}`);
+    }
+    for (const { number, source } of misplacedEventTokens(onSection(text))) {
+      violations.push(
+        `${name}: a push/workflow_dispatch token under \`on:\` outside an event position\n    ${source.trim()}` +
+          ` (line ${number} of the trigger section)`,
+      );
+    }
+  }
+
+  assert.deepEqual(
+    violations,
+    [],
+    "a workflow uses a spelling the lexical scans in this file cannot read, so it is silently " +
+      "unscanned while they stay green. Rewrite the line in the canonical form — `key: value`, " +
+      "unquoted keys, lowercase booleans, block mappings, no comment on an `if:` line, and no " +
+      "push/workflow_dispatch token under `on:` outside an event key or shorthand entry — or, if " +
+      "the spelling has to stay, teach the scan to read it and relax the rule here in the same " +
+      `change:\n\n${violations.join("\n")}\n`,
+  );
+});
+
+test("the conformance scan detects each spelling it claims to", () => {
+  // A conformance test passes by finding NOTHING, so a detector that has stopped
+  // detecting is indistinguishable from a clean tree — it would go green on the
+  // day it broke and stay green forever after. Every spelling is asserted
+  // against a synthetic workflow here, and every canonical form asserted clean,
+  // so the green above means "no such spelling" rather than "no scan".
+  const reasons = (text) => nonCanonicalSpellings(text).map((finding) => finding.reason);
+  const input = (property) => `on:\n  workflow_dispatch:\n    inputs:\n      token:\n        ${property}\n`;
+
+  // The spellings #3550's review rounds found in the scans themselves.
+  assert.deepEqual(reasons("jobs:\n  gate:\n    if : github.event_name == 'push'\n"), [
+    "a key with whitespace before its colon",
+  ]);
+  assert.deepEqual(reasons(input("required : true")), ["a key with whitespace before its colon"]);
+  assert.deepEqual(reasons(input('"required": true')), ["a quoted key"]);
+  assert.deepEqual(reasons(input("required: TRUE")), ["a non-lowercase boolean (`TRUE`)"]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs: { token: { required: true } }\n"), [
+    "a flow-style mapping",
+  ]);
+  assert.deepEqual(reasons("jobs:\n  gate:\n    steps: [{ if: github.event_name == 'push' }]\n"), [
+    "a flow sequence with a non-scalar entry",
+  ]);
+  assert.deepEqual(
+    reasons("jobs:\n  gate:\n    if: github.event_name == 'push' # || github.event_name == 'workflow_dispatch'\n"),
+    ["a comment on the same line as an `if:` expression"],
+  );
+
+  // …and the ones the ban-list version of this scan still let through, each of
+  // which is why it is now a shape rather than a list. A quoted key INSIDE a
+  // flow mapping matched no anchored `^key:` and no `{…key:` sniff; an anchor
+  // put `&must_supply true` where an exact-boolean test read a string; an
+  // explicit key split the property across two lines with no `key:` on either;
+  // and `- if:` moved the condition past `/^\s*if:/` in the master-verify loop.
+  assert.deepEqual(reasons(input('hidden_required: { "required": true }')), ["a flow-style mapping"]);
+  assert.deepEqual(reasons(input("required: &must_supply true")), ["an anchored value"]);
+  assert.deepEqual(reasons(input("required: *must_supply")), ["an aliased value"]);
+  assert.deepEqual(reasons(input("required: !!bool true")), ["a tagged value"]);
+  assert.deepEqual(reasons("on:\n  workflow_dispatch:\n    inputs:\n      ? required\n      : true\n"), [
+    "an explicit mapping key (`? key` / `: value`)",
+    "an explicit mapping key (`? key` / `: value`)",
+  ]);
+  assert.deepEqual(reasons("jobs:\n  gate:\n    steps:\n      - if: github.event_name == 'push'\n"), [
+    "a sequence-prefixed `if:` key (lead the step with `- name:` instead)",
+  ]);
+  assert.deepEqual(reasons("on:\n  <<: *defaults\n  push:\n"), ["a merge key (`<<: *base`)"]);
+
+  // A COMPACT block scalar owns its body from the key's column, not the dash's.
+  // Measuring from the dash swallowed every later sibling of that key — so a
+  // step spelled `- run: |` could carry an unreadable `if :` below its script
+  // and this scan would report nothing at all, which is the silent direction.
+  assert.deepEqual(
+    reasons("jobs:\n  g:\n    steps:\n      - run: |\n          echo hi\n        if : github.event_name == 'push'\n"),
+    ["a key with whitespace before its colon"],
+    "a sibling key after a compact block scalar must still be scanned",
+  );
+
+  // A double-quoted scalar DECODES: `"pu\\u0073h"` is the token `push` to
+  // GitHub and to nothing here, so the workflow gates master while every scan
+  // reads it as one that does not.
+  assert.deepEqual(reasons('on: "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on: ["pu\\u0073h"]\njobs:\n'), ["an escaped double-quoted scalar"]);
+  assert.deepEqual(reasons('on:\n  - "pu\\u0073h"\njobs:\n'), ["an escaped double-quoted scalar"]);
+
+  // The canonical forms this repository is written in, and the two exemptions
+  // that keep the rules honest: a quoted `'true'` is a STRING in a choice input,
+  // and a block scalar's body is a program rather than YAML — `run: |` holds
+  // shell, and shell holds colons, braces, anchors and quoted keys.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n  push:\n    branches: [ master ]\n    paths:\n      - '**.go'\n      - 'go.mod'\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      dry_run:\n        type: boolean\n        default: false\n",
+    "on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [auto, 'true', 'false']\n",
+    "on:\n  workflow_run:\n    workflows: [PR Validation]\n    types: [completed]\n",
+    "jobs:\n  gate:\n    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'\n",
+    "jobs:\n  gate:\n    if: >-\n      always() &&\n      needs.a.outputs.b != ''\n",
+    "jobs:\n  gate:\n    name: Build & verify\n    steps:\n      - uses: actions/checkout@v6\n",
+    "jobs:\n  gate:\n    steps:\n      - name: Scope\n        run: ${{ steps.scope.outputs.run }}\n",
+    'jobs:\n  gate:\n    steps:\n      - run: |\n          jq \'{ "required": true }\' <<<"$x"\n          test a : b\n          echo "? explicit" && echo &pid\n',
+    "jobs:\n  gate:\n    steps:\n      - run: |\n          echo hi\n        if: github.event_name == 'workflow_dispatch'\n",
+    'jobs:\n  gate:\n    steps:\n      - name: Set up Go\n        with:\n          go-version: "1.25"\n',
+  ]) {
+    assert.deepEqual(reasons(canonical), [], `a canonical workflow must be clean: ${JSON.stringify(canonical)}`);
+  }
+
+  // The event-position rule, which is about WHERE a token is rather than how it
+  // is spelled, so it is asked of the trigger section separately.
+  const misplaced = (text) => misplacedEventTokens(onSection(text)).map((finding) => finding.source.trim());
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      mode:\n        options: [push, dry-run]\n"),
+    ["options: [push, dry-run]"],
+    "a push token in an input's options keeps answering `gates master` after the trigger is removed",
+  );
+  assert.deepEqual(misplaced("on:\n  push:\n    paths:\n      - 'scripts/push-release.sh'\n"), [
+    "- 'scripts/push-release.sh'",
+  ]);
+  assert.deepEqual(
+    misplaced("on:\n  workflow_dispatch:\n    inputs:\n      push:\n        type: boolean\n"),
+    ["push:"],
+    "an INPUT named push is not an event key; only the direct child of `on:` is",
+  );
+  // Legitimate positions: event keys at the direct-child indent, and every
+  // shorthand form of the trigger list.
+  for (const canonical of [
+    "on:\n  push:\n    branches: [master]\n  workflow_dispatch:\n",
+    "on:\n    push:\n      branches: [master]\n    workflow_dispatch:\n",
+    "on: push\njobs:\n",
+    "on: 'push'\njobs:\n",
+    "on: [push, pull_request]\njobs:\n",
+    'on: ["push", "workflow_dispatch"]\njobs:\n',
+    "on:\n  - push\n  - workflow_dispatch\njobs:\n",
+  ]) {
+    assert.deepEqual(misplaced(canonical), [], `a canonical trigger must be clean: ${JSON.stringify(canonical)}`);
+  }
+  // A flow-style `on:` is not shorthand: it is a mapping, reported as one by the
+  // rule above, and its tokens are not in a position this scan can vouch for.
+  assert.deepEqual(misplaced('on: {"push": {"branches": ["master"]}}\njobs:\n'), [
+    'on: {"push": {"branches": ["master"]}}',
+  ]);
+});
 
 test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
   // #3396: this is not retryable by status (404), so before this change it went
@@ -4503,6 +4723,16 @@ async function runApplyGateStep({
   return { notices, error };
 }
 
+// One entry of the pulls.listFiles response. A `files:` option is normally a
+// list of path strings, which becomes the plain shape the API returns for an
+// edit. A RENAME carries a second path — pass the object form
+// `{ filename, previous_filename, status: "renamed" }` to get it, rather than
+// echoing back whatever the caller asked for: the old path is exactly the field
+// the gate used to drop, so a fake that could not express it could not fail.
+function pullRequestFile(file) {
+  return typeof file === "string" ? { filename: file, status: "modified" } : { ...file };
+}
+
 function fakeGateGithub({
   headSha = HEAD_SHA,
   headCommittedDate = "2026-07-09T01:00:00Z",
@@ -4642,7 +4872,7 @@ function fakeGateGithub({
     };
   };
   const responses = new Map([
-    [listFiles, files.map((filename) => ({ filename }))],
+    [listFiles, files.map(pullRequestFile)],
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
@@ -4887,7 +5117,7 @@ function fakeGateGithub({
         return options.head ? siblingPullRequests : dependentPullRequests;
       }
       if (fn === listFiles && pullRequestOverride.files) {
-        return pullRequestOverride.files.map((filename) => ({ filename }));
+        return pullRequestOverride.files.map(pullRequestFile);
       }
       return responses.get(fn) || [];
     },
@@ -5130,6 +5360,282 @@ function mentionsPushTrigger(section) {
   // are as valid as their bare forms, and a scan that requires the token to end
   // the line answers "no push trigger" for them.
   return /(?:^|[\s[{,"'])push["']?\s*(?::|,|\]|\}|$)/m.test(triggers);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow spelling conformance (#3617).
+//
+// Everything above reads these workflows lexically, and #3550's review found —
+// correctly, four separate times in its last two rounds — that valid YAML
+// escapes it: `if :`, `"required": true`, `required: TRUE`, a flow-style job
+// mapping, a trailing `# comment` on an `if:` line, and a `push` token sitting
+// in an input's `options:` list rather than in an event position. Each miss
+// leaves that workflow silently unscanned while the tests above stay green.
+//
+// The maintainer ACCEPTED all four rather than widening a sixth regex: the scan
+// is a tripwire over files THIS repository controls, it was never a YAML parser,
+// and making it one is an unbounded series. So the assumptions are enforced
+// instead. These helpers answer the opposite question — does any workflow use a
+// spelling the scan cannot read? — and the conformance test below fails naming
+// the file and the line. A non-canonical spelling is then loud at the moment it
+// is introduced, which is the direction that cannot cost master a silent gap.
+//
+// Being a tripwire too, its errors run the same way: a false positive is a
+// visible failure someone resolves by rewriting one line canonically, and every
+// rule is written to fail in that direction rather than to be clever.
+// ---------------------------------------------------------------------------
+
+function indentOf(line) {
+  return line.match(/^ */)[0].length;
+}
+
+// GitHub expression spans removed. `${{ fromJSON(…) }}` is not a flow mapping
+// and `${{ steps.x.outputs.y }}` carries no key; left in, every expression in
+// the repository reads as one.
+function withoutExpressions(line) {
+  return line.replace(/\$\{\{.*?\}\}/g, "");
+}
+
+// A workflow's YAML STRUCTURE lines, as [lineNumber, text] pairs. A block
+// scalar's body is arbitrary text — `run: |` holds shell, and shell holds
+// colons, braces and quoted keys — so scanning it for YAML spellings reports
+// the program rather than the workflow. Everything indented under a block-scalar
+// header is dropped; the header line itself stays, since it is a real key.
+function structuralLines(text) {
+  const rows = [];
+  let scalarIndent = null;
+  for (const [index, line] of text.split("\n").entries()) {
+    if (scalarIndent !== null) {
+      if (line.trim().length === 0 || indentOf(line) > scalarIndent) {
+        continue;
+      }
+      scalarIndent = null;
+    }
+    rows.push([index + 1, line]);
+    const header = /^(?<indent>[ \t]*)(?<dashes>(?:-[ \t]+)*)(?<key>[^\s#][^:]*:)?[ \t]*[|>][+-]?[0-9]*[ \t]*(?:#.*)?$/.exec(
+      line,
+    );
+    if (header) {
+      // A block scalar's body is indented past the node that OWNS it, and for a
+      // compact sequence entry that node is the key, not the dash: in
+      // `- run: |`, a later `if:` sibling of `run` sits between the dash column
+      // and the body, so measuring from the dash swallows a real key — silently,
+      // which is the one direction this whole test exists to prevent. A bare
+      // `- |` is the entry itself, so there the dash column is right.
+      scalarIndent = header.groups.indent.length + (header.groups.key ? header.groups.dashes.length : 0);
+    }
+  }
+  return rows;
+}
+
+// YAML node-type indicators that can open a VALUE, and what each one is. They
+// are a CLOSED set — which is the whole reason the rule below is written as "the
+// value must be a scalar" rather than as a list of spellings to ban.
+const NON_SCALAR_VALUES = {
+  "&": "an anchored value",
+  "*": "an aliased value",
+  "!": "a tagged value",
+  "{": "a flow-style mapping",
+};
+
+// Whether a VALUE is one the scans can read: a plain or quoted scalar, a flow
+// sequence of those, or a block-scalar header (whose body is a program, not
+// YAML, and is dropped by structuralLines above). Returns why it is not, or
+// null.
+function scalarFault(text) {
+  if (NON_SCALAR_VALUES[text[0]]) {
+    return NON_SCALAR_VALUES[text[0]];
+  }
+  // A DOUBLE-quoted scalar processes escapes, so `"pu\\u0073h"` is the token
+  // `push` to GitHub and is not the token `push` to anything here — the workflow
+  // gates master and every scan reads it as one that does not. Plain and
+  // single-quoted scalars do no such decoding, and every escape begins with a
+  // backslash, so the whole class is this one test.
+  if (/^"(?:[^"\\]|\\.)*"$/.test(text) && text.includes("\\")) {
+    return "an escaped double-quoted scalar";
+  }
+  return null;
+}
+
+function nonScalarValueFault(value) {
+  const text = value.trim();
+  if (text.length === 0 || /^[|>][+-]?[0-9]*$/.test(text)) {
+    return null;
+  }
+  if (!text.startsWith("[")) {
+    return scalarFault(text);
+  }
+  const sequence = /^\[(?<entries>.*)\]$/.exec(text);
+  if (!sequence) {
+    return "a flow sequence that does not close on its own line";
+  }
+  for (const entry of sequence.groups.entries.split(",")) {
+    const item = entry.trim();
+    if (item.length === 0) {
+      continue;
+    }
+    if (item.startsWith("[")) {
+      return "a flow sequence with a non-scalar entry";
+    }
+    const fault = scalarFault(item);
+    if (fault) {
+      return NON_SCALAR_VALUES[item[0]] ? "a flow sequence with a non-scalar entry" : fault;
+    }
+  }
+  return null;
+}
+
+// The canonical shape of a workflow line — optional sequence dashes, a BARE
+// key, a colon, a scalar value; or a scalar sequence entry. Returns the reason a
+// line is not that shape, or null.
+//
+// Stated POSITIVELY on purpose. The first version of this scan banned the six
+// spellings #3550 had already found, and one review round produced four more:
+// a quoted key INSIDE a flow mapping, `- if:`, `required: &must_supply true`,
+// and `? required` / `: true`. That is the same unbounded series the maintainer
+// ended on #3550, reappearing one level up — a ban list can always be escaped by
+// a spelling nobody has thought of yet, and each escape is silent. A shape can
+// only be MET. So the question asked here is "is this line the form the scans
+// assume?", which rejects every anchor, alias, tag, merge key, explicit key and
+// flow mapping there is, including the ones invented after this was written.
+function canonicalLineFault(line) {
+  const text = line.trim();
+  if (text.length === 0) {
+    return null;
+  }
+  // `? required` on one line and `: true` on the next resolve to the same
+  // property and leave no `key:` for any scan to anchor on.
+  if (/^\?(?:[ \t]|$)/.test(text) || /^:(?:[ \t]|$)/.test(text)) {
+    return "an explicit mapping key (`? key` / `: value`)";
+  }
+  const sequenceEntry = /^-(?:[ \t]|$)/.test(text);
+  const rest = text.replace(/^(?:-[ \t]+)*/, "").trim();
+  if (rest.length === 0) {
+    return null;
+  }
+  // A merge key splices another mapping in wholesale, so the keys the scans look
+  // for are not in the file at all. GitHub resolves it; nothing here can.
+  if (/^<<[ \t]*:/.test(rest)) {
+    return "a merge key (`<<: *base`)";
+  }
+  if (/^["'][^"']*["'][ \t]*:/.test(rest)) {
+    return "a quoted key";
+  }
+  if (/^[A-Za-z_][A-Za-z0-9_.-]*[ \t]+:/.test(rest)) {
+    return "a key with whitespace before its colon";
+  }
+  const mapping = /^(?<key>[A-Za-z_][A-Za-z0-9_.-]*):(?:[ \t]+(?<value>.*))?$/.exec(rest);
+  if (mapping) {
+    // `- if:` defeats `/^\s*if:/`, which is how the master-verify loop above
+    // finds the conditions it checks for dispatch admission. Steps in this
+    // repository lead with `- name:`, so the key never carries the dash.
+    if (mapping.groups.key === "if" && sequenceEntry) {
+      return "a sequence-prefixed `if:` key (lead the step with `- name:` instead)";
+    }
+    return nonScalarValueFault(mapping.groups.value || "");
+  }
+  if (sequenceEntry) {
+    return scalarFault(rest) || nonScalarValueFault(rest);
+  }
+  return "a line that is neither `key: value` nor a sequence entry";
+}
+
+// Every spelling in a workflow file that the scans above would read wrongly.
+// Each one is valid YAML that GitHub honours, so the workflow itself works —
+// what breaks is this suite's reading of it, silently, which is the failure mode
+// every one of these findings shared.
+function nonCanonicalSpellings(text) {
+  const findings = [];
+  for (const [number, source] of structuralLines(text)) {
+    const line = withoutExpressions(source);
+    // Comments are prose about workflows and routinely quote the very spellings
+    // being banned, so the shape rules read the line without them. The `if:`
+    // rule at the end is the one that needs them and takes the raw line.
+    const bare = withoutComments(line);
+    const reasons = [];
+
+    const fault = canonicalLineFault(bare);
+    if (fault) {
+      reasons.push(fault);
+    }
+
+    // A value spelling rather than a shape: `required: TRUE` is a boolean to
+    // YAML and not to `/required:\s*true\b/`, which is case-sensitive on
+    // purpose — matching either case would also match the STRING "True" in a
+    // choice input. Quoted values are exempt for the same reason: docs.yml's
+    // `options: [auto, 'true', 'false']` are strings by intent.
+    const property = /^[ \t]*(?:-[ \t]+)*[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:[ \t]*(?<value>.*)$/.exec(bare);
+    const value = property ? property.groups.value.trim() : "";
+    if (/^(?:true|false)$/i.test(value) && !/^(?:true|false)$/.test(value)) {
+      reasons.push(`a non-lowercase boolean (\`${value}\`)`);
+    }
+
+    // `topLevelDisjuncts()` reads the raw scalar, so a trailing comment is part
+    // of the expression it splits: `if: … == 'push' # || … 'workflow_dispatch'`
+    // reads as admitting a dispatch that it does not admit. Only the header line
+    // can carry one — measured with a YAML parser: a `#` inside a BLOCK scalar
+    // is literal expression text, which the scan and YAML read identically, and
+    // a comment inside a plain multi-line scalar is a parse error.
+    if (/^\s*(?:-[ \t]+)*if[ \t]*:/.test(line) && /(?:^|\s)#/.test(line)) {
+      reasons.push("a comment on the same line as an `if:` expression");
+    }
+
+    for (const reason of reasons) {
+      findings.push({ number, source, reason });
+    }
+  }
+  return findings;
+}
+// Every `push` / `workflow_dispatch` token in a trigger section that is not in a
+// position the scan reads as an event. `mentionsPushTrigger()` matches the token
+// anywhere in the section and the dispatch check matches `workflow_dispatch:` at
+// any depth, so an input named `push`, a `paths:` glob containing it, or an
+// `options: [push, dry-run]` list is read as a trigger that is not declared —
+// and, worse, keeps reading as one after the real trigger is removed.
+//
+// Two positions are legitimate: an event KEY at the direct-child indent of
+// `on:`, and a SHORTHAND entry (`on: push`, `on: [push, …]`, `on:` with a
+// `- push` list under it). Everything else is reported.
+function misplacedEventTokens(section) {
+  if (section == null) {
+    return [];
+  }
+  const lines = withoutComments(section).split("\n");
+  const content = lines.slice(1).filter((line) => line.trim().length > 0);
+  // Read from the section rather than assumed. This repository indents `on:` by
+  // two; the scans above do not require that and neither does this.
+  const childIndent = content.length === 0 ? null : Math.min(...content.map(indentOf));
+  const misplaced = [];
+  for (const [index, source] of lines.entries()) {
+    let line = source;
+    if (index === 0) {
+      const shorthand = /^on[ \t]*:[ \t]*(?<value>.*)$/.exec(line);
+      if (shorthand && isPlainEventShorthand(shorthand.groups.value)) {
+        line = "on:";
+      }
+    } else if (indentOf(line) === childIndent) {
+      line = line
+        .replace(/^([ \t]*)(?:push|workflow_dispatch)[ \t]*:/, "$1:")
+        .replace(/^([ \t]*-[ \t]*)(?:push|workflow_dispatch)[ \t]*$/, "$1");
+    }
+    if (/\b(?:push|workflow_dispatch)\b/.test(line)) {
+      misplaced.push({ number: index + 1, source: source.trimEnd() });
+    }
+  }
+  return misplaced;
+}
+
+// Whether an `on:` value is the shorthand form: one plain event name, or a flow
+// sequence of them. `on: {"push": {…}}` is not — it is a flow mapping, reported
+// as one — and neither is anything carrying nested structure.
+function isPlainEventShorthand(value) {
+  const text = value.trim();
+  if (text.length === 0) {
+    return false;
+  }
+  const sequence = /^\[(?<entries>[^[\]{}]*)\]$/.exec(text);
+  const entries = sequence ? sequence.groups.entries.split(",") : [text];
+  return entries.every((entry) => /^[ \t]*(?:"[A-Za-z_]+"|'[A-Za-z_]+'|[A-Za-z_]+)[ \t]*$/.test(entry));
 }
 
 // The exact wire shape from Auto Gate run 32044471684: GET
