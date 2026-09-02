@@ -113,6 +113,9 @@ func TestApplyLiveArmingResolvesDuplicateIDsFirstWins(t *testing.T) {
 
 	got := ApplyLiveArming([]Task{armingFixture("a", "0 9 * * *"), armingFixture("a", "0 9 * * *")}, []Task{first, second})
 
+	// Both observations describe this record equally (same repo, same expression),
+	// so first-wins decides — which is what the scheduler, the watch supervisor
+	// and `af tasks list` all report for a duplicated id (#855).
 	assert.Equal(t, ArmingArmed, got[0].Arming, "the first observation wins over the duplicate behind it")
 	assert.Equal(t, ArmingUnknown, got[1].Arming, "the duplicate row claims nothing")
 	assert.Nil(t, got[1].NextRunAt)
@@ -135,12 +138,18 @@ func TestApplyLiveArmingIsANoOpWithNothingObserved(t *testing.T) {
 	assert.Nil(t, ApplyLiveArming(nil, []Task{armingFixture("a", "0 9 * * *")}))
 }
 
-func TestApplyLiveArmingRefusesADuplicateFromAnotherRepo(t *testing.T) {
-	// The daemon skips a duplicated id GLOBALLY, first row wins. A repo-scoped
-	// reader sees only its own rows, so the row the daemon SKIPPED can be the only
-	// one in the list and is then locally first — first-wins cannot catch it, and
-	// the observation about the other repo's row would report this one as armed
-	// and scheduled precisely because it is the one that will never run.
+func TestApplyLiveArmingTakesTheDuplicateObservationThatIsAboutThisRow(t *testing.T) {
+	// The daemon skips a duplicated id GLOBALLY, first row wins, and answers about
+	// every repo. A repo-scoped reader sees only its own rows, so the row the
+	// daemon SKIPPED can be the only one in this list — locally first, where
+	// first-wins cannot see the skip.
+	//
+	// Two ways to get this wrong, and the second is the one that survived a review
+	// round. Taking the other repo's ARMED row reports the duplicate that will
+	// never run as scheduled. Refusing it but stopping there discards the
+	// authoritative NOT-ARMED row for this record, which reads as "unobserved" and
+	// suppresses the warning just as thoroughly — the task still renders a
+	// computed fire time and no mark.
 	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
 	globallyFirst := armingFixture("dup", "0 9 * * *")
 	globallyFirst.ProjectPath = "/repo-a"
@@ -155,7 +164,24 @@ func TestApplyLiveArmingRefusesADuplicateFromAnotherRepo(t *testing.T) {
 
 	got := ApplyLiveArming([]Task{local}, []Task{globallyFirst, skipped})
 
-	assert.Equal(t, ArmingUnknown, got[0].Arming,
-		"the armed observation is about the OTHER repo's row")
-	assert.Nil(t, got[0].NextRunAt, "and so is its fire time")
+	assert.Equal(t, ArmingNotArmed, got[0].Arming,
+		"the observation ABOUT this row is the one that answers")
+	assert.Nil(t, got[0].NextRunAt, "and it carries no fire time, because nothing is holding it")
+}
+
+func TestApplyLiveArmingStaysUnknownWhenNoObservationIsAboutThisRow(t *testing.T) {
+	// The daemon answered, but only about the other repo's row — a list truncated
+	// mid-write, or a store this reader has not seen all of. "Nothing reported on
+	// THIS record" is the honest answer; inheriting the neighbour's is not.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	other := armingFixture("dup", "0 9 * * *")
+	other.ProjectPath = "/repo-a"
+	other.Arming, other.NextRunAt = ArmingArmed, &next
+
+	local := armingFixture("dup", "0 9 * * *")
+	local.ProjectPath = "/repo-b"
+
+	got := ApplyLiveArming([]Task{local}, []Task{other})
+	assert.Equal(t, ArmingUnknown, got[0].Arming)
+	assert.Nil(t, got[0].NextRunAt)
 }

@@ -176,6 +176,24 @@ func NewWithSocket(socketPath string) *Client {
 	}
 }
 
+// CloseIdleConnections drains the transport's idle connection pool.
+//
+// A Client built for ONE round-trip and then dropped does not release its
+// connection: the completed keep-alive socket stays in the pool with its
+// read-loop goroutine, and that goroutine keeps the transport reachable, so
+// nothing is ever collected. Measured against a real unix-socket server, 200
+// such clients leak 400 descriptors — both ends — and forcing GC reclaims none.
+//
+// Callers that make one call and discard the Client must defer this. The WS path
+// already does it for its cloned transport (see stream.go); this is the REST
+// twin (#3626 review).
+func (c *Client) CloseIdleConnections() {
+	c.httpClient.CloseIdleConnections()
+	if c.remoteTransport != nil {
+		c.remoteTransport.CloseIdleConnections()
+	}
+}
+
 // call POSTs req as JSON to /v1/<method>, decodes the shared {data,error}
 // envelope, and unmarshals the envelope's data member into resp. It is the
 // single client-side twin of daemon/httpserver.go's rpcHandler: request struct

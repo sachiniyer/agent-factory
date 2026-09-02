@@ -55,6 +55,20 @@ var withDaemonHTTP = func(fn func(*apiclient.Client) error) error {
 	if err != nil {
 		return err
 	}
+	// Every helper here builds a fresh Client for ONE round-trip, and a fresh
+	// Client is a fresh http.Transport. A completed keep-alive connection stays in
+	// that transport's idle pool with its read-loop goroutine, and the pool is
+	// never drained: the transport is unreachable but not collectable, because the
+	// goroutine holds it. Measured against a real unix-socket server: 200 one-shot
+	// clients leak 400 descriptors (both ends), and two forced GCs reclaim none of
+	// them. The TUI polls through here twice every 750ms, so this is the one place
+	// it compounds (#3626 review).
+	//
+	// The same discipline the WS path already applies to its cloned transport
+	// (apiclient/stream.go, session/agentserver_remote.go). It costs the keep-alive
+	// only for callers that were never going to reuse the connection anyway —
+	// which is all of them, since the Client dies with this function.
+	defer c.CloseIdleConnections()
 	err = fn(c)
 	deadline := time.Now().Add(daemonHTTPRetryWait)
 	for httpCallRetryable(err) && time.Now().Before(deadline) {
@@ -469,6 +483,7 @@ var liveTaskArmingFetcher = func() ([]task.Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer c.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(context.Background(), liveArmingTimeout)
 	defer cancel()
 	return c.ListTasks(ctx)

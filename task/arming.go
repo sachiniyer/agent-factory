@@ -38,12 +38,17 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 	if len(tasks) == 0 || len(observed) == 0 {
 		return tasks
 	}
-	live := make(map[string]Task, len(observed))
+	// EVERY observation for an id is kept, in order, not just the first. The
+	// daemon answers about all repos while this list is one repo's, so a
+	// duplicated id can hold the other repo's row AND this one's — and it is
+	// precisely this one's, the row the daemon refused to arm, that carries the
+	// answer worth having. Keeping only the first discarded it and reported the
+	// task as merely unobserved, which suppresses the not-armed warning and falls
+	// back to a computed fire time: a task that will never run, rendered as if it
+	// were fine (#3626 review).
+	live := make(map[string][]Task, len(observed))
 	for _, o := range observed {
-		if _, dup := live[o.ID]; dup {
-			continue
-		}
-		live[o.ID] = o
+		live[o.ID] = append(live[o.ID], o)
 	}
 	seen := make(map[string]bool, len(tasks))
 	for i := range tasks {
@@ -51,8 +56,8 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 			continue
 		}
 		seen[tasks[i].ID] = true
-		o, ok := live[tasks[i].ID]
-		if !ok || !sameTrigger(o, tasks[i]) {
+		o, ok := firstMatching(live[tasks[i].ID], tasks[i])
+		if !ok {
 			continue
 		}
 		tasks[i].Arming = o.Arming
@@ -63,6 +68,25 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 		tasks[i].NextRunAt = o.NextRunAt
 	}
 	return tasks
+}
+
+// firstMatching picks the observation that is about t, preferring the EARLIEST
+// when several are — which is first-wins, applied where it belongs.
+//
+// First-wins is the daemon's rule for a duplicated id and it is a rule about
+// which row gets ARMED, so it has to be resolved among the rows that are
+// candidates for this record, not among every row sharing the id. Applied to the
+// id alone it threw away the only observation that described the record in hand
+// as soon as another repo held the same id. Applied here it still gives a
+// same-repo duplicate the first row's answer, which is what the scheduler, the
+// watch supervisor and `af tasks list` all report (#855).
+func firstMatching(observed []Task, t Task) (Task, bool) {
+	for _, o := range observed {
+		if sameTrigger(o, t) {
+			return o, true
+		}
+	}
+	return Task{}, false
 }
 
 // sameTrigger reports whether an observation about o describes the same trigger
