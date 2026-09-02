@@ -887,3 +887,84 @@ func TestDockerAccount_RefusesEveryMountInstallingOption(t *testing.T) {
 		})
 	}
 }
+
+// TestDockerAccount_RejectsProtectedDeviceTargets covers --device, whose value
+// is host:container[:permissions] — a container path the repository chooses,
+// the same shape -v has. Docker creates the node at that path, and under af's
+// account bind mount the node is written THROUGH to the operator's registered
+// account directory on the host, root-owned and outliving the container
+// (#3521).
+//
+// #3403 recorded --device as "not a vector" and that reading was too narrow: it
+// tested a container path that already EXISTS, which Docker leaves intact. A
+// path that does not exist yet is created, and `.HostConfig.Devices` records it
+// while `.Mounts` stays empty — the column the earlier classifier never read.
+func TestDockerAccount_RejectsProtectedDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "account subdirectory", args: []string{"--device", "/dev/zero:/af-account/.config/planted"}},
+		{name: "account root", args: []string{"--device", "/dev/zero:/af-account"}},
+		{name: "runtime home subdirectory", args: []string{"--device", "/dev/zero:/af-home/.config/planted"}},
+		{name: "inline spelling", args: []string{"--device=/dev/zero:/af-account/.config/planted"}},
+		{name: "with permissions", args: []string{"--device", "/dev/zero:/af-account/.config/planted:rwm"}},
+		{name: "inline spelling on the runtime home", args: []string{"--device=/dev/zero:/af-home:rwm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAccountDockerRunArgs(tt.args, "codex")
+			require.Errorf(t, err, "a --device wrote a node into the account boundary: %v", tt.args)
+			require.Contains(t, err.Error(), "--device")
+		})
+	}
+}
+
+// TestDockerAccount_AllowsHarmlessDeviceTargets is the over-refusal boundary
+// #3398 drew for /af-account-cache, held for --device: passing a real device
+// through is ordinary configuration, and refusing the whole option would break
+// GPU, FUSE and audio passthrough for every account-scoped session while
+// buying nothing the path check does not already give.
+//
+// Measured on Docker 29.4.0, reading `.HostConfig.Devices`: each row below
+// resolves to the container path shown, and none of them is under the boundary.
+func TestDockerAccount_AllowsHarmlessDeviceTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "host path only", args: []string{"--device", "/dev/fuse"}},                          // -> /dev/fuse
+		{name: "explicit container path", args: []string{"--device", "/dev/nvidia0:/dev/nvidia0"}}, // -> /dev/nvidia0
+		{name: "permissions in the second field", args: []string{"--device", "/dev/zero:rwm"}},     // -> /dev/zero
+		{name: "similarly named path", args: []string{"--device", "/dev/sda:/af-account-cache/disk"}},
+		{name: "another similarly named path", args: []string{"--device", "/dev/sda:/af-accountant/disk"}},
+		{name: "inline spelling", args: []string{"--device=/dev/snd"}},
+		// pflag reads a single dash as a shorthand cluster, so `-device X` is
+		// `-d -e vice` and X becomes the IMAGE — measured: Docker fails with
+		// "invalid reference format" and installs no device at all.
+		{name: "single dash is not the option", args: []string{"-device", "/dev/zero:/af-account/.config/planted"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoErrorf(t, validateAccountDockerRunArgs(tt.args, "codex"), "a harmless --device was refused: %v", tt.args)
+		})
+	}
+}
+
+// TestDockerAccount_DeviceScanDoesNotSkipALaterMount pins that consuming
+// --device's value does not step over what follows it, the same trap #3402's
+// cluster scan had to avoid.
+func TestDockerAccount_DeviceScanDoesNotSkipALaterMount(t *testing.T) {
+	tests := [][]string{
+		{"--device", "/dev/fuse", "--mount", "type=bind,src=/tmp/other,dst=/af-account"},
+		{"--device", "/dev/fuse", "--mount", `type=bind,src=/tmp/other,"DST=/af-account/.config"`},
+		{"--device=/dev/fuse", "-v", "/tmp/other:/af-home"},
+		{"--device", "/dev/fuse", "-e", "CODEX_API_KEY=repo-identity"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			require.Errorf(t, validateAccountDockerRunArgs(args, "codex"),
+				"a guarded option after --device escaped validation: %v", args)
+		})
+	}
+}
