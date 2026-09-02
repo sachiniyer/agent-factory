@@ -667,15 +667,46 @@ async function beginAggregateDecision({ github, context, core, headSha }) {
   };
 }
 
+// Establish several publish preconditions as ONE observation.
+//
+// Issuing them concurrently is not enough: each performs a GitHub read, and if
+// one of those retries, the other's answer is already stale by that backoff when
+// Promise.all finally resolves. So the reads are single-shot here, and a
+// transient failure discards the WHOLE round and re-reads everything — the
+// answers that count all come from the same round, and none can be older than
+// one request's latency, which is the floor.
+//
+// A precondition that is genuinely violated — ownership lost, auto-merge still
+// armed, an unevaluated PR in the set — is not retryable and stops immediately.
+async function establishPublishPreconditions(label, preconditions) {
+  for (let attempt = 0; ; attempt += 1) {
+    const settled = await Promise.allSettled(preconditions.map((precondition) => precondition()));
+    const rejected = settled.filter((outcome) => outcome.status === "rejected");
+    if (rejected.length === 0) {
+      return;
+    }
+    const violated = rejected.find((outcome) => !isRetryableGitHubError(outcome.reason));
+    if (violated) {
+      throw violated.reason;
+    }
+    if (attempt >= RETRY_DELAYS_MS.length) {
+      throw retryFailure(label, attempt + 1, rejected[0].reason, "AutoGateReadError", true);
+    }
+    await delay(retryDelayMilliseconds(rejected[0].reason, RETRY_DELAYS_MS[attempt]));
+  }
+}
+
 // Re-establish that this transaction still owns the aggregate on this head.
 // Aggregate invalidation runs outside the head-keyed serialized lane, so a newer
 // event can take ownership at any moment — including during a write's backoff.
-async function assertStillOwnsAggregate({ github, context, headSha, checkRunId }) {
+async function assertStillOwnsAggregate({ github, context, headSha, checkRunId, retry = true }) {
   const { owner, repo } = context.repo;
   const identity = aggregateIdentity(headSha);
-  const checkRuns = await retryRead(`could not re-read aggregate checks at ${headSha}`, () =>
-    github.paginate(github.rest.checks.listForRef, { owner, repo, ref: headSha, per_page: 100 }),
-  );
+  const read = () =>
+    github.paginate(github.rest.checks.listForRef, { owner, repo, ref: headSha, per_page: 100 });
+  const checkRuns = retry
+    ? await retryRead(`could not re-read aggregate checks at ${headSha}`, read)
+    : await read();
   const latestGeneration = newestCheckGeneration(
     checkRuns.filter(
       (run) =>
@@ -783,19 +814,26 @@ async function reportAggregateDecision({
           // On every attempt because a retried write sleeps and reissues: the
           // generation check at the top of reportAggregateDecision covers the
           // moment the decision was built, not the moment each attempt writes.
-          await Promise.all([
-            checkRunId
-              ? assertStillOwnsAggregate({
-                  github,
-                  context,
-                  headSha: aggregate.headSha,
-                  checkRunId,
-                })
-              : Promise.resolve(),
-            typeof beforePublish === "function"
-              ? beforePublish({ pullNumbers: aggregate.pullNumbers })
-              : Promise.resolve(),
-          ]);
+          await establishPublishPreconditions(
+            `could not establish the publish preconditions for ${aggregate.headSha}`,
+            [
+              ...(checkRunId
+                ? [
+                    () =>
+                      assertStillOwnsAggregate({
+                        github,
+                        context,
+                        headSha: aggregate.headSha,
+                        checkRunId,
+                        retry: false,
+                      }),
+                  ]
+                : []),
+              ...(typeof beforePublish === "function"
+                ? [() => beforePublish({ pullNumbers: aggregate.pullNumbers, retry: false })]
+                : []),
+            ],
+          );
         }
       : undefined,
   });
@@ -932,13 +970,14 @@ async function processAggregateHead({
       core,
       headSha: pending.headSha,
       checkRunId: pending.checkRunId,
-      beforePublish: ({ pullNumbers }) =>
+      beforePublish: ({ pullNumbers, retry }) =>
         confirmNativeAutoMergeDisabled({
           github,
           context,
           results: manualMergeResults,
           evaluated: pending.pullNumbers.map(Number),
           pullNumbers,
+          retry,
         }),
     });
   } catch (error) {
@@ -1664,7 +1703,7 @@ async function ensureNativeAutoMergeDisabled({ github, context, core, results })
 // every read that write depends on. The mutation succeeding is a claim; this is
 // the evidence. Anything still armed — or any state that cannot be read — throws,
 // so no consumable green is published.
-async function confirmNativeAutoMergeDisabled({ github, context, results, evaluated, pullNumbers }) {
+async function confirmNativeAutoMergeDisabled({ github, context, results, evaluated, pullNumbers, retry = true }) {
   // The set this transaction guarded was frozen from its own association
   // snapshot, but the aggregate re-reads associations before publishing and can
   // pass for a LARGER set — a PR reopened or retargeted onto this head, carrying
@@ -1683,7 +1722,7 @@ async function confirmNativeAutoMergeDisabled({ github, context, results, evalua
     }
   }
   const numbers = results.map((result) => Number(result.prNumber));
-  const states = await readNativeAutoMergeStates({ github, context, numbers });
+  const states = await readNativeAutoMergeStates({ github, context, numbers, retry });
   const armed = [...states.entries()]
     .filter(([, state]) => state.armed)
     .map(([number]) => number);
@@ -1708,7 +1747,7 @@ async function confirmNativeAutoMergeDisabled({ github, context, results, evalua
 //
 // Separate from getPullRequest on purpose: the whole defect is that
 // getPullRequest's answer is many round trips old by the time the decision acts.
-async function readNativeAutoMergeStates({ github, context, numbers }) {
+async function readNativeAutoMergeStates({ github, context, numbers, retry = true }) {
   const { owner, repo } = context.repo;
   if (numbers.length === 0) {
     return new Map();
@@ -1737,7 +1776,12 @@ async function readNativeAutoMergeStates({ github, context, numbers }) {
     variables[`n${index}`] = number;
   });
   const label = `could not read auto-merge state for PR ${joinPullNumbers(numbers)}`;
-  const response = await retryRead(label, () => github.graphql(query, variables));
+  // Single-shot when it is a publish precondition: retrying inside one
+  // observation makes the other stale by this backoff (see
+  // establishPublishPreconditions).
+  const response = retry
+    ? await retryRead(label, () => github.graphql(query, variables))
+    : await github.graphql(query, variables);
   const states = new Map();
   numbers.forEach((number, index) => {
     const pr = response?.repository?.[`pr${index}`];

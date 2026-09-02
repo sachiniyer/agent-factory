@@ -592,6 +592,63 @@ test("ownership is re-established alongside the guard, not before it", async () 
   );
 });
 
+test("a transient precondition read discards the whole round", async () => {
+  // Codex P1 (round 6): issuing the two preconditions concurrently is not the
+  // same as observing them simultaneously. If one retries internally, the
+  // other's answer is already stale by that backoff when Promise.all resolves —
+  // long enough for a newer invalidation to land unseen.
+  //
+  // So the reads are single-shot and a transient failure discards the ROUND:
+  // every answer that counts comes from the same round. The oracle is that the
+  // ownership read is re-issued when only the auto-merge read failed.
+  const github = fakeGateGithub({ author: "detail-app" });
+  let autoMergeReads = 0;
+  let ownershipReads = 0;
+  const realGraphql = github.graphql;
+  github.graphql = async (query, variables) => {
+    if (query.includes("query AutoMergeState")) {
+      autoMergeReads += 1;
+      // Fail only the first guard round; the disarm snapshot is read 1.
+      if (autoMergeReads === 2) {
+        throw new Error("fetch failed");
+      }
+    }
+    return realGraphql(query, variables);
+  };
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    // Only the check-run reads that happen after the disarm snapshot, which is
+    // where the guard rounds live. Earlier ones belong to the evaluation.
+    if (fn === github.rest.checks.listForRef && autoMergeReads >= 1) {
+      ownershipReads += 1;
+    }
+    return realPaginate(fn, options);
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "manual", "a transient guard read must not fail the transaction");
+  // Three auto-merge reads: the disarm snapshot, the round that failed, and the
+  // round that succeeded.
+  assert.equal(autoMergeReads, 3);
+  // Three check-run reads after the disarm snapshot: the aggregate's own
+  // evaluation, then ONE PER GUARD ROUND. Two rounds means two ownership reads —
+  // the first round's answer is discarded rather than carried across the other
+  // read's failure. Retrying inside the observations instead would leave two.
+  assert.equal(
+    ownershipReads,
+    3,
+    `ownership must be re-read for the retried round; saw ${ownershipReads} reads`,
+  );
+});
+
 test("a guard read failure blocks cleanly instead of being retried as a write", async () => {
   // Codex P2 (round 4): a failing precondition is not a failing write. Left to
   // the write's retry classifier it was reissued three more times — nine reads —
@@ -622,10 +679,10 @@ test("a guard read failure blocks cleanly instead of being retried as a write", 
   assert.equal(transaction.state, "evaluation-error");
   assert.match(
     github.updatedChecks.at(-1).output.summary,
-    /could not read auto-merge state for PR #1465 after 3 attempts: fetch failed/,
+    /could not establish the publish preconditions for .* after 3 attempts: fetch failed/,
   );
-  // Bounded: one disarm snapshot plus the guard's own three attempts. Not three
-  // of those per write attempt, which is the nine-read behaviour this prevents.
+  // Bounded: one disarm snapshot plus the guard's own three rounds. Not three of
+  // those per write attempt, which is the nine-read behaviour this prevents.
   assert.equal(github.autoMergeStateReads, 4, "the guard must not be retried by the write");
   assert.ok(
     !github.updatedChecks.some((check) => check.conclusion === "success"),
