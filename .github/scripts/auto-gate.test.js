@@ -2268,7 +2268,10 @@ test("an unreadable ownership check never becomes 'nobody owns this head'", asyn
 
   const { error } = await runApplyGateStep({ github });
 
-  assert.equal(error, null, "the refusal is conceded rather than reddening the run");
+  // The refusal stays LOUD: nothing proved another actor won, the PR is still
+  // open, and the merge did not happen — conceding would leave the aggregate's
+  // PASS standing for a merge that never occurred.
+  assert.match(error?.message || "", /Repository rule violations found/);
   // Retried before giving up, then reported as unknown rather than as absent.
   assert.equal(checkReads, 3);
   // …and crucially, no new WAITING generation: a blind invalidation here is what

@@ -1028,15 +1028,22 @@ async function processAggregateHead({
       // merge raises no event, so nothing would come along to repair it. That
       // one falls through to the ordinary invalidation below, exactly as a
       // successful merge does, and for the same reason.
-      // "owner-unknown" joins it: both mean this run must not write to the
-      // aggregate, one because a live transaction owns it and one because the
-      // read that would have proved it failed.
-      if (
-        error?.autoGateConcessionReason === "newer-owner" ||
-        error?.autoGateConcessionReason === "owner-unknown"
-      ) {
+      if (error?.autoGateConcessionReason === "newer-owner") {
         core.notice(message);
         return { state: "conceded", pending, aggregate };
+      }
+      // Ownership could not be read. Skip the write — a blind invalidation would
+      // supersede whichever transaction owns this head — but do NOT swallow the
+      // failure: nothing proved another actor won, the PR is still open, and the
+      // merge did not happen. Conceding here would leave the aggregate's PASS
+      // standing for a merge that never occurred.
+      if (error?.autoGateOwnershipUnknown) {
+        core.warning(
+          `Not invalidating ${pending.headSha}: ownership could not be determined ` +
+            `(${error.autoGateOwnershipUnknown}), so this run will not overwrite whichever ` +
+            "transaction owns it. The merge refusal below stands.",
+        );
+        throw error;
       }
       let invalidated;
       try {
@@ -1526,14 +1533,18 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
           per_page: 100,
         }),
       );
-    } catch (error) {
-      return {
-        reason: "owner-unknown",
-        message:
-          `Conceding merge-refused race for PR #${prNumber} without invalidating ` +
-          `${expectedHeadSha}: ownership could not be determined (${formatError(error)}), and ` +
-          "a blind invalidation would supersede whichever transaction owns it.",
-      };
+    } catch (readError) {
+      // NOT a concession. Nothing here proved another actor won: the PR is still
+      // open and the merge did not happen, so exiting successfully would leave
+      // the aggregate's PASS standing for a merge that never occurred. The
+      // refusal must stay loud.
+      //
+      // What the unknown DOES change is the invalidation: creating a newer
+      // generation blind would supersede whichever transaction owns this head,
+      // which is the damage the ownership read exists to avoid. So the original
+      // error is marked and rethrown, and the caller skips the write only.
+      error.autoGateOwnershipUnknown = formatError(readError);
+      return null;
     }
     const newerOwner = aggregateChecks
       .filter((check) => {
