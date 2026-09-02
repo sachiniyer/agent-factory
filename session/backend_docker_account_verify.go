@@ -388,16 +388,29 @@ func deviceResidueNote(found []string, accountSource string) string {
 // account boundary that af did not configure". It names both halves the
 // operator needs: where it landed, and which configured container paths could
 // have resolved onto it.
+//
+// The two branches are not decoration. When Docker recorded no container path
+// but af's own account mount, NOTHING could have been aliased — there was no
+// entry to resolve — and blaming the image would send the operator hunting for a
+// symlink that is not there. The reachable causes then are a device node left in
+// the account directory by an EARLIER session (the daemon plants those as root
+// at container start, before any check can run, so they outlive the refusal that
+// found them) or a nested mount point inside the account directory on this host,
+// which af cannot tell apart from an aliased one. Both need a different remedy
+// than "edit run_args", so they get a different sentence.
 func aliasRefusal(found string, configured []string, note string) error {
 	var message strings.Builder
-	message.WriteString("the selected image aliases af's account boundary — ")
-	message.WriteString(found)
 	if len(configured) > 0 {
+		message.WriteString("the selected image aliases af's account boundary — ")
+		message.WriteString(found)
 		fmt.Fprintf(&message,
-			". af configured only its own account mount there; Docker was also configured to install %s, and the image resolves one of those onto the account, so the session would run on repository content instead of the selected identity",
+			". af configured only its own account mount there; Docker was also configured to install %s, and the image resolves one of those onto the account, so the session would run on repository content instead of the selected identity. Remove that entry from docker.run_args, or select an image that has no symlink at that path",
 			quotedPathList(configured))
+	} else {
+		message.WriteString("af's account boundary does not hold — ")
+		message.WriteString(found)
+		message.WriteString(". Docker records no container path here but af's own account mount, so nothing in docker.run_args aliased onto it: this is residue left in the account directory by an earlier session, or a nested mount point inside the account directory on this host. af cannot tell either apart from an aliased mount, and will not run the session on a boundary it cannot account for")
 	}
-	message.WriteString(". Remove that entry from docker.run_args, or select an image that has no symlink at that path")
 	if note != "" {
 		message.WriteString(". ")
 		message.WriteString(note)

@@ -207,6 +207,57 @@ func TestAccountRuntimeVerify_RefusesAnAliasedImageVolume(t *testing.T) {
 	assert.Contains(t, err.Error(), "/device-target")
 }
 
+// When Docker recorded NO container path but af's own account mount, nothing
+// could have been aliased — there was no entry to resolve — so the refusal must
+// not send the operator hunting for a symlink that is not there.
+//
+// Both reachable causes need a different remedy than "edit run_args": a device
+// node planted by an EARLIER session (the daemon writes those as root at
+// container start, before any check can run, so they outlive the refusal that
+// finds them) and a nested mount point inside the account directory on the host.
+func TestAccountRuntimeVerify_WithNothingConfiguredDoesNotBlameRunArgs(t *testing.T) {
+	inspected, err := parseDockerInspectContainer([]byte(cleanInspect(verifyAccountSource)))
+	require.NoError(t, err)
+	configured := configuredContainerPaths(inspected)
+	require.Empty(t, configured, "the fixture must configure nothing but the account mount")
+
+	t.Run("a nested mount", func(t *testing.T) {
+		targets, err := parseMountinfoTargets([]byte(cleanMountinfo +
+			"2441 2440 8:2 / /af-account/vault rw,relatime - ext4 /dev/sdb rw\n"))
+		require.NoError(t, err)
+		err = verifyResolvedAccountBoundary(targets, configured)
+		require.Error(t, err, "af cannot tell a nested mount from an aliased one, so it must still refuse")
+		assert.Contains(t, err.Error(), "/af-account/vault")
+		assert.Contains(t, err.Error(), "nested mount point")
+		assert.NotContains(t, err.Error(), "Remove that entry from docker.run_args",
+			"there is no run_args entry to remove; telling the operator to edit one sends them hunting for nothing")
+		assert.NotContains(t, err.Error(), "the selected image aliases",
+			"nothing was configured, so nothing could have been aliased")
+	})
+
+	t.Run("residue from an earlier session", func(t *testing.T) {
+		err := verifyAccountDeviceScan(
+			[]byte("/af-account/planted\n"+accountDeviceScanSentinel+"\n"), configured, verifyAccountSource)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "residue left in the account directory by an earlier session")
+		assert.Contains(t, err.Error(), verifyAccountSource+"/planted",
+			"the operator has to remove it on the HOST, so name the host path")
+		assert.NotContains(t, err.Error(), "Remove that entry from docker.run_args")
+	})
+}
+
+// A node under the runtime home stays inside the container's own filesystem and
+// goes away with it, so the refusal must not send the operator looking for it on
+// the host.
+func TestAccountRuntimeVerify_RuntimeHomeDeviceLeavesNoHostResidue(t *testing.T) {
+	err := verifyAccountDeviceScan(
+		[]byte("/af-home/planted\n"+accountDeviceScanSentinel+"\n"), []string{"/device-target/planted"}, verifyAccountSource)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "/af-home/planted")
+	assert.NotContains(t, err.Error(), verifyAccountSource,
+		"/af-home is created inside the container, so nothing was written through the bind mount")
+}
+
 // The configured half is the backstop for what no resolution is needed to see:
 // an entry Docker recorded straight onto the boundary. The lexical guard already
 // refuses these from argv, so this holds the line for an option af's argv walk
