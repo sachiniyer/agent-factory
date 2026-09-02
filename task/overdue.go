@@ -108,9 +108,13 @@ type ScheduleHealth struct {
 	// OldestMissedAt is the first occurrence the task did not run — the instant
 	// the silence began. Zero when the task is not overdue.
 	OldestMissedAt time.Time
-	// Unassessable reports that no verdict could be reached at all: the record
-	// carries neither a last run nor a creation time, so there is no instant to
-	// measure lateness from.
+	// Unassessable reports that no lateness verdict could be reached. There are
+	// two ways in, and the wording every surface uses has to cover both: the
+	// record carries no instant to measure from at all, or it carries one the
+	// schedule cannot be evaluated against — a reference old enough that the next
+	// two occurrences after it fall outside robfig's search horizon, which a
+	// leap-day task last run in 2096 and read in 2099 manages. Saying "this record
+	// has no timestamps" would be false in the second case (#3623 review).
 	//
 	// It is a THIRD answer, not a flavour of health, and that is the whole point.
 	// The store stamps CreatedAt on every create now, so only a hand-edited or

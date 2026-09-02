@@ -199,7 +199,7 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 		// Never a clean bill for a record nothing could be measured from. It may
 		// have been firing perfectly and it may never have fired at all; saying
 		// which would be inventing the answer.
-		return "cannot be assessed — this record has neither a last run nor a creation time to measure from"
+		return "cannot be assessed — no lateness could be measured from this record's history against its schedule"
 	}
 	if !health.Overdue {
 		if !t.Enabled || t.CronExpr == "" {

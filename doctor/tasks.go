@@ -109,7 +109,7 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	}
 	if len(unassessable) > 0 {
 		qualifiers = append(qualifiers, fmt.Sprintf(
-			"%d could not be assessed (no last run and no creation time to measure from) — %s",
+			"%d could not be assessed (no lateness could be measured from their history against their schedule) — %s",
 			len(unassessable), describeTaskNames(unassessable)))
 	}
 	withQualifiers := func(detail string) string {

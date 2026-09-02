@@ -207,6 +207,6 @@ func TestTasksShow_UnassessableRecordSaysSo(t *testing.T) {
 	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
 	got := out.String()
 
-	assert.Contains(t, got, "cannot be assessed")
+	assert.Contains(t, got, "cannot be assessed — no lateness could be measured")
 	assert.NotContains(t, got, "on schedule")
 }

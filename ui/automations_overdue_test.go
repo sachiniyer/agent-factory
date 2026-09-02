@@ -74,7 +74,9 @@ func TestAutomationsCompactSummaryCountsOverdue(t *testing.T) {
 
 	out := a.View()
 	requireExactRect(t, out, layout.Rect{W: 70, H: 1}, "compact strip")
-	assert.Contains(t, out, "Automations: 2 (1 on · 1 overdue)")
+	assert.Contains(t, out, "Automations: 2 (1 on · [!] 1)",
+		"the label is the mark, not the word: the count spans every marked row, and an "+
+			"expression the scheduler cannot fire is not late")
 }
 
 // TestAutomationsPrefersTheLiveNextRun: when the record carries what the
@@ -220,7 +222,7 @@ func TestAutomationsCompactSummaryCountsTasksThatCanNeverFire(t *testing.T) {
 	a.SetRect(layout.Rect{W: 70, H: 1})
 	a.SetCompact(true)
 
-	assert.Contains(t, a.View(), "2 overdue")
+	assert.Contains(t, a.View(), "[!] 2")
 }
 
 // TestAutomationsDiagnosesAMalformedExpression: an expression that does not
@@ -258,4 +260,40 @@ func TestAutomationsDiagnosisSurvivesTheRailMinimum(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "Invalid cron",
 		"enough of the reason has to survive the clip to read as one:\n%s", out)
+}
+
+// TestAutomationsMarksAnUnassessableRowUnknown: a record whose health could not
+// be established must not keep the tick — that is the claim this whole change
+// exists to stop making — and must not carry the warning mark either, which
+// would call an unestablished thing a failure. It gets its own.
+func TestAutomationsMarksAnUnassessableRowUnknown(t *testing.T) {
+	blank := stripTasks()[0]
+	blank.Unassessable = true
+
+	a := newTestAutomations([]task.Task{blank})
+	a.SetRect(layout.Rect{W: 100, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "▾[?]  nightly-sweep",
+		"unknown gets its own mark, not a tick and not a warning:\n%s", out)
+	assert.NotContains(t, out, "[✓]")
+	assert.NotContains(t, out, "[!]")
+	assert.Contains(t, out, "Health unknown", "and the row says what it could not do")
+}
+
+// TestAutomationsAttentionCountExcludesUnknowns: the compact summary answers
+// "is anything wrong?", and an unknown is not an answer of yes. It is the same
+// line doctor draws, and the rows carry "[?]" at any width that has rows.
+func TestAutomationsAttentionCountExcludesUnknowns(t *testing.T) {
+	blank := stripTasks()[0]
+	blank.Unassessable = true
+
+	a := newTestAutomations([]task.Task{blank, stripTasks()[1]})
+	a.SetRect(layout.Rect{W: 70, H: 1})
+	a.SetCompact(true)
+
+	out := a.View()
+	assert.Contains(t, out, "Automations: 2 (1 on)", "no attention count when nothing is wrong")
+	assert.NotContains(t, out, "[!]")
 }

@@ -37,6 +37,12 @@ var automationsDisabledStyle = lipgloss.NewStyle().
 var automationsOverdueStyle = lipgloss.NewStyle().
 	Foreground(activeTheme.Warning)
 
+// automationsUnknownStyle paints a row whose health could not be established.
+// Muted rather than warning-colored on purpose: an unknown is not a failure, and
+// coloring it like one trains people to ignore the rows that are.
+var automationsUnknownStyle = lipgloss.NewStyle().
+	Foreground(activeTheme.ForegroundMuted)
+
 // automationItemTitleStyle paints an automation's title in the SAME adaptive
 // color the instances tree uses for instance titles (tree.InstanceTitleColor),
 // so the automations rail and the instance list above it read as one stacked
@@ -270,6 +276,12 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 	// the row exactly as wide as it was at the 22-column rail minimum. Collapsed
 	// rows are the point: a warning you have to focus a row to see is one nobody
 	// sees.
+	// An unknown gets its own mark rather than borrowing either neighbour's. A
+	// tick would be the claim this whole change exists to stop making, and "[!]"
+	// would call an unestablished thing a failure (#3623 review).
+	if tsk.Unassessable {
+		glyph, glyphStyle = "[?]", automationsUnknownStyle
+	}
 	if needsAttention(tsk) {
 		glyph, glyphStyle = "[!]", automationsOverdueStyle
 	}
@@ -331,6 +343,11 @@ func needsAttention(tsk task.Task) bool {
 // contradiction — and a count that hit the derivation's cap is marked with a
 // trailing "+" so a floor never renders as an exact number.
 func attentionFragment(tsk task.Task) string {
+	if tsk.Unassessable {
+		// Says what could not be done rather than what is wrong, and leads the line
+		// for the same reason the others do — the rail clips from the right.
+		return "Health unknown"
+	}
 	if tsk.Unschedulable {
 		// An expression that PARSES is already diagnosed by the next/last summary
 		// as "No upcoming run" (#2596), and repeating that here would push the line
@@ -368,9 +385,16 @@ func (a *AutomationsPane) detailRow(tsk task.Task) string {
 	return automationDetailStyle.Render(fitLine(indent+detail, a.rect.W))
 }
 
-// overdueCount returns how many of the projection's tasks have missed their
-// schedule. Only enabled cron tasks can be overdue (see task.DeriveScheduleHealth).
-func (a *AutomationsPane) overdueCount() int {
+// attentionCount returns how many of the projection's tasks carry a WARNING —
+// stopped firing, or an expression the scheduler cannot fire. Only enabled cron
+// tasks can (see task.DeriveScheduleHealth).
+//
+// Tasks whose health could not be established are deliberately absent: the
+// compact summary this feeds answers "is anything wrong?", and an unknown is not
+// an answer of yes. Same line `af doctor` draws — unknowns are named where there
+// is room and never raise an alarm — and the rows carry "[?]" for it at any
+// width that has rows at all.
+func (a *AutomationsPane) attentionCount() int {
 	n := 0
 	for _, tsk := range a.proj.GetTasks() {
 		if needsAttention(tsk) {
@@ -537,7 +561,7 @@ func (a *AutomationsPane) String() string {
 			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
 			primary: fmt.Sprintf("%d", len(tasks)),
 		}
-		if overdue := a.overdueCount(); overdue > 0 {
+		if attention := a.attentionCount(); attention > 0 {
 			// The degraded one-line mode has no rows, so this line IS the section —
 			// and it is the narrowest thing the rail draws. A task that has stopped
 			// firing is easiest to miss exactly here, so the count rides the header
@@ -557,8 +581,14 @@ func (a *AutomationsPane) String() string {
 			// spelling picked by digit count would be no better: rebinding the
 			// manager key changes the budget. "[!] 100" fits at any count, and it is
 			// the mark the rows above carry at wider widths.
-			header.counts = fmt.Sprintf("%d (%d on · %d overdue)", len(tasks), a.enabledCount(), overdue)
-			header.primary = fmt.Sprintf("[!] %d", overdue)
+			//
+			// The label is the GLYPH rather than the word "overdue", because the
+			// count includes every task carrying the mark — one whose expression the
+			// scheduler cannot fire is not late, and compact mode has no rows to
+			// correct the impression with (#3623 review). It is also what the primary
+			// rung below shows, so the two rungs speak the same vocabulary.
+			header.counts = fmt.Sprintf("%d (%d on · [!] %d)", len(tasks), a.enabledCount(), attention)
+			header.primary = fmt.Sprintf("[!] %d", attention)
 		}
 		style := automationsTitleDimStyle
 		if a.focused {
