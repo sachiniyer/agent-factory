@@ -353,3 +353,21 @@ func TestOverdue_EnableWithNoRunAtAllIsStillMeasurable(t *testing.T) {
 	require.True(t, health.Overdue, "but two unfired occurrences since it came on are")
 	assert.Equal(t, 2, health.MissedOccurrences)
 }
+
+// TestOverdue_MalformedEnableEntryDoesNotShadowARealOne: a hand-edited or
+// truncated row with no timestamp must not be answered with — measuring from the
+// zero time would report the task as millions of occurrences overdue, and
+// stopping at it would hide the real enable behind it.
+func TestOverdue_MalformedEnableEntryDoesNotShadowARealOne(t *testing.T) {
+	last := at(2026, time.August, 14, 14, 20, 8)
+	tsk := cronTask("20 * * * *", &last)
+	tsk.Audit = []AuditEntry{
+		{At: at(2026, time.September, 1, 14, 5, 0), Actor: ActorCLI, Action: AuditEnabled},
+		{Actor: ActorCLI, Action: AuditEnabled}, // no timestamp at all
+	}
+
+	health := DeriveScheduleHealth(tsk, at(2026, time.September, 1, 15, 20, 0))
+	require.True(t, health.Overdue)
+	assert.Equal(t, 2, health.MissedOccurrences,
+		"the real enable behind the malformed entry is what the clock restarts from")
+}

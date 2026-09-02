@@ -188,10 +188,15 @@ func scheduleReference(t Task) (time.Time, bool) {
 // lastEnabledAt returns when the task was most recently switched ON, from its
 // audit trail. Only the explicit enable action counts: a create is already
 // covered by CreatedAt, and an ordinary edit does not restart anything.
+//
+// An entry with no timestamp is SKIPPED rather than answered with — a
+// hand-edited or truncated row must not shadow a real enable behind it, and
+// measuring from the zero time would report the task as millions of occurrences
+// overdue.
 func lastEnabledAt(t Task) (time.Time, bool) {
 	for i := len(t.Audit) - 1; i >= 0; i-- {
-		if t.Audit[i].Action == AuditEnabled {
-			return t.Audit[i].At, !t.Audit[i].At.IsZero()
+		if t.Audit[i].Action == AuditEnabled && !t.Audit[i].At.IsZero() {
+			return t.Audit[i].At, true
 		}
 	}
 	return time.Time{}, false
