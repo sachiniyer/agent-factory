@@ -148,6 +148,36 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 	return root, config.DerivedRepoIDForUnresolvedRoot(root), nil
 }
 
+// attributedDeleteRepoID redirects a PROVISIONAL delete target onto the real
+// identity the daemon has already resolved for it but not yet promoted (#3530
+// review id 3915722493).
+//
+// A record written before Project.RepoID is addressed by an invented id while
+// its path does not resolve. But "does not resolve" is a question asked at one
+// instant: a returning checkout publishes its real-ID candidate into
+// rootHealProbes as soon as git answers, and the marker verification that
+// promotes it takes longer still — so a path that comes back and goes away
+// again leaves the delete normalizing to the invented id while the daemon is
+// already holding the real one. The delete would then archive nothing under
+// the identity this project's live sessions are keyed by, deregister the
+// project, and report success, leaving those sessions as orphans.
+//
+// It is not a guess. The pending probe was spawned FOR this record's root, so
+// the identity it resolved is this project's own; and a path that resolves at
+// normalization time never reaches here, so this can never redirect a delete
+// aimed at an occupant. Real ids pass through untouched.
+func (m *Manager) attributedDeleteRepoID(repoID string) string {
+	if !config.IsDerivedRepoID(repoID) {
+		return repoID
+	}
+	realID := m.pendingReattributionRealID(repoID)
+	if realID == "" {
+		return repoID
+	}
+	log.InfoLog.Printf("delete project: %s is a provisional identity, and a re-attribution probe has already resolved this project's real identity %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
+	return realID
+}
+
 // registeredProjectRootForRepoID resolves the path needed by
 // config.DeregisterProject when a direct client supplies only the daemon's
 // repo identity. Registry read failure is an unknown outcome, not evidence that
@@ -315,6 +345,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if normErr != nil {
 			return deleteProjectTarget{}, normErr
 		}
+		repoID = m.attributedDeleteRepoID(repoID)
 	} else if repoPath == "" {
 		var err error
 		repoPath, err = registeredProjectRootForRepoID(repoID)
@@ -331,6 +362,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if normErr != nil {
 			return deleteProjectTarget{repoID: repoID}, normErr
 		}
+		pathRepoID = m.attributedDeleteRepoID(pathRepoID)
 		if pathRepoID != repoID {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project: repo_id %s does not match repo_path %q (repo id %s); nothing was changed", repoID, repoPath, pathRepoID)
 		}

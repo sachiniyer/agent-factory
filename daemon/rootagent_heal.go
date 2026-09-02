@@ -617,18 +617,6 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again, but project %s is mid-delete; leaving it unresolved so the delete keeps its target", record.root, record.projectID)
 			continue
 		}
-		// Retirement is deferred past publication (#3299 review round 10)
-		// and queued only now, after the fence check: the probe's presence
-		// is what keeps this repo attribution-pending, and releasing it
-		// before the healed snapshot is visible would let a concurrent
-		// verdict resolve against the OLD layers for an instant.
-		retiredID := derivedID
-		settles = append(settles, func() {
-			m.mu.Lock()
-			delete(m.rootHealProbes, retiredID)
-			delete(m.rootHealProbeFailures, retiredID)
-			m.mu.Unlock()
-		})
 		// A verified match is positive proof that the checkout at the recorded
 		// path IS this project's. If a delete ran while that could not be
 		// established — a temporarily unreadable marker, say — claimantForRecord
@@ -700,6 +688,29 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 				continue
 			}
 		}
+		// Retirement is deferred past publication (#3299 review round 10) and
+		// queued only HERE, once the transition is certain to complete: the
+		// probe's presence is what keeps this repo attribution-pending, and
+		// releasing it before the healed snapshot is visible would let a
+		// concurrent verdict resolve against the OLD layers for an instant.
+		//
+		// "Once it is certain" is the part that moved (#3530 review id
+		// 3915722486). Queued right after the fence check above, the
+		// retirement still ran when either step below declined to complete the
+		// transition — a late delete fence deferring the promotion, or a
+		// reconciliation write that failed — so the gate holding the real
+		// repository closed was dropped while the deletion tombstone and the
+		// personal layer were still keyed by the provisional id. The same
+		// pass's legacy sweep could then create the real-ID root in the middle
+		// of that delete. Deferring the promotion has to defer its retirement
+		// too; both retry on the next pass, together.
+		retiredID := derivedID
+		settles = append(settles, func() {
+			m.mu.Lock()
+			delete(m.rootHealProbes, retiredID)
+			delete(m.rootHealProbeFailures, retiredID)
+			m.mu.Unlock()
+		})
 		healed.projectRoots[repo.ID] = record.root
 		delete(healed.unresolvedRoots, derivedID)
 		log.InfoLog.Printf("root agent snapshot: recorded project root %s resolves again (repo %s, checkout marker verified); its personal layer applies under the repo's real identity and the singleton sweep can ensure it this run", record.root, repo.ID)
@@ -728,6 +739,9 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, realID string) bool {
 	if derivedID == realID {
 		return true
+	}
+	if rootPromotionFenceHookForTest != nil {
+		rootPromotionFenceHookForTest(derivedID)
 	}
 	// A delete that fenced this identity between the pass's fence check and
 	// here must not have its fence copied forward: DeleteProject's defer

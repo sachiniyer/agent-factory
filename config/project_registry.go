@@ -532,6 +532,13 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		return projectBinding{}, err
 	}
 	checkoutRoot := worktreeRoot
+	// The identity root the probes above have ESTABLISHED, which is a
+	// different question from the workspace root next to it: a bare
+	// repository's identity is the bare common directory shared by all of its
+	// worktrees, while the checkout being registered is the linked worktree.
+	// repoContextFromResolution draws the same line; this names it so the
+	// resolution below can be checked against it.
+	identityRoot := commonDir
 	if bare == "false" {
 		checkoutRoot, err = resolveMainRepoRoot("-C", resolved)
 		if err != nil {
@@ -541,6 +548,10 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 		if err != nil {
 			return projectBinding{}, fmt.Errorf("resolve git checkout root: %w", err)
 		}
+		identityRoot = checkoutRoot
+	}
+	if projectBindingIdentityRaceHookForTest != nil {
+		projectBindingIdentityRaceHookForTest()
 	}
 	// A binding that cannot state its identity must not be committed: the
 	// record would be written legacy-shaped, and if the path disappeared
@@ -551,6 +562,26 @@ func resolveProjectBinding(path string) (projectBinding, error) {
 	identityRepo, identityErr := RepoFromPath(resolved)
 	if identityErr != nil {
 		return projectBinding{}, fmt.Errorf("resolve repository identity for %q: %w", resolved, identityErr)
+	}
+	// One binding, one repository. The resolution above is a SECOND probe of
+	// the same path, and a path that changed repositories in between answers
+	// both of them successfully — so registration would record repository A's
+	// root, checkout root and marker with repository B's id, permanently, and
+	// a later delete or policy lookup would target B's state (#3530 review id
+	// 3915722459).
+	//
+	// The id itself still comes from RepoFromPath rather than from
+	// RepoIDFromRoot(identityRoot) on purpose: that is the value every runtime
+	// consumer computes for this path, and re-deriving it here from a
+	// differently-normalised spelling would write down an identity nothing
+	// else agrees with — a silent split, which is worse than the collision.
+	// What changes is that it must now AGREE with what the earlier probes
+	// established, and a disagreement refuses the binding instead of
+	// committing a record that describes two repositories at once. Comparison
+	// is by identity of the directory, not by spelling, so the normalisation
+	// difference above is not itself a disagreement.
+	if !sameProjectPath(identityRepo.IdentityPath(), identityRoot) {
+		return projectBinding{}, fmt.Errorf("project path %q changed repositories while af was resolving it: its checkout root and marker describe the repository rooted at %s, but its identity now resolves to %s — nothing was registered; retry once the path is stable", resolved, identityRoot, identityRepo.IdentityPath())
 	}
 	identity := identityRepo.ID
 	return projectBinding{
@@ -734,6 +765,22 @@ func writeNewProjectRecord(dir string, record projectRecord) error {
 }
 
 func writeProjectRecord(dir string, record projectRecord) error {
+	// The field and the version travel together, for every writer (#3530
+	// review ids 3914971928, 3915518778, 3915722471). A record carrying
+	// repo_id at schema v1 is accepted by an OLDER af, which unmarshals the
+	// unknown field away and writes the record back without it on its next
+	// rebind or checkout rediscovery — the durable identity loss the bump
+	// exists to prevent. Registration's backfill, the moved-checkout
+	// rediscovery, the rebind and the reconciliation all add that field, so
+	// the stamp belongs at the one place they share rather than at four call
+	// sites that can each forget it.
+	//
+	// Deliberately conditional: a rewrite that adds nothing new stays at the
+	// version it was read at, so an older af keeps reading the records it
+	// could always read.
+	if record.RepoID != "" && record.SchemaVersion < projectRegistrySchemaVersion {
+		record.SchemaVersion = projectRegistrySchemaVersion
+	}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal project metadata: %w", err)
@@ -865,3 +912,11 @@ func sameProjectPath(left, right string) bool {
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }
+
+// projectBindingIdentityRaceHookForTest, when non-nil, runs between the probes
+// that establish a path's checkout root, common directory and marker and the
+// resolution that names its repository identity. That window is #3530 review
+// id 3915722459's entire subject and nothing else can hold it open: a real
+// mount flip or worktree re-point lands inside microseconds, so a test that
+// races it pins nothing.
+var projectBindingIdentityRaceHookForTest func()

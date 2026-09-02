@@ -171,6 +171,14 @@ var rootHealPrePublishHookForTest func()
 // classification the probe reaches.
 var rootReattributionProbeHookForTest func(root string)
 
+// rootPromotionFenceHookForTest, when non-nil, runs inside
+// promoteDerivedIdentity BEFORE it re-checks the delete fence — the window
+// between the consume phase's own fence check and the promotion's. A delete
+// landing there defers the promotion, and #3530 review id 3915722486 is about
+// what the pass must NOT have already done by then. Nothing else can hold that
+// window open: it is two locked reads apart in a real daemon.
+var rootPromotionFenceHookForTest func(derivedID string)
+
 // recordRootAbsent reports whether a recorded project root is GONE, as opposed
 // to present but unresolvable. It is what separates the "bring the path back"
 // remedy from "repair its metadata or access" (review id 3787021890), so the
