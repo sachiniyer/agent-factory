@@ -408,7 +408,19 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				t.Fatalf("planted nothing in %s, so this contract check would pass vacuously", typ)
 			}
 
+			// Hidden state, populated BEFORE anything is marshalled. Everything
+			// below compares what the walk could plant; a marshaler that emits
+			// an unexported field only when it is set matches a zero-valued
+			// baseline exactly while a real record leaks. session.InstanceData
+			// carries five unexported fields, two of them
+			// (snapshotStorageTabs, runtimeCleanup) holding user text
+			// (#3592 review).
+			hiddenForms := plantHiddenState(filler, value)
+
 			custom := marshalOrFail(t, typ.String()+".MarshalJSON", value)
+			// The twin copies the EXPORTED fields only, so the hidden state
+			// just planted cannot reach the baseline — which is what makes it
+			// show up below as an added member rather than a matching one.
 			baseline := marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value))
 
 			var customMembers, baselineMembers map[string]json.RawMessage
@@ -419,17 +431,21 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 				t.Fatalf("the plain twin of %s did not render a JSON object: %v", typ, err)
 			}
 
-			declared := make(map[string]struct{}, len(entry.extra))
-			for _, name := range entry.extra {
-				declared[name] = struct{}{}
-			}
 			var added, changed, dropped []string
 			for name, got := range customMembers {
 				want, isField := baselineMembers[name]
 				switch {
 				case !isField:
-					if _, ok := declared[name]; !ok {
+					// A declared extra is checked by VALUE, not just by name: a
+					// member that keeps its name and starts carrying user text
+					// satisfies a name-only declaration while the reason for the
+					// exemption stops being true (#3592 review).
+					declared, ok := entry.extra[name]
+					if !ok {
 						added = append(added, fmt.Sprintf("%s = %s", name, got))
+					} else if string(got) != declared {
+						changed = append(changed,
+							fmt.Sprintf("%s: emits %s, the entry declares %s", name, got, declared))
 					}
 				case string(got) != string(want):
 					changed = append(changed, fmt.Sprintf("%s: emits %s, the field holds %s", name, got, want))
@@ -440,9 +456,15 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					dropped = append(dropped, name)
 				}
 			}
-			for _, name := range entry.extra {
+			for name := range entry.extra {
 				if _, ok := customMembers[name]; !ok {
 					dropped = append(dropped, name+" (declared as an extra, not emitted)")
+				}
+			}
+
+			for _, form := range hiddenForms {
+				if strings.Contains(string(custom), form) {
+					added = append(added, fmt.Sprintf("text planted in an UNEXPORTED field: %s", form))
 				}
 			}
 
@@ -493,6 +515,35 @@ func plainTwinOf(t *testing.T, value reflect.Value) reflect.Value {
 		t.Fatalf("the plain twin of %s still renders itself, so it is no baseline", typ)
 	}
 	return twin
+}
+
+// plantHiddenState plants markers into the UNEXPORTED fields of value and
+// returns the forms to search the marshaler's output for. reflect will not set
+// them, so it reaches each one through the pointer its address gives — the only
+// way to ask what a marshaler does with state this walk cannot otherwise
+// populate.
+//
+// It runs AFTER the exported checks, on the same filler, so its markers continue
+// the same sequence and cannot collide with theirs; whatever it cannot plant is
+// not a hole in the guard, because hidden state is exactly what the marshaler
+// exemption is supposed to forbid emitting at all. Its own unsupported reports
+// are ignored for the same reason — they are read before this runs.
+func plantHiddenState(filler *sentinelFiller, value reflect.Value) []string {
+	first := len(filler.planted)
+	typ := value.Type()
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath == "" {
+			continue
+		}
+		hidden := value.Field(i)
+		filler.fill(reflect.NewAt(hidden.Type(), hidden.Addr().UnsafePointer()).Elem(), field.Name, 0, false)
+	}
+	var forms []string
+	for _, planted := range filler.planted[first:] {
+		forms = append(forms, planted.forms...)
+	}
+	return forms
 }
 
 func marshalOrFail(t *testing.T, what string, value reflect.Value) []byte {

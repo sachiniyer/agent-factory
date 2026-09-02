@@ -343,9 +343,19 @@ func rendersItself(t reflect.Type) bool {
 // exported ones are still there.
 type reviewedMarshaler struct {
 	why string
-	// extra are the JSON member names the marshaler adds at the TOP level of its
-	// own output. Empty means "exactly the fields, nothing added".
-	extra []string
+	// extra are the members the marshaler adds at the TOP level of its own
+	// output, each mapped to the EXACT JSON value it must produce for a record
+	// whose fields the walk has planted into. Empty means "exactly the fields,
+	// nothing added".
+	//
+	// A name alone is not a review. A marshaler that keeps the member
+	// `status_name` but starts filling it from user text still satisfies a
+	// name-only declaration, and the exemption's reason — "enum words derived
+	// from the integers beside them" — would no longer be true of anything
+	// (#3592 review). The values below are the words for the ZERO enums the
+	// walk leaves in place, so a member that starts carrying planted text, or a
+	// different derivation, fails.
+	extra map[string]string
 }
 
 // reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
@@ -364,12 +374,12 @@ var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	reflect.TypeOf(session.InstanceData{}): {
 		why: "MarshalJSON (#3631) marshals a `type alias InstanceData` of the same exported fields, " +
 			"plus status_name/liveness_name — enum words derived from the Status/Liveness integers beside them, never from user text",
-		extra: []string{"status_name", "liveness_name"},
+		extra: map[string]string{"status_name": `"running"`, "liveness_name": `"running"`},
 	},
 	reflect.TypeOf(session.TabData{}): {
 		why: "MarshalJSON (#3631) marshals a `type alias TabData` of the same exported fields, " +
 			"plus kind_name — the TabKind enum word, never user text",
-		extra: []string{"kind_name"},
+		extra: map[string]string{"kind_name": `"agent"`},
 	},
 }
 
