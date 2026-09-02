@@ -243,7 +243,7 @@ var paneExitWait = 3 * time.Second
 // which is the property daemon.KillSession needs, since it holds a per-session
 // kills-in-flight guard across this call with no deadline of its own.
 func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
-	state, _, err := t.closeAndWaitForPaneExit()
+	state, _, err := t.closeAndWaitForPaneExit(false)
 	return state, err
 }
 
@@ -261,10 +261,28 @@ func (t *TmuxSession) CloseAndWaitForPaneExit() (PaneState, error) {
 // tab is closed: tabs of one instance share a worktree, so a scan run while a
 // sibling is still live reports that sibling.
 func (t *TmuxSession) CloseAndWaitForPaneExitReportingBlindness() (PaneState, bool, error) {
-	return t.closeAndWaitForPaneExit()
+	return t.closeAndWaitForPaneExit(false)
 }
 
-func (t *TmuxSession) closeAndWaitForPaneExit() (PaneState, bool, error) {
+// CloseAndWaitForPaneExitTrustingOwnGeneration is
+// CloseAndWaitForPaneExitReportingBlindness for the one class of caller that can
+// vouch for something the generic path cannot: exclusive ownership of this
+// session's lifecycle for the ENTIRE call (#3413). Archive and kill are that
+// caller — closeTabForDestructiveTeardown, which holds the op-lock and
+// killsInFlight the whole time — so no other daemon-created instance can mint a
+// same-named replacement mid-call, and a foreign af HOME is excluded before the
+// generation check ever runs regardless. With #3309's actual risk structurally
+// ruled out here, a vanished session whose live processes carry a NEWER
+// generation than any captured predecessor (a session that flapped through a
+// restore while its teardown was starting) is reapable instead of being refused
+// forever behind a guard built for callers with no such guarantee. Every other
+// caller keeps using the two methods above, and #3309's protection for them is
+// unchanged.
+func (t *TmuxSession) CloseAndWaitForPaneExitTrustingOwnGeneration() (PaneState, bool, error) {
+	return t.closeAndWaitForPaneExit(true)
+}
+
+func (t *TmuxSession) closeAndWaitForPaneExit(trustLiveGeneration bool) (PaneState, bool, error) {
 	pid, pidErr := t.panePID()
 	var (
 		paneProcess proctree.Process
@@ -307,7 +325,7 @@ func (t *TmuxSession) closeAndWaitForPaneExit() (PaneState, bool, error) {
 	var vanishedSurvivors error
 	blind := processes.captureErr != nil && sessionGoneWithNoPaneObserved(processes.captureErr, pidErr)
 	if blind {
-		vanishedSurvivors = t.sweepVanishedSessionProcesses()
+		vanishedSurvivors = t.sweepVanishedSessionProcesses(trustLiveGeneration)
 	}
 
 	refuse := func(why error) (PaneState, bool, error) {
@@ -426,7 +444,10 @@ func sessionGoneWithNoPaneObserved(captureErr, pidErr error) bool {
 //
 // A home we cannot resolve is not evidence of absence: it means no candidate can
 // be attributed, so the sweep refuses.
-func (t *TmuxSession) sweepVanishedSessionProcesses() error {
+//
+// trustLiveGeneration is threaded straight from closeAndWaitForPaneExit's own
+// caller (#3413): see CloseAndWaitForPaneExitTrustingOwnGeneration.
+func (t *TmuxSession) sweepVanishedSessionProcesses(trustLiveGeneration bool) error {
 	ownHome, err := afHomeDir()
 	if err != nil {
 		return fmt.Errorf("tmux session %s is gone and its surviving processes cannot be attributed to this "+
@@ -436,7 +457,7 @@ func (t *TmuxSession) sweepVanishedSessionProcesses() error {
 	// refresh — the marker scan IS the evidence standing in for the ancestry tmux
 	// lost, so passing the capture failure through would make it a blocker again
 	// and defeat the point.
-	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil)
+	return reapVanishedSessionProcesses(t.sanitizedName, ownHome, nil, nil, trustLiveGeneration)
 }
 
 // capturePaneProcess turns tmux's bare pane PID into a process-table identity

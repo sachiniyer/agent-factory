@@ -209,6 +209,16 @@ func TeardownStateUnknown(err error) bool {
 // DEFAULT reap action and therefore runs constantly, stepped straight from a
 // wedged tmux server into MoveWorktree on a possibly-live pane (#1917 review).
 // Two copies of a safety rule is one copy of a safety rule.
+//
+// Both callers (teardown.go's kill and archive modes) hold this session's
+// exclusive lifecycle lock for their entire run — daemon/archive.go's op-lock +
+// killsInFlight, doc'd there as "archive, kill, and Lost-recovery never
+// interleave" — which is exactly the guarantee
+// CloseAndWaitForPaneExitTrustingOwnGeneration needs (#3413): a session that
+// flapped through a restore and vanished with its live processes carrying a
+// newer generation than any captured predecessor is reapable here instead of
+// refused forever, because no OTHER daemon-created instance can have minted
+// that generation while this lock holds.
 func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string) (teardownState, bool, error) {
 	// A session that provably never created a pane has no liveness to establish,
 	// so it is KNOWN without asking tmux — which matters because the machines
@@ -235,7 +245,7 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	if ts.ProvenNoPane() {
 		return stateKnown, false, nil
 	}
-	state, blind, err := ts.CloseAndWaitForPaneExitReportingBlindness()
+	state, blind, err := ts.CloseAndWaitForPaneExitTrustingOwnGeneration()
 	if state != tmux.PaneStateKnown {
 		return stateUnknown, blind, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
 	}

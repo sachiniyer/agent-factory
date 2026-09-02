@@ -681,7 +681,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 			exists, known, probeErr := probeSessionStrict(cmdExec, match)
 			if known && !exists {
 				if reapErr := reapVanishedSessionProcessCohort(match, ownHome, preMarkerProcesses[match],
-					preMarkerCaptureErrs[match], preMarkerGenerations[match]); reapErr != nil {
+					preMarkerCaptureErrs[match], preMarkerGenerations[match], false); reapErr != nil {
 					return fmt.Errorf("tmux session %s vanished during ownership lookup, but its process cleanup is incomplete: %w",
 						match, reapErr)
 				}
@@ -880,21 +880,51 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 	candidates := make([]proctree.Process, 0, len(recovery.markerCandidates)+len(recovery.verifiedProcesses))
 	candidates = append(candidates, recovery.markerCandidates...)
 	candidates = append(candidates, recovery.verifiedProcesses...)
+	// false: this is the background CleanupSessions sweep, which holds no
+	// exclusive claim on any one session's lifecycle — see reapVanishedSessionProcesses.
 	return reapVanishedSessionProcessCohort(recovery.match, ownHome, candidates,
-		recovery.markerCaptureError, recovery.generations)
+		recovery.markerCaptureError, recovery.generations, false)
 }
 
-func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error) error {
+// reapVanishedSessionProcesses answers "did anything this session spawned
+// outlive it?" WITHOUT asking tmux, and acts on the answer rather than merely
+// reporting it.
+//
+// trustLiveGeneration (#3413) lets a caller that holds this session's exclusive
+// lifecycle lock for its ENTIRE sweep — archive and kill, via
+// closeTabForDestructiveTeardown — seed the generation cohort from whatever the
+// live marker scan finds, instead of failing closed on an empty one. Every other
+// caller (this package's own background CleanupSessions sweep included) passes
+// false and keeps the strict #3309 refusal: see reapVanishedSessionProcessCohort.
+func reapVanishedSessionProcesses(match, ownHome string, candidates []proctree.Process, captureErr error, trustLiveGeneration bool) error {
 	return reapVanishedSessionProcessCohort(match, ownHome, candidates, captureErr,
-		orphanGenerations(candidates, match))
+		orphanGenerations(candidates, match), trustLiveGeneration)
 }
 
 func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctree.Process, captureErr error,
-	generations orphanGenerationSet,
+	generations orphanGenerationSet, trustLiveGeneration bool,
 ) error {
 	var sweepErr error
 	if captureErr != nil {
 		sweepErr = fmt.Errorf("could not establish the complete pane process tree before ownership lookup: %w", captureErr)
+	}
+	if generations.empty() && trustLiveGeneration {
+		// The caller holds this exact session's exclusive lifecycle lock for the
+		// whole sweep (archive/kill's op-lock + killsInFlight, #3413), and this
+		// instance still occupies its (repo, title) map slot throughout — so no
+		// OTHER daemon-created instance can mint a same-named replacement while
+		// this runs, and a foreign af HOME is excluded by markedOrphanProcesses
+		// BEFORE the generation check ever runs (below). With #3309's actual risk
+		// — a genuine replacement — structurally excluded here, the live marker
+		// scan's own generation(s) can seed the cohort instead of failing closed
+		// on an empty one: a flapping session that minted a newer generation
+		// between capture and this sweep is reapable again, not stuck forever
+		// behind the guard that (correctly) protects the OTHER callers below, who
+		// hold no such exclusivity.
+		seeded, refreshErr := refreshOrphanCandidates(candidates, match, nil)
+		sweepErr = errors.Join(sweepErr, refreshErr)
+		candidates = seeded
+		generations = orphanGenerations(candidates, match)
 	}
 	// Establish the generation cohort once, before the grace window opens, from
 	// captured predecessor evidence. A blind recovery cannot manufacture that

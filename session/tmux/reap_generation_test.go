@@ -39,7 +39,7 @@ func TestVanishedSessionSweepDoesNotReapSameNameReplacement(t *testing.T) {
 	sweepDone := make(chan error, 1)
 	go func() {
 		close(sweepStarted)
-		sweepDone <- reapVanishedSessionProcesses(name, home, []proctree.Process{old}, nil)
+		sweepDone <- reapVanishedSessionProcesses(name, home, []proctree.Process{old}, nil, false)
 	}()
 	<-sweepStarted
 	// Keep the replacement comfortably inside the old generation's 200ms grace
@@ -77,11 +77,55 @@ func TestBlindVanishedSessionSweepDoesNotAdoptReplacementGeneration(t *testing.T
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	replacement := spawnMarkedSessionWithEscapee(t, name, home, "replacement")
 
-	err := reapVanishedSessionProcesses(name, home, nil, nil)
+	err := reapVanishedSessionProcesses(name, home, nil, nil, false)
 	require.True(t, proctree.AliveSame(replacement),
 		"a blind vanished-session sweep reaped a same-named replacement")
 	require.ErrorContains(t, err, "generation",
 		"blind recovery must refuse when it cannot identify the predecessor generation")
+}
+
+// TestTrustedBlindVanishedSessionSweepReapsNewerGeneration pins the #3413 fix.
+// Archive/kill hold this exact session's exclusive lifecycle lock for their
+// entire call (daemon/archive.go's op-lock + killsInFlight), which structurally
+// rules out the actual risk #3338/#3309 protect against — a same-name
+// REPLACEMENT appearing mid-sweep. With that risk excluded, a trusted sweep can
+// reap a survivor whose generation is simply NEWER than anything captured,
+// restoring the non-destructive escape hatch for a session that flapped
+// through a restore between capture and teardown.
+func TestTrustedBlindVanishedSessionSweepReapsNewerGeneration(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_trusted_blind_newer_generation"
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	survivor := spawnMarkedSessionWithEscapee(t, name, home, "newer-generation")
+
+	err := reapVanishedSessionProcesses(name, home, nil, nil, true)
+	require.NoError(t, err, "a trusted sweep must reap its own session's survivor, not refuse it")
+	require.False(t, proctree.AliveSame(survivor),
+		"the newer-generation survivor must be reaped once the caller vouches for exclusivity")
+}
+
+// TestTrustedBlindVanishedSessionSweepStillRejectsForeignHome pins the boundary
+// of the #3413 trust: it rules out a same-name REPLACEMENT, nothing more. A
+// process from a DIFFERENT agent-factory home is the #1122 case
+// markedOrphanProcesses already silently skips regardless of generation, and
+// trusting the live generation must not change that.
+func TestTrustedBlindVanishedSessionSweepStillRejectsForeignHome(t *testing.T) {
+	testguard.IsolateTmux(t)
+	shrinkReapWaits(t)
+
+	const name = "af_trusted_blind_foreign_home"
+	ourHome := t.TempDir()
+	foreignHome := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", ourHome)
+	foreign := spawnMarkedSessionWithEscapee(t, name, foreignHome, "some-generation")
+
+	err := reapVanishedSessionProcesses(name, ourHome, nil, nil, true)
+	require.NoError(t, err, "a foreign-home process is silently skipped, not an error")
+	require.True(t, proctree.AliveSame(foreign),
+		"trusting the live generation must not waive the AF_HOME ownership boundary")
 }
 
 // Captured ancestry remains authoritative even if a descendant execs with a
@@ -137,7 +181,7 @@ func TestVanishedSessionSweepRefusesDescendantThatChangesGeneration(t *testing.T
 
 	sweepDone := make(chan error, 1)
 	go func() {
-		sweepDone <- reapVanishedSessionProcesses(name, home, []proctree.Process{parent}, nil)
+		sweepDone <- reapVanishedSessionProcesses(name, home, []proctree.Process{parent}, nil, false)
 	}()
 	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, os.WriteFile(trigger, []byte("go"), 0o600))
