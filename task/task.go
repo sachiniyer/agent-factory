@@ -367,33 +367,9 @@ func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error
 	if err := ValidateTaskID(t.ID); err != nil {
 		return Task{}, err
 	}
-	// The audit trail is STORE-OWNED history, never client input (#3623 review).
-	// AddTaskRequest carries a whole task.Task, so a client could otherwise
-	// persist a trail of changes that never happened — and since the lateness
-	// derivation reads the most recent enable out of that trail, a forged FUTURE
-	// entry would push the reference point forward and suppress overdue detection
-	// on that task indefinitely. A create has exactly one entry, and this function
-	// writes it.
-	t.Audit = nil
-	// The store owns the creation stamp, in both directions.
-	//
-	// A MISSING one is the failure this feature exists to catch: CreatedAt is the
-	// reference the lateness derivation falls back to for a task that has never
-	// run, so a record without it derives no verdict at all and an enabled cron
-	// task that never fires reports healthy forever. An HTTP client can omit the
-	// field; the store cannot.
-	//
-	// A FUTURE one is the same hole the sanitized audit trail above closes, via a
-	// different field: `scheduleReference` trusts it for a never-run task, so a
-	// timestamp dated next year switches overdue detection off until then. It is
-	// clamped rather than rejected because no client can be trusted to agree with
-	// this clock to the second — a remote `--daemon-url` caller stamps its own —
-	// and refusing an add over a second of skew would be a worse bargain than
-	// correcting a value that is never legitimately in the future. An EARLIER
-	// stamp is kept: that is a migration importing real history.
-	if now := nowFn(); t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
-		t.CreatedAt = now
-	}
+	// Everything the STORE owns is reset here, as a class rather than one field
+	// at a time — see resetStoreOwnedFields.
+	t.resetStoreOwnedFields(nowFn())
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).

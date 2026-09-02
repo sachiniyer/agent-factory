@@ -57,12 +57,15 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 		}
 		enabled++
 		h := task.DeriveScheduleHealth(t, now)
+		classified := true
 		switch {
 		case h.Overdue:
 			overdue = append(overdue, t)
 			health = append(health, h)
 		case h.Unschedulable:
 			unschedulable = append(unschedulable, t)
+		default:
+			classified = false
 		}
 		// Whether this task's arming was OBSERVED is per-task, not per-run: a
 		// daemon answers reads while it is still warming up, and every task it
@@ -73,11 +76,12 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 			armingUnobserved++
 			continue
 		}
-		// A task already reported as overdue is not listed again: not-armed is the
-		// CAUSE of that same silence, and naming it twice with two remediations
-		// makes one problem look like two. `af tasks show <id>`, which the
-		// remediation names, reports the arming state.
-		if t.Arming == task.ArmingNotArmed && !h.Overdue {
+		// A task this run has ALREADY named is not listed again. Not-armed is the
+		// cause of an overdue task's silence, and it is the daemon's response to an
+		// expression that can never fire — in both cases naming it twice with two
+		// remediations makes one problem look like two. `af tasks show <id>`, which
+		// every remediation names, reports the arming state.
+		if t.Arming == task.ArmingNotArmed && !classified {
 			unarmed = append(unarmed, t)
 		}
 	}

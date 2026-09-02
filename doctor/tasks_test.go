@@ -305,3 +305,26 @@ func TestDoctor_ReportsAnInvalidExpressionWithNoDaemon(t *testing.T) {
 	assert.NotContains(t, row.Detail, "firing on schedule")
 	assert.Positive(t, report.UnresolvedCount())
 }
+
+// TestDoctor_UnschedulableTaskIsNotAlsoListedAsUnarmed: the scheduler refuses an
+// expression it cannot parse, so a live daemon reports that same task as
+// not-armed — which is its RESPONSE to the condition, not a second condition.
+// Same rule as the overdue case, and the guard has to cover every class the run
+// has already named rather than just the first one it grew.
+func TestDoctor_UnschedulableTaskIsNotAlsoListedAsUnarmed(t *testing.T) {
+	opts := testOptions(t, false)
+	broken := healthyTask("badcr0n2")
+	broken.Name = "Hand-edited watchdog"
+	broken.CronExpr = "99 * * * *"
+	broken.Arming = task.ArmingNotArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{broken}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Contains(t, row.Detail, "a cron expression that can never fire")
+	assert.NotContains(t, row.Detail, "enabled but not armed",
+		"one condition, reported once:\n%s", row.Detail)
+	assert.Equal(t, 1, strings.Count(row.Detail, "badcr0n2"))
+}

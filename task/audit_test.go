@@ -303,3 +303,62 @@ func TestAddTask_ClampsAFutureCreatedAt(t *testing.T) {
 	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
 		"and overdue detection reaches the task again")
 }
+
+// TestAddTask_DiscardsClientSuppliedRunHistory: LastRunAt/LastRunStatus are
+// scheduler-owned by contract, and `scheduleReference` prefers a nonzero
+// LastRunAt over CreatedAt — so a create carrying a future run time claims the
+// task just ran and switches overdue detection off until that date. Third
+// variant of one defect: the request carries a whole task.Task, so the store
+// resets everything it owns rather than the field last reported.
+func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	forged := time.Now().Add(365 * 24 * time.Hour)
+	created, err := AddTaskChecked(Task{
+		ID: "history1", Name: "Forged history", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+		LastRunAt: &forged, LastRunStatus: "started",
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
+	assert.Empty(t, created.LastRunStatus)
+
+	stored, err := GetTask("history1")
+	require.NoError(t, err)
+	require.Nil(t, stored.LastRunAt)
+	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
+		"and the derivation reaches the task instead of waiting a year")
+}
+
+// TestAddTask_ResetsEveryStoreOwnedField is the class rather than its members:
+// three review rounds found the same defect through three different fields, so
+// the create path resets all of them together.
+func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", dir)
+
+	future := time.Now().Add(48 * time.Hour)
+	next := time.Now().Add(time.Hour)
+	created, err := AddTaskChecked(Task{
+		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
+		ProjectPath: dir, Program: "claude", Enabled: true,
+		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
+		Audit:   []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
+		Overdue: true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
+		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
+	}, ActorAPI, nil)
+	require.NoError(t, err)
+
+	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
+	assert.Nil(t, created.LastRunAt)
+	assert.Empty(t, created.LastRunStatus)
+	require.Len(t, created.Audit, 1, "only the store's own create entry")
+	assert.Equal(t, AuditCreated, created.Audit[0].Action)
+	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")
+	assert.Zero(t, created.MissedOccurrences)
+	assert.False(t, created.MissedOccurrencesCapped)
+	assert.False(t, created.Unschedulable)
+	assert.Empty(t, created.Arming)
+	assert.Nil(t, created.NextRunAt)
+}

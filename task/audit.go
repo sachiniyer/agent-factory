@@ -153,3 +153,45 @@ func changedFields(before, after Task) []string {
 	add(before.Enabled != after.Enabled, "enabled")
 	return fields
 }
+
+// resetStoreOwnedFields clears every field on a NEW task that the store owns
+// rather than the caller, and stamps the one it must supply. It runs on the
+// create path before validation, so what is validated is what will be stored.
+//
+// The class matters more than any of its members. AddTaskRequest carries a whole
+// task.Task, so a client can populate ANY field — and three separate review
+// findings on #3623 were the same defect through three different ones, each
+// found only after the previous was closed:
+//
+//   - Audit: a forged trail is not just wrong data. Lateness is measured from the
+//     most recent enable IN that trail, so an entry dated in the future pushes the
+//     reference past now and switches overdue detection off for that task forever.
+//   - LastRunAt / LastRunStatus: scheduler-owned by contract (see UpdateTaskStatus,
+//     and the surface-parity inventory, which already declared them "never a client
+//     input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
+//     forged future run time suppresses detection the same way — a task that has
+//     never run claiming it just did.
+//   - CreatedAt: the fallback reference for a task that has never run. Absent, no
+//     verdict can be derived at all and the task reports healthy forever; dated in
+//     the future, detection is off until then.
+//
+// So the rule is stated once, positively: a create supplies the task's DEFINITION,
+// and the store supplies its history. The creation stamp is clamped rather than
+// rejected because no client agrees with this clock to the second — a remote
+// --daemon-url caller stamps its own — and refusing an add over a second of skew
+// is a worse bargain than correcting a value that is never legitimately in the
+// future. An EARLIER stamp is kept: that is a migration importing real history.
+//
+// The derived read-time fields are cleared for consistency rather than for
+// safety; saveTasks strips them on the way to disk regardless (see stripDerived),
+// but the record this function returns to the caller should not echo a health
+// verdict the client invented either.
+func (t *Task) resetStoreOwnedFields(now time.Time) {
+	t.Audit = nil
+	t.LastRunAt = nil
+	t.LastRunStatus = ""
+	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
+		t.CreatedAt = now
+	}
+	t.stripDerived()
+}

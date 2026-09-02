@@ -270,3 +270,34 @@ func TestWatcherSupervisor_DuplicateIDsWatchTheFirst(t *testing.T) {
 	assert.Equal(t, watcherSignature(first), w.sig,
 		"the first occurrence is the one watched, matching the cron scheduler's rule")
 }
+
+// TestFirstOccurrencePerID_ResolvesMixedTriggerDuplicates is the case the
+// per-subsystem duplicate checks structurally cannot see. The cron scheduler
+// skips watch rows before its own duplicate check and the watch supervisor skips
+// cron rows before its own, so an enabled cron row followed by an enabled watch
+// row sharing an ID passes BOTH: the scheduler arms the cron entry, the
+// supervisor starts the watch process, and each event that process emits is
+// delivered by ID — resolving to the first record and running the cron task's
+// configuration on someone else's trigger.
+//
+// Resolving it over the whole ordered list, before anything filters by kind, is
+// the only place that sees the collision.
+func TestFirstOccurrencePerID_ResolvesMixedTriggerDuplicates(t *testing.T) {
+	cronRow := enabledCronTask("mixed001", "")
+	watchRow := watchTask("mixed001", "printf 'line\\n'; sleep 30", "")
+	other := enabledCronTask("other001", "")
+
+	kept := firstOccurrencePerID([]task.Task{cronRow, watchRow, other})
+
+	require.Len(t, kept, 2, "the duplicate is gone before either subsystem filters by kind")
+	assert.Equal(t, "mixed001", kept[0].ID)
+	assert.False(t, kept[0].IsWatch(), "first wins, matching the scheduler's own rule")
+	assert.Equal(t, "other001", kept[1].ID, "and unrelated tasks keep their order")
+}
+
+// TestFirstOccurrencePerID_LeavesDistinctIDsAlone keeps the dedupe from being a
+// filter on anything but a genuine collision.
+func TestFirstOccurrencePerID_LeavesDistinctIDsAlone(t *testing.T) {
+	tasks := []task.Task{enabledCronTask("aaaa2001", ""), enabledCronTask("aaaa2002", "")}
+	assert.Equal(t, tasks, firstOccurrencePerID(tasks))
+}

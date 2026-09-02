@@ -226,13 +226,17 @@ func TestScheduleHealthIsNeverPersisted(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", dir)
 
 	last := at(2026, time.August, 14, 14, 20, 8)
-	tsk := cronTask("20 * * * *", &last)
+	tsk := cronTask("20 * * * *", nil)
 	tsk.ID = "persist1"
 	// A caller handing the store a fully-annotated record — exactly what a
 	// load-modify-save path would do now that every load annotates.
 	next := at(2026, time.September, 1, 15, 20, 0)
 	tsk.Overdue, tsk.MissedOccurrences, tsk.Arming, tsk.NextRunAt = true, 432, ArmingArmed, &next
 	require.NoError(t, AddTask(tsk))
+	// The run history comes from its own writer, not from the create: a create
+	// supplies the task's definition and the store supplies its history (see
+	// resetStoreOwnedFields).
+	require.NoError(t, UpdateTaskStatus("persist1", &last, "started"))
 
 	raw, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
 	require.NoError(t, err)
