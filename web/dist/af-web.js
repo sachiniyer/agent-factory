@@ -12655,12 +12655,7 @@ var TasksPane = class {
       { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
       icon(mark ? mark.icon : t.enabled ? "square-check" : "square")
     );
-    if (mark) {
-      enabledDot.setAttribute("role", "img");
-      enabledDot.setAttribute("aria-label", taskHealthSummary(t));
-    } else {
-      enabledDot.setAttribute("aria-hidden", "true");
-    }
+    enabledDot.setAttribute("aria-hidden", "true");
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));
     const metaParts = [];
@@ -15999,6 +15994,7 @@ async function refreshDaemonPalette(tok) {
 }
 function stopStream() {
   resyncRequestGeneration += 1;
+  taskRefreshGeneration += 1;
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");

@@ -3129,7 +3129,11 @@ test("#3626: the tasks list marks a task that has stopped firing, and says how f
   // rather than a column added, as the rail does it.
   const mark = overdue.locator(".af-task-enabled.af-task-warn");
   await expect(mark).toHaveCount(1);
-  await expect(mark).toHaveAttribute("aria-label", /overdue/);
+  // Hidden from assistive tech: the glyph is there to survive visual clipping,
+  // and CSS ellipsis does not clip the accessibility tree — labelling it with the
+  // same summary the row already shows announced the verdict twice (#3626
+  // review). The words below are what a screen reader gets.
+  await expect(mark).toHaveAttribute("aria-hidden", "true");
 
   // The DETAIL, in the row, in the rail's own words. The count is whatever the
   // daemon derived from a month of a daily schedule, so the assertion is on the

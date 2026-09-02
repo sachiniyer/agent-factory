@@ -1836,6 +1836,15 @@ function stopStream(): void {
   // prevents a request that has not started; a response from the previous stream
   // must not land in a newly-connected (possibly differently-authorized) app.
   resyncRequestGeneration += 1;
+  // And the task list, for the same reason and through one door the
+  // generation+token fence in refreshTasks cannot close by itself: reconnecting
+  // with the SAME credential moves neither of them, and the tokenless loopback
+  // (#1696) makes "the same credential" the ordinary path rather than an edge
+  // case. connect() loads tasks directly rather than through refreshTasks, so
+  // without this a request still in flight from the previous stream outlives the
+  // disconnect and overwrites the freshly-connected list, restoring rows that
+  // were removed while it was away (#3626 review).
+  taskRefreshGeneration += 1;
   paletteRefreshGate.invalidate();
   clearPaletteRetry();
   root?.removeAttribute("data-af-resync-settled");

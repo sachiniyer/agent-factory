@@ -310,15 +310,15 @@ export class TasksPane {
       { class: `af-task-enabled${t.enabled ? " af-task-on" : ""}${mark ? ` ${mark.cls}` : ""}` },
       icon(mark ? mark.icon : t.enabled ? "square-check" : "square"),
     );
-    // The mark is the row's only sign that something is wrong when the meta line
-    // is ellipsized, so it carries a label for a screen reader rather than being
-    // hidden like the plain enabled tick.
-    if (mark) {
-      enabledDot.setAttribute("role", "img");
-      enabledDot.setAttribute("aria-label", taskHealthSummary(t));
-    } else {
-      enabledDot.setAttribute("aria-hidden", "true");
-    }
+    // Hidden from assistive tech even when it is a MARK. The glyph exists to
+    // survive visual CLIPPING, and clipping is a sighted-reader problem: CSS
+    // ellipsis does not remove the health text from the accessibility tree, so
+    // labelling the glyph with the same summary announced the verdict twice. The
+    // words carry it, and taskHealthMark returns a mark on exactly the states
+    // taskHealthSummary has words for — pinned below, because a mark with no
+    // words would be a row that says nothing at all to a screen reader (#3626
+    // review).
+    enabledDot.setAttribute("aria-hidden", "true");
 
     const name = h("div", { class: "af-task-name" }, t.name && t.name.trim() !== "" ? t.name : "(unnamed task)");
     const trigger = h("div", { class: "af-task-trigger" }, triggerSummary(t));

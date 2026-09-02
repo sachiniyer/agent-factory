@@ -163,3 +163,31 @@ test("a stronger verdict wins the line, as af doctor orders them", () => {
   const impossible = task({ unschedulable: true, unschedulable_reason: "no-occurrence", arming: "not-armed" });
   assert.equal(taskHealthSummary(impossible), "No upcoming run");
 });
+
+test("a mark always has words, on every state that can carry one", () => {
+  // The glyph is aria-hidden — it exists to survive visual clipping, which is a
+  // sighted-reader problem — so the VISIBLE summary is the only thing a screen
+  // reader gets. A state that could be marked without words would be a row that
+  // announces nothing at all. Exhaustive over the states taskHealthMark answers.
+  const marked: TaskData[] = [
+    task({ overdue: true, missed_occurrences: 5 }),
+    task({ overdue: true, missed_occurrences: 0, missed_occurrences_capped: true }),
+    task({ unschedulable: true, unschedulable_reason: "no-trigger" }),
+    task({ unschedulable: true, unschedulable_reason: "invalid-expression" }),
+    task({ unschedulable: true, unschedulable_reason: "no-occurrence" }),
+    task({ unschedulable: true }),
+    task({ arming: "not-armed" }),
+    task({ unassessable: true }),
+    task({ unassessable: true, arming: "not-armed" }),
+  ];
+  for (const t of marked) {
+    assert.notEqual(taskHealthMark(t), null, `expected a mark for ${JSON.stringify(t)}`);
+    assert.notEqual(taskHealthSummary(t), "", `a mark with no words for ${JSON.stringify(t)}`);
+  }
+
+  // And the converse, so the invariant is not satisfied by marking everything:
+  // an unmarked row has nothing to announce either.
+  const healthy = task();
+  assert.equal(taskHealthMark(healthy), null);
+  assert.equal(taskHealthSummary(healthy), "");
+});
