@@ -88,8 +88,13 @@ func TestSelected_RefusesAnUnregisteredAccount(t *testing.T) {
 
 // Agents whose credential relocation was never verified refuse, rather than
 // accepting a selection that would do nothing.
+//
+// gemini left this list in #3387 on measured evidence (GEMINI_CLI_HOME moves the
+// keychain, verified under strace); the rest stay because their agent-specific
+// variables move settings or config while the credentials follow a generic
+// XDG/HOME path — amp and opencode were both measured doing exactly that.
 func TestDir_RefusesAnUnverifiedAgent(t *testing.T) {
-	for _, agent := range []string{"gemini", "amp", "aider", "unknown"} {
+	for _, agent := range []string{"amp", "aider", "opencode", "devin", "unknown"} {
 		_, err := Dir(t.TempDir(), agent, "work")
 		require.ErrorIs(t, err, ErrUnsupportedAgent, "agent %q", agent)
 	}

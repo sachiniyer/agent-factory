@@ -762,24 +762,36 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 				"agent whose account you mean",
 			opts.Account, requested, requested, agent, agent, requested)
 	}
-	// An EXPLICIT list, still, and claude is on it now because af's launch rewrite
-	// carries provenance the boundary verifies (#3083): the launcher declares
-	// `--session-id`/`--plugin-dir`, so the rewritten command is provable rather
-	// than refused. codex needs no declaration — af leaves its command unmodified.
+	// Still an EXPLICIT list, and still deliberately NOT sessionenv.SupportsAccounts:
+	// that answers "does this agent have a credential-root variable", which is a
+	// different question from "can af prove its launch to the boundary". Keeping them
+	// separate is what makes an agent added to the roster unsupported HERE until
+	// someone checks the second question, which fails in the safe direction (#3051,
+	// #3083). claude is on the list because af's launch rewrite carries provenance the
+	// boundary verifies — the launcher declares `--session-id`/`--plugin-dir`, so the
+	// rewritten command is provable rather than refused; codex needs no declaration,
+	// because af leaves its command unmodified.
 	//
-	// Deliberately NOT keyed on sessionenv.SupportsAccounts: that answers "does this
-	// agent have a credential-root variable", which is a different question from "can
-	// af prove its launch to the boundary". Keeping them separate is what makes an
-	// agent added to the first list unsupported here until someone checks the second,
-	// which fails in the safe direction (#3051, #3083).
-	if agent == "codex" || agent == "claude" {
+	// What changed in #3609 is only WHERE the list lives. This function kept its own
+	// copy, so once gemini joined the roster `af accounts add gemini work` succeeded
+	// and `--account work` answered "supported: claude, codex" — a sentence the roster
+	// had just made false, and the user had no way to tell which surface was wrong.
+	// sessionenv owns the one list now, and every surface says the same thing about a
+	// rostered-but-unproven agent.
+	if sessionenv.AccountLaunchProven(agent) {
 		return nil
+	}
+	// A ROSTERED agent gets the registration-only sentence, because "unsupported" is
+	// false for it: the account exists, the login works, and only the launch is
+	// unproven. Naming the follow-up is what makes that a state rather than a dead end.
+	if reason, ok := sessionenv.AccountRegistrationOnlyReason(agent); ok {
+		return fmt.Errorf("account %q is registered for %s, but %s", opts.Account, agent, reason)
 	}
 	return fmt.Errorf(
 		"account %q cannot be used with %s yet: af has not established that the account boundary can "+
 			"verify how it launches that agent, so the session could start on the ambient identity or exit "+
-			"immediately; account scoping currently supports claude and codex",
-		opts.Account, agent)
+			"immediately; account scoping supports %s",
+		opts.Account, agent, sessionenv.AccountAgentsSummary())
 }
 
 // resolveAccountForProvision resolves opts.Account to the registered account's

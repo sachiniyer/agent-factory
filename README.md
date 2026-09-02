@@ -130,7 +130,9 @@ af tasks add --name triage --prompt "Triage open issues" --cron "0 9 * * *"
   [backends](docs/backends.md).
 - **Account scoping** — register separate Claude or Codex credential homes with
   `af accounts add`, then select one for a local or docker session with
-  `--account`. `af` refuses an unproved fallback and never rotates accounts on its
+  `--account`. Gemini homes register and log in the same way, but no session can
+  be scoped to one yet — af has not verified how it launches that agent under an
+  account. `af` refuses an unproved fallback and never rotates accounts on its
   own. See [`af accounts`](docs/reference/cli.md#af-accounts).
 - **Explicit idle and limit state** — state never relies on colour or motion:
   static glyphs and text distinguish ready, lost, dead, archived, and

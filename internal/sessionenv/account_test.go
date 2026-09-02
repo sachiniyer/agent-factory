@@ -327,11 +327,15 @@ func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
 }
 
 // An agent whose credential relocation was never VERIFIED must refuse, not
-// silently accept a selection that does nothing. gemini and amp have the
-// allowlist entries but were not testable, and allowlist membership is not
-// evidence.
+// silently accept a selection that does nothing. Allowlist membership is not
+// evidence: amp and opencode both HAVE agent-specific variables that relocate
+// only settings/config, so an entry taken from the allowlist would have scoped
+// nothing while looking like it worked (#3387 measured both).
+//
+// gemini left this list in #3387 because its relocation was actually verified —
+// see accountConfigVars — which is the only way an agent may leave it.
 func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
-	for _, agent := range []string{"gemini", "amp", "aider", "opencode", "unknown"} {
+	for _, agent := range []string{"amp", "aider", "opencode", "devin", "unknown"} {
 		_, err := ApplyAccount(nil, "", Account{Agent: agent, Name: "x", Dir: "/d"})
 		require.Error(t, err, "agent %q must refuse rather than accept an inert account selection", agent)
 		require.Contains(t, err.Error(), "does not support multiple accounts")
@@ -542,4 +546,213 @@ func TestApplyAccount_TrustedWrapperIsNotABasename(t *testing.T) {
 		})
 		require.Error(t, err, "%s is not the generated wrapper and must not inherit its trust", executable)
 	}
+}
+
+// TestApplyAccount_ScopesGemini pins the roster entry #3387 added on evidence.
+//
+// The subtraction half is the point: gemini reads GEMINI_API_KEY and
+// GOOGLE_API_KEY as identities that outrank the config directory, so a session
+// that selected an account while either passed through would authenticate as
+// whoever that key belongs to while every visible signal said otherwise.
+func TestApplyAccount_ScopesGemini(t *testing.T) {
+	ambient := []string{
+		"GEMINI_API_KEY=ambient-key",
+		"GOOGLE_API_KEY=ambient-google-key",
+		"GEMINI_CLI_HOME=/somewhere/else",
+		"PATH=/usr/bin",
+	}
+	out, err := ApplyAccount(ambient, "", Account{
+		Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work",
+	})
+	require.NoError(t, err)
+
+	dir, ok := envValue(out, "GEMINI_CLI_HOME")
+	require.True(t, ok, "the account must be injected through the verified variable")
+	require.Equal(t, "/afhome/accounts/gemini/work", dir,
+		"GEMINI_CLI_HOME is a HOME-like root: the CLI appends .gemini/ itself, so af "+
+			"points it at the account directory rather than at a .gemini path")
+
+	for _, name := range []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		value, present := envValue(out, name)
+		require.True(t, present,
+			"%s must survive as an EMPTY definition rather than be removed: gemini reads a repository "+
+				"`.env` after this boundary and assigns only names it does not already find", name)
+		require.Empty(t, value,
+			"%s outranks the config directory, so leaving it with a value makes the account selection a lie", name)
+	}
+	_, keptPath := envValue(out, "PATH")
+	require.True(t, keptPath, "scoping must not strip unrelated environment")
+
+	require.Equal(t, 1, strings.Count(strings.Join(out, "\n")+"\n", "GEMINI_API_KEY="),
+		"the ambient value must be REPLACED, not shadowed by a later entry: a consumer that keeps the "+
+			"first occurrence would read the ambient key back")
+}
+
+// TestApplyAccount_PinsGeminiIdentityNamesAgainstAProjectDotenv is the half that
+// subtraction alone does not hold (#3609 review, Codex P1).
+//
+// Removing a name is enough only while nothing else writes to the environment
+// between this boundary and the agent. gemini writes to it itself: it walks up
+// from the workspace looking for `<dir>/.gemini/.env` and `<dir>/.env` at every
+// level and applies what it finds, so a checked-in `.env` recreates exactly the
+// names removed here and the session authenticates as the repository while every
+// visible signal reports the selected account.
+//
+// Measured against gemini 0.51.0 under a throwaway HOME. With the names absent
+// and a repository `.env` naming them, the CLI announced "Both GOOGLE_API_KEY and
+// GEMINI_API_KEY are set. Using GOOGLE_API_KEY." and sent a real request that came
+// back `400 API key not valid`. With the names present and EMPTY, the identical
+// run reported no auth method at all — the same output as a directory with no
+// `.env`. A `.env` naming only GOOGLE_APPLICATION_CREDENTIALS signed a JWT with
+// that service-account key against an oauth-personal account, and one naming
+// GOOGLE_GENAI_USE_VERTEXAI moved the session onto Vertex; both were held off by
+// the same empty definition.
+func TestApplyAccount_PinsGeminiIdentityNamesAgainstAProjectDotenv(t *testing.T) {
+	out, err := ApplyAccount([]string{"PATH=/usr/bin"}, "", Account{
+		Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work",
+	})
+	require.NoError(t, err)
+
+	for _, name := range []string{
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+	} {
+		value, present := envValue(out, name)
+		require.True(t, present,
+			"%s must be DEFINED so gemini's own `.env` loader will not assign it; removing it leaves the "+
+				"name free for a repository file to claim", name)
+		require.Empty(t, value, "%s must be defined EMPTY, never carry a value", name)
+	}
+
+	// The config variable is injected with the account, never pinned empty — an
+	// empty copy of it would erase the selection this whole function makes.
+	dir, ok := envValue(out, "GEMINI_CLI_HOME")
+	require.True(t, ok)
+	require.Equal(t, "/afhome/accounts/gemini/work", dir)
+
+	// codex has no measured late environment source, so its boundary is unchanged:
+	// names are removed, not pinned. Pinning an unmeasured agent would be a guess
+	// about how its CLI reads an empty value.
+	codex, err := ApplyAccount([]string{"OPENAI_API_KEY=ambient", "PATH=/usr/bin"}, "", Account{
+		Agent: "codex", Name: "work", Dir: "/afhome/accounts/codex/work",
+	})
+	require.NoError(t, err)
+	_, present := envValue(codex, "OPENAI_API_KEY")
+	require.False(t, present, "codex keeps the removal boundary it was measured with")
+}
+
+// Every identity a late-environment agent has must be pinned, not just the ones
+// somebody remembered. A credential or selector added to that agent later and
+// left out of the pinned set is a silent reopening of the `.env` hole, and it
+// would pass every other test in this file.
+func TestAccountLateEnvironmentNames_CoverEveryIdentityForThatAgent(t *testing.T) {
+	for agent, pinned := range accountLateEnvironmentNames {
+		configVar, ok := SupportsAccounts(agent)
+		require.True(t, ok, "%s pins names but is not on the account roster", agent)
+		_, pinsConfigVar := pinned[configVar]
+		require.False(t, pinsConfigVar,
+			"%s must be injected with the account directory, so pinning it empty would erase the selection", configVar)
+
+		for name := range accountCredentialNames[agent] {
+			_, ok := pinned[name]
+			require.True(t, ok,
+				"%s is an identity for %s but is only REMOVED, so the agent's own `.env` can put it back", name, agent)
+		}
+		for _, selector := range AgentAuthSelectors(agent) {
+			_, ok := pinned[selector]
+			require.True(t, ok,
+				"%s selects a cloud identity for %s and is only removed, so a repository `.env` can turn "+
+					"that mode on after this boundary has run", selector, agent)
+		}
+	}
+}
+
+// A provisioner must neutralize exactly what the local shim does. AccountIdentityNames
+// is the shared classification, so a name the shim pins but the list omits is a
+// docker or restored-tmux session with a hole the local one does not have.
+func TestAccountIdentityNames_IncludeTheNamesTheShimPins(t *testing.T) {
+	for agent, pinned := range accountLateEnvironmentNames {
+		names := AccountIdentityNames(agent)
+		for name := range pinned {
+			require.Contains(t, names, name,
+				"%s is pinned locally for %s but absent from the shared identity list, so a container "+
+					"or restore path would leave it free", name, agent)
+		}
+	}
+}
+
+// TestApplyAccount_RefusesGeminiWhileACloudModeIsActive: gemini's two selectors
+// are guarded exactly as Claude's Bedrock/Vertex/Foundry are (#2462), so adding
+// the agent to the roster inherits the refusal rather than needing a new one.
+// Vertex/GCA authenticate through Google Cloud credentials, so the account
+// directory would stop being the session's identity while still appearing to be.
+func TestApplyAccount_RefusesGeminiWhileACloudModeIsActive(t *testing.T) {
+	for _, selector := range []string{"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA"} {
+		_, err := ApplyAccount([]string{selector + "=1"}, "",
+			Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+		require.Error(t, err, "%s active must refuse an account scope", selector)
+		require.Contains(t, err.Error(), "cloud mode")
+		require.Contains(t, err.Error(), selector, "the refusal must name which mode blocked it")
+	}
+
+	// Without a selector the same agent scopes normally, so the guard cannot
+	// pass by refusing everything.
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, "",
+		Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+	require.NoError(t, err)
+}
+
+// The roster and the launch proof answer DIFFERENT questions, and #3609 is the
+// first time an agent sat between them: gemini's credential root relocates, so it
+// is on the roster, but nobody has verified how af launches it, so `--account`
+// refuses. Two separate lists is the design — it is what makes a newly rostered
+// agent fail closed at the launch boundary (#3051, #3083). What the two must not
+// do is describe that state differently to the user.
+func TestAccountRoster_SeparatesRegistrationFromLaunchProof(t *testing.T) {
+	for _, agent := range []string{"claude", "codex"} {
+		require.True(t, AccountLaunchProven(agent), "%s launches under an account today", agent)
+		require.False(t, AccountRegistrationOnly(agent), "%s is not registration-only", agent)
+		reason, ok := AccountRegistrationOnlyReason(agent)
+		require.False(t, ok, "%s must yield no notice, so a caller cannot print one by forgetting to check", agent)
+		require.Empty(t, reason)
+	}
+
+	_, supported := SupportsAccounts("gemini")
+	require.True(t, supported, "gemini's credential root was measured to relocate (#3387)")
+	require.False(t, AccountLaunchProven("gemini"), "gemini's launch proof is the open follow-up")
+	require.True(t, AccountRegistrationOnly("gemini"))
+
+	reason, ok := AccountRegistrationOnlyReason("gemini")
+	require.True(t, ok)
+	require.Contains(t, reason, "gemini", "the sentence must name which agent it is about")
+	require.Contains(t, reason, accountLaunchProofIssueURL,
+		"a state the operator cannot act on has to name the follow-up that lifts it")
+	require.NotContains(t, reason, "does not support",
+		"registration works, so calling it unsupported is the false half of the contradiction")
+
+	// Every launch-proven agent is on the roster. The reverse is the interesting
+	// direction and is deliberately allowed; this one is incoherent — a launch
+	// proof for an agent with no credential root scopes nothing.
+	for agent := range accountLaunchProvenAgents {
+		_, ok := SupportsAccounts(agent)
+		require.True(t, ok, "%s is launch-proven but has no credential root to launch into", agent)
+	}
+}
+
+// Every "supported: …" list a user reads comes from AccountAgentsSummary, so a
+// registration-only agent cannot appear in one as though a session could use it.
+func TestAccountAgentsSummary_MarksRegistrationOnlyAgents(t *testing.T) {
+	summary := AccountAgentsSummary()
+	require.Contains(t, summary, "gemini ("+AccountRegistrationOnlyMarker+")")
+	require.NotContains(t, summary, "claude ("+AccountRegistrationOnlyMarker+")")
+	require.NotContains(t, summary, "codex ("+AccountRegistrationOnlyMarker+")")
+
+	// AccountAgents stays BARE, because its callers index directories by these
+	// names; a marked name would look up an account root that does not exist.
+	require.Equal(t, []string{"claude", "codex", "gemini"}, AccountAgents())
+
+	// And the refusal an unsupported agent gets carries the marked form.
+	_, err := ApplyAccount(nil, "", Account{Agent: "aider", Name: "work", Dir: "/d"})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "gemini ("+AccountRegistrationOnlyMarker+")")
 }
