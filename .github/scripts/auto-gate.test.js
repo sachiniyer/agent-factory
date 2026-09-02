@@ -1771,6 +1771,42 @@ test("an unclear cross-check answer is never read as a vanished PR", async () =>
   assert.equal(github.readAttemptsByFn.listReviews, 2, "an unknown answer still retries the read");
 });
 
+test("a NOT_FOUND paired with the resolved id in a different error is not tolerated", () => {
+  // Codex P2: an envelope-wide substring test pairs a NOT_FOUND about one object
+  // with our id appearing in some other error of a multi-error response. That
+  // combination says nothing about the object this run resolved, so it must stay
+  // loud.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  const split = new Error("Request failed due to following response errors:");
+  split.name = "GraphqlResponseError";
+  split.errors = [
+    { type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'ISSUE_other'." },
+    { type: "FORBIDDEN", message: `Resource not accessible: '${nodeId}'.` },
+  ];
+  assert.equal(isSelfContradictoryNotFound(split, nodeId), false);
+
+  // The same two facts in one record is the real thing, and is tolerated.
+  const together = new Error("Request failed due to following response errors:");
+  together.name = "GraphqlResponseError";
+  together.errors = [
+    { type: "FORBIDDEN", message: "Resource not accessible: 'ISSUE_other'." },
+    { type: "NOT_FOUND", message: `Could not resolve to a node with the global id of '${nodeId}'.` },
+  ];
+  assert.equal(isSelfContradictoryNotFound(together, nodeId), true);
+});
+
+test("a NOT_FOUND for a longer id that merely starts with ours is not tolerated", () => {
+  // Node ids are opaque base64url, so a substring test accepts a different
+  // object whose id happens to extend ours.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId + "XyZ"), nodeId), false);
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound("QQ" + nodeId), nodeId), false);
+  // Exactly the id, delimited by the quotes around it, still matches.
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), nodeId), true);
+});
+
 test("the tolerated NOT_FOUND is exactly the one naming the resolved id", () => {
   const { isSelfContradictoryNotFound } = __test;
   const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";

@@ -161,19 +161,31 @@ function isSelfContradictoryNotFound(error, nodeId) {
   if (!nodeId || !error) {
     return false;
   }
-  const body = error.response?.data;
-  const detail = `${typeof body?.message === "string" ? body.message : ""} ${error.message || ""}`;
-  if (!detail.includes(nodeId)) {
-    return false;
-  }
-  const status = Number(error.status ?? error.response?.status);
-  return (
-    status === 404 ||
-    String(body?.type || "").toUpperCase() === "NOT_FOUND" ||
-    graphQLResponseErrors(error).some(
-      (responseError) => String(responseError?.type || "").toUpperCase() === "NOT_FOUND",
-    )
+  // The id must be the WHOLE id, not a prefix of a longer one: node ids are
+  // opaque base64url, so a bare substring test would accept a NOT_FOUND about a
+  // different object whose id merely starts with ours.
+  const namesSubject = new RegExp(
+    `(?<![A-Za-z0-9_-])${nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`,
   );
+  // …and the id has to be named by the SAME error record that says NOT_FOUND.
+  // Checking the whole envelope would pair a NOT_FOUND about one object with our
+  // id appearing in a different error of a multi-error response, which proves
+  // nothing about the object this run resolved.
+  const notFoundNamingSubject = (record) =>
+    String(record?.type || "").toUpperCase() === "NOT_FOUND" &&
+    namesSubject.test(String(record?.message || ""));
+
+  if (graphQLResponseErrors(error).some(notFoundNamingSubject)) {
+    return true;
+  }
+  const body = error.response?.data;
+  if (notFoundNamingSubject(body)) {
+    return true;
+  }
+  // A transport-level 404 with no structured body of its own: the message is the
+  // only record there is, so it must both be a 404 and name the id itself.
+  const status = Number(error.status ?? error.response?.status);
+  return status === 404 && namesSubject.test(String(error.message || ""));
 }
 
 // The cross-check said the subject really is gone. That is a conclusion, not a
