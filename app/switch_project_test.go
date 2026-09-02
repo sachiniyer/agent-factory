@@ -1118,3 +1118,47 @@ func TestBuildProjectListKeepsAnOccupantWhenItsProbeTimesOut(t *testing.T) {
 	assert.True(t, found,
 		"an unanswered probe is not evidence that the path is gone, so its root_agents key must keep the identity the daemon will resolve for it rather than borrowing the registry row's: got %+v", projects)
 }
+
+// TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally pins #3530
+// review id 3919195017 — the limit of the "answered negative" rule.
+//
+// Git exiting normally is not the same as git ANSWERING that the path is free:
+// dubious ownership, an unreadable .git and other operational failures all
+// complete. Treating them alike hands a live occupant's path-keyed opt-in to a
+// stale registry row, which is what the answered-verdict test above forbids for
+// a timeout.
+func TestBuildProjectListKeepsAnOccupantWhenGitFailsOperationally(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID)
+	pathID := config.RepoIDFromRoot(filepath.Clean(registeredRoot))
+	require.NotEqual(t, project.RepoID, pathID)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	// git COMPLETES, with an operational failure rather than a verdict about
+	// the path: exit 128 and a message that is not the not-a-repository one.
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	binDir := t.TempDir()
+	wrapper := filepath.Join(binDir, "git")
+	require.NoError(t, os.WriteFile(wrapper, []byte("#!/bin/sh\ncase \" $* \" in\n  *\"$AF_BROKEN_PROJECT\"*) echo \"fatal: detected dubious ownership in repository\" >&2; exit 128 ;;\nesac\nexec \"$AF_REAL_GIT\" \"$@\"\n"), 0o755))
+	t.Setenv("AF_BROKEN_PROJECT", registeredRoot)
+	t.Setenv("AF_REAL_GIT", realGit)
+	t.Setenv("PATH", binDir)
+
+	projects, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	found := false
+	for _, project := range projects {
+		if project.RepoID == pathID {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"an operational git failure is not a verdict that the path is free, so its root_agents key must keep the identity the daemon will resolve for it: got %+v", projects)
+}

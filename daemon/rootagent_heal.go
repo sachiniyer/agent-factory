@@ -768,19 +768,29 @@ func retryReconcileOwed(healed *rootAgentSnapshot) bool {
 	// The registry is read ONCE for the whole pass, and only when an unproven
 	// entry needs it: a proven entry's retry is the write alone.
 	var projects []config.Project
+	projectsRead := true
 	for _, owed := range healed.reconcileOwed {
 		if owed.proven {
 			continue
 		}
-		if listed, err := config.ListProjects(); err == nil {
-			projects = listed
-		}
+		listed, err := config.ListProjects()
+		// A failed LIST is not evidence that a project is gone (#3530 review id
+		// 3919195000). Dropping unproven entries on it would leave the healer
+		// with no work for a path that resolves — so repairing the registry
+		// could never complete the proof for the rest of this daemon run,
+		// which is the defect the latch exists to prevent.
+		projectsRead = err == nil
+		projects = listed
 		break
 	}
 	remaining := make(map[string]reconcileOwedEntry, len(healed.reconcileOwed))
 	changed := false
 	for projectID, owed := range healed.reconcileOwed {
 		if !owed.proven {
+			if !projectsRead {
+				remaining[projectID] = owed
+				continue
+			}
 			// Re-establish the proof before writing anything. Absence of a
 			// record, or a proof that now names a DIFFERENT identity, drops the
 			// entry: the first has nothing to write to, and the second means

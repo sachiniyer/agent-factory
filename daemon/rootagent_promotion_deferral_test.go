@@ -1325,3 +1325,116 @@ func TestContestedIdentityDefersThePromotion(t *testing.T) {
 		t.Fatalf("and it must stay where the occupant's own resolution finds it")
 	}
 }
+
+// TestProvisionalDeleteFencesTheHistoricalIdentity pins #3530 review id
+// 3919194996. The historical-session preflight and the fence installation used
+// to be separate acquisitions of m.mu, and the fence went on the provisional id
+// alone — so a checkout reappearing in between let a create reserve under the
+// historical id and commit after the registry row was removed.
+func TestProvisionalDeleteFencesTheHistoricalIdentity(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "repo")
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("remove the checkout: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	provisional := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	// Observed while the delete runs — the durable sweep is the one call that
+	// happens with the fences installed.
+	fencedMidDelete := map[string]bool{}
+	original := deregisterRootAgents
+	deregisterRootAgents = func(ids ...string) ([]string, error) {
+		manager.mu.Lock()
+		for id := range manager.projectDeletes {
+			fencedMidDelete[id] = true
+		}
+		manager.mu.Unlock()
+		return nil, nil
+	}
+	t.Cleanup(func() { deregisterRootAgents = original })
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject by the recorded path: %v", err)
+	}
+	if !fencedMidDelete[provisional] || !fencedMidDelete[historical] {
+		t.Fatalf("a provisional delete must fence the historical identity too, or a create can reserve under it and commit after the row is gone; fenced %v", fencedMidDelete)
+	}
+	manager.mu.Lock()
+	left := len(manager.projectDeletes)
+	manager.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("and it must remove exactly the fences it installed; %d left behind", left)
+	}
+}
+
+// TestUnprovenLatchSurvivesAnUnreadableRegistry pins #3530 review id
+// 3919195000. A failed registry LIST is not evidence that a project is gone;
+// dropping unproven entries on it leaves the healer with no work for a path
+// that resolves, so repairing the registry could never complete the proof for
+// the rest of the daemon run — the very defect the latch exists to prevent.
+func TestUnprovenLatchSurvivesAnUnreadableRegistry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	marker := checkoutMarkerPathForTest(t, repoPath)
+	if err := os.Chmod(marker, 0o000); err != nil {
+		t.Fatalf("chmod marker: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !ok {
+		t.Fatalf("fixture must latch the unproven row")
+	}
+
+	// The marker becomes readable, but an unrelated record cannot be read, so
+	// the retry's registry list fails.
+	if err := os.Chmod(marker, 0o644); err != nil {
+		t.Fatalf("restore marker: %v", err)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	corrupt := filepath.Join(dir, "prj_ffffffffffffffffffffffffffffffff")
+	if err := os.MkdirAll(corrupt, 0o755); err != nil {
+		t.Fatalf("mkdir corrupt record: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "project.json"), []byte("{ not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt record: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if _, kept := manager.rootAgentLayers.Load().reconcileOwed[project.ID]; !kept {
+		t.Fatalf("an unreadable registry must not drop the unproven latch: the row resolves, so nothing else would ever retry it")
+	}
+
+	// Repaired, and the next due pass completes it.
+	if err := os.RemoveAll(corrupt); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.mu.Lock()
+	manager.rootHealNextAttempt = nowFunc()
+	manager.mu.Unlock()
+	manager.EnsureRootAgents()
+
+	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
+		t.Fatalf("the retained latch must complete once the registry reads again: recorded %q, want %s", recorded, realID)
+	}
+}

@@ -249,3 +249,67 @@ func TestRegistrationRefusesAnIdentityFromADifferentRepository(t *testing.T) {
 		t.Fatalf("registration recorded root %s (repository %s) with identity %s — the root, the checkout marker and the id describe two different repositories", project.Root, rootRepo.ID, project.RepoID)
 	}
 }
+
+// TestRegistrationRefusesARepointedPathAtCommitTime pins #3530 review id
+// 3919195005.
+//
+// resolveProjectBinding runs BEFORE the registry lock, so a path repointed in
+// between would be committed pairing the new workspace with the previous
+// repository's identity and marker — permanently, because the one-way writer
+// never replaces it. The re-check narrows that window to the write itself; it
+// cannot close it, and says so.
+func TestRegistrationRefusesARepointedPathAtCommitTime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	base := testguard.CanonicalTempDir(t)
+	// BARE clones, because that is the shape where the recorded root IS the
+	// repointed path: a bare repository's linked workspace is what the record
+	// stores, while a normal repository's record stores its unmoving main root.
+	source := filepath.Join(base, "source")
+	initRepoWithCommit(t, source)
+	repoA := filepath.Join(base, "A.git")
+	repoB := filepath.Join(base, "B.git")
+	for _, bare := range []string{repoA, repoB} {
+		if err := exec.Command("git", "clone", "--quiet", "--bare", source, bare).Run(); err != nil {
+			t.Fatalf("git clone --bare %s: %v", bare, err)
+		}
+	}
+	live := filepath.Join(base, "live")
+	if err := exec.Command("git", "-C", repoA, "worktree", "add", "--detach", live).Run(); err != nil {
+		t.Fatalf("git worktree add: %v", err)
+	}
+
+	// The flip happens after the binding is resolved and the registry lock is
+	// held — the window this re-check exists for.
+	flipped := false
+	projectRegistryCommitRaceHookForTest = func() {
+		if flipped {
+			return
+		}
+		flipped = true
+		if err := exec.Command("git", "-C", repoA, "worktree", "remove", "--force", live).Run(); err != nil {
+			t.Fatalf("detach the worktree from A: %v", err)
+		}
+		if err := exec.Command("git", "-C", repoB, "worktree", "add", "--detach", live).Run(); err != nil {
+			t.Fatalf("attach the path to B: %v", err)
+		}
+	}
+	t.Cleanup(func() { projectRegistryCommitRaceHookForTest = nil })
+
+	project, err := RegisterProject(live)
+	if !flipped {
+		t.Fatalf("fixture never ran the flip; the seam is not on the path to the commit")
+	}
+	if err != nil {
+		if !strings.Contains(err.Error(), "changed repositories") {
+			t.Fatalf("refusing is correct, but the message must say what happened: %v", err)
+		}
+		return
+	}
+	rootRepo, rootErr := RepoFromPath(project.Root)
+	if rootErr != nil {
+		t.Fatalf("RepoFromPath(%s): %v", project.Root, rootErr)
+	}
+	if project.RepoID != rootRepo.ID {
+		t.Fatalf("registration committed root %s (repository %s) with identity %s", project.Root, rootRepo.ID, project.RepoID)
+	}
+}

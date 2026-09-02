@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -26,12 +28,13 @@ type projectPathResolution struct {
 	id         string
 	root       string
 	resolvedAt time.Time
-	// answeredNotARepo records that Git ANSWERED about this path and the
-	// answer was "not a repository" — as against a probe that timed out or
-	// could not run, which leaves this false (#3530 review id 3918120760).
-	// resolvedAt alone cannot tell those apart, and a caller that treats an
-	// unanswered probe as "nothing is there" hands a live repository's
-	// root_agents key to a stale registry row.
+	// answeredNotARepo records a DETERMINATE verdict about this path: git said
+	// it is not inside a repository, or the path is provably gone. A probe that
+	// timed out, could not run, or failed for an operational reason — dubious
+	// ownership, an unreadable .git — leaves this false (#3530 review ids
+	// 3918120760, 3919195017). resolvedAt alone cannot tell those apart, and a
+	// caller that treats any failure as "nothing is there" hands a live
+	// repository's root_agents key to a stale registry row.
 	answeredNotARepo bool
 }
 
@@ -87,11 +90,23 @@ func (m *home) resolveProjectPaths(paths []string) map[string]projectPathResolut
 		go func(path string) {
 			repo, err := config.RepoFromPathContext(ctx, path)
 			if err != nil {
-				// An ANSWER is what a caller may act on; a killed or
-				// abandoned probe is not one. config owns that rule.
+				// A DETERMINATE verdict is what a caller may act on, and
+				// "the probe failed" is not one (#3530 review ids 3918120760,
+				// 3919195017). Two outcomes qualify: git answered that the
+				// path is not inside a repository, or the path is provably
+				// gone. Everything else — a killed probe, dubious ownership,
+				// an unreadable .git, a permission error — leaves a repository
+				// that may well be there, and the daemon will apply a
+				// path-keyed opt-in to whatever IS there.
+				answered := errors.Is(err, config.ErrNotGitRepository)
+				if !answered {
+					if _, statErr := os.Stat(path); statErr != nil && config.PathDeterminatelyAbsent(statErr) {
+						answered = true
+					}
+				}
 				results <- projectPathProbeResult{
 					path:       path,
-					answered:   !config.RepoProbeUnanswered(err),
+					answered:   answered,
 					resolved:   false,
 					resolution: projectPathResolution{},
 				}

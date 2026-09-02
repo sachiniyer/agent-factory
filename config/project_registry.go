@@ -329,6 +329,23 @@ func RegisterProject(path string) (Project, error) {
 		if err != nil {
 			return err
 		}
+		if projectRegistryCommitRaceHookForTest != nil {
+			projectRegistryCommitRaceHookForTest()
+		}
+		// The binding was resolved BEFORE this lock was taken, and a path that
+		// was repointed in between would be committed with the previous
+		// repository's identity and marker (#3530 review id 3919195005) —
+		// permanently, since the one-way writer never replaces it. Re-resolve
+		// immediately before publishing and refuse a disagreement, the same
+		// rule resolveProjectBinding applies to its own two probes. This
+		// narrows the window to the write itself rather than the whole
+		// registry scan; check-then-act cannot close it, and a refusal costs
+		// only a retry.
+		if current, err := RepoFromPath(binding.root); err != nil {
+			return fmt.Errorf("re-check repository identity for %q before registering: %w", binding.root, err)
+		} else if current.ID != binding.repoID {
+			return fmt.Errorf("project path %q changed repositories while af was registering it: it resolved to %s and now resolves to %s — nothing was registered; retry once the path is stable", binding.root, binding.repoID, current.ID)
+		}
 		record := projectRecord{
 			SchemaVersion: projectRegistrySchemaVersion,
 			ID:            projectID,
@@ -920,3 +937,9 @@ func sameProjectPath(left, right string) bool {
 // mount flip or worktree re-point lands inside microseconds, so a test that
 // races it pins nothing.
 var projectBindingIdentityRaceHookForTest func()
+
+// projectRegistryCommitRaceHookForTest, when non-nil, runs inside the
+// registration lock, immediately before the identity re-check that guards the
+// commit. That window — binding resolved, lock taken, record not yet written —
+// is #3530 review id 3919195005's subject, and nothing else can hold it open.
+var projectRegistryCommitRaceHookForTest func()

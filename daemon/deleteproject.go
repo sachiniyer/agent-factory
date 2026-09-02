@@ -366,6 +366,10 @@ func claimantForRecord(p config.Project) string {
 func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deleteProjectTarget, error) {
 	repoID := strings.TrimSpace(req.RepoID)
 	repoPath := strings.TrimSpace(req.RepoPath)
+	// Set by any lookup that actually SELECTED a registry row, which is a
+	// different question from "a path was supplied" (#3530 review id
+	// 3919195012).
+	registeredRootMatched := false
 	if repoID == "" {
 		if repoPath == "" {
 			return deleteProjectTarget{}, fmt.Errorf("delete project: repo_id or repo_path is required")
@@ -393,6 +397,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		if err != nil {
 			return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root from repo_id; nothing was changed: %w", repoID, err)
 		}
+		registeredRootMatched = repoPath != ""
 	} else {
 		// Both selectors must describe one project. Otherwise RepoID chooses the
 		// sessions/root-agent state while RepoPath chooses a potentially different
@@ -416,9 +421,17 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 		}
 		if registeredRoot != "" {
 			repoPath = registeredRoot
+			registeredRootMatched = true
 		}
 	}
 	claimantProjectID := ""
+	// Whether a registry scan actually SELECTED a row, which is the condition
+	// the transition gate is documented to want — path presence is not it
+	// (#3530 review id 3919195012). A two-selector delete can name another
+	// valid workspace of a repository whose unresolved row is mid-transition:
+	// the path is non-empty, no row matches it, and treating that as "a row was
+	// selected" skipped the reverse gate entirely.
+	rowFound := registeredRootMatched
 	if repoPath != "" {
 		if projects, _, _, _, err := config.ListProjectsDetailed(); err == nil {
 			for _, p := range projects {
@@ -429,6 +442,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 				if pathutil.ResolveForCompare(filepath.Clean(p.Root)) != pathutil.ResolveForCompare(filepath.Clean(repoPath)) {
 					continue
 				}
+				rowFound = true
 				claimantProjectID = claimantForRecord(p)
 				if claimantProjectID == "" {
 					// The row matches this path by NAME, but nothing proves the
@@ -464,7 +478,7 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	// the reappearance visible. It narrows the window rather than closing it —
 	// check-then-act is not atomic — and what remains is bounded by the
 	// delete's own fence.
-	if err := m.refuseIfIdentityInTransition(repoID, repoPath != ""); err != nil {
+	if err := m.refuseIfIdentityInTransition(repoID, rowFound); err != nil {
 		return deleteProjectTarget{repoID: repoID}, err
 	}
 	return deleteProjectTarget{
@@ -499,36 +513,60 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// path, which is the collision this change removes — so the honest answer
 	// is to refuse and name the remedy. The overwhelmingly common upgrade case,
 	// a legacy row with no sessions left, is untouched.
-	stranded := []string(nil)
+	// The historical identity a provisional target's recorded path used to
+	// have. Both checks below key on it, and both happen under ONE acquisition
+	// of m.mu together with the fence installation (#3530 review id
+	// 3919194996): checking in one critical section and fencing in another let
+	// a checkout reappear in between, a create reserve under the historical id,
+	// and that create commit after the registry row was removed — because the
+	// fence went on the provisional id alone.
+	fenced := []string{repoID}
+	historical := ""
 	if config.IsDerivedRepoID(repoID) && repoPath != "" {
-		if historical := config.RepoIDFromRoot(filepath.Clean(repoPath)); historical != repoID {
-			m.mu.Lock()
-			stranded = m.repoSessionTitlesLocked(historical, false)
-			m.mu.Unlock()
+		if id := config.RepoIDFromRoot(filepath.Clean(repoPath)); id != repoID {
+			historical = id
+			fenced = append(fenced, id)
 		}
 	}
+
+	m.mu.Lock()
+	// A provisional target reaches nothing by construction, which is the point
+	// — but the row it would still deregister may have LIVE sessions filed
+	// under the historical hash of its recorded path, created while that path
+	// resolved (#3530 review id 3918535480). Deregistering while archiving
+	// nothing leaves them orphaned behind a success. Which project that hash
+	// names cannot be established from here — a stranger may have reused the
+	// path, which is the collision this change removes — so the honest answer
+	// is to refuse and name the remedy. The overwhelmingly common upgrade case,
+	// a legacy row with no sessions left, is untouched.
+	stranded := []string(nil)
+	if historical != "" {
+		stranded = m.repoSessionTitlesLocked(historical, false)
+	}
+	starting := m.repoSessionTitlesLocked(repoID, true)
+	if len(stranded) == 0 && len(starting) == 0 {
+		if m.projectDeletes == nil {
+			m.projectDeletes = make(map[string]struct{})
+		}
+		for _, id := range fenced {
+			m.projectDeletes[id] = struct{}{}
+			m.stampProjectDeleteLocked(id)
+		}
+	}
+	m.mu.Unlock()
 	if len(stranded) > 0 {
 		sort.Strings(stranded)
 		return result, fmt.Errorf("delete project %s: this project was registered before af recorded repository identities, and session(s) %v are still live under the identity its recorded path used to have; deleting now would deregister the project and leave them behind — nothing was changed. Bring the checkout at %s back once so af can record the project's identity, then delete; or archive those sessions first", repoID, stranded, repoPath)
 	}
-
-	m.mu.Lock()
-	starting := m.repoSessionTitlesLocked(repoID, true)
-	if len(starting) == 0 {
-		if m.projectDeletes == nil {
-			m.projectDeletes = make(map[string]struct{})
-		}
-		m.projectDeletes[repoID] = struct{}{}
-		m.stampProjectDeleteLocked(repoID)
-	}
-	m.mu.Unlock()
 	if len(starting) > 0 {
 		sort.Strings(starting)
 		return result, fmt.Errorf("delete project %s: session(s) %v are still starting or changing; nothing was changed — delete again once their operations finish", repoID, starting)
 	}
 	defer func() {
 		m.mu.Lock()
-		delete(m.projectDeletes, repoID)
+		for _, id := range fenced {
+			delete(m.projectDeletes, id)
+		}
 		// Stamp the REMOVE too, not only the install above. A create that began
 		// before this delete did samples a counter value below the install's stamp,
 		// so the install alone already covers it — but a create that began while
@@ -536,7 +574,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 		// nothing move. Stamping here puts the transition after that sample, which
 		// is what makes an in-progress delete visible to a create that could not
 		// have seen its start (#2947).
-		m.stampProjectDeleteLocked(repoID)
+		for _, id := range fenced {
+			m.stampProjectDeleteLocked(id)
+		}
 		m.mu.Unlock()
 	}()
 
