@@ -58,8 +58,9 @@ func TestAutomationsExpandedRowExplainsOverdue(t *testing.T) {
 
 	out := a.View()
 	require.Contains(t, out, "▾[!]  nightly-sweep")
-	assert.Contains(t, out, "last Jun 14 03:00 · overdue · missed 18",
-		"the detail names the silence and its size:\n%s", out)
+	assert.Contains(t, out, "overdue · missed 18 · 0 3 * * *",
+		"the warning leads the detail line, ahead of the task's own configuration, "+
+			"because a narrow rail ellipsizes from the right:\n%s", out)
 }
 
 // TestAutomationsCompactSummaryCountsOverdue: the one-line degraded mode is
@@ -108,4 +109,34 @@ func TestAutomationsSaysWhenATaskIsNotArmed(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "not armed")
 	assert.NotContains(t, out, "next Jul 02 03:00")
+}
+
+// TestAutomationsOverdueSurvivesTheNarrowRail: the rail's minimum is 22 columns
+// and the detail line is ellipsized from the right, so ordering IS the design
+// here — a warning that only fits at 100 columns is not a warning on the rail
+// this pane actually lives in.
+func TestAutomationsOverdueSurvivesTheNarrowRail(t *testing.T) {
+	a := newTestAutomations([]task.Task{overdueStripTask()})
+	a.SetRect(layout.Rect{W: 30, H: 4})
+	a.Focus()
+
+	out := a.View()
+	assert.Contains(t, out, "overdue",
+		"the warning must survive the ellipsis at the rail's narrow end:\n%s", out)
+}
+
+// TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum: the compact mode
+// has no rows, so this one line is the entire section — and it is also the
+// narrowest thing the rail ever draws. At 22 columns the section label itself
+// does not fit; the count has to survive where it does not, or the degraded rail
+// shows no warning at all.
+func TestAutomationsCompactSummaryKeepsTheCountAtTheRailMinimum(t *testing.T) {
+	a := newTestAutomations([]task.Task{overdueStripTask(), stripTasks()[1]})
+	a.SetRect(layout.Rect{W: 22, H: 1})
+	a.SetCompact(true)
+
+	out := a.View()
+	requireExactRect(t, out, layout.Rect{W: 22, H: 1}, "compact strip at the rail minimum")
+	assert.Contains(t, out, "1 overdue", "the count outranks the section label here:\n%s", out)
+	assert.Contains(t, out, "manage", "and the manager key is still the last thing cut")
 }

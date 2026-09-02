@@ -233,13 +233,6 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 	if tsk.LastRunAt != nil {
 		parts = append(parts, "last "+tsk.LastRunAt.Format("Jan 02 15:04"))
 	}
-	if tsk.Overdue {
-		overdue := "overdue"
-		if tsk.MissedOccurrences > 0 {
-			overdue = fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
-		}
-		parts = append(parts, overdue)
-	}
 	// An errored task says so even with no LastRunAt. A task refused at arming
 	// has never run, so gating this on a timestamp would hide the one thing it
 	// has to report — and an unarmed task is exactly the one that looks healthy
@@ -302,6 +295,13 @@ func (a *AutomationsPane) titleRow(tsk task.Task, expanded bool) string {
 // that used to trail every collapsed row (#1126). Empty when a task has neither.
 func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 	var parts []string
+	// An overdue task leads with the problem, ahead of its own configuration
+	// (#3623). The rail is narrow and this line is ellipsized to fit, so whatever
+	// sits last is what gets cut: at the 22-column minimum the cron expression
+	// would survive and the warning would not, which is backwards.
+	if tsk.Overdue {
+		parts = append(parts, overdueFragment(tsk))
+	}
 	trigger := tsk.CronExpr
 	if tsk.IsWatch() {
 		trigger = "watch: " + tsk.WatchCmd
@@ -313,6 +313,16 @@ func (a *AutomationsPane) rowDetail(tsk task.Task) string {
 		parts = append(parts, next)
 	}
 	return strings.Join(parts, " · ")
+}
+
+// overdueFragment is the detail line's warning text. The missed count is omitted
+// rather than printed as zero when the walk found none — a saturated or
+// uncounted "missed 0" beside "overdue" reads as a contradiction.
+func overdueFragment(tsk task.Task) string {
+	if tsk.MissedOccurrences <= 0 {
+		return "overdue"
+	}
+	return fmt.Sprintf("overdue · missed %d", tsk.MissedOccurrences)
 }
 
 // detailRow renders the expanded row's detail as a dim line indented under the

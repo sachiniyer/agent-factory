@@ -146,3 +146,20 @@ func TestTasksShowCmd_ReadsTheStoreAndScopes(t *testing.T) {
 	assert.Contains(t, got, "unknown — no running daemon answered",
 		"and it does not invent an arming observation it never made")
 }
+
+// TestTasksShow_InvalidExpressionIsNotOnSchedule: nothing can be derived from an
+// expression with no occurrences, and reporting the absence of a verdict as
+// "on schedule" would put a reassuring line directly above the arming line
+// saying the daemon refused to schedule it.
+func TestTasksShow_InvalidExpressionIsNotOnSchedule(t *testing.T) {
+	tsk := showFixture()
+	tsk.CronExpr = "99 * * * *"
+	tsk.Overdue, tsk.MissedOccurrences = false, 0
+
+	var out bytes.Buffer
+	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 14, 20, 12, 0, time.Local))
+	got := out.String()
+
+	assert.Contains(t, got, "cron expression is invalid, so nothing is scheduled")
+	assert.NotContains(t, got, "on schedule")
+}

@@ -172,6 +172,15 @@ func describeScheduleHealth(t task.Task, now time.Time) string {
 	if t.IsWatch() {
 		return ""
 	}
+	if t.CronExpr != "" {
+		if _, err := task.ParseCron(t.CronExpr); err != nil {
+			// Say so rather than falling through to "on schedule". Nothing can be
+			// derived from an expression with no occurrences, and a task the
+			// scheduler refuses to parse is the opposite of healthy — it is also
+			// exactly why the arming line above reads "not armed".
+			return "cron expression is invalid, so nothing is scheduled: " + err.Error()
+		}
+	}
 	health := task.DeriveScheduleHealth(t, now)
 	if !health.Overdue {
 		if !t.Enabled || t.CronExpr == "" {

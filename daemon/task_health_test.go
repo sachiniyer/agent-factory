@@ -157,10 +157,12 @@ func TestControlUpdateTask_RecordsTheDisableAndItsSurface(t *testing.T) {
 
 	stored, err := task.GetTask("aaaa1006")
 	require.NoError(t, err)
-	require.Len(t, stored.Audit, 1, "the pre-existing task had no trail; the disable starts one")
-	assert.Equal(t, task.AuditDisabled, stored.Audit[0].Action)
-	assert.Equal(t, task.ActorTUI, stored.Audit[0].Actor)
-	assert.Equal(t, []string{"enabled"}, stored.Audit[0].Fields)
+	// The seed's own create is entry 0, recorded as unknown because task.AddTask
+	// declares no surface; the disable is what this test is about.
+	require.Len(t, stored.Audit, 2)
+	assert.Equal(t, task.AuditDisabled, stored.Audit[1].Action)
+	assert.Equal(t, task.ActorTUI, stored.Audit[1].Actor)
+	assert.Equal(t, []string{"enabled"}, stored.Audit[1].Fields)
 
 	// And the response proves the disarm actually took effect rather than
 	// asserting that it should have.
