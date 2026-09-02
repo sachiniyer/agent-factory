@@ -34,11 +34,13 @@ type InstanceData struct {
 	// Status is the legacy single-axis status int (#1195). Still written for one
 	// release for rollback safety and read as the fallback source for records
 	// that predate the `liveness` field. New code should read Liveness.
+	// The wire names its integer as `status_name` (session/state_names.go).
 	Status Status `json:"status"`
 	// Liveness is the daemon-owned health axis (#1195), the new canonical
 	// persisted state. omitempty + additive: records written before #1195 have
 	// no `liveness` key and decode to LivenessUnset, signaling FromInstanceData
-	// to fall back to the legacy `status` int (rollforward).
+	// to fall back to the legacy `status` int (rollforward). The wire names it as
+	// `liveness_name`, applying that same fallback (session/state_names.go).
 	Liveness Liveness `json:"liveness,omitempty"`
 	// InFlightOp is the transient operation axis (#1195/#1436) carried by the
 	// daemon Snapshot so secondary TUIs can reconstruct non-round-trippable ops
@@ -552,8 +554,9 @@ type TabData struct {
 	// omitempty + additive, mirroring the InstanceData.ID / BranchCreatedByUs
 	// rollforward precedent: a record written before #1738 has no id, and
 	// restoreLocalTabs backfills a fresh one on load.
-	ID       string  `json:"id,omitempty"`
-	Name     string  `json:"name"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name"`
+	// The wire names it as `kind_name`, the word `tab_kinds[].kind` uses too.
 	Kind     TabKind `json:"kind"`
 	Command  string  `json:"command,omitempty"`
 	TmuxName string  `json:"tmux_name,omitempty"`

@@ -181,5 +181,5 @@ func processTabBaseName(requestedName, command string) string {
 			return base
 		}
 	}
-	return "process"
+	return processTabName
 }

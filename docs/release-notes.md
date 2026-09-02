@@ -1,5 +1,23 @@
 # Release Notes
 
+## `af sessions list` now tells you what its numbers mean
+
+- **Three new string fields, and nothing removed.** Every session carries
+  `status_name` and `liveness_name` beside `status`/`liveness`, and every tab
+  carries `kind_name` beside `kind`. The integers keep their type and value, so
+  no existing script changes.
+- **They are the words `--status` accepts.** `af sessions list --status ready`
+  documented six lifecycle names that appeared nowhere in the output, so mapping
+  a listed session back to a filter value meant hardcoding enum numbers no
+  document defined. Now you list, read the row's own `liveness_name`, and filter
+  on it.
+- **`tabs[].kind_name` spells what `tab_kinds[].kind` already spelled.** One
+  payload used to say `kind: 0` in one array and `kind: "shell"` in the next.
+- One caveat worth knowing: `status` is the older single-axis value and cannot
+  express a usage-limit wall — such a session reports `status_name: "ready"`
+  while `liveness_name` says `limit-reached`. **Branch on `liveness_name`.** See
+  [HTTP API → session state names](http-api.md#session-state-names).
+
 ## A remote hook can return an ssh host instead of an endpoint
 
 - **New `remote_hooks.provision_cmd`.** Your script makes a machine and prints

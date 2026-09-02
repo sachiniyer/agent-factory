@@ -778,7 +778,16 @@ func init() {
 	// opt-in to global breadth, matching `tasks list` (#2089).
 	sessionsListCmd.Flags().BoolVar(&sessionsListAllFlag, "all", false, "List sessions across every project instead of only the current one")
 	sessionsListCmd.Flags().BoolVar(&sessionsListLiveFlag, "live", false, "Exclude archived sessions")
-	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil, "Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached)")
+	// The vocabulary comes from session's canonical Liveness ↔ name table, which
+	// is also what every row's `liveness_name` is spelled from (#3631) — so the
+	// help can never advertise a word the payload does not report, or miss one it
+	// does. It names liveness_name and NOT status_name deliberately: status_name
+	// spells the legacy axis, which has no word for loading/deleting and reads
+	// `ready` for a limit-reached row, so pointing users at it here would send
+	// them to a filter value that selects a different set of rows than they read.
+	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil,
+		fmt.Sprintf("Filter by lifecycle status; repeat for more than one (%s). Matches each row's liveness_name; status_name names the legacy status integer and is not a filter value",
+			strings.Join(session.LivenessNameList(), ", ")))
 	sessionsListCmd.Flags().DurationVar(&sessionsListMaxAgeFlag, "max-age", 0, "Only list sessions created within this duration (for example 24h)")
 	sessionsListCmd.Flags().IntVar(&sessionsListLimitFlag, "limit", 0, "Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded)")
 
