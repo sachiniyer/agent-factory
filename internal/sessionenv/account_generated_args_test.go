@@ -347,20 +347,24 @@ func TestGenerateAccountLaunchProof_ExecPrefixWithAbsolutePath(t *testing.T) {
 		GeneratedArgs:     proof.GeneratedArgs,
 	}), "validation strips exec the same way, so the producer/conducer pair must agree")
 
-	// `exec --` separates the builtin's options from the executable; the
-	// consumer strips both, so the proof must too.
+	// The `--` separator is the one exec form that declares nothing. It was
+	// accepted here at first, on the reasoning that the consumer stripped it too —
+	// but agreeing about a command neither side can launch is not agreement. dash
+	// gives its exec builtin no options and takes `--` as the command name, so
+	// /bin/sh -c on Debian and Ubuntu exits 127 with `exec: --: not found`: the
+	// very failure this proof exists to prevent (#3557).
 	dashBase := "exec -- " + executable + " --dangerously-skip-permissions"
 	dashFinal := dashBase + " --session-id " + genSessionID
-	dashProof, ok := GenerateAccountLaunchProof(dashBase, dashFinal, []string{"--dangerously-skip-permissions"})
-	require.True(t, ok)
-	require.Equal(t, executable, dashProof.TrustedExecutable,
-		"exec -- must also be stripped before extracting TrustedExecutable")
-	require.NoError(t, ValidateAccountCommand(dashFinal, Account{
+	_, ok = GenerateAccountLaunchProof(dashBase, dashFinal, []string{"--dangerously-skip-permissions"})
+	require.False(t, ok, "an exec -- base declares nothing: no /bin/sh answer is portable")
+	err := ValidateAccountCommand(dashFinal, Account{
 		Agent:             "claude",
 		Name:              "work",
-		TrustedExecutable: dashProof.TrustedExecutable,
-		GeneratedArgs:     dashProof.GeneratedArgs,
-	}), "exec -- must tokenize the same way on both sides")
+		TrustedExecutable: executable,
+		GeneratedArgs:     []string{"--dangerously-skip-permissions", "--session-id", genSessionID},
+	})
+	require.Error(t, err, "exec -- must be refused on both sides, not accepted on both")
+	require.Contains(t, err.Error(), "dash", "the refusal names the shell that refuses the command")
 }
 
 // Stripping the prefix widens executable provenance only for an ABSOLUTE path,
