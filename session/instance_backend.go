@@ -58,34 +58,34 @@ type runtimeLiveBoundary struct {
 
 // Recover re-establishes a Lost instance's backing session (#1108).
 func (i *Instance) Recover() error {
-	return i.RecoverWithLiveBoundary(nil)
+	return i.RecoverFencedWithLiveBoundary(nil)
 }
 
-// RecoverWithLiveBoundary is Recover with a callback at the replacement's
-// ConfirmLive edge. It exists for lifecycle facts that must be settled after a
-// backend has successfully created the runtime but before the restore fence is
-// dropped. The callback cannot veto recovery: settlement failures remain owed
-// for retry, and a full disk must not turn a running replacement back into Lost.
-func (i *Instance) RecoverWithLiveBoundary(beforeLive func()) error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
-		return fmt.Errorf("recover: %w", err)
-	}
-	return i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
-}
-
-// RecoverFencedWithLiveBoundary is RecoverWithLiveBoundary with an
-// OpRestoring fence for the duration of the recovery. It validates first
-// (requires OpNone), then raises MarkRestoring so clients see the operation
-// and hide Kill, runs the backend, and lowers the fence with ClearOp on
-// failure (ConfirmLive clears it on success). The manual Lost/Dead restore
-// path uses this to close the asymmetry where the archived-restore path
-// projects OpRestoring via BeginRestore but the lost-restore path did not.
+// RecoverFencedWithLiveBoundary re-establishes a Lost instance's backing session
+// under an OpRestoring fence, with an optional callback at the replacement's
+// ConfirmLive edge.
+//
+// The callback exists for lifecycle facts that must be settled after a backend
+// has successfully created the runtime but before the restore fence is dropped.
+// It cannot veto recovery: settlement failures remain owed for retry, and a full
+// disk must not turn a running replacement back into Lost.
+//
+// The fence is raised for the whole backend call so clients see the operation
+// and hide Kill, and so the status poll — which skips any session with an op in
+// flight — cannot read the teardown this call is performing as an independent
+// death. ConfirmLive clears it on success; the failure path lowers it with
+// ClearOp. It closes the asymmetry where the archived-restore path projects
+// OpRestoring via BeginRestore but the lost-restore path did not.
+//
+// There is deliberately no unfenced variant (#3555). Both entry points — the
+// manual Lost/Dead restore RPC and the daemon's automatic Lost-restore loop —
+// come through here, because neither caller raises a lifecycle fence of its own
+// and the automatic loop's only other protection is that it happens to run on
+// the poll goroutine. A precondition that holds because of where its caller runs
+// is not a precondition the next caller inherits.
 func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
-	if err := i.ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
-		return fmt.Errorf("recover: %w", err)
-	}
-	if err := i.Transition(MarkRestoring()); err != nil {
-		return fmt.Errorf("recover: raise restore fence: %w", err)
+	if err := i.beginRecoverFence(); err != nil {
+		return err
 	}
 	err := i.withLiveBoundary(beforeLive, func() error { return i.currentBackend().Recover(i) })
 	if err != nil {
@@ -94,6 +94,33 @@ func (i *Instance) RecoverFencedWithLiveBoundary(beforeLive func()) error {
 		_ = i.Transition(ClearOp())
 	}
 	return err
+}
+
+// beginRecoverFence validates the recover precondition and raises the restore
+// fence in ONE critical section (#3555, the same defect #2997 fixed in
+// BeginLimitResume next door).
+//
+// Splitting them is its own race, and the epoch guard cannot cover it: an
+// observation landing in the gap is CURRENT, not stale, so nothing drops it, and
+// tkMarkRestoring is keyed on the op axis alone — it would happily fence a
+// liveness that had just been clobbered. Recovery would then run against a
+// session that is no longer lost, which on a remote backend means replacing a
+// sandbox that had just become reachable again and stranding its unpushed work.
+//
+// Under one lock there are only two arrivals: an observation applied before the
+// critical section, which validation sees and refuses, and one blocked until
+// after the raise, which the epoch guard drops as superseded. See
+// lifecycleViewLocked, which documents this as the pattern.
+func (i *Instance) beginRecoverFence() error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionRecoverLost); err != nil {
+		return fmt.Errorf("recover: %w", err)
+	}
+	if err := i.transitionLocked(MarkRestoring()); err != nil {
+		return fmt.Errorf("recover: raise restore fence: %w", err)
+	}
+	return nil
 }
 
 func (i *Instance) withLiveBoundary(beforeLive func(), run func() error) error {
@@ -202,7 +229,7 @@ func (i *Instance) Respawn() error {
 }
 
 // RespawnWithLiveBoundary is Respawn with the same pre-ConfirmLive callback as
-// RecoverWithLiveBoundary. Limit recovery uses it to retire facts owned by the
+// RecoverFencedWithLiveBoundary. Limit recovery uses it to retire facts owned by the
 // exited, limit-blocked process before its replacement becomes visible.
 func (i *Instance) RespawnWithLiveBoundary(beforeLive func()) error {
 	if op := i.GetInFlightOp(); op != OpRespawning {

@@ -452,7 +452,12 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	// a failed recovery leaves its evidence intact, but before the backend can
 	// lower the restore fence and expose the replacement. A failed write remains
 	// owed and does not veto a replacement that is already running (#2883).
-	if err := inst.RecoverWithLiveBoundary(func() {
+	//
+	// The same fenced entry point the manual restore RPC uses (#3555). This loop
+	// raises no lifecycle fence of its own — the op-lock above serializes daemon
+	// operations, not the status poll, which skips on the op AXIS — so the fence
+	// has to come from the recovery itself.
+	if err := inst.RecoverFencedWithLiveBoundary(func() {
 		if perr := m.prepareRuntimeReplacement(repoID, key, inst); perr != nil {
 			log.WarningLog.Printf("restore of %q reached its live boundary before predecessor evidence was durable: %v", inst.Title, perr)
 		}
