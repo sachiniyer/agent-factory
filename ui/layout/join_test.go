@@ -1,6 +1,7 @@
 package layout
 
 import (
+	"math/rand"
 	"strings"
 	"testing"
 
@@ -22,6 +23,7 @@ func TestJoinsMatchLipglossOnPlainBlocks(t *testing.T) {
 		{"equal heights", []string{rail, pane}},
 		{"ragged heights", []string{rail, short, pane}},
 		{"single block", []string{rail}},
+		{"single RAGGED block", []string{short}},
 		{"with an empty block", []string{rail, "", pane}},
 		{"styled", []string{"\x1b[31mred!\x1b[0m\nblue", pane}},
 	} {
@@ -36,6 +38,7 @@ func TestJoinsMatchLipglossOnPlainBlocks(t *testing.T) {
 		{"stacked rail", []string{rail, "────", short}},
 		{"frame plus bar", []string{rail, bar}},
 		{"single block", []string{rail}},
+		{"single RAGGED block", []string{short}},
 	} {
 		if got, want := JoinVertical(c.blocks...), lipgloss.JoinVertical(lipgloss.Left, c.blocks...); got != want {
 			t.Errorf("%s: JoinVertical = %q, lipgloss = %q", c.name, got, want)
@@ -113,5 +116,48 @@ func TestJoinHorizontalKeepsColumnsAligned(t *testing.T) {
 	}
 	if lines[2] != "ccc"+" "+"  " {
 		t.Errorf("short columns must fill with blanks, got %q", lines[2])
+	}
+}
+
+// The differential that actually found something. The hand-written cases above
+// were written by the same person who wrote the code, and they missed a real
+// divergence for the oldest reason: the "single block" case used equal-width
+// lines, so the padding under test was a no-op and it passed.
+//
+// lipgloss short-circuits a lone block and returns it untouched. This padded its
+// lines out to the widest, so a RAGGED single block came back padded here and
+// unpadded there — invisible in the app today, since every seam in home_view
+// joins at least two blocks, but a divergence on precisely the path where these
+// helpers are supposed to be invisible.
+//
+// Randomised over the alphabet the frame is actually built from, because the
+// content that breaks a width helper is never the content you think to type.
+func TestJoinsMatchLipglossOverRandomPlainBlocks(t *testing.T) {
+	alphabet := []string{"a", "b", "z", " ", "你", "─", "│", "▸", "\x1b[31mr\x1b[0m", "…", "é", "한"}
+	rng := rand.New(rand.NewSource(20260902))
+
+	block := func() string {
+		lines := make([]string, rng.Intn(4)+1)
+		for i := range lines {
+			var b strings.Builder
+			for j := 0; j < rng.Intn(8); j++ {
+				b.WriteString(alphabet[rng.Intn(len(alphabet))])
+			}
+			lines[i] = b.String()
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	for iter := 0; iter < 5000; iter++ {
+		blocks := make([]string, rng.Intn(3)+1)
+		for i := range blocks {
+			blocks[i] = block()
+		}
+		if got, want := JoinHorizontal(blocks...), lipgloss.JoinHorizontal(lipgloss.Top, blocks...); got != want {
+			t.Fatalf("JoinHorizontal diverged for %q:\n got  %q\n want %q", blocks, got, want)
+		}
+		if got, want := JoinVertical(blocks...), lipgloss.JoinVertical(lipgloss.Left, blocks...); got != want {
+			t.Fatalf("JoinVertical diverged for %q:\n got  %q\n want %q", blocks, got, want)
+		}
 	}
 }

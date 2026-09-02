@@ -330,3 +330,43 @@ func TestDetectionCoversEmojiClustersAndNotOrdinaryScripts(t *testing.T) {
 		}
 	}
 }
+
+// The bound must never be BELOW Cells — swept over every scalar value, and over
+// every plausible cluster built from the disagreement carriers.
+//
+// This is what makes the contract measure safe to switch on. contractCells picks
+// CellsUpperBound for an unreliable row and Cells for every other, and if the
+// bound could come in under Cells for some input then flipping that switch would
+// make a row NARROWER, truncating content that fits — the harm #3610 measured,
+// arriving through the back door. Being a max() makes it true by construction;
+// the sweep is here because "by construction" is a claim about code that can be
+// edited, and 1.1M scalar values cost a second to check.
+//
+// It does NOT show that the bound beats what a TERMINAL advances. Nothing in this
+// tree can: that is a measurement against a real tmux, and the corpus in
+// TestCellsUpperBoundNeverUnderReportsTmux is the whole of what has been made.
+func TestCellsUpperBoundIsNeverBelowCells(t *testing.T) {
+	for r := rune(0); r < 0x110000; r++ {
+		if r >= 0xD800 && r <= 0xDFFF { // surrogates are not scalar values
+			continue
+		}
+		s := string(r)
+		if got, floor := CellsUpperBound(s), Cells(s); got < floor {
+			t.Fatalf("U+%04X: CellsUpperBound = %d, below Cells = %d — switching a row onto "+
+				"the bound would make it NARROWER and truncate content that fits", r, got, floor)
+		}
+	}
+	// And in clusters, where a per-rune bound could still lose to a cluster measure.
+	for _, carrier := range []rune{'\u200d', '\ufe0f', '\U0001F3FB', '\U000E0067'} {
+		for r := rune(0x2000); r < 0x1FB00; r++ {
+			if r >= 0xD800 && r <= 0xDFFF {
+				continue
+			}
+			s := string(r) + string(carrier) + string(r)
+			if got, floor := CellsUpperBound(s), Cells(s); got < floor {
+				t.Fatalf("U+%04X + U+%04X: CellsUpperBound = %d, below Cells = %d",
+					r, carrier, got, floor)
+			}
+		}
+	}
+}

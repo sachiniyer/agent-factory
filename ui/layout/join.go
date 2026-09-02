@@ -34,6 +34,16 @@ import "strings"
 // JoinVertical stacks blocks top to bottom, left-aligned, padding every line out
 // to the widest line across all of them in the contract measure.
 func JoinVertical(blocks ...string) string {
+	// One block is already its own frame: there is nothing to align it WITH, so
+	// it goes back untouched. lipgloss short-circuits the same way, and matching
+	// it is the point — a ragged single block would otherwise come back padded
+	// here and unpadded there, which is a divergence on the one path where these
+	// helpers are supposed to be invisible. (Found by a randomised differential;
+	// the hand-written single-block case used equal-width lines, so padding was a
+	// no-op and it passed.)
+	if len(blocks) < 2 {
+		return firstOrEmpty(blocks)
+	}
 	var lines []string
 	width := 0
 	for _, b := range blocks {
@@ -55,8 +65,9 @@ func JoinVertical(blocks ...string) string {
 // tallest is filled out with blank rows of that width, so every column starts at
 // the same screen coordinate on every row.
 func JoinHorizontal(blocks ...string) string {
-	if len(blocks) == 0 {
-		return ""
+	// One block is already its own frame — see JoinVertical.
+	if len(blocks) < 2 {
+		return firstOrEmpty(blocks)
 	}
 	cols := make([][]string, len(blocks))
 	widths := make([]int, len(blocks))
@@ -89,4 +100,11 @@ func JoinHorizontal(blocks ...string) string {
 		rows[y] = b.String()
 	}
 	return strings.Join(rows, "\n")
+}
+
+func firstOrEmpty(blocks []string) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	return blocks[0]
 }
