@@ -156,14 +156,145 @@ var accountCredentialNames = map[string]map[string]struct{}{
 	"codex": nameSet(
 		"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
 	),
-	// Both are read by the CLI as an identity that outranks the config
-	// directory, so both must be subtracted (#3387). GOOGLE_APPLICATION_CREDENTIALS
-	// is NOT here on purpose: it is not on gemini's unconditional allowlist at
-	// all — it is admitted only behind a cloud-mode selector (#2462), and an
-	// active selector makes ApplyAccount REFUSE rather than scope.
+	// All three are read by the CLI as an identity that outranks the config
+	// directory, so all three must be subtracted (#3387).
+	//
+	// GOOGLE_APPLICATION_CREDENTIALS was left OUT of this set when the roster
+	// entry landed, on the reasoning that it is not on gemini's unconditional
+	// allowlist — it is admitted only behind a cloud-mode selector (#2462), and an
+	// active selector makes ApplyAccount refuse rather than scope. Measurement
+	// falsified that: the allowlist governs what af PASSES, and gemini has a second
+	// environment source af does not filter. With the account selecting
+	// oauth-personal and a repository `.env` naming GOOGLE_APPLICATION_CREDENTIALS
+	// and nothing else, gemini 0.51.0 signed a JWT with that service-account key —
+	// no selector anywhere. So it is an identity for this agent whatever admitted
+	// it, and accountLateEnvironmentNames is what keeps a late source from putting
+	// it back (#3609 review).
 	"gemini": nameSet(
-		"GEMINI_API_KEY", "GOOGLE_API_KEY",
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
 	),
+}
+
+// accountLateEnvironmentNames are the identity names af must leave DEFINED AND
+// EMPTY rather than merely remove, because the agent's own CLI reads a
+// REPOSITORY-CONTROLLED environment file after af's boundary has installed the
+// session environment.
+//
+// Subtraction is the whole point of ApplyAccount, and for claude and codex it is
+// enough: nothing else writes to the process environment between the boundary and
+// the agent. gemini is different. It walks up from the workspace looking for
+// `<dir>/.gemini/.env` and `<dir>/.env` at every level, falling back to the same
+// two under its home, and applies what it finds — so a checked-in `.env` recreates
+// exactly the names this package just removed, and the session then authenticates
+// as the repository while every visible signal reports the selected account.
+//
+// Measured against gemini 0.51.0 under a throwaway HOME (#3609 review). With a
+// repository `.env` naming GEMINI_API_KEY and GOOGLE_API_KEY and neither name in
+// the process environment, the CLI announced "Both GOOGLE_API_KEY and
+// GEMINI_API_KEY are set. Using GOOGLE_API_KEY." and sent a real request that came
+// back `400 API key not valid` — the project's key, used. With both names present
+// but EMPTY, the same run was byte-identical to a run in a directory with no
+// `.env` at all: the CLI reported no auth method. That is the loader's rule —
+// it assigns only when the name is not already an own property of the environment,
+// and an empty string is one.
+//
+// The alternatives were measured and rejected rather than assumed:
+//
+//   - `--ignore-env` is read straight from argv by the loader but is not a
+//     declared flag, so yargs exits first with "Unknown arguments: ignore-env".
+//   - `advanced.ignoreLocalEnv` in the account's settings blocks `<dir>/.env` but
+//     NOT `<dir>/.gemini/.env`, and a workspace `.gemini/settings.json` setting it
+//     back to false wins — the repository being defended against writes the
+//     setting.
+//   - `advanced.excludedEnvVars` has the same `.gemini/.env` blind spot, by
+//     construction: the loader skips the exclusion list for that path.
+//
+// Only the empty value covers every location, and it cannot be overridden by the
+// repository at all. It also does not divert the account: with an account whose
+// settings select oauth-personal, empty values produced exactly the behaviour of
+// the names being absent.
+//
+// The two cloud-mode selectors are in the set for the same measured reason. A
+// `.env` setting GOOGLE_GENAI_USE_VERTEXAI=true moved the session onto Vertex and
+// the project named beside it; pinned empty, it did not. An operator's selector is
+// still answered by the refusal above rather than by this, because that one is in
+// the process environment where ApplyAccount can see it — this only stops a
+// repository from turning a cloud mode on after the fact.
+//
+// An empty value is what the docker backend has always installed (`-e NAME=`),
+// so this brings the local shim's boundary into line with the container's rather
+// than inventing a shape.
+var accountLateEnvironmentNames = map[string]map[string]struct{}{
+	"gemini": nameSet(
+		"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
+	),
+}
+
+// accountLaunchProvenAgents answers a DIFFERENT question from accountConfigVars,
+// and the two must not be collapsed.
+//
+// accountConfigVars answers "does this agent have a credential-root variable af
+// can point at an account directory" — measured per agent, and true for gemini.
+// This answers "has anyone verified that the account boundary can PROVE how af
+// launches this agent", which is about af's own command rewriting, not the
+// agent's environment. claude is here because the launcher declares its
+// `--session-id`/`--plugin-dir` rewrite as GeneratedArgs, so the rewritten command
+// is provable rather than refused (#3083); codex is here because af leaves its
+// command unmodified.
+//
+// Keeping them separate is what makes a newly rostered agent fail CLOSED at the
+// launch boundary until someone checks the second question (#3051, #3083). What
+// changed in #3609 is only where the list lives: session's launch gate used to
+// keep its own copy, so `af accounts add gemini work` could succeed while
+// `--account work` answered "supported: claude, codex" — a statement the roster
+// had just made false. One list, read by every surface, cannot say two things.
+var accountLaunchProvenAgents = nameSet("claude", "codex")
+
+// accountLaunchProofIssueURL is the follow-up that removes the registration-only
+// state for gemini. It is a URL rather than a bare issue number because these
+// messages reach operators outside this repository, for whom "#3639" resolves to
+// nothing.
+const accountLaunchProofIssueURL = "https://github.com/sachiniyer/agent-factory/issues/3639"
+
+// AccountLaunchProven reports whether af has established that the account
+// boundary can verify how this agent launches. An agent that supports accounts
+// but is not launch-proven can be registered and logged in; a session cannot be
+// scoped to it yet.
+func AccountLaunchProven(agent string) bool {
+	_, ok := accountLaunchProvenAgents[agent]
+	return ok
+}
+
+// AccountRegistrationOnly reports an agent that is on the account roster but
+// whose sessions cannot yet be scoped to an account.
+func AccountRegistrationOnly(agent string) bool {
+	_, supported := SupportsAccounts(agent)
+	return supported && !AccountLaunchProven(agent)
+}
+
+// AccountRegistrationOnlyMarker is the short form, for a listing column.
+const AccountRegistrationOnlyMarker = "registration only"
+
+// AccountRegistrationOnlyReason is the ONE sentence every surface says about a
+// registration-only agent — `af accounts add`, `af accounts list` and the launch
+// refusal all embed this clause, so none of them can describe the state
+// differently from the others. It carries no leading capital, so a caller can
+// frame it, and it ENDS IN A URL, so a caller must not append punctuation: a
+// period fused to the link is one a terminal hands over as part of the address.
+//
+// The second return is false for an agent that is not registration-only, so a
+// caller cannot print the notice for claude or codex by forgetting to check.
+func AccountRegistrationOnlyReason(agent string) (string, bool) {
+	if !AccountRegistrationOnly(agent) {
+		return "", false
+	}
+	return fmt.Sprintf(
+		"a session cannot be scoped to a %s account yet — af has not verified that the account boundary can "+
+			"prove how it launches %s, so --account refuses rather than risk starting the session on the "+
+			"ambient identity while reporting the account you asked for. Registering and logging in work "+
+			"today, and the launch proof is tracked at %s",
+		agent, agent, accountLaunchProofIssueURL), true
 }
 
 // SupportsAccounts reports whether an agent can be account-scoped, and the
@@ -173,8 +304,9 @@ func SupportsAccounts(agent string) (string, bool) {
 	return v, ok
 }
 
-// AccountAgents lists the agents that support account scoping, for help text and
-// for an error that can name the alternatives.
+// AccountAgents lists the agents that support account scoping, sorted. These are
+// bare names, for a caller that iterates them; a caller writing a SENTENCE wants
+// AccountAgentsSummary, which marks the ones a session cannot be scoped to yet.
 func AccountAgents() []string {
 	out := make([]string, 0, len(accountConfigVars))
 	for agent := range accountConfigVars {
@@ -184,9 +316,26 @@ func AccountAgents() []string {
 	return out
 }
 
+// AccountAgentsSummary names the account-scoped agents for a message, marking
+// each registration-only one.
+//
+// Every "supported: …" list a user reads comes from here. A bare join said
+// "supported: claude, codex, gemini" while `--account` refused gemini outright,
+// which is the same contradiction from the other side (#3609 review).
+func AccountAgentsSummary() string {
+	agents := AccountAgents()
+	for idx, agent := range agents {
+		if AccountRegistrationOnly(agent) {
+			agents[idx] = agent + " (" + AccountRegistrationOnlyMarker + ")"
+		}
+	}
+	return strings.Join(agents, ", ")
+}
+
 // AccountIdentityNames lists every environment variable whose value can select
-// an identity instead of the named account: the agent's credential variables
-// and its credential-root variable. Provisioners use the same classification as
+// an identity instead of the named account: the agent's credential variables,
+// its credential-root variable, and anything its own late environment source
+// could use to reintroduce one. Provisioners use the same classification as
 // ApplyAccount so a remote/container launch cannot drift from the local shim's
 // account boundary.
 func AccountIdentityNames(agent string) []string {
@@ -195,8 +344,28 @@ func AccountIdentityNames(agent string) []string {
 		return nil
 	}
 	denied := accountScopedNames(agent, configVar)
+	for name := range accountLateEnvironmentNames[agent] {
+		denied[name] = struct{}{}
+	}
 	out := make([]string, 0, len(denied))
 	for name := range denied {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// accountPinnedEmptyNames is the sorted set ApplyAccount installs as empty
+// values, never the config variable itself — that one is injected with the
+// account directory, and an empty copy of it would erase the selection this
+// function exists to make.
+func accountPinnedEmptyNames(agent, configVar string) []string {
+	pinned := accountLateEnvironmentNames[agent]
+	out := make([]string, 0, len(pinned))
+	for name := range pinned {
+		if name == configVar {
+			continue
+		}
 		out = append(out, name)
 	}
 	sort.Strings(out)
@@ -246,7 +415,7 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	if !ok {
 		return nil, fmt.Errorf(
 			"agent %q does not support multiple accounts; supported: %s",
-			account.Agent, strings.Join(AccountAgents(), ", "))
+			account.Agent, AccountAgentsSummary())
 	}
 	if strings.TrimSpace(account.Dir) == "" {
 		return nil, fmt.Errorf("account %q for agent %q has no credential directory",
@@ -292,7 +461,11 @@ func applyAccount(env []string, command string, account Account, validateCommand
 	}
 
 	denied := accountScopedNames(account.Agent, configVar)
-	out := make([]string, 0, len(env)+1)
+	pinned := accountPinnedEmptyNames(account.Agent, configVar)
+	for _, name := range pinned {
+		denied[name] = struct{}{}
+	}
+	out := make([]string, 0, len(env)+len(pinned)+1)
 	for _, kv := range env {
 		name, _, found := strings.Cut(kv, "=")
 		if !found {
@@ -302,6 +475,16 @@ func applyAccount(env []string, command string, account Account, validateCommand
 			continue
 		}
 		out = append(out, kv)
+	}
+	// DEFINED AND EMPTY, not absent. The agent's own late environment source only
+	// assigns a name it does not already find, so an empty value is what holds a
+	// repository `.env` off the identity this session was scoped to — removal
+	// alone leaves the name free for that file to claim. Nothing here is a
+	// credential: every pinned name is one accountLateEnvironmentNames measured as
+	// identity-bearing for this agent, and the account directory injected below is
+	// what the session actually authenticates with.
+	for _, name := range pinned {
+		out = append(out, name+"=")
 	}
 	// Appended last so it wins over any ambient copy that survived, though the
 	// removal above means there should not be one.
@@ -343,6 +526,13 @@ var accountNonCredentialNames = map[string]map[string]struct{}{
 	// The config var itself, plus the two cloud-mode selectors — the operator's
 	// deployment signal, handled by the cloud-mode refusal above rather than by
 	// subtraction, exactly as Claude's Bedrock/Vertex/Foundry selectors are.
+	//
+	// "Kept" is about this classification only. An operator's selector, which is
+	// the one ApplyAccount can see, still produces the refusal — but the selectors
+	// are also in accountLateEnvironmentNames, because a repository `.env` can turn
+	// a cloud mode on AFTER that refusal has had its look, and a session that
+	// silently moved onto Vertex is not the operator's deployment choice being
+	// respected (#3609 review).
 	"gemini": nameSet(
 		"GEMINI_CLI_HOME", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 	),

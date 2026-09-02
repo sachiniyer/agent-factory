@@ -110,13 +110,33 @@ func TestAccountScoping_RefusesUnsupportedCombinations(t *testing.T) {
 	require.NoError(t, refuseUnsupportedAccountAgent(claude, claude.Path),
 		"an account-scoped claude create must reach the launch that carries its declaration")
 
-	// An agent nobody has established the boundary can verify still refuses, and the
-	// error names what does work rather than only what does not.
-	unproven := base
-	unproven.Program = "gemini"
-	err := refuseUnsupportedAccountAgent(unproven, unproven.Path)
+	// A ROSTERED agent whose launch nobody has verified still refuses — the roster
+	// and this boundary answer different questions, and gemini sits between them.
+	// What the refusal may NOT say is that the agent is unsupported: `af accounts
+	// add gemini work` succeeds, so "supported: claude, codex" was a sentence the
+	// roster had already made false, and the operator had no way to tell which
+	// surface was lying (#3609 review).
+	registrationOnly := base
+	registrationOnly.Program = "gemini"
+	err := refuseUnsupportedAccountAgent(registrationOnly, registrationOnly.Path)
 	require.Error(t, err, "an unproven agent must refuse rather than start on the ambient identity")
-	require.Contains(t, err.Error(), "claude and codex", "the error must name what does work")
+	require.Contains(t, err.Error(), "af has not verified",
+		"the refusal must name the launch proof as the missing thing")
+	require.Contains(t, err.Error(), "is registered for gemini",
+		"the refusal must concede what DOES work, since the account exists")
+	require.Contains(t, err.Error(), "https://github.com/sachiniyer/agent-factory/issues/3639",
+		"a state the operator cannot act on needs the follow-up that lifts it")
+	require.NotContains(t, err.Error(), "supported: claude, codex",
+		"gemini is on the roster now, so that list is false at this boundary")
+
+	// An agent that is not on the roster at all gets the other sentence, and it
+	// names the alternatives with their state rather than as a bare list.
+	unrostered := base
+	unrostered.Program = "aider"
+	err = refuseUnsupportedAccountAgent(unrostered, unrostered.Path)
+	require.Error(t, err, "an agent with no verified credential root must refuse")
+	require.Contains(t, err.Error(), "gemini (registration only)",
+		"naming gemini without its state would send the operator at a launch that refuses")
 
 	// No account selected leaves every path untouched.
 	plain := InstanceOptions{Title: "t", Path: t.TempDir(), Program: "claude", Backend: BackendDocker}

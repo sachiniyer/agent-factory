@@ -85,7 +85,7 @@ func ValidateName(name string) error {
 func Dir(home, agent, name string) (string, error) {
 	if _, ok := sessionenv.SupportsAccounts(agent); !ok {
 		return "", fmt.Errorf("%w: %s (supported: %s)",
-			ErrUnsupportedAgent, agent, strings.Join(sessionenv.AccountAgents(), ", "))
+			ErrUnsupportedAgent, agent, sessionenv.AccountAgentsSummary())
 	}
 	if err := ValidateName(name); err != nil {
 		return "", err

@@ -38,6 +38,16 @@ type accountEntry struct {
 	Agent string `json:"agent"`
 	Name  string `json:"name"`
 	Dir   string `json:"dir"`
+	// RegistrationOnly is true while the agent is on the account roster but a
+	// session cannot be scoped to one of its accounts yet — af has verified that
+	// the agent's credential root relocates, not that the account boundary can
+	// prove how af launches it.
+	//
+	// It is always emitted, never omitempty. An automation caller reading this to
+	// decide whether to start a session needs the difference between "false" and
+	// "this af is too old to say", and an omitted false is the same bytes as a
+	// missing field (#3609 review).
+	RegistrationOnly bool `json:"registration_only"`
 }
 
 // accountsFlagError routes a flag-parse failure through the same {data,error}
@@ -82,6 +92,15 @@ Register an account, then log in with the agent pointed at that directory:
   af accounts add codex work
   CODEX_HOME=$(af accounts add codex work) codex login
 
+  af accounts add gemini work
+  GEMINI_CLI_HOME=$(af accounts add gemini work) gemini
+
+Those two variables do not have the same shape, and mixing them up is the easy
+mistake. CODEX_HOME and CLAUDE_CONFIG_DIR name the config directory itself.
+GEMINI_CLI_HOME is a HOME-like root: gemini appends .gemini/ to it, so the account
+directory af prints holds the credential at <dir>/.gemini/gemini-credentials.json.
+Point the variable at the printed directory, never at a .gemini path inside it.
+
 Select an account for a session with:
 
   af sessions create --account work
@@ -101,7 +120,61 @@ bind-MOUNTS the directory, so account writes land in your real account. ` +
 		session.AccountWriteBackRationale + `
 
 af never switches accounts on its own — not on a rate limit, not on a failure.
-A session runs as the account it was started with.`,
+A session runs as the account it was started with.` + accountsRegistrationOnlyHelp(),
+}
+
+// accountsRegistrationOnlyHelp appends the registration-only agents to the group
+// help, derived rather than written down. An agent is registration-only while af
+// has verified that its credential root relocates but not that the account
+// boundary can prove how af launches it — so `add` and `list` work and `--account`
+// refuses. Composing it from the roster means the help stops saying it by itself
+// on the day the launch proof lands, instead of becoming the stale sentence that
+// contradicts the CLI (#3609 review).
+func accountsRegistrationOnlyHelp() string {
+	var out strings.Builder
+	for _, agent := range sessionenv.AccountAgents() {
+		reason, ok := sessionenv.AccountRegistrationOnlyReason(agent)
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(&out, "\n\n%s", wrapHelpParagraph("Registration only · "+reason, helpWrapColumns))
+	}
+	return out.String()
+}
+
+// helpWrapColumns is the width the rest of this group's help is written to by
+// hand.
+const helpWrapColumns = 80
+
+// wrapHelpParagraph greedily wraps a single paragraph on spaces.
+//
+// The composed notice is assembled from a sentence sessionenv owns, so it cannot
+// be hand-wrapped where it is written the way the literal help above is. Left
+// unwrapped it renders as one 400-column line in `af accounts --help` and in the
+// generated CLI reference, beside paragraphs that stop at 80.
+//
+// A word longer than the width keeps its own line rather than being split, which
+// is what keeps the follow-up URL in one piece — a broken link is worse than a
+// long line, and the link is the actionable half of the sentence.
+func wrapHelpParagraph(text string, width int) string {
+	var out strings.Builder
+	column := 0
+	for idx, word := range strings.Fields(text) {
+		switch {
+		case idx == 0:
+			out.WriteString(word)
+			column = len(word)
+		case column+1+len(word) > width:
+			out.WriteString("\n")
+			out.WriteString(word)
+			column = len(word)
+		default:
+			out.WriteString(" ")
+			out.WriteString(word)
+			column += 1 + len(word)
+		}
+	}
+	return out.String()
 }
 
 var accountsAddCmd = &cobra.Command{
@@ -181,6 +254,14 @@ same directory and touches nothing inside it.`,
 			fmt.Fprintf(cmd.ErrOrStderr(), "Log in with %s's own login flow, with %s set to %s.\n",
 				agent, configVar, config.ShellQuotePath(dir))
 		}
+		// Said HERE, at the moment the operator is being invited to put real
+		// credentials somewhere. Registration succeeding and `--account` refusing
+		// later is the contradiction #3609 was reviewed for; the account is still
+		// worth creating — #3384's login verb needs it — but the operator has to
+		// learn what it cannot do yet before they log in, not after.
+		if reason, ok := sessionenv.AccountRegistrationOnlyReason(agent); ok {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Registration only · %s\n", reason)
+		}
 		return nil
 	},
 }
@@ -226,7 +307,7 @@ than accepting a selection that would silently do nothing.`,
 		if len(args) == 1 {
 			if _, ok := sessionenv.SupportsAccounts(args[0]); !ok {
 				return jsonWrapError(cmd, accountsJSONFlag, fmt.Errorf("%w: %s (supported: %s)",
-					agentaccount.ErrUnsupportedAgent, args[0], joinAgents(agents)))
+					agentaccount.ErrUnsupportedAgent, args[0], sessionenv.AccountAgentsSummary()))
 			}
 			agents = []string{args[0]}
 		}
@@ -237,12 +318,15 @@ than accepting a selection that would silently do nothing.`,
 			if err != nil {
 				return jsonWrapError(cmd, accountsJSONFlag, err)
 			}
+			registrationOnly := sessionenv.AccountRegistrationOnly(agent)
 			for _, name := range names {
 				dir, err := agentaccount.Dir(home, agent, name)
 				if err != nil {
 					return jsonWrapError(cmd, accountsJSONFlag, err)
 				}
-				entries = append(entries, accountEntry{Agent: agent, Name: name, Dir: dir})
+				entries = append(entries, accountEntry{
+					Agent: agent, Name: name, Dir: dir, RegistrationOnly: registrationOnly,
+				})
 			}
 		}
 		sort.Slice(entries, func(i, j int) bool {
@@ -260,22 +344,29 @@ than accepting a selection that would silently do nothing.`,
 				"No accounts registered · add one with `af accounts add %s <name>`\n", agents[0])
 			return nil
 		}
+		// The marker is a FOURTH column rather than a rewritten line, so the three
+		// fields a script already reads stay where they were and only a
+		// registration-only row grows one.
+		noted := make(map[string]struct{}, len(entries))
 		for _, entry := range entries {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", entry.Agent, entry.Name, entry.Dir)
+			row := fmt.Sprintf("%s\t%s\t%s", entry.Agent, entry.Name, entry.Dir)
+			if entry.RegistrationOnly {
+				row += "\t" + sessionenv.AccountRegistrationOnlyMarker
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), row)
+			if _, seen := noted[entry.Agent]; seen {
+				continue
+			}
+			noted[entry.Agent] = struct{}{}
+			// The why goes to stderr, once per agent: the column says WHICH rows are
+			// affected and a two-word marker cannot say what to do about it, but a
+			// paragraph repeated per row would bury the listing it annotates.
+			if reason, ok := sessionenv.AccountRegistrationOnlyReason(entry.Agent); ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Registration only · %s\n", reason)
+			}
 		}
 		return nil
 	},
-}
-
-func joinAgents(agents []string) string {
-	out := ""
-	for idx, agent := range agents {
-		if idx > 0 {
-			out += ", "
-		}
-		out += agent
-	}
-	return out
 }
 
 func init() {

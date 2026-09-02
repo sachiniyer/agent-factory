@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -54,6 +55,21 @@ func TestAccountsHelpDoesNotAssertRefusingBackendLocation(t *testing.T) {
 func runAccounts(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	tempAFHome(t)
+	return runAccountsHere(t, args...)
+}
+
+// runAccountsInHome runs against a home the CALLER owns, so one case can register
+// an account and then list it. runAccounts makes a fresh home per invocation,
+// which is right for the failure-envelope cases and useless for a round trip.
+func runAccountsInHome(t *testing.T, home string, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	leaveAmbientRepo(t)
+	return runAccountsHere(t, args...)
+}
+
+func runAccountsHere(t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	// --daemon-url / AF_DAEMON_URL makes both subcommands refuse (they write the
 	// LOCAL home), so an ambient value on the developer's box would turn every
 	// case below into the remote-target refusal.
@@ -254,5 +270,121 @@ func TestAccountsAddJSONSuccessEnvelope(t *testing.T) {
 	}
 	if entry.Agent != "codex" || entry.Name != "work" || entry.Dir == "" {
 		t.Fatalf("unexpected entry: %+v", entry)
+	}
+}
+
+// `af accounts add gemini work` must say, at the moment it invites the operator
+// to log real credentials in, that no session can be scoped to the account yet.
+//
+// The roster and the launch boundary answer different questions, and gemini sits
+// between them: its credential root relocates, so registration and login work,
+// but af has not verified how it launches, so `--account` refuses. Registration
+// succeeding while the launch refusal said "supported: claude, codex" was the
+// contradiction #3609 was reviewed for — the operator had no way to tell which
+// surface was lying (#3609 review).
+func TestAccountsAddGeminiReportsRegistrationOnly(t *testing.T) {
+	_, stderr, err := runAccounts(t, "add", "gemini", "work")
+	if err != nil {
+		t.Fatalf("add failed: %v", err)
+	}
+	// Case-insensitively: the marker is the lowercase form a listing COLUMN takes,
+	// and prose at the head of a line is sentence case. Both must be the same words.
+	if !strings.Contains(strings.ToLower(stderr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("add did not report the registration-only state:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "https://github.com/sachiniyer/agent-factory/issues/3639") {
+		t.Fatalf("the notice must name the follow-up that lifts it:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "GEMINI_CLI_HOME") {
+		t.Fatalf("add must still print the login guidance for a registration-only agent:\n%s", stderr)
+	}
+
+	// A launch-proven agent gets no notice, so the guard cannot pass by printing
+	// it for everyone.
+	_, codexErr, err := runAccounts(t, "add", "codex", "work")
+	if err != nil {
+		t.Fatalf("add codex failed: %v", err)
+	}
+	if strings.Contains(strings.ToLower(codexErr), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("codex is launch-proven and must not be marked:\n%s", codexErr)
+	}
+}
+
+// `af accounts list` marks the rows a session cannot be scoped to, and says why
+// once — on stderr, so the listing on stdout stays parseable.
+func TestAccountsListMarksRegistrationOnlyRows(t *testing.T) {
+	home := t.TempDir()
+	if _, _, err := runAccountsInHome(t, home, "add", "gemini", "work"); err != nil {
+		t.Fatalf("add gemini failed: %v", err)
+	}
+	if _, _, err := runAccountsInHome(t, home, "add", "codex", "work"); err != nil {
+		t.Fatalf("add codex failed: %v", err)
+	}
+
+	stdout, stderr, err := runAccountsInHome(t, home, "list")
+	if err != nil {
+		t.Fatalf("list failed: %v", err)
+	}
+	var gemini, codex string
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		switch {
+		case strings.HasPrefix(line, "gemini\t"):
+			gemini = line
+		case strings.HasPrefix(line, "codex\t"):
+			codex = line
+		}
+	}
+	if gemini == "" || codex == "" {
+		t.Fatalf("both accounts must be listed:\n%s", stdout)
+	}
+	if fields := strings.Split(gemini, "\t"); len(fields) != 4 ||
+		fields[3] != sessionenv.AccountRegistrationOnlyMarker {
+		t.Fatalf("the gemini row must carry the marker as a fourth column: %q", gemini)
+	}
+	// The three fields a script already reads must not move for a launch-proven
+	// agent, so the marker cannot be a rewritten line.
+	if fields := strings.Split(codex, "\t"); len(fields) != 3 {
+		t.Fatalf("the codex row must keep its three columns: %q", codex)
+	}
+	if !strings.Contains(stderr, "https://github.com/sachiniyer/agent-factory/issues/3639") {
+		t.Fatalf("the listing must explain the marker on stderr:\n%s", stderr)
+	}
+
+	jsonOut, _, err := runAccountsInHome(t, home, "list", "--json")
+	if err != nil {
+		t.Fatalf("list --json failed: %v", err)
+	}
+	env := requireEnvelope(t, jsonOut, "stdout")
+	var entries []accountEntry
+	if err := json.Unmarshal(env.Data, &entries); err != nil {
+		t.Fatalf("envelope data is not a list of accountEntry: %v (%q)", err, jsonOut)
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		seen[entry.Agent] = entry.RegistrationOnly
+	}
+	if !seen["gemini"] {
+		t.Fatalf("gemini must be registration_only:true in the envelope: %q", jsonOut)
+	}
+	if seen["codex"] {
+		t.Fatalf("codex must be registration_only:false in the envelope: %q", jsonOut)
+	}
+}
+
+// The group help must show the gemini form, with the shape that makes it
+// different: GEMINI_CLI_HOME is a HOME-like root and the CLI appends .gemini/
+// itself, so an operator who copies the CODEX_HOME line and swaps names points
+// the variable one level too deep and logs in somewhere af will not look.
+func TestAccountsHelpShowsTheGeminiHomeRootShape(t *testing.T) {
+	for _, want := range []string{
+		"GEMINI_CLI_HOME=$(af accounts add gemini work) gemini",
+		"<dir>/.gemini/gemini-credentials.json",
+	} {
+		if !strings.Contains(accountsCmd.Long, want) {
+			t.Fatalf("account help is missing %q:\n%s", want, accountsCmd.Long)
+		}
+	}
+	if !strings.Contains(strings.ToLower(accountsCmd.Long), sessionenv.AccountRegistrationOnlyMarker) {
+		t.Fatalf("account help must name the registration-only roster:\n%s", accountsCmd.Long)
 	}
 }
