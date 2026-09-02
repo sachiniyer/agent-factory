@@ -436,6 +436,24 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	v.Set(m)
 }
 
+// dedupeSorted removes repeats and orders the result. Seeded containers visit
+// the same path once per element, so a single unplantable field would otherwise
+// be listed guardSliceSeed times and counted as that many fields — a report that
+// misstates how much of the record is uncovered.
+func dedupeSorted(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func join(path, field string) string {
 	if path == "" {
 		return field
@@ -468,19 +486,17 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 
 	// A subtree the walk could not reach is a subtree this guard cannot speak
 	// for. Fail rather than quietly cover less than the name promises.
-	if len(filler.tooDeep) > 0 {
-		sort.Strings(filler.tooDeep)
+	if tooDeep := dedupeSorted(filler.tooDeep); len(tooDeep) > 0 {
 		t.Errorf("the reflective walk hit its depth limit (%d) and skipped %d subtree(s):\n  %s\n\n"+
 			"Those fields were never marker-planted, so this guard says nothing about them. "+
 			"Raise guardMaxDepth, or flatten the shape.",
-			guardMaxDepth, len(filler.tooDeep), strings.Join(filler.tooDeep, "\n  "))
+			guardMaxDepth, len(tooDeep), strings.Join(tooDeep, "\n  "))
 	}
-	if len(filler.unsupported) > 0 {
-		sort.Strings(filler.unsupported)
+	if unsupported := dedupeSorted(filler.unsupported); len(unsupported) > 0 {
 		t.Errorf("the reflective walk met %d field(s) it cannot plant a marker in:\n  %s\n\n"+
 			"encoding/json can still serialize these, so they are holes in the guard, not "+
 			"fields it may ignore. Extend sentinelFiller to populate them.",
-			len(filler.unsupported), strings.Join(filler.unsupported, "\n  "))
+			len(unsupported), strings.Join(unsupported, "\n  "))
 	}
 	if len(filler.planted) == 0 {
 		t.Fatal("the reflective fill planted no marker: the walk is broken, " +
