@@ -160,6 +160,16 @@ func LoadConfigReadOnly() (ReadOnlyConfigLoad, error) {
 	tomlPath := filepath.Join(configDir, TomlConfigFileName)
 	prettyTomlPath := prettyHomePath(tomlPath)
 
+	// The same refusal the startup path makes, and for a sharper reason here: a
+	// dangling link reads as ENOENT, which this would report as Missing — so
+	// `af config validate` would exit 0 and `af doctor` would advise starting af
+	// to write defaults, while af itself refuses to start on that very link. A
+	// diagnostic that disagrees with the thing it diagnoses is worse than no
+	// diagnostic (#3660 review).
+	if err := refuseDanglingConfigLink(tomlPath); err != nil {
+		return ReadOnlyConfigLoad{Path: tomlPath}, err
+	}
+
 	tomlData, tomlErr := os.ReadFile(tomlPath)
 	if tomlErr == nil {
 		cfg, err := parseLoadedConfigTOML(tomlData, prettyTomlPath, tomlPath)

@@ -414,3 +414,34 @@ func TestStartupDoesNotDestroyOrIgnoreASymlinkedConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), missing)
 	})
 }
+
+// TestReadOnlyLoadRefusesADanglingLink pins that the diagnostics agree with
+// startup. LoadConfigReadOnly backs `af config validate` and `af doctor`; with a
+// dangling link it reported Missing:true, so validate exited 0 and doctor
+// advised starting af to write defaults — while af itself refuses to start on
+// that same link. A diagnostic that contradicts the thing it diagnoses sends the
+// reader looking in the wrong place (#3660 review).
+func TestReadOnlyLoadRefusesADanglingLink(t *testing.T) {
+	home, dotfiles := t.TempDir(), t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	missing := filepath.Join(dotfiles, "gone.toml")
+	link := filepath.Join(home, TomlConfigFileName)
+	require.NoError(t, os.Symlink(missing, link))
+
+	loaded, err := LoadConfigReadOnly()
+	require.Error(t, err, "a broken link must not read as 'no config file yet'")
+	assert.False(t, loaded.Missing, "and must not be reported as missing")
+	assert.Contains(t, err.Error(), link)
+	assert.Contains(t, err.Error(), missing)
+
+	// It stays read-only: nothing is created at either end.
+	assert.NoFileExists(t, missing)
+	info, lerr := os.Lstat(link)
+	require.NoError(t, lerr)
+	assert.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink)
+
+	// And it agrees with startup, which is the whole point.
+	_, startupErr := LoadConfig()
+	require.Error(t, startupErr)
+}
