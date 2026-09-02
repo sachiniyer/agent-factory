@@ -187,6 +187,13 @@ type Backend interface {
 	// Kill terminates the session and cleans up all associated resources.
 	Kill(instance *Instance) error
 
+	// KillTrustingOwnLifecycleLock is Kill for a caller that holds this
+	// instance's exclusive lifecycle lock for its entire call (#3413) — only
+	// the local tmux backend's generation-cohort guard cares about the
+	// distinction; every other backend implements this as a plain alias to
+	// Kill.
+	KillTrustingOwnLifecycleLock(instance *Instance) error
+
 	// CloseAttachOnly releases resources this Instance opened to view or drive the
 	// session WITHOUT destroying the underlying session, worktree, or off-box
 	// workspace. It is the non-destructive sibling of Kill, used to discard a

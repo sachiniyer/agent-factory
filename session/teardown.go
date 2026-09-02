@@ -210,16 +210,18 @@ func TeardownStateUnknown(err error) bool {
 // wedged tmux server into MoveWorktree on a possibly-live pane (#1917 review).
 // Two copies of a safety rule is one copy of a safety rule.
 //
-// Both callers (teardown.go's kill and archive modes) hold this session's
-// exclusive lifecycle lock for their entire run — daemon/archive.go's op-lock +
-// killsInFlight, doc'd there as "archive, kill, and Lost-recovery never
-// interleave" — which is exactly the guarantee
-// CloseAndWaitForPaneExitTrustingOwnGeneration needs (#3413): a session that
-// flapped through a restore and vanished with its live processes carrying a
-// newer generation than any captured predecessor is reapable here instead of
-// refused forever, because no OTHER daemon-created instance can have minted
-// that generation while this lock holds.
-func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string) (teardownState, bool, error) {
+// trustLiveGeneration (#3413) must come from the caller, not be assumed here:
+// this session-layer helper is reachable from BOTH daemon's locked
+// KillSession/ArchiveSession entry points (which hold the op-lock +
+// killsInFlight for their entire call, ruling out a same-name replacement
+// appearing mid-teardown) AND from unlocked internal cleanup — a setup-error
+// defer killing an instance before it is even registered is one real example —
+// which cannot make that claim. Passing true from the wrong caller would let a
+// trusted scan adopt a genuine replacement's generation and reap it: exactly
+// the #3309 regression the guard exists to prevent. See
+// Instance.KillTrustingOwnLifecycleLock and daemon/archive.go's archiveTeardown
+// for the only two callers allowed to pass true.
+func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName string, trustLiveGeneration bool) (teardownState, bool, error) {
 	// A session that provably never created a pane has no liveness to establish,
 	// so it is KNOWN without asking tmux — which matters because the machines
 	// where this happens are the ones where asking cannot be answered (#2985).
@@ -245,7 +247,14 @@ func closeTabForDestructiveTeardown(ts *tmux.TmuxSession, verb, title, tabName s
 	if ts.ProvenNoPane() {
 		return stateKnown, false, nil
 	}
-	state, blind, err := ts.CloseAndWaitForPaneExitTrustingOwnGeneration()
+	var state tmux.PaneState
+	var blind bool
+	var err error
+	if trustLiveGeneration {
+		state, blind, err = ts.CloseAndWaitForPaneExitTrustingOwnGeneration()
+	} else {
+		state, blind, err = ts.CloseAndWaitForPaneExitReportingBlindness()
+	}
 	if state != tmux.PaneStateKnown {
 		return stateUnknown, blind, fmt.Errorf("%s %q: tab %q: %w", verb, title, tabName, err)
 	}
@@ -471,6 +480,9 @@ type teardownKill struct {
 	// boundary itself (#3278 review). Nil for everything but an archived,
 	// record-free, local worktree.
 	recheckOrigin func() error
+	// trustLiveGeneration is set only by prepareKillTeardown when its caller
+	// holds this session's exclusive lifecycle lock (#3413); see closeTab.
+	trustLiveGeneration bool
 }
 
 // beforeKillTeardownOriginRecheck runs between the daemon's pre-tombstone
@@ -495,14 +507,18 @@ func SetBeforeKillTeardownOriginRecheckForTest(hook func()) func() {
 // pre-tombstone admission check has validated it. The returned cleanup gives
 // ownership back if pane teardown aborts before handleWorktree can revalidate
 // the claim at the deletion boundary.
-func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
+//
+// trustLiveGeneration is threaded straight from the caller into every
+// teardownKill this returns (#3413); see closeTabForDestructiveTeardown for
+// which callers may pass true.
+func (i *Instance) prepareKillTeardown(trustLiveGeneration bool) (teardownKill, func(), error) {
 	noop := func() {}
 	i.mu.RLock()
 	gw := i.gitWorktree
 	archived := i.liveness == LiveArchived
 	i.mu.RUnlock()
 	if gw == nil {
-		return teardownKill{}, noop, nil
+		return teardownKill{trustLiveGeneration: trustLiveGeneration}, noop, nil
 	}
 	if gw.CleanupRetryPending() {
 		return teardownKill{}, noop, fmt.Errorf("%w: kill cleanup previously stalled; refusing to repeat pane teardown or enter an unbounded delete in this daemon process — restart the daemon to retry from the persisted record", ErrWorkspaceStateUnknown)
@@ -523,7 +539,7 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 		// identity-qualified cleanup against the now-gone origin.
 		if archived && !gw.IsExternalWorktree() && gw.GetRepoPath() != "" &&
 			i.Capabilities().Workspace == WorkspaceLocalWorktree {
-			return teardownKill{recheckOrigin: func() error {
+			return teardownKill{trustLiveGeneration: trustLiveGeneration, recheckOrigin: func() error {
 				beforeKillTeardownOriginRecheck()
 				// An already-absent archived directory has nothing to orphan,
 				// and ordinary cleanup settles the missing path and clears the
@@ -562,7 +578,7 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 				return nil
 			}}, noop, nil
 		}
-		return teardownKill{}, noop, nil
+		return teardownKill{trustLiveGeneration: trustLiveGeneration}, noop, nil
 	}
 	if recovery.State != git.RelocationRecoveryCleanupReady &&
 		recovery.State != git.RelocationRecoveryCleanupFinalizing {
@@ -576,7 +592,7 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 		return teardownKill{}, noop, fmt.Errorf("%w: cannot claim cleanup-ready worktree: %v", ErrWorkspaceStateUnknown, err)
 	}
 	handled := false
-	mode := teardownKill{cleanupClaim: &claim, claimHandled: &handled}
+	mode := teardownKill{cleanupClaim: &claim, claimHandled: &handled, trustLiveGeneration: trustLiveGeneration}
 	return mode, func() {
 		if !handled {
 			gw.PreserveRelocationClaim(claim)
@@ -589,10 +605,16 @@ func (i *Instance) prepareKillTeardown() (teardownKill, func(), error) {
 // recursive delete and leaves a half-deleted directory ("Directory not empty",
 // #802). Best-effort for anything tmux ANSWERED with; an unknown stops the core.
 var killCloseTab = func(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
-	return closeTabForDestructiveTeardown(ts, "kill", title, tabName)
+	return closeTabForDestructiveTeardown(ts, "kill", title, tabName, false)
 }
 
-func (teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+func (m teardownKill) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	// Bypasses the stubbable var above when trusted (#3413): killCloseTab exists
+	// for tests to stub the ORDINARY close, and no existing test needs to stub
+	// the trusted variant — production always wants the real behavior here.
+	if m.trustLiveGeneration {
+		return closeTabForDestructiveTeardown(ts, "kill", title, tabName, true)
+	}
 	return killCloseTab(ts, title, tabName)
 }
 
@@ -745,6 +767,9 @@ type teardownArchive struct {
 	claimHandled *bool
 	beforeMove   func() error
 	hookErr      *error
+	// trustLiveGeneration is set only by ArchiveTeardownWithClaim's caller when
+	// it holds this session's exclusive lifecycle lock (#3413); see closeTab.
+	trustLiveGeneration bool
 }
 
 // closeTab waits for the pane to exit before handleWorktree relocates the
@@ -757,10 +782,14 @@ type teardownArchive struct {
 // default reap action, so that ran far more often than the kill path did (#1917
 // review).
 var archiveCloseTab = func(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
-	return closeTabForDestructiveTeardown(ts, "archive", title, tabName)
+	return closeTabForDestructiveTeardown(ts, "archive", title, tabName, false)
 }
 
-func (teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+func (m teardownArchive) closeTab(ts *tmux.TmuxSession, title, tabName string) (teardownState, bool, error) {
+	// See teardownKill.closeTab: bypasses the stubbable var above when trusted.
+	if m.trustLiveGeneration {
+		return closeTabForDestructiveTeardown(ts, "archive", title, tabName, true)
+	}
 	return archiveCloseTab(ts, title, tabName)
 }
 

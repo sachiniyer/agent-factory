@@ -52,8 +52,8 @@ func plantStuckEditorAfterTeardown(t *testing.T, manager *Manager, inst *session
 	t.Helper()
 	cmd, _ := startOwnedSleep(t)
 	original := archiveTeardown
-	archiveTeardown = func(target *session.Instance, dest string, claim sessiongit.RelocationClaim, beforeMove func() error) (error, error) {
-		hookErr, err := original(target, dest, claim, beforeMove)
+	archiveTeardown = func(target *session.Instance, dest string, claim sessiongit.RelocationClaim, beforeMove func() error, trust bool) (error, error) {
+		hookErr, err := original(target, dest, claim, beforeMove, trust)
 		if err != nil {
 			return hookErr, err
 		}

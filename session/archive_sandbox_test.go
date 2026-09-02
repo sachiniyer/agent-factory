@@ -264,8 +264,9 @@ type stubAgentServer struct {
 	killCalls int
 }
 
-func (s *stubAgentServer) Archive() (string, error) { return s.branch, nil }
-func (s *stubAgentServer) Kill() error              { s.killCalls++; return s.killErr }
+func (s *stubAgentServer) Archive() (string, error)            { return s.branch, nil }
+func (s *stubAgentServer) Kill() error                         { s.killCalls++; return s.killErr }
+func (s *stubAgentServer) KillTrustingOwnLifecycleLock() error { return s.Kill() }
 
 func (s *stubAgentServer) Provision(bool) error            { return nil }
 func (s *stubAgentServer) Launch(bool) error               { return nil }

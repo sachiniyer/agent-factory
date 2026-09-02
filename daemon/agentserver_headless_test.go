@@ -116,6 +116,8 @@ func (f *fakeHeadlessAgentServer) Kill() error {
 	return nil
 }
 
+func (f *fakeHeadlessAgentServer) KillTrustingOwnLifecycleLock() error { return f.Kill() }
+
 func (f *fakeHeadlessAgentServer) set(b *bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

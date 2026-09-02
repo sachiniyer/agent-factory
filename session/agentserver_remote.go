@@ -262,6 +262,12 @@ func (s *remoteAgentServer) Kill() error {
 	return killErr
 }
 
+// KillTrustingOwnLifecycleLock: no tmux, no generation cohort — a plain alias
+// (#3413).
+func (s *remoteAgentServer) KillTrustingOwnLifecycleLock() error {
+	return s.Kill()
+}
+
 // Archive pushes the sandbox's session branch to origin over the control REST
 // (#1592 Phase 4 PR6): the in-sandbox agent-server owns the worktree, so the
 // push happens THERE (it commits any uncommitted work and pushes), and this
@@ -346,6 +352,12 @@ func (s *deadRemoteAgentServer) Kill() error {
 		return s.teardown()
 	}
 	return nil
+}
+
+// KillTrustingOwnLifecycleLock: no tmux, no generation cohort — a plain alias
+// (#3413).
+func (s *deadRemoteAgentServer) KillTrustingOwnLifecycleLock() error {
+	return s.Kill()
 }
 
 func (s *deadRemoteAgentServer) Archive() (string, error) { return "", s.err() }

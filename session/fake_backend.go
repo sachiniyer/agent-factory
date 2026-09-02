@@ -102,6 +102,12 @@ func (b *FakeBackend) Kill(instance *Instance) error {
 	return nil
 }
 
+// KillTrustingOwnLifecycleLock: the fake backend has no tmux/generation
+// concept — a plain alias (#3413).
+func (b *FakeBackend) KillTrustingOwnLifecycleLock(instance *Instance) error {
+	return b.Kill(instance)
+}
+
 // CloseAttachOnly is a no-op for the fake backend: it holds no real PTY to
 // release. Tests that need to distinguish a non-destructive close from a Kill
 // embed FakeBackend and override this (and Kill) to record the call.

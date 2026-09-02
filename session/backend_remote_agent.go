@@ -76,6 +76,12 @@ func (b *remoteAgentBackend) Kill(i *Instance) error {
 	return nil
 }
 
+// KillTrustingOwnLifecycleLock: no tmux, no generation cohort — a plain alias
+// (#3413).
+func (b *remoteAgentBackend) KillTrustingOwnLifecycleLock(i *Instance) error {
+	return b.Kill(i)
+}
+
 // CloseAttachOnly discards a duplicate instance's local view without reaping
 // the remote workspace its canonical instance still owns.
 func (b *remoteAgentBackend) CloseAttachOnly(i *Instance) error {
