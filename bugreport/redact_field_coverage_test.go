@@ -313,6 +313,79 @@ func mustVisit(f reflect.StructField) bool {
 	return t.Kind() == reflect.Struct
 }
 
+// effectiveJSONName is the key encoding/json will use for a field.
+func effectiveJSONName(f reflect.StructField) string {
+	tag := f.Tag.Get("json")
+	if tag == "" {
+		return f.Name
+	}
+	if name := strings.Split(tag, ",")[0]; name != "" {
+		return name
+	}
+	return f.Name
+}
+
+// droppedJSONNames returns the names encoding/json will emit for NEITHER of the
+// fields claiming them. When two anonymously embedded types export the same
+// JSON name at the same depth, json resolves the tie by dropping both — measured:
+// `struct{ aa; bb }` where each has `Dup string \`json:"dup"\“ marshals to
+// {"fine":"ok"}, with no "dup" key at all.
+//
+// The guard must honour that, or it demands redaction for a value which cannot
+// enter the bundle — the same misleading classification jsonSkipped exists to
+// prevent (#3592 review).
+//
+// This implements the SAME-DEPTH TIE only, not json's full dominance algorithm
+// (shallower-wins, tagged-beats-untagged). Those other rules choose WHICH field
+// is emitted; both candidates are still real fields the guard should visit, so
+// getting them wrong costs a redundant visit rather than a missed leak. A tie is
+// the only rule that makes a field unserializable, so it is the only one whose
+// absence can produce a false demand.
+func droppedJSONNames(t reflect.Type) map[string]bool {
+	byDepth := map[string]map[int]int{}
+	note := func(name string, depth int) {
+		if byDepth[name] == nil {
+			byDepth[name] = map[int]int{}
+		}
+		byDepth[name][depth]++
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !mustVisit(f) {
+			continue
+		}
+		if !f.Anonymous {
+			note(effectiveJSONName(f), 0)
+			continue
+		}
+		et := f.Type
+		if et.Kind() == reflect.Ptr {
+			et = et.Elem()
+		}
+		if et.Kind() != reflect.Struct {
+			continue
+		}
+		for j := 0; j < et.NumField(); j++ {
+			if ef := et.Field(j); mustVisit(ef) && !ef.Anonymous {
+				note(effectiveJSONName(ef), 1)
+			}
+		}
+	}
+	dropped := map[string]bool{}
+	for name, depths := range byDepth {
+		best := -1
+		for d := range depths {
+			if best == -1 || d < best {
+				best = d
+			}
+		}
+		if best >= 0 && depths[best] > 1 {
+			dropped[name] = true
+		}
+	}
+	return dropped
+}
+
 // guardMinByteArray is the shortest fixed byte array that can hold a marker
 // distinctive enough to trust. Below it, a truncated sentinel prefix is too
 // short to tell a planted value from incidental data, so the field is reported
@@ -339,6 +412,20 @@ func plantedByteArray(n int) []byte {
 	return b
 }
 
+// isUnplantableScalar reports an element kind that json serializes but fill has
+// no way to plant readable text in. Refusing is the point: a numeric container
+// holding user text (the []rune case generalizes) would otherwise sit in a
+// zero-valued fixture the collect pass can never see.
+func isUnplantableScalar(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int64,
+		reflect.Uint, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128:
+		return true
+	}
+	return false
+}
+
 type sentinelFiller struct {
 	tooDeep     []string
 	unsupported []string
@@ -350,6 +437,39 @@ type sentinelFiller struct {
 // one-element probe while every later element still reaches the bundle
 // verbatim. Two elements make the collection-wide contract observable.
 const guardSliceSeed = 2
+
+// fillEmbedded descends into an anonymous embed, skipping the promoted names
+// encoding/json drops as ambiguous at the parent level.
+func (f *sentinelFiller) fillEmbedded(v reflect.Value, path string, depth int, dropped map[string]bool) {
+	t := v.Type()
+	if t.Kind() == reflect.Ptr {
+		// An unexported pointer embed cannot be allocated through reflect;
+		// fill reports it rather than passing over it.
+		f.fill(v, path, depth)
+		return
+	}
+	if t.Kind() != reflect.Struct {
+		f.fill(v, path, depth)
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !mustVisit(field) || dropped[effectiveJSONName(field)] {
+			continue
+		}
+		f.fill(v.Field(i), join(path, field.Name), depth+1)
+	}
+}
+
+// plantRunes writes the sentinel's code points into a rune slice.
+func (f *sentinelFiller) plantRunes(v reflect.Value) {
+	runes := []rune(guardSentinel)
+	rv := reflect.MakeSlice(v.Type(), len(runes), len(runes))
+	for i, r := range runes {
+		rv.Index(i).SetInt(int64(r))
+	}
+	v.Set(rv)
+}
 
 // fill plants guardSentinel throughout v, allocating pointers, slices and maps
 // on the way so nested shapes are actually visited.
@@ -390,9 +510,17 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return
 		}
+		dropped := droppedJSONNames(v.Type())
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
 			if !mustVisit(field) {
+				continue
+			}
+			if field.Anonymous {
+				f.fillEmbedded(v.Field(i), join(path, field.Name), depth+1, dropped)
+				continue
+			}
+			if dropped[effectiveJSONName(field)] {
 				continue
 			}
 			f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -400,6 +528,19 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			v.SetBytes([]byte(guardSentinel))
+			return
+		}
+		// []rune is []int32, and json emits it as the code points, from which
+		// the exact text reconstructs. It is a text container, so it gets a
+		// real sentinel rather than the element walk (which plants nothing,
+		// since fill has no numeric case) (#3592 review).
+		if v.Type().Elem().Kind() == reflect.Int32 {
+			f.plantRunes(v)
+			return
+		}
+		if isUnplantableScalar(v.Type().Elem().Kind()) {
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s ([]%s cannot carry a text sentinel)", path, v.Type().Elem().Kind()))
 			return
 		}
 		v.Set(reflect.MakeSlice(v.Type(), guardSliceSeed, guardSliceSeed))
@@ -419,6 +560,25 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 				return
 			}
 			reflect.Copy(v, reflect.ValueOf([]byte(guardSentinel)))
+			return
+		}
+		if v.Type().Elem().Kind() == reflect.Int32 {
+			if v.Len() < guardMinByteArray {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s ([%d]rune is too short to hold a distinctive sentinel)", path, v.Len()))
+				return
+			}
+			for i, r := range []rune(guardSentinel) {
+				if i >= v.Len() {
+					break
+				}
+				v.Index(i).SetInt(int64(r))
+			}
+			return
+		}
+		if isUnplantableScalar(v.Type().Elem().Kind()) {
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s ([%d]%s cannot carry a text sentinel)", path, v.Len(), v.Type().Elem().Kind()))
 			return
 		}
 		for i := 0; i < v.Len(); i++ {
@@ -485,9 +645,17 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 		if v.Type() == reflect.TypeOf(time.Time{}) {
 			return nil
 		}
+		dropped := droppedJSONNames(v.Type())
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
 			if !mustVisit(field) {
+				continue
+			}
+			if field.Anonymous {
+				found = append(found, collectEmbedded(v.Field(i), join(path, field.Name), depth+1, dropped)...)
+				continue
+			}
+			if dropped[effectiveJSONName(field)] {
 				continue
 			}
 			found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
@@ -495,6 +663,12 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			if bytes.Contains(v.Bytes(), []byte(guardSentinel)) {
+				found = append(found, path)
+			}
+			return found
+		}
+		if v.Type().Elem().Kind() == reflect.Int32 {
+			if strings.Contains(runeContents(v), guardSentinel) {
 				found = append(found, path)
 			}
 			return found
@@ -509,6 +683,16 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 			}
 			return found
 		}
+		if v.Type().Elem().Kind() == reflect.Int32 {
+			marker := guardSentinel
+			if v.Len() < len([]rune(marker)) {
+				marker = string([]rune(marker)[:v.Len()])
+			}
+			if v.Len() >= guardMinByteArray && strings.Contains(runeContents(v), marker) {
+				found = append(found, path)
+			}
+			return found
+		}
 		for i := 0; i < v.Len(); i++ {
 			found = append(found, collectSentinelPaths(v.Index(i), path+"[]", depth+1)...)
 		}
@@ -519,6 +703,33 @@ func collectSentinelPaths(v reflect.Value, path string, depth int) []string {
 		}
 	}
 	return found
+}
+
+// collectEmbedded mirrors fillEmbedded so the two walks agree on which promoted
+// fields are in scope.
+func collectEmbedded(v reflect.Value, path string, depth int, dropped map[string]bool) []string {
+	t := v.Type()
+	if t.Kind() != reflect.Struct {
+		return collectSentinelPaths(v, path, depth)
+	}
+	var found []string
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !mustVisit(field) || dropped[effectiveJSONName(field)] {
+			continue
+		}
+		found = append(found, collectSentinelPaths(v.Field(i), join(path, field.Name), depth+1)...)
+	}
+	return found
+}
+
+// runeContents reads a rune slice or array back as text.
+func runeContents(v reflect.Value) string {
+	out := make([]rune, v.Len())
+	for i := 0; i < v.Len(); i++ {
+		out[i] = rune(v.Index(i).Int())
+	}
+	return string(out)
 }
 
 func join(path, field string) string {
