@@ -7,7 +7,6 @@ import (
 
 	xansi "github.com/charmbracelet/x/ansi"
 
-	"github.com/muesli/reflow/truncate"
 	"github.com/muesli/termenv"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 )
@@ -358,7 +357,30 @@ func PlaceOverlay(
 
 		pos := 0
 		if placeX > 0 {
-			left := truncate.String(bgLine, uint(placeX))
+			// Budget the prefix in the measure `pos` is then READ in (#723). It
+			// used to be truncate.String, which counts rune by rune with
+			// runewidth while everything around it is grapheme-aware — the last
+			// hold-out against the one-measure invariant #3610 declared, and the
+			// defect moved rather than went away when that landed. Measured on
+			// bg = "A" + <ZWJ family> + 18*"b" at placeX 10:
+			//
+			//	pre-#3610   overlay drawn at visual column 4, not 10 — misplaced by 6
+			//	post-#3610  overlay correctly at 10; SIX background cells blanked
+			//
+			// The prefix consumed 10 cells by runewidth and 4 by Cells, so `pos`
+			// under-reported it, the padding below filled the difference with
+			// blanks, and TruncateLeft then skipped the background those blanks
+			// were standing in for. Both failures are one disagreement.
+			//
+			// A cluster that would STRADDLE placeX is never split: TruncateToCells
+			// cuts before it and the pad below carries the prefix to placeX
+			// exactly. That is the decision on #723 — the overlay's column must
+			// equal the origin its mouse zones were registered at (#3585), so
+			// placing it a cell early or late reopens exactly the mismatch that PR
+			// closed, whereas blanking the cells a straddling grapheme would have
+			// occupied is the honest rendering of "this cell is half under an
+			// opaque overlay". The blanking is bounded by one cluster's width.
+			left := layout.TruncateToCells(bgLine, placeX)
 			pos = lineWidth(left)
 			b.WriteString(left)
 			if pos < placeX {

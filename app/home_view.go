@@ -6,7 +6,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -168,7 +167,14 @@ func (m *home) View() string {
 	if m.lastLayout.ProjectsVisible {
 		railParts = append(railParts, m.renderProjectsRule(), m.projects.View())
 	}
-	rail := lipgloss.JoinVertical(lipgloss.Left, railParts...)
+	// layout's joins, not lipgloss's, for every seam of the frame (#3614). Each
+	// block is already exactly Rect-sized by the §2.6 contract, so there is
+	// nothing to align — but lipgloss re-measures anyway, and pads every line out
+	// to its block's widest by lipgloss.Width. That is precisely the measure
+	// ClampToRect withholds cells from when a row's true width cannot be known, so
+	// lipgloss puts them straight back and the row leaves the frame 2 cells past
+	// the rectangle it was just clamped into. Measured; see layout/join.go.
+	rail := layout.JoinVertical(railParts...)
 	cols := []string{rail}
 	if len(m.visiblePanes) == 0 {
 		switch {
@@ -207,7 +213,7 @@ func (m *home) View() string {
 			cols = append(cols, w.View())
 		}
 	}
-	top := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
+	top := layout.JoinHorizontal(cols...)
 	// Stack the delivery-failure alarm banner (#1238) above everything when
 	// raised, so it is visible without navigating and the layout reserved its
 	// row in relayout.
@@ -217,7 +223,7 @@ func (m *home) View() string {
 	}
 	m.menu.SetStatusText(m.dragStatusText())
 	viewParts = append(viewParts, top, m.statusBar.View())
-	mainView := lipgloss.JoinVertical(lipgloss.Left, viewParts...)
+	mainView := layout.JoinVertical(viewParts...)
 
 	if m.state == stateHelp {
 		if m.textOverlay == nil {

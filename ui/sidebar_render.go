@@ -110,16 +110,23 @@ func (s *Sidebar) String() string {
 		b.WriteString(s.renderWindowIndicator("▼", hiddenBelow))
 	}
 
-	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
-	// Safety clamp to the exact allocation via PR 1's shared helper:
-	// lipgloss.Place pads but never truncates in either dimension, fitWindow
-	// force-includes the first windowed row even when it alone exceeds the
-	// height budget (e.g. a tall PR row at a tiny height), and rare row shapes
-	// (double-digit index prefixes at ultra-narrow widths) can still exceed
-	// the width after the per-row truncation (#646/#700 class).
+	// Size to the exact allocation with the shared helper: it pads AND truncates
+	// in both dimensions, which is what this needs — fitWindow force-includes the
+	// first windowed row even when it alone exceeds the height budget (e.g. a tall
+	// PR row at a tiny height), and rare row shapes (double-digit index prefixes at
+	// ultra-narrow widths) can still exceed the width after the per-row truncation
+	// (#646/#700 class).
+	//
+	// It used to run lipgloss.Place first and clamp after. Place pads but never
+	// truncates, so it was doing only the half the clamp already does — and doing
+	// it in lipgloss's measure, which puts back the cells the clamp deliberately
+	// withholds from a row whose width cannot be trusted (#3614). One pass, one
+	// measure.
 	if s.width > 0 && s.height > 0 {
-		out = layout.ClampToRect(out, layout.Rect{W: s.width, H: s.height})
-	} else if s.height > 0 {
+		return layout.ClampToRect(b.String(), layout.Rect{W: s.width, H: s.height})
+	}
+	out := lipgloss.Place(s.width, s.height, lipgloss.Left, lipgloss.Top, b.String())
+	if s.height > 0 {
 		if lines := strings.Split(out, "\n"); len(lines) > s.height {
 			out = strings.Join(lines[:s.height], "\n")
 		}
