@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 const readyIcon = "● "
@@ -473,12 +474,15 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	if prefix != "" {
 		titleContent = fmt.Sprintf("%s %s", prefix, titleText)
 	}
-	title := titleS.Render(lipgloss.JoinHorizontal(
-		lipgloss.Left,
-		lipgloss.Place(r.width-3, 1, lipgloss.Left, lipgloss.Center, titleContent),
-		" ",
-		join,
-	))
+	// The status glyph is laid out FROM THE RIGHT EDGE, and the title fills what
+	// is left (#3614). It reserved its width before too — the title went into
+	// width-3 and the glyph was joined after — but by lipgloss.Width, which
+	// under-counts clustered content: a title carrying a ZWJ family produced a row
+	// the sidebar's own ClampToRect then measured as over-wide, and what a
+	// right-to-left clamp cuts off such a row is its TAIL, which is where this
+	// glyph lives. RowWithRightAffix does the same reservation in the measure the
+	// clamp enforces, so the over-estimate costs a shorter title and the ● stays.
+	title := titleS.Render(layout.RowWithRightAffix(titleContent, " "+join, r.width))
 
 	remainingWidth := r.width
 	remainingWidth -= prefixWidth
@@ -565,8 +569,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		}
 	}
 
-	// join title and subtitle
-	text := lipgloss.JoinVertical(lipgloss.Left, lines...)
+	// Join title and subtitle in the CONTRACT measure. lipgloss pads every line of
+	// a stacked block out to its widest by lipgloss.Width, which would put back
+	// exactly the cells RowWithRightAffix just took off the clustered title row —
+	// and the clamp downstream would then cut the tail, and the glyph with it
+	// (#3614).
+	text := layout.JoinVertical(lines...)
 
 	return text
 }
@@ -637,11 +645,10 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 	prefix := fmt.Sprintf("%s%s %d ",
 		strings.Repeat(" ", runewidth.StringWidth(instancePrefix(expandedArrow, r.width))),
 		connector, oneBased)
-	text := prefix + label + marker
-	if r.width > 0 && runewidth.StringWidth(text) > r.width {
+	body := prefix + label
+	if r.width > 0 && runewidth.StringWidth(body+marker) > r.width {
 		// Same narrow-width handling as the instance rows: drop the "…" tail
-		// when it would itself overflow, since lipgloss.Place won't clip
-		// oversize content.
+		// when it would itself overflow, since the row is placed, not clipped.
 		tail := "…"
 		if r.width < runewidth.StringWidth(tail) {
 			tail = ""
@@ -667,13 +674,13 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		// process tab is named after its command, a web tab after a session title;
 		// neither is guaranteed ASCII).
 		if avail := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(marker); avail > 0 {
-			text = prefix + runewidth.Truncate(label, avail, tail) + marker
-		}
-		// Below that the row is narrower than its own connector and marker, so
-		// there is no name left to spend and the marker goes too: clamp the row to
-		// the container and let it degrade, exactly as it did before.
-		if runewidth.StringWidth(text) > r.width {
-			text = runewidth.Truncate(text, r.width, tail)
+			body = prefix + runewidth.Truncate(label, avail, tail)
+		} else {
+			// Below that the row is narrower than its own connector and marker, so
+			// there is no name left to spend and the marker goes too: clamp the row
+			// to the container and let it degrade, exactly as it did before.
+			body = runewidth.Truncate(body+marker, r.width, tail)
+			marker = ""
 		}
 	}
 	style := tabRowStyle
@@ -689,6 +696,14 @@ func (r *InstanceRenderer) RenderTab(label string, oneBased int, isLast, selecte
 		// stays inside the sidebar container.
 		pad = 0
 	}
+	// The marker's width is reserved in the measure the sidebar's clamp enforces
+	// (#3614), for the same reason the instance row's ● status glyph is — but the
+	// marker stays NEXT TO the name, which is where a tmux-style active cue
+	// belongs. lipgloss.Place used to pad this row out in lipgloss's measure, which
+	// under-counts a clustered label — a tab is named after a session title or a
+	// process command, neither guaranteed ASCII — so the row reached the clamp
+	// looking over-wide and the clamp took its tail, which is exactly the marker
+	// the reservation above exists to protect.
 	return style.Padding(0, pad).Render(
-		lipgloss.Place(r.width, 1, lipgloss.Left, lipgloss.Center, text))
+		layout.RowKeepingTail(body, marker, r.width))
 }

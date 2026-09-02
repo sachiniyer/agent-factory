@@ -3,8 +3,9 @@ package ui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // fitLine clips s to width terminal cells, marking the cut with an ellipsis.
@@ -18,15 +19,21 @@ import (
 // pane behind print into the form. xansi.Truncate cuts on cell boundaries and
 // never splits a sequence; the trailing reset closes any style the cut left
 // open.
+//
+// It measures with layout.Cells, the ONE width answer (#3585/#3610), which is
+// what the rail header budgets its ladder in before calling this (#3641). The
+// two were lipgloss.Width and layout.Cells — the same answer for every string
+// either has been handed, but "the same answer today" is how a shared invariant
+// stops being one.
 func fitLine(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= width {
+	if layout.Cells(s) <= width {
 		return s
 	}
 	tail := "…"
-	if width < lipgloss.Width(tail) {
+	if width < layout.Cells(tail) {
 		tail = ""
 	}
 	out := xansi.Truncate(s, width, tail)

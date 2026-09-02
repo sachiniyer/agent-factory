@@ -330,9 +330,11 @@ func overlayOrigin(fg, bg string) layout.Point {
 	// layout.BlockWidth, not lipgloss.Width: this origin is what places the modal
 	// AND what every RegisterZones call registers its buttons against, so measuring
 	// it differently from the compositor put the zones where the modal was not
-	// drawn (#3585). BlockWidth, not Cells — these are whole multi-line blocks, and
-	// Cells would sum their rows rather than take the widest. Heights are line
-	// counts and need no such agreement.
+	// drawn (#3585). BlockWidth says these are whole multi-line blocks and the
+	// widest row is the answer wanted — it is Cells itself since #3614, which took
+	// the widest line there too so no caller can reach the summed answer that
+	// reported a 120-column frame as ~188 and pushed every zone off the modal.
+	// Heights are line counts and need no such agreement.
 	fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
 	bgW, bgH := layout.BlockWidth(bg), lipgloss.Height(bg)
 	y := centerOffset(bgH - fgH)

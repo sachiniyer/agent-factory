@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/muesli/ansi"
 )
 
 // Cells reports how many terminal cells s occupies once rendered.
@@ -59,50 +60,93 @@ import (
 //
 // Escape sequences are discounted: x-ansi parses them, including OSC hyperlinks,
 // whose URIs PrintableRuneWidth would otherwise count as visible text (#3433).
-func Cells(s string) int {
-	return xansi.StringWidth(s)
-}
-
-// BlockWidth is the widest LINE of a multi-line block — lipgloss.Width's shape,
-// on Cells' measure.
 //
-// Cells measures one line. Handing it a whole block does not fail, it returns the
-// SUM of every row, because that is what x/ansi's StringWidth does with newlines
-// in it — and lipgloss.Width, which the callers replaced, takes the max instead.
-// Measured: "abcd\nab\nabcdefgh" is 8 to lipgloss.Width and 14 to
-// xansi.StringWidth.
+// # One line or many
 //
-// That distinction is not cosmetic. overlayOrigin measures a whole FRAME to
-// centre a modal in it; summing its rows reported a 120-column frame as ~188,
+// Cells reports the WIDEST line of a multi-line block, not the sum of its rows.
+// x/ansi's StringWidth does sum them, and that is not a defensible answer for
+// anything: no caller wants "how many cells would these rows occupy end to end".
+// It cost a real defect once already — overlayOrigin measures a whole FRAME to
+// centre a modal in it, and the summed width reported a 120-column frame as ~188,
 // pushed the modal to the right-hand clamp, and left every mouse zone registered
-// somewhere the modal was not drawn — the exact defect #3585 is about,
-// reintroduced by the fix for it. Caught by the real-terminal play-test, which is
-// why that gate exists.
-func BlockWidth(s string) int {
+// somewhere the modal was not drawn, which is #3585's own defect reintroduced by
+// its fix. It was caught by the real-terminal play-test and repaired at the one
+// call site; taking the widest line here means no caller can reach the summed
+// answer again (#3614). BlockWidth is kept as the explicit spelling of the same
+// thing for callers that replaced lipgloss.Width and want to say so.
+func Cells(s string) int {
+	if !strings.ContainsRune(s, '\n') {
+		return xansi.StringWidth(s)
+	}
 	widest := 0
 	for _, line := range strings.Split(s, "\n") {
-		if w := Cells(line); w > widest {
+		if w := xansi.StringWidth(line); w > widest {
 			widest = w
 		}
 	}
 	return widest
 }
 
+// CellsUpperBound reports a width the string is guaranteed NOT to exceed in tmux.
+//
+// It is the max rule #3610 measured and then withdrew as the general measure: on
+// the corpus in Cells' table it never under-reports what tmux advances, where
+// each half alone does — x/ansi under-reports the chained ZWJ family (2 against
+// 4), and PrintableRuneWidth under-reports a variation-selector emoji (1 against
+// 2). It is NOT a better measure than Cells; it is a deliberate OVERestimate,
+// wrong by 4 cells on that same family, which is exactly why adopting it
+// everywhere cut the ● status dot off ordinary sidebar rows.
+//
+// So it has one job: bound a row whose width cannot be known, in the one
+// direction the fixed-rectangle contract can survive. See the contract measure in
+// contract.go for where that applies and why under-filling is the accepted cost.
+//
+// Multi-line input takes the widest line, like Cells. The stripped string is what
+// PrintableRuneWidth is fed, because it counts an OSC hyperlink's URI as visible
+// text (#3433) and would otherwise report a bound larger than any rectangle.
+func CellsUpperBound(s string) int {
+	widest := 0
+	for _, line := range strings.Split(s, "\n") {
+		w := xansi.StringWidth(line)
+		if p := ansi.PrintableRuneWidth(xansi.Strip(line)); p > w {
+			w = p
+		}
+		if w > widest {
+			widest = w
+		}
+	}
+	return widest
+}
+
+// BlockWidth is the widest LINE of a multi-line block — lipgloss.Width's shape,
+// on Cells' measure. It is now exactly Cells, and kept as the explicit spelling
+// for callers that replaced lipgloss.Width and want the code to say which shape
+// they meant.
+//
+// It was not always the same function. Cells summed a block's rows until #3614,
+// because that is what x/ansi's StringWidth does with newlines in it, and
+// BlockWidth existed to stop callers reaching that answer. Cells takes the widest
+// line itself now, so the trap is closed at the source rather than at the one
+// call site that fell into it; see Cells.
+func BlockWidth(s string) int { return Cells(s) }
+
 // TruncateToCells shortens s until it fits width by the Cells measure, without
 // ever cutting through a control sequence.
 //
-// Two measures are in play and they are not interchangeable. x/ansi's truncator
-// is the one that keeps escape sequences atomic — reflow's takes the first letter
-// of an OSC hyperlink's URI for the terminator and cuts through it (#3433) — but
-// it truncates by ITS OWN cell count, which is not what Cells reports whenever
-// Cells takes the legacy overestimate. Asking it once for `width` and trusting
-// the result is therefore wrong in a way that is easy to miss: clamping "\U0001F44D\U0001F3FD"
-// (Cells 4, x/ansi 2) into 3 columns returns the grapheme untouched, still 4 by
-// Cells, so a caller that then pads on `Cells < width` pads nothing and emits a
-// row narrower than the rectangle it promised.
+// x/ansi's truncator is the one that keeps escape sequences atomic — reflow's
+// takes the first letter of an OSC hyperlink's URI for the terminator and cuts
+// through it (#3433) — and it truncates by its OWN cell count. That count is
+// Cells today, so one call would do; the loop stays because the two are not the
+// same function and nothing forces them to agree. Asking once and trusting the
+// result fails in a way that is easy to miss: if the truncator ever counts a
+// grapheme lower than the measure the caller pads by, it returns a row that still
+// measures over, the pad is skipped on `Cells < width`, and the row goes out
+// narrower than the rectangle it promised.
 //
 // So the parser is asked for progressively less until the result actually fits.
-// A row that already fits returns on the first attempt.
+// A row that already fits returns on the first attempt, which is every ordinary
+// row. truncateToContract in contract.go is the same loop against the contract
+// measure, where the two genuinely do disagree.
 func TruncateToCells(s string, width int) string {
 	if width <= 0 {
 		return ""
