@@ -13,6 +13,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -578,7 +579,7 @@ func checkStaleTempHomes(ctx *scanContext, report *Report) {
 		if age < ctx.opts.MinTempHomeAge {
 			continue
 		}
-		if !pathInside(tempDir, dir) {
+		if !pathutil.IsStrictlyInside(dir, tempDir) {
 			continue
 		}
 
@@ -712,7 +713,7 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) f
 		if dir == activeHome {
 			return fmt.Errorf("refusing to remove the active home %s", dir)
 		}
-		if !pathInside(tempDir, dir) {
+		if !pathutil.IsStrictlyInside(dir, tempDir) {
 			return fmt.Errorf("refusing to remove %s: it is not inside the temp dir %s", dir, tempDir)
 		}
 		if !isAFHome(dir) {
@@ -746,14 +747,6 @@ func staleTempHomeRemoveFix(ctx *scanContext, dir, tempDir, activeHome string) f
 		}
 		return os.RemoveAll(dir)
 	}
-}
-
-func pathInside(base, path string) bool {
-	rel, err := filepath.Rel(base, path)
-	if err != nil || rel == "." || rel == ".." {
-		return false
-	}
-	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // newestMtime returns the most recent mtime among the dir itself and its

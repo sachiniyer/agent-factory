@@ -330,11 +330,11 @@ func (p *ProjectsPane) String() string {
 		// The registry read failed, so the rows below may be missing every
 		// registered sessionless project — say so instead of rendering the
 		// remaining sources as a complete list (#3298). This row also stands
-		// in for the empty-state line: "no other projects yet" would be a
+		// in for the empty-state line: "No other projects yet" would be a
 		// claim the failed read cannot support.
 		lines = append(lines, projectsHintStyle.Render(fitLine("  registry unreadable · list may be incomplete", p.rect.W)))
 	} else if len(p.projects) == 0 {
-		lines = append(lines, projectRowStyle.Render(fitLine("  no other projects yet", p.rect.W)))
+		lines = append(lines, projectRowStyle.Render(fitLine("  No other projects yet", p.rect.W)))
 	}
 
 	// Reserve the last rail row as a blank bottom margin so the workspace frame's

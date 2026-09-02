@@ -224,7 +224,7 @@ func TestProjectsPaneDegradedNotice(t *testing.T) {
 	empty.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
 	empty.SetDegraded(true)
 	out = empty.String()
-	if strings.Contains(out, "no other projects yet") {
+	if strings.Contains(out, "No other projects yet") {
 		t.Fatalf("a degraded empty section must not claim there are no projects, got:\n%s", out)
 	}
 	if !strings.Contains(out, "registry unreadable") {
@@ -238,4 +238,19 @@ func TestProjectsPaneDegradedNotice(t *testing.T) {
 	if out := compact.String(); !strings.Contains(out, "?") {
 		t.Fatalf("the compact count must mark a degraded read, got:\n%s", out)
 	}
+}
+
+// TestProjectsEmptyStateUsesSentenceCase is #3632. The only assertion that
+// mentioned this line was a NEGATIVE one — a degraded section must not claim
+// there are no projects — so nothing pinned the string the section actually
+// renders, and it drifted out of sentence case unnoticed.
+func TestProjectsEmptyStateUsesSentenceCase(t *testing.T) {
+	p := newTestProjects(nil)
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
+
+	out := stripANSI(p.String())
+	assert.Contains(t, out, "No other projects yet",
+		"the empty Projects section renders in sentence case:\n%s", out)
+	assert.NotContains(t, out, "no other projects yet",
+		"the lowercase form must be gone:\n%s", out)
 }

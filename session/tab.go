@@ -52,6 +52,13 @@ const webTabName = "web"
 // TabLabel).
 const vscodeTabName = "vscode"
 
+// processTabName is the fallback canonical name of a CLI-spawned Process tab —
+// used when neither --name nor the command's first word yields a usable token
+// (see processTabBaseName). It is also the kind's wire spelling in `kind_name`;
+// unlike shell/web/vscode it is NOT a `--kind` value, because a process tab is
+// what the default request makes when given a command (see tabKindVocabulary).
+const processTabName = "process"
+
 // tmuxTabSeparator joins an instance's agent tmux session name to a tab's name
 // to derive that tab's own tmux session name (af_<repoHash>_<title>__<tab>).
 // Deterministic so a tab's session is collision-free across instances and
@@ -279,9 +286,42 @@ func newVSCodeTab() *Tab {
 	return &Tab{ID: newTabID(), Name: vscodeTabName, Kind: TabKindVSCode}
 }
 
+// tabKindVocabulary is the canonical TabKind ↔ name table, in enum order. It is
+// the SINGLE source of truth for those words: `tabs[].kind_name`
+// (session/state_names.go), `tab_kinds[].kind`, the `--kind` flag, and
+// CreateTabRequest.Kind all resolve through it, so the payload cannot spell a
+// kind one way in one array and another way eleven lines below (#3631).
+//
+// creatable marks the subset a client may NAME in a create request. Agent is not
+// creatable — a session's agent tab is made with the session — so offering it
+// would invite a control with no call behind it. Process has no `--kind`
+// spelling either: a process tab is what the default request makes when given a
+// command. Both still have a NAME, because both still appear in `tabs[].kind`
+// and a payload that refuses to spell a value it emits is the defect this table
+// closes.
+var tabKindVocabulary = []struct {
+	kind      TabKind
+	name      string
+	creatable bool
+}{
+	{TabKindAgent, agentTabName, false},
+	{TabKindShell, shellTabName, true},
+	{TabKindProcess, processTabName, false},
+	{TabKindWeb, webTabName, true},
+	{TabKindVSCode, vscodeTabName, true},
+}
+
+var tabKindNameByKind = func() map[TabKind]string {
+	out := make(map[TabKind]string, len(tabKindVocabulary))
+	for _, entry := range tabKindVocabulary {
+		out[entry.kind] = entry.name
+	}
+	return out
+}()
+
 // tabKindNames maps the CreateTabRequest.Kind / `--kind` wire value to the
-// TabKind it selects. It is the SINGLE source of truth for that vocabulary: the
-// CLI (api/sessions_tabs.go) validates against it and the daemon
+// TabKind it selects: the creatable half of tabKindVocabulary, inverted. The CLI
+// (api/sessions_tabs.go) validates against it and the daemon
 // (daemon/manager_tabs.go) dispatches on it, so the two can no longer drift into
 // the state where a kind the CLI accepts is one the daemon rejects.
 //
@@ -290,10 +330,23 @@ func newVSCodeTab() *Tab {
 // its own before consulting this map. "shell" is the canonical explicit spelling
 // for the same shell path Shell=true selects; "Terminal" remains its
 // presentation-only label (TabLabel), not a second wire identifier.
-var tabKindNames = map[string]TabKind{
-	"shell":  TabKindShell,
-	"web":    TabKindWeb,
-	"vscode": TabKindVSCode,
+var tabKindNames = func() map[string]TabKind {
+	out := make(map[string]TabKind, len(tabKindVocabulary))
+	for _, entry := range tabKindVocabulary {
+		if entry.creatable {
+			out[entry.name] = entry.kind
+		}
+	}
+	return out
+}()
+
+// TabKindName returns the wire name of a TabKind — the same word
+// `tab_kinds[].kind` and `--kind` use, for the kinds that have one there, and
+// the honest spelling of the two that do not (agent, process). It returns "" for
+// a value this binary does not recognize, so a record written by a newer af
+// reports no name rather than a wrong one.
+func TabKindName(k TabKind) string {
+	return tabKindNameByKind[k]
 }
 
 // ParseTabKindName resolves a `--kind` / CreateTabRequest.Kind wire value to its

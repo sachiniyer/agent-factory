@@ -82,7 +82,7 @@ af_close_tasks
 af_ensure_nav
 af_send ']'
 af_wait_for '▾\[✓\]  yearly-audit' "$AF_DRIVER_TIMEOUT" 'automations row focused and expanded'
-af_wait_for '0 0 31 2 \* · no upcoming run' "$AF_DRIVER_TIMEOUT" \
+af_wait_for '0 0 31 2 \* · No upcoming run' "$AF_DRIVER_TIMEOUT" \
     'the automations rail names the absence instead of a zero-time next run'
 # Refute the PREFIX, not the whole timestamp: a clipped "next Jan 0…" would slip
 # past a refute that spells out "next Jan 01 00:00" in full.

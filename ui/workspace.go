@@ -11,7 +11,7 @@ import (
 // N-pane model has no selection-driven pane — content appears when the user
 // opens a tab as a pane (`s`), so the empty state must say exactly that.
 func EmptyWorkspace(r layout.Rect) string {
-	return emptyWorkspaceContent(r, []string{"no panes open — s opens the selected tab"})
+	return emptyWorkspaceContent(r, []string{"No panes open — s opens the selected tab"})
 }
 
 // FirstRunWorkspace renders the zero-session onboarding state. It is distinct

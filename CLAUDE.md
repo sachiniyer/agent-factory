@@ -60,7 +60,7 @@ Working style:
   accumulate.
 - Never run `pkill tmux`/`pkill af` or bare `tmux kill-server` on a shared host; tmux teardown must name an isolated socket with `-L` or `-S`.
 - Before opening a PR run the **cheap local checks** — `gofmt -l .`,
-  `go build ./...`, `golangci-lint run --timeout=3m --fast`,
+  `go build ./...`, `go vet ./...`, `golangci-lint run --timeout=3m --fast`,
   `scripts/lint-file-length.sh` — plus `go test` on **only the non-daemon,
   non-app package you changed**. Then push and let CI run the rest, and fix what
   CI reports on your PR head.
@@ -137,6 +137,14 @@ gofmt -w .
 golangci-lint run --timeout=3m --fast
 gofmt -l .   # should produce no output
 scripts/lint-file-length.sh   # or: make lint-file-length
+
+# copylocks and the rest of vet's passes (#3613). golangci-lint runs with
+# --fast, which disables govet outright (fast: false), so vet findings are
+# invisible to the line above no matter what a config file says. This IS a
+# routine local check — unlike deadcode it walks no whole-program call graph,
+# and unlike the suites below it compiles the tests without running them, so it
+# spawns no daemon and touches no tmux. PR Validation's Lint job blocks on it.
+go vet ./...
 
 # NOT a routine local check — whole-program analysis, and the fleet running it
 # concurrently buries the box. CI runs it on every push and REPORTS rather than

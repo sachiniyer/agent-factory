@@ -160,7 +160,7 @@ func TestPane_OpenHideFlow(t *testing.T) {
 	pressKey(t, h, "x")
 	require.Zero(t, h.store.NumOpenPanes())
 	assert.Equal(t, layout.RegionTree, h.ring.Active())
-	assert.Contains(t, h.View(), "no panes open", "the empty workspace advertises the open verb")
+	assert.Contains(t, h.View(), "No panes open", "the empty workspace advertises the open verb")
 }
 
 // TestPane_OpenAlreadyOpenFocuses: s on a tab that is already open as a pane

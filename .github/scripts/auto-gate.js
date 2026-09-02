@@ -67,6 +67,25 @@ const CODEX_REVIEW_RE = /\bCodex Review\b/i;
 const CODEX_RATE_LIMIT_RE = /reached your Codex usage limits for code reviews/i;
 const CODEX_BODY_FINDING_RE = /\bP[0-3]\b/i;
 const REVIEWED_COMMIT_RE = /(?:\*\*Reviewed commit:\*\*|Reviewed commit:)\s*`([0-9a-f]{7,40})`/i;
+// The second artifact shape. Codex emits the prose line above when a review is
+// REQUESTED; when it reviews automatically on a push it only edits its summary
+// comment, whose table names the commit in a cell (#3606). Both are the same
+// reviewer saying the same thing about the same head, so both count — a PR whose
+// final head was reviewed automatically otherwise blocks forever on a review
+// that already ran, which is how every final head came to need a manual
+// `@codex review`.
+//
+// A row is a verdict only when it is Completed AND names a commit AND carries a
+// parseable time. `Running` is progress, not a verdict.
+// The marker GitHub's Codex integration writes into its own persistent summary
+// comment. Requiring it is what stops any body that merely CONTAINS a
+// table-looking line — a review quoting this very format, which reviewing this
+// gate does — from being read as a verdict artifact.
+const CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->";
+const CODEX_SUMMARY_ROW_LABEL_RE = /\bCode Review\b/i;
+const CODEX_SUMMARY_ROW_COMPLETED_RE = /\bCompleted\b/i;
+const CODEX_SUMMARY_ROW_COMMIT_RE = /`([0-9a-f]{7,40})`/i;
+const CODEX_SUMMARY_ROW_TIME_RE = /<relative-time[^>]*\bdatetime="([^"]+)"/i;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
@@ -565,6 +584,23 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     manualMergeReasons.push(MANUAL_MERGE_REVIEWER_UNAVAILABLE_REASON);
   }
   const manualMergeRequired = manualMergeReasons.length > 0;
+  // The manual path exists so branch protection does not sit red on a PR this
+  // gate will never merge itself. It was passing the required check for EVERY
+  // blocker, which made "the author is external" waive a live Codex finding and
+  // let three hand merges ship one (#3534, #3545, #3546 → #3555, #3557, #3553).
+  //
+  // A finding is a claim about the CODE. It does not depend on who opened the
+  // PR, and the degradation above already refuses to let "the reviewer is down"
+  // waive one — this is the same rule, applied to the branch that skipped it.
+  //
+  // Findings ONLY. The other unmet requirements stay notes here, deliberately: a
+  // live finding is cleared per-thread by a RESOLVED / ACCEPTED / [gate-ack]
+  // reply the maintainer already posts, so blocking on one leaves an exit. A
+  // missing play-tested label or an absent verdict has no such per-item answer
+  // on a PR whose author does not iterate, and blocking on those would turn the
+  // manual path into a stop with no way out — the failure mode the reviewer
+  // degradation was written to avoid.
+  const manualMergeBlockers = manualMergeRequired ? codex.findingBlockers ?? [] : [];
 
   return finish(core, setOutputs, {
     prNumber: String(pr.number),
@@ -572,6 +608,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     shouldMerge: !manualMergeRequired && reasons.length === 0,
     manualMergeRequired,
     manualMergeReasons,
+    manualMergeBlockers,
     degradedForUnavailableReviewer,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
@@ -632,12 +669,18 @@ async function reportDecision({ github, context, core, result, manual = false })
         run.app?.id === GITHUB_ACTIONS_APP_ID,
     )
     .sort((left, right) => latestRunTime(right) - latestRunTime(left))[0];
-  const decisionPasses = result.shouldMerge || result.manualMergeRequired;
+  // A manual-merge PR passes the required check only while nothing the
+  // maintainer must answer first is outstanding (#3558).
+  const manualMergeBlockers = result.manualMergeBlockers || [];
+  const manualMergePasses = result.manualMergeRequired && manualMergeBlockers.length === 0;
+  const decisionPasses = result.shouldMerge || manualMergePasses;
   const state =
     manual && !priorDecision
       ? "never-ran"
       : result.manualMergeRequired
-        ? "manual"
+        ? manualMergePasses
+          ? "manual"
+          : "manual-blocked"
         : result.shouldMerge
           ? "pass"
           : "waiting";
@@ -645,9 +688,11 @@ async function reportDecision({ github, context, core, result, manual = false })
     state === "never-ran"
       ? `NEVER_RAN: no prior decision; recovery ${decisionPasses ? "passed" : "is waiting"}`
       : result.manualMergeRequired
-        ? result.degradedForUnavailableReviewer
-          ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
-          : "PASS: maintainer review and manual merge required"
+        ? manualMergePasses
+          ? result.degradedForUnavailableReviewer
+            ? "PASS: reviewer usage-limited; maintainer review and manual merge required"
+            : "PASS: maintainer review and manual merge required"
+          : "BLOCKED: a manual merge still requires every live Codex finding to be answered"
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
           : "WAITING: Auto Gate requirements are not yet satisfied";
@@ -2532,10 +2577,14 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   const codexReviewArtifacts = [...codexComments, ...reviews]
     .filter((comment) => comment.user?.login === CODEX_REVIEWER)
     .sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a));
-  const matchingReviewArtifacts = codexReviewArtifacts.filter((comment) => {
-    const reviewedCommit = parseReviewedCommit(comment.body || "");
-    return reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha);
-  });
+  // Both artifact shapes, each carrying its OWN time: the prose line's is its
+  // comment's, the summary row's is the row's. Sorted by that rather than by
+  // comment order, because the summary comment is edited on every review
+  // activity and its comment time says nothing about when this review completed.
+  const matchingReviewArtifacts = codexReviewArtifacts
+    .map((artifact) => parseVerdictArtifact(artifact, sha))
+    .filter(Boolean)
+    .sort((left, right) => right.time - left.time);
   const verdict = matchingReviewArtifacts[0];
 
   if (!verdict) {
@@ -2576,13 +2625,20 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
         ? "; the latest Codex response was usage-limited"
         : "; the latest Codex response was usage-limited but predates this head, so it is not " +
           "evidence about this head";
-    const missingVerdictReason = `Codex has not reviewed head ${sha} yet${suffix}`;
+    // Split, because the two states need different actions from a reader: one
+    // says wait for or request a review, the other says a review ran and this
+    // gate could not read it — go look at the artifact, not at Codex.
+    const missingVerdictReason = summaryNamesHead(codexReviewArtifacts, sha)
+      ? `a Codex review exists for head ${sha} but carried no parseable verdict${suffix}`
+      : `Codex has not reviewed head ${sha} yet${suffix}`;
     if (reviewerUnavailable) {
       reviewerUnavailableReason = missingVerdictReason;
     }
     reasons.push(missingVerdictReason);
   } else {
-    const verdictTime = reviewArtifactTime(verdict);
+    // The artifact's own time: the comment's for a prose line, the row's for a
+    // summary row.
+    const verdictTime = verdict.time;
     if (lastPushTime == null || verdictTime === 0 || verdictTime <= lastPushTime) {
       reasons.push("Codex verdict for the head commit is older than the head commit timestamp");
     } else {
@@ -2590,8 +2646,47 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     }
   }
 
-  if (verdict && CODEX_BODY_FINDING_RE.test(verdict.body || "")) {
-    reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
+  // Findings are read from artifacts BOUND to this head, which is a wider set
+  // than the verdict artifacts: an automatic review can carry a P0-P3 in its body
+  // with no `Reviewed commit:` line at all, and it is bound to the head by its
+  // own commit_id. Leaving those out let a Completed summary row pass while the
+  // finding beside it was never inspected.
+  //
+  // A summary row is deliberately NOT in this set. It records that a review
+  // completed, not that it was clean, and its body never carries findings — so
+  // letting it be the newest finding-capable artifact would clear a finding by
+  // the mere fact that Codex rewrote the table afterwards, which it does on every
+  // review activity including posting that finding.
+  //
+  // Newest-wins is preserved among the bound artifacts, so a newer clean verdict
+  // still supersedes an older body-only finding.
+  // Declared here because a body finding is a finding: the manual-merge path
+  // consumes findingBlockers, not reasons, so a finding recorded only in reasons
+  // publishes a PASSING manual decision and a maintainer merges with it live —
+  // exactly what #3591 closed for inline findings.
+  const findingBlockers = [];
+  const headBoundArtifacts = codexReviewArtifacts.filter((artifact) => {
+    const reviewedCommit = parseReviewedCommit(artifact.body || "");
+    if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha)) {
+      return true;
+    }
+    return String(artifact.commit_id || "").toLowerCase() === String(sha || "").toLowerCase();
+  });
+  const latestBoundArtifact = headBoundArtifacts[0];
+  if (latestBoundArtifact && CODEX_BODY_FINDING_RE.test(latestBoundArtifact.body || "")) {
+    const bodyFindingReason = "latest exact-head Codex review body contains a P0-P3 finding";
+    reasons.push(bodyFindingReason);
+    // The remedy has to be one that terminates. A body finding has no thread, so
+    // no RESOLVED reply can clear it — it clears when a NEWER head-bound artifact
+    // for this head is clean, which is what a fresh review produces. Advertising
+    // a reply here would send the maintainer round a loop with no exit, the same
+    // trap the unpushed-fix-claim remedy avoids.
+    findingBlockers.push({
+      reason: bodyFindingReason,
+      remedy:
+        "request a fresh `@codex review` so a newer clean verdict for this head supersedes it, " +
+        "or push the fix — no reply can clear a finding that is not on a thread",
+    });
   }
 
   const reviewComments = await retryRead(
@@ -2622,8 +2717,23 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
     (comment) => isLiveFinding(comment) && !resolvedByAllowedReply.has(comment.id),
   );
 
+  // Collected as their own list, not recognised later by matching this string.
+  // The manual-merge path has to block on findings specifically (#3558), and a
+  // gate that identifies another gate's blocker by its message drifts the moment
+  // someone rewords the message.
+  //
+  // Each carries the REMEDY that clears it, because the two do not clear the same
+  // way and a blanket instruction is wrong for one of them (#3591 review). The
+  // remedy travels with the reason for the same purpose as the reason itself: so
+  // the summary renders what the gate knows rather than inferring it back out of
+  // the message.
   if (unresolvedFindings.length > 0) {
-    reasons.push(`${unresolvedFindings.length} unresolved live Codex inline finding(s)`);
+    const unresolvedReason = `${unresolvedFindings.length} unresolved live Codex inline finding(s)`;
+    reasons.push(unresolvedReason);
+    findingBlockers.push({
+      reason: unresolvedReason,
+      remedy: "reply RESOLVED, ACCEPTED or [gate-ack] on each thread",
+    });
   } else {
     notes.push("No unresolved live Codex inline findings");
   }
@@ -2664,13 +2774,35 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   });
 
   if (unpushedFixClaims.length > 0) {
-    reasons.push(
+    const unpushedReason =
       `${unpushedFixClaims.length} finding(s) marked RESOLVED with no commit pushed after them; ` +
-        "the head predates the fix they claim",
-    );
+      "the head predates the fix they claim";
+    reasons.push(unpushedReason);
+    // A finding whose only answer is a claim the head cannot contain is still a
+    // live finding, so it belongs in the same list as the unanswered kind.
+    //
+    // Its remedy is NOT "reply RESOLVED". The predicate above already requires a
+    // RESOLVED reply to exist, and then turns on lastPushTime — which another
+    // reply does not move. Only a commit newer than the finding clears it, or
+    // withdrawing the claim with ACCEPTED / [gate-ack], which short-circuits the
+    // filter. Advertising RESOLVED here would send the maintainer round a loop
+    // that cannot terminate.
+    findingBlockers.push({
+      reason: unpushedReason,
+      remedy:
+        "push the commit that fixes them, or reply ACCEPTED / [gate-ack] to withdraw the fix " +
+        "claim — another RESOLVED reply cannot clear this one",
+    });
   }
 
-  return { ok: reasons.length === 0, reasons, notes, reviewerUnavailable, reviewerUnavailableReason };
+  return {
+    ok: reasons.length === 0,
+    reasons,
+    notes,
+    reviewerUnavailable,
+    reviewerUnavailableReason,
+    findingBlockers,
+  };
 }
 
 function parseReviewedCommit(body) {
@@ -2678,6 +2810,77 @@ function parseReviewedCommit(body) {
     return null;
   }
   return body.match(REVIEWED_COMMIT_RE)?.[1]?.toLowerCase() || null;
+}
+
+// The Code Review rows of a Codex summary table. Split on cells rather than
+// matched as one regex so a row is read positionally — status in its own cell,
+// commit in its own cell — and the header and separator rows fall out for free
+// because neither names a Code Review.
+function parseSummaryRows(body) {
+  const text = String(body || "");
+  // Authenticated first. Without this, a finding-bearing review body that quotes
+  // the table format parses as a `summary-row` artifact, and the P0-P3 check —
+  // which deliberately reads only prose — skips its finding.
+  if (!text.includes(CODEX_SUMMARY_MARKER)) {
+    return [];
+  }
+  const rows = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim().startsWith("|")) {
+      continue;
+    }
+    const cells = line.split("|").slice(1, -1).map((cell) => cell.trim());
+    if (cells.length < 3 || !CODEX_SUMMARY_ROW_LABEL_RE.test(cells[0])) {
+      continue;
+    }
+    rows.push({
+      completed: CODEX_SUMMARY_ROW_COMPLETED_RE.test(cells[1]),
+      commit: CODEX_SUMMARY_ROW_COMMIT_RE.exec(cells[2])?.[1]?.toLowerCase() || null,
+      // The ROW's timestamp, not the comment's. The summary comment is edited on
+      // every review activity, so its own updated_at says when Codex last
+      // touched anything — not when this review completed, which is what the
+      // freshness rule is comparing against the head.
+      time: parseTimestamp(CODEX_SUMMARY_ROW_TIME_RE.exec(cells[1])?.[1]),
+    });
+  }
+  return rows;
+}
+
+// A Codex artifact's verdict for this head, or null. Prose first: it is the
+// explicit form and carries the artifact's own timestamp, exactly as before.
+//
+// The commit is matched as a PREFIX of the head, which needs no API lookup: the
+// head SHA is already known here, so there is nothing to resolve and no
+// check-then-use window to be raced. A stale row for an older head has to clear
+// two independent bars — its seven-character cell must equal this head's prefix,
+// and its own timestamp must post-date the head — and freshness is the one doing
+// the work.
+function parseVerdictArtifact(artifact, headSha) {
+  const body = artifact.body || "";
+  const reviewedCommit = parseReviewedCommit(body);
+  if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
+    return { kind: "prose", time: reviewArtifactTime(artifact), body };
+  }
+  const row = parseSummaryRows(body).find(
+    (candidate) =>
+      candidate.completed &&
+      candidate.commit != null &&
+      candidate.time != null &&
+      reviewedCommitMatchesHead(candidate.commit, headSha),
+  );
+  return row ? { kind: "summary-row", time: row.time, body } : null;
+}
+
+// Whether any artifact's summary table names this head at all, whatever its
+// status. This is what separates "no review has run" from "a review ran and this
+// gate could not read its verdict" — the distinction that cost an hour of
+// looking for a missing review that had already completed.
+function summaryNamesHead(artifacts, headSha) {
+  return artifacts.some((artifact) =>
+    parseSummaryRows(artifact.body || "").some(
+      (row) => row.commit != null && reviewedCommitMatchesHead(row.commit, headSha),
+    ),
+  );
 }
 
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {
@@ -2717,11 +2920,25 @@ function finish(core, setOutputs, result) {
   let summary;
   if (result.manualMergeRequired) {
     const manual = (result.manualMergeReasons || []).join(" ") || MANUAL_MERGE_AUTHOR_REASON;
-    const unmet =
-      result.reasons.length === 0
-        ? ""
-        : `\n\nUnmet automatic-merge requirements:\n- ${result.reasons.join("\n- ")}`;
-    summary = `PASS: ${manual}${unmet}`;
+    // Blockers are lifted out of the unmet list and named first. The unmet list
+    // is advisory — things this gate would have wanted before merging itself —
+    // and burying a hard blocker inside it is how one gets read as another
+    // "maintainer's call" line on the way to a hand merge (#3558).
+    const blockers = result.manualMergeBlockers || [];
+    const blockerReasons = new Set(blockers.map((blocker) => blocker.reason));
+    const unmet = result.reasons.filter((reason) => !blockerReasons.has(reason));
+    const unmetSuffix =
+      unmet.length === 0 ? "" : `\n\nUnmet automatic-merge requirements:\n- ${unmet.join("\n- ")}`;
+    // Each blocker is rendered with ITS OWN remedy. One blanket instruction was
+    // wrong for the unpushed-fix-claim blocker, which no further reply can clear.
+    const blocked = blockers
+      .map((blocker) => `${blocker.reason} — ${blocker.remedy}`)
+      .join("\n- ");
+    summary =
+      blockers.length === 0
+        ? `PASS: ${manual}${unmetSuffix}`
+        : `BLOCKED: ${manual} A manual merge still requires every live Codex finding to be ` +
+          `answered:\n- ${blocked}${unmetSuffix}`;
   } else {
     summary =
       result.reasons.length === 0
@@ -2772,6 +2989,8 @@ module.exports = {
   resolveTargets,
   __test: {
     CONCEDED_MERGE_REFUSALS,
+    parseSummaryRows,
+    parseVerdictArtifact,
     MASTER_PUSH_WORKFLOWS,
     isSelfContradictoryNotFound,
     evaluateCodex,

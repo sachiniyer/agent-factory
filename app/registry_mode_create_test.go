@@ -147,7 +147,7 @@ func TestRegistryModeEmptyWorkspaceNamesOnlyLiveKeys(t *testing.T) {
 }
 
 // A pane-empty workspace keeps its own message even with no active project.
-// "no panes open" and "no project selected" answer different questions and are
+// "No panes open" and "No project selected" answer different questions and are
 // not alternatives — collapsing them told a user who had just closed their panes
 // to go pick a project instead of reopening one. Caught in review on this PR.
 func TestPaneEmptyWorkspaceKeepsItsOwnMessageWithoutAProject(t *testing.T) {
@@ -160,7 +160,7 @@ func TestPaneEmptyWorkspaceKeepsItsOwnMessageWithoutAProject(t *testing.T) {
 
 	view := flatten(h.View())
 
-	assert.Contains(t, view, "no panes open", "the pane-empty state owns this message")
+	assert.Contains(t, view, "No panes open", "the pane-empty state owns this message")
 	assert.NotContains(t, view, "No project selected",
 		"#2830 is scoped to the EMPTY rail; it must not reach a workspace that has sessions")
 }

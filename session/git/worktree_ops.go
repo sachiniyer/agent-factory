@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -770,7 +771,7 @@ func reapWorktreeWriters(worktreePath string) {
 	root := normalizeWorktreePath(worktreePath)
 	reapWorktreeWritersMatching(worktreePath, func(pid int) bool {
 		cwd, ok := proctree.WorkingDir(pid)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	})
 }
 
@@ -814,7 +815,7 @@ func worktreeWriterProcesses(
 ) []proctree.Process {
 	matches := func(pid int) bool {
 		cwd, ok := workingDir(pid)
-		return ok && pathAtOrUnder(root, filepath.Clean(cwd))
+		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}
 	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxServer)
 }
@@ -876,20 +877,4 @@ func worktreeWriterProcessesMatching(
 		}
 	}
 	return procs
-}
-
-// pathAtOrUnder reports whether cleaned path p is root itself or a path nested
-// inside it. root must already be cleaned and symlink-resolved (normalizeWorktreePath)
-// and p cleaned; the kernel resolves /proc/<pid>/cwd, so the caller cleans the cwd
-// but need not re-resolve it. A sibling ("/a/b-other") or a parent is rejected —
-// only the tree itself and its descendants match.
-func pathAtOrUnder(root, p string) bool {
-	if p == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, p)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

@@ -595,7 +595,7 @@ func (w *TabbedWindow) renderHeader(width int) string {
 			text = fmt.Sprintf(" %s · %s — selected: %s ", inst.Title, label, w.selectionHint)
 		}
 	} else {
-		text = " no session selected "
+		text = " No session selected "
 	}
 	if w.IsInScrollMode() {
 		// Scroll mode is pane chrome, not terminal history. Keeping this cue in

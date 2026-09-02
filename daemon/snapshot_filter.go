@@ -7,22 +7,19 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-var snapshotStatusLiveness = map[string]session.Liveness{
-	"running":       session.LiveRunning,
-	"ready":         session.LiveReady,
-	"lost":          session.LiveLost,
-	"dead":          session.LiveDead,
-	"archived":      session.LiveArchived,
-	"limit-reached": session.LiveLimitReached,
-}
-
-const snapshotStatusNames = "running, ready, lost, dead, archived, limit-reached"
+// snapshotStatusNames is the accepted `statuses` vocabulary, rendered for the
+// "valid: …" half of a rejection. It is DERIVED from session's canonical
+// Liveness ↔ name table rather than restated here (#3631): the same table names
+// each row's `liveness_name`, so the word this filter accepts and the word the
+// payload reports it by cannot drift apart, and a Liveness value added later
+// reaches both at once.
+var snapshotStatusNames = strings.Join(session.LivenessNameList(), ", ")
 
 // Validate checks the additive Snapshot filters without reading manager state.
 func (r SnapshotRequest) Validate() error {
 	for _, raw := range r.Statuses {
 		status := strings.ToLower(strings.TrimSpace(raw))
-		if _, ok := snapshotStatusLiveness[status]; !ok {
+		if _, ok := session.ParseLivenessName(status); !ok {
 			return fmt.Errorf("invalid session status %q (valid: %s)", raw, snapshotStatusNames)
 		}
 	}
@@ -51,12 +48,20 @@ func FilterSnapshotInstances(req SnapshotRequest, instances []session.InstanceDa
 	statuses := make(map[session.Liveness]struct{}, len(req.Statuses))
 	for _, raw := range req.Statuses {
 		status := strings.ToLower(strings.TrimSpace(raw))
-		statuses[snapshotStatusLiveness[status]] = struct{}{}
+		liveness, ok := session.ParseLivenessName(status)
+		if !ok {
+			// Unreachable: Validate above rejects the request first. Skipping
+			// rather than inserting the zero Liveness keeps a future caller that
+			// bypasses Validate from silently filtering on LivenessUnset, which
+			// matches nothing and would read as "no such sessions".
+			continue
+		}
+		statuses[liveness] = struct{}{}
 	}
 
 	filtered := make([]session.InstanceData, 0, len(instances))
 	for _, instance := range instances {
-		liveness := snapshotLiveness(instance)
+		liveness := session.RecordedLiveness(instance)
 		if req.Live && liveness == session.LiveArchived {
 			continue
 		}
@@ -78,11 +83,4 @@ func FilterSnapshotInstances(req SnapshotRequest, instances []session.InstanceDa
 
 func (r SnapshotRequest) hasFilters() bool {
 	return r.Live || len(r.Statuses) > 0 || !r.CreatedAfter.IsZero() || r.Limit != nil
-}
-
-func snapshotLiveness(instance session.InstanceData) session.Liveness {
-	if instance.Liveness != session.LivenessUnset {
-		return instance.Liveness
-	}
-	return session.LivenessForStatus(instance.Status)
 }

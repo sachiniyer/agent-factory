@@ -56,6 +56,16 @@ jobs:
             exit 1
           fi
 
+      # copylocks and the rest of vet's passes (#3613). This cannot live in the
+      # golangci-lint step above: that runs with --fast, which disables govet
+      # outright (it is fast: false), so enabling govet in a config file would
+      # change nothing while --fast is on the command line. Until this step
+      # existed, `go vet` ran ONLY in the release workflows' preflight — so a
+      # vet-only finding blocked every preview release instead of failing the
+      # PR that introduced it.
+      - name: go vet
+        run: go vet ./...
+
       # REPORTS, does not block (#3014). The gate was right about the code and wrong
       # about the workflow: requiring every merged symbol to be reachable means a
       # feature cannot land its mechanism first and its call site second. That
