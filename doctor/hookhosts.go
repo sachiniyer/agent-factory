@@ -107,18 +107,20 @@ func checkOrphanedHookHosts(ctx *scanContext, report *Report) {
 		return
 	}
 
-	var candidates, unrecognized []string
+	var candidates []hookHostPin
+	var unrecognized []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if !entry.IsDir() {
+		if !entry.IsDir() || !isHookHostSlug(name) {
 			unrecognized = append(unrecognized, name)
 			continue
 		}
-		if err := hookHostPinShape(filepath.Join(root, name)); err != nil {
+		key, err := hookHostPinShape(filepath.Join(root, name))
+		if err != nil {
 			unrecognized = append(unrecognized, name)
 			continue
 		}
-		candidates = append(candidates, name)
+		candidates = append(candidates, hookHostPin{slug: name, size: key.Size(), modTime: key.ModTime()})
 	}
 
 	// Anything that is not one of af's pins is reported and never touched. af
@@ -160,9 +162,9 @@ func checkOrphanedHookHosts(ctx *scanContext, report *Report) {
 		return
 	}
 
-	for _, slug := range candidates {
-		dir := filepath.Join(root, slug)
-		if title, owned := owners[slug]; owned {
+	for _, pin := range candidates {
+		dir := filepath.Join(root, pin.slug)
+		if title, owned := owners[pin.slug]; owned {
 			report.Pass(sectionRemote, "hook host key", fmt.Sprintf("%s is owned by session %q", dir, title))
 			continue
 		}
@@ -172,28 +174,60 @@ func checkOrphanedHookHosts(ctx *scanContext, report *Report) {
 			Severity:    StatusWarn,
 			Detail:      fmt.Sprintf("%s pins a host key for a session that no longer exists in any project, so nothing will ever need it again", dir),
 			FixAction:   "remove " + dir,
-			fix:         hookHostRemoveFix(ctx, root, slug),
+			fix:         hookHostRemoveFix(ctx, root, pin),
 			Remediation: "run `af doctor --fix` to remove it, or `" + shellsuggest.Command("rm", "-rf", dir) + "`",
 		})
 	}
 }
 
-// hookHostPinShape reports whether dir is one of af's pins: a directory holding
+// hookHostPin is one candidate directory: its slug, plus the identity of the
+// pinned key inside it as doctor saw it at DETECTION.
+//
+// The identity is carried to fix time and re-checked there. It is the one guard
+// that catches a create doctor's own enumeration cannot see: a session that
+// recycles a killed session's title rewrites this exact file, and nothing else
+// ever writes it — so a key that changed between detection and the removal means
+// an owner appeared, whatever the inventory says.
+type hookHostPin struct {
+	slug    string
+	size    int64
+	modTime time.Time
+}
+
+// isHookHostSlug reports whether name is something Slugify could have produced,
+// which is the only way a directory under the store can be af's.
+//
+// Slugify's image is exactly its fixed points: it lowercases, replaces spaces
+// with "-", strips everything outside [a-z0-9-], truncates to a bounded length
+// and trims "-", so applying it to its own output changes nothing. A name it
+// cannot produce — "backup copy", "Notes", a 300-character path — was created by
+// somebody else, and --fix must not remove it however pin-shaped its contents
+// happen to be.
+func isHookHostSlug(name string) bool {
+	return session.Slugify(name) == name
+}
+
+// hookHostPinShape reports whether dir is one of af's pins — a directory holding
 // exactly one regular file named known_hosts, which is what
-// hookProvisionKnownHosts writes and all it writes.
+// hookProvisionKnownHosts writes and all it writes — and returns that file's
+// identity.
 //
 // A positive identity test, not a negative one. --fix must remove only a
 // directory it has PROVEN af created; an unreadable or unexpected shape means
 // "not proven", which spares it.
-func hookHostPinShape(dir string) error {
+func hookHostPinShape(dir string) (fs.FileInfo, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("its contents could not be listed: %w", err)
+		return nil, fmt.Errorf("its contents could not be listed: %w", err)
 	}
 	if len(entries) != 1 || entries[0].Name() != session.HookHostsPinFileName || !entries[0].Type().IsRegular() {
-		return fmt.Errorf("it does not hold exactly one regular %s file, so af did not write it", session.HookHostsPinFileName)
+		return nil, fmt.Errorf("it does not hold exactly one regular %s file, so af did not write it", session.HookHostsPinFileName)
 	}
-	return nil
+	info, err := entries[0].Info()
+	if err != nil {
+		return nil, fmt.Errorf("its pinned %s could not be read: %w", session.HookHostsPinFileName, err)
+	}
+	return info, nil
 }
 
 // hookHostRemoveFix removes one orphaned pin, re-establishing every precondition
@@ -213,20 +247,30 @@ func hookHostPinShape(dir string) error {
 // number of orphans. An enumeration is one in-memory RPC plus one walk of the
 // records, and orphans are counted in ones — the wrong thing to economise on when
 // the cost of being wrong is a stranded machine.
-func hookHostRemoveFix(ctx *scanContext, root, slug string) func() error {
+func hookHostRemoveFix(ctx *scanContext, root string, pin hookHostPin) func() error {
 	return func() error {
-		dir := filepath.Join(root, slug)
+		dir := filepath.Join(root, pin.slug)
 		if !pathInside(root, dir) {
 			return fmt.Errorf("refusing to remove %s: it is not inside the pinned host-key store %s", dir, root)
 		}
-		if err := hookHostPinShape(dir); err != nil {
+		key, err := hookHostPinShape(dir)
+		if err != nil {
 			return fmt.Errorf("refusing to remove %s: %w", dir, err)
+		}
+		// The pin must be the SAME pin doctor examined. Nothing writes this file
+		// except provisioning, so a key that changed since detection means a
+		// session claimed the slug — and it catches that even when the create is
+		// too young for the inventory below to name it, which is the one race the
+		// inventory cannot win.
+		if key.Size() != pin.size || !key.ModTime().Equal(pin.modTime) {
+			return fmt.Errorf("refusing to remove %s: its pinned %s has been rewritten since doctor examined it, so a session is provisioning against it",
+				dir, session.HookHostsPinFileName)
 		}
 		owners, err := hookHostOwnerSlugs(ctx)
 		if err != nil {
 			return fmt.Errorf("refusing to remove %s: the session inventory is incomplete: %w", dir, err)
 		}
-		if title, owned := owners[slug]; owned {
+		if title, owned := owners[pin.slug]; owned {
 			return fmt.Errorf("refusing to remove %s: session %q now owns it", dir, title)
 		}
 		return os.RemoveAll(dir)
@@ -244,26 +288,35 @@ func hookHostOwnerSlugs(ctx *scanContext) (map[string]string, error) {
 		return nil, err
 	}
 	owners := map[string]string{}
-	// The daemon first: it holds sessions that are not on disk yet (a create is
-	// registered in pendingCreates and joins the instance map only once
-	// provisioning completes, and the pin is written inside that window).
-	live, err := ctx.opts.sessionInventory()
-	if err != nil {
-		return nil, fmt.Errorf("the running daemon's session list could not be read: %w", err)
-	}
-	for _, data := range live {
-		addHookHostOwner(owners, data.Title)
-	}
-	// Then the disk, which holds sessions the daemon does not: a persisted row
-	// that failed to materialize is skipped by the daemon and invisible to its
-	// snapshot, and a kill tombstone awaiting its reap outlives the daemon that
-	// wrote it. Every project, never just the cwd's.
-	stored, err := hookHostStoredTitles()
+	// The DISK first, and the daemon last. Both are required — neither is a
+	// superset — but the order is not arbitrary: the daemon is the source that
+	// GAINS a session first (a create registers in pendingCreates before it
+	// provisions, and the pin is written inside that window), while a row reaches
+	// disk only at a later checkpoint. Reading the fast-moving source last, right
+	// before the caller acts, is what keeps a create that began DURING this walk
+	// from being missed — the all-project walk is the slow half, and a snapshot
+	// taken before it is stale by the time it is used.
+	stored, err := hookHostStoredTitlesFn()
 	if err != nil {
 		return nil, err
 	}
 	for _, title := range stored {
 		addHookHostOwner(owners, title)
+	}
+	live, err := ctx.opts.sessionInventory()
+	if err != nil {
+		return nil, fmt.Errorf("the running daemon's session list could not be read: %w", err)
+	}
+	for _, data := range live {
+		// A row with no title names no slug, and guessing one ("session", which is
+		// what Slugify answers for an empty title) would spare the wrong directory
+		// while leaving the right one exposed. af never writes a titleless row, so
+		// this is unreachable state — and unreachable state read as an answer is
+		// how a failed read becomes an empty result.
+		if data.Title == "" {
+			return nil, fmt.Errorf("the running daemon reported a session with no title, so its pinned directory cannot be identified")
+		}
+		addHookHostOwner(owners, data.Title)
 	}
 	return owners, nil
 }
@@ -273,10 +326,9 @@ func hookHostOwnerSlugs(ctx *scanContext) (map[string]string, error) {
 // path refuses that within a project, not across the box), and which one is
 // named matters only to the message.
 //
-// Slugify never answers with an empty string — a title that survives no
-// character of it falls back to "session", which is also the directory such a
-// session would have pinned. So a record whose title is unreadable still claims
-// a slug rather than none, which is the direction that spares a directory.
+// Its callers have already refused an empty title, so the "session" fallback
+// Slugify applies to one is never reached from here — a titleless row makes the
+// whole enumeration UNKNOWN instead of claiming a slug it cannot know.
 func addHookHostOwner(owners map[string]string, title string) {
 	slug := session.Slugify(title)
 	if _, seen := owners[slug]; !seen {
@@ -301,6 +353,13 @@ func hookHostHomeAgrees(ctx *scanContext) error {
 	}
 	return nil
 }
+
+// hookHostStoredTitlesFn is the disk half of the enumeration, indirected so a
+// test can observe WHEN it runs relative to the daemon read. That order is a
+// correctness property rather than an implementation detail — see the comment in
+// hookHostOwnerSlugs — and an invariant no assertion pins is one a refactor
+// silently reverses.
+var hookHostStoredTitlesFn = hookHostStoredTitles
 
 // hookHostStoredTitles returns the title of every session record on disk, across
 // every project, or an error if even one project's records could not be read.
@@ -335,33 +394,35 @@ func hookHostStoredTitles() ([]string, error) {
 
 // hookHostRecordTitles decodes one project's records down to their titles.
 //
-// It accepts both stored shapes because the all-projects loader hands back the
-// file's RAW bytes whenever it could not unwrap the envelope itself, and refuses
-// anything else: a file that will not decode is a failed read, and a failed read
-// is not an empty project.
+// The ARRAY is the only shape it accepts, and that is a deliberate narrowing
+// rather than an oversight. LoadAllRepoInstancesReportingSkipDetails unwraps
+// every envelope it can VALIDATE and hands back the array; it falls back to the
+// file's raw bytes only when that validation FAILED. So an envelope-shaped
+// payload reaching this function is, by construction, state the production loader
+// refused — `{"instances":[]}` with no schema_version among them — and reading
+// its `instances` member as a complete inventory would take the loader's
+// rejection and answer "this project has no sessions". That is the failed read
+// read as an empty result, one layer down.
+//
+// A row with no title is refused for the same reason: af never writes one, so it
+// is state we do not understand, and the slug Slugify would invent for it
+// ("session") is a guess that spares the wrong directory.
 func hookHostRecordTitles(raw json.RawMessage) ([]string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return nil, nil
 	}
-	type record struct {
+	var rows []struct {
 		Title string `json:"title"`
 	}
-	var rows []record
-	arrayErr := json.Unmarshal(trimmed, &rows)
-	if arrayErr != nil {
-		var envelope struct {
-			Instances json.RawMessage `json:"instances"`
-		}
-		if err := json.Unmarshal(trimmed, &envelope); err != nil || len(bytes.TrimSpace(envelope.Instances)) == 0 {
-			return nil, arrayErr
-		}
-		if err := json.Unmarshal(envelope.Instances, &rows); err != nil {
-			return nil, err
-		}
+	if err := json.Unmarshal(trimmed, &rows); err != nil {
+		return nil, err
 	}
 	titles := make([]string, 0, len(rows))
-	for _, row := range rows {
+	for i, row := range rows {
+		if row.Title == "" {
+			return nil, fmt.Errorf("record %d has no title, so the session that owns its pinned directory cannot be identified", i)
+		}
 		titles = append(titles, row.Title)
 	}
 	return titles, nil

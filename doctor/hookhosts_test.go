@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -604,7 +605,8 @@ func TestHookHostsPinShapeRejectsASymlinkedKey(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("k\n"), 0o600))
 	require.NoError(t, os.Symlink(target, filepath.Join(dir, session.HookHostsPinFileName)))
 
-	require.ErrorContains(t, hookHostPinShape(dir), "af did not write it")
+	_, shapeErr := hookHostPinShape(dir)
+	require.ErrorContains(t, shapeErr, "af did not write it")
 
 	report := f.run(t)
 
@@ -672,11 +674,13 @@ func serveHookHostSnapshotHandler(t *testing.T, home string, handler http.Handle
 
 // --- Record decoding. -----------------------------------------------------
 
-// TestHookHostRecordTitlesAcceptsBothStoredShapes pins the two forms a project's
-// records arrive in — the unwrapped array, and the raw envelope the all-projects
-// loader hands back when it could not unwrap the file itself — and pins that
-// anything else is an ERROR rather than an empty project.
-func TestHookHostRecordTitlesAcceptsBothStoredShapes(t *testing.T) {
+// TestHookHostRecordTitlesAcceptsOnlyTheUnwrappedArray pins what one project's
+// records may be. The all-projects loader unwraps every envelope it can
+// VALIDATE, so the array is the only shape valid state arrives in — and an
+// envelope reaching this function is state the loader REFUSED, which must be an
+// error rather than an inventory. A row with no title is refused for the same
+// reason.
+func TestHookHostRecordTitlesAcceptsOnlyTheUnwrappedArray(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		raw   string
@@ -684,13 +688,17 @@ func TestHookHostRecordTitlesAcceptsBothStoredShapes(t *testing.T) {
 		fails bool
 	}{
 		{name: "array", raw: `[{"title":"one"},{"title":"two"}]`, want: []string{"one", "two"}},
-		{name: "envelope", raw: `{"schema_version":1,"instances":[{"title":"one"}]}`, want: []string{"one"}},
 		{name: "empty array", raw: `[]`},
 		{name: "null", raw: `null`},
 		{name: "blank", raw: ``},
 		{name: "corrupt", raw: `{ nope`, fails: true},
 		{name: "wrong element type", raw: `[1,2,3]`, fails: true},
-		{name: "envelope with corrupt instances", raw: `{"instances":[1]}`, fails: true},
+		// Envelope-shaped payloads only reach here when the loader could not
+		// validate them, so every one of these is refused — including the one that
+		// looks perfectly well-formed.
+		{name: "envelope the loader would have unwrapped", raw: `{"schema_version":1,"instances":[{"title":"one"}]}`, fails: true},
+		{name: "envelope with no schema version", raw: `{"instances":[]}`, fails: true},
+		{name: "record with no title", raw: `[{"path":"/tmp/x"}]`, fails: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := hookHostRecordTitles(json.RawMessage(tc.raw))
@@ -790,4 +798,182 @@ func TestHookHostsManualRemovalIsSafeToPaste(t *testing.T) {
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Remediation, "`rm -rf '"+dir+"'`",
 		"the path must be quoted, or the suggestion removes two unrelated paths")
+}
+
+// --- Review round 2: state the loader refused, names af cannot mint, and the
+// --- identity of the pin itself. -------------------------------------------
+
+// TestHookHostsEnvelopeThatFailedValidationIsUnknown drives that narrowing
+// end-to-end through the production loader. `{"instances":[]}` carries no
+// schema_version, so the loader cannot validate it and hands back the file's raw
+// bytes; read as an envelope it says "this project has no sessions", which is the
+// loader's rejection laundered into an answer.
+func TestHookHostsEnvelopeThatFailedValidationIsUnknown(t *testing.T) {
+	f := newHookHostFixture(t, hookHostOwnerSlug)
+	dir := f.pinDir(hookHostOwnerSlug)
+	path, err := config.RepoInstancesPath("reporefused")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(`{"instances":[]}`), 0o644))
+
+	report := f.run(t)
+
+	requireUnknown(t, report, "could not be parsed")
+	requireIntactPin(t, dir)
+}
+
+// TestHookHostsTitlelessRecordIsUnknown — a stored row with no title names no
+// slug. Slugify would answer "session" for it, which spares one directory while
+// leaving the one it actually owns exposed.
+func TestHookHostsTitlelessRecordIsUnknown(t *testing.T) {
+	f := newHookHostFixture(t, hookHostOwnerSlug)
+	dir := f.pinDir(hookHostOwnerSlug)
+	path, err := config.RepoInstancesPath("repotitleless")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, config.SaveRepoInstances("repotitleless", json.RawMessage(`[{"path":"/tmp/x"}]`)))
+
+	report := f.run(t)
+
+	requireUnknown(t, report, "no title")
+	requireIntactPin(t, dir)
+}
+
+// TestHookHostsTitlelessDaemonRowIsUnknown is the same refusal on the other
+// source.
+func TestHookHostsTitlelessDaemonRowIsUnknown(t *testing.T) {
+	f := newHookHostFixture(t, hookHostOwnerSlug)
+	dir := f.pinDir(hookHostOwnerSlug)
+	f.opts.sessionInventory = func() ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "", Liveness: session.LiveRunning}}, nil
+	}
+
+	report := f.run(t)
+
+	requireUnknown(t, report, "no title")
+	requireIntactPin(t, dir)
+}
+
+// TestHookHostsNonSlugDirectoryNameIsNeverRemoved — a directory af could not
+// have named is not af's, however pin-shaped its contents are. `backup copy`
+// holds exactly one regular known_hosts file and still must survive `--fix`.
+func TestHookHostsNonSlugDirectoryNameIsNeverRemoved(t *testing.T) {
+	f := newHookHostFixture(t, "")
+	for _, name := range []string{"backup copy", "Capitalised", "trailing-"} {
+		dir := filepath.Join(f.root, name)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, session.HookHostsPinFileName), []byte("k\n"), 0o600))
+	}
+
+	report := f.run(t)
+
+	findings := hookHostFindings(report)
+	require.Len(t, findings, 1)
+	require.False(t, findings[0].Actionable)
+	require.Nil(t, findings[0].fix)
+	for _, name := range []string{"backup copy", "Capitalised", "trailing-"} {
+		require.DirExists(t, filepath.Join(f.root, name))
+		require.FileExists(t, filepath.Join(f.root, name, session.HookHostsPinFileName))
+	}
+}
+
+// TestHookHostsNameGateAcceptsEverySlugAfCanMint is the other half of that gate,
+// and the one that matters: a name test that rejected a real pin would make the
+// collector silently useless. Every slug the production Slugify can produce must
+// pass it.
+func TestHookHostsNameGateAcceptsEverySlugAfCanMint(t *testing.T) {
+	for _, title := range []string{
+		"gone session", "Deploy API v2", "fix-3560-hook-hosts-doctor", "UPPER CASE",
+		"emoji 🎉 title", "  leading and trailing  ", "!!!", "", "a",
+		strings.Repeat("very long title ", 40), strings.Repeat("-", 210) + "a",
+		"tabs\tand\nnewlines", "dots.and/slashes", "42",
+	} {
+		slug := session.Slugify(title)
+		require.True(t, isHookHostSlug(slug),
+			"a pin af would really write for title %q (slug %q) was rejected as not-af's", title, slug)
+	}
+}
+
+// TestHookHostsFixRefusesWhenThePinIsRewrittenAfterDetection covers the race no
+// inventory can win: a create registers and writes its pin while doctor is
+// enumerating, so it is too young for either source to name — and the file itself
+// is the evidence. Nothing writes a pin except provisioning, so a key that
+// changed since detection means an owner appeared.
+//
+// The rewrite is staged from inside the detection-time inventory read, which runs
+// AFTER the candidate's identity is captured and before any removal — exactly the
+// window a provisioning session lands in.
+func TestHookHostsFixRefusesWhenThePinIsRewrittenAfterDetection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rewrite func(t *testing.T, path string)
+	}{
+		{
+			name: "different key",
+			rewrite: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("[10.0.0.99]:22 ssh-ed25519 BBBB-a-different-machine\n"), 0o600))
+			},
+		},
+		{
+			// Same length, so only the modification time can tell them apart.
+			name: "same-size key, newer mtime",
+			rewrite: func(t *testing.T, path string) {
+				original, err := os.ReadFile(path)
+				require.NoError(t, err)
+				replacement := append([]byte(nil), original...)
+				replacement[1] = 'X'
+				require.NoError(t, os.WriteFile(path, replacement, 0o600))
+				later := time.Now().Add(time.Hour)
+				require.NoError(t, os.Chtimes(path, later, later))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookHostFixture(t, hookHostOwnerSlug)
+			dir := f.pinDir(hookHostOwnerSlug)
+			key := filepath.Join(dir, session.HookHostsPinFileName)
+			rewritten := false
+			f.opts.sessionInventory = func() ([]session.InstanceData, error) {
+				if !rewritten {
+					rewritten = true
+					tc.rewrite(t, key)
+				}
+				return nil, nil // too young for the inventory to name
+			}
+
+			report := f.run(t)
+
+			findings := hookHostFindings(report)
+			require.Len(t, findings, 1)
+			require.False(t, findings[0].Fixed, "the removal must not have happened")
+			require.ErrorContains(t, findings[0].FixErr, "has been rewritten since doctor examined it")
+			requireIntactPin(t, dir)
+		})
+	}
+}
+
+// TestHookHostsInventoryReadsTheDaemonAfterTheDiskWalk pins the order of the two
+// halves. The daemon is the source that gains a session FIRST — a create is in
+// pendingCreates before it provisions — while a row reaches disk only at a later
+// checkpoint, and the all-project walk is the slow half. Taking the fast-moving
+// read last is what keeps a create that began during the walk from being missed.
+func TestHookHostsInventoryReadsTheDaemonAfterTheDiskWalk(t *testing.T) {
+	f := newHookHostFixture(t, hookHostOwnerSlug)
+	f.opts.Fix = false // exactly one enumeration, so the order is unambiguous
+	var order []string
+	f.opts.sessionInventory = func() ([]session.InstanceData, error) {
+		order = append(order, "daemon")
+		return nil, nil
+	}
+	restore := hookHostStoredTitlesFn
+	hookHostStoredTitlesFn = func() ([]string, error) {
+		order = append(order, "disk")
+		return nil, nil
+	}
+	t.Cleanup(func() { hookHostStoredTitlesFn = restore })
+
+	f.run(t)
+
+	require.Equal(t, []string{"disk", "daemon"}, order,
+		"the daemon read must come last, so a create that began during the disk walk is still seen")
 }
