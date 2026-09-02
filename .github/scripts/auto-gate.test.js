@@ -1597,6 +1597,372 @@ test("a workflow dispatch failure remains single-shot after merge", async () => 
   assert.equal(github.workflowDispatchAttempts, 1);
 });
 
+// The exact wire shape from Auto Gate run 32044471684: GET
+// /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
+// body naming the PR's OWN node id, during a wider GitHub degradation.
+function selfContradictoryNotFound(nodeId = "PR_node_1465") {
+  const body = {
+    type: "NOT_FOUND",
+    path: ["node"],
+    message: `Could not resolve to a node with the global id of '${nodeId}'.`,
+  };
+  const error = new Error(`Not Found: ${JSON.stringify(body)}`);
+  error.status = 404;
+  error.response = { status: 404, data: body };
+  return error;
+}
+
+test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
+  // #3396: this is not retryable by status (404), so before this change it went
+  // straight out of retryTransient, past evaluate(), and reddened master as an
+  // unhandled error — for an id the gate had resolved seconds earlier.
+  const github = fakeGateGithub({
+    readErrorsByFn: { listReviews: [selfContradictoryNotFound()] },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: false,
+  });
+
+  assert.equal(transaction.state, "pass");
+  assert.equal(transaction.aggregate.ok, true);
+  assert.equal(github.readAttemptsByFn.listReviews, 2, "the contradicted read must be retried");
+  assert.equal(github.pullGetReads, 1, "the retry must be justified by a cross-check");
+});
+
+test("a self-contradictory NOT_FOUND that never clears blocks instead of throwing", async () => {
+  // Retries exhausted is still not an unhandled error: it is a read failure, so
+  // the aggregate publishes a clean BLOCKED verdict a human can act on.
+  const github = fakeGateGithub({
+    readErrorsByFn: {
+      listReviews: [
+        selfContradictoryNotFound(),
+        selfContradictoryNotFound(),
+        selfContradictoryNotFound(),
+      ],
+    },
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: false,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(transaction.aggregate.ok, false);
+  assert.equal(github.readAttemptsByFn.listReviews, 3);
+});
+
+test("a NOT_FOUND for an id the gate did not resolve stays loud", async () => {
+  // The property #3346 established on purpose. NOT_FOUND is only tolerated for
+  // the node id THIS run resolved; anything else is real breakage and is not
+  // retried even once.
+  const github = fakeGateGithub({
+    readErrorsByFn: { listReviews: [selfContradictoryNotFound("PR_some_other_node")] },
+  });
+
+  await assert.rejects(
+    autoGate.processAggregateHead({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      headSha: HEAD_SHA,
+      targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+      mergeEnabled: false,
+    }),
+    /Could not resolve to a node with the global id of 'PR_some_other_node'/,
+  );
+
+  assert.equal(github.readAttemptsByFn.listReviews, 1, "an unrelated NOT_FOUND must not retry");
+  assert.equal(github.pullGetReads, 0, "an unrelated NOT_FOUND must not be cross-checked");
+});
+
+test("a PR that genuinely vanished mid-run concludes cleanly", async () => {
+  // Deleted or transferred between the resolve and the read. A gone PR cannot be
+  // evaluated and there is nothing to report on it, so the run concludes rather
+  // than failing — and leaves any existing decision untouched.
+  const notFound = new Error("Not Found");
+  notFound.status = 404;
+  const github = fakeGateGithub({
+    readErrorsByFn: { listReviews: [selfContradictoryNotFound()] },
+    pullGetError: notFound,
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.isOpen, false);
+  assert.equal(result.shouldMerge, false);
+  assert.deepEqual(result.reasons, ["PR #1465 no longer exists"]);
+  // Not an evaluation error, so it never becomes the "Auto Gate evaluation
+  // failed for PR #N" throw that reddens master.
+  assert.doesNotMatch(result.summary, /auto-gate evaluation error/);
+
+  // Nothing is published for a PR that is not there: no head was resolved, so
+  // there is no (PR, head) decision to write.
+  const write = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+  });
+  assert.equal(write.state, "unreported");
+  assert.equal(github.createdChecks.length, 0);
+});
+
+test("a vanished PR ends its aggregate transaction without throwing", async () => {
+  const notFound = new Error("Not Found");
+  notFound.status = 404;
+  const github = fakeGateGithub({
+    readErrorsByFn: { listReviews: [selfContradictoryNotFound()] },
+    pullGetError: notFound,
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  // The aggregate stays non-green — a head whose PR disappeared is not a head
+  // that passed — but the run ends cleanly instead of as an unhandled error,
+  // and nothing merges.
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.mergedWith, null);
+});
+
+test("an unreadable ruleset never becomes an absent one", async () => {
+  // Codex P1 (round 3): the 404 handler reads "this repository does not use
+  // rulesets" and falls back to classic branch protection. A retry-exhausted
+  // self-contradictory 404 carries status 404 too, so it was swallowed the same
+  // way — and with neither mechanism readable the gate reports NO required
+  // checks, which is a fail-open a merge can walk through.
+  const notFound = selfContradictoryNotFound();
+  const github = fakeGateGithub({ requestErrors: [notFound, notFound, notFound] });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(transaction.state, "evaluation-error");
+  assert.equal(github.mergedWith, null, "nothing may merge while required checks are unknown");
+  assert.match(
+    github.updatedChecks.at(-1).output.summary,
+    /could not read branch rules for master after 3 attempts/,
+  );
+});
+
+test("a PR that vanishes before its decision write concludes cleanly", async () => {
+  // Codex P2 (round 3): the gone marker was converted only inside evaluate(),
+  // so a deletion landing on reportDecision's reads still rethrew and reddened
+  // the run.
+  const gone = new Error("Not Found");
+  gone.status = 404;
+  const github = fakeGateGithub({ pullGetError: gone });
+  let thrown = 0;
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    // Let the evaluation finish, then fail the decision-reporting read.
+    if (fn === github.rest.checks.listForRef && github.reviewCommentReads > 0 && thrown === 0) {
+      thrown += 1;
+      throw selfContradictoryNotFound();
+    }
+    return realPaginate(fn, options);
+  };
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.equal(thrown, 1);
+  assert.equal(transaction.state, "association-changed");
+  assert.equal(github.mergedWith, null);
+});
+
+test("an unclear cross-check answer is never read as a vanished PR", async () => {
+  // Fail-closed on the unknown: only a definite 404 is evidence of absence. A
+  // 500 during a degradation would otherwise conclude the PR was deleted.
+  const unavailable = new Error("upstream unavailable");
+  unavailable.status = 500;
+  const github = fakeGateGithub({
+    readErrorsByFn: { listReviews: [selfContradictoryNotFound()] },
+    pullGetError: unavailable,
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.isOpen, true);
+  assert.ok(!result.reasons.includes("PR #1465 no longer exists"));
+  assert.equal(github.readAttemptsByFn.listReviews, 2, "an unknown answer still retries the read");
+});
+
+test("a NOT_FOUND paired with the resolved id in a different error is not tolerated", () => {
+  // Codex P2: an envelope-wide substring test pairs a NOT_FOUND about one object
+  // with our id appearing in some other error of a multi-error response. That
+  // combination says nothing about the object this run resolved, so it must stay
+  // loud.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  const split = new Error("Request failed due to following response errors:");
+  split.name = "GraphqlResponseError";
+  split.errors = [
+    { type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'ISSUE_other'." },
+    { type: "FORBIDDEN", message: `Resource not accessible: '${nodeId}'.` },
+  ];
+  assert.equal(isSelfContradictoryNotFound(split, nodeId), false);
+
+  // The same two facts in one record is the real thing, and is tolerated.
+  const together = new Error("Request failed due to following response errors:");
+  together.name = "GraphqlResponseError";
+  together.errors = [
+    { type: "FORBIDDEN", message: "Resource not accessible: 'ISSUE_other'." },
+    { type: "NOT_FOUND", message: `Could not resolve to a node with the global id of '${nodeId}'.` },
+  ];
+  assert.equal(isSelfContradictoryNotFound(together, nodeId), true);
+});
+
+test("a NOT_FOUND for a longer id that merely starts with ours is not tolerated", () => {
+  // Node ids are opaque base64url, so a substring test accepts a different
+  // object whose id happens to extend ours.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId + "XyZ"), nodeId), false);
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound("QQ" + nodeId), nodeId), false);
+  // Exactly the id, delimited by the quotes around it, still matches.
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), nodeId), true);
+});
+
+test("a REST 404 whose structured body splits the pairing is not tolerated", () => {
+  // Codex P2 (round 2): the per-record test correctly rejects a split
+  // NOT_FOUND/node-id pairing, but the transport-message fallback then accepted
+  // the same body because a 404's message is that body serialized. The fallback
+  // is only for errors with no structured record at all.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  const body = {
+    errors: [
+      { type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'ISSUE_other'." },
+      { type: "FORBIDDEN", message: `Resource not accessible: '${nodeId}'.` },
+    ],
+  };
+  const split = new Error(`Not Found: ${JSON.stringify(body)}`);
+  split.status = 404;
+  split.response = { status: 404, data: body };
+  assert.equal(isSelfContradictoryNotFound(split, nodeId), false);
+
+  // The same transport with the two facts in ONE record is the real thing.
+  const together = {
+    errors: [
+      { type: "FORBIDDEN", message: "Resource not accessible: 'ISSUE_other'." },
+      { type: "NOT_FOUND", message: `Could not resolve to a node with the global id of '${nodeId}'.` },
+    ],
+  };
+  const real = new Error(`Not Found: ${JSON.stringify(together)}`);
+  real.status = 404;
+  real.response = { status: 404, data: together };
+  assert.equal(isSelfContradictoryNotFound(real, nodeId), true);
+});
+
+test("a decision-reporting read carries the resolved subject too", async () => {
+  // Codex P2 (round 2): the reads inside reportDecision run after the PR was
+  // resolved, so the same NOT_FOUND arriving there was non-retryable and
+  // rethrew unhandled — the very outcome this PR removes. Driven directly at
+  // reportDecision so the failure lands on ITS read rather than on whichever
+  // check-run read happens to come first in a whole transaction.
+  const github = fakeGateGithub();
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, true, "the fixture must reach reportDecision cleanly");
+
+  const before = github.readAttemptsByFn.listForRef || 0;
+  let thrown = 0;
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && thrown === 0) {
+      thrown += 1;
+      throw selfContradictoryNotFound();
+    }
+    return realPaginate(fn, options);
+  };
+
+  const write = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+  });
+
+  assert.equal(thrown, 1);
+  assert.equal(write.state, "pass", "the decision must publish rather than throw");
+  assert.ok(
+    (github.readAttemptsByFn.listForRef || 0) > before,
+    "the contradicted read must be retried rather than rethrown",
+  );
+  assert.ok(github.pullGetReads > 0, "the retry must be justified by a cross-check");
+});
+
+test("the tolerated NOT_FOUND is exactly the one naming the resolved id", () => {
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), nodeId), true);
+  // A GraphQL-transport NOT_FOUND for the same id, rather than a REST 404 body.
+  const graphqlError = new Error(`Could not resolve to a node with the global id of '${nodeId}'.`);
+  graphqlError.name = "GraphqlResponseError";
+  graphqlError.errors = [{ type: "NOT_FOUND", message: graphqlError.message }];
+  assert.equal(isSelfContradictoryNotFound(graphqlError, nodeId), true);
+
+  // Everything else is untouched.
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), "PR_other"), false);
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), null), false);
+  assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), ""), false);
+  const forbidden = new Error(`FORBIDDEN for '${nodeId}'`);
+  forbidden.status = 403;
+  forbidden.response = { status: 403, data: { type: "FORBIDDEN", message: forbidden.message } };
+  assert.equal(isSelfContradictoryNotFound(forbidden, nodeId), false);
+  const plainNotFound = new Error("Not Found");
+  plainNotFound.status = 404;
+  assert.equal(isSelfContradictoryNotFound(plainNotFound, nodeId), false);
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -1937,6 +2303,9 @@ function fakeGateGithub({
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
+  readErrorsByFn = {},
+  pullGetError = null,
+  requestErrors = [],
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -1994,6 +2363,9 @@ function fakeGateGithub({
     associationReads: 0,
     checkCreateAttempts: 0,
     checkListReads: 0,
+    pullGetReads: 0,
+    requestReads: 0,
+    readAttemptsByFn: {},
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
     mergeAttempts: 0,
@@ -2019,7 +2391,21 @@ function fakeGateGithub({
       checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
       repos: { listCommitStatusesForRef, listPullRequestsAssociatedWithCommit },
-      pulls: { listFiles, listReviews, listReviewComments, merge },
+      pulls: {
+        listFiles,
+        listReviews,
+        listReviewComments,
+        merge,
+        // The REST cross-check resolvedPullRequest() uses. It is deliberately a
+        // different code path from the GraphQL read that resolved the PR.
+        get: async () => {
+          github.pullGetReads += 1;
+          if (pullGetError) {
+            throw pullGetError;
+          }
+          return { data: { number: 1465, merged } };
+        },
+      },
     },
     graphql: async (_query, variables) => {
       if (_query.includes("mutation DisablePullRequestAutoMerge")) {
@@ -2069,6 +2455,12 @@ function fakeGateGithub({
       };
     },
     paginate: async (fn, options = {}) => {
+      const attempt = (github.readAttemptsByFn[fn.name] || 0) + 1;
+      github.readAttemptsByFn[fn.name] = attempt;
+      const scriptedError = (readErrorsByFn[fn.name] || [])[attempt - 1];
+      if (scriptedError) {
+        throw scriptedError;
+      }
       const number = options.pull_number || options.issue_number;
       const pullRequestOverride = pullRequestsByNumber[number] || {};
       if (fn === listForRef) {
@@ -2122,6 +2514,11 @@ function fakeGateGithub({
       return responses.get(fn) || [];
     },
     request: async (route) => {
+      github.requestReads += 1;
+      const scriptedError = requestErrors[github.requestReads - 1];
+      if (scriptedError) {
+        throw scriptedError;
+      }
       if (route.includes("/rules/branches/")) {
         return {
           data: [

@@ -45,10 +45,11 @@ const MAX_RATE_LIMIT_DELAY_MS = 10000;
 // stale-green safety window. Squash merge, workflow dispatch, and GraphQL
 // mutations are also non-idempotent; keep those calls single-shot and never
 // route them through these helpers.
-async function retryRead(label, operation) {
+async function retryRead(label, operation, subject = null) {
   return retryTransient(label, operation, {
     failureName: "AutoGateReadError",
     readFailure: true,
+    subject,
   });
 }
 
@@ -123,12 +124,19 @@ async function createCheckRun({ github, owner, repo, headSha, name, externalId, 
   }
 }
 
-async function retryTransient(label, operation, { failureName, readFailure }) {
+async function retryTransient(label, operation, { failureName, readFailure, subject = null }) {
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();
     } catch (error) {
-      if (!isRetryableGitHubError(error)) {
+      // A NOT_FOUND for a node id this run resolved itself contradicts a fact
+      // this run established, so it is answered rather than believed: confirm
+      // the subject on a different code path before retrying (#3396).
+      const selfContradictory = isSelfContradictoryNotFound(error, subject?.nodeId);
+      if (selfContradictory && !(await subject.exists())) {
+        throw subjectGone(subject, error);
+      }
+      if (!selfContradictory && !isRetryableGitHubError(error)) {
         throw error;
       }
       if (attempt >= RETRY_DELAYS_MS.length) {
@@ -137,6 +145,85 @@ async function retryTransient(label, operation, { failureName, readFailure }) {
       await delay(retryDelayMilliseconds(error, RETRY_DELAYS_MS[attempt]));
     }
   }
+}
+
+// A NOT_FOUND naming a node id THIS RUN already resolved. GitHub answered with
+// that id moments earlier, so the second answer cannot also be true; during the
+// 2026-08-17 degradation it arrived on a REST read (`pulls/:n/reviews` returned
+// HTTP 404 carrying a GraphQL NOT_FOUND body for the PR's own node id), which is
+// not retryable by status and so escaped unhandled and reddened master.
+//
+// Deliberately narrow. NOT_FOUND stays a hard, loud error for every id the gate
+// did not just resolve itself — the property #3346 established on purpose — and
+// the id has to be named verbatim, so a NOT_FOUND about anything else is
+// untouched by this.
+function isSelfContradictoryNotFound(error, nodeId) {
+  if (!nodeId || !error) {
+    return false;
+  }
+  // The id must be the WHOLE id, not a prefix of a longer one: node ids are
+  // opaque base64url, so a bare substring test would accept a NOT_FOUND about a
+  // different object whose id merely starts with ours.
+  const namesSubject = new RegExp(
+    `(?<![A-Za-z0-9_-])${nodeId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`,
+  );
+  // …and the id has to be named by the SAME error record that says NOT_FOUND.
+  // Checking the whole envelope would pair a NOT_FOUND about one object with our
+  // id appearing in a different error of a multi-error response, which proves
+  // nothing about the object this run resolved.
+  const notFoundNamingSubject = (record) =>
+    String(record?.type || "").toUpperCase() === "NOT_FOUND" &&
+    namesSubject.test(String(record?.message || ""));
+
+  const body = error.response?.data;
+  const records = [
+    ...graphQLResponseErrors(error),
+    ...(Array.isArray(body?.errors) ? body.errors : []),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? [body] : []),
+  ];
+  if (records.length > 0) {
+    // Structured records exist, so they ARE the evidence — the transport message
+    // is only their serialization, and consulting it as a fallback would re-admit
+    // through the back door the very split pairing the per-record test rejects.
+    return records.some(notFoundNamingSubject);
+  }
+  // No structured record at all: the transport message is the only record there
+  // is, so it must both be a 404 and name the id itself.
+  const status = Number(error.status ?? error.response?.status);
+  return status === 404 && namesSubject.test(String(error.message || ""));
+}
+
+// The cross-check said the subject really is gone. That is a conclusion, not a
+// read failure: a PR deleted or transferred mid-run cannot be evaluated, and
+// evaluate() finishes cleanly on it rather than reporting an evaluation error.
+function subjectGone(subject, error) {
+  const gone = new Error(`PR #${subject.number} no longer exists`);
+  gone.autoGatePullRequestGone = true;
+  gone.prNumber = subject.number;
+  gone.cause = error;
+  return gone;
+}
+
+// The PR this run already resolved, carried by every read performed afterwards.
+// exists() deliberately uses REST while getPullRequest used GraphQL: a
+// cross-check on the same code path that just lied proves nothing.
+function resolvedPullRequest({ github, context, pr }) {
+  const { owner, repo } = context.repo;
+  return {
+    nodeId: pr.id,
+    number: pr.number,
+    exists: async () => {
+      try {
+        await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+        return true;
+      } catch (error) {
+        // Only a definite 404 is evidence of absence. Any other answer — a 500,
+        // a rate limit, a network failure — is an unknown, and an unknown must
+        // not be read as "the PR is gone".
+        return Number(error?.status ?? error?.response?.status) !== 404;
+      }
+    },
+  };
 }
 
 function retryFailure(label, attempts, error, failureName, readFailure) {
@@ -246,6 +333,20 @@ async function evaluate({ github, context, core, prNumber, setOutputs = true }) 
   try {
     return await evaluatePullRequest({ github, context, core, prNumber, setOutputs });
   } catch (error) {
+    // A PR that no longer exists is a conclusion, not an evaluation failure: it
+    // cannot be evaluated and there is nothing to report on it. isOpen false
+    // leaves any existing decision untouched (#3396).
+    if (error?.autoGatePullRequestGone) {
+      core.notice(error.message);
+      return finish(core, setOutputs, {
+        prNumber: String(error.prNumber || prNumber || ""),
+        shouldMerge: false,
+        isOpen: false,
+        docsChanged: false,
+        reasons: [error.message],
+        notes: [],
+      });
+    }
     const message = formatError(error);
     const warning = isReadFailure(error) ? message : error?.stack || message;
     core.warning(warning);
@@ -318,7 +419,11 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     reasons.push(`mergeability is still ${pr.mergeable}`);
   }
 
-  const files = await listPullRequestFiles({ github, context, number: pr.number });
+  // Everything below reads about a PR this run has now resolved, so each read
+  // carries that identity and can tell a self-contradictory NOT_FOUND from a
+  // real one (#3396).
+  const subject = resolvedPullRequest({ github, context, pr });
+  const files = await listPullRequestFiles({ github, context, number: pr.number, subject });
   const touchesTui = files.some((path) => TUI_PATH_PREFIXES.some((prefix) => path.startsWith(prefix)));
   const docsChanged = files.some((path) =>
     DOCS_DEPLOY_PATHS.some((docsPath) => path === docsPath || path.startsWith(docsPath)),
@@ -343,6 +448,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     branch: pr.baseRefName,
     sha: pr.headRefOid,
     core,
+    subject,
   });
   if (!requiredChecks.ok) {
     reasons.push(...requiredChecks.reasons);
@@ -355,6 +461,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     number: pr.number,
     sha: pr.headRefOid,
     lastCommitDate: pr.lastCommitDate,
+    subject,
   });
   if (!codex.ok) {
     reasons.push(...codex.reasons);
@@ -403,6 +510,18 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 }
 
 async function reportDecision({ github, context, core, result, manual = false }) {
+  // This runs after the PR was resolved, so its reads carry that identity for the
+  // same reason evaluatePullRequest's do: without it a self-contradictory
+  // NOT_FOUND arriving here is non-retryable and rethrows unhandled, reddening
+  // the run over a PR the gate resolved seconds earlier (#3396).
+  const subject =
+    result?.pullRequestId && Number(result.prNumber) > 0
+      ? resolvedPullRequest({
+          github,
+          context,
+          pr: { id: result.pullRequestId, number: Number(result.prNumber) },
+        })
+      : null;
   if (!result?.headSha || !result.prNumber) {
     core.info("Auto Gate decision was not reported because no pull-request head was resolved.");
     return { state: "unreported", priorDecision: false };
@@ -430,6 +549,7 @@ async function reportDecision({ github, context, core, result, manual = false })
         ref: result.headSha,
         per_page: 100,
       }),
+    subject,
   );
   const priorDecision = checkRuns
     .filter(
@@ -790,6 +910,17 @@ async function processAggregateHead({
       manualMergeRequired ||= Boolean(result.manualMergeRequired);
       write = await reportDecision({ github, context, core, result, manual });
     } catch (error) {
+      // The PR vanished between its evaluation and its decision write. evaluate()
+      // converts this marker into a clean conclusion, but reportDecision's reads
+      // are outside it, so without this the same deletion reddens the run from a
+      // few lines further down (#3396).
+      if (error?.autoGatePullRequestGone) {
+        core.notice(
+          `Keeping aggregate ${pending.headSha} non-green because PR #${prNumber} ` +
+            "no longer exists.",
+        );
+        return { state: "association-changed", pending };
+      }
       if (!isReadFailure(error)) {
         throw error;
       }
@@ -1435,21 +1566,24 @@ async function disableNativeAutoMerge({ github, core, result }) {
   );
 }
 
-async function listPullRequestFiles({ github, context, number }) {
+async function listPullRequestFiles({ github, context, number, subject = null }) {
   const { owner, repo } = context.repo;
-  const files = await retryRead(`could not list files for PR #${number}`, () =>
-    github.paginate(github.rest.pulls.listFiles, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: 100,
-    }),
+  const files = await retryRead(
+    `could not list files for PR #${number}`,
+    () =>
+      github.paginate(github.rest.pulls.listFiles, {
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      }),
+    subject,
   );
   return files.map((file) => file.filename);
 }
 
-async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
-  const required = await getRequiredCheckSpecs({ github, context, branch, core });
+async function evaluateRequiredChecks({ github, context, branch, sha, core, subject = null }) {
+  const required = await getRequiredCheckSpecs({ github, context, branch, core, subject });
   const syntheticDecisionSpecs = required.specs.filter(
     (spec) =>
       isSyntheticDecisionContext(spec.context) &&
@@ -1474,21 +1608,27 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core }) {
   }
 
   const { owner, repo } = context.repo;
-  const checkRuns = await retryRead(`could not read check runs at commit ${sha}`, () =>
-    github.paginate(github.rest.checks.listForRef, {
-      owner,
-      repo,
-      ref: sha,
-      per_page: 100,
-    }),
+  const checkRuns = await retryRead(
+    `could not read check runs at commit ${sha}`,
+    () =>
+      github.paginate(github.rest.checks.listForRef, {
+        owner,
+        repo,
+        ref: sha,
+        per_page: 100,
+      }),
+    subject,
   );
-  const statuses = await retryRead(`could not read commit statuses at ${sha}`, () =>
-    github.paginate(github.rest.repos.listCommitStatusesForRef, {
-      owner,
-      repo,
-      ref: sha,
-      per_page: 100,
-    }),
+  const statuses = await retryRead(
+    `could not read commit statuses at ${sha}`,
+    () =>
+      github.paginate(github.rest.repos.listCommitStatusesForRef, {
+        owner,
+        repo,
+        ref: sha,
+        per_page: 100,
+      }),
+    subject,
   );
 
   for (const spec of specs) {
@@ -1515,18 +1655,21 @@ function isSyntheticDecisionContext(contextName) {
   );
 }
 
-async function getRequiredCheckSpecs({ github, context, branch, core }) {
+async function getRequiredCheckSpecs({ github, context, branch, core, subject = null }) {
   const { owner, repo } = context.repo;
   const specs = new Map();
   const errors = [];
 
   try {
-    const response = await retryRead(`could not read branch rules for ${branch}`, () =>
-      github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
-        owner,
-        repo,
-        branch,
-      }),
+    const response = await retryRead(
+      `could not read branch rules for ${branch}`,
+      () =>
+        github.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
+          owner,
+          repo,
+          branch,
+        }),
+      subject,
     );
 
     for (const rule of response.data || []) {
@@ -1540,6 +1683,14 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
       }
     }
   } catch (error) {
+    // A 404 here normally means "this repository does not use that mechanism",
+    // which is why it is swallowed. A retry-exhausted read failure carries status
+    // 404 too, and swallowing THAT is a fail-open: with neither mechanism
+    // readable the gate reports no required checks at all, and a PR with nothing
+    // green can pass. An unreadable ruleset is not an absent one.
+    if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+      throw error;
+    }
     if (error.status !== 404) {
       const message = `could not read branch rules for ${branch}: ${formatError(error)}`;
       core.warning(message);
@@ -1559,6 +1710,7 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
           "GET /repos/{owner}/{repo}/branches/{branch}/protection/required_status_checks",
           { owner, repo, branch },
         ),
+      subject,
     );
 
     for (const contextName of response.data.contexts || []) {
@@ -1570,6 +1722,14 @@ async function getRequiredCheckSpecs({ github, context, branch, core }) {
       }
     }
   } catch (error) {
+    // A 404 here normally means "this repository does not use that mechanism",
+    // which is why it is swallowed. A retry-exhausted read failure carries status
+    // 404 too, and swallowing THAT is a fail-open: with neither mechanism
+    // readable the gate reports no required checks at all, and a PR with nothing
+    // green can pass. An unreadable ruleset is not an absent one.
+    if (isReadFailure(error) || error?.autoGatePullRequestGone) {
+      throw error;
+    }
     if (error.status !== 404) {
       const message = `could not read branch protection checks for ${branch}: ${formatError(error)}`;
       core.warning(message);
@@ -1660,7 +1820,7 @@ function formatRunSource(run) {
   return `${name} (${run.app.id || "unknown app id"})`;
 }
 
-async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
+async function evaluateCodex({ github, context, number, sha, lastCommitDate, subject = null }) {
   const notes = [];
   const reasons = [];
   // Set only where it is proven: no exact-head verdict AND the reviewer's own
@@ -1676,21 +1836,27 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     reasons.push("last commit timestamp was unavailable, so Codex freshness cannot be verified");
   }
 
-  const comments = await retryRead(`could not read issue comments for PR #${number}`, () =>
-    github.paginate(github.rest.issues.listComments, {
-      owner,
-      repo,
-      issue_number: number,
-      per_page: 100,
-    }),
+  const comments = await retryRead(
+    `could not read issue comments for PR #${number}`,
+    () =>
+      github.paginate(github.rest.issues.listComments, {
+        owner,
+        repo,
+        issue_number: number,
+        per_page: 100,
+      }),
+    subject,
   );
-  const reviews = await retryRead(`could not read reviews for PR #${number}`, () =>
-    github.paginate(github.rest.pulls.listReviews, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: 100,
-    }),
+  const reviews = await retryRead(
+    `could not read reviews for PR #${number}`,
+    () =>
+      github.paginate(github.rest.pulls.listReviews, {
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      }),
+    subject,
   );
   const codexComments = comments.filter((comment) => comment.user?.login === CODEX_REVIEWER);
   const codexReviewArtifacts = [...codexComments, ...reviews]
@@ -1758,13 +1924,16 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate }) {
     reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
   }
 
-  const reviewComments = await retryRead(`could not read review comments for PR #${number}`, () =>
-    github.paginate(github.rest.pulls.listReviewComments, {
-      owner,
-      repo,
-      pull_number: number,
-      per_page: 100,
-    }),
+  const reviewComments = await retryRead(
+    `could not read review comments for PR #${number}`,
+    () =>
+      github.paginate(github.rest.pulls.listReviewComments, {
+        owner,
+        repo,
+        pull_number: number,
+        per_page: 100,
+      }),
+    subject,
   );
   const resolvedByAllowedReply = new Set(
     reviewComments
@@ -1932,6 +2101,7 @@ module.exports = {
   resolveAggregateHeads,
   resolveTargets,
   __test: {
+    isSelfContradictoryNotFound,
     evaluateCodex,
     evaluateRequiredChecks,
     hasResolutionMarker,
