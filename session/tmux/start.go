@@ -32,6 +32,10 @@ func (t *TmuxSession) Start(workDir string) error {
 	// boundary. SetProgram cannot do this: the live-session Restore path rewrites
 	// the command string without re-execing the existing pane.
 	t.resetCodexSafetyState()
+	// Same proven boundary: a key af sent to the PREVIOUS pane process cannot
+	// explain anything the new one does (#3579).
+	t.resetDialogKeystroke()
+	t.resetClaudeTrustState()
 
 	// Create a new detached tmux session and start claude in it. The -e
 	// markers (when supported) let `af doctor` trace any process the pane
@@ -273,11 +277,28 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 	switch DetectAgentFromCommand(t.programCmd()) {
 	case ProgramClaude:
 		if claudeTrustPromptPresent(content) {
-			if err := t.TapEnter(); err != nil {
-				log.ErrorLog.Printf("could not tap enter on trust/MCP screen: %v", err)
-			}
-			return true
+			// NOT a bare Enter. Claude Code 2.1.257 made "No, exit" the
+			// preselected option of the folder-trust dialog, so the Enter this
+			// branch used to send chose to QUIT the agent (#3579).
+			// answerClaudeTrustPrompt reads the pane, moves the cursor onto the
+			// affirmative row by label, and confirms only what it has seen
+			// selected — the same look-then-act contract the codex branch below
+			// already keeps.
+			return t.answerClaudeTrustPrompt(content)
 		}
+		// A pane with no dialog on it retires the refusal notice, so a later
+		// dialog af cannot read is reported again rather than swallowed.
+		//
+		// It deliberately does NOT release a pending movement key. A capture
+		// taken mid-repaint can match no dialog at all, and treating that as
+		// "the dialog is gone" would let the next complete frame re-send a key
+		// af has already sent. Only an observed change of the selected row, or
+		// a new pane process (Start), releases that.
+		t.claudeTrust.refusalLogged = false
+		// Clearing firstSeen too is safe in the one direction that matters: it
+		// can only make af wait longer before typing into the NEXT dialog, never
+		// sooner. A pending movement key is a different matter and stays.
+		t.claudeTrust.firstSeen = time.Time{}
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
 			return true
@@ -300,14 +321,18 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			}
 			if err := t.TapEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on Codex directory-trust screen: %v", err)
+				return true
 			}
+			t.noteDialogKeystroke(codexDirectoryTrustDialogName, codexDirectoryTrustAffirmative, "Enter")
 			return true
 		}
 	default:
 		if DocTrustPromptPresent(content) {
 			if err := t.TapDAndEnter(); err != nil {
 				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
+				return true
 			}
+			t.noteDialogKeystroke(docTrustDialogName, "", "D", "Enter")
 			return true
 		}
 	}
