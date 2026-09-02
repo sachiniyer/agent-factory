@@ -308,3 +308,47 @@ func TestPlaceOverlayLeavesASelfClosedHyperlinkAlone(t *testing.T) {
 		t.Fatal("no spurious hyperlink closer may be appended to a row that closed its own")
 	}
 }
+
+// hasUnterminatedOSC reports whether s contains an OSC introducer with no
+// terminator after it — the shape that swallows whatever the terminal is given
+// next as OSC payload.
+func hasUnterminatedOSC(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != 0x1b || s[i+1] != ']' {
+			continue
+		}
+		rest := s[i+2:]
+		st := strings.Index(rest, "\x1b\\")
+		bel := strings.IndexByte(rest, '\a')
+		if st < 0 && bel < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// #3433 review. reflow's truncator is not OSC-aware: it takes the first letter of
+// a URI for the sequence terminator and counts the rest as visible text, so the
+// width clip could cut a hyperlink in half and emit an unterminated OSC command.
+// That is worse than a mispositioned row — it corrupts output past the modal.
+func TestPlaceOverlayNeverSplitsAHyperlinkWhenClipping(t *testing.T) {
+	const cols, rows = 10, 3
+	bg := strings.TrimSuffix(strings.Repeat(strings.Repeat("x", cols)+"\n", rows), "\n")
+
+	// Four visible cells, but ansi.PrintableRuneWidth reads 21 because it counts
+	// the URI — so the width clip fires on a row that genuinely fits.
+	link := "\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\"
+	if w := ansi.PrintableRuneWidth(link); w <= cols {
+		t.Fatalf("precondition: the row must read too wide under the compositor's measure; got %d", w)
+	}
+	fg := strings.Join([]string{link, link}, "\n")
+
+	out := PlaceOverlay(0, 0, fg, bg, true)
+
+	if hasUnterminatedOSC(out) {
+		t.Fatalf("the clip must not cut through an OSC sequence; got %q", out)
+	}
+	if !strings.Contains(out, "https://example.com") {
+		t.Fatalf("an atomic sequence must survive intact, not be shortened; got %q", out)
+	}
+}

@@ -129,6 +129,36 @@ func fadeSGR(match string) string {
 	return "\x1b[" + strings.Join(parts, ";") + "m"
 }
 
+// clipLine truncates one foreground row to width WITHOUT ever cutting through a
+// control sequence.
+//
+// Two truncators, because neither is right for both kinds of row and the failure
+// modes are not symmetric:
+//
+//   - reflow's truncator accounts per printable rune with runewidth, exactly as
+//     getLines and the placement arithmetic below do, so its result really is
+//     within width by this compositor's measure. But it is not OSC-aware: it takes
+//     the first letter of a hyperlink's URI for the sequence terminator, counts the
+//     rest of the URI as visible text, and will happily cut in the middle of it.
+//     Measured, truncating a 4-cell hyperlink to 10 yields "\x1b]8;;https://exa" —
+//     an unterminated OSC command, which swallows whatever the terminal is given
+//     next.
+//   - x/ansi parses OSC properly and keeps sequences atomic, but measures in cells
+//     rather than printable runes, so it does not bound the row by the measure the
+//     rest of this function uses.
+//
+// A mangled control sequence is the worse failure — it corrupts output past the
+// modal, not just inside it — so a row carrying one is clipped with the parser and
+// a plain row with the measure-consistent truncator. Rows with hyperlinks remain
+// mispositioned, because ansi.PrintableRuneWidth counts their URIs as text; that is
+// the measure problem #3433 defers, and it predates any clipping.
+func clipLine(line string, width int) string {
+	if strings.Contains(line, "\x1b]") {
+		return xansi.Truncate(line, width, "")
+	}
+	return truncate.String(line, uint(width))
+}
+
 // widestLine measures the widest of these rows with the same measure getLines
 // uses, so a re-measure after clipping cannot disagree with the original.
 func widestLine(lines []string) int {
@@ -142,9 +172,16 @@ func widestLine(lines []string) int {
 }
 
 // osc8Regex matches an OSC 8 hyperlink introducer with either terminator, ST
-// (\x1b\\) or BEL. The capture is the URI: a hyperlink is OPENED by a sequence
-// carrying one and CLOSED by the same sequence with it empty.
-var osc8Regex = regexp.MustCompile("\x1b\\]8;[^;]*;([^\x1b\a]*)(?:\x1b\\\\|\a)")
+// (ESC backslash) or BEL. The capture is the URI: a hyperlink is OPENED by a
+// sequence carrying one and CLOSED by the same sequence with it empty.
+//
+// Written as a raw literal with \x1b and \x07 as REGEX escapes rather than as
+// literal control bytes. Embedding a real BEL trips CodeQL's
+// go/suspicious-character-in-regex, which exists because a bell in a pattern is
+// far more often a mistyped \A or [[:alpha:]] than an intended 0x07 — and the one
+// place it is genuinely intended is exactly this, an OSC terminator. Spelling it
+// as an escape says so, to the query and to the next reader.
+var osc8Regex = regexp.MustCompile(`\x1b\]8;[^;]*;([^\x1b\x07]*)(?:\x1b\\|\x07)`)
 
 // closeSequences returns what must be emitted after line so that whatever follows
 // it — a background segment, or the end of the frame — starts clean.
@@ -263,14 +300,14 @@ func PlaceOverlay(
 	}
 	if fgWidth > bgWidth {
 		for i, line := range fgLines {
-			// truncate accumulates runewidth per printable rune and skips escape
-			// sequences — the same accounting getLines and the placement arithmetic
-			// below use — so the clipped rows really are within bgWidth by THIS
-			// compositor's measure, and it closes any SGR it cuts through rather
-			// than leaking the style onto the frame.
-			fgLines[i] = truncate.String(line, uint(bgWidth))
+			fgLines[i] = clipLine(line, bgWidth)
 		}
-		fgWidth = bgWidth
+		// An OSC row can still measure over the frame here, because the measure
+		// over-counts it rather than because it is wide (see clipLine). Cap the
+		// placement width so the clamp below stays inside the frame either way.
+		if fgWidth = widestLine(fgLines); fgWidth > bgWidth {
+			fgWidth = bgWidth
+		}
 	}
 	// An overlay is OPAQUE: every cell inside its rectangle belongs to it,
 	// including the blank tail of a row narrower than the widest one. Only the
