@@ -61,7 +61,8 @@ func TestLoadTasksTagsEveryReadWithTheStoreGeneration(t *testing.T) {
 		"two reads of an unchanged store must agree, or nothing would ever pair")
 
 	ran := time.Now()
-	require.NoError(t, UpdateTaskStatus("bbb00002", &ran, "started"))
+	_, err = UpdateTaskStatus("bbb00002", &ran, "started")
+	require.NoError(t, err)
 
 	after, err := LoadTasks()
 	require.NoError(t, err)
@@ -123,7 +124,8 @@ func TestOrdinalNeverReachesDisk(t *testing.T) {
 	})
 
 	ran := time.Now()
-	require.NoError(t, UpdateTaskStatus("bbb00002", &ran, "started"))
+	_, statusErr := UpdateTaskStatus("bbb00002", &ran, "started")
+	require.NoError(t, statusErr)
 
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -278,6 +280,38 @@ func TestStableRepoBindingUpdatesDoNotMoveRows(t *testing.T) {
 		assert.Equal(t, after[0].StoreGeneration, tk.StoreGeneration,
 			"and so must every record it publishes")
 	}
+}
+
+func TestUpdateTaskStatusReturnsTheIdentityTheNextReadWillReport(t *testing.T) {
+	// The third publisher, and the one the first two fixes missed. The daemon
+	// records an arming refusal with UpdateTaskStatus and then publishes the
+	// result as EventTaskUpdated (daemon/task_arming.go recordArmingStatus); the
+	// copy it walked in with was identified against the PRE-write bytes, so
+	// announcing that would name a version of the store this very call retired
+	// (#3684 review). Returning the committed record is what lets the publisher
+	// announce something current.
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	setupTestTasks(t, []Task{
+		ordinalRow("aaa00001", "first", "0 9 * * *", "/repo"),
+		ordinalRow("bbb00002", "second", "0 10 * * *", "/repo"),
+	})
+
+	before, err := LoadTasks()
+	require.NoError(t, err)
+
+	updated, err := UpdateTaskStatus("bbb00002", nil, "errored: not armed — target is gone")
+	require.NoError(t, err)
+	assert.Equal(t, "errored: not armed — target is gone", updated.LastRunStatus,
+		"precondition: the status write landed")
+
+	read, err := LoadTasks()
+	require.NoError(t, err)
+	require.Len(t, read, 2)
+	assert.NotEqual(t, before[1].StoreGeneration, updated.StoreGeneration,
+		"precondition: the write really did produce a new generation")
+	assert.Equal(t, read[1].StoreGeneration, updated.StoreGeneration,
+		"the record it returns names the store it wrote, which is what the next read sees")
+	assert.Equal(t, read[1].Ordinal, updated.Ordinal, "and the row it still occupies")
 }
 
 func TestUpdateTaskReturnsTheIdentityTheNextReadWillReport(t *testing.T) {

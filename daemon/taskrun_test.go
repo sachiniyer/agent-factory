@@ -436,7 +436,7 @@ func TestRunTask_PersistsFailureStatusOnBadRepo(t *testing.T) {
 	// The stale "started" this test is about is seeded through the
 	// scheduler-owned writer: a create supplies the task's definition and the
 	// store supplies its history (task.resetStoreOwnedFields).
-	if err := task.UpdateTaskStatus("dddd0001", &now, "started"); err != nil {
+	if _, err := task.UpdateTaskStatus("dddd0001", &now, "started"); err != nil {
 		t.Fatalf("seed run status: %v", err)
 	}
 

@@ -224,6 +224,19 @@ type Task struct {
 	// two stores on two machines are two different files, so their rows can never
 	// pair. Empty means the record came from no read — see Ordinal for why that
 	// has to fail closed.
+	//
+	// The contract it implies, stated once so a caller cannot get it wrong
+	// quietly: a row identity belongs to ONE LIST FROM ONE READ. It is file-wide,
+	// so any write retires every row's identity at once, not just the row that
+	// changed — which means a list assembled from more than one read (a cached
+	// list patched with single records from mutation events, say) is a mixture of
+	// generations and pairs only where the generations happen to line up. That
+	// degrades to UNKNOWN per row rather than to a wrong answer, which is the
+	// right direction, but it is still less than the caller wanted: a consumer
+	// that pairs arming should re-read the list, which is what app/sync.go does on
+	// every poll. A record delivered on its own — an EventTaskUpdated payload, a
+	// mutation response — carries the identity of the write that produced it and
+	// is not a member of anyone else's list (#3684 review).
 	StoreGeneration string `json:"store_generation,omitempty"`
 }
 
@@ -764,24 +777,32 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // written. Callers that record a supervision-status change (not an event
 // delivery) pass nil so a concurrent writer's newer LastRunAt is never reverted
 // by a value the caller read outside the file lock (#1215).
-func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) error {
+// It returns the record as committed, identified against the file the write
+// produced. Returning it rather than only an error is what stops the next caller
+// that PUBLISHES a status change from announcing the copy it walked in with:
+// that copy was identified against the pre-write bytes, so it names a version of
+// the store that this very call retired (#3684 review). Callers that only need
+// the error discard it.
+func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
 	if err := ValidateTaskID(taskID); err != nil {
-		return err
+		return Task{}, err
 	}
 	path, err := getTasksPathFn()
 	if err != nil {
-		return err
+		return Task{}, err
 	}
 	if err := ensureTasksSchemaMigrated(path); err != nil {
-		return err
+		return Task{}, err
 	}
-	return config.WithFileLock(path, func() error {
+	var updated Task
+	lockErr := config.WithFileLock(path, func() error {
 		tasks, err := loadTasksLocked(path)
 		if err != nil {
 			return err
 		}
 
 		found := false
+		row := -1
 		for i := range tasks {
 			if tasks[i].ID == taskID {
 				// nil means "preserve the on-disk LastRunAt": a status-only
@@ -792,6 +813,7 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 					tasks[i].LastRunAt = lastRunAt
 				}
 				tasks[i].LastRunStatus = lastRunStatus
+				row = i
 				found = true
 				break
 			}
@@ -801,8 +823,17 @@ func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string)
 			return fmt.Errorf("task with id %q not found", taskID)
 		}
 
-		return saveTasks(tasks)
+		generation, err := writeTasks(tasks)
+		if err != nil {
+			return err
+		}
+		updated = stampRowIdentity(tasks, generation)[row]
+		return nil
 	})
+	if lockErr != nil {
+		return Task{}, lockErr
+	}
+	return updated, nil
 }
 
 // capApplies reports whether this task's shape can carry a concurrency cap: it
