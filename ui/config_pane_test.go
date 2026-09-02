@@ -235,7 +235,7 @@ func TestConfigPaneSurfacesRestartNoticeAtTheMomentOfTheEdit(t *testing.T) {
 	// hands back, so this pins that the pane renders THAT, not a hardcoded string.
 	c.save = func(key, value string) (*config.SetResult, string, error) {
 		return &config.SetResult{Key: key, Value: value, Path: "/tmp/config.toml", RequiresRestart: true},
-			config.EffectNotice(key, true), nil
+			config.EffectNotice(key, config.ApplyOutcome{DaemonApplied: true}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -485,7 +485,7 @@ func TestConfigPaneClosingClearsTheLastWritesStatus(t *testing.T) {
 	selectKey(t, c, "default_program")
 	c.save = func(k, v string) (*config.SetResult, string, error) {
 		return &config.SetResult{Key: k, Value: v, Path: "/tmp/config.toml", RequiresRestart: true},
-			config.EffectNotice(k, true), nil
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApplied: true}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
@@ -692,7 +692,7 @@ func TestSavingAnUntouchedFieldWritesNothing(t *testing.T) {
 	c.save = func(k, v string) (*config.SetResult, string, error) {
 		writes++
 		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
-			config.EffectNotice(k, true), nil
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApplied: true}), nil
 	}
 
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})

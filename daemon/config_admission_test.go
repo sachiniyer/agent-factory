@@ -214,7 +214,7 @@ func TestSetGlobalConfigValueNoDaemonWritesLocally(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp.Result)
 	require.Equal(t, "default_program", resp.Result.Key)
-	require.Equal(t, config.EffectNotice("default_program", false), resp.RestartNotice)
+	require.Equal(t, config.EffectNotice("default_program", config.ApplyOutcome{}), resp.RestartNotice)
 
 	written, readErr := os.ReadFile(filepath.Join(home, config.TomlConfigFileName))
 	require.NoError(t, readErr)
@@ -244,7 +244,7 @@ func TestSetGlobalConfigValueLegacyDaemonFallsBack(t *testing.T) {
 
 	resp, err := SetGlobalConfigValue("default_program", "codex")
 	require.NoError(t, err)
-	require.Equal(t, config.EffectNotice("default_program", true), resp.RestartNotice)
+	require.Equal(t, config.EffectNotice("default_program", config.ApplyOutcome{DaemonApplied: true}), resp.RestartNotice)
 	select {
 	case <-stub.applied:
 	default:
