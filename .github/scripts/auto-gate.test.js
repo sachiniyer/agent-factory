@@ -2179,7 +2179,14 @@ test("merge invalidates the old-head aggregate before dispatching docs", async (
     prNumber: 1465,
   });
 
-  assert.deepEqual(github.operations, ["merge", "check:create", "docs:dispatch"]);
+  assert.deepEqual(github.operations, [
+    "merge",
+    "check:create",
+    "dispatch:build.yml",
+    "dispatch:docs.yml",
+    "dispatch:lint.yml",
+    "dispatch:web-selftest.yml",
+  ]);
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
   assert.equal(github.associationReads, 2, "invalidation after merge must be write-only");
@@ -2202,11 +2209,14 @@ test("a post-merge invalidation error cannot suppress the docs dispatch attempt"
   );
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.ok(github.operations.includes("docs:dispatch"));
+  assert.ok(github.operations.includes("dispatch:docs.yml"));
 });
 
 test("a workflow dispatch failure remains single-shot after merge", async () => {
   const error = new Error("docs dispatch unavailable");
+  // Retryable by status on purpose: a dispatch is a write, so it must NOT be
+  // retried even when the classifier would call the failure transient. A second
+  // accepted dispatch is a duplicate run, and for docs.yml a duplicate deploy.
   error.status = 500;
   const github = fakeGateGithub({
     files: ["docs/auto-gate.md"],
@@ -2224,23 +2234,421 @@ test("a workflow dispatch failure remains single-shot after merge", async () => 
   );
 
   assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.equal(github.workflowDispatchAttempts, 1);
+  // One attempt per master-verify workflow and no more: a failing dispatch is
+  // never retried, and one unavailable workflow does not cost master the rest.
+  assert.equal(github.workflowDispatchAttempts, __test.MASTER_PUSH_WORKFLOWS.length);
 });
 
-// The exact wire shape from Auto Gate run 32044471684: GET
-// /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
-// body naming the PR's OWN node id, during a wider GitHub degradation.
-function selfContradictoryNotFound(nodeId = "PR_node_1465") {
-  const body = {
-    type: "NOT_FOUND",
-    path: ["node"],
-    message: `Could not resolve to a node with the global id of '${nodeId}'.`,
-  };
-  const error = new Error(`Not Found: ${JSON.stringify(body)}`);
-  error.status = 404;
-  error.response = { status: 404, data: body };
-  return error;
-}
+test("an auto-gate merge re-raises every gate its own push suppressed", async () => {
+  const github = fakeGateGithub({ files: ["session/storage.go"] });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(
+    github.dispatchedWorkflows.map((dispatch) => dispatch.workflow_id),
+    __test.MASTER_PUSH_WORKFLOWS,
+  );
+  // A dispatch takes a branch ref, never a SHA. master is the commit the merge
+  // above just created.
+  for (const dispatch of github.dispatchedWorkflows) {
+    assert.equal(dispatch.ref, "master");
+  }
+  // Only docs.yml carries an input, and it is the merge COMMIT, never a path
+  // list: docs.yml still owns which paths mean "deploy". A copy of that list
+  // here would be a second source of truth, and it had already drifted.
+  for (const dispatch of github.dispatchedWorkflows) {
+    if (dispatch.workflow_id === "docs.yml") {
+      assert.deepEqual(dispatch.inputs, { verify_sha: "merge-sha" });
+    } else {
+      assert.equal(dispatch.inputs, undefined);
+    }
+  }
+});
+
+test("a merge that changes workflows warns that its own set may be stale", async () => {
+  // Codex P2: auto-gate.yml pins every checkout to the default branch, so this
+  // loop re-raises the set known to master's PRE-merge copy of the gate. A merge
+  // that ADDS a push-gated workflow cannot re-raise it for its own landing
+  // commit — the running copy's list predates it. Deriving the set from the
+  // merged tree would mean re-parsing triggers at merge time, where a misparse
+  // silently skips a dispatch or reds a merge that already landed; the gap is
+  // made visible instead.
+  const warnings = [];
+  const github = fakeGateGithub({ files: [".github/workflows/new-gate.yml"] });
+
+  await autoGate.merge({
+    github,
+    context: fakeContext(),
+    core: { ...fakeCore(), warning: (message) => warnings.push(message) },
+    prNumber: 1465,
+  });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.ok(
+    warnings.some((warning) => /changed workflow definitions/.test(warning)),
+    `a workflow-changing merge must say its dispatch set may be stale; got ${JSON.stringify(warnings)}`,
+  );
+
+  // A merge that touches no workflow definition says nothing.
+  const quiet = [];
+  const other = fakeGateGithub({ files: ["session/storage.go"] });
+  await autoGate.merge({
+    github: other,
+    context: fakeContext(),
+    core: { ...fakeCore(), warning: (message) => quiet.push(message) },
+    prNumber: 1465,
+  });
+  assert.deepEqual(quiet, []);
+});
+
+test("the re-raised Docs run decides deployment from its own path list", () => {
+  // The gate must not carry a second copy of docs.yml's deploy paths. It had
+  // one, and it had drifted: gate.docsChanged knew only `docs/` and `mkdocs.yml`
+  // while docs.yml also deploys for README.md, commands/docs_gen.go,
+  // requirements-docs.txt and scripts/gen-docs.sh — so an auto-gate merge
+  // touching any of those left Pages stale.
+  // Comments may name the paths — explaining the drift is the point. Code may
+  // not carry them, so the scan is over the file with comments stripped.
+  const gate = fs
+    .readFileSync(path.join(__dirname, "auto-gate.js"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+    .join("\n");
+  const docs = fs.readFileSync(path.join(__dirname, "..", "workflows", "docs.yml"), "utf8");
+
+  // The gate names none of those paths, and passes no deploy input.
+  for (const deployPath of [
+    "mkdocs.yml",
+    "README.md",
+    "commands/docs_gen.go",
+    "requirements-docs.txt",
+    "scripts/gen-docs.sh",
+  ]) {
+    assert.doesNotMatch(
+      gate,
+      new RegExp(deployPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `${deployPath} is a docs.yml deploy path and must not be copied into the gate`,
+    );
+  }
+  assert.doesNotMatch(gate, /deploy_docs/);
+
+  // What the gate DOES name is the commit — publishing is not monotonic, so a
+  // run raised for this merge must decide on this merge's paths even if master
+  // advanced before it started.
+  assert.match(gate, /verify_sha: response\.data\.sha/);
+  assert.match(docs, /verify_sha:[\s\S]*?default: ''/);
+  // The sha reaches the script through the ENVIRONMENT and is validated as a
+  // full commit SHA. verify_sha is free-form input, and this step's run can
+  // publish Pages, so substituting it into the program text would be a script
+  // injection with a publish primitive on the end of it.
+  assert.match(docs, /env:\s+EVENT_NAME:[\s\S]*?VERIFY_SHA: \$\{\{ inputs\.verify_sha \}\}/);
+  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" && ! "\$VERIFY_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/);
+  assert.match(docs, /after="\$\{VERIFY_SHA:-\$EVENT_SHA\}"/);
+  assert.match(docs, /if \[\[ -n "\$VERIFY_SHA" \|\| -z "\$before"/);
+  // No ${{ }} expansion may remain inside the step's shell program.
+  const step = /- name: Check docs deploy paths[\s\S]*?\n      - name: /.exec(docs)[0];
+  const program = step.slice(step.indexOf("run: |"));
+  assert.doesNotMatch(program, /\$\{\{/, "no expression may be substituted into the shell program");
+
+  // docs.yml accepts a dispatch that defers to its own rule, and falls through
+  // to the same path diff a push uses when it does.
+  assert.match(docs, /deploy_docs:[\s\S]*?default: auto[\s\S]*?options: \[auto, 'true', 'false'\]/);
+  assert.match(docs, /"\$EVENT_NAME" == "workflow_dispatch" && "\$DEPLOY_DOCS" != "auto"/);
+  assert.match(docs, /case "\$path" in\s+docs\/\*\|mkdocs\.yml\|README\.md/);
+});
+
+test("one unavailable master-verify workflow does not suppress the others", async () => {
+  const github = fakeGateGithub({
+    files: ["session/storage.go"],
+    workflowDispatchErrorsByWorkflow: { "build.yml": new Error("build dispatch unavailable") },
+  });
+
+  await assert.rejects(
+    autoGate.merge({
+      github,
+      context: fakeContext(),
+      core: fakeCore(),
+      prNumber: 1465,
+    }),
+    // The merge itself succeeded; the failure is reported as a post-merge error
+    // so the run goes red and a human re-raises the missing gate by hand.
+    /merged, but post-merge operation\(s\) failed[\s\S]*build dispatch unavailable/,
+  );
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(
+    github.dispatchedWorkflows.map((dispatch) => dispatch.workflow_id),
+    __test.MASTER_PUSH_WORKFLOWS.filter((workflow) => workflow !== "build.yml"),
+  );
+});
+
+test("the trigger scan asks a question no YAML spelling can hide", () => {
+  // Six review rounds of parsing these triggers by hand each found another valid
+  // spelling — shorthand, flow mappings, deeper indentation, comments in four
+  // positions, unclosed flow sequences — and every one failed the same way: it
+  // read as "no trigger here" rather than "cannot read this", so the workflow
+  // left the comparison and MASTER_PUSH_WORKFLOWS together, silently.
+  //
+  // The parser is gone. The question is now lexical — does this file's trigger
+  // section mention a push trigger? — which no indentation, flow style or
+  // comment can change the answer to. It over-includes a push trigger scoped to
+  // some other branch, and that is the point: over-inclusion is a test failure a
+  // human resolves with an explicit exception, under-inclusion is a master
+  // commit nothing verifies.
+  const forms = [
+    "on:\n  push:\n    branches: [master]\n\njobs:\n",
+    "on:\n  push:\n    branches: [ master ]\n\njobs:\n",
+    "on:\n  push:\n    branches:\n      - master\n\njobs:\n",
+    "on:\n    push:\n      branches: [master]\n\njobs:\n",
+    "on:\n  push:\n\njobs:\n",
+    "on:\n  push: {}\n\njobs:\n",
+    "on:\n  push: # every branch\n\njobs:\n",
+    "on: # workflow events\n  push:\n\njobs:\n",
+    "on:\n  pull_request:\n# master signal\n  push:\n\njobs:\n",
+    "on: push\njobs:\n",
+    "on: [push]\njobs:\n",
+    "on: [push, pull_request]\njobs:\n",
+    'on: {"push": {"branches": ["master"]}}\njobs:\n',
+    "on:\n  push:\n    branches: [\n      master,\n    ]\n\njobs:\n",
+    "on:\n  push:\n    branches: ['**']\n\njobs:\n",
+  ];
+  for (const form of forms) {
+    assert.equal(
+      mentionsPushTrigger(onSection(form)),
+      true,
+      `a push trigger must be seen in: ${JSON.stringify(form)}`,
+    );
+  }
+
+  // Negatives: no push trigger at all, and a push mentioned only in a comment or
+  // in a job — neither is a trigger, and comments are stripped before the scan.
+  for (const form of [
+    "on:\n  pull_request:\n    branches: [master]\n\njobs:\n",
+    "on:\n  workflow_dispatch:\n\njobs:\n",
+    "on:\n  # we deliberately do not run on push here\n  pull_request:\n\njobs:\n",
+    "on:\n  pull_request:\n\njobs:\n  push:\n    runs-on: ubuntu-latest\n",
+  ]) {
+    assert.equal(
+      mentionsPushTrigger(onSection(form)),
+      false,
+      `no push trigger may be seen in: ${JSON.stringify(form)}`,
+    );
+  }
+
+  // A file with no readable `on:` section at all is null, which the anti-rot
+  // test turns into a failure naming the file rather than a silent exclusion.
+  assert.equal(onSection("name: x\njobs:\n  a:\n    runs-on: ubuntu-latest\n"), null);
+});
+
+
+test("the dispatch contract survives the spellings that hid from the parser", () => {
+  // Flow mappings put `required:` mid-line, which the anchored check missed —
+  // the same blind spot the parser had, reintroduced lexically.
+  for (const flow of [
+    "    inputs: { token: { required: true, type: string } }",
+    "      token: { required: true }",
+    "      token:\n        required: true",
+  ]) {
+    assert.match(withoutComments(flow), /required:\s*true\b/, `a required input must be seen in: ${flow}`);
+  }
+  assert.doesNotMatch(withoutComments("      token:\n        required: false"), /required:\s*true\b/);
+
+  // A condition admits a dispatch only if it lets one through. Naming the event
+  // in order to EXCLUDE it is the opposite.
+  assert.equal(admitsDispatch("github.event_name == 'push' || github.event_name == 'workflow_dispatch'"), true);
+  assert.equal(admitsDispatch("'push' == github.event_name"), false);
+  assert.equal(admitsDispatch("github.event_name == 'push'"), false);
+  assert.equal(admitsDispatch("github.event_name != 'workflow_dispatch'"), false);
+  assert.equal(admitsDispatch("'workflow_dispatch' != github.event_name"), false);
+  // Admitted only when an input the gate does not supply happens to be set: the
+  // dispatch succeeds and the job it was raised for is skipped anyway.
+  assert.equal(
+    admitsDispatch(
+      "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_checks)",
+    ),
+    false,
+  );
+
+  // A YAML alias resolves to a trigger GitHub honours and this scan cannot read,
+  // so it is reported unreadable rather than answering "no push".
+  assert.equal(usesUnresolvableYaml(onSection("on: *push_event\njobs:\n")), true);
+  assert.equal(usesUnresolvableYaml(onSection("on:\n  <<: *base\n  push:\n\njobs:\n")), true);
+  assert.equal(usesUnresolvableYaml(onSection("on:\n  push:\n    branches: [master]\n\njobs:\n")), false);
+  // A glob in a paths filter is not an alias.
+  assert.equal(
+    usesUnresolvableYaml(onSection("on:\n  push:\n    paths:\n      - '**.go'\n\njobs:\n")),
+    false,
+  );
+
+  // An expectation scoped to its own declaration cannot be satisfied by a LATER
+  // input's properties.
+  const twoInputs = [
+    "    inputs:",
+    "      verify_sha:",
+    "        type: boolean",
+    "      other:",
+    "        type: string",
+  ].join("\n");
+  assert.doesNotMatch(
+    declarationBlock(twoInputs, /^ *verify_sha:/) || "",
+    /type: string/,
+    "a later input's type must not satisfy verify_sha's expectation",
+  );
+  assert.match(
+    declarationBlock(twoInputs.replace("type: boolean", "type: string"), /^ *verify_sha:/) || "",
+    /type: string/,
+  );
+
+  // An exception holds only while the triggers it was justified against stand.
+  const recorded = "on:\n  push:\n    branches: [release]\n";
+  PUSH_TRIGGER_EXCEPTIONS["zz-probe.yml"] = { reason: "release-only", triggers: recorded };
+  try {
+    assert.equal(exemptedByRecordedTriggers("zz-probe.yml", onSection(recorded)), true);
+    // Widened to include master: the reason no longer describes it, so the
+    // exemption lapses and the workflow re-enters the comparison.
+    assert.equal(
+      exemptedByRecordedTriggers(
+        "zz-probe.yml",
+        onSection("on:\n  push:\n    branches: [release, master]\n"),
+      ),
+      false,
+    );
+    // Comment and whitespace churn alone does not lapse it.
+    assert.equal(
+      exemptedByRecordedTriggers(
+        "zz-probe.yml",
+        onSection("on:\n  push: # release train\n    branches: [release]   \n"),
+      ),
+      true,
+    );
+  } finally {
+    delete PUSH_TRIGGER_EXCEPTIONS["zz-probe.yml"];
+  }
+});
+
+test("the master-verify list names every workflow that gates master on push", () => {
+  // The anti-rot mechanism for MASTER_PUSH_WORKFLOWS. A `push:` trigger cannot
+  // be computed at runtime, so the gate carries a literal copy; this reads the
+  // workflow directory and fails if that copy stops describing it — the same
+  // arrangement web-selftest-scope.test.js uses for SELFTEST_PATHS.
+  const workflowDir = path.join(__dirname, "..", "workflows");
+  const workflowFiles = fs
+    .readdirSync(workflowDir)
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+  const sections = new Map(
+    workflowFiles.map((name) => [
+      name,
+      onSection(fs.readFileSync(path.join(workflowDir, name), "utf8")),
+    ]),
+  );
+
+  // A trigger section this scan cannot read is a failure naming the file, never
+  // a silent exclusion — that confusion is what every missed spelling had in
+  // common.
+  for (const [name, section] of sections) {
+    assert.notEqual(
+      section,
+      null,
+      `${name}: no \`on:\` section could be located, so this scan cannot tell whether the ` +
+        "workflow runs on a master push",
+    );
+    assert.equal(
+      usesUnresolvableYaml(section),
+      false,
+      `${name}: its \`on:\` section uses a YAML alias or merge key, which GitHub resolves and ` +
+        "this scan cannot; inline the trigger or teach the scan to resolve it",
+    );
+  }
+
+  const mentionsPush = workflowFiles
+    .filter((name) => mentionsPushTrigger(sections.get(name)))
+    .filter((name) => !exemptedByRecordedTriggers(name, sections.get(name)))
+    .sort();
+
+  assert.deepEqual(
+    [...__test.MASTER_PUSH_WORKFLOWS].sort(),
+    mentionsPush,
+    "a workflow with a push trigger is missing from MASTER_PUSH_WORKFLOWS (or vice versa); " +
+      "an auto-gate merge would land on master without it ever running. If its push trigger " +
+      "genuinely cannot reach master, add it to PUSH_TRIGGER_EXCEPTIONS with the reason",
+  );
+
+  for (const name of __test.MASTER_PUSH_WORKFLOWS) {
+    const section = sections.get(name);
+    const file = fs.readFileSync(path.join(workflowDir, name), "utf8");
+
+    // A dispatch is how the gate re-raises them, so each has to accept one.
+    assert.match(
+      withoutComments(section),
+      /^ *workflow_dispatch:/m,
+      `${name} is re-raised by the gate but declares no workflow_dispatch trigger`,
+    );
+
+    // …and has to accept the call merge() actually makes. A required input with
+    // no value from the gate is a 422 AFTER the commit has landed, which is the
+    // verification lost silently again. Deliberately blunt: any required input
+    // at all must be one the gate supplies, so adding one forces the decision
+    // rather than passing on a parse this test got wrong.
+    // Anywhere in the section, not anchored to a line: a flow mapping such as
+    // `inputs: { token: { required: true } }` puts it mid-line, which is exactly
+    // the blind spot the previous anchored form had.
+    const required = withoutComments(section).match(/required:\s*true\b/);
+    assert.equal(
+      required,
+      null,
+      `${name} declares a required workflow_dispatch input, but the gate sends only ` +
+        `${JSON.stringify(SUPPLIED_DISPATCH_INPUTS[name] || [])}; either give it a default or ` +
+        "supply it from merge()",
+    );
+
+    // The dispatched run must reach the same jobs the suppressed push would
+    // have. Keyed on any `if:` condition that consults github.event_name at all,
+    // rather than on one spelling of one comparison: `'push' == github.event_name`
+    // and `github.event_name != 'workflow_dispatch'` exclude the dispatch just as
+    // effectively. Non-conditions that read the event — an env passthrough, a
+    // concurrency `cancel-in-progress` — gate nothing and are not conditions.
+    const lines = file.split("\n");
+    for (const [index, line] of lines.entries()) {
+      if (!/^\s*if:/.test(line)) {
+        continue;
+      }
+      const condition = declarationBlock(lines.slice(index).join("\n"), /^\s*if:/);
+      if (!/github\.event_name/.test(condition)) {
+        continue;
+      }
+      assert.ok(
+        admitsDispatch(condition),
+        `${name} gates a job or step on the event name without admitting workflow_dispatch, so ` +
+          `the re-raised run would skip it: ${condition.trim()}`,
+      );
+    }
+
+    // Every input the gate supplies must still be declared, and still take the
+    // kind of value the gate sends.
+    for (const [input, expectation] of Object.entries(SUPPLIED_DISPATCH_INPUTS[name] || {})) {
+      const declaration = new RegExp(`^ *${input}:[ \\t]*(?:#[^\\n]*)?$`, "m");
+      assert.match(
+        withoutComments(section),
+        declaration,
+        `the gate sends dispatch input "${input}" to ${name}, which no longer declares it; ` +
+          "GitHub would reject the dispatch after the merge has landed",
+      );
+      const block = declarationBlock(withoutComments(section), declaration);
+      assert.match(
+        block || "",
+        expectation,
+        `${name}'s "${input}" input no longer accepts what merge() sends`,
+      );
+    }
+  }
+});
+
 
 test("a NOT_FOUND for the PR's own node id is retried instead of throwing", async () => {
   // #3396: this is not retryable by status (404), so before this change it went
@@ -3447,6 +3855,7 @@ function fakeGateGithub({
   checkCreateErrors = [],
   checkUpdateErrors = [],
   workflowDispatchError = null,
+  workflowDispatchErrorsByWorkflow = {},
   nativeAutoMergeDisableError = null,
   autoMergeStateError = null,
   autoMergeStateHeadByNumber = {},
@@ -3553,6 +3962,7 @@ function fakeGateGithub({
     readAttemptsByFn: {},
     checkUpdateAttempts: 0,
     disabledAutoMergePullRequestIds: [],
+    dispatchedWorkflows: [],
     mergeAttempts: 0,
     pullGetReads: 0,
     nativeAutoMergeDisableAttempts: 0,
@@ -3571,12 +3981,14 @@ function fakeGateGithub({
     workflowDispatchAttempts: 0,
     rest: {
       actions: {
-        createWorkflowDispatch: async () => {
+        createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;
-          if (workflowDispatchError) {
-            throw workflowDispatchError;
+          const perWorkflowError = workflowDispatchErrorsByWorkflow[options.workflow_id];
+          if (workflowDispatchError || perWorkflowError) {
+            throw workflowDispatchError || perWorkflowError;
           }
-          github.operations.push("docs:dispatch");
+          github.operations.push(`dispatch:${options.workflow_id}`);
+          github.dispatchedWorkflows.push(options);
         },
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
@@ -3771,6 +4183,170 @@ function fakeGateGithub({
   };
 
   return github;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow trigger scan.
+//
+// Lexical, not a parser. Six review rounds of reading these triggers as YAML by
+// hand each turned up another valid spelling — shorthand, flow mappings, deeper
+// indentation, comments in four positions, an unclosed flow sequence — and every
+// one failed identically: it read as "no trigger here" rather than "cannot read
+// this", so the workflow dropped out of the comparison AND out of
+// MASTER_PUSH_WORKFLOWS at the same moment, silently. The repo has no YAML
+// library (no package.json; web-selftest-scope.test.js reads its workflow
+// textually too), so the answer was to stop needing one.
+//
+// The question is now "does this file's trigger section mention a push
+// trigger?", which no formatting can change the answer to. It over-includes a
+// push trigger scoped to a branch other than master; that is a visible test
+// failure resolved with an explicit exception below, which is the direction that
+// cannot cost master an unverified commit.
+// ---------------------------------------------------------------------------
+
+// Workflows whose trigger section mentions push but which genuinely cannot run
+// on a master push. Empty today; an entry needs a reason, because adding one
+// means the gate will NOT re-raise that workflow after a merge.
+const PUSH_TRIGGER_EXCEPTIONS = {
+  // "name.yml": { reason: "why its push trigger cannot reach master",
+  //               triggers: "<the on: section this reason was written against>" },
+};
+
+// An exception holds only while the triggers it was justified against are
+// unchanged. A name-keyed exemption is permanent, so a workflow later widened to
+// include master would stay exempt and its commits unverified — the exemption
+// outliving the reason for it.
+function exemptedByRecordedTriggers(name, section) {
+  const exception = PUSH_TRIGGER_EXCEPTIONS[name];
+  if (!exception) {
+    return false;
+  }
+  return normalizeTriggers(section) === normalizeTriggers(exception.triggers);
+}
+
+function normalizeTriggers(section) {
+  return withoutComments(section || "")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .join("\n");
+}
+
+// The dispatch inputs merge() sends, and what each one's declaration must still
+// accept. A rename, a removal, or a type change on any of these is a 422 after
+// the commit has already landed.
+const SUPPLIED_DISPATCH_INPUTS = {
+  "docs.yml": { verify_sha: /type: string/ },
+};
+
+// A declaration and everything indented under it: the matched line plus every
+// following line indented deeper. One bounded extraction so an expectation
+// cannot drift into a LATER input's properties — a lazy match across the whole
+// section would accept `verify_sha: boolean` as long as some other input was a
+// string.
+function declarationBlock(text, pattern) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => pattern.test(line));
+  if (start < 0) {
+    return null;
+  }
+  const indent = lines[start].match(/^ */)[0].length;
+  const block = [lines[start]];
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim().length === 0) {
+      block.push(line);
+      continue;
+    }
+    if (line.match(/^ */)[0].length <= indent) {
+      break;
+    }
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+// Whether a condition lets a dispatched run through UNCONDITIONALLY. Naming the
+// event is not enough in two different ways: `!= 'workflow_dispatch'` names it in
+// order to exclude it, and `… && inputs.run_checks` admits it only when an input
+// the gate does not supply happens to be set — the dispatch then succeeds and
+// the job it was raised for is skipped anyway.
+function admitsDispatch(condition) {
+  if (!/workflow_dispatch/.test(condition)) {
+    return false;
+  }
+  if (/(?:!=\s*'workflow_dispatch')|(?:'workflow_dispatch'\s*!=)/.test(condition)) {
+    return false;
+  }
+  // Input dependence is rejected rather than evaluated: deciding whether
+  // `inputs.x` is truthy for the gate's dispatch means modelling declared
+  // defaults and what merge() sends, and getting that wrong is silent. A
+  // workflow that needs one has to say so.
+  return !/\binputs\./.test(condition);
+}
+
+// A YAML alias or merge key in the trigger section — `on: *push_event`,
+// `<<: *base`. GitHub resolves them; this scan cannot, and an unresolved alias
+// reads as "no push trigger", which is the silent direction. Anything aliased is
+// reported unreadable so it fails by name instead.
+function usesUnresolvableYaml(section) {
+  const triggers = withoutComments(section || "");
+  return /(?:^|[:\-[,{])\s*\*[A-Za-z_]/m.test(triggers) || /^\s*<<\s*:/m.test(triggers);
+}
+
+// The `on:` section: from the `on:` line to the next real top-level key. Comment
+// and blank lines stay inside it, since a standalone comment between events is
+// valid YAML and truncating there loses whatever follows.
+function onSection(text) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => /^on:/.test(line));
+  if (start < 0) {
+    return null;
+  }
+  const section = [lines[start]];
+  for (const line of lines.slice(start + 1)) {
+    if (/^[A-Za-z_]/.test(line)) {
+      break;
+    }
+    section.push(line);
+  }
+  return section.join("\n");
+}
+
+// Comments removed, so prose about push in a trigger section cannot be mistaken
+// for a trigger. Quoted `#` in a workflow trigger section does not occur, and a
+// false strip would only over-include, which fails visibly.
+function withoutComments(text) {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/(^|\s)#.*$/, "$1"))
+    .join("\n");
+}
+
+// Whether the trigger section mentions a push trigger, in any spelling.
+function mentionsPushTrigger(section) {
+  if (section == null) {
+    return false;
+  }
+  const triggers = withoutComments(section);
+  // `on: push`, `on: [push, …]`, `  push:` and `"push":` all contain the token;
+  // `pull_request` and `workflow_dispatch` do not, and a job named push lives
+  // outside this section.
+  return /(?:^|[\s[{,"'])push(?:["']?\s*:|\s*[,\]]|\s*$)/m.test(triggers);
+}
+
+// The exact wire shape from Auto Gate run 32044471684: GET
+// /repos/:o/:r/pulls/3395/reviews answered HTTP 404 with a GraphQL NOT_FOUND
+// body naming the PR's OWN node id, during a wider GitHub degradation.
+function selfContradictoryNotFound(nodeId = "PR_node_1465") {
+  const body = {
+    type: "NOT_FOUND",
+    path: ["node"],
+    message: `Could not resolve to a node with the global id of '${nodeId}'.`,
+  };
+  const error = new Error(`Not Found: ${JSON.stringify(body)}`);
+  error.status = 404;
+  error.response = { status: 404, data: body };
+  return error;
 }
 
 function fakeContext(payload = {}) {
