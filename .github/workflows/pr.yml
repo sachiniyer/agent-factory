@@ -302,6 +302,33 @@ jobs:
           systemd --version | head -1
           systemctl --user show-environment >/dev/null
 
+      # #3650's two reds. They run FIRST because the survival red refuses to
+      # touch a pre-existing agent-factory-daemon.service, and the step below
+      # installs one. Same pin discipline as that step: `go test -run` exits 0
+      # when the pattern matches nothing, so a rename would silently retire the
+      # gate on the merge path (#2916).
+      - name: Test daemon-spawned hook scopes
+        env:
+          AF_SYSTEMD_LIFECYCLE_TEST: "1"
+        run: |
+          set -euo pipefail
+          run_pinned() {
+            pkg="$1"; pin="$2"; want="$3"
+            matched="$(go test "$pkg" -list "$pin" | grep -c '^Test' || true)"
+            if [ "$matched" != "$want" ]; then
+              echo "::error::the pinned tests do not resolve — $matched of $want for $pin in $pkg"
+              echo "This gate would have run less than it claims and gone green."
+              go test "$pkg" -list '.*' | grep '^Test' || echo "(no tests in $pkg)"
+              exit 1
+            fi
+            go test -v -count=1 "$pkg" -run "$pin"
+          }
+          # The production hook path: /proc/<pid>/cgroup of a real
+          # post_worktree_commands process, and its survival across the daemon
+          # unit stopping.
+          run_pinned ./session/git \
+            '^(TestDaemonSpawnedPostWorktreeHookLeavesTheDaemonCgroup|TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping)$' 2
+
       - name: Test abrupt daemon failure ownership
         env:
           AF_SYSTEMD_LIFECYCLE_TEST: "1"
