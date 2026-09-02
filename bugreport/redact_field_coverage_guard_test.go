@@ -2,6 +2,7 @@ package bugreport
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -410,11 +411,7 @@ var (
 //
 // The bar is the same as the classification maps: a reason saying why the
 // contract still holds without it.
-var unpopulatedMarshalerState = map[string]string{
-	"session.InstanceData: archiveReportSource.hooksCtx (interface)": "an interface field on the git worktree HANDLE the record keeps for its archive report. " +
-		"The walk cannot choose a concrete type for it, and the surrounding *git.GitWorktree IS allocated and planted — so anything the marshaler emitted " +
-		"from that handle still moves the output and fails the independence check; only a value derived from this one nil field would not",
-}
+var unpopulatedMarshalerState = map[string]string{}
 
 // unclassifiedFixtureGaps returns the unplantable unwalked state that is not
 // recorded in unpopulatedMarshalerState.
@@ -561,6 +558,10 @@ type fixtureSpec struct {
 	// sparse empties the walked strings and collections, which fill otherwise
 	// always populates — the other ordinary production state no fixture read.
 	sparse bool
+	// emptyNotNil makes those collections allocated-but-empty instead of nil.
+	// A marshaler can tell the two apart, and reflect.Zero only gives the nil
+	// one (#3592 review).
+	emptyNotNil bool
 }
 
 // newMarshalerFixture builds a FRESH record and marshals it.
@@ -574,6 +575,28 @@ type fixtureSpec struct {
 // carry IDENTICAL planted text and differ only in whatever else the spec varies.
 // That is what makes the independence checks below possible.
 func newMarshalerFixture(t *testing.T, typ reflect.Type, spec fixtureSpec) marshalerFixture {
+	t.Helper()
+	// TWO records, not one read twice. Capturing the baseline first protects it
+	// from a marshaler that rewrites what it renders, but only until the NEXT
+	// call: json addresses a slice element when it invokes a pointer-receiver
+	// marshaler, so an element that clears itself after rendering leaves the
+	// custom call reading what the baseline call destroyed (#3592 review).
+	//
+	// The build is deterministic — the sequence number fixes every marker, the
+	// pattern fixes every scalar — so the two records are identical without a
+	// deep copy having to be written and kept correct.
+	forBaseline, _ := plantedRecord(t, typ, spec)
+	forCustom, unwalked := plantedRecord(t, typ, spec)
+	return marshalerFixture{
+		baseline: marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, forBaseline)),
+		custom:   marshalReviewed(t, typ, forCustom),
+		unwalked: unwalked,
+	}
+}
+
+// plantedRecord builds one record to a spec and returns it with the forms
+// planted where encoding/json could never reach them.
+func plantedRecord(t *testing.T, typ reflect.Type, spec fixtureSpec) (reflect.Value, []string) {
 	t.Helper()
 	filler := &sentinelFiller{seq: spec.seq}
 	value := reflect.New(typ).Elem()
@@ -599,16 +622,9 @@ func newMarshalerFixture(t *testing.T, typ reflect.Type, spec fixtureSpec) marsh
 		nilOptionalPointers(value, 0)
 	}
 	if spec.sparse {
-		sparseWalkedState(value, 0)
+		sparseWalkedState(value, spec.emptyNotNil, 0)
 	}
-	// The baseline is captured FIRST. The twin shares the planted slices and
-	// maps, so a value-receiver marshaler that rewrites what it renders would
-	// otherwise be compared against a baseline it had already rewritten.
-	return marshalerFixture{
-		baseline: marshalOrFail(t, "the plain twin of "+typ.String(), plainTwinOf(t, value)),
-		custom:   marshalReviewed(t, typ, value),
-		unwalked: unwalked,
-	}
+	return value, unwalked
 }
 
 // nilOptionalPointers clears every pointer the walk allocated, so the record
@@ -664,39 +680,87 @@ func nilOptionalPointers(value reflect.Value, depth int) {
 }
 
 // sparseWalkedState empties the walked side of a record: exported strings
-// cleared, exported slices and maps set nil.
+// cleared, exported collections emptied, exported byte and rune arrays zeroed.
 //
 // fill plants a marker in every string and seeds two entries into every
 // collection, so a marshaler that acts only when a field is EMPTY — an ordinary
-// production state — had its branch shut in every fixture (#3592 review). The
-// hidden side is deliberately left populated: that is what the independence
-// comparison is reading.
-func sparseWalkedState(value reflect.Value, depth int) {
+// production state — had its branch shut in every fixture (#3592 review).
+//
+// Three things it must NOT touch, each a way of getting the comparison wrong:
+//
+//   - `json:"-"` fields and unexported ones. They are the hidden state the
+//     independence reading compares, and clearing them in both fixtures leaves
+//     nothing to compare (#3592 review).
+//   - an anonymous unexported EMBEDDING is descended into rather than skipped:
+//     json promotes its exported members and fill plants them, so they are part
+//     of the walked side even though the embedding itself is unexported — the
+//     same exception mustVisit makes (#3592 review).
+//   - nil is not the only empty. `reflect.Zero` gives a NIL slice or map, and a
+//     marshaler can distinguish that from an allocated empty one, so emptyNotNil
+//     reads the other shape.
+func sparseWalkedState(value reflect.Value, emptyNotNil bool, depth int) {
 	if depth > guardMaxDepth {
 		return
 	}
 	switch value.Kind() {
 	case reflect.Pointer:
 		if !value.IsNil() {
-			sparseWalkedState(value.Elem(), depth+1)
+			sparseWalkedState(value.Elem(), emptyNotNil, depth+1)
 		}
-	case reflect.String, reflect.Slice, reflect.Map:
+	case reflect.String:
 		if value.CanSet() {
-			value.Set(reflect.Zero(value.Type()))
+			value.SetString("")
+		}
+	case reflect.Slice:
+		if !value.CanSet() {
+			return
+		}
+		if emptyNotNil {
+			value.Set(reflect.MakeSlice(value.Type(), 0, 0))
+			return
+		}
+		value.Set(reflect.Zero(value.Type()))
+	case reflect.Map:
+		if !value.CanSet() {
+			return
+		}
+		if emptyNotNil {
+			value.Set(reflect.MakeMap(value.Type()))
+			return
+		}
+		value.Set(reflect.Zero(value.Type()))
+	case reflect.Array:
+		// A byte or rune array holds planted text, and json emits it whether or
+		// not it is zero — so the all-zero array is a state a marshaler can act
+		// on, and fill never leaves one (#3592 review).
+		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
+			if value.CanSet() {
+				value.Set(reflect.Zero(value.Type()))
+			}
+			return
+		}
+		for i := 0; i < value.Len(); i++ {
+			sparseWalkedState(value.Index(i), emptyNotNil, depth+1)
 		}
 	case reflect.Struct:
 		if value.Type() == reflect.TypeOf(time.Time{}) {
 			return
 		}
 		for i := 0; i < value.NumField(); i++ {
-			if value.Type().Field(i).PkgPath != "" {
+			field := value.Type().Field(i)
+			if field.Tag.Get("json") == "-" {
 				continue
 			}
-			sparseWalkedState(value.Field(i), depth+1)
-		}
-	case reflect.Array:
-		for i := 0; i < value.Len(); i++ {
-			sparseWalkedState(value.Index(i), depth+1)
+			if field.PkgPath != "" {
+				if !field.Anonymous || baseType(field.Type).Kind() != reflect.Struct {
+					continue
+				}
+				held := value.Field(i)
+				sparseWalkedState(reflect.NewAt(held.Type(), held.Addr().UnsafePointer()).Elem(),
+					emptyNotNil, depth+1)
+				continue
+			}
+			sparseWalkedState(value.Field(i), emptyNotNil, depth+1)
 		}
 	}
 }
@@ -772,6 +836,9 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					for label, adjust := range map[string]func(*fixtureSpec){
 						" (nil pointers)": func(spec *fixtureSpec) { spec.nilPointers = true },
 						" (sparse)":       func(spec *fixtureSpec) { spec.sparse = true },
+						" (empty, not nil)": func(spec *fixtureSpec) {
+							spec.sparse, spec.emptyNotNil = true, true
+						},
 					} {
 						mode := base
 						adjust(&mode)
@@ -1050,7 +1117,7 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 					plantUnwalkedInto(filler, settable, at, depth+1, hidden, closeChans)
 					continue
 				}
-				filler.fill(settable, at, 0, false)
+				fillUnwalked(filler, settable, at)
 				plantUnwalkedInto(filler, settable, at, depth+1, true, closeChans)
 			case field.Tag.Get("json") == "-":
 				// Same treatment as an unexported field, opaque state included:
@@ -1061,7 +1128,7 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 				// place opaque state is populated — an explicit call here as
 				// well was redundant, and a probe that removed it stayed red
 				// because the recursion had already done the work.
-				filler.fill(value.Field(i), at, 0, false)
+				fillUnwalked(filler, value.Field(i), at)
 				plantUnwalkedInto(filler, value.Field(i), at, depth+1, true, closeChans)
 			default:
 				plantUnwalkedInto(filler, value.Field(i), at, depth+1, hidden, closeChans)
@@ -1072,6 +1139,23 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			populateOpaque(filler, value, path, closeChans)
 		}
 	}
+}
+
+// fillUnwalked plants into hidden state, leaving the kinds populateOpaque owns
+// to it.
+//
+// fill REPORTS an interface rather than planting one, which is right for the
+// walked side — there is no correct marker without knowing the concrete type —
+// and wrong here, where the recursion is about to give it a representative
+// value. Calling fill anyway left the report standing beside a field that had
+// just been populated, and the gap register then demanded an entry for it
+// (#3592 review).
+func fillUnwalked(filler *sentinelFiller, value reflect.Value, path string) {
+	switch value.Kind() {
+	case reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return
+	}
+	filler.fill(value, path, 0, false)
 }
 
 // guardHiddenInstant is the value a hidden timestamp is set to: fixed, so two
@@ -1125,6 +1209,23 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 			}
 			return out
 		}))
+	case reflect.Interface:
+		// A hidden interface can be a pure GATE — GitWorktree's constructors
+		// assign a non-nil hooksCtx, and a marshaler can branch on its presence
+		// without ever reading it, which the register's old rationale did not
+		// cover (#3592 review). A context satisfies context.Context and any, so
+		// it opens both shapes; anything narrower is recorded rather than
+		// guessed at.
+		if !value.CanSet() || !value.IsNil() {
+			return
+		}
+		ctx := reflect.ValueOf(context.Background())
+		if ctx.Type().Implements(value.Type()) {
+			value.Set(ctx)
+			return
+		}
+		filler.unsupported = append(filler.unsupported,
+			path+" ("+value.Type().String()+" has no representative value to populate)")
 	case reflect.UnsafePointer:
 		filler.unsupported = append(filler.unsupported,
 			path+" (hidden unsafe.Pointer cannot be populated)")
