@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	aflog "github.com/sachiniyer/agent-factory/log"
 )
 
@@ -106,7 +107,14 @@ func TestConfigWritersFollowASymlinkedConfig(t *testing.T) {
 
 		// The decision: the .bak belongs beside the REAL file, since that is the
 		// file being rewritten and the place a dotfiles `git status` will show it.
-		assert.Equal(t, filepath.Dir(real), filepath.Dir(result.Backup),
+		//
+		// Compared through ResolveForCompare because macOS spells the same
+		// directory two ways: t.TempDir() hands back /var/folders/…, EvalSymlinks
+		// resolves /var to /private/var, and a raw string compare fails on a
+		// backup that is sitting in exactly the right place.
+		assert.Equal(t,
+			pathutil.ResolveForCompare(filepath.Dir(real)),
+			pathutil.ResolveForCompare(filepath.Dir(result.Backup)),
 			"the backup belongs beside the file that was rewritten, not beside the link")
 		backup, err := os.ReadFile(result.Backup)
 		require.NoError(t, err)
@@ -194,7 +202,11 @@ func TestFollowingWriterNoticesTheLinkOncePerProcess(t *testing.T) {
 
 	assert.Equal(t, 1, strings.Count(logged.String(), link),
 		"three writes through one link must produce one notice, not three")
-	assert.Contains(t, logged.String(), real, "the notice names where the write landed")
+	// Resolved on both sides: on macOS the notice carries /private/var/… while
+	// the fixture holds /var/…, and a substring check would pass by coincidence
+	// rather than because the notice named the right file.
+	assert.Contains(t, logged.String(), pathutil.ResolveForCompare(real),
+		"the notice names where the write landed")
 }
 
 // TestFollowingWriterStillHardensAFHome is the ordering pin.
