@@ -212,9 +212,9 @@ af tasks list | jq '.[] | select(.overdue)'   # --json wraps this in {data,error
 af doctor                       # WARN row naming overdue and unarmed tasks
 ```
 
-`af doctor` raises one row under **Automations**: `N enabled tasks have not fired on schedule; oldest missed <time> — <id> "<name>" (missed N)`, plus any task that is enabled but not armed. It exits non-zero on either, so a health probe on a box nobody watches catches a task that quietly stopped.
+`af doctor` raises one row under **Automations**: `N enabled tasks have not fired on schedule; oldest missed <time> — <id> "<name>" (missed N)`, plus any task that is enabled but not armed, plus any whose expression the scheduler cannot fire. It exits non-zero on those, so a health probe on a box nobody watches catches a task that quietly stopped. Tasks whose health could not be established are named in the row but never raise an alarm, and only cron tasks are counted as "firing on schedule" — a watch task has no schedule, so an armed watcher proves its process is supervised and nothing more.
 
-In the TUI, an overdue automation's row carries a static `[!]` in place of its enabled tick, and the expanded row reads `… · overdue · missed N`.
+In the TUI, an automation that has stopped firing — or whose expression the scheduler cannot fire — carries a static `[!]` in place of its enabled tick, and its expanded row leads with the reason (`overdue · missed N`, or `Invalid cron expression`). One whose health could not be established carries `[?]` and reads `Health unknown`: an unknown is not a failure, so it is marked but never counted as one.
 
 ## Daemon lifecycle
 

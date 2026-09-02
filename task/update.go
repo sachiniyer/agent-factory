@@ -293,18 +293,29 @@ func UpdateTaskChecked(id string, update TaskUpdate, expect ProjectExpectation, 
 					if err != nil {
 						return err
 					}
-					if validatedRepoID != "" && validatedRepoID != merged.RepoID {
+					if validatedRepoID != "" {
 						merged.RepoID = validatedRepoID
-						// The daemon resolved a legacy row's binding as a side effect of
-						// someone else's patch, and that write is durable. Recorded here or
-						// nowhere: changedFields covers only patchable fields, and once
-						// RepoID is set the stable-binding loader — which writes this same
-						// daemon-upgrade entry on the path it owns — skips the row forever.
-						// A no-op patch that backfills would otherwise leave no trace at all
-						// (#3623 review). Attributed to the daemon rather than to the caller,
-						// because nobody asked for it.
-						appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
 					}
+				}
+				// The daemon resolved a legacy row's binding, and that write is
+				// durable. Recorded here or nowhere: changedFields covers only
+				// patchable fields, and once RepoID is set the stable-binding loader —
+				// which writes this same daemon-upgrade entry on the path it owns —
+				// skips the row forever, so a patch that backfills would leave no trace
+				// at all.
+				//
+				// Keyed on the RESULT rather than on which branch produced it (#3623
+				// review). Two of them can: the validator, and the pre-lock resolution
+				// above, which `af tasks update --project-path <the path it already
+				// has>` reaches — an explicit same-value path resolves and persists the
+				// ID before the validator ever sees a difference to report.
+				//
+				// A real REBIND is excluded: there the user moved the task, project_path
+				// is in changedFields, and auditUpdate already records it as their
+				// change. This entry is only for a binding that resolved while the path
+				// stood still, which nobody asked for.
+				if merged.ProjectPath == existing.ProjectPath && merged.RepoID != existing.RepoID {
+					appendAudit(&merged, ActorDaemonUpgrade, AuditUpdated, []string{"repo_id"}, nowFn())
 				}
 				// Diffed against the record just loaded under this lock, and
 				// stamped before the write — so the trail records the change that

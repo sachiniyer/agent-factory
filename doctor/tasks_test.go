@@ -160,7 +160,7 @@ func TestDoctor_HealthyTasksPass(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusPass, row.Status)
-	assert.Contains(t, row.Detail, "1 enabled task is firing on schedule")
+	assert.Contains(t, row.Detail, "1 enabled cron task is firing on schedule")
 	assert.NotContains(t, row.Detail, "arming not observed")
 }
 
@@ -347,7 +347,7 @@ func TestDoctor_UnassessableTaskIsAQualifierNotAnAlarm(t *testing.T) {
 
 	row := taskRow(t, report)
 	assert.Equal(t, StatusPass, row.Status)
-	assert.Contains(t, row.Detail, "1 enabled task is firing on schedule",
+	assert.Contains(t, row.Detail, "1 enabled cron task is firing on schedule",
 		"the count covers what was actually assessed:\n%s", row.Detail)
 	assert.Contains(t, row.Detail, "1 could not be assessed")
 	assert.Contains(t, row.Detail, `blank001 "Hand-edited row"`)
@@ -390,4 +390,68 @@ func TestDoctor_QualifiersRideTheAlarmingRowToo(t *testing.T) {
 	assert.Contains(t, row.Detail, "not fired on schedule")
 	assert.Contains(t, row.Detail, "could not be assessed")
 	assert.Positive(t, report.UnresolvedCount(), "the overdue task is still the actionable part")
+}
+
+// TestDoctor_WatchTasksAreNotFiringOnASchedule: a watch task fires when its
+// command emits a line, which may correctly be never, so counting it in a
+// sentence about schedules would be a claim nobody made — an armed watcher
+// proves its process is supervised, nothing more. Its arming is its signal, and
+// the unarmed clause still covers it.
+func TestDoctor_WatchTasksAreNotFiringOnASchedule(t *testing.T) {
+	opts := testOptions(t, false)
+	watcher := healthyTask("watch001")
+	watcher.CronExpr, watcher.WatchCmd = "", "tail -f ci.log"
+	watcher.Arming = task.ArmingArmed
+	cron := healthyTask("cron0001")
+	cron.Arming = task.ArmingArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{watcher, cron}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusPass, row.Status)
+	assert.Contains(t, row.Detail, "1 enabled cron task is firing on schedule",
+		"the watch task is not counted in a claim about schedules:\n%s", row.Detail)
+}
+
+// TestDoctor_OnlyWatchTasksClaimsNothing: with nothing scheduled there is
+// nothing to call on-schedule, and the row must not lead with a count of zero.
+func TestDoctor_OnlyWatchTasksClaimsNothing(t *testing.T) {
+	opts := testOptions(t, false)
+	watcher := healthyTask("watch002")
+	watcher.CronExpr, watcher.WatchCmd = "", "tail -f ci.log"
+	watcher.Arming = task.ArmingArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{watcher}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusPass, row.Status)
+	assert.Contains(t, row.Detail, "no enabled cron task could be assessed")
+	assert.NotContains(t, row.Detail, "firing on schedule")
+	assert.Zero(t, report.UnresolvedCount())
+}
+
+// TestDoctor_AnUnarmedWatchTaskIsStillReported: a watcher whose process crashed
+// past its restart budget reports not-armed, and that IS the signal for a watch
+// task — excluding them from the schedule sentence must not exclude them from
+// the alarm.
+func TestDoctor_AnUnarmedWatchTaskIsStillReported(t *testing.T) {
+	opts := testOptions(t, false)
+	watcher := healthyTask("watch003")
+	watcher.Name = "CI tail"
+	watcher.CronExpr, watcher.WatchCmd = "", "tail -f ci.log"
+	watcher.Arming = task.ArmingNotArmed
+	opts.taskInventory = func() ([]task.Task, error) { return []task.Task{watcher}, nil }
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	row := taskRow(t, report)
+	assert.Equal(t, StatusWarn, row.Status)
+	assert.Contains(t, row.Detail, "enabled but not armed")
+	assert.Contains(t, row.Detail, `watch003 "CI tail"`)
+	assert.Positive(t, report.UnresolvedCount())
 }

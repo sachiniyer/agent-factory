@@ -51,12 +51,22 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	var unschedulable []task.Task
 	var unassessable []task.Task
 	enabled := 0
+	scheduled := 0
 	armingUnobserved := 0
 	for _, t := range tasks {
 		if !t.Enabled {
 			continue
 		}
 		enabled++
+		if !t.IsWatch() {
+			// Only a cron task has a schedule to be judged against. A watch task
+			// fires when its command emits a line, which may correctly be never, so
+			// counting it as "firing on schedule" would be a claim nobody made — an
+			// armed watcher proves its process is supervised, nothing more (#3623
+			// review). Its arming IS its signal, and the unarmed clause below still
+			// covers it.
+			scheduled++
+		}
 		h := task.DeriveScheduleHealth(t, now)
 		classified := true
 		switch {
@@ -120,15 +130,19 @@ func checkTaskSchedules(ctx *scanContext, report *Report) {
 	}
 
 	if len(overdue) == 0 && len(unarmed) == 0 && len(unschedulable) == 0 {
-		assessed := enabled - len(unassessable)
+		assessed := scheduled - len(unassessable)
 		if assessed == 0 {
-			// Every enabled task is an unknown, so there is nothing to call healthy.
-			report.Pass(sectionAutomations, "task schedules",
-				strings.Join(qualifiers, "; "))
+			// Nothing with a schedule was assessed — every enabled task is a watch
+			// task, an unknown, or both — so there is nothing to call healthy.
+			detail := "no enabled cron task could be assessed"
+			if len(qualifiers) > 0 {
+				detail = strings.Join(qualifiers, "; ")
+			}
+			report.Pass(sectionAutomations, "task schedules", detail)
 			return
 		}
 		report.Pass(sectionAutomations, "task schedules",
-			withQualifiers(fmt.Sprintf("%s firing on schedule", countTasksAre(assessed))))
+			withQualifiers(fmt.Sprintf("%s firing on schedule", countCronTasksAre(assessed))))
 		return
 	}
 
@@ -180,6 +194,15 @@ func countTasksAre(n int) string {
 		return "1 enabled task is"
 	}
 	return fmt.Sprintf("%d enabled tasks are", n)
+}
+
+// countCronTasksAre names the kind, because the sentence it builds is about a
+// SCHEDULE and a watch task does not have one.
+func countCronTasksAre(n int) string {
+	if n == 1 {
+		return "1 enabled cron task is"
+	}
+	return fmt.Sprintf("%d enabled cron tasks are", n)
 }
 
 func countTasksHave(n int) string {

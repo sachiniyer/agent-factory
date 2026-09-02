@@ -402,3 +402,58 @@ func TestAudit_ValidatorRepoIDThatChangesNothingRecordsNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, auditOf(t, id), 2, "a validator that changed nothing recorded nothing")
 }
+
+// TestAudit_SamePathBackfillIsRecorded: `af tasks update <id> --project-path
+// <the path it already has>` resolves and persists the RepoID before the
+// validator ever sees a difference to report — so keying the audit on the
+// validator's branch missed it, and changedFields sees no project_path change
+// either. A durable write with no trace, which is the one thing this trail
+// cannot do.
+func TestAudit_SamePathBackfillIsRecorded(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := filepath.Join(t.TempDir(), "repo")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+
+	// Written while the path is not yet a repository, so RepoID starts empty.
+	require.NoError(t, AddTask(Task{
+		ID: "samepath", Name: "Legacy", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}))
+	require.NoError(t, exec.Command("git", "init", repo).Run())
+
+	same := repo
+	_, err := UpdateTaskChecked("samepath", TaskUpdate{ProjectPath: &same}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	stored, err := GetTask("samepath")
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.RepoID, "precondition: the backfill happened")
+	require.Len(t, stored.Audit, 2, "the create, and the binding the daemon resolved")
+	assert.Equal(t, ActorDaemonUpgrade, stored.Audit[1].Actor)
+	assert.Equal(t, []string{"repo_id"}, stored.Audit[1].Fields)
+}
+
+// TestAudit_ARealRebindIsTheUsersChange: moving a task to another repository
+// also changes RepoID, but the user asked for that and project_path is already
+// in their entry. A second daemon-upgrade line there would be noise.
+func TestAudit_ARealRebindIsTheUsersChange(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	from := filepath.Join(t.TempDir(), "from")
+	to := filepath.Join(t.TempDir(), "to")
+	for _, dir := range []string{from, to} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, exec.Command("git", "init", dir).Run())
+	}
+	require.NoError(t, AddTask(Task{
+		ID: "rebind01", Name: "Mover", Prompt: "p", CronExpr: "0 3 * * *",
+		ProjectPath: from, Program: "claude", Enabled: false, CreatedAt: time.Now(),
+	}))
+
+	_, err := UpdateTaskChecked("rebind01", TaskUpdate{ProjectPath: &to}, ProjectExpectation{}, ActorCLI, nil)
+	require.NoError(t, err)
+
+	trail := auditOf(t, "rebind01")
+	require.Len(t, trail, 2, "the create, and the user's move — not a third for the derived id")
+	assert.Equal(t, ActorCLI, trail[1].Actor)
+	assert.Equal(t, []string{"project_path"}, trail[1].Fields)
+}

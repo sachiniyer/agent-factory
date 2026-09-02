@@ -70,7 +70,7 @@ func TestTasksShow_UnknownArmingIsNotReportedAsUnarmed(t *testing.T) {
 	var out bytes.Buffer
 	renderTaskShow(&out, tsk, time.Date(2026, time.September, 1, 16, 30, 0, 0, time.Local))
 
-	assert.Contains(t, out.String(), "unknown — no running daemon answered")
+	assert.Contains(t, out.String(), "unknown — nothing has reported on it yet")
 	assert.NotContains(t, out.String(), "not armed")
 }
 
@@ -151,7 +151,7 @@ func TestTasksShowCmd_ReadsTheStoreAndScopes(t *testing.T) {
 	assert.Contains(t, got, "Master Health Watch · 4ab7ba4f")
 	assert.True(t, strings.Contains(got, "overdue · missed "),
 		"the store read carries the derivation, with no daemon involved:\n%s", got)
-	assert.Contains(t, got, "unknown — no running daemon answered",
+	assert.Contains(t, got, "unknown — nothing has reported on it yet",
 		"and it does not invent an arming observation it never made")
 }
 

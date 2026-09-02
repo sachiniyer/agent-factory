@@ -43,9 +43,9 @@ var tasksShowCmd = &cobra.Command{
 		"not report the occurrences it missed while it was off. Watch tasks have no " +
 		"schedule and are never overdue — their arming state is the signal.\n\n" +
 		"\"Enabled but not armed\" means the task is enabled on disk and the running " +
-		"daemon is not holding it: it will not fire until that is fixed. When no " +
-		"daemon is reachable the arming state is reported as unknown rather than " +
-		"guessed.\n\n" +
+		"daemon is not holding it: it will not fire until that is fixed. When nothing " +
+		"has reported on it — no daemon running, or one still starting up — the arming " +
+		"state is reported as unknown rather than guessed.\n\n" +
 		"The task must belong to the resolved project: --repo when given, otherwise " +
 		"the current directory's project. Outside a git repository there is no " +
 		"project context and the id resolves globally.\n\n" +
@@ -151,7 +151,11 @@ func describeArming(t task.Task) string {
 		}
 		return "not armed (disabled)"
 	default:
-		return "unknown — no running daemon answered"
+		// Not "no daemon answered": one that is still warming up answers and
+		// reports exactly this, because arming has not run yet (see
+		// taskScheduler.armed). Sending that user to daemon recovery would be
+		// wrong, so the wording covers both ways nothing was observed.
+		return "unknown — nothing has reported on it yet (no daemon running, or one still starting up)"
 	}
 }
 
