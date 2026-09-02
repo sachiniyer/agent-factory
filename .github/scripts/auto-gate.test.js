@@ -2127,6 +2127,99 @@ test("an abbreviated commit must resolve to this head, not merely prefix it", as
   assert.ok(honest.commitResolutionReads > 0, "the abbreviation must actually be resolved");
 });
 
+test("a ref named after the abbreviation defeats no ambiguity check", async () => {
+  // Codex P1: the endpoint that resolves an abbreviation also accepts a branch
+  // or tag NAME, and seven hex characters is a legal ref name. A contributor who
+  // can push `refs/heads/<prefix>` at the new head makes the lookup answer with
+  // that head — and answer instead of erroring, which is precisely how the
+  // ambiguity signal that guards the collision gets silenced.
+  const github = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA)],
+    existingRefs: [`heads/${HEAD_SHA.slice(0, 7)}`],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "a shadowed abbreviation proves nothing");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("carried no parseable verdict")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+
+  // A tag of that name shadows it just as well.
+  const tagged = fakeGateGithub({
+    issueComments: [codexSummaryTable(HEAD_SHA)],
+    existingRefs: [`tags/${HEAD_SHA.slice(0, 7)}`],
+  });
+  const withTag = await autoGate.evaluate({
+    github: tagged,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(withTag.shouldMerge, false);
+
+  // With no such ref, the same row resolves and passes — and both namespaces
+  // were actually consulted.
+  const clean = fakeGateGithub({ issueComments: [codexSummaryTable(HEAD_SHA)] });
+  const passes = await autoGate.evaluate({
+    github: clean,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(passes.shouldMerge, true, `blocked on: ${passes.reasons.join("; ")}`);
+  assert.deepEqual(clean.refLookups, [
+    `heads/${HEAD_SHA.slice(0, 7)}`,
+    `tags/${HEAD_SHA.slice(0, 7)}`,
+  ]);
+});
+
+test("a body finding blocks the manual-merge decision, not just the auto one", async () => {
+  // Codex P1: the manual path consumes findingBlockers, not reasons. A body
+  // finding recorded only in reasons publishes a PASSING manual decision, so the
+  // required aggregate turns green and a maintainer merges with the finding
+  // live — exactly what #3591 closed for inline findings.
+  const github = fakeGateGithub({
+    author: "outside-contributor",
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:30:00Z" })],
+    reviews: [
+      {
+        user: { login: "chatgpt-codex-connector[bot]" },
+        body: "Codex Review\n\nP1: this is wrong.",
+        commit_id: HEAD_SHA,
+        submitted_at: "2026-07-09T01:40:00Z",
+      },
+    ],
+  });
+
+  const transaction = await autoGate.processAggregateHead({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    headSha: HEAD_SHA,
+    targets: [{ prNumber: 1465, headSha: HEAD_SHA }],
+    mergeEnabled: true,
+  });
+
+  assert.notEqual(transaction.state, "manual", "a live body finding must not publish a manual PASS");
+  const decision = github.createdChecks.find((check) => check.name === decisionName(1465, HEAD_SHA));
+  assert.equal(decision.conclusion, "failure");
+  assert.match(decision.output.summary, /P0-P3 finding/);
+  // The remedy must be one that can actually terminate: no thread exists, so no
+  // reply can clear it.
+  assert.match(decision.output.summary, /request a fresh `@codex review`/);
+  assert.doesNotMatch(decision.output.summary, /reply RESOLVED[^\n]*to clear this/);
+});
+
 test("a Codex rate-limit message never becomes a verdict", async () => {
   const result = await evaluateGate({ issueComments: [codexRateLimit()] });
 
@@ -4414,6 +4507,9 @@ function fakeGateGithub({
   // abbreviation -> full sha it resolves to, or an Error to throw (GitHub answers
   // 422 for a short SHA that matches more than one object).
   commitResolutions = {},
+  // Ref names that exist in the repo, e.g. ["heads/aa224dd"]. A seven-character
+  // hex string is a legal branch name, and one shadows the abbreviation lookup.
+  existingRefs = [],
 } = {}) {
   const listFiles = function listFiles() {};
   const listForRef = function listForRef() {};
@@ -4503,6 +4599,7 @@ function fakeGateGithub({
     checkCreateAttempts: 0,
     checkListReads: 0,
     commitResolutionReads: 0,
+    refLookups: [],
     pullGetReads: 0,
     requestReads: 0,
     readAttemptsByFn: {},
@@ -4539,6 +4636,17 @@ function fakeGateGithub({
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
       issues: { listComments },
+      git: {
+        getRef: async ({ ref }) => {
+          github.refLookups.push(ref);
+          if (existingRefs.includes(ref)) {
+            return { data: { ref: `refs/${ref}` } };
+          }
+          const missing = new Error("Not Found");
+          missing.status = 404;
+          throw missing;
+        },
+      },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,

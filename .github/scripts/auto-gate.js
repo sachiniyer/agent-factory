@@ -2677,6 +2677,11 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   //
   // Newest-wins is preserved among the bound artifacts, so a newer clean verdict
   // still supersedes an older body-only finding.
+  // Declared here because a body finding is a finding: the manual-merge path
+  // consumes findingBlockers, not reasons, so a finding recorded only in reasons
+  // publishes a PASSING manual decision and a maintainer merges with it live —
+  // exactly what #3591 closed for inline findings.
+  const findingBlockers = [];
   const headBoundArtifacts = codexReviewArtifacts.filter((artifact) => {
     const reviewedCommit = parseReviewedCommit(artifact.body || "");
     if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha)) {
@@ -2686,7 +2691,19 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   });
   const latestBoundArtifact = headBoundArtifacts[0];
   if (latestBoundArtifact && CODEX_BODY_FINDING_RE.test(latestBoundArtifact.body || "")) {
-    reasons.push("latest exact-head Codex review body contains a P0-P3 finding");
+    const bodyFindingReason = "latest exact-head Codex review body contains a P0-P3 finding";
+    reasons.push(bodyFindingReason);
+    // The remedy has to be one that terminates. A body finding has no thread, so
+    // no RESOLVED reply can clear it — it clears when a NEWER head-bound artifact
+    // for this head is clean, which is what a fresh review produces. Advertising
+    // a reply here would send the maintainer round a loop with no exit, the same
+    // trap the unpushed-fix-claim remedy avoids.
+    findingBlockers.push({
+      reason: bodyFindingReason,
+      remedy:
+        "request a fresh `@codex review` so a newer clean verdict for this head supersedes it, " +
+        "or push the fix — no reply can clear a finding that is not on a thread",
+    });
   }
 
   const reviewComments = await retryRead(
@@ -2727,7 +2744,6 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // remedy travels with the reason for the same purpose as the reason itself: so
   // the summary renders what the gate knows rather than inferring it back out of
   // the message.
-  const findingBlockers = [];
   if (unresolvedFindings.length > 0) {
     const unresolvedReason = `${unresolvedFindings.length} unresolved live Codex inline finding(s)`;
     reasons.push(unresolvedReason);
@@ -2886,6 +2902,19 @@ async function abbreviationNamesHead({ github, context, abbreviation, headSha, c
   const { owner, repo } = context.repo;
   let resolved = false;
   try {
+    // The endpoint that resolves an abbreviation also accepts a BRANCH OR TAG
+    // NAME, and a seven-character hex string is a legal ref name. A contributor
+    // who can push a ref named `abcdef0` pointing at the new head makes the
+    // lookup answer with that head — so it answers "yes" for a row about a
+    // different commit, and, worse, it answers instead of erroring, which is how
+    // the ambiguity signal below is silenced. There is no object-only endpoint
+    // that takes an abbreviation: the Git database API and GraphQL's GitObjectID
+    // both require the full 40 characters (measured). So the shadow is excluded
+    // directly — if a ref of that name exists, this resolution proves nothing.
+    if (await refExists({ github, context, name: short })) {
+      cache.set(short, false);
+      return false;
+    }
     const commit = await retryRead(`could not resolve commit ${short} for head ${head}`, () =>
       github.rest.repos.getCommit({ owner, repo, ref: short }),
     );
@@ -2898,6 +2927,24 @@ async function abbreviationNamesHead({ github, context, abbreviation, headSha, c
   }
   cache.set(short, resolved);
   return resolved;
+}
+
+// Whether a branch or tag of exactly this name exists. Any answer other than a
+// definite "no" counts as "yes", because the question is only ever asked to
+// decide whether to DISTRUST a resolution.
+async function refExists({ github, context, name }) {
+  const { owner, repo } = context.repo;
+  for (const namespace of ["heads", "tags"]) {
+    try {
+      await github.rest.git.getRef({ owner, repo, ref: `${namespace}/${name}` });
+      return true;
+    } catch (error) {
+      if (Number(error?.status ?? error?.response?.status) !== 404) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 // Whether any artifact's summary table names this head at all, whatever its
