@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -36,7 +37,13 @@ func newArchiveSkippedEntry(path string, reason ArchiveSkipReason) ArchiveSkippe
 	return ArchiveSkippedEntry{Path: display, PathBytes: raw, Reason: reason}
 }
 
-func (entry ArchiveSkippedEntry) filesystemPath() string {
+// FilesystemPath is the on-disk name this entry stands for: the raw bytes when
+// the name is not valid UTF-8, otherwise the display path. It is what the
+// incomplete-archive warning PRINTS, and it is exported for that reason: the
+// bug-report redactor has to take exactly this string back out of the bundled
+// daemon log, so its tests assert against this accessor rather than deriving
+// the same rule a second time — which is how the two would drift apart (#3553).
+func (entry ArchiveSkippedEntry) FilesystemPath() string {
 	return archiveFilesystemPath(entry.Path, entry.PathBytes)
 }
 
@@ -258,7 +265,7 @@ func (report ArchiveReport) warningSuffix() string {
 				totalEntries++
 			}
 			entries = insertBoundedArchiveWarningEntry(entries, archiveWarningEntry{
-				path: entry.filesystemPath(), reason: entry.Reason,
+				path: entry.FilesystemPath(), reason: entry.Reason,
 			}, maxArchiveWarningEntries)
 		}
 	}
@@ -321,9 +328,32 @@ func insertBoundedArchivePath(paths []string, path string, limit int) []string {
 	return paths
 }
 
+// skipReasonText renders one reason into the bounded warning. A known reason is
+// a compile-time constant; an unknown one is a STORED string — a record written
+// by another binary, or a corrupt one — and it is the only field in this format
+// that is neither a number nor %q-quoted, so it is first reduced to what a
+// single line can carry.
+//
+// The warning is one log line, one TUI row, one error string. A newline in that
+// value splits all three. A parenthesis or a quote closes its field early, which
+// is also how the bug-report redactor loses track of what to remove: it reads
+// this format to take the user file names back out of a bundled log (#3553), and
+// an entry it cannot delimit is an entry whose name ships. Only the emitter can
+// prevent that — a single-line row cannot be reassembled downstream — so the
+// value is passed through, minus the characters that would break the row it
+// lands in.
 func skipReasonText(reason ArchiveSkipReason) string {
 	if reason == ArchiveSkipPermissionDenied {
 		return "permission denied"
 	}
-	return string(reason)
+	return strings.Map(archiveReasonRune, string(reason))
+}
+
+// archiveReasonRune keeps one rune of an unknown reason, or replaces it with the
+// same replacement character an unrepresentable path display carries.
+func archiveReasonRune(r rune) rune {
+	if r == '(' || r == ')' || r == '"' || r == utf8.RuneError || unicode.IsControl(r) {
+		return '\uFFFD'
+	}
+	return r
 }
