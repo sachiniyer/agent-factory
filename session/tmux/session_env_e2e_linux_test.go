@@ -143,7 +143,7 @@ func TestRealPaneEnvironmentIsFiltered(t *testing.T) {
 	agentPath := filepath.Join(dir, ProgramCodex)
 	program := "#!/bin/sh\n" +
 		"test -n \"$OPENAI_API_KEY\" && test -n \"$CUSTOM_PROVIDER_TOKEN\" || exit 9\n" +
-		"tr '\\000' '\\n' < /proc/$$/environ | sed 's/=.*//' | sort > \"$1\"\n" +
+		"tr '\\000' '\\n' < /proc/$$/environ | sed 's/=.*//' | sort > \"$1.partial\" && mv -f \"$1.partial\" \"$1\"\n" +
 		"if git -C \"$2\" push origin HEAD:refs/heads/session-env-e2e >/dev/null 2>&1; then : > \"$3\"; fi\n" +
 		"while :; do sleep 1; done\n"
 	if err := os.WriteFile(agentPath, []byte(program), 0o700); err != nil {
@@ -293,26 +293,15 @@ func TestAccountScopedShellTabInheritsSelectedCredentials(t *testing.T) {
 			t.Fatalf("tmux stored the ambient API identity for the account shell: %q", line)
 		}
 	}
-	reportCommand := "printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\" > " + shellquote.Quote(reportPath) + "; " +
-		"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n' >> " + shellquote.Quote(reportPath) +
-		"; else printf 'OPENAI_API_KEY=absent\\n' >> " + shellquote.Quote(reportPath) + "; fi\n"
+	reportCommand := atomicReport(reportPath,
+		"printf 'CODEX_HOME=%s\\n' \"${CODEX_HOME-<unset>}\"; "+
+			"if [ \"${OPENAI_API_KEY+x}\" = x ]; then printf 'OPENAI_API_KEY=present\\n'; "+
+			"else printf 'OPENAI_API_KEY=absent\\n'; fi") + "\n"
 	if err := shell.SendRawKeys([]byte(reportCommand)); err != nil {
 		t.Fatalf("inspect account-scoped shell environment: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	var report []byte
-	for time.Now().Before(deadline) {
-		report, err = os.ReadFile(reportPath)
-		if err == nil && len(report) > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("shell tab did not report its environment: %v", err)
-	}
-	got := string(report)
+	got := waitForReport(t, "shell tab", reportPath)
 	if !strings.Contains(got, "CODEX_HOME="+accountDir+"\n") {
 		t.Fatalf("shell tab did not inherit selected account root; report:\n%s", got)
 	}
@@ -351,8 +340,8 @@ func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir
 	if err := os.Remove(newWindowReport); err != nil && !os.IsNotExist(err) {
 		t.Fatalf("clear prior new-window report: %v", err)
 	}
-	newWindowCommand := "printf 'CODEX_HOME=%s\\nOPENAI_API_KEY=%s\\n' \"${CODEX_HOME-<unset>}\" \"${OPENAI_API_KEY-<unset>}\" > " +
-		shellquote.Quote(newWindowReport)
+	newWindowCommand := atomicReport(newWindowReport,
+		"printf 'CODEX_HOME=%s\\nOPENAI_API_KEY=%s\\n' \"${CODEX_HOME-<unset>}\" \"${OPENAI_API_KEY-<unset>}\"")
 	target := strings.TrimSpace(string(newPane))
 	if output, err := exec.Command("tmux", "send-keys", "-t", target, "-l", newWindowCommand).CombinedOutput(); err != nil {
 		t.Fatalf("write new-window probe: %v: %s", err, output)
@@ -360,20 +349,75 @@ func assertAccountScopedNewWindow(t *testing.T, session *TmuxSession, accountDir
 	if output, err := exec.Command("tmux", "send-keys", "-t", target, "Enter").CombinedOutput(); err != nil {
 		t.Fatalf("submit new-window probe: %v: %s", err, output)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	var report []byte
-	for time.Now().Before(deadline) {
-		report, err = os.ReadFile(newWindowReport)
-		if err == nil && len(report) > 0 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil {
-		t.Fatalf("tmux-created window did not report its environment: %v", err)
-	}
-	got := string(report)
+	got := waitForReport(t, "tmux-created window", newWindowReport)
 	if got != "CODEX_HOME="+accountDir+"\nOPENAI_API_KEY=<unset>\n" {
 		t.Fatalf("tmux-created window escaped account scoping; report:\n%s", got)
+	}
+}
+
+// reportDeadline bounds how long a probe shell has to publish its environment
+// report. It is a liveness bound only: with atomicReport doing the writing, no
+// value of it can expose a half-written report to waitForReport.
+const reportDeadline = 3 * time.Second
+
+// atomicReport renders the shell fragment that runs body and publishes its
+// output as the report at path. body writes to a temp file beside path, and a
+// rename moves it in — rename(2) within one directory is atomic, so a reader
+// watching path sees the finished report or no file at all.
+//
+// The alternative — write the report in place and have the reader poll for
+// "non-empty" — is what #3618 was: a probe that truncated the file, wrote its
+// first line, and was read in the gap before its second. The reader took a
+// one-line report as the whole thing and the OPENAI_API_KEY assertion fired,
+// accusing production of a credential leak it never committed. Publishing by
+// rename makes that window unobservable rather than merely unlikely, so no
+// poll predicate has to encode where the writer's last line ends.
+//
+// body is a shell command list with no trailing separator, and must not itself
+// redirect stdout. The temp file is truncated on every write, so a leftover
+// from an earlier probe cannot be published by a later one.
+func atomicReport(path, body string) string {
+	partial := shellquote.Quote(path + reportPartialSuffix)
+	return "{ " + body + "; } > " + partial + " && mv -f " + partial + " " + shellquote.Quote(path)
+}
+
+// reportPartialSuffix names the temp file atomicReport writes before renaming.
+// waitForReport reads it when it gives up, because how far the writer got is
+// the one thing a stalled probe owes whoever reads the failure.
+const reportPartialSuffix = ".partial"
+
+// waitForReport returns the completed report that writer published at path.
+//
+// Because reports arrive by rename, the file's existence *is* the completion
+// condition and this poll cannot hand back a partial one. Missing the deadline
+// therefore means exactly one thing — the writer never finished — and the
+// failure says so, naming the path and quoting whatever was there instead of
+// letting a content assertion downstream read a slow shell as a product defect.
+func waitForReport(t *testing.T, writer, path string) string {
+	t.Helper()
+	var (
+		report  []byte
+		lastErr error
+	)
+	deadline := time.Now().Add(reportDeadline)
+	for {
+		report, lastErr = os.ReadFile(path)
+		if lastErr == nil && len(report) > 0 {
+			return string(report)
+		}
+		if !time.Now().Before(deadline) {
+			if lastErr == nil {
+				t.Fatalf("%s never completed its environment report: %s was published empty within %s (contents %q)",
+					writer, path, reportDeadline, report)
+			}
+			partial, partialErr := os.ReadFile(path + reportPartialSuffix)
+			if partialErr != nil {
+				t.Fatalf("%s never completed its environment report: neither %s nor its %s temp appeared within %s (%v)",
+					writer, path, reportPartialSuffix, reportDeadline, lastErr)
+			}
+			t.Fatalf("%s never completed its environment report: %s was never renamed into place within %s; the unfinished temp held:\n%s",
+				writer, path, reportDeadline, partial)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
