@@ -612,6 +612,8 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     degradedForUnavailableReviewer,
     isOpen: pr.state === "OPEN" && !pr.merged,
     baseRefName: pr.baseRefName,
+    headRefName: pr.headRefName,
+    headRepository: pr.headRepository,
     headSha: pr.headRefOid,
     workflowsChanged,
     reasons,
@@ -1790,6 +1792,12 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
     );
   }
 
+  try {
+    await deleteMergedHeadRef({ github, context, core, gate, prNumber });
+  } catch (error) {
+    postMergeErrors.push(error);
+  }
+
   if (postMergeErrors.length > 0) {
     const detail = postMergeErrors.map((error) => error.message || String(error)).join("; ");
     throw new AggregateError(
@@ -1971,6 +1979,66 @@ async function resolveMergeRefusal({ github, error, options, ownedAggregateCheck
   return null;
 }
 
+// Delete the merged head branch. The repository's delete_branch_on_merge setting
+// does not fire for a GITHUB_TOKEN merge, so every auto-gate merge left its
+// branch behind and origin regrew to 201 (#3603).
+//
+// Three conditions, each protecting something different, and every one of them
+// no-ops rather than failing: this runs after the merge has landed, and nothing
+// here is worth reddening a merge that already succeeded.
+async function deleteMergedHeadRef({ github, context, core, gate, prNumber }) {
+  const { owner, repo } = context.repo;
+  const branch = gate.headRefName;
+  // (a) A fork's branch is not ours to delete, and the token cannot anyway.
+  if (!branch || gate.headRepository !== `${owner}/${repo}`) {
+    return;
+  }
+  try {
+    // (b) The ref must still point at the commit that was merged. A lane that
+    // pushed after the merge keeps its branch — that work is not in master, and
+    // deleting it would destroy the only copy that had been pushed anywhere.
+    const ref = await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
+    const tip = String(ref?.data?.object?.sha || "").toLowerCase();
+    if (tip !== String(gate.headSha || "").toLowerCase()) {
+      core.notice(
+        `Keeping ${branch}: it now points at ${tip || "an unreadable commit"}, not the merged ` +
+          `${gate.headSha}, so it carries work this merge did not take.`,
+      );
+      return;
+    }
+
+    // (c) Another open PR may be based on this branch; deleting it closes that
+    // PR and throws away its review.
+    const dependents = await github.paginate(github.rest.pulls.list, {
+      owner,
+      repo,
+      base: branch,
+      state: "open",
+      per_page: 100,
+    });
+    if (dependents.length > 0) {
+      core.notice(
+        `Keeping ${branch}: it is the base of open PR ${joinPullNumbers(
+          dependents.map((pull) => pull.number),
+        )}.`,
+      );
+      return;
+    }
+
+    await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` });
+    core.notice(`Deleted merged head branch ${branch} for PR #${prNumber}.`);
+  } catch (error) {
+    // Already gone, or the ref moved under us between the read and the delete.
+    // Both mean there is nothing left to prune, which is the desired end state.
+    const status = Number(error?.status ?? error?.response?.status);
+    if (status === 404 || status === 422) {
+      core.notice(`Nothing to prune for ${branch}: ${formatError(error)}.`);
+      return;
+    }
+    throw error;
+  }
+}
+
 async function resolveTargets({ github, context, core, prNumber }) {
   const numbers = [];
   const payload = context.payload;
@@ -2100,6 +2168,7 @@ async function getPullRequest({ github, context, number }) {
     title: pr.title,
     url: pr.url,
     baseRefName: pr.baseRefName,
+    headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
     headRepository: pr.headRepository?.nameWithOwner || "",
     isDraft: pr.isDraft,
@@ -2989,6 +3058,7 @@ module.exports = {
   resolveTargets,
   __test: {
     CONCEDED_MERGE_REFUSALS,
+    deleteMergedHeadRef,
     parseSummaryRows,
     parseVerdictArtifact,
     MASTER_PUSH_WORKFLOWS,

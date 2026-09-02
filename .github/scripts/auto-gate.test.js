@@ -3807,6 +3807,105 @@ test("the apply-gate step delegates refusal classification to the helper", () =>
   }
 });
 
+test("a merged head branch is deleted", async () => {
+  // #3603: delete_branch_on_merge does not fire for a GITHUB_TOKEN merge, so
+  // every auto-gate merge left its branch behind and origin regrew to 201.
+  const github = fakeGateGithub();
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("a fork's head branch is never deleted", async () => {
+  // (a) Not ours to delete, and the token could not anyway. Driven directly:
+  // a fork head cannot reach this step through merge(), because it fails the
+  // gate first — so asserting through merge() would pass whatever this check
+  // did.
+  const github = fakeGateGithub();
+
+  await __test.deleteMergedHeadRef({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    gate: {
+      headRefName: "siyer/fix-3603",
+      headRepository: "contributor/agent-factory",
+      headSha: HEAD_SHA,
+    },
+    prNumber: 1465,
+  });
+
+  assert.deepEqual(github.deletedRefs, []);
+  assert.deepEqual(github.refReads, [], "a fork head is not even inspected");
+
+  // The same branch on this repository is deleted, so the fixture proves the
+  // check and not merely an inert path.
+  await __test.deleteMergedHeadRef({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    gate: {
+      headRefName: "siyer/fix-3603",
+      headRepository: "sachiniyer/agent-factory",
+      headSha: HEAD_SHA,
+    },
+    prNumber: 1465,
+  });
+  assert.deepEqual(github.deletedRefs, ["heads/siyer/fix-3603"]);
+});
+
+test("a head branch that moved after the merge is kept", async () => {
+  // (b) A lane that pushed after the merge keeps its branch: that work is not in
+  // master, and the pushed ref may be the only copy of it anywhere.
+  const github = fakeGateGithub({ remoteRefSha: OTHER_SHA });
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+  assert.deepEqual(github.deletedRefs, [], "a moved ref carries work this merge did not take");
+});
+
+test("a head branch that another open PR is based on is kept", async () => {
+  // (c) Deleting it would close that PR and throw away its review.
+  const github = fakeGateGithub({ dependentPullRequests: [{ number: 2048 }] });
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.deepEqual(github.deletedRefs, []);
+});
+
+test("a head branch already gone is a no-op, not a failure", async () => {
+  const github = fakeGateGithub({ remoteRefSha: null });
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+
+  assert.deepEqual(github.deletedRefs, [], "nothing left to prune is the desired end state");
+});
+
+test("a deletion failure never reds a merge that already landed", async () => {
+  // The whole point of the step being non-fatal: the merge has happened, and no
+  // pruning problem is worth reporting it as a failure.
+  const gone = new Error("Reference does not exist");
+  gone.status = 422;
+  const github = fakeGateGithub({ deleteRefError: gone });
+
+  await autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 });
+  assert.equal(github.mergedWith.sha, HEAD_SHA);
+
+  // An unexpected failure is reported, but only as a post-merge error — the
+  // merge itself still stands.
+  const broken = new Error("ref service unavailable");
+  broken.status = 500;
+  const failing = fakeGateGithub({ deleteRefError: broken });
+  await assert.rejects(
+    autoGate.merge({ github: failing, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /merged, but post-merge operation\(s\) failed[\s\S]*ref service unavailable/,
+  );
+  assert.equal(failing.mergedWith.sha, HEAD_SHA, "the merge still happened");
+});
+
 test("merge freshly refuses a shared head whose other PR is waiting", async () => {
   const github = fakeGateGithub({
     associatedPullRequests: [
@@ -4408,11 +4507,19 @@ function fakeGateGithub({
   associationError = null,
   associationErrorAtRead = 1,
   associationErrorEveryRead = false,
+  headRefName = "siyer/fix-3603",
+  // What heads/<headRefName> points at now. null means the ref is gone.
+  remoteRefSha = undefined,
+  refReadError = null,
+  deleteRefError = null,
+  // Open PRs based on the head branch.
+  dependentPullRequests = [],
   readErrorsByFn = {},
   pullGetError = null,
   requestErrors = [],
 } = {}) {
   const listFiles = function listFiles() {};
+  const listOpenPullRequests = function listOpenPullRequests() {};
   const listForRef = function listForRef() {};
   const listCommitStatusesForRef = function listCommitStatusesForRef() {};
   const listComments = function listComments() {};
@@ -4487,6 +4594,7 @@ function fakeGateGithub({
   };
   const responses = new Map([
     [listFiles, files.map((filename) => ({ filename }))],
+    [listOpenPullRequests, dependentPullRequests],
     [listForRef, checkRuns],
     [listCommitStatusesForRef, statuses],
     [listComments, issueComments],
@@ -4515,6 +4623,8 @@ function fakeGateGithub({
     injectedCheckRuns: [],
     operations: [],
     mergedWith: null,
+    refReads: [],
+    deletedRefs: [],
     reviewCommentReads: 0,
     reviewCommentReadsByNumber: {},
     createdChecks: [],
@@ -4534,12 +4644,34 @@ function fakeGateGithub({
         },
       },
       checks: { create: createCheck, listForRef, update: updateCheck },
+      git: {
+        getRef: async ({ ref }) => {
+          github.refReads.push(ref);
+          if (refReadError) {
+            throw refReadError;
+          }
+          const sha = remoteRefSha === undefined ? headSha : remoteRefSha;
+          if (sha === null) {
+            const gone = new Error("Not Found");
+            gone.status = 404;
+            throw gone;
+          }
+          return { data: { object: { sha } } };
+        },
+        deleteRef: async ({ ref }) => {
+          github.deletedRefs.push(ref);
+          if (deleteRefError) {
+            throw deleteRefError;
+          }
+        },
+      },
       issues: { listComments },
       repos: {
         listCommitStatusesForRef,
         listPullRequestsAssociatedWithCommit,
       },
       pulls: {
+        list: listOpenPullRequests,
         listFiles,
         listReviews,
         listReviewComments,
@@ -4623,6 +4755,7 @@ function fakeGateGithub({
             url: "https://example.invalid/pr/1465",
             baseRefName: pullRequestOverride.baseRefName || "master",
             headRefOid: pullRequestOverride.headRefOid || headSha,
+            headRefName: pullRequestOverride.headRefName ?? headRefName,
             headRepository: {
               nameWithOwner:
                 pullRequestOverride.headRepository || "sachiniyer/agent-factory",
