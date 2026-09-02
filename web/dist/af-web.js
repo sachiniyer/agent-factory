@@ -10851,10 +10851,27 @@ function tabToKeepOnClose(ids, closedIndex, activeIndex) {
   return ids[keepIndex] ?? "";
 }
 function rebindTargetAfterAwait(pinnedGen, pinnedSelId, currentGen, currentSelId, targetIdx) {
-  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
-    return -1;
+  if (currentSelId !== pinnedSelId) {
+    return { kind: "refused", reason: "selection-moved" };
   }
-  return targetIdx;
+  if (currentGen !== pinnedGen) {
+    return { kind: "refused", reason: "layout-moved" };
+  }
+  if (targetIdx < 0) {
+    return { kind: "refused", reason: "tab-gone" };
+  }
+  return { kind: "rebind", idx: targetIdx };
+}
+function tabRebindRefusalNotice(reason, verb) {
+  const done = verb === "create" ? "Tab created" : "Tab closed";
+  switch (reason) {
+    case "selection-moved":
+      return `${done} on the session you left \xB7 this pane kept its tab`;
+    case "layout-moved":
+      return `${done} \xB7 the pane you focused meanwhile kept its tab`;
+    case "tab-gone":
+      return verb === "create" ? `${done}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done} \xB7 the tab the pane would have moved to is gone too`;
+  }
 }
 
 // src/layout.ts
@@ -15509,18 +15526,21 @@ function openTab(index) {
   splitView.setFocusedTab(index);
   focusTerminal();
 }
-function guardedTabRebind(selId, run, resolve, attach) {
+function guardedTabRebind(selId, run, resolve, verb) {
   const gen = splitView.layoutGeneration();
   void run().then((sessions) => {
     const targetIdx = resolve(sessions);
+    const currentGen = splitView.layoutGeneration();
     store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-    const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
-    if (idx >= 0) {
-      splitView.setFocusedTab(idx);
-      if (attach) {
+    const outcome = rebindTargetAfterAwait(gen, selId, currentGen, store.get().selectedId, targetIdx);
+    if (outcome.kind === "rebind") {
+      splitView.setFocusedTab(outcome.idx);
+      if (verb === "create") {
         focusTerminal();
       }
+      return;
     }
+    surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
   }).catch((e) => surfaceTabError(e));
 }
 function createSessionTab(kind = "shell") {
@@ -15548,7 +15568,7 @@ function createSessionTab(kind = "shell") {
       const grown = sessions.find((s) => s.id === selId);
       return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
     },
-    true
+    "create"
   );
 }
 function closeSessionTab(index) {
@@ -15575,7 +15595,7 @@ function closeSessionTab(index) {
       const shrunk = sessions.find((s) => s.id === selId);
       return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     },
-    false
+    "close"
   );
 }
 function renameSessionTab(id, name, editedSessionId) {

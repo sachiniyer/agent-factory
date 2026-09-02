@@ -151,9 +151,21 @@ export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex
   return ids[keepIndex] ?? "";
 }
 
-/** The tab ordinal a post-await pane rebind should land on, or -1 to leave the pane
- *  where it is. The store-side twin of the layout guard, and the shared decision
- *  createSessionTab and closeSessionTab both route through (#2000).
+/** The gesture a post-await rebind belongs to. Both await a round trip and then
+ *  re-point the focused pane; only a create also attaches the keyboard to it. */
+export type TabRebindVerb = "create" | "close";
+
+/** Why a post-await rebind was refused. The refusal itself is #2000's, and correct;
+ *  naming it is what stops it reading as a hang (#3663). */
+export type TabRebindRefusal = "selection-moved" | "layout-moved" | "tab-gone";
+
+/** Either the tab ordinal the focused pane should end on, or the reason it must stay
+ *  where it is. */
+export type TabRebindOutcome = { kind: "rebind"; idx: number } | { kind: "refused"; reason: TabRebindRefusal };
+
+/** The tab ordinal a post-await pane rebind should land on, or the refusal that
+ *  leaves the pane where it is. The store-side twin of the layout guard, and the
+ *  shared decision createSessionTab and closeSessionTab both route through (#2000).
  *
  *  Both verbs await a round trip and then re-point the FOCUSED pane. splitView.trees
  *  is per-session and setFocusedTab carries no session of its own, so a `targetIdx`
@@ -168,18 +180,49 @@ export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex
  *     `layoutGeneration`; re-pointing from an intent formed before that yanks it back.
  *
  *  `targetIdx < 0` is the honest "the tab is gone" — the created/kept tab was closed
- *  out-of-band during the await, or its session vanished — and -1 flows straight
- *  through as "leave the pane where syncSplit's identity remap already settled it",
- *  never a guess. Mirrors closeSessionTab's `next >= 0` and tabToKeepOnClose's -1. */
+ *  out-of-band during the await, or its session vanished — and the pane stays where
+ *  syncSplit's identity remap already settled it, never a guess. Mirrors
+ *  closeSessionTab's `next >= 0` and tabToKeepOnClose's -1.
+ *
+ *  It answers WHICH of the three refused, rather than a bare -1, because the caller
+ *  has to tell the user something: the tab bar grew or shrank while the pane stayed
+ *  put, and a refusal nobody reports is indistinguishable from a hang — the #3663
+ *  signature. The selection is checked first: leaving the session subsumes whatever
+ *  the layout did meanwhile, and is the fact worth telling them. */
 export function rebindTargetAfterAwait(
   pinnedGen: number,
   pinnedSelId: string,
   currentGen: number,
   currentSelId: string | null,
   targetIdx: number,
-): number {
-  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
-    return -1;
+): TabRebindOutcome {
+  if (currentSelId !== pinnedSelId) {
+    return { kind: "refused", reason: "selection-moved" };
   }
-  return targetIdx;
+  if (currentGen !== pinnedGen) {
+    return { kind: "refused", reason: "layout-moved" };
+  }
+  if (targetIdx < 0) {
+    return { kind: "refused", reason: "tab-gone" };
+  }
+  return { kind: "rebind", idx: targetIdx };
+}
+
+/** What to tell the user when a rebind was refused: what the gesture DID do, then why
+ *  the pane did not follow. Never an error — nothing failed, and in two of the three
+ *  cases the refusal is the user's own newer intent being honoured. The wording is
+ *  what makes the outcome distinguishable from a hang, so it names the pane's state
+ *  rather than reporting a fault (#3663). */
+export function tabRebindRefusalNotice(reason: TabRebindRefusal, verb: TabRebindVerb): string {
+  const done = verb === "create" ? "Tab created" : "Tab closed";
+  switch (reason) {
+    case "selection-moved":
+      return `${done} on the session you left · this pane kept its tab`;
+    case "layout-moved":
+      return `${done} · the pane you focused meanwhile kept its tab`;
+    case "tab-gone":
+      return verb === "create"
+        ? `${done}, but it is no longer in the tab list · the pane kept its tab`
+        : `${done} · the tab the pane would have moved to is gone too`;
+  }
 }

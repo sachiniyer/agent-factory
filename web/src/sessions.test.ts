@@ -7,6 +7,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   applyEvent,
@@ -15,6 +18,9 @@ import {
   rebindTargetAfterAwait,
   removeSession,
   sessionKey,
+  tabRebindRefusalNotice,
+  type TabRebindRefusal,
+  type TabRebindVerb,
   tabToKeepOnClose,
   upsertSession,
 } from "./sessions.js";
@@ -282,7 +288,7 @@ test("an out-of-range active index yields no tab to follow", () => {
 // it.
 
 test("rebind proceeds to the resolved tab when neither generation nor selection moved", () => {
-  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", 3), 3);
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", 3), { kind: "rebind", idx: 3 });
 });
 
 test("rebind BAILS when the user switched sessions during the await (#2000)", () => {
@@ -290,22 +296,124 @@ test("rebind BAILS when the user switched sessions during the await (#2000)", ()
   // user selects another session meanwhile, an ordinal resolved against the OLD
   // session's roster must not be applied to the NEW session's per-session tree — the
   // #1815 finding, in the one place (create) its guard was never applied.
-  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-b", 3), -1);
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, "sess-b", 3), { kind: "refused", reason: "selection-moved" });
 });
 
 test("rebind BAILS when the layout generation moved — the user focused another pane (#1815)", () => {
   // A slow round trip leaves a wide window in which the user can focus another pane or
   // split the layout; re-pointing from an intent formed before that yanks it back.
-  assert.equal(rebindTargetAfterAwait(5, "sess-a", 6, "sess-a", 3), -1);
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 6, "sess-a", 3), { kind: "refused", reason: "layout-moved" });
 });
 
 test("rebind BAILS when the resolved target no longer exists (idx < 0)", () => {
   // The created/kept tab was closed by another client during the await, or the session
   // vanished: -1 is the honest "leave the pane where syncSplit already settled it",
   // never a guess. Mirrors closeSessionTab's `next >= 0` and tabToKeepOnClose's -1.
-  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", -1), -1);
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", -1), { kind: "refused", reason: "tab-gone" });
 });
 
 test("a null current selection (session killed mid-flight) bails against any pinned id", () => {
-  assert.equal(rebindTargetAfterAwait(5, "sess-a", 5, null, 3), -1);
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, null, 3), { kind: "refused", reason: "selection-moved" });
+});
+
+// --- #3663: a refusal that names itself -------------------------------------
+//
+// The refusals above are all CORRECT — #2000's semantics are unchanged — but until
+// now every one of them returned the same bare -1 and the caller dropped it on the
+// floor. The tab bar still grew or shrank (CreateTab/CloseTab publish session.updated
+// on their own, #1812), so the user was left with a tab the pane never followed,
+// keystrokes going to the tab they thought they had left, and nothing said anywhere:
+// a refusal indistinguishable from a hang, which is the signature that took `Web
+// selftest` red on master at 11f91a24.
+//
+// Every case below FORCES the negative branch directly. Waiting for the race is not
+// an option: it has fired once in 62 master runs.
+
+test("#3663 each way to refuse names itself, so the outcome can be told from a hang", () => {
+  // Same three inputs the guard has always vetoed, now distinguishable from each
+  // other AND from a rebind.
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, "sess-b", 3), { kind: "refused", reason: "selection-moved" });
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 6, "sess-a", 3), { kind: "refused", reason: "layout-moved" });
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", -1), { kind: "refused", reason: "tab-gone" });
+  // Leaving the session subsumes whatever the layout did meanwhile: that is the fact
+  // worth telling the user, so it is reported even when the generation moved too.
+  assert.deepEqual(rebindTargetAfterAwait(5, "sess-a", 6, "sess-b", -1), { kind: "refused", reason: "selection-moved" });
+});
+
+test("#3663 a refusal never re-points the pane — #2000's semantics are unchanged", () => {
+  // The one thing that must NOT regress while making the refusal audible: no refusal
+  // may carry an ordinal, or the newer intent loses to the older one.
+  const refusals = [
+    rebindTargetAfterAwait(5, "sess-a", 5, "sess-b", 3),
+    rebindTargetAfterAwait(5, "sess-a", 6, "sess-a", 3),
+    rebindTargetAfterAwait(5, "sess-a", 5, "sess-a", -1),
+    rebindTargetAfterAwait(5, "sess-a", 5, null, 0),
+  ];
+  for (const outcome of refusals) {
+    assert.equal(outcome.kind, "refused");
+    assert.ok(!("idx" in outcome), "a refusal must carry no tab to rebind to");
+  }
+});
+
+test("#3663 every refusal has words, and they say what the gesture DID do", () => {
+  const verbs: TabRebindVerb[] = ["create", "close"];
+  const reasons: TabRebindRefusal[] = ["selection-moved", "layout-moved", "tab-gone"];
+  const notices: string[] = [];
+  for (const verb of verbs) {
+    for (const reason of reasons) {
+      const notice = tabRebindRefusalNotice(reason, verb);
+      notices.push(notice);
+      // The gesture SUCCEEDED — the roster is committed either way — so the notice
+      // opens with what happened, not with a failure.
+      assert.match(notice, verb === "create" ? /^Tab created/ : /^Tab closed/, notice);
+      // …and then says where that leaves the pane, on the app's own separator.
+      assert.match(notice, / · /, notice);
+      assert.doesNotMatch(notice, /[A-Z]{2,}/, `no caps-shouting: ${notice}`);
+    }
+  }
+  // Six distinct sentences: a notice that cannot tell two refusals apart would be the
+  // same silence one level up.
+  assert.equal(new Set(notices).size, notices.length, "each verb+reason pair reads differently");
+});
+
+
+// --- #3663: index.ts routes BOTH arms ---------------------------------------
+//
+// index.ts cannot be imported here (it builds DOM nodes and mounts at import time),
+// so the assertion that guardedTabRebind actually SURFACES the refusal is made
+// against its source. Without it, every test above would pass in a tree whose
+// negative branch is still an empty `if`, which is the tree #3663 was filed against.
+
+/** The source of one top-level `function name(` … `}` at column 0. */
+function topLevelFunction(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `index.ts must declare ${name}`);
+  const end = source.indexOf("\n}\n", start);
+  assert.notEqual(end, -1, `${name} must close at column 0`);
+  return source.slice(start, end);
+}
+
+test("#3663 guardedTabRebind surfaces the refusal instead of dropping it", () => {
+  const body = topLevelFunction(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"), "guardedTabRebind");
+  assert.match(body, /rebindTargetAfterAwait\(/, "the shared guard is still the one decision");
+  assert.match(
+    body,
+    /surfaceNotice\(tabRebindRefusalNotice\(/,
+    "the negative branch must tell the user, or a refusal is a hang again",
+  );
+});
+
+test("#3663 the layout generation is read BEFORE the commit that could move it", () => {
+  // The suspected input on the issue: line 929 read layoutGeneration() AFTER the
+  // store.set on 928, whose rerender runs syncSplit. syncSplit does not in fact bump
+  // it — it calls only setSession, which reaches neither commit() nor focusPane(),
+  // layoutGen's only two writers — but the guard asks what the USER did during the
+  // await, and its own commit is not that. Reading first keeps the answer true of a
+  // future setSession that DOES bump.
+  const body = topLevelFunction(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"), "guardedTabRebind");
+  const afterAwait = body.indexOf("void run()");
+  const genRead = body.indexOf("splitView.layoutGeneration()", afterAwait);
+  const commit = body.indexOf("store.set({ sessions", afterAwait);
+  assert.ok(genRead !== -1 && commit !== -1, "guardedTabRebind must read the generation and commit the roster");
+  assert.ok(genRead < commit, "the post-await generation read must precede the roster commit");
 });
