@@ -232,7 +232,7 @@ program = 'codex'
 	require.Len(t, result.Migrated, 2, "the migratable keys still migrate")
 	require.Len(t, result.Left, 1)
 	assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
-	assert.Equal(t, "register <path> as a project, set [root_agent] there, then remove its root_agents entry", result.Left[0].Step)
+	assert.Equal(t, "register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry", result.Left[0].Step)
 	assert.Equal(t, []string{"/home/me/one", "/home/me/two"}, result.Left[0].Detail,
 		"each legacy path is named, sorted, so the reader need not open the file")
 
@@ -509,6 +509,19 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 			"the listener stays up on a downgrade — that is what makes the fallback unsafe")
 	})
 
+	t.Run("silent when the loopback flag is inert", func(t *testing.T) {
+		// require_loopback_token only tightens a token that require_token must
+		// first turn on. With enforcement off, nothing is authenticated even
+		// before the migration, so a downgrade loses no authentication and the
+		// caution would simply be untrue (#3624 review).
+		migrateHome(t, "schema_version = 1\nrequire_loopback_token = true\nrequire_token = false\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.NotEmpty(t, result.Migrated)
+		assert.Empty(t, result.Cautions)
+	})
+
 	t.Run("silent when the requirement was off", func(t *testing.T) {
 		// A migrated `false` is the built-in default anyway, so there is nothing
 		// to lose and nothing to say. Warning here would train readers to skip
@@ -530,4 +543,60 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 		assert.Empty(t, result.Cautions,
 			"strict host-key checking and no credential mount are the safe fallbacks")
 	})
+}
+
+// TestRootAgentsWarningAndMigrateReportShareOneStep is the structural pin for
+// the drift the #3624 review caught. The warning's recipe and the migrate
+// report's manual step were separate strings for exactly one commit, and in
+// that commit they disagreed: the report gained "then remove its root_agents
+// entry" and the warning did not, so a reader following the WARNING would
+// register the project, write [root_agent], and still see the warning forever.
+//
+// They are now one literal. This fails if anyone splits them again.
+func TestRootAgentsWarningAndMigrateReportShareOneStep(t *testing.T) {
+	step := legacyRootAgentsDeprecation().migrationRemedy()
+	require.NotEmpty(t, step)
+	assert.Contains(t, legacyRootAgentsAdvice, step,
+		"the loader's warning must carry the same recipe the migrate report prints")
+	assert.Contains(t, step, "remove its root_agents entry",
+		"a recipe that stops before the removal leaves the warning it was meant to end")
+
+	// And the warning a reader actually sees carries it end to end.
+	warnings := captureLog(t, &aflog.WarningLog)
+	_, err := parseConfigTOML([]byte("schema_version = 1\n\n[root_agents.'/home/me/repo']\n"), "warn.toml")
+	require.NoError(t, err)
+	assert.Contains(t, warnings.String(), step)
+}
+
+// TestMigratedValueIsTheEffectiveValue pins one meaning for MigratedKey.Value.
+// A --json caller comparing two migrations of the same setting must not get
+// "0.0.0.0:8443" from one and "'0.0.0.0:8443'" from the other purely because
+// one file also wrote the redundant grouped spelling (#3624 review).
+func TestMigratedValueIsTheEffectiveValue(t *testing.T) {
+	relocated := func(t *testing.T) MigratedKey {
+		t.Helper()
+		migrateHome(t, "schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n")
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1)
+		return result.Migrated[0]
+	}
+	dropped := func(t *testing.T) MigratedKey {
+		t.Helper()
+		migrateHome(t, "schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n\n[network]\nlisten_addr = '0.0.0.0:8443'\n")
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1)
+		return result.Migrated[0]
+	}
+
+	var moved, redundant MigratedKey
+	t.Run("relocated", func(t *testing.T) { moved = relocated(t) })
+	t.Run("redundant", func(t *testing.T) { redundant = dropped(t) })
+
+	assert.Equal(t, "0.0.0.0:8443", moved.Value, "no TOML quoting leaks into the report")
+	assert.Equal(t, moved.Value, redundant.Value,
+		"the same setting reports the same value however the file spelled it")
+	assert.False(t, moved.Redundant)
+	assert.True(t, redundant.Redundant)
 }

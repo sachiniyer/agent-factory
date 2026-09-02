@@ -75,7 +75,7 @@ func TestConfigMigrateReportsMigratedAndLeftInPlace(t *testing.T) {
 		"the summary must frame the diff, not follow it — a moved key renders as a removed and an added line, "+
 			"so a reader who meets the raw diff first is alarmed before they are told what it means")
 	assert.Contains(t, out,
-		"left in place — root_agents has no in-file migration · register <path> as a project, set [root_agent] there, then remove its root_agents entry")
+		"left in place — root_agents has no in-file migration · register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry")
 	assert.Contains(t, out, "  /home/me/one")
 	assert.Contains(t, out, "  /home/me/two")
 
@@ -102,7 +102,7 @@ func TestConfigMigrateSecondRunIsIdempotentAndStillNamesRootAgents(t *testing.T)
 	assert.Contains(t, out, "nothing to migrate in "+path)
 	assert.NotContains(t, out, "migrated ")
 	assert.NotContains(t, out, "backup ")
-	assert.Contains(t, out, "left in place — root_agents has no in-file migration · register <path> as a project, set [root_agent] there, then remove its root_agents entry")
+	assert.Contains(t, out, "left in place — root_agents has no in-file migration · register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry")
 
 	after, err := os.ReadFile(path)
 	require.NoError(t, err)

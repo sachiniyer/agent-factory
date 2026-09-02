@@ -71,7 +71,7 @@ type configDeprecation struct {
 // root_agents key is what the loader warns about — a remedy that stops before
 // the removal leaves the reader having done the work and still seeing the
 // warning that sent them (#3624 review).
-const legacyRootAgentsManualStep = "register <path> as a project, set [root_agent] there, then remove its root_agents entry"
+const legacyRootAgentsManualStep = "register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry"
 
 // configDeprecations returns every deprecated global-config key in one list.
 // The flat aliases are derived from configKeyAliases rather than restated, so a

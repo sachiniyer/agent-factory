@@ -95,8 +95,11 @@ func (r *MigrationResult) Changed() bool { return r != nil && len(r.Migrated) > 
 type MigratedKey struct {
 	From string `json:"from"`
 	To   string `json:"to"`
-	// Value is the value as it now reads in the file. It is reported so the
-	// caller can show that the migration moved a value rather than changed one.
+	// Value is the setting's effective value, in the canonical form `af config
+	// get` prints — the same string whichever spelling the file happened to use,
+	// so a --json caller can compare two migrations of one key. It is reported so
+	// a caller can show the migration moved a value rather than changed one; the
+	// raw TOML token that was actually relocated is deliberately not exposed.
 	Value string `json:"value"`
 	// Redundant marks a key that was already written in BOTH spellings with the
 	// same value: nothing moved, the stale flat line was simply dropped.
@@ -187,7 +190,13 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 			return nil, unremovableKeyError(alias.legacy, prettyPath)
 		}
 		content = updated
-		result.Migrated = append(result.Migrated, MigratedKey{From: alias.legacy, To: alias.canonical, Value: encoded})
+		// Value is the EFFECTIVE value, never the raw TOML token: a --json caller
+		// comparing two migrations of the same setting must not get "0.0.0.0:8443"
+		// from one and "'0.0.0.0:8443'" from the other purely because one file
+		// happened to write the redundant spelling (#3624 review). The source's
+		// own bytes are what got written to the file; they are not the report.
+		effective, _ := CurrentValue(beforeCfg, alias.canonical)
+		result.Migrated = append(result.Migrated, MigratedKey{From: alias.legacy, To: alias.canonical, Value: effective})
 	}
 	if len(result.Migrated) == 0 {
 		return result, nil
@@ -230,7 +239,7 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	// should be the ordinary unified diff they already know how to read — and one
 	// this repo does not have to own a differ to produce.
 	result.Diff = udiff.Unified(prettyPath, prettyPath, before, content)
-	result.Cautions = downgradeCautions(result.Migrated, prettyHomePath(backup))
+	result.Cautions = downgradeCautions(result.Migrated, beforeCfg, prettyHomePath(backup))
 	return result, nil
 }
 
@@ -248,10 +257,28 @@ var tokenKeysLostOnDowngrade = map[string]bool{
 // af predating the grouped spellings. It fires only when a token requirement was
 // actually turned ON and then moved: a migrated `false` is the default anyway, so
 // warning about it would be noise that teaches people to skip the notice.
-func downgradeCautions(migrated []MigratedKey, backup string) []string {
+//
+// The value comes from the PARSED config rather than from MigratedKey.Value.
+// That field holds whatever now reads in the file — the source's own bytes for a
+// relocated line, the canonical form for a dropped redundant one — so keying a
+// security decision off it would mean matching TOML source text. Asking the
+// loader what the setting actually decoded to cannot drift with a spelling.
+func downgradeCautions(migrated []MigratedKey, cfg *Config, backup string) []string {
+	// network.require_loopback_token is INERT while network.require_token is
+	// false — it tightens a token that require_token must first turn on, so a
+	// config with the loopback flag alone authenticates nothing even before the
+	// migration, and there is no authentication for a downgrade to lose. Saying
+	// otherwise would be a security warning that is simply untrue for that
+	// config, which is worse than silence (#3624 review).
+	if enforced, ok := CurrentValue(cfg, "network.require_token"); !ok || enforced != "true" {
+		return nil
+	}
 	var affected []string
 	for _, key := range migrated {
-		if tokenKeysLostOnDowngrade[key.To] && key.Value == "true" {
+		if !tokenKeysLostOnDowngrade[key.To] {
+			continue
+		}
+		if value, ok := CurrentValue(cfg, key.To); ok && value == "true" {
 			affected = append(affected, key.To)
 		}
 	}

@@ -677,9 +677,12 @@ Rewrite deprecated config keys to their current spelling
 Rewrite the deprecated keys in the global config to their current spelling, in
 place, and print the diff. This is the command the deprecated-key warnings name.
 
-It changes spelling, never meaning. Each value is carried over exactly as it was
-written, the rewritten file is re-parsed before anything is saved, and a rewrite
-that would change even one effective value is refused rather than written. The
+It changes spelling, never meaning. A value written on one line is carried over
+exactly as its own bytes, quoting and all; a value spread over several lines (an
+array, typically) is re-encoded compactly rather than relocated as raw text, so
+its formatting can change even though its contents do not. Either way the
+rewritten file is re-parsed before anything is saved, and a rewrite that would
+change even one effective value is refused rather than written. The
 readers of the old spellings stay, so an older config keeps loading and nothing
 about your running configuration changes.
 

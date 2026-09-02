@@ -14,7 +14,14 @@ var legacyRootAgentsWarned sync.Map
 
 // legacyRootAgentsAdvice is the migration recipe both root_agents notices open
 // with. Only their tail differs: what happened to the file.
-const legacyRootAgentsAdvice = "root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, register the project and set enabled = true plus the optional program in its personal [root_agent] config"
+//
+// Its recipe IS legacyRootAgentsManualStep, spliced in rather than restated.
+// The two were separate strings for one commit and immediately drifted — the
+// review caught the migrate report omitting the "remove the entry" step, and
+// fixing only that would have left the WARNING telling readers to do work that
+// does not silence it. Sharing the literal is what makes that class impossible
+// rather than merely fixed once (#3624 review).
+const legacyRootAgentsAdvice = "root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, " + legacyRootAgentsManualStep
 
 // legacyRootAgentsInShape reports whether shape carries a configured legacy
 // path map. An empty table is not one, so the presence test and the migration's
