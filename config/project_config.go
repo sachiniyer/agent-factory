@@ -273,7 +273,10 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
-	cmd.WaitDelay = repoGitWaitDelay
+	// This probe runs under registeredProjectProbeTimeout inside the scan's own
+	// budget, so its drain allowance is derived from that deadline rather than
+	// from the unbounded default (#3503).
+	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -357,6 +360,9 @@ func ResolveProjectSelector(selector string) (Project, error) {
 	}
 	binding, err := resolveProjectBinding(selector)
 	if err != nil {
+		if RepoProbeUnanswered(err) {
+			return Project{}, fmt.Errorf("%q is not a registered project, and %s: %w", selector, RepoProbeUnansweredClaim("the path", selector), err)
+		}
 		return Project{}, fmt.Errorf("%q is not a registered project and is not inside a git repository: %w", selector, err)
 	}
 	for _, p := range projects {

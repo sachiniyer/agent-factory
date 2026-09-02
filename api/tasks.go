@@ -580,6 +580,9 @@ var tasksUpdateCmd = &cobra.Command{
 				return jsonError(fmt.Errorf("failed to resolve --project-path %q: %w", taskUpdateProjectPathFlag, err))
 			}
 			if _, err := config.RepoFromPath(absPath); err != nil {
+				if config.RepoProbeUnanswered(err) {
+					return jsonError(fmt.Errorf("%s — retry, or pass a different --project-path: %w", config.RepoProbeUnansweredClaim("--project-path", absPath), err))
+				}
 				return jsonError(fmt.Errorf("--project-path %q is not a valid git repository: %w", absPath, err))
 			}
 			patch.ProjectPath = strPtr(absPath)

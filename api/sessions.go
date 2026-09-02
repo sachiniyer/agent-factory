@@ -20,7 +20,6 @@ import (
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/git"
 
 	"github.com/spf13/cobra"
 )
@@ -389,8 +388,8 @@ pointing at one).`,
 		}
 		workspace := repo.WorkspacePath()
 
-		if !git.IsGitRepo(workspace) {
-			return jsonError(fmt.Errorf("path %s is not a git repository", workspace))
+		if err := requireGitRepoWorkspace(workspace); err != nil {
+			return jsonError(err)
 		}
 
 		// Fail fast on the reserved root-agent title (#1106) before any

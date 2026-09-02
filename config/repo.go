@@ -81,8 +81,9 @@ func markUnansweredProbe(ctx context.Context, err error) error {
 //     exec error type (measured: "exec format error", and a box out of process
 //     slots produces the same shape with EAGAIN);
 //   - Cmd.WaitDelay expiring before the output pipe closed, so the read was
-//     abandoned mid-flight — repoGitWaitDelay is 100ms, and a loaded box
-//     reaches it (#3500 was observed on a host whose load baseline is 60-95);
+//     abandoned mid-flight — #3500 was observed on a host whose load baseline
+//     is 60-95, where the then-100ms allowance was inside the drain's own noise
+//     (repoGitWaitDelay carries that measurement and why it is now 2s, #3503);
 //   - a signalled death, which ProcessState reports as a negative exit code;
 //   - a cancelled context, whose child CommandContext kills — hence signalled;
 //   - anything that loses the output after a clean exit.
@@ -98,15 +99,134 @@ func probeWentUnanswered(err error) bool {
 	return true
 }
 
+// RepoProbeUnanswered reports whether a repository-resolution failure left the
+// question unanswered — the git child was never started, was killed, or its
+// output was abandoned — rather than answered with a verdict about the path.
+//
+// It is the predicate every site that NARRATES such a failure should branch on
+// (#3504). "git answered, and the answer is no" and "we could not ask git" are
+// different states, and only the first entitles a caller to tell a user that
+// their path is not a repository.
+func RepoProbeUnanswered(err error) bool {
+	return errors.Is(err, ErrRepoProbeUnanswered)
+}
+
+// ClassifyGitProbeError marks a failed git invocation with ErrRepoProbeUnanswered
+// when nothing proves git answered, for callers that run a repository probe of
+// their OWN rather than going through RepoFromPath (session/git's repo check,
+// doctor's setup probe). Sharing the classifier is what keeps those callers from
+// re-deriving the rule and drifting from it — the enumeration this replaced had
+// a measured gap (a fork/exec failure is an *fs.PathError, matching neither exec
+// error type), and a second copy would grow its own.
+//
+// It returns err unchanged when the outcome proves git answered.
+func ClassifyGitProbeError(ctx context.Context, err error) error {
+	return markUnansweredProbe(ctx, err)
+}
+
+// RepoProbeUnansweredClaim words what an unanswered probe entitles a caller to
+// say about path. subject names the thing being resolved ("--repo", "project
+// path", "root_agents entry"), so one sentence serves every surface and cannot
+// drift between them. The ANSWERED half stays with each call site, whose
+// existing copy is already correct for a real verdict.
+func RepoProbeUnansweredClaim(subject, path string) string {
+	return fmt.Sprintf("%s %q could not be checked: git never answered the probe (the subprocess was killed, could not be started, or was abandoned mid-read), so whether the path is a git repository is unknown", subject, path)
+}
+
 // maxRepoIDLength caps the size of an accepted repoID. Legitimate IDs are
 // 12 chars; the cap is loose enough to accommodate future schemes while
 // preventing unbounded allocation in path joins or error messages.
 const maxRepoIDLength = 128
 
-// repoGitWaitDelay bounds Output waiting on a pipe inherited by a helper that
-// outlives a cancelled git process. The normal rev-parse path has no helpers;
-// this is the fail-closed edge for hooks/wrappers around git on a stale mount.
-const repoGitWaitDelay = 100 * time.Millisecond
+// repoGitWaitDelay bounds how long Output keeps waiting for the child's pipes
+// to reach EOF once the child has exited or the caller's context is done.
+//
+// WHAT IT CANNOT DO, and the old comment here claimed otherwise (#3503). That
+// comment called this "the fail-closed edge for hooks/wrappers around git on a
+// stale mount". It is not, and no value of this constant could make it one:
+// Cmd.WaitDelay's timer starts only when the context is done OR the child has
+// exited, and the entry points that matter — RepoFromPath and CurrentRepo —
+// pass context.Background(). A git wedged on a stale mount never exits and that
+// context is never done, so the timer never starts. Measured: with a child that
+// sleeps forever and WaitDelay at 100ms, Output was still blocked after 3s.
+// Bounding that hang needs a deadline on the CALLER's context, which those two
+// entry points deliberately do not have (see RepoFromPathContext's contract).
+//
+// WHY 2s AND NOT THE PREVIOUS 100ms. What this actually bounds is the parent's
+// own pipe drain, and 100ms sat inside the noise of a loaded box. Measured over
+// 300 `git rev-parse --show-toplevel` runs at load ~95 on a 16-core host, the
+// gap from git's last write to Wait returning was p50 1.0ms, p90 5.3ms, p99
+// 33.7ms — and max 184ms, past the old budget. No helper can explain that one:
+// strace shows rev-parse performs exactly one execve and never forks, so
+// nothing exists to inherit the pipe. The old value turned ordinary scheduler
+// latency into a failed repository probe.
+//
+// And 100ms was too tight even for the case it WAS written for. With a helper
+// genuinely holding the pipe, Output returned ErrWaitDelay at 104ms while
+// already holding git's complete, correct answer (measured). Discarding an
+// answer you are already holding is not fail-closed; it is just lossy. 2s is
+// what every other WaitDelay in this repo uses for this same mechanism —
+// session/git, session/tmux, hooks, github, docker, the daemon probes.
+//
+// A var, not a const, only so tests can drive both values; production never
+// reassigns it.
+var repoGitWaitDelay = 2 * time.Second
+
+// minRepoProbeWaitDelay floors the allowance repoProbeWaitDelay computes.
+//
+// The floor is not cosmetic: WaitDelay == 0 means NO BOUND AT ALL, so a caller
+// whose deadline has all but elapsed must never be able to arithmetic its way
+// into disabling the guard entirely.
+const minRepoProbeWaitDelay = 50 * time.Millisecond
+
+// repoProbeWaitDelay picks the drain allowance for one probe, from the caller's
+// own promise rather than from a single global number (#3503, question 2).
+//
+// The axis that matters is not which git command runs — since #3500 every probe
+// here is load-bearing, because an unanswered one fails the whole resolution
+// rather than falling back — but whether the CALLER imposed a deadline:
+//
+//   - No deadline (RepoFromPath, CurrentRepo): there is no budget to overrun,
+//     so the probe takes the full allowance. Being generous costs a bounded
+//     extra wait in the rare inherited-pipe case; being stingy costs a spurious
+//     failure on every loaded box, which is what #3503 reported.
+//   - A deadline (ResolveRegisteredProjectRepoID gives these probes 250ms
+//     inside a 1s registry scan; app's project-path scan gives them 150ms):
+//     the allowance is the time the caller has left, so it tracks each
+//     caller's own value instead of hardcoding copies of them here.
+//
+// BE PRECISE ABOUT WHAT THE DEADLINE CASE BUYS, because the obvious phrasing —
+// "the drain fits inside the caller's budget" — is FALSE and an earlier draft
+// of this comment said it (#3594 review). WaitDelay's timer starts when the
+// context is done, so an allowance granted there is ADDED to the deadline, not
+// carved out of it: a 250ms probe whose git is still alive at the deadline and
+// whose pipe is held by a descendant can take ~500ms.
+//
+// What it actually guarantees is that the overrun is PROPORTIONAL TO WHAT THE
+// CALLER ASKED FOR and never the global default: a caller that promised 150ms
+// can be late by another 150ms, but nothing can drag it to 2.15s. That is the
+// property worth having, and it is the one the tests assert.
+//
+// Nor can a bounded caller have both. The measured drain tail is ~184ms, so any
+// budget below that cannot simultaneously clear the drain and honour itself.
+// The tie breaks toward the budget, and only for these callers, because a
+// caller that set a deadline has ALREADY accepted it may not get an answer in
+// time and has a fallback for that. An unbounded caller has made no such
+// peace, which is exactly why it never trades an answer for time.
+func repoProbeWaitDelay(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return repoGitWaitDelay
+	}
+	remaining := time.Until(deadline)
+	if remaining >= repoGitWaitDelay {
+		return repoGitWaitDelay
+	}
+	if remaining < minRepoProbeWaitDelay {
+		return minRepoProbeWaitDelay
+	}
+	return remaining
+}
 
 // ValidateRepoID enforces the shape of a repository identifier before it is
 // used to construct a filesystem path. Returns an error when the id is
@@ -157,7 +277,7 @@ func resolveRepoRoots(pathArgs ...string) (repoRootResolution, error) {
 func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootResolution, error) {
 	// Get the toplevel for the current location
 	topCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--show-toplevel")...)
-	topCmd.WaitDelay = repoGitWaitDelay
+	topCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	// The outside-repository classification below parses Git's diagnostic. Force
 	// that one command to the locale the parser expects so a translated stderr
 	// cannot turn ordinary absence into a fatal scope-resolution error (#3134).
@@ -206,7 +326,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	// In a worktree:    git-dir == "<main>/.git/worktrees/<name>",
 	//                   git-common-dir == "<main>/.git"
 	infoCmd := exec.CommandContext(ctx, "git", "-C", toplevel, "rev-parse", "--git-dir", "--git-common-dir")
-	infoCmd.WaitDelay = repoGitWaitDelay
+	infoCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	infoOut, err := infoCmd.Output()
 	if err != nil {
 		// Classified from the command's own outcome, never from ctx state
@@ -257,7 +377,7 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 	// For submodules, git stores the worktree path in core.worktree inside the git dir.
 	// For regular repos, core.worktree is unset and the parent of .git is the repo root.
 	wtCmd := exec.CommandContext(ctx, "git", "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
-	wtCmd.WaitDelay = repoGitWaitDelay
+	wtCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	wtOut, err := wtCmd.Output()
 	if err == nil {
 		worktree := trimGitOutputLine(wtOut)
@@ -278,13 +398,13 @@ func resolveRepoRootsContext(ctx context.Context, pathArgs ...string) (repoRootR
 
 func resolveDirectBareRepoRootContext(ctx context.Context, pathArgs ...string) (string, error) {
 	bareCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--is-bare-repository")...)
-	bareCmd.WaitDelay = repoGitWaitDelay
+	bareCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	bareOut, err := bareCmd.Output()
 	if err != nil || strings.TrimSpace(string(bareOut)) != "true" {
 		return "", err
 	}
 	dirCmd := exec.CommandContext(ctx, "git", append(pathArgs, "rev-parse", "--absolute-git-dir")...)
-	dirCmd.WaitDelay = repoGitWaitDelay
+	dirCmd.WaitDelay = repoProbeWaitDelay(ctx)
 	dirOut, err := dirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to resolve bare git directory: %w", err)
@@ -301,7 +421,7 @@ func trimGitOutputLine(out []byte) string {
 
 func gitDirIsBareContext(ctx context.Context, gitDir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "--git-dir", gitDir, "rev-parse", "--is-bare-repository")
-	cmd.WaitDelay = repoGitWaitDelay
+	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to inspect git common directory %s: %w", gitDir, markUnansweredProbe(ctx, err))
