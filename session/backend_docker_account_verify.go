@@ -333,8 +333,9 @@ func unescapeMountinfoField(field string) (string, error) {
 // the image spelled, mountinfo names the path the mount actually landed on.
 //
 // configured is the container paths Docker recorded other than af's own account
-// mount, named in the refusal so the operator reads which entry to remove rather
-// than only where it landed.
+// mount. They reach the refusal as CANDIDATES — one of them may be what the
+// image aliased onto the account, and af cannot say which, or whether it was any
+// of them; see resolvedMountCauses.
 func verifyResolvedAccountBoundary(targets, configured []string) error {
 	atAccountHome := 0
 	for _, target := range targets {
