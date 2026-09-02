@@ -101,14 +101,36 @@ type Account struct {
 // codex-cli 0.146.1: CODEX_HOME pointed at an empty directory reports "Not
 // logged in" against "Logged in using ChatGPT".
 //
-// gemini and amp are deliberately ABSENT. GEMINI_CLI_HOME and AMP_HOME are on
-// the session-env allowlist, but allowlist membership is not evidence that they
-// relocate credentials, and neither CLI was available to test. An agent missing
-// here reports unsupported rather than silently accepting an account selection
-// that would do nothing (#2983).
+// gemini 0.51.0: GEMINI_CLI_HOME pointed at an empty directory reports "Please
+// set an Auth method in your <GEMINI_CLI_HOME>/.gemini/settings.json…" while the
+// real home holds gemini-credentials.json, and every .gemini path it opens moves
+// with the variable (#3387, verified under strace). The bundle earns it by
+// SHADOWING homedir(): `function homedir(){ return process.env["GEMINI_CLI_HOME"]
+// || os.homedir() }`, and FileKeychain joins that with ".gemini" — so the
+// variable is a HOME-like root and the credentials land at <dir>/.gemini/, not
+// directly in <dir> the way CLAUDE_CONFIG_DIR's do.
+//
+// amp, aider, opencode and devin are deliberately ABSENT, and #3387 replaced
+// "not tested" with a measured reason for each:
+//
+//   - amp: credentials are $XDG_DATA_HOME/amp/secrets.json. AMP_HOME is the
+//     INSTALL dir, not a config root — the allowlist's presence of it proved
+//     nothing — and AMP_SETTINGS_FILE relocates only settings.json, which holds
+//     no credential.
+//   - opencode: OPENCODE_CONFIG and OPENCODE_CONFIG_DIR move config only;
+//     `opencode auth list` keeps reading $HOME/.local/share/opencode/auth.json.
+//   - devin: no DEVIN_* variable is referenced by the binary at all.
+//   - aider: no credential store to relocate; identity arrives per-invocation as
+//     API keys (flags, AIDER_*/provider env, or ~/.aider.conf.yml).
+//
+// Their only lever is a GENERIC XDG/HOME variable, which cannot express "this
+// agent's account" without relocating every other tool's state too. An agent
+// missing here reports unsupported rather than silently accepting an account
+// selection that would do nothing (#2983).
 var accountConfigVars = map[string]string{
 	"claude": "CLAUDE_CONFIG_DIR",
 	"codex":  "CODEX_HOME",
+	"gemini": "GEMINI_CLI_HOME",
 }
 
 // accountCredentialNames are the variables that carry an IDENTITY for an agent
@@ -133,6 +155,14 @@ var accountCredentialNames = map[string]map[string]struct{}{
 	),
 	"codex": nameSet(
 		"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+	),
+	// Both are read by the CLI as an identity that outranks the config
+	// directory, so both must be subtracted (#3387). GOOGLE_APPLICATION_CREDENTIALS
+	// is NOT here on purpose: it is not on gemini's unconditional allowlist at
+	// all — it is admitted only behind a cloud-mode selector (#2462), and an
+	// active selector makes ApplyAccount REFUSE rather than scope.
+	"gemini": nameSet(
+		"GEMINI_API_KEY", "GOOGLE_API_KEY",
 	),
 }
 
@@ -309,5 +339,11 @@ var accountNonCredentialNames = map[string]map[string]struct{}{
 	),
 	"codex": nameSet(
 		"CODEX_HOME", "CODEX_SQLITE_HOME", "CODEX_CA_CERTIFICATE",
+	),
+	// The config var itself, plus the two cloud-mode selectors — the operator's
+	// deployment signal, handled by the cloud-mode refusal above rather than by
+	// subtraction, exactly as Claude's Bedrock/Vertex/Foundry selectors are.
+	"gemini": nameSet(
+		"GEMINI_CLI_HOME", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA",
 	),
 }

@@ -327,11 +327,15 @@ func TestApplyAccount_DifferentAccountsGetDifferentRoots(t *testing.T) {
 }
 
 // An agent whose credential relocation was never VERIFIED must refuse, not
-// silently accept a selection that does nothing. gemini and amp have the
-// allowlist entries but were not testable, and allowlist membership is not
-// evidence.
+// silently accept a selection that does nothing. Allowlist membership is not
+// evidence: amp and opencode both HAVE agent-specific variables that relocate
+// only settings/config, so an entry taken from the allowlist would have scoped
+// nothing while looking like it worked (#3387 measured both).
+//
+// gemini left this list in #3387 because its relocation was actually verified —
+// see accountConfigVars — which is the only way an agent may leave it.
 func TestApplyAccount_RefusesAnUnverifiedAgent(t *testing.T) {
-	for _, agent := range []string{"gemini", "amp", "aider", "opencode", "unknown"} {
+	for _, agent := range []string{"amp", "aider", "opencode", "devin", "unknown"} {
 		_, err := ApplyAccount(nil, "", Account{Agent: agent, Name: "x", Dir: "/d"})
 		require.Error(t, err, "agent %q must refuse rather than accept an inert account selection", agent)
 		require.Contains(t, err.Error(), "does not support multiple accounts")
@@ -542,4 +546,58 @@ func TestApplyAccount_TrustedWrapperIsNotABasename(t *testing.T) {
 		})
 		require.Error(t, err, "%s is not the generated wrapper and must not inherit its trust", executable)
 	}
+}
+
+// TestApplyAccount_ScopesGemini pins the roster entry #3387 added on evidence.
+//
+// The subtraction half is the point: gemini reads GEMINI_API_KEY and
+// GOOGLE_API_KEY as identities that outrank the config directory, so a session
+// that selected an account while either passed through would authenticate as
+// whoever that key belongs to while every visible signal said otherwise.
+func TestApplyAccount_ScopesGemini(t *testing.T) {
+	ambient := []string{
+		"GEMINI_API_KEY=ambient-key",
+		"GOOGLE_API_KEY=ambient-google-key",
+		"GEMINI_CLI_HOME=/somewhere/else",
+		"PATH=/usr/bin",
+	}
+	out, err := ApplyAccount(ambient, "", Account{
+		Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work",
+	})
+	require.NoError(t, err)
+
+	dir, ok := envValue(out, "GEMINI_CLI_HOME")
+	require.True(t, ok, "the account must be injected through the verified variable")
+	require.Equal(t, "/afhome/accounts/gemini/work", dir,
+		"GEMINI_CLI_HOME is a HOME-like root: the CLI appends .gemini/ itself, so af "+
+			"points it at the account directory rather than at a .gemini path")
+
+	for _, name := range []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"} {
+		_, present := envValue(out, name)
+		require.False(t, present,
+			"%s outranks the config directory, so leaving it makes the account selection a lie", name)
+	}
+	_, keptPath := envValue(out, "PATH")
+	require.True(t, keptPath, "scoping must not strip unrelated environment")
+}
+
+// TestApplyAccount_RefusesGeminiWhileACloudModeIsActive: gemini's two selectors
+// are guarded exactly as Claude's Bedrock/Vertex/Foundry are (#2462), so adding
+// the agent to the roster inherits the refusal rather than needing a new one.
+// Vertex/GCA authenticate through Google Cloud credentials, so the account
+// directory would stop being the session's identity while still appearing to be.
+func TestApplyAccount_RefusesGeminiWhileACloudModeIsActive(t *testing.T) {
+	for _, selector := range []string{"GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA"} {
+		_, err := ApplyAccount([]string{selector + "=1"}, "",
+			Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+		require.Error(t, err, "%s active must refuse an account scope", selector)
+		require.Contains(t, err.Error(), "cloud mode")
+		require.Contains(t, err.Error(), selector, "the refusal must name which mode blocked it")
+	}
+
+	// Without a selector the same agent scopes normally, so the guard cannot
+	// pass by refusing everything.
+	_, err := ApplyAccount([]string{"PATH=/usr/bin"}, "",
+		Account{Agent: "gemini", Name: "work", Dir: "/afhome/accounts/gemini/work"})
+	require.NoError(t, err)
 }
