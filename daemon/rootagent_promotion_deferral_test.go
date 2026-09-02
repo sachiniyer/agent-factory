@@ -711,3 +711,105 @@ func TestUnresolvedProjectStillSeesItsPathKeyedOptIn(t *testing.T) {
 		t.Fatalf("an opt-in whose per-tick retry covers the repo must report that, got reason %v", verdict.reason)
 	}
 }
+
+// TestOccupiedRecordedRootDoesNotBorrowItsOptIn pins review id 3917294309 (P2)
+// — the limit of the lookup the test above added.
+//
+// Hashing the recorded path and asking the generic resolver matches an OCCUPANT
+// main-rooted there, because that repository resolves to exactly that hash. The
+// verdict then promised a root under the original project's identity that the
+// legacy sweep will only ever create for the occupant.
+func TestOccupiedRecordedRootDoesNotBorrowItsOptIn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded workspace: %v", err)
+	}
+
+	manager, err := NewManager(rootTestConfig(worktree, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[realID]; !ok {
+		t.Fatalf("fixture must file the record under its recorded identity %s", realID)
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got != rootAgentWillMaterialize {
+		t.Fatalf("fixture precondition: with the path gone, the opt-in is this project's own; got reason %v", got)
+	}
+
+	// An unrelated repository takes the recorded path. Its own identity IS the
+	// path's hash, so the opt-in now belongs to it — and the legacy sweep will
+	// create a root for the occupant, never for this project.
+	if err := exec.Command("git", "init", worktree).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	occupantID := repoID(t, worktree)
+	if occupantID != config.RepoIDFromRoot(filepath.Clean(worktree)) {
+		t.Fatalf("fixture must main-root the occupant at the recorded path, got %s", occupantID)
+	}
+
+	if got := manager.rootAgentMaterializeVerdictFor(realID).reason; got == rootAgentWillMaterialize {
+		t.Fatalf("the occupant's opt-in was borrowed for %s: the verdict promises a root the legacy sweep will only ever create for %s, which admits root-targeted tasks and delivery waits for a root that never appears", realID, occupantID)
+	}
+}
+
+// TestVerifiedRealToRealDeleteFollowsTheProbe pins review id 3917294314 (P2).
+//
+// A record can carry a STALE real identity — its checkout returns under a
+// different real id after the repository's identity root moved — and a verified
+// probe proves the two are one project before the promotion is consumed. A
+// delete arriving with the old id found no registry row (the live checkout
+// resolves to the new one), and the provisional-only redirect returned early,
+// so it archived the old id's sessions and reported success while the durable
+// row survived.
+func TestVerifiedRealToRealDeleteFollowsTheProbe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	realID := repoID(t, repoPath)
+	staleID := config.RepoIDFromRoot(filepath.Join(testguard.CanonicalTempDir(t), "former-identity-root"))
+	if staleID == realID || config.IsDerivedRepoID(staleID) {
+		t.Fatalf("fixture needs two distinct REAL identities, got %s and %s", staleID, realID)
+	}
+	setRecordedRepoID(t, project.ID, staleID)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[staleID]; !ok {
+		t.Fatalf("fixture must file the record under its written identity %s", staleID)
+	}
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	repo, err := config.RepoFromPath(repoPath)
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	installVerifiedProbe(t, manager, staleID, repo)
+
+	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: staleID})
+	if err != nil {
+		t.Fatalf("DeleteProject by the stale recorded identity: %v", err)
+	}
+	if result.RepoID != realID {
+		t.Fatalf("a verified probe proves this checkout is %s; the delete stayed on the record's stale %s, so it archives the wrong identity's sessions", realID, result.RepoID)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("the durable record survived a delete that reported success")
+	}
+}

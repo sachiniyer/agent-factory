@@ -159,15 +159,11 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 		// hashing one it cannot resolve — which is no longer this project's
 		// identity now that an unresolved record is addressed by the identity
 		// it RECORDED (#3530). Master matched here by accident, because it
-		// addressed such a project BY that hash. Without the second lookup a
-		// project whose opt-in sits in root_agents the whole time resolves to
-		// "disabled" instead of "enabled, but its recorded path did not
-		// resolve" — the misreport #3264 exists to prevent.
-		//
-		// It reaches only keys naming this record's own recorded root: a key
-		// whose path still resolves is matched by identity above, and an
-		// unresolvable one is compared by its own cleaned spelling.
-		legacy = m.legacyRootAgentForRepo(config.RepoIDFromRoot(filepath.Clean(unresolved.root)))
+		// addressed such a project BY that hash. Without this a project whose
+		// opt-in sits in root_agents the whole time resolves to "disabled"
+		// instead of "enabled, but its recorded path did not resolve" — the
+		// misreport #3264 exists to prevent.
+		legacy = m.legacyRootAgentForRecordedRoot(unresolved.root)
 	}
 	if legacy == nil && !isProject && !isUnresolved {
 		if len(layers.recordFailureIDs) > 0 {
@@ -186,6 +182,44 @@ func (m *Manager) rootAgentMaterializeVerdictFor(repoID string) rootAgentMateria
 		return rootAgentMaterializeVerdict{reason: rootAgentProjectUnresolved, enabledSource: resolution.EnabledSource, rootUnresolved: true, rootIdentityMismatch: unresolved.identityMismatch, rootMarkerUnreadable: unresolved.markerUnreadable, rootPathVanished: unresolved.pathVanished, projectID: unresolved.projectID}
 	}
 	return rootAgentMaterializeVerdict{reason: rootAgentWillMaterialize}
+}
+
+// legacyRootAgentForRecordedRoot returns the root_agents entry spelled as an
+// unresolved record's own recorded root — and only while that root would still
+// produce THIS project's identity (#3530 review id 3917294309).
+//
+// Matching by hashing the path and asking the generic resolver was wrong in one
+// direction: a different repository main-rooted at the recorded path resolves
+// to that very hash, so the lookup returned the OCCUPANT's opt-in for the
+// original project's identity, and the verdict promised a root the legacy sweep
+// will only ever create for the occupant.
+//
+// So the key is found by its spelling — no resolver involved — and then the
+// recorded root is resolved ONCE. If it resolves, the entry belongs to whatever
+// is there now and the sweep will create under that identity rather than this
+// one, so it is not this project's answer. If it does not, the entry is this
+// project's opt-in and its per-tick retry creates the root when the recorded
+// checkout returns, which is exactly what the verdict should say.
+//
+// The single probe costs no more than the per-key resolution
+// LegacyRootAgentForRepo already performs, and it runs only when a key names
+// this record's root.
+func (m *Manager) legacyRootAgentForRecordedRoot(root string) *config.RootAgentConfig {
+	cleaned := filepath.Clean(root)
+	found := false
+	for key := range m.cfg.RootAgents {
+		if filepath.Clean(config.ExpandTilde(key)) == cleaned {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if _, err := config.RepoFromPath(cleaned); err == nil {
+		return nil
+	}
+	return m.legacyRootAgentForRepo(config.RepoIDFromRoot(cleaned))
 }
 
 // rootAgentUnavailableDetail renders a refusing verdict as the clause a

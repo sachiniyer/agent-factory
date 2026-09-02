@@ -149,18 +149,25 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 }
 
 // attributedDeleteTarget answers which identity a delete must act under when
-// the path it named resolves to a PROVISIONAL one (#3530 review ids
-// 3915722493, 3916379586).
+// the one it named is the identity a record is FILED under rather than the one
+// its checkout has been proven to have (#3530 review ids 3915722493,
+// 3916379586, 3917294314).
 //
-// A record written before Project.RepoID is addressed by an invented id while
-// its path does not resolve. But "does not resolve" is a question asked at one
-// instant: a returning checkout publishes its real-ID candidate into
-// rootHealProbes as soon as git answers, and the marker verification that
-// promotes it takes longer still. So a path that comes back and goes away again
-// leaves this normalizing to the invented id while the daemon is already
-// holding the real one — the delete then archives nothing under the identity
-// the project's live sessions are keyed by, deregisters the project, and
-// reports success.
+// Usually that is a record written before Project.RepoID, addressed by an
+// invented id while its path does not resolve. But "does not resolve" is a
+// question asked at one instant: a returning checkout publishes its real-ID
+// candidate into rootHealProbes as soon as git answers, and the marker
+// verification that promotes it takes longer still. So a path that comes back
+// leaves this on the id the record carries while the daemon is already holding
+// the identity that checkout actually has — the delete then archives nothing
+// under the identity the project's live sessions are keyed by, deregisters the
+// project, and reports success.
+//
+// It is deliberately NOT limited to a provisional id. A reconciled record whose
+// recorded root is a linked workspace keeps that path while its repository's
+// identity root moves, so the id left behind is a REAL one and the same split
+// follows; an ordinary repo id that no probe is keyed by is returned untouched,
+// which is every other delete.
 //
 // Only a PROVEN match moves it, because the candidate alone is not evidence
 // that the checkout at the recorded path is this project's — see
@@ -168,17 +175,14 @@ func normalizeDeleteProjectPath(path string) (string, string, error) {
 // names is unknown, and an unknown target refuses instead of picking one; a
 // delete cannot be un-done by a verdict that arrives afterwards.
 func (m *Manager) attributedDeleteTarget(repoID string) (string, error) {
-	if !config.IsDerivedRepoID(repoID) {
-		return repoID, nil
-	}
 	realID, unknown := m.pendingAttributionFor(repoID)
 	if unknown {
-		return repoID, fmt.Errorf("delete project: %s is a provisional identity and af is still checking whether the checkout at its recorded path is that project's own, so which project this names is unknown; nothing was changed — delete again once that check settles", repoID)
+		return repoID, fmt.Errorf("delete project: af is still checking whether the checkout at the recorded root of %s is that project's own, so which project this names is unknown; nothing was changed — delete again once that check settles", repoID)
 	}
 	if realID == "" {
 		return repoID, nil
 	}
-	log.InfoLog.Printf("delete project: %s is a provisional identity, and a re-attribution probe has VERIFIED this project's real identity %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
+	log.InfoLog.Printf("delete project: %s is the identity this project's record is filed under, and a re-attribution probe has VERIFIED its checkout as %s; deleting under that instead so the delete cannot split from the sessions and policy keyed by it", repoID, realID)
 	return realID, nil
 }
 
