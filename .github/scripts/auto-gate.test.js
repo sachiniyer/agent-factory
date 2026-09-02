@@ -1807,6 +1807,80 @@ test("a NOT_FOUND for a longer id that merely starts with ours is not tolerated"
   assert.equal(isSelfContradictoryNotFound(selfContradictoryNotFound(nodeId), nodeId), true);
 });
 
+test("a REST 404 whose structured body splits the pairing is not tolerated", () => {
+  // Codex P2 (round 2): the per-record test correctly rejects a split
+  // NOT_FOUND/node-id pairing, but the transport-message fallback then accepted
+  // the same body because a 404's message is that body serialized. The fallback
+  // is only for errors with no structured record at all.
+  const { isSelfContradictoryNotFound } = __test;
+  const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";
+  const body = {
+    errors: [
+      { type: "NOT_FOUND", message: "Could not resolve to a node with the global id of 'ISSUE_other'." },
+      { type: "FORBIDDEN", message: `Resource not accessible: '${nodeId}'.` },
+    ],
+  };
+  const split = new Error(`Not Found: ${JSON.stringify(body)}`);
+  split.status = 404;
+  split.response = { status: 404, data: body };
+  assert.equal(isSelfContradictoryNotFound(split, nodeId), false);
+
+  // The same transport with the two facts in ONE record is the real thing.
+  const together = {
+    errors: [
+      { type: "FORBIDDEN", message: "Resource not accessible: 'ISSUE_other'." },
+      { type: "NOT_FOUND", message: `Could not resolve to a node with the global id of '${nodeId}'.` },
+    ],
+  };
+  const real = new Error(`Not Found: ${JSON.stringify(together)}`);
+  real.status = 404;
+  real.response = { status: 404, data: together };
+  assert.equal(isSelfContradictoryNotFound(real, nodeId), true);
+});
+
+test("a decision-reporting read carries the resolved subject too", async () => {
+  // Codex P2 (round 2): the reads inside reportDecision run after the PR was
+  // resolved, so the same NOT_FOUND arriving there was non-retryable and
+  // rethrew unhandled — the very outcome this PR removes. Driven directly at
+  // reportDecision so the failure lands on ITS read rather than on whichever
+  // check-run read happens to come first in a whole transaction.
+  const github = fakeGateGithub();
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+  assert.equal(result.shouldMerge, true, "the fixture must reach reportDecision cleanly");
+
+  const before = github.readAttemptsByFn.listForRef || 0;
+  let thrown = 0;
+  const realPaginate = github.paginate;
+  github.paginate = async (fn, options) => {
+    if (fn === github.rest.checks.listForRef && thrown === 0) {
+      thrown += 1;
+      throw selfContradictoryNotFound();
+    }
+    return realPaginate(fn, options);
+  };
+
+  const write = await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result,
+  });
+
+  assert.equal(thrown, 1);
+  assert.equal(write.state, "pass", "the decision must publish rather than throw");
+  assert.ok(
+    (github.readAttemptsByFn.listForRef || 0) > before,
+    "the contradicted read must be retried rather than rethrown",
+  );
+  assert.ok(github.pullGetReads > 0, "the retry must be justified by a cross-check");
+});
+
 test("the tolerated NOT_FOUND is exactly the one naming the resolved id", () => {
   const { isSelfContradictoryNotFound } = __test;
   const nodeId = "PR_kwDORdIFwM8AAAABACUcDg";

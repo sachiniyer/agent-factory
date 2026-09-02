@@ -175,15 +175,20 @@ function isSelfContradictoryNotFound(error, nodeId) {
     String(record?.type || "").toUpperCase() === "NOT_FOUND" &&
     namesSubject.test(String(record?.message || ""));
 
-  if (graphQLResponseErrors(error).some(notFoundNamingSubject)) {
-    return true;
-  }
   const body = error.response?.data;
-  if (notFoundNamingSubject(body)) {
-    return true;
+  const records = [
+    ...graphQLResponseErrors(error),
+    ...(Array.isArray(body?.errors) ? body.errors : []),
+    ...(body && typeof body === "object" && !Array.isArray(body) ? [body] : []),
+  ];
+  if (records.length > 0) {
+    // Structured records exist, so they ARE the evidence — the transport message
+    // is only their serialization, and consulting it as a fallback would re-admit
+    // through the back door the very split pairing the per-record test rejects.
+    return records.some(notFoundNamingSubject);
   }
-  // A transport-level 404 with no structured body of its own: the message is the
-  // only record there is, so it must both be a 404 and name the id itself.
+  // No structured record at all: the transport message is the only record there
+  // is, so it must both be a 404 and name the id itself.
   const status = Number(error.status ?? error.response?.status);
   return status === 404 && namesSubject.test(String(error.message || ""));
 }
@@ -505,6 +510,18 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
 }
 
 async function reportDecision({ github, context, core, result, manual = false }) {
+  // This runs after the PR was resolved, so its reads carry that identity for the
+  // same reason evaluatePullRequest's do: without it a self-contradictory
+  // NOT_FOUND arriving here is non-retryable and rethrows unhandled, reddening
+  // the run over a PR the gate resolved seconds earlier (#3396).
+  const subject =
+    result?.pullRequestId && Number(result.prNumber) > 0
+      ? resolvedPullRequest({
+          github,
+          context,
+          pr: { id: result.pullRequestId, number: Number(result.prNumber) },
+        })
+      : null;
   if (!result?.headSha || !result.prNumber) {
     core.info("Auto Gate decision was not reported because no pull-request head was resolved.");
     return { state: "unreported", priorDecision: false };
@@ -532,6 +549,7 @@ async function reportDecision({ github, context, core, result, manual = false })
         ref: result.headSha,
         per_page: 100,
       }),
+    subject,
   );
   const priorDecision = checkRuns
     .filter(
