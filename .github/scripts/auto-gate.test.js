@@ -2480,6 +2480,66 @@ test("the dispatch contract survives the spellings that hid from the parser", ()
   assert.equal(admitsDispatch("github.event.head_commit != null"), false);
   assert.equal(admitsDispatch("github.event.head_commit != null || github.event_name == 'workflow_dispatch'"), true);
 
+  // Admission must be UNCONDITIONAL: any extra predicate on the dispatch branch
+  // can make it false, whatever context it comes from. Enumerating `inputs.` was
+  // the wrong shape — `vars.`, `env.`, `needs.` and whatever GitHub adds next
+  // gate it just as well.
+  assert.equal(
+    admitsDispatch("github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && vars.RUN_CHECKS == 'true')"),
+    false,
+  );
+  assert.equal(
+    admitsDispatch("github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.run_checks)"),
+    false,
+  );
+  assert.equal(
+    admitsDispatch("(github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'"),
+    true,
+  );
+  assert.equal(admitsDispatch("'workflow_dispatch' == github.event_name"), true);
+  // A bare dispatch test nested inside a conjunction is not a top-level disjunct.
+  assert.equal(
+    admitsDispatch("(github.event_name == 'workflow_dispatch' || github.event_name == 'push') && vars.ENABLED"),
+    false,
+  );
+
+  // Indexed access is the same predicate as dotted access.
+  assert.equal(consultsEvent("github['event']['head_commit'] != null"), true);
+  assert.equal(consultsEvent("github[\"event_name\"] == 'push'"), true);
+  assert.equal(consultsEvent("github.event.head_commit != null"), true);
+  assert.equal(consultsEvent("github.event_name == 'push'"), true);
+  assert.equal(consultsEvent("github.ref == 'refs/heads/master'"), false);
+
+  // The type comes from the DIRECT property, never from prose that contains it.
+  const prose = [
+    "      verify_sha:",
+    "        description: 'Expected type: string SHA'",
+    "        type: boolean",
+  ].join("\n");
+  assert.equal(directProperties(prose).type, "boolean");
+  assert.equal(
+    directProperties("      verify_sha:\n        type: string").type,
+    "string",
+  );
+  // A block scalar's content is nested deeper and is not a direct property.
+  const scalar = [
+    "      verify_sha:",
+    "        description: |",
+    "          type: string",
+    "        type: boolean",
+  ].join("\n");
+  assert.equal(directProperties(scalar).type, "boolean");
+
+  // Quoted shorthand is as valid as the bare form.
+  for (const quoted of ["on: 'push'\njobs:\n", 'on: "push"\njobs:\n', "on: ['push']\njobs:\n", 'on: ["push", "pull_request"]\njobs:\n']) {
+    assert.equal(
+      mentionsPushTrigger(onSection(quoted)),
+      true,
+      `a quoted push trigger must be seen in: ${JSON.stringify(quoted)}`,
+    );
+  }
+  assert.equal(mentionsPushTrigger(onSection("on: ['pull_request']\njobs:\n")), false);
+
   // A YAML alias resolves to a trigger GitHub honours and this scan cannot read,
   // so it is reported unreadable rather than answering "no push".
   assert.equal(usesUnresolvableYaml(onSection("on: *push_event\njobs:\n")), true);
@@ -2627,7 +2687,7 @@ test("the master-verify list names every workflow that gates master on push", ()
         continue;
       }
       const condition = declarationBlock(lines.slice(index).join("\n"), /^\s*if:/);
-      if (!/github\.event(?:_name|\.)/.test(condition)) {
+      if (!consultsEvent(condition)) {
         continue;
       }
       assert.ok(
@@ -2647,12 +2707,15 @@ test("the master-verify list names every workflow that gates master on push", ()
         `the gate sends dispatch input "${input}" to ${name}, which no longer declares it; ` +
           "GitHub would reject the dispatch after the merge has landed",
       );
-      const block = declarationBlock(withoutComments(section), declaration);
-      assert.match(
-        block || "",
-        expectation,
-        `${name}'s "${input}" input no longer accepts what merge() sends`,
-      );
+      const properties = directProperties(declarationBlock(withoutComments(section), declaration) || "");
+      for (const [property, value] of Object.entries(expectation)) {
+        assert.equal(
+          properties[property],
+          value,
+          `${name}'s "${input}" input declares ${property}: ${properties[property]}, but merge() ` +
+            `sends a value that needs ${property}: ${value}`,
+        );
+      }
     }
   }
 });
@@ -4244,8 +4307,33 @@ function normalizeTriggers(section) {
 // accept. A rename, a removal, or a type change on any of these is a 422 after
 // the commit has already landed.
 const SUPPLIED_DISPATCH_INPUTS = {
-  "docs.yml": { verify_sha: /type: string/ },
+  "docs.yml": { verify_sha: { type: "string" } },
 };
+
+// A declaration's DIRECT properties: the lines one level under it, excluding
+// anything nested deeper. A regex over the whole block is satisfied by prose —
+// `description: 'Expected type: string SHA'` inside the same declaration reads
+// as the type itself — so the value has to come from the property, not from the
+// text containing it.
+function directProperties(block) {
+  const [, ...rest] = block.split("\n");
+  const content = rest.filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"));
+  if (content.length === 0) {
+    return {};
+  }
+  const indent = Math.min(...content.map((line) => line.match(/^ */)[0].length));
+  const properties = {};
+  for (const line of content) {
+    if (line.match(/^ */)[0].length !== indent) {
+      continue;
+    }
+    const property = /^ *(?<key>[A-Za-z0-9_-]+):[ \t]*(?<value>.*)$/.exec(line);
+    if (property) {
+      properties[property.groups.key] = property.groups.value.trim().replace(/^["']|["']$/g, "");
+    }
+  }
+  return properties;
+}
 
 // A declaration and everything indented under it: the matched line plus every
 // following line indented deeper. One bounded extraction so an expectation
@@ -4279,17 +4367,56 @@ function declarationBlock(text, pattern) {
 // the gate does not supply happens to be set — the dispatch then succeeds and
 // the job it was raised for is skipped anyway.
 function admitsDispatch(condition) {
-  if (!/workflow_dispatch/.test(condition)) {
-    return false;
+  // Unconditional reachability, checked structurally rather than by listing the
+  // contexts that could gate it. Enumerating `inputs.` was the wrong shape:
+  // `vars.`, `env.`, `secrets.`, `needs.` and anything GitHub adds later gate a
+  // dispatch branch just as well. So the requirement is positive — one top-level
+  // disjunct must be the dispatch test AND NOTHING ELSE.
+  return topLevelDisjuncts(condition).some((disjunct) =>
+    /^github\.event_name\s*==\s*'workflow_dispatch'$|^'workflow_dispatch'\s*==\s*github\.event_name$/.test(
+      disjunct,
+    ),
+  );
+}
+
+// A condition's top-level `||` operands, with wrapping parentheses stripped.
+// Depth-aware so `(a || b) && c` is one operand, not two — reading it as two
+// would see a bare dispatch test inside a conjunction that can still exclude it.
+function topLevelDisjuncts(condition) {
+  const operands = [];
+  let depth = 0;
+  let current = "";
+  for (let index = 0; index < condition.length; index += 1) {
+    const character = condition[index];
+    if (character === "(") {
+      depth += 1;
+    } else if (character === ")") {
+      depth -= 1;
+    }
+    if (depth === 0 && character === "|" && condition[index + 1] === "|") {
+      operands.push(current);
+      current = "";
+      index += 1;
+      continue;
+    }
+    current += character;
   }
-  if (/(?:!=\s*'workflow_dispatch')|(?:'workflow_dispatch'\s*!=)/.test(condition)) {
-    return false;
-  }
-  // Input dependence is rejected rather than evaluated: deciding whether
-  // `inputs.x` is truthy for the gate's dispatch means modelling declared
-  // defaults and what merge() sends, and getting that wrong is silent. A
-  // workflow that needs one has to say so.
-  return !/\binputs\./.test(condition);
+  operands.push(current);
+  return operands.map((operand) => {
+    let text = operand.trim();
+    while (text.startsWith("(") && text.endsWith(")")) {
+      text = text.slice(1, -1).trim();
+    }
+    return text.replace(/\s+/g, " ");
+  });
+}
+
+// Whether a condition consults the event at all — its name or its payload, in
+// dotted or indexed form. `github['event']['head_commit']` is the same predicate
+// as `github.event.head_commit`, and a scan that reads only the dotted spelling
+// answers "this condition does not depend on the event".
+function consultsEvent(condition) {
+  return /github\s*(?:\.\s*event(?:_name|\s*\.)|\[\s*['"]event)/.test(condition);
 }
 
 // A YAML alias or merge key in the trigger section — `on: *push_event`,
@@ -4339,7 +4466,10 @@ function mentionsPushTrigger(section) {
   // `on: push`, `on: [push, …]`, `  push:` and `"push":` all contain the token;
   // `pull_request` and `workflow_dispatch` do not, and a job named push lives
   // outside this section.
-  return /(?:^|[\s[{,"'])push(?:["']?\s*:|\s*[,\]]|\s*$)/m.test(triggers);
+  // The closing quote is optional on BOTH sides: `on: 'push'` and `on: ['push']`
+  // are as valid as their bare forms, and a scan that requires the token to end
+  // the line answers "no push trigger" for them.
+  return /(?:^|[\s[{,"'])push["']?\s*(?::|,|\]|\}|$)/m.test(triggers);
 }
 
 // The exact wire shape from Auto Gate run 32044471684: GET
