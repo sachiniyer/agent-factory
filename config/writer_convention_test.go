@@ -178,8 +178,15 @@ func TestFollowingWriterStaysInsideTheConfigPackage(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			// Skip ONLY trees that cannot hold Go by construction. Skipping by
+			// package name is how a fence acquires a hole: `web` was on this list
+			// as "frontend", but web/embed.go is a real Go package, so a call
+			// there would have bypassed a guard whose whole job is to have no
+			// exceptions (#3660 review). The .go suffix filter below is what
+			// decides; this is only about not walking hundreds of thousands of
+			// files that cannot match it.
 			switch d.Name() {
-			case ".git", "node_modules", "web", "docs", "vendor":
+			case ".git", "node_modules":
 				return filepath.SkipDir
 			}
 			return nil
