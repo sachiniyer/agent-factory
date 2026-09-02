@@ -86,6 +86,21 @@ const CODEX_SUMMARY_ROW_LABEL_RE = /\bCode Review\b/i;
 const CODEX_SUMMARY_ROW_COMPLETED_RE = /\bCompleted\b/i;
 const CODEX_SUMMARY_ROW_COMMIT_RE = /`([0-9a-f]{7,40})`/i;
 const CODEX_SUMMARY_ROW_TIME_RE = /<relative-time[^>]*\bdatetime="([^"]+)"/i;
+// The third spelling of "this artifact is about commit X": the SHAs in the
+// artifact's own body. A finding posted as an ISSUE COMMENT carries no
+// `commit_id` — that field exists only on reviews — and the finding shape Codex
+// emits for lines outside the diff hunks carries no `Reviewed commit:` line
+// either, so #3656 auto-merged with eight live P2s that the gate never
+// inspected (#3670). Every one of those findings linked
+// `blob/<40-hex>/docs/daemon-memory.md#L145`, naming the merged head outright;
+// only the spelling was one no branch of the binding rule read.
+//
+// URL-form, 40-hex, deliberately. A bare backticked short SHA would also match
+// the summary table's Commit CELL, and binding the summary comment to a head is
+// precisely what #3606's rule forbids — see codexArtifactBindsToHead. The
+// lookahead keeps a longer hex run from matching its first 40 characters.
+const CODEX_BODY_COMMIT_RE =
+  /\/(?:blob|blame|commit|commits|raw|tree)\/([0-9a-f]{40})(?![0-9a-f])/gi;
 // Docs/Deploy is deliberately conditional and is skipped on pull_request runs.
 const ALLOWED_SKIPPED_CHECKS = new Set(["Deploy"]);
 const RESOLUTION_MARKER_RE = /\b(?:RESOLVED|ACCEPTED)\b/;
@@ -2773,13 +2788,9 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // publishes a PASSING manual decision and a maintainer merges with it live —
   // exactly what #3591 closed for inline findings.
   const findingBlockers = [];
-  const headBoundArtifacts = codexReviewArtifacts.filter((artifact) => {
-    const reviewedCommit = parseReviewedCommit(artifact.body || "");
-    if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, sha)) {
-      return true;
-    }
-    return String(artifact.commit_id || "").toLowerCase() === String(sha || "").toLowerCase();
-  });
+  const headBoundArtifacts = codexReviewArtifacts.filter((artifact) =>
+    codexArtifactBindsToHead(artifact, sha),
+  );
   const latestBoundArtifact = headBoundArtifacts[0];
   if (latestBoundArtifact && CODEX_BODY_FINDING_RE.test(latestBoundArtifact.body || "")) {
     const bodyFindingReason = "latest exact-head Codex review body contains a P0-P3 finding";
@@ -2794,6 +2805,62 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
       remedy:
         "request a fresh `@codex review` so a newer clean verdict for this head supersedes it, " +
         "or push the fix — no reply can clear a finding that is not on a thread",
+    });
+  }
+
+  // …and the artifacts that name NO commit at all block too (#3670).
+  //
+  // The rule above binds an artifact to a head by fields that only some artifact
+  // shapes carry, and every shape it cannot bind was silently DROPPED: not
+  // inspected, not reported, not counted against the merge. That is fail-open by
+  // construction — the newest unanticipated artifact shape reopens the hole the
+  // moment Codex invents one, which is exactly how the issue-comment finding
+  // shape got past a rule written for reviews. Unknown is not clean.
+  //
+  // Scoped to artifacts that name no commit ANYWHERE, not to "not bound to this
+  // head": an artifact naming some other commit is stale evidence about an older
+  // head, which the head-bound rule already handles correctly and which must not
+  // start blocking every PR that was ever reviewed twice.
+  //
+  // The remedy has to terminate, and for this blocker nothing mechanical can end
+  // it: no push changes the fact that the artifact names no commit, and there is
+  // no thread to reply on. So the exit is the explicit one this repo already
+  // uses for a finding no commit can answer — an allowed author says, on the PR,
+  // that they read it. That is a human acknowledgement, not a heuristic: the
+  // gate never decides for itself that an artifact it could not classify is
+  // clean.
+  const acknowledgementTimes = [...comments, ...reviews]
+    .filter(
+      (artifact) =>
+        ALLOWED_AUTHORS.has(artifact.user?.login || "") &&
+        hasResolutionMarker(artifact.body || ""),
+    )
+    .map((artifact) => reviewArtifactTime(artifact))
+    .filter((time) => time > 0);
+  const unboundFindingArtifacts = codexReviewArtifacts.filter((artifact) => {
+    if (!CODEX_BODY_FINDING_RE.test(artifact.body || "") || isCodexSummaryArtifact(artifact)) {
+      return false;
+    }
+    if (codexArtifactNamesAnyCommit(artifact)) {
+      return false;
+    }
+    // Fails closed on an unknown order, like every other timestamp comparison in
+    // this file: an artifact whose own time will not parse is never acknowledged.
+    const artifactTime = reviewArtifactTime(artifact);
+    return (
+      artifactTime === 0 || !acknowledgementTimes.some((ackTime) => ackTime > artifactTime)
+    );
+  });
+  if (unboundFindingArtifacts.length > 0) {
+    const unboundReason =
+      `${unboundFindingArtifacts.length} Codex artifact(s) carrying a P0-P3 finding name no ` +
+      "commit, so the gate cannot tell which head they are about";
+    reasons.push(unboundReason);
+    findingBlockers.push({
+      reason: unboundReason,
+      remedy:
+        "read the finding on the PR and answer it with RESOLVED, ACCEPTED or [gate-ack] in a " +
+        "PR comment — no push can clear an artifact that names no commit",
     });
   }
 
@@ -2991,6 +3058,72 @@ function summaryNamesHead(artifacts, headSha) {
   );
 }
 
+// Every 40-hex commit an artifact's body names through a GitHub URL. A Set
+// because the only questions asked of it are "does it name this head" and "does
+// it name anything".
+//
+// matchAll needs the /g flag and does not disturb the shared regex's lastIndex —
+// it iterates over its own clone — so the module-level constant is safe to reuse
+// here without the reset a manual exec loop would need.
+function parseBodyCommits(body) {
+  return new Set(
+    [...String(body || "").matchAll(CODEX_BODY_COMMIT_RE)].map((match) => match[1].toLowerCase()),
+  );
+}
+
+// Codex's own persistent summary comment, as opposed to a body that merely
+// quotes one. It records that a review COMPLETED, never what the review found,
+// so it is neither a finding carrier nor evidence about a head — the invariant
+// #3606 established and the reason a summary row must never supersede a finding.
+//
+// Anchored at the start of the body, where the real comment carries it. `bodies
+// that CONTAIN the marker` is the wrong test: this repository's own gate script
+// holds that marker as a string literal, so a Codex review OF this file can
+// quote it, and an exemption keyed on `includes` would drop that review's
+// findings — the exact fail-open this function exists to help prevent. A body
+// that quotes the marker mid-text is therefore still inspected in full.
+function isCodexSummaryArtifact(artifact) {
+  const body = String(artifact?.body || "");
+  return body.trimStart().startsWith(CODEX_SUMMARY_MARKER) && parseSummaryRows(body).length > 0;
+}
+
+// The three spellings of "this artifact is about THIS head", in the order they
+// were added: the `Reviewed commit:` prose line, the review's own commit_id, and
+// the 40-hex SHAs the body links (#3670).
+function codexArtifactBindsToHead(artifact, headSha) {
+  // A summary comment names the head in its table on every review activity,
+  // including the activity of posting a finding. Letting it bind would make it
+  // the newest finding-capable artifact and clear the finding beside it — so it
+  // binds to nothing, which is what its lack of a commit_id and of a `Reviewed
+  // commit:` line achieved implicitly before body SHAs became a binding rule.
+  if (isCodexSummaryArtifact(artifact)) {
+    return false;
+  }
+  const reviewedCommit = parseReviewedCommit(artifact.body || "");
+  if (reviewedCommit != null && reviewedCommitMatchesHead(reviewedCommit, headSha)) {
+    return true;
+  }
+  if (String(artifact.commit_id || "").toLowerCase() === String(headSha || "").toLowerCase()) {
+    return true;
+  }
+  return parseBodyCommits(artifact.body).has(String(headSha || "").toLowerCase());
+}
+
+// Whether the artifact names any commit at all, by any of the spellings above
+// plus the summary table's own cells. The question the blocking rule asks is not
+// "is this about the head" but "can this be placed against a head at all" — an
+// artifact that answers no is unclassifiable rather than stale.
+function codexArtifactNamesAnyCommit(artifact) {
+  const body = artifact?.body || "";
+  if (parseReviewedCommit(body) != null || String(artifact?.commit_id || "") !== "") {
+    return true;
+  }
+  if (parseBodyCommits(body).size > 0) {
+    return true;
+  }
+  return parseSummaryRows(body).some((row) => row.commit != null);
+}
+
 function reviewedCommitMatchesHead(reviewedCommit, headSha) {
   const normalizedHead = String(headSha || "").toLowerCase();
   return /^[0-9a-f]{40}$/.test(normalizedHead) && normalizedHead.startsWith(reviewedCommit);
@@ -3107,6 +3240,10 @@ module.exports = {
     hasResolutionMarker,
     latestRequiredState,
     parseReviewedCommit,
+    parseBodyCommits,
+    codexArtifactBindsToHead,
+    codexArtifactNamesAnyCommit,
+    isCodexSummaryArtifact,
     reviewedCommitMatchesHead,
   },
 };

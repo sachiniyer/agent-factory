@@ -2110,6 +2110,203 @@ test("a body finding blocks the manual-merge decision, not just the auto one", a
   assert.doesNotMatch(decision.output.summary, /reply RESOLVED[^\n]*to clear this/);
 });
 
+test("an issue-comment finding blocks on the head its own links name", async () => {
+  // #3670, reproduced from #3656: the finding shape Codex uses for lines outside
+  // the diff hunks is an ISSUE COMMENT. It carries no `commit_id` — issue
+  // comments have no such field — and no `Reviewed commit:` line, so both
+  // binding branches missed it, `latestBoundArtifact` fell through to an older
+  // clean artifact, and the PR auto-merged with eight live P2s the gate never
+  // read. Every finding in it links `blob/<head>/…`: the head IS stated.
+  const github = fakeGateGithub({
+    issueComments: [
+      codexIssueCommentFinding(HEAD_SHA, { timestamp: "2026-07-09T01:20:00Z" }),
+      // The real ordering: Codex rewrites its table when it posts a finding, so
+      // the summary row is one second NEWER than the finding it accompanies, and
+      // the summary comment is the newest artifact on the PR. That row is what
+      // supplied #3656's passing verdict.
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  const result = await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.equal(result.shouldMerge, false, "eight live P2s for this head must not auto-merge");
+  assert.ok(
+    result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // The verdict still resolved from the row, so the block is attributable to the
+  // finding rather than to the gate having lost the review it already had.
+  assert.ok(
+    result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`),
+    `got: ${result.notes.join("; ")}`,
+  );
+});
+
+test("a finding artifact that names no commit blocks anyway", async () => {
+  // The same body with every SHA stripped. Binding by body SHAs cannot save this
+  // one, which is the point: a finding-bearing artifact the gate cannot place
+  // against any head is unclassified, and unknown is not clean. Without this
+  // half, the next artifact shape nobody anticipated reopens the hole.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  assert.doesNotMatch(stripped.body, /[0-9a-f]{40}/i, "the fixture must name no commit at all");
+  assert.match(stripped.body, /P2/, "…while still carrying findings");
+
+  const result = await evaluateGate({
+    issueComments: [
+      stripped,
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, false, "an unclassifiable finding is not a clean one");
+  assert.ok(
+    result.reasons.some((reason) => reason.includes("name no commit")),
+    `got: ${result.reasons.join("; ")}`,
+  );
+  // …and it is the second half doing the work, not the first: nothing bound it.
+  assert.ok(
+    !result.reasons.includes("latest exact-head Codex review body contains a P0-P3 finding"),
+    `got: ${result.reasons.join("; ")}`,
+  );
+});
+
+test("a clean head-bound summary row still passes", async () => {
+  // The guard on both halves: neither may turn the ordinary passing shape — an
+  // automatic review that completed cleanly and recorded itself in the table —
+  // into a block. The summary comment names a commit, so it is not
+  // unclassifiable; it carries no finding, so there is nothing to bind.
+  const result = await evaluateGate({
+    issueComments: [codexSummaryTable(HEAD_SHA, { rowTime: "2026-07-09T01:20:00Z" })],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+  assert.ok(result.notes.includes(`Codex verdict matches head ${HEAD_SHA}`));
+});
+
+test("a finding artifact naming another head is stale, not unclassifiable", async () => {
+  // The blocking half is scoped to artifacts that name NO commit, not to every
+  // artifact unbound to this head. An older head's findings are stale evidence —
+  // the case the head-bound rule already decides — and reading them as
+  // unclassifiable would block every PR Codex ever reviewed twice.
+  const result = await evaluateGate({
+    issueComments: [
+      codexIssueCommentFinding(OTHER_SHA, { timestamp: "2026-07-09T01:19:00Z" }),
+      codexSummaryTable(HEAD_SHA, {
+        rowTime: "2026-07-09T01:20:01Z",
+        commentTime: "2026-07-09T01:20:06Z",
+      }),
+    ],
+  });
+
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("an unclassifiable finding clears only by an allowed author answering it", async () => {
+  // The block has to terminate, and nothing mechanical can end this one: no push
+  // changes the fact that the artifact names no commit, and there is no thread to
+  // reply on. The exit is the explicit one — an allowed author says on the PR
+  // that they read it — so the gate never decides for itself that what it could
+  // not classify was clean.
+  const stripped = codexIssueCommentFinding(HEAD_SHA, {
+    ref: "master",
+    timestamp: "2026-07-09T01:20:00Z",
+  });
+  const summary = codexSummaryTable(HEAD_SHA, {
+    rowTime: "2026-07-09T01:20:01Z",
+    commentTime: "2026-07-09T01:20:06Z",
+  });
+
+  const outsider = await evaluateGate({
+    issueComments: [stripped, summary, prComment("outside-contributor", "ACCEPTED — ignore it.")],
+  });
+  assert.equal(outsider.shouldMerge, false, "only an allowed author's answer counts");
+
+  const discussion = await evaluateGate({
+    issueComments: [stripped, summary, prComment("sachiniyer", "Looking at these now.")],
+  });
+  assert.equal(discussion.shouldMerge, false, "discussion is not an answer without a marker");
+
+  const predating = await evaluateGate({
+    issueComments: [
+      stripped,
+      summary,
+      prComment("sachiniyer", "All eight read — [gate-ack].", "2026-07-09T01:19:00Z"),
+    ],
+  });
+  assert.equal(predating.shouldMerge, false, "an answer cannot precede the finding it answers");
+
+  const answered = await evaluateGate({
+    issueComments: [
+      stripped,
+      summary,
+      prComment("sachiniyer", "All eight read — [gate-ack].", "2026-07-09T01:25:00Z"),
+    ],
+  });
+  assert.equal(answered.shouldMerge, true, `blocked on: ${answered.reasons.join("; ")}`);
+});
+
+test("only a URL-form commit binds an artifact body to a head", () => {
+  const { parseBodyCommits, codexArtifactBindsToHead, isCodexSummaryArtifact } = __test;
+
+  // The summary table names the head in a backticked CELL. Reading that as a
+  // binding would make the summary comment the newest finding-capable artifact
+  // and clear the finding beside it — the #3606 rule, now load-bearing for a
+  // second reason.
+  const summary = codexSummaryTable(HEAD_SHA);
+  assert.equal(parseBodyCommits(summary.body).size, 0, "a backticked short SHA is not a binding");
+  assert.equal(codexArtifactBindsToHead(summary, HEAD_SHA), false);
+  assert.equal(isCodexSummaryArtifact(summary), true);
+
+  // …and a body that merely QUOTES the marker is not the summary comment. This
+  // gate script holds that marker as a string literal, so a Codex review OF this
+  // file quotes it; exempting such a body would drop its findings.
+  const marker = summary.body.split("\n")[0];
+  const quoting = {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "Codex Review",
+      "",
+      "P1: the exemption must not key on `includes`:",
+      "",
+      `> ${marker}`,
+      "| Review | Status | Commit | Review trigger |",
+      "| --- | --- | --- | --- |",
+      `| 📝 **Code Review** | ✅ **Completed** | \`${HEAD_SHA.slice(0, 7)}\` | New commits |`,
+    ].join("\n"),
+    commit_id: HEAD_SHA,
+    submitted_at: "2026-07-09T01:20:00Z",
+  };
+  assert.equal(isCodexSummaryArtifact(quoting), false, "quoting the marker is not carrying it");
+  assert.equal(codexArtifactBindsToHead(quoting, HEAD_SHA), true, "…so its finding is inspected");
+
+  // The permalink form binds, and only to the head it names.
+  const finding = codexIssueCommentFinding(HEAD_SHA);
+  assert.deepEqual([...parseBodyCommits(finding.body)], [HEAD_SHA]);
+  assert.equal(codexArtifactBindsToHead(finding, HEAD_SHA), true);
+  assert.equal(codexArtifactBindsToHead(finding, OTHER_SHA), false);
+  assert.equal(__test.codexArtifactNamesAnyCommit(finding), true);
+  assert.equal(
+    __test.codexArtifactNamesAnyCommit(codexIssueCommentFinding(HEAD_SHA, { ref: "master" })),
+    false,
+  );
+});
+
 test("a row whose cell prefixes a different commit does not match this head", () => {
   // The commit cell is matched as a prefix of the head, with no lookup: the head
   // SHA is already known, so there is nothing to resolve. What keeps a stale row
@@ -5785,6 +5982,58 @@ function codexSummaryTable(
     created_at: commentTime,
     updated_at: commentTime,
   };
+}
+
+// Codex's OTHER finding artifact: an ISSUE COMMENT, captured from the real one
+// #3656 auto-merged past (comment 5514996957) with the commit substituted and
+// six of its eight P2 findings elided. Issue comments have no `commit_id` field
+// at all — not null, absent — and this shape emits no `Reviewed commit:` line,
+// so the only thing naming a head is the permalink on every finding (#3670).
+//
+// `ref` substitutes what those permalinks point at. A branch name is how the
+// SHA-stripped variant is built: the same body, naming no commit anywhere.
+function codexIssueCommentFinding(sha, { timestamp = "2026-07-09T01:20:00Z", ref = null } = {}) {
+  const target = ref ?? sha;
+  const finding = (anchor, title, prose) =>
+    [
+      `https://github.com/sachiniyer/agent-factory/blob/${target}/docs/daemon-memory.md${anchor}`,
+      `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${title}**`,
+      "",
+      prose,
+    ].join("\n");
+  return {
+    user: { login: "chatgpt-codex-connector[bot]" },
+    body: [
+      "",
+      "### 💡 Codex Review",
+      "",
+      finding(
+        "#L145-L147",
+        "Include unscoped descendant process trees",
+        "When a plain-exec child forks, every descendant inherits the daemon cgroup unless it is explicitly moved.",
+      ),
+      "",
+      "---",
+      "",
+      finding(
+        "#L194",
+        "Stop labeling the file counter as page cache",
+        "The `file` counter also includes tmpfs/shared memory and dirty or writeback pages.",
+      ),
+      "    ",
+      "",
+      "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+      "<br/>",
+      "",
+      "</details>",
+    ].join("\n"),
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
+function prComment(login, body, timestamp = "2026-07-09T01:25:00Z") {
+  return { user: { login }, body, created_at: timestamp, updated_at: timestamp };
 }
 
 function codexRateLimit(timestamp = "2026-07-09T01:20:00Z") {
