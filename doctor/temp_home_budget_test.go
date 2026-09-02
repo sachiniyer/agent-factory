@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -674,4 +675,132 @@ func countDirReads(t *testing.T) *int {
 	}
 	t.Cleanup(func() { scanDirBatch = prev })
 	return &read
+}
+
+// ---- fourth review round on #3568 ----
+
+// TestNegativeLimitAlsoDisablesTheReadBudget: Options.MaxTempHomeCandidates
+// documents that a negative value disables the bound and accepts an unbounded
+// sweep. The read budget was armed unconditionally, so a caller that opted out
+// of one bound was silently truncated by another it had never been told about —
+// the documented escape hatch did not exist.
+func TestNegativeLimitAlsoDisablesTheReadBudget(t *testing.T) {
+	root := t.TempDir()
+	noisy := filepath.Join(root, "TestFoo")
+	require.NoError(t, os.MkdirAll(filepath.Join(noisy, "home"), 0755))
+	const files = 300
+	for i := 0; i < files; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(noisy, fmt.Sprintf("f%04d", i)), nil, 0644))
+	}
+
+	withSmallReadBudget(t, 32)
+
+	sweep := candidateTempHomes(root, -1)
+
+	assert.False(t, sweep.truncated(),
+		"a caller that disabled the bound asked for a COMPLETE sweep and must get one")
+	assert.False(t, sweep.hitReadBudget)
+	assert.Equal(t, 1, sweep.visited)
+	assert.Contains(t, sweep.candidates, filepath.Join(noisy, "home"),
+		"the nested home behind those files must still be found")
+}
+
+// TestTruncationNoticeNamesTheBudgetThatActuallyFired: a directory of plain
+// files exhausts the READ budget while recording a single candidate, so
+// blaming the candidate budget points the reader at a limit that never came
+// near firing.
+func TestTruncationNoticeNamesTheBudgetThatActuallyFired(t *testing.T) {
+	root := t.TempDir()
+	noisy := filepath.Join(root, "TestFoo")
+	require.NoError(t, os.MkdirAll(noisy, 0755))
+	for i := 0; i < 300; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(noisy, fmt.Sprintf("f%04d", i)), nil, 0644))
+	}
+
+	withSmallReadBudget(t, 32)
+	sweep := candidateTempHomes(root, 50000)
+
+	require.True(t, sweep.hitReadBudget)
+	require.False(t, sweep.hitCandidateLimit,
+		"precondition: one candidate against a 50000 limit — the candidate budget cannot be what stopped this")
+
+	detail := tempHomeSweepTruncationDetail(root, sweep, 50000)
+	assert.Contains(t, detail, "read budget")
+	assert.NotContains(t, detail, "50000-candidate budget",
+		"naming a bound that never fired sends the reader to the wrong number")
+}
+
+// TestRootThatCannotBeListedIsUnreadableNotPartial: os.Open succeeding and the
+// first ReadDir failing is an unreadable temp dir, not a large one. Reporting
+// "too large to list in full" would hide a configuration fault (TempDir naming
+// a regular file) behind advice to clean /tmp.
+func TestRootThatCannotBeListedIsUnreadableNotPartial(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0644))
+
+	sweep := candidateTempHomes(file, 50000)
+
+	assert.True(t, sweep.unreadable, "nothing was listed, so this is an unreadable root")
+	assert.False(t, sweep.rootPartial, "and it is not a partially read one")
+
+	report := &Report{}
+	reportTempHomeSweepTruncation(report, file, sweep, 50000)
+	notices := findingsFor(report, "temp-home-scan")
+	require.Len(t, notices, 1)
+	assert.Contains(t, notices[0].Detail, "could not be listed at all")
+	assert.NotContains(t, notices[0].Detail, "too large to list in full")
+}
+
+// TestChildrenAreSortedOnACompleteExpansion pins that an ORDINARY, untruncated
+// scan is reproducible. os.ReadDir sorted; File.ReadDir does not, so streaming
+// made candidate order depend on filesystem order — changing --verbose and
+// verbose JSON between runs on machines where nothing was truncated at all.
+//
+// The seam returns entries in reverse order rather than trusting the
+// filesystem to hand back something unsorted, so this stages the condition
+// deterministically instead of hoping for it.
+func TestChildrenAreSortedOnACompleteExpansion(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "TestFoo")
+	for _, name := range []string{"aaa", "bbb", "ccc", "ddd", "eee"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, name), 0755))
+	}
+
+	prev := scanDirBatch
+	scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) {
+		entries, err := prev(f, n)
+		for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+			entries[i], entries[j] = entries[j], entries[i]
+		}
+		return entries, err
+	}
+	t.Cleanup(func() { scanDirBatch = prev })
+
+	sweep := candidateTempHomes(root, 50000)
+	require.False(t, sweep.truncated(), "precondition: nothing here is truncated")
+
+	children := sweep.candidates[1:] // [0] is the parent itself
+	assert.True(t, sort.StringsAreSorted(children),
+		"a complete scan must produce a reproducible candidate order, got %v", children)
+}
+
+// TestRootTruncationStillAssessesTheNamesAlreadyRead is the worst of the
+// fourth-round findings. When the temp root exhausted the read budget, the
+// loop broke immediately — so a huge root reported an incomplete scan and then
+// assessed NOTHING, not even the first-level names it had already paid to
+// read. Those names are in hand and each may itself be an abandoned home.
+func TestRootTruncationStillAssessesTheNamesAlreadyRead(t *testing.T) {
+	root := t.TempDir()
+	fillTempDir(t, root, 300)
+
+	withSmallReadBudget(t, 32)
+	sweep := candidateTempHomes(root, 50000)
+
+	require.True(t, sweep.rootPartial, "precondition: the root itself was cut short")
+	assert.NotEmpty(t, sweep.candidates,
+		"the first-level names already read must still be assessed; expansion stops, assessment does not")
+	assert.GreaterOrEqual(t, len(sweep.candidates), sweep.offered,
+		"every name the root listing produced should have become a candidate")
+	assert.Zero(t, sweep.visited,
+		"none of them was expanded, so none counts as finished")
 }

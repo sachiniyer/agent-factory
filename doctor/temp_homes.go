@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -228,8 +229,21 @@ func tempHomeSweepTruncationDetail(tempDir string, sweep tempHomeSweep, budget i
 	detail := fmt.Sprintf("this run did NOT assess every temp home: it finished %d of %s under "+
 		"%s, having inspected %s", sweep.visited, total, tempDir,
 		plural(len(sweep.candidates), "candidate directory", "candidate directories"))
-	if sweep.visited+sweep.unlistable < sweep.offered {
-		detail += fmt.Sprintf(" against a %d-candidate budget", budget)
+	// Name the bound that ACTUALLY fired. They stop the sweep for different
+	// reasons and a reader sent to the wrong number is worse off than one sent
+	// to none: a first-level directory holding 500,000 plain files exhausts the
+	// read budget while recording a single candidate, and "against a
+	// 50000-candidate budget" points at a limit that never came near firing.
+	var stops []string
+	if sweep.hitCandidateLimit {
+		stops = append(stops, fmt.Sprintf("a %d-candidate budget", budget))
+	}
+	if sweep.hitReadBudget {
+		stops = append(stops, fmt.Sprintf("a %d-entry read budget (it read %d)",
+			tempHomeReadBudget, sweep.entriesRead))
+	}
+	if len(stops) > 0 {
+		detail += " against " + strings.Join(stops, " and ")
 	}
 	if sweep.unlistable > 0 {
 		detail += fmt.Sprintf("; %s could not be listed at all, so anything nested inside them was never seen",
@@ -321,6 +335,14 @@ type tempHomeSweep struct {
 	// makes offered a LOWER BOUND rather than a total — there may be more
 	// first-level directories we never saw the names of.
 	rootPartial bool
+	// hitCandidateLimit and hitReadBudget record WHICH bound stopped the sweep.
+	// Both exist because they stop it for different reasons and the notice has
+	// to name the right one: a first-level directory holding 500,000 plain
+	// files exhausts the read budget while recording a single candidate, and
+	// blaming the candidate budget there tells the reader to look at a number
+	// that never fired.
+	hitCandidateLimit bool
+	hitReadBudget     bool
 }
 
 // truncated reports whether the sweep gave up before seeing the whole temp dir.
@@ -381,20 +403,35 @@ var scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) { return f.Rea
 // expandTempHomeChildren appends dir's subdirectories to the sweep, stopping at
 // the budget. It reports whether the directory was expanded in FULL, and any
 // error that ended the listing early.
-func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expanded bool, err error) {
+func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit, readBudget int) (expanded bool, err error) {
 	f, openErr := os.Open(dir)
 	if openErr != nil {
 		return false, openErr
 	}
 	defer func() { _ = f.Close() }()
+
+	// Collected, sorted, and only then appended. os.ReadDir sorted; File.ReadDir
+	// does not, so appending straight from the batches made the candidate order
+	// of an ORDINARY, complete scan depend on filesystem order — changing
+	// --verbose output and verbose JSON between runs on machines where nothing
+	// was truncated at all. Buffering is bounded by the same budgets as the
+	// read, so this cannot reintroduce the unbounded memory the streaming fixed.
+	var children []string
+	defer func() {
+		sort.Strings(children)
+		sweep.candidates = append(sweep.candidates, children...)
+	}()
+
 	for {
-		if limit > 0 && len(sweep.candidates) >= limit {
+		if limit > 0 && len(sweep.candidates)+len(children) >= limit {
+			sweep.hitCandidateLimit = true
 			return false, nil
 		}
-		if sweep.entriesRead >= tempHomeReadBudget {
+		if readBudget > 0 && sweep.entriesRead >= readBudget {
 			// Charged per ENTRY, not per candidate. Without this a directory of
 			// a million files — which contributes no candidates — is read to
 			// EOF however small the candidate budget is.
+			sweep.hitReadBudget = true
 			return false, nil
 		}
 		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
@@ -403,10 +440,11 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expand
 			if !entry.IsDir() {
 				continue
 			}
-			if limit > 0 && len(sweep.candidates) >= limit {
+			if limit > 0 && len(sweep.candidates)+len(children) >= limit {
+				sweep.hitCandidateLimit = true
 				return false, nil
 			}
-			sweep.candidates = append(sweep.candidates, filepath.Join(dir, entry.Name()))
+			children = append(children, filepath.Join(dir, entry.Name()))
 		}
 		if errors.Is(readErr, io.EOF) {
 			return true, nil
@@ -434,7 +472,7 @@ func expandTempHomeChildren(sweep *tempHomeSweep, dir string, limit int) (expand
 // place. Only a root that exceeds the budget loses that, and there the PREFIX
 // that was read is filesystem-ordered anyway, so sorting could not have made it
 // reproducible.
-func readTempRoot(sweep *tempHomeSweep, tempDir string) ([]string, bool) {
+func readTempRoot(sweep *tempHomeSweep, tempDir string, readBudget int) ([]string, bool) {
 	f, err := os.Open(tempDir)
 	if err != nil {
 		// A temp dir that cannot be opened has told us NOTHING. That is not the
@@ -447,8 +485,9 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string) ([]string, bool) {
 
 	var names []string
 	for {
-		if sweep.entriesRead >= tempHomeReadBudget {
+		if readBudget > 0 && sweep.entriesRead >= readBudget {
 			sweep.rootPartial = true
+			sweep.hitReadBudget = true
 			break
 		}
 		batch, readErr := scanDirBatch(f, tempHomeChildBatch)
@@ -463,6 +502,16 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string) ([]string, bool) {
 			break
 		}
 		if readErr != nil {
+			if sweep.entriesRead == 0 {
+				// The FIRST read failed, so nothing was listed at all. Opening
+				// succeeded and reading did not, which happens when TempDir
+				// names a regular file (ENOTDIR) or the filesystem refuses the
+				// listing outright. That is an unreadable temp dir, not a large
+				// one — reporting it as "too large to list in full" would hide
+				// a configuration or I/O fault behind advice to clean /tmp.
+				sweep.unreadable = true
+				return nil, false
+			}
 			// Some of the root was read. That is a partial listing, not an
 			// absent one: offered becomes a lower bound and the run is reported
 			// incomplete rather than unreadable.
@@ -482,21 +531,40 @@ func readTempRoot(sweep *tempHomeSweep, tempDir string) ([]string, bool) {
 // the counts it returns describe whole entries rather than a partially expanded
 // one. A limit <= 0 disables the bound.
 func candidateTempHomes(tempDir string, limit int) tempHomeSweep {
+	// A caller that disables the candidate bound is asking for a COMPLETE
+	// sweep, so the read budget has to come off with it. Leaving it armed made
+	// the documented escape hatch a lie: the caller opted out of one bound and
+	// silently got truncated by another it was never told about.
+	readBudget := tempHomeReadBudget
+	if limit <= 0 {
+		readBudget = 0
+	}
+
 	var sweep tempHomeSweep
-	level1, ok := readTempRoot(&sweep, tempDir)
+	level1, ok := readTempRoot(&sweep, tempDir, readBudget)
 	if !ok {
 		return sweep
 	}
 	for _, name := range level1 {
 		if limit > 0 && len(sweep.candidates) >= limit {
-			break
-		}
-		if sweep.entriesRead >= tempHomeReadBudget {
+			sweep.hitCandidateLimit = true
 			break
 		}
 		dir := filepath.Join(tempDir, name)
 		sweep.candidates = append(sweep.candidates, dir)
-		expanded, listErr := expandTempHomeChildren(&sweep, dir, limit)
+		if readBudget > 0 && sweep.entriesRead >= readBudget {
+			// No budget left to look INSIDE this one — but its name is already
+			// in hand and costs nothing more to record, and the directory
+			// itself may BE an abandoned home. Previously this broke out of the
+			// loop, so a temp root big enough to exhaust the read budget
+			// assessed NOTHING: it reported an incomplete scan and then failed
+			// to check even the names it had already paid to read. Expansion
+			// stops; assessment does not. Not counted as visited, because its
+			// children were never looked at.
+			sweep.hitReadBudget = true
+			continue
+		}
+		expanded, listErr := expandTempHomeChildren(&sweep, dir, limit, readBudget)
 		if listErr != nil {
 			// A directory we could not list may hold homes we will never see.
 			// NOT counted as visited: that would make it indistinguishable from
