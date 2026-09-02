@@ -2863,6 +2863,20 @@ async function evaluateCodex({ github, context, number, sha, lastCommitDate, sub
   // candidate at all, and this is the one question that needs the PR's history
   // rather than its head. A failed read throws out of retryRead and blocks, like
   // every other read here — an unreadable commit list is not an empty one.
+  //
+  // KNOWN and ACCEPTED: a force-push drops the old head from this list, so a
+  // finding linking a rebased-away commit stops reading as stale and starts
+  // blocking, clearable only by an acknowledgement naming it (Codex P2 on
+  // #3676). That is the fail-closed side of an unavoidable trade, and it is the
+  // side this file takes everywhere else: after a rebase nobody can say whether
+  // the finding survived, and "unknown" is what the whole rule treats as
+  // not-clean. The alternative asks GitHub whether the linked commit is
+  // associated with THIS PR (repos.listPullRequestsAssociatedWithCommit, already
+  // used elsewhere here), which would cover a force-pushed-away commit IF that
+  // association outlives the rewrite — unverified, and a guess about someone
+  // else's retention policy is not a thing to gate merges on. Measure it first;
+  // until then one acknowledgement is the cost, on a PR that has both been
+  // rebased and carries a finding no head-bound artifact answers.
   const prCommitShas =
     findingCandidates.length === 0
       ? new Set()
