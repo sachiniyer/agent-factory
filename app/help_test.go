@@ -725,3 +725,57 @@ func TestGeneralHelpHidesAliasShadowedByAQuitRebind(t *testing.T) {
 		})
 	}
 }
+
+// TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy answers the second
+// Codex finding on #3634. The attach overlay has its own dismiss policy —
+// enter attaches, esc cancels, everything else is a no-op. Gating the scroll
+// branch on the GENERIC dismiss set meant a key the generic set called a
+// dismissal (say `[keys] quit = "pgdown"`) skipped scrolling and was then
+// refused by the policy: dead in both branches, on the exact key the overflow
+// marker advertises.
+func TestAttachHelpScrollKeyReboundToQuitStillReachesItsPolicy(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"pgdown"}}))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInstanceAttach{agent: tmux.ProgramClaude}, nil)
+	require.Equal(t, stateHelp, h.state)
+	h.textOverlay.SetHeight(8)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the attach screen overflows")
+
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyPgDown})
+	require.Equal(t, stateHelp, h.state, "the attach overlay must not close on a paging key")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more",
+		"a key the attach policy refuses must still scroll the overflowing overlay")
+
+	// Its own policy is untouched.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state, "esc still cancels the attach overlay")
+}
+
+// TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows answers the
+// third Codex finding on #3634, and it is #2413's trap in reverse. The
+// interactive help is a press-any-key gate BY DESIGN: the dismiss keystroke is
+// the user's first pane input and gets replayed (#1576). Suspending that gate
+// whenever the content overflows made every non-scroll key inert at small
+// sizes — including ctrl+], the key the overlay's own last line names.
+func TestFirstRunInteractiveHelpKeepsAnyKeyDismissalWhenItOverflows(t *testing.T) {
+	h := newTestHome(t)
+	resizeHome(h, 80, 24)
+	_, _ = h.showHelpScreen(helpTypeInteractive{}, nil)
+	require.Equal(t, stateHelp, h.state)
+	// Squeeze it the way a 40x10 terminal does.
+	h.textOverlay.SetHeight(7)
+	require.True(t, h.textOverlay.Scrollable(), "precondition: the interactive help overflows")
+
+	// The scroll affordance it now paints is honoured…
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, stateHelp, h.state, "↓ must scroll an overflowing overlay")
+	require.Contains(t, xansi.Strip(h.textOverlay.Render()), "↑ more")
+
+	// …and every other key still dismisses, including the one it names.
+	_, _ = h.handleHelpState(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	require.Equal(t, stateDefault, h.state,
+		"ctrl+] — the key this overlay tells the user to press — must still close it (#2413)")
+}

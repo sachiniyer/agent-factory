@@ -559,8 +559,13 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Scrolling is a property of the CONTENT, not of the caller: any overlay
 	// that overflows paints "↓ more", so any overlay that overflows must honour
 	// the keys that marker advertises (#3628).
-	scrolling := m.textOverlay != nil && m.textOverlay.Scrollable()
-	if scrolling && !isHelpDismissKey(msg) {
+	//
+	// A key this overlay would treat as DISMISSAL never scrolls — and "would
+	// treat as dismissal" has to be asked of the overlay's own policy, not of
+	// the generic set. The attach overlay's policy accepts only enter/esc, so
+	// gating on the generic set could swallow a key the policy then refuses,
+	// leaving it dead in both branches (#3634 review).
+	if m.textOverlay != nil && m.textOverlay.Scrollable() && !m.dismissesTextOverlay(msg) {
 		// Effective bindings precede hardcoded aliases so an advertised rebind
 		// such as up=pgdown keeps its configured meaning inside help.
 		if isHelpLineUpKey(msg) {
@@ -604,10 +609,7 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		runOnDismiss = run
-	} else if (scrolling || !m.textOverlayDismissAnyKey) && !isHelpDismissKey(msg) {
-		// While the content overflows, the press-any-key gate is suspended: the
-		// scroll keys the "↓ more" marker advertises must scroll rather than
-		// close the screen out from under an unread tail (#3628).
+	} else if !m.textOverlayDismissAnyKey && !isHelpDismissKey(msg) {
 		return m, nil
 	}
 
@@ -650,6 +652,22 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// dismissesTextOverlay reports whether the open overlay would close on msg. It
+// asks the overlay's own policy where it has one, so the scroll branch and the
+// dismiss branch agree about every key and none can fall between them (#3634
+// review). A press-any-key overlay is deliberately NOT treated as "dismisses
+// everything" here: while its content overflows the scroll keys must scroll,
+// and every other key still dismisses through the branch below — which is what
+// keeps the first-run interactive help's ctrl+] alive at sizes where it
+// overflows (#1576/#2413).
+func (m *home) dismissesTextOverlay(msg tea.KeyMsg) bool {
+	if m.textOverlayDismissPolicy != nil {
+		dismiss, _ := m.textOverlayDismissPolicy(msg)
+		return dismiss
+	}
+	return isHelpDismissKey(msg)
 }
 
 // recordHelpScreenSeen persists the one-shot mask of the overlay the user just
