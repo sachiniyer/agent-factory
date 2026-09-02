@@ -257,10 +257,12 @@ test("a non-allowed author gets a passing manual decision without an automatic m
   assert.doesNotMatch(exactDecision.output.summary, /not an allowed maintainer/);
   assert.equal(github.updatedChecks.at(-1).conclusion, "success");
   assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
+  // The disable is the last thing before the aggregate PASS — the only green
+  // branch protection can consume.
   assert.deepEqual(github.operations.slice(0, 4), [
     "check:create",
-    "auto-merge:disable",
     "check:create",
+    "auto-merge:disable",
     "check:update",
   ]);
 });
@@ -286,11 +288,14 @@ test("a native auto-merge cancellation failure leaves the manual-only aggregate 
     /cannot disable native auto-merge/,
   );
 
-  assert.equal(github.createdChecks.length, 1);
   assert.equal(github.nativeAutoMergeDisableAttempts, 1);
+  // The aggregate — the only consumable green — was never published.
   assert.equal(github.createdChecks[0].name, "Auto Gate decision");
   assert.equal(github.createdChecks[0].conclusion, "failure");
-  assert.equal(github.updatedChecks.length, 0);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published when the disable failed",
+  );
 });
 
 test("auto-merge armed after the PR read is still disabled before the green", async () => {
@@ -318,14 +323,19 @@ test("auto-merge armed after the PR read is still disabled before the green", as
   assert.equal(transaction.state, "manual");
   assert.deepEqual(github.disabledAutoMergePullRequestIds, ["PR_node_1465"]);
   assert.equal(github.nativeAutoMergeArmed, false);
-  // Disabled BEFORE the decision is published, not after: the ordering is what
-  // stops GitHub merging on the green this transaction is about to write.
+  // Disabled immediately BEFORE the aggregate PASS, which is the only green
+  // branch protection consumes. Ordering is the whole mechanism.
   assert.deepEqual(github.operations.slice(0, 4), [
     "check:create",
-    "auto-merge:disable",
     "check:create",
+    "auto-merge:disable",
     "check:update",
   ]);
+  assert.equal(
+    github.operations.indexOf("auto-merge:disable") + 1,
+    github.operations.lastIndexOf("check:update"),
+    "no other write may separate the disarm from the aggregate green",
+  );
 });
 
 test("the auto-merge state is read fresh rather than trusted from the snapshot", async () => {
@@ -368,10 +378,12 @@ test("a disable that leaves auto-merge armed refuses to publish the green", asyn
   );
 
   assert.equal(github.nativeAutoMergeDisableAttempts, 1);
-  // Only the invalidation check exists; no passing decision was written.
-  assert.equal(github.createdChecks.length, 1);
+  // The aggregate stays on its WAITING failure; no consumable green exists.
   assert.equal(github.createdChecks[0].conclusion, "failure");
-  assert.equal(github.updatedChecks.length, 0);
+  assert.ok(
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published while auto-merge is still armed",
+  );
 });
 
 test("an unreadable auto-merge state leaves the manual-only aggregate red", async () => {
@@ -401,8 +413,8 @@ test("an unreadable auto-merge state leaves the manual-only aggregate red", asyn
     /could not read auto-merge state for PR #1465 after 3 attempts/,
   );
   assert.ok(
-    !github.createdChecks.some((check) => check.conclusion === "success"),
-    "no passing decision may be published when the auto-merge state is unknown",
+    !github.updatedChecks.some((check) => check.conclusion === "success"),
+    "no passing aggregate may be published when the auto-merge state is unknown",
   );
 });
 

@@ -756,6 +756,7 @@ async function processAggregateHead({
   }
 
   let manualMergeRequired = false;
+  const manualMergeResults = [];
   for (const prNumber of pending.pullNumbers) {
     const result = await evaluate({ github, context, core, prNumber, setOutputs: false });
     if (evaluationFailed(result)) {
@@ -784,10 +785,9 @@ async function processAggregateHead({
     let write;
     try {
       if (result.manualMergeRequired) {
-        // Unconditional on the snapshot: a stale "not armed" is exactly the bug.
-        await ensureNativeAutoMergeDisabled({ github, context, core, result });
+        manualMergeRequired = true;
+        manualMergeResults.push(result);
       }
-      manualMergeRequired ||= Boolean(result.manualMergeRequired);
       write = await reportDecision({ github, context, core, result, manual });
     } catch (error) {
       if (!isReadFailure(error)) {
@@ -805,6 +805,34 @@ async function processAggregateHead({
     }
     if (write.state === "read-only") {
       return { state: "read-only", pending };
+    }
+  }
+
+  // Disarm as late as the API allows. The fixed aggregate below is the ONLY
+  // green branch protection consumes — the per-PR decisions carry their own
+  // names and gate nothing — so this is the last observation before the
+  // consumable green, and the interval it leaves is the single write that
+  // follows it rather than the rest of the loop.
+  //
+  // That last write cannot be conditioned on the observation: GitHub has no
+  // compare-and-set for a check run. The residual is irreducible here, and the
+  // gate's auto_merge_enabled subscription is what covers it.
+  for (const result of manualMergeResults) {
+    try {
+      await ensureNativeAutoMergeDisabled({ github, context, core, result });
+    } catch (error) {
+      if (!isReadFailure(error)) {
+        throw error;
+      }
+      const aggregate = await blockAggregateEvaluation({
+        github,
+        context,
+        core,
+        headSha: pending.headSha,
+        checkRunId: pending.checkRunId,
+        reason: formatError(error),
+      });
+      return { state: "evaluation-error", pending, aggregate };
     }
   }
 
