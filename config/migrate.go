@@ -67,7 +67,7 @@ func MigrateGlobalConfig() (*MigrationResult, error) {
 	}
 
 	var result *MigrationResult
-	if err := WithFileLock(tomlPath, func() error {
+	if err := WithFollowedFileLock(tomlPath, func() error {
 		var err error
 		result, err = migrateConfigFile(tomlPath)
 		return err
@@ -242,7 +242,15 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 		return nil, fmt.Errorf("internal error: migrating %s would change %s (no changes written)", prettyPath, diff)
 	}
 
-	backup, err := availableBackupPath(tomlPath + ".bak")
+	// The backup belongs beside the file actually being rewritten. When
+	// config.toml is a symlink that is the target, not the link's directory:
+	// it is the copy a dotfiles `git status` will show, and putting it next to
+	// the link would scatter the two halves across two repositories (#3660).
+	realPath, err := resolveWriteTarget(tomlPath)
+	if err != nil {
+		return nil, err
+	}
+	backup, err := availableBackupPath(realPath + ".bak")
 	if err != nil {
 		return nil, err
 	}
@@ -256,10 +264,13 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if info, statErr := os.Stat(tomlPath); statErr == nil {
 		mode = info.Mode().Perm()
 	}
+	// The backup path is already derived from the RESOLVED config, and
+	// availableBackupPath only returns a path that does not exist — so there is
+	// no link to follow here and the plain writer says so.
 	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(bom+content), mode); err != nil {
+	if err := AtomicWriteFileFollowingLink(tomlPath, []byte(bom+content), mode); err != nil {
 		return nil, err
 	}
 	result.Backup = backup

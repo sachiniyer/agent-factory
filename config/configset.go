@@ -416,7 +416,7 @@ func SetGlobalConfigValue(key, rawValue string) (*SetResult, error) {
 		rawStructured: rawValue, clear: spec.kind == cfgStringList && canonical == ""}
 
 	var result *SetResult
-	writeErr := WithFileLock(tomlPath, func() error {
+	writeErr := WithFollowedFileLock(tomlPath, func() error {
 		var err error
 		result, err = write.apply(tomlPath, prettyPath)
 		return err
@@ -639,7 +639,7 @@ func (w scalarWrite) apply(tomlPath, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
-	if err := AtomicWriteFile(tomlPath, []byte(updated), 0644); err != nil {
+	if err := AtomicWriteFileFollowingLink(tomlPath, []byte(updated), 0644); err != nil {
 		return nil, err
 	}
 	value := w.canonical

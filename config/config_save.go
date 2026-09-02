@@ -45,7 +45,7 @@ func withGlobalConfigLock(fn func() error) error {
 	if err != nil {
 		return err
 	}
-	return WithFileLock(tomlPath, fn)
+	return WithFollowedFileLock(tomlPath, fn)
 }
 
 // loadConfigLocked re-reads config.toml from inside the config file lock
@@ -102,7 +102,7 @@ func saveConfigLocked(config *Config) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return AtomicWriteFile(tomlPath, data, 0644)
+	return AtomicWriteFileFollowingLink(tomlPath, data, 0644)
 }
 
 // SaveConfig persists the whole global config under the config file lock, so a
@@ -127,7 +127,7 @@ func SaveConfig(config *Config) error {
 	if err != nil {
 		return err
 	}
-	return WithFileLock(tomlPath, func() error {
+	return WithFollowedFileLock(tomlPath, func() error {
 		return saveConfigLocked(config)
 	})
 }
