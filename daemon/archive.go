@@ -248,6 +248,28 @@ func (m *Manager) archiveSession(req ArchiveSessionRequest, taskTargets map[stri
 		return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its VS Code editor teardown could not be confirmed; no session teardown was started: %w", req.Title, err)
 	}
 
+	// Cancel and JOIN the in-process post-worktree hook runner before anything
+	// touches the tree. Archive relocates the checkout, so this is the #2770
+	// ordering the rebuild and cleanup paths already keep, and it must happen
+	// before the on-archive hook's own survivor sweep: stopping a live runner's
+	// current SCOPE without cancelling its context makes it treat the dead command
+	// as an ordinary failure and start the next configured command in a fresh
+	// scope — into a tree that is about to move (#3650 review). It also stops any
+	// survivor from a previous daemon generation, which has no in-process handle.
+	//
+	// A failure here cancels the archive the same way the editor teardown above
+	// does, and for the same reason: it is not "the hook failed", which teardown
+	// deliberately treats as best-effort, but "a process may still be writing into
+	// the tree we are about to move", which nothing downstream re-checks.
+	if worktree, wtErr := instance.GetGitWorktree(); wtErr == nil && worktree != nil {
+		if err := worktree.CancelAndJoinHooks(); err != nil {
+			_ = instance.Transition(session.CancelArchive())
+			instance.PreserveWorktreeRelocationClaimForRetry(relocationClaim)
+			m.persistInstance(repoID, instance)
+			return "", session.InstanceData{}, fmt.Errorf("cannot archive session %q because its post-worktree hooks could not be confirmed stopped; no session teardown was started: %w", req.Title, err)
+		}
+	}
+
 	// Tear down tmux and relocate the worktree in one call: the move is folded
 	// into the teardown core immediately after the pane-exit wait (#1195 Ph2b),
 	// so no live pane is cwd'd in the worktree during the move (previously a

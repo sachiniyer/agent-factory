@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -106,6 +107,20 @@ type GitWorktree struct {
 	// outlive the worktree itself.
 	hooksCtx    context.Context
 	hooksCancel context.CancelFunc
+	// hookScopeSessionID names the transient scopes a DAEMON-spawned hook run
+	// enters. It is set from the session's stable id at creation and restore;
+	// empty means no scope is ever derived, which is the TUI/CLI path.
+	hookScopeSessionID string
+	// hookScopeUnitPrefix is the durable handle: the prefix of every scope unit
+	// this session's hooks have entered. Written by the hook goroutine the first
+	// time a scope is actually created and by the storage restore, read by the
+	// snapshot projection and by cleanup — concurrently, hence the atomic.
+	//
+	// Its ABSENCE is meaningful and is the rollback contract: a record written by
+	// a build that knows nothing about scopes, or by this build on a path that
+	// never entered one, comes back with an empty prefix and takes exactly the
+	// behaviour that shipped before #3650.
+	hookScopeUnitPrefix atomic.Pointer[string]
 	// hooksDone is closed when the most recent post-worktree hook run finishes
 	// (completion or cancellation). Set by Setup/Rebuild* right before they
 	// return, read by the readiness wait after Start returns — a strict
@@ -143,6 +158,32 @@ func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	}
 	g.hookEnvPassthrough = normalized
 	return nil
+}
+
+// SetHookScopeSessionID records the session identity that daemon-spawned hook
+// scopes are named after. Call it before Setup or a rebuild; an empty id (the
+// default) means hooks are spawned exactly as they were before #3650.
+func (g *GitWorktree) SetHookScopeSessionID(id string) {
+	g.hookScopeSessionID = id
+}
+
+// HookScopeUnitPrefix returns the recorded scope handle, or "" when this
+// worktree's hooks have never entered a scope.
+func (g *GitWorktree) HookScopeUnitPrefix() string {
+	if prefix := g.hookScopeUnitPrefix.Load(); prefix != nil {
+		return *prefix
+	}
+	return ""
+}
+
+// SetHookScopeUnitPrefix records the durable handle. Both producers land here:
+// the hook runner when it creates the session's first scope, and storage when a
+// record that already carries one is loaded.
+func (g *GitWorktree) SetHookScopeUnitPrefix(prefix string) {
+	if strings.TrimSpace(prefix) == "" {
+		return
+	}
+	g.hookScopeUnitPrefix.Store(&prefix)
 }
 
 // HooksDone returns a channel that is closed once the worktree's post-worktree

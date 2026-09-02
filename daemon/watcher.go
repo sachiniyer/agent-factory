@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/task"
 )
@@ -525,7 +526,7 @@ func exitedFromSignal(err error, sig syscall.Signal) bool {
 // run's output tail (never nil) for the caller's failure logging.
 func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	tail := &tailBuffer{}
-	cmd := newDaemonChildCommand(w.sup.shell, "-c", w.cmdStr)
+	cmd := systemdunit.NewBoundChildCommand(w.sup.shell, "-c", w.cmdStr)
 	cmd.Dir = w.dir
 	cmd.Env = append(os.Environ(),
 		"AF_TASK_ID="+w.taskID,

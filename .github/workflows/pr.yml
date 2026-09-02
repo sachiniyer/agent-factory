@@ -323,11 +323,19 @@ jobs:
             fi
             go test -v -count=1 "$pkg" -run "$pin"
           }
-          # The production hook path: /proc/<pid>/cgroup of a real
+          # The production hook path FIRST: /proc/<pid>/cgroup of a real
           # post_worktree_commands process, and its survival across the daemon
-          # unit stopping.
+          # unit stopping. These are the two reds, so nothing added later may
+          # come between them and a failing run — a pin that cannot resolve
+          # exits this step before they run, and the failure then reports the
+          # harness refusing rather than the defect.
           run_pinned ./session/git \
             '^(TestDaemonSpawnedPostWorktreeHookLeavesTheDaemonCgroup|TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping)$' 2
+          # Then the scope SHAPES: bound dies with its owner, unbound survives
+          # it, a scoped child leaves the spawning process's cgroup, and the
+          # survivor sweep kills a TERM-ignoring hook inside its own bound.
+          run_pinned ./internal/systemdunit \
+            '^(TestBoundScopeDiesWithItsOwnerWhileUnboundScopeSurvives|TestUnboundScopeIsASiblingOfTheDaemonUnit|TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound)$' 3
 
       - name: Test abrupt daemon failure ownership
         env:
