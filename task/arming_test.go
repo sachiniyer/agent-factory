@@ -352,6 +352,35 @@ func TestApplyLiveArmingRefusesObservationsShiftedByAStraddlingWrite(t *testing.
 	assert.Nil(t, got[1].NextRunAt)
 }
 
+func TestApplyLiveArmingRefusesAShiftedRowThatAgreesOnEverythingButItsID(t *testing.T) {
+	// The straddling REMOVAL, and the twin of the insert above — it shifts rows the
+	// other way. The rail read the file before a row was deleted and the daemon
+	// after, so the rail's row 1 is a task that no longer exists and the daemon's
+	// row 1 is the task that used to be row 2.
+	//
+	// Configured alike — same project, same expression, both enabled — those two
+	// agree on every field this guard compares except the id, which no update verb
+	// can change. Without comparing it, the deleted task would take the survivor's
+	// "armed" and the survivor's next fire: a fabricated armed for a task the
+	// daemon never reported on (#3684 review). The id cannot REPLACE the row, since
+	// a hand-edited store can duplicate it; it is the staleness half of the guard,
+	// and it was implicit while the lookup was keyed on the id.
+	next := time.Date(2026, 3, 4, 9, 0, 0, 0, time.UTC)
+	survivor := armingFixture(1, "kept", "0 9 * * *")
+	survivor.Arming, survivor.NextRunAt = ArmingArmed, &next
+
+	// What the rail is still holding: the row that was deleted, and the one that
+	// has since moved up into its place.
+	stale := []Task{armingFixture(1, "gone", "0 9 * * *"), armingFixture(2, "kept", "0 9 * * *")}
+	got := ApplyLiveArming(stale, []Task{survivor})
+
+	assert.Equal(t, ArmingUnknown, got[0].Arming,
+		"row 1 now holds a different task, and a deleted one must not inherit its answer")
+	assert.Nil(t, got[0].NextRunAt, "least of all its next fire")
+	assert.Equal(t, ArmingUnknown, got[1].Arming, "and nothing was observed about row 2 any more")
+	assert.Nil(t, got[1].NextRunAt)
+}
+
 func TestApplyLiveArmingIgnoresUnnumberedRecords(t *testing.T) {
 	// Version skew. An older daemon's ListTasks response carries no ordinal field
 	// at all, and JSON decodes that absence to the zero value — so the type has to

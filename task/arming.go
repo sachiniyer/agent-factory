@@ -121,7 +121,26 @@ func ApplyLiveArming(tasks, observed []Task) []Task {
 // happened to preserve the expression. What it is NOT any more is a stand-in for
 // row identity — that was its job while the match was made on content, and it is
 // the ordinal's job now.
+//
+// ID is compared first, and it has to be STATED here rather than assumed. It is
+// not an identity — a hand-edited store can duplicate it, which is the whole
+// reason the pairing moved to rows — but it is immutable for a row, since no
+// update verb can change it (see TaskUpdate), so an observation about a different
+// id is never about this record however well everything else matches. While the
+// lookup was keyed on the id that held implicitly; keyed on the row it does not.
+//
+// The case is a straddling REMOVAL, the twin of the insert above: deleting a row
+// shifts every row below it UP, so the rail's row N becomes the daemon's row
+// N-1. A replacement task in the same project with the same expression — or a
+// watch task with the same signature — agrees on every other field here, and
+// adopting its answer would report the deleted task as armed, carrying the
+// replacement's next fire. That is a fabricated armed for a task the daemon never
+// reported on, which is the exact false clean bill this feature exists to remove
+// (#3684 review).
 func sameTrigger(o, t Task) bool {
+	if o.ID != t.ID {
+		return false
+	}
 	if o.IsWatch() != t.IsWatch() || o.Enabled != t.Enabled {
 		return false
 	}
