@@ -172,18 +172,52 @@ type plantedField struct {
 // reflect agrees this is reachable: the embedded field itself reports
 // CanSet=false, but its promoted exported members report CanSet=true — measured,
 // not assumed — which is why fill can descend and plant in them.
+// hasJSONOption reports whether a json tag carries the given option.
+func hasJSONOption(f reflect.StructField, want string) bool {
+	parts := strings.Split(f.Tag.Get("json"), ",")
+	for _, opt := range parts[1:] {
+		if opt == want {
+			return true
+		}
+	}
+	return false
+}
+
+// definesIsZero reports whether a type supplies its own IsZero, which Go 1.25's
+// `omitzero` consults. A custom IsZero may call the planted marker zero — a
+// validated identifier type could treat a deliberately invalid value as empty —
+// so json would drop the marker before the leak search while a real value
+// serializes normally (#3592 review).
+func definesIsZero(t reflect.Type) bool {
+	m, ok := t.MethodByName("IsZero")
+	if !ok {
+		if pm, pok := reflect.PointerTo(t).MethodByName("IsZero"); pok {
+			m, ok = pm, true
+		}
+	}
+	return ok && m.Type.NumIn() == 1 && m.Type.NumOut() == 1 && m.Type.Out(0).Kind() == reflect.Bool
+}
+
 func mustVisit(f reflect.StructField) bool {
 	// `json:"-"` is an explicit never-serialize marker, not a selection rule
 	// among competing fields, so honouring it is not the modelling this guard
 	// gave up. It must be honoured BEFORE the walk, because an unplantable
 	// shape behind that tag (any, []int, an unreviewed marshaler) would
 	// otherwise be reported as a hole in a field json cannot emit (#3592 review).
-	// Compare the PARSED tag name, not the whole tag. encoding/json omits the
-	// field for every "-" spelling — `json:"-"`, `json:"-,"` and
-	// `json:"-,omitempty"` all marshal to nothing (measured) — so an exact-string
-	// match on `-` alone reported a harmless non-serializable field as a hole
-	// (#3592 review).
-	if strings.Split(f.Tag.Get("json"), ",")[0] == "-" {
+	// ONLY the exact tag `json:"-"` is ignored. `json:"-,"` and
+	// `json:"-,omitempty"` serialize the field under the key "-" — measured, in
+	// isolation:
+	//
+	//	struct{ F string `json:"-"` ; N string }           -> {"n":"n"}
+	//	struct{ F string `json:"-,"` ; N string }          -> {"-":"SECRET","n":"n"}
+	//	struct{ F string `json:"-,omitempty"`; N string }  -> {"-":"SECRET","n":"n"}
+	//
+	// An earlier revision parsed the name before the comma and skipped all
+	// three. That was based on a probe which put BOTH comma forms in one
+	// struct, where they collide on the name "-" and json drops the pair — the
+	// tie rule, mistaken for the ignore rule. Skipping them plants nothing in a
+	// field json does emit, which is a missed leak (#3592 review).
+	if f.Tag.Get("json") == "-" {
 		return false
 	}
 	if f.IsExported() {
@@ -207,6 +241,20 @@ var (
 	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
 )
+
+// baseType strips pointers so a reviewed value type is recognised through one.
+func baseType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return t
+}
+
+// rendersItself reports whether a type supplies its own JSON or text encoding.
+func rendersItself(t reflect.Type) bool {
+	return t.Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(jsonMarshalerType) ||
+		t.Implements(textMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType)
+}
 
 // reviewedMarshalerTypes are the self-rendering types whose MarshalJSON has been
 // read and shown to emit only the exported fields this walk already covers.
@@ -278,13 +326,68 @@ func (f *sentinelFiller) nextMarker() string {
 // []byte as base64, [N]byte and []rune as integer lists. Markers are
 // alphanumeric-and-dash, so json never escapes them and the raw form is exact.
 func (f *sentinelFiller) record(v reflect.Value, path, marker string) {
+	f.planted = append(f.planted, plantedField{path: path, forms: f.formsFor(v, marker, false)})
+}
+
+// recordContainer is record for a byte or rune container, which additionally
+// keeps a tail fragment so a redaction touching only the first element is still
+// observable.
+func (f *sentinelFiller) recordContainer(v reflect.Value, path, marker string) {
+	f.planted = append(f.planted, plantedField{path: path, forms: f.formsFor(v, marker, true)})
+}
+
+func (f *sentinelFiller) formsFor(v reflect.Value, marker string, withTail bool) []string {
 	forms := []string{marker}
-	if v.CanInterface() {
-		if form, err := json.Marshal(v.Interface()); err == nil {
-			forms = append(forms, string(form))
+	if !v.CanInterface() {
+		return forms
+	}
+	form, err := json.Marshal(v.Interface())
+	if err != nil {
+		return forms
+	}
+	forms = append(forms, string(form))
+	// A tail is only meaningful for a container. Deriving one from a plain
+	// string would strip the marker's unique prefix and leave a fragment every
+	// other marker shares, matching any field at all — measured, as 38 spurious
+	// leaks (#3592 review).
+	if withTail {
+		if tail := encodedTail(string(form)); tail != "" {
+			forms = append(forms, tail)
 		}
 	}
-	f.planted = append(f.planted, plantedField{path: path, forms: forms})
+	return forms
+}
+
+// encodedTail derives a fragment matching the LATTER PART of an encoded
+// container, so a redaction that rewrites only its first element is still seen.
+//
+// Ordinary slices are protected from an index-zero-only redaction by seeding two
+// elements, but a byte or rune container is ONE planted value whose whole
+// encoding is recorded — change one element and that encoding no longer matches,
+// so the guard reads "redacted" while nearly every byte survives verbatim
+// (#3592 review).
+//
+// The tail is taken from the encoding itself rather than re-marshalled:
+//
+//   - An integer list "[a,b,c]" contains ",b,c]" — everything after the first
+//     comma is a literal substring of the whole.
+//   - A base64 string encodes in 3-byte groups, so dropping the first 4
+//     characters yields the encoding of everything from byte three onward,
+//     which is likewise a substring.
+func encodedTail(form string) string {
+	if len(form) > 2 && form[0] == '[' && form[len(form)-1] == ']' {
+		if comma := strings.Index(form, ","); comma >= 0 && comma+1 < len(form)-1 {
+			return form[comma+1 : len(form)-1]
+		}
+		return ""
+	}
+	if len(form) > 2 && form[0] == '"' && form[len(form)-1] == '"' {
+		body := form[1 : len(form)-1]
+		if len(body) > 8 {
+			return body[4:]
+		}
+	}
+	return ""
 }
 
 // fill plants markers throughout v, allocating pointers, slices and maps on the
@@ -302,12 +405,8 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 	// implements json.Marshaler via the promoted value method, so keying on the
 	// POINTER type missed the exemption and failed the suite on an ordinary
 	// optional timestamp (#3592 review).
-	if ty := v.Type(); ty.Implements(jsonMarshalerType) || reflect.PointerTo(ty).Implements(jsonMarshalerType) ||
-		ty.Implements(textMarshalerType) || reflect.PointerTo(ty).Implements(textMarshalerType) {
-		base := ty
-		for base.Kind() == reflect.Ptr {
-			base = base.Elem()
-		}
+	if ty := v.Type(); rendersItself(ty) {
+		base := baseType(ty)
 		if _, reviewed := reviewedMarshalerTypes[base]; !reviewed {
 			f.unsupported = append(f.unsupported, path+" ("+ty.String()+" renders itself)")
 			return
@@ -341,6 +440,20 @@ func (f *sentinelFiller) fill(v reflect.Value, path string, depth int) {
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Type().Field(i)
 			if !mustVisit(field) {
+				continue
+			}
+			// A custom IsZero decides omitzero, and it may call the planted
+			// marker zero even though real values are not — json would then
+			// drop the marker before the leak search and the guard would pass
+			// over a field that serializes in production (#3592 review).
+			// Not a concern for a reviewed self-rendering type: this walk
+			// plants no marker in one (time.Time is skipped as text-free), so
+			// there is nothing for omitzero to drop.
+			_, reviewedField := reviewedMarshalerTypes[baseType(field.Type)]
+			if !reviewedField && hasJSONOption(field, "omitzero") && definesIsZero(field.Type) {
+				f.unsupported = append(f.unsupported,
+					fmt.Sprintf("%s (omitzero with a custom %s.IsZero may drop the marker)",
+						join(path, field.Name), field.Type.String()))
 				continue
 			}
 			f.fill(v.Field(i), join(path, field.Name), depth+1)
@@ -394,7 +507,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 				v.Index(i).SetUint(uint64(b))
 			}
 		}
-		f.record(v, path, marker)
+		f.recordContainer(v, path, marker)
 	case elem == reflect.Int32:
 		// []rune is []int32, and json emits it as code points from which the
 		// exact text reconstructs.
@@ -419,7 +532,7 @@ func (f *sentinelFiller) fillSequence(v reflect.Value, path string, depth int, i
 				v.Index(i).SetInt(int64(r))
 			}
 		}
-		f.record(v, path, marker)
+		f.recordContainer(v, path, marker)
 	case isUnplantableScalar(elem):
 		f.unsupported = append(f.unsupported,
 			fmt.Sprintf("%s (%s of %s cannot carry a text marker)", path, v.Kind(), elem))
@@ -445,6 +558,16 @@ func (f *sentinelFiller) fillMap(v reflect.Value, path string, depth int) {
 	// Note the hole but DO NOT return: the keys of such a map are still
 	// plantable and still reach the bundle, so returning here would trade a
 	// value-shaped blind spot for a key-shaped one.
+	// json calls MarshalText on a key type that defines it, BEFORE any numeric
+	// conversion, so a named integer key can carry text this walk never plants
+	// and never searches for (#3592 review).
+	if kt := v.Type().Key(); rendersItself(kt) {
+		if _, reviewed := reviewedMarshalerTypes[baseType(kt)]; !reviewed {
+			f.unsupported = append(f.unsupported,
+				fmt.Sprintf("%s (map key %s renders itself)", path, kt.String()))
+			return
+		}
+	}
 	valueScalar := isScalarNumeric(v.Type().Elem().Kind())
 	if valueScalar {
 		f.unsupported = append(f.unsupported,
