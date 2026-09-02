@@ -151,9 +151,42 @@ export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex
   return ids[keepIndex] ?? "";
 }
 
-/** The tab ordinal a post-await pane rebind should land on, or -1 to leave the pane
- *  where it is. The store-side twin of the layout guard, and the shared decision
- *  createSessionTab and closeSessionTab both route through (#2000).
+/** The gesture a post-await rebind belongs to. Both await a round trip and then
+ *  re-point the focused pane; only a create also attaches the keyboard to it. */
+export type TabRebindVerb = "create" | "close";
+
+/** Why a post-await rebind was refused. The refusal itself is #2000's, and correct;
+ *  naming it is what stops it reading as a hang (#3663). */
+export type TabRebindRefusal = "session-gone" | "selection-moved" | "layout-moved" | "tab-gone";
+
+/** Either the tab ordinal the focused pane should end on, or the reason it must stay
+ *  where it is. */
+export type TabRebindOutcome = { kind: "rebind"; idx: number } | { kind: "refused"; reason: TabRebindRefusal };
+
+/** Everything the guard weighs, as one record rather than five positional arguments —
+ *  four of the six are a number or a string, and a caller that transposed two of them
+ *  would still typecheck. */
+export interface TabRebindInputs {
+  /** layoutGeneration() as it stood when the RPC was issued. */
+  pinnedGen: number;
+  /** The session the gesture was aimed at, as it stood when the RPC was issued. */
+  pinnedSelId: string;
+  /** layoutGeneration() after the await, read BEFORE the roster commit — see
+   *  index.ts guardedTabRebind for why that ordering matters. */
+  currentGen: number;
+  /** The session selected after the await. */
+  currentSelId: string | null;
+  /** Whether the pinned session survived into the refreshed roster. False means it
+   *  was killed under the user, which is NOT the same fact as the user selecting a
+   *  different one, and reads very differently to whoever is told about it. */
+  pinnedSessionAlive: boolean;
+  /** The tab the pane should end on in the post-await roster, or -1 if it is gone. */
+  targetIdx: number;
+}
+
+/** The tab ordinal a post-await pane rebind should land on, or the refusal that
+ *  leaves the pane where it is. The store-side twin of the layout guard, and the
+ *  shared decision createSessionTab and closeSessionTab both route through (#2000).
  *
  *  Both verbs await a round trip and then re-point the FOCUSED pane. splitView.trees
  *  is per-session and setFocusedTab carries no session of its own, so a `targetIdx`
@@ -164,22 +197,63 @@ export function tabToKeepOnClose(ids: string[], closedIndex: number, activeIndex
  *     pinned `pinnedSelId`), so the ordinal names a tab in a session that is no longer
  *     on screen — applying it re-points and attaches the wrong session's pane. This is
  *     the #1815 finding, in the one place (create) its guard was never applied.
- *   - generation guard: the user focused another pane or changed the layout, bumping
- *     `layoutGeneration`; re-pointing from an intent formed before that yanks it back.
+ *   - generation guard: the layout moved, bumping `layoutGeneration`; re-pointing from
+ *     an intent formed before that yanks it back.
  *
  *  `targetIdx < 0` is the honest "the tab is gone" — the created/kept tab was closed
- *  out-of-band during the await, or its session vanished — and -1 flows straight
- *  through as "leave the pane where syncSplit's identity remap already settled it",
- *  never a guess. Mirrors closeSessionTab's `next >= 0` and tabToKeepOnClose's -1. */
-export function rebindTargetAfterAwait(
-  pinnedGen: number,
-  pinnedSelId: string,
-  currentGen: number,
-  currentSelId: string | null,
-  targetIdx: number,
-): number {
-  if (currentGen !== pinnedGen || currentSelId !== pinnedSelId || targetIdx < 0) {
-    return -1;
+ *  out-of-band during the await — and the pane stays where syncSplit's identity remap
+ *  already settled it, never a guess. Mirrors closeSessionTab's `next >= 0` and
+ *  tabToKeepOnClose's -1.
+ *
+ *  It answers WHICH guard refused, rather than a bare -1, because the caller has to
+ *  tell the user something: the tab bar grew or shrank while the pane stayed put, and
+ *  a refusal nobody reports is indistinguishable from a hang — the #3663 signature.
+ *
+ *  Order is most-specific-cause first, and it is the wording that makes it matter. A
+ *  session killed under the user ALSO moves the selection (pickSelection lands
+ *  somewhere else) and ALSO takes the target with it, so checking it first is what
+ *  stops "that session is gone" being reported as "the session you left" (#3668
+ *  Codex). Between the remaining two, leaving the session subsumes whatever the
+ *  layout did meanwhile. */
+export function rebindTargetAfterAwait(inputs: TabRebindInputs): TabRebindOutcome {
+  if (!inputs.pinnedSessionAlive) {
+    return { kind: "refused", reason: "session-gone" };
   }
-  return targetIdx;
+  if (inputs.currentSelId !== inputs.pinnedSelId) {
+    return { kind: "refused", reason: "selection-moved" };
+  }
+  if (inputs.currentGen !== inputs.pinnedGen) {
+    return { kind: "refused", reason: "layout-moved" };
+  }
+  if (inputs.targetIdx < 0) {
+    return { kind: "refused", reason: "tab-gone" };
+  }
+  return { kind: "rebind", idx: inputs.targetIdx };
+}
+
+/** What to tell the user when a rebind was refused: what the gesture DID do, then why
+ *  the pane did not follow. Never an error — nothing failed, and in two of the four
+ *  cases the refusal is the user's own newer intent being honoured. The wording is
+ *  what makes the outcome distinguishable from a hang, so it names the pane's state
+ *  rather than reporting a fault (#3663).
+ *
+ *  Each sentence claims only what its reason actually establishes. "layout-moved" is
+ *  deliberately not "you focused another pane": layoutGeneration is bumped by a focus
+ *  move, by re-pointing a pane at another tab, by closing a pane, by a drag-drop
+ *  split, and by a concurrent rebind of this same kind — so naming the focus case
+ *  would be wrong for four of the five (#3668 Codex). */
+export function tabRebindRefusalNotice(reason: TabRebindRefusal, verb: TabRebindVerb): string {
+  const done = verb === "create" ? "Tab created" : "Tab closed";
+  switch (reason) {
+    case "session-gone":
+      return `${done} · its session is gone now`;
+    case "selection-moved":
+      return `${done} on the session you left · this pane kept its tab`;
+    case "layout-moved":
+      return `${done} · the layout changed meanwhile, so the pane kept its tab`;
+    case "tab-gone":
+      return verb === "create"
+        ? `${done}, but it is no longer in the tab list · the pane kept its tab`
+        : `${done} · the tab the pane would have moved to is gone too`;
+  }
 }

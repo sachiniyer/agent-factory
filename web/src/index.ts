@@ -70,6 +70,8 @@ import {
   clampActiveTab,
   pickSelection,
   rebindTargetAfterAwait,
+  tabRebindRefusalNotice,
+  type TabRebindVerb,
   tabToKeepOnClose,
   upsertSession,
 } from "./sessions.js";
@@ -907,32 +909,65 @@ function openTab(index: number): void {
  *  to one roster). The roster is committed unconditionally so the grown/shrunk tab list
  *  always lands; only the pane rebind is gated, by sessions.rebindTargetAfterAwait —
  *  the one place the guard lives, so both call sites (and the next) stay in step.
- *  `attach` attaches the focused terminal after (a create/open, mirroring the TUI's
- *  `t`), or leaves the keyboard where it is (a close). Errors (e.g. a remote session,
- *  or the tab cap) surface on the pane header's status line. */
+ *  `verb` is the gesture: a create attaches the focused terminal after (mirroring the
+ *  TUI's `t`), a close leaves the keyboard where it is, and both name themselves in
+ *  the notice a refusal now carries. Errors (e.g. a remote session, or the tab cap)
+ *  surface on the pane header's status line. */
 function guardedTabRebind(
   selId: string,
   run: () => Promise<SessionData[]>,
   resolve: (sessions: SessionData[]) => number,
-  attach: boolean,
+  verb: TabRebindVerb,
 ): void {
   // Pinned BEFORE the RPC is issued, exactly where closeSessionTab captured `gen`.
   const gen = splitView.layoutGeneration();
   void run()
     .then((sessions) => {
       const targetIdx = resolve(sessions);
-      // Commit the roster first (rerender → syncSplit re-validates the tree against the
-      // new tabCount), then re-point the focused pane only if the pinned intent still
+      // Read the generation BEFORE committing the roster. The guard asks whether the
+      // USER formed a newer intent during the await, and this commit's own rerender is
+      // not one. It does not move the generation today — syncSplit calls only
+      // setSession, which reaches neither of layoutGen's two writers, commit() and
+      // focusPane() — but reading first means a future setSession that DID bump could
+      // never turn this commit into a refusal of itself (#3663).
+      const currentGen = splitView.layoutGeneration();
+      // Commit the roster (rerender → syncSplit re-validates the tree against the new
+      // tabCount), then re-point the focused pane only if the pinned intent still
       // holds. selectedId is read AFTER the set so it reflects any session switch the
-      // user made during the await (pickSelection keeps their newer choice).
+      // user made during the await (pickSelection keeps their newer choice) — the one
+      // input that deliberately does read the committed state.
       store.set({ sessions, selectedId: pickSelection(sessions, store.get().selectedId) });
-      const idx = rebindTargetAfterAwait(gen, selId, splitView.layoutGeneration(), store.get().selectedId, targetIdx);
-      if (idx >= 0) {
-        splitView.setFocusedTab(idx);
-        if (attach) {
+      // Whether the session this gesture was aimed at survived the round trip. A
+      // session killed by another client mid-flight ALSO moves the selection
+      // (pickSelection lands elsewhere) and ALSO takes the target with it, so without
+      // this the guard would report the user's own doing for something done to them
+      // (#3668 Codex). An EMPTY pinned id is not evidence of a death: a record with no
+      // id never matches the store's selection either, and the selection guard is the
+      // one that refuses it.
+      const pinnedSessionAlive = selId === "" || sessions.some((s) => s.id === selId);
+      const outcome = rebindTargetAfterAwait({
+        pinnedGen: gen,
+        pinnedSelId: selId,
+        currentGen,
+        currentSelId: store.get().selectedId,
+        pinnedSessionAlive,
+        targetIdx,
+      });
+      if (outcome.kind === "rebind") {
+        splitView.setFocusedTab(outcome.idx);
+        if (verb === "create") {
           focusTerminal();
         }
+        return;
       }
+      // The refusal itself is #2000's and stands: the user's newer intent wins, and a
+      // tab that is gone cannot be focused. What changes is that it no longer LOOKS
+      // like a hang. The roster is committed either way, so the tab bar grew or shrank
+      // while the pane stayed put and the keyboard kept going to the tab the user
+      // thought they had left — with nothing said anywhere, which is the #3663
+      // signature. Recovering instead would re-point the pane against a roster that
+      // newer intent has already moved past, which is exactly what #2000 forbids.
+      surfaceNotice(tabRebindRefusalNotice(outcome.reason, verb));
     })
     .catch((e) => surfaceTabError(e));
 }
@@ -977,7 +1012,7 @@ function createSessionTab(kind: NewTabKind = "shell"): void {
       const grown = sessions.find((s) => s.id === selId);
       return grown ? sessionTabs(grown).findIndex((t) => t.name === createdName) : -1;
     },
-    true,
+    "create",
   );
 }
 
@@ -1028,7 +1063,7 @@ function closeSessionTab(index: number): void {
   // The post-await rebind — and its layoutGeneration + selectedId guard, once
   // spelled out here and the source of the #1815 finding — now lives in
   // guardedTabRebind, which createSessionTab shares so neither can forget it (#2000).
-  // A close only re-points the focused pane; it does not attach (attach = false).
+  // A close only re-points the focused pane; it does not attach (verb "close").
   guardedTabRebind(
     selId,
     () => closeTab(selId, sel.title, target.name, tabRealId(target), tok).then(() => fetchSnapshot(tok)),
@@ -1039,7 +1074,7 @@ function closeSessionTab(index: number): void {
       const shrunk = sessions.find((s) => s.id === selId);
       return shrunk ? sessionTabs(shrunk).map(tabIdentity).indexOf(keepId) : -1;
     },
-    false,
+    "close",
   );
 }
 
