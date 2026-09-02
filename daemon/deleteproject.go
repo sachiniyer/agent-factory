@@ -419,6 +419,21 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	} else if attributed != repoID {
 		recordedRepoID = repoID
 		repoID = attributed
+		if repoPath == "" {
+			// The row can already have been reconciled to the real id while
+			// its probe was still unconsumed, so a lookup under the
+			// provisional id the caller supplied found nothing (#3530 review
+			// id 3916912942). Without a second look the delete archives the
+			// real id's sessions and reports success while skipping both the
+			// recorded-path opt-in sweep and DeregisterProject, leaving the
+			// durable row to reappear. The provisional id is kept for the
+			// fence; only the lookup follows the identity we now act under.
+			registeredRoot, err := registeredProjectRootForRepoID(repoID)
+			if err != nil {
+				return deleteProjectTarget{repoID: repoID}, fmt.Errorf("delete project %s: could not determine its registered root after re-attributing %s; nothing was changed: %w", repoID, recordedRepoID, err)
+			}
+			repoPath = registeredRoot
+		}
 	}
 	claimantProjectID := ""
 	if repoPath != "" {

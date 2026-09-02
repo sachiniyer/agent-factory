@@ -180,6 +180,9 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 	// so a registered project on a stalled or missing checkout keeps its own
 	// row instead of vanishing or borrowing an ancestor's.
 	provenRegistryIDs := m.resolveRegisteredProjectIdentities(registeredProjects)
+	// recordedIdentities remembers which identity each registry row lent to a
+	// path, so the root_agents union below can ask rather than re-hash.
+	recordedIdentities := make(map[string]string, len(registeredProjects))
 	for _, project := range registeredProjects {
 		if project.Root == "" {
 			continue
@@ -212,11 +215,36 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 			}
 			rootPriority = 0
 		}
+		recordedIdentities[filepath.Clean(project.Root)] = resolved.id
 		ensure(resolved, rootPriority)
 	}
 	if m.appConfig != nil {
 		for path := range m.appConfig.RootAgents {
-			ensure(resolvePath(config.ExpandTilde(path)), 2)
+			expanded := config.ExpandTilde(path)
+			resolved := resolvePath(expanded)
+			// A root_agents key is a PATH, and an unresolvable one falls back
+			// to its own hash — which is no longer any project's identity now
+			// that a registered project is addressed by the identity it
+			// RECORDED (#3530 review id 3916912933). Unioned under that hash it
+			// becomes a second row for one project: zero sessions, nothing to
+			// open, and a delete that is refused because delete-project
+			// normalizes the same path back to the recorded identity.
+			//
+			// Only the FALLBACK defers to the record. A key whose path Git
+			// still resolves belongs to the repository actually there, exactly
+			// as rootAgentKeyMatchesRepo reads it — availability is not
+			// identity, and a stale row must not claim a live checkout.
+			//
+			// The active workspace is excluded explicitly: its resolution is
+			// pre-seeded from the identity opening the home already
+			// established, so it carries no probe timestamp and would
+			// otherwise look like a fallback.
+			if resolved.resolvedAt.IsZero() && expanded != m.repoRoot {
+				if recorded, ok := recordedIdentities[filepath.Clean(expanded)]; ok && recorded != "" {
+					resolved.id = recorded
+				}
+			}
+			ensure(resolved, 2)
 		}
 	}
 	// The active workspace is the best selectable spelling and wins over a

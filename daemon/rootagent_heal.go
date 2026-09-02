@@ -34,7 +34,8 @@ import (
 // ensure curve and the injectable clock.
 func (m *Manager) healRootAgentLayers() {
 	layers := m.rootAgentLayers.Load()
-	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 && len(layers.unresolvedRoots) == 0 {
+	if !layers.registryUnreadable && len(layers.personalUnreadable) == 0 &&
+		len(layers.unresolvedRoots) == 0 && len(layers.reconcileOwed) == 0 {
 		return
 	}
 	// Two independent cadences (#3299 review round 8). The registry and
@@ -82,10 +83,11 @@ func (m *Manager) healRootAgentLayers() {
 			streak := m.observeRootHealRegistrySnapshot(projects)
 			if streak >= 2 {
 				logRegistryRecordProblems(failures, strays)
-				personal, personalUnreadable, projectRoots, unresolvedRoots := projectRootAgentLayers(projects)
+				personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed := projectRootAgentLayers(projects)
 				verifiedProjects, _, _, stillPresent, perr := config.ListProjectsDetailed()
 				if perr == nil && stillPresent && sameRootHealRegistryProjects(projects, verifiedProjects) {
 					healed.personal, healed.personalUnreadable, healed.projectRoots, healed.unresolvedRoots = personal, personalUnreadable, projectRoots, unresolvedRoots
+					healed.reconcileOwed = reconcileOwed
 					healed.recordFailureIDs = recordFailureDirectoryIDs(failures)
 					healed.registryUnreadable = false
 					changed = true
@@ -114,6 +116,9 @@ func (m *Manager) healRootAgentLayers() {
 				changed = true
 				rpChanged = true
 			}
+		}
+		if retryReconcileOwed(&healed) {
+			changed = true
 		}
 		reattrChanged, settles := m.reattributeUnresolvedRoots(&healed)
 		if reattrChanged {
@@ -676,18 +681,26 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 			} else if wrote {
 				log.InfoLog.Printf("root agent snapshot: project %s resolved to repo %s for the first time; recording that identity so an absent path still addresses this project", record.projectID, repo.ID)
 			}
-			// An invented identity is provisional, and EVERYTHING keyed under
-			// it has to come with the project when it is promoted (#3530
-			// review ids 3914971803, 3914971837). Leaving any of it behind
-			// reproduces the fail-open this whole mechanism exists to close:
-			// resolution under the real id would miss a personal disable, miss
-			// a fail-closed latch, or miss a deletion, and start a root from
-			// the lower-precedence layers.
-			if !promoteDerivedIdentity(m, healed, derivedID, repo.ID) {
-				log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified, but a delete holds its provisional identity; leaving the promotion to the next pass", record.root)
-				continue
-			}
 		}
+		// EVERYTHING keyed under the identity being left behind has to come
+		// with the project (#3530 review ids 3914971803, 3914971837). Leaving
+		// any of it behind reproduces the fail-open this whole mechanism exists
+		// to close: resolution under the new id would miss a personal disable,
+		// miss a fail-closed latch, or miss a deletion, and start a root from
+		// the lower-precedence layers.
+		//
+		// Deliberately NOT limited to a provisional identity (#3530 review id
+		// 3916912953). A REAL id can be left behind too: a reconciled record
+		// whose recorded root is a linked workspace keeps that path while its
+		// repository's identity root moves, so the same checkout verifies
+		// against a marker while resolving to a different real id. Gating the
+		// move on IsDerivedRepoID published the project under the new identity
+		// with its layers, latch and tombstone still filed under the old one —
+		// which is the fail-open, arriving by another door. The durable
+		// Project.RepoID stays where it was: that field is one-way by
+		// construction and a real→real change is a rebind's business (#3611),
+		// while the in-memory snapshot follows the resolution exactly as the
+		// startup path already does for a project whose path resolves.
 		// Retirement is deferred past publication (#3299 review round 10) and
 		// queued only HERE, once the transition is certain to complete: the
 		// probe's presence is what keeps this repo attribution-pending, and
@@ -704,6 +717,10 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 		// pass's legacy sweep could then create the real-ID root in the middle
 		// of that delete. Deferring the promotion has to defer its retirement
 		// too; both retry on the next pass, together.
+		if !promoteRecordedIdentity(m, healed, derivedID, repo.ID) {
+			log.InfoLog.Printf("root agent snapshot: recorded project root %s is verified, but a delete holds the identity it is filed under; leaving the promotion to the next pass", record.root)
+			continue
+		}
 		retiredID := derivedID
 		settles = append(settles, func() {
 			m.mu.Lock()
@@ -718,17 +735,56 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 	return changed, settles
 }
 
-// promoteDerivedIdentity moves every piece of state a provisional identity was
-// holding onto the real one, at the moment the two are proven to be the same
-// project (#3530).
+// retryReconcileOwed re-attempts the durable identity writes a snapshot build
+// proved but could not persist (#3530 review id 3916912922).
 //
-// It exists only for a record written before Project.RepoID: such a record is
-// keyed by an invented id until its path first resolves, and that id is what
-// the snapshot's layers, latches and any deletion tombstone were filed under.
-// A promotion that moved only the project root would leave a personal
-// enabled=false, an unreadable-config latch, or a delete invisible to
-// resolution under the real id — each of which starts a root the user did not
-// ask for.
+// Only the WRITE is retried. The proof — exact-workspace resolution plus the
+// record's own checkout marker — was established when the entry was latched and
+// is not re-derived here, so this cannot bind a project to a replacement
+// checkout that has taken the path since. An entry is dropped when the write
+// succeeds or when the writer reports that nothing was owed (an identity is
+// already recorded, or the record is gone); anything else keeps it for the next
+// pass.
+//
+// Runs on the poll goroutine, on every heal pass, and touches no filesystem
+// unless something is owed.
+func retryReconcileOwed(healed *rootAgentSnapshot) bool {
+	if len(healed.reconcileOwed) == 0 {
+		return false
+	}
+	remaining := make(map[string]string, len(healed.reconcileOwed))
+	changed := false
+	for projectID, repoID := range healed.reconcileOwed {
+		wrote, err := config.ReconcileProjectRepoID(projectID, repoID)
+		if err != nil {
+			remaining[projectID] = repoID
+			continue
+		}
+		changed = true
+		if wrote {
+			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is recorded after all; an absent path now addresses this project as itself", projectID, repoID)
+		}
+	}
+	if !changed {
+		return false
+	}
+	healed.reconcileOwed = remaining
+	return true
+}
+
+// promoteRecordedIdentity moves every piece of state the identity a project was
+// FILED under is holding onto the identity its checkout has just been proven to
+// have (#3530).
+//
+// Usually that is a record written before Project.RepoID: it is keyed by an
+// invented id until its path first resolves, and that id is what the snapshot's
+// layers, latches and any deletion tombstone were filed under. But it is not
+// only that case — a reconciled record whose recorded root is a linked
+// workspace keeps that path while its repository's identity root moves, so the
+// id left behind is a REAL one (review id 3916912953). Either way, a promotion
+// that moved only the project root would leave a personal enabled=false, an
+// unreadable-config latch, or a delete invisible to resolution under the new
+// id — each of which starts a root the user did not ask for.
 //
 // Deliberately NOT an alias. The old design kept both identities alive and
 // taught every consumer to check the other one, which is the collision class
@@ -736,12 +792,12 @@ func (m *Manager) reattributeUnresolvedRoots(healed *rootAgentSnapshot) (changed
 // reconcile later.
 // Returns false when the promotion must not happen yet, in which case the
 // caller leaves the project on its provisional identity for another pass.
-func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, realID string) bool {
-	if derivedID == realID {
+func promoteRecordedIdentity(m *Manager, healed *rootAgentSnapshot, recordedID, realID string) bool {
+	if recordedID == realID {
 		return true
 	}
 	if rootPromotionFenceHookForTest != nil {
-		rootPromotionFenceHookForTest(derivedID)
+		rootPromotionFenceHookForTest(recordedID)
 	}
 	// A delete that fenced this identity between the pass's fence check and
 	// here must not have its fence copied forward: DeleteProject's defer
@@ -751,27 +807,27 @@ func promoteDerivedIdentity(m *Manager, healed *rootAgentSnapshot, derivedID, re
 	// Refusing the promotion is the honest answer — the delete owns this
 	// identity right now, and the next pass promotes once it settles.
 	m.mu.Lock()
-	_, fenced := m.projectDeletes[derivedID]
+	_, fenced := m.projectDeletes[recordedID]
 	m.mu.Unlock()
 	if fenced {
 		return false
 	}
-	if layer, ok := healed.personal[derivedID]; ok {
+	if layer, ok := healed.personal[recordedID]; ok {
 		healed.personal[realID] = layer
-		delete(healed.personal, derivedID)
+		delete(healed.personal, recordedID)
 	}
-	if projectID, ok := healed.personalUnreadable[derivedID]; ok {
+	if projectID, ok := healed.personalUnreadable[recordedID]; ok {
 		healed.personalUnreadable[realID] = projectID
-		delete(healed.personalUnreadable, derivedID)
+		delete(healed.personalUnreadable, recordedID)
 	}
-	// A deletion recorded against the provisional identity is a deletion of
-	// this project, so it has to reach the identity the project now has.
+	// A deletion recorded against the identity this project was filed under is
+	// a deletion of this project, so it has to reach the identity it now has.
 	m.mu.Lock()
-	if claimant, ok := m.deletedRootRepos[derivedID]; ok {
+	if claimant, ok := m.deletedRootRepos[recordedID]; ok {
 		if _, already := m.deletedRootRepos[realID]; !already {
 			m.deletedRootRepos[realID] = claimant
 		}
-		delete(m.deletedRootRepos, derivedID)
+		delete(m.deletedRootRepos, recordedID)
 	}
 	m.mu.Unlock()
 	return true

@@ -43,7 +43,17 @@ type rootAgentSnapshot struct {
 	// their layers sit in personal/personalUnreadable — so consumer verdicts
 	// must not call them unconfigured and advise adding config that already
 	// exists (#3264 review).
-	unresolvedRoots    map[string]unresolvedProjectRecord
+	unresolvedRoots map[string]unresolvedProjectRecord
+	// reconcileOwed maps a project ID to the repository identity that was
+	// PROVEN to be its own but could not be written to its registry record
+	// (#3530 review id 3916912922). It is a latch, not bookkeeping: a project
+	// whose path resolves never enters unresolvedRoots, so without it the heal
+	// pass has no reason to run at all and a failed backfill — an unrelated
+	// corrupt record makes the strict registry load fail — is never retried
+	// for the life of the daemon. If the checkout disappears before the next
+	// restart, that restart addresses the project by a provisional identity
+	// and loses the state stored under its real one.
+	reconcileOwed      map[string]string
 	legacyRepoIDs      map[string]bool
 	registryUnreadable bool
 }
@@ -88,7 +98,7 @@ func buildRootAgentSnapshot(cfg *config.Config) rootAgentSnapshot {
 	}
 	logRegistryRecordProblems(failures, strays)
 	snap.recordFailureIDs = recordFailureDirectoryIDs(failures)
-	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots = projectRootAgentLayers(projects)
+	snap.personal, snap.personalUnreadable, snap.projectRoots, snap.unresolvedRoots, snap.reconcileOwed = projectRootAgentLayers(projects)
 	return snap
 }
 
@@ -179,11 +189,12 @@ type unresolvedProjectRecord struct {
 	pathVanished bool
 }
 
-func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord) {
+func projectRootAgentLayers(projects []config.Project) (personal map[string]*config.RootAgentLayer, personalUnreadable, projectRoots map[string]string, unresolvedRoots map[string]unresolvedProjectRecord, reconcileOwed map[string]string) {
 	personal = map[string]*config.RootAgentLayer{}
 	personalUnreadable = map[string]string{}
 	projectRoots = map[string]string{}
 	unresolvedRoots = map[string]unresolvedProjectRecord{}
+	reconcileOwed = map[string]string{}
 	for _, p := range projects {
 		var repoID, repoRoot string
 		if repo, repoErr := config.RepoFromPath(p.Root); repoErr == nil {
@@ -220,7 +231,15 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 				// provisional and the next pass tries again.
 				if proven, ok := config.ResolveRegisteredProjectRepoID(context.Background(), p); ok && proven == repoID {
 					if _, err := config.ReconcileProjectRepoID(p.ID, repoID); err != nil {
-						log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; if its path goes away before this succeeds it will fall back to a provisional identity: %v", p.ID, repoID, err)
+						// Keep the work, or there is none left to retry: this
+						// project resolves, so it never joins unresolvedRoots
+						// and the heal pass would return before reaching
+						// anything (#3530 review id 3916912922). The proof has
+						// already been established here — the latch carries the
+						// identity it established, and the retry only re-does
+						// the WRITE.
+						reconcileOwed[p.ID] = repoID
+						log.WarningLog.Printf("root agent snapshot: project %s resolves to repo %s but its identity could not be recorded; retrying on the ensure cadence — until it succeeds, a path that goes away falls back to a provisional identity: %v", p.ID, repoID, err)
 					}
 				}
 			}
@@ -284,5 +303,5 @@ func projectRootAgentLayers(projects []config.Project) (personal map[string]*con
 			personal[repoID] = layer
 		}
 	}
-	return personal, personalUnreadable, projectRoots, unresolvedRoots
+	return personal, personalUnreadable, projectRoots, unresolvedRoots, reconcileOwed
 }

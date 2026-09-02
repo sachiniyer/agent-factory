@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -480,5 +481,233 @@ func assertDeletedUnderRealIdentity(t *testing.T, manager *Manager, result Delet
 	manager.mu.Unlock()
 	if !suppressedReal {
 		t.Fatalf("the delete must suppress the identity it is actually deleting (%s)", realID)
+	}
+}
+
+// TestRealToRealReattributionCarriesItsState pins review id 3916912953 (P1).
+//
+// The identity a project is FILED under is not always provisional. A
+// reconciled record whose recorded root is a linked workspace keeps that path
+// while its repository's identity root moves, so the same checkout verifies
+// against its own marker and resolves to a different REAL id. Gating the state
+// move on IsDerivedRepoID published the project under the new identity while
+// its personal layer, unreadable latch and deletion tombstone stayed under the
+// old one — so a global or legacy enable could start the new-ID root while the
+// personal disable sat one identity away, unread.
+func TestRealToRealReattributionCarriesItsState(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	writePersonalRootAgent(t, project.ID, "enabled = false")
+	realID := repoID(t, repoPath)
+	// The identity the record wrote down is real and stale: the checkout has
+	// not moved, its repository's identity root has. Nothing here is
+	// provisional, which is the whole point.
+	staleID := config.RepoIDFromRoot(filepath.Join(testguard.CanonicalTempDir(t), "former-identity-root"))
+	if staleID == realID || config.IsDerivedRepoID(staleID) {
+		t.Fatalf("fixture needs two distinct REAL identities, got %s and %s", staleID, realID)
+	}
+	setRecordedRepoID(t, project.ID, staleID)
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	before := manager.rootAgentLayers.Load()
+	if _, ok := before.unresolvedRoots[staleID]; !ok {
+		t.Fatalf("fixture must file the record under its written identity %s, got %+v", staleID, before.unresolvedRoots)
+	}
+	if _, ok := before.personal[staleID]; !ok {
+		t.Fatalf("fixture must file the personal layer under the same identity %s", staleID)
+	}
+
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	layers := manager.rootAgentLayers.Load()
+	if root, ok := layers.projectRoots[realID]; !ok || root != repoPath {
+		t.Fatalf("the verified checkout must join projectRoots under the identity it resolves to (%s at %s), got %q (present=%v)", realID, repoPath, root, ok)
+	}
+	if _, stale := layers.personal[staleID]; stale {
+		t.Fatalf("the personal layer stayed under the stale identity %s while the project was published under %s — a global or legacy enable now starts a root the user disabled", staleID, realID)
+	}
+	if _, moved := layers.personal[realID]; !moved {
+		t.Fatalf("the personal layer must arrive under the identity the project was published as (%s)", realID)
+	}
+}
+
+// TestRedirectedRepoIDDeleteRecoversTheRegistryRow pins review id 3916912942
+// (P2). The reconciliation write lands durably before the verified probe is
+// consumed, so a delete arriving with the provisional id finds no row under it,
+// gets redirected to the real id, and used to keep the empty path — archiving
+// the real sessions and reporting success while skipping both the recorded-path
+// opt-in sweep and DeregisterProject.
+func TestRedirectedRepoIDDeleteRecoversTheRegistryRow(t *testing.T) {
+	manager, _, derivedID, realID := pendingAttributionFixture(t, verifiedProbe)
+	project := onlyRegisteredProject(t)
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoID: derivedID}); err != nil {
+		t.Fatalf("DeleteProject by the provisional identity: %v", err)
+	}
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, project.ID)); statErr == nil {
+		t.Fatalf("the durable record survived a delete that reported success: the row had already been reconciled to %s, so the lookup under %s found nothing and the redirect never went back for it", realID, derivedID)
+	}
+}
+
+// TestStartupReconciliationRetriesUntilItSucceeds pins review id 3916912922
+// (P2). A project that resolves at startup never joins unresolvedRoots, so
+// when its durable backfill fails — here because an unrelated unreadable record
+// makes the registry's strict load fail — nothing was left for the heal pass to
+// do, and healRootAgentLayers returned before reaching any retry. The promised
+// backfill could then never succeed for the life of the daemon.
+func TestStartupReconciliationRetriesUntilItSucceeds(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	realID := repoID(t, repoPath)
+
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	corrupt := filepath.Join(dir, "prj_ffffffffffffffffffffffffffffffff")
+	if err := os.MkdirAll(corrupt, 0o755); err != nil {
+		t.Fatalf("mkdir corrupt record: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "project.json"), []byte("{ not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt record: %v", err)
+	}
+
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if recorded := onlyIdentityFor(t, project.ID); recorded != "" {
+		t.Fatalf("fixture must start with the backfill having FAILED, got %q", recorded)
+	}
+	owed := manager.rootAgentLayers.Load().reconcileOwed
+	if owed[project.ID] != realID {
+		t.Fatalf("a proven-but-unwritten identity must be retained as work; owed=%v", owed)
+	}
+
+	// The registry is repaired, and the ensure cadence completes what the boot
+	// promised.
+	if err := os.RemoveAll(corrupt); err != nil {
+		t.Fatalf("repair registry: %v", err)
+	}
+	manager.EnsureRootAgents()
+
+	if recorded := onlyIdentityFor(t, project.ID); recorded != realID {
+		t.Fatalf("the backfill must complete once the registry is readable again: recorded %q, want %s", recorded, realID)
+	}
+	if left := manager.rootAgentLayers.Load().reconcileOwed; len(left) != 0 {
+		t.Fatalf("a completed reconciliation must drop its latch, got %v", left)
+	}
+}
+
+// setRecordedRepoID writes a specific identity into a record, which is the only
+// way to build a record whose written identity is STALE: every writer in config
+// records the identity it just resolved.
+func setRecordedRepoID(t *testing.T, projectID, repoID string) {
+	t.Helper()
+	dir, err := config.ProjectRegistryDir()
+	if err != nil {
+		t.Fatalf("ProjectRegistryDir: %v", err)
+	}
+	path := filepath.Join(dir, projectID, "project.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+	var record map[string]any
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+	record["repo_id"] = repoID
+	out, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatalf("write record: %v", err)
+	}
+}
+
+func onlyIdentityFor(t *testing.T, projectID string) string {
+	t.Helper()
+	projects, _, _, _, err := config.ListProjectsDetailed()
+	if err != nil {
+		t.Fatalf("ListProjectsDetailed: %v", err)
+	}
+	for _, p := range projects {
+		if p.ID == projectID {
+			return p.RepoID
+		}
+	}
+	t.Fatalf("project %s is missing from the registry", projectID)
+	return ""
+}
+
+// TestUnresolvedProjectStillSeesItsPathKeyedOptIn closes the same class as the
+// delete sweep and the switcher row, found by auditing it rather than by
+// review: the verdict's legacy lookup.
+//
+// A root_agents key is a PATH, and LegacyRootAgentForRepo falls back to hashing
+// one it cannot resolve. Master matched an unresolved project's opt-in by
+// accident, because it addressed such a project BY that hash; addressing it by
+// the identity it RECORDED makes the lookup miss, and the repo then resolves to
+// "disabled" instead of "enabled, but its recorded path did not resolve" — the
+// misreport #3264 exists to prevent, and it hides an opt-in that has been in
+// root_agents the whole time.
+func TestUnresolvedProjectStillSeesItsPathKeyedOptIn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	worktree, project, realID := worktreeRecordedProject(t)
+	if _, err := config.ReconcileProjectRepoID(project.ID, realID); err != nil {
+		t.Fatalf("record the resolved identity: %v", err)
+	}
+	if realID == config.RepoIDFromRoot(filepath.Clean(worktree)) {
+		t.Fatalf("fixture must use a recorded root that is not the repository's identity root, both %s", realID)
+	}
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatalf("remove the recorded workspace: %v", err)
+	}
+
+	// The opt-in is spelled as the recorded path — the only spelling that
+	// survives the workspace.
+	manager, err := NewManager(rootTestConfig(worktree, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[realID]; !ok {
+		t.Fatalf("fixture must file the record under its recorded identity %s", realID)
+	}
+
+	verdict := manager.rootAgentMaterializeVerdictFor(realID)
+	if verdict.reason == rootAgentDisabled {
+		t.Fatalf("the project's own root_agents opt-in, spelled as its recorded root, is invisible under the identity the record wrote down: the verdict says disabled where nothing disabled it")
+	}
+	// The legacy entry's per-tick retry is what covers this repo — it creates
+	// the root the moment the recorded path returns — so "will materialize" is
+	// the accurate answer, and it is the answer master gave for this shape
+	// before the identity moved out from under the lookup.
+	if verdict.reason != rootAgentWillMaterialize {
+		t.Fatalf("an opt-in whose per-tick retry covers the repo must report that, got reason %v", verdict.reason)
 	}
 }

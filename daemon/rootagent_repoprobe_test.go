@@ -206,7 +206,7 @@ func TestRootAgentSnapshotDoesNotNarrateAnUnansweredProbeAsNotARepository(t *tes
 
 	_ = installUnanswerableGit(t)
 	warnings, _ := captureRootEnsureLogs(t)
-	_, _, projectRoots, unresolvedRoots := projectRootAgentLayers([]config.Project{project})
+	_, _, projectRoots, unresolvedRoots, _ := projectRootAgentLayers([]config.Project{project})
 
 	got := warnings.String()
 	if strings.Contains(got, "does not resolve to a git repository") {

@@ -1006,3 +1006,36 @@ func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) 
 	assert.Contains(t, ids, config.RepoIDFromRoot(filepath.Clean(project.Root)),
 		"the registration keeps its own recorded-root identity rather than vanishing")
 }
+
+// TestBuildProjectListMergesAStaleOptInIntoItsRecordedProject pins #3530 review
+// id 3916912933.
+//
+// A root_agents key is a PATH, and an unresolvable one falls back to its own
+// hash. Once a registered project is addressed by the identity it RECORDED —
+// which for a bare clone's linked workspace is the bare directory, not the
+// path — that hash is nobody's identity, so the switcher rendered a second row
+// for the same project: zero sessions, nothing to open, and a delete that
+// delete-project refuses because it normalizes the same path back to the
+// recorded identity.
+func TestBuildProjectListMergesAStaleOptInIntoItsRecordedProject(t *testing.T) {
+	_, bare, registeredRoot, _ := setupBareProjectWorktrees(t)
+	h := newTestHome(t)
+	h.repoRoot = ""
+	h.repoID = ""
+
+	project, err := config.RegisterProject(registeredRoot)
+	require.NoError(t, err)
+	require.Equal(t, config.RepoIDFromRoot(bare), project.RepoID,
+		"fixture must record an identity that is not the recorded path's hash")
+	// The registered workspace goes away, and its root_agents opt-in — keyed by
+	// that same path — is all that is left of it in the config.
+	require.NoError(t, os.RemoveAll(registeredRoot))
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{registeredRoot: {}}
+
+	projects, degraded := h.buildProjectListFrom(nil)
+	require.False(t, degraded)
+	require.Len(t, projects, 1,
+		"one project must not split into a registry row and a path-hash row: %+v", projects)
+	assert.Equal(t, config.RepoIDFromRoot(bare), projects[0].RepoID,
+		"the surviving row is the one the record vouches for")
+}
