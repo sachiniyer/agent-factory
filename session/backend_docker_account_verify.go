@@ -250,35 +250,42 @@ func classifyAccountMountSource(recorded, want string) accountSourceVerdict {
 // an image VOLUME, which never appears in argv at all; the aliased cases it
 // cannot see by construction are the resolved check's job.
 //
+// It reports EVERY offender rather than the first, for the reason the resolved
+// check and the check sequence around it do: an operator who removes the one
+// entry a refusal named, only to be refused again for the next, has been given a
+// worse answer than the whole list at once (#3602 review).
+//
 // accountSource is the host directory af mounted. warn receives one line when
 // Docker reported a source this host cannot resolve — see
 // classifyAccountMountSource for why that is a note rather than a refusal.
 func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource string, warn func(string, ...any)) error {
 	own := 0
+	var observed []string
 	for _, mount := range c.Mounts {
 		destination := path.Clean(mount.Destination)
 		if destination == dockerAccountHome {
+			own++
 			if mount.Type != "bind" {
-				return fmt.Errorf(
-					"Docker recorded a %q mount at %s where af installed a bind of the account directory; refusing rather than running the session on something af did not select",
-					mount.Type, dockerAccountHome)
+				observed = append(observed, fmt.Sprintf(
+					"Docker recorded a %q mount at %s where af installed a bind of the account directory",
+					mount.Type, dockerAccountHome))
+				continue
 			}
 			switch classifyAccountMountSource(mount.Source, accountSource) {
 			case accountSourceForeign:
-				return fmt.Errorf(
-					"Docker recorded the mount at %s as a bind of %q, which is a different directory on this host than the account af selected (%q); refusing rather than running the session on a directory af did not name",
-					dockerAccountHome, mount.Source, accountSource)
+				observed = append(observed, fmt.Sprintf(
+					"Docker recorded the mount at %s as a bind of %q, which is a different directory on this host than the account af selected (%q)",
+					dockerAccountHome, mount.Source, accountSource))
 			case accountSourceUnresolvable:
 				if warn != nil {
 					warn("backend=docker: the Docker daemon reports the account mount at %s as a bind of %q, which this host cannot resolve; af asked for %q. That is what a daemon translating client paths looks like, so it is not treated as a mismatch — but if these are genuinely different directories, the session is running on the wrong one.",
 						dockerAccountHome, mount.Source, accountSource)
 				}
 			}
-			own++
 			continue
 		}
 		if root := accountProtectedPath(destination); root != "" {
-			return configuredBoundaryRefusal("a "+mount.Type+" mount", mount.Destination, root)
+			observed = append(observed, configuredBoundaryObservation("a "+mount.Type+" mount", mount.Destination, root))
 		}
 	}
 	tmpfsTargets := make([]string, 0, len(c.HostConfig.Tmpfs))
@@ -288,25 +295,33 @@ func verifyConfiguredAccountBoundary(c dockerInspectContainer, accountSource str
 	sort.Strings(tmpfsTargets)
 	for _, target := range tmpfsTargets {
 		if root := accountProtectedPath(target); root != "" {
-			return configuredBoundaryRefusal("a tmpfs", target, root)
+			observed = append(observed, configuredBoundaryObservation("a tmpfs", target, root))
 		}
 	}
 	for _, device := range c.HostConfig.Devices {
 		if root := accountProtectedPath(device.PathInContainer); root != "" {
-			return configuredBoundaryRefusal("a device node", device.PathInContainer, root)
+			observed = append(observed, configuredBoundaryObservation("a device node", device.PathInContainer, root))
 		}
 	}
 	if own != 1 {
-		return fmt.Errorf(
-			"Docker recorded %d mounts at %s where af configured exactly one (the account); refusing rather than running the session on a boundary af cannot account for",
-			own, dockerAccountHome)
+		observed = append(observed, fmt.Sprintf(
+			"Docker recorded %d mounts at %s where af configured exactly one (the account)",
+			own, dockerAccountHome))
 	}
-	return nil
+	if len(observed) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s; refusing rather than running the session on a boundary af cannot account for",
+		strings.Join(observed, "; and "))
 }
 
-func configuredBoundaryRefusal(what, target, root string) error {
-	return fmt.Errorf(
-		"Docker was configured to install %s at %q, inside af's account boundary at %s; nothing but af's own account mount may land there",
+// configuredBoundaryObservation states one thing Docker was configured to put
+// inside the account boundary. A phrase rather than a whole error, because a
+// container can be configured with several and the refusal names them together.
+func configuredBoundaryObservation(what, target, root string) string {
+	return fmt.Sprintf(
+		"Docker was configured to install %s at %q, inside af's account boundary at %s, where nothing but af's own account mount may land",
 		what, target, root)
 }
 

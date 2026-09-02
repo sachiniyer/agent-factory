@@ -402,6 +402,25 @@ func TestAccountRuntimeVerify_ConfiguredSetIsTheBackstop(t *testing.T) {
 	}
 }
 
+// The configured check reports EVERY offender, for the same reason the resolved
+// one does: an operator who removes the single entry a refusal named, only to be
+// refused again for the next, has been given a worse answer than the whole list.
+func TestAccountRuntimeVerify_ConfiguredSetReportsEveryOffender(t *testing.T) {
+	inspect := `[{"Mounts":[
+		{"Type":"bind","Source":"` + verifyAccountSource + `","Destination":"/af-account","RW":true},
+		{"Type":"bind","Source":"/repo/evil","Destination":"/af-account/.config","RW":true}],
+		"HostConfig":{"Tmpfs":{"/af-account/tmp":"","/af-home/scratch":""},
+		"Devices":[{"PathOnHost":"/dev/zero","PathInContainer":"/af-account/planted"}]}}]`
+	inspected, err := parseDockerInspectContainer([]byte(inspect))
+	require.NoError(t, err)
+	err = verifyConfiguredAccountBoundary(inspected, verifyAccountSource, nil)
+	require.Error(t, err)
+	for _, want := range []string{"/af-account/.config", "/af-account/tmp", "/af-home/scratch", "/af-account/planted"} {
+		assert.Containsf(t, err.Error(), want,
+			"every configured entry inside the boundary must be named, not only the first found")
+	}
+}
+
 // The mount at dockerAccountHome is the account af named — decided by DIRECTORY
 // identity, never by string equality (#3602 review).
 //
