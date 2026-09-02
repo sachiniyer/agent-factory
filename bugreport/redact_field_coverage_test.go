@@ -265,6 +265,10 @@ var reviewedMarshalerTypes = map[reflect.Type]string{
 	reflect.TypeOf(time.Time{}):               "timestamp; carries no user text and is skipped by the walk",
 	reflect.TypeOf(git.ArchiveRetainedTree{}): "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, normalized via clone()",
 	reflect.TypeOf(git.ArchiveSkippedEntry{}): "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
+	reflect.TypeOf(session.InstanceData{}): "MarshalJSON (#3631) marshals a `type alias InstanceData` of the same exported fields, " +
+		"plus status_name/liveness_name — enum words derived from the Status/Liveness integers beside them, never from user text",
+	reflect.TypeOf(session.TabData{}): "MarshalJSON (#3631) marshals a `type alias TabData` of the same exported fields, " +
+		"plus kind_name — the TabKind enum word, never user text",
 }
 
 // isUnplantableScalar reports an element kind that json serializes but fill has
