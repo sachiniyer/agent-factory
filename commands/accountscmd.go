@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -156,22 +157,29 @@ const helpWrapColumns = 80
 // A word longer than the width keeps its own line rather than being split, which
 // is what keeps the follow-up URL in one piece — a broken link is worse than a
 // long line, and the link is the actionable half of the sentence.
+//
+// Width is counted in RUNES, not bytes. The sentence carries `—` and `·`, which
+// are three bytes each and one column each, so len() would wrap this paragraph
+// several columns short of every hand-written one beside it. Rune count is the
+// right measure for this text specifically — it is prose with no wide or
+// combining characters — and not a general terminal-width function.
 func wrapHelpParagraph(text string, width int) string {
 	var out strings.Builder
 	column := 0
 	for idx, word := range strings.Fields(text) {
+		length := utf8.RuneCountInString(word)
 		switch {
 		case idx == 0:
 			out.WriteString(word)
-			column = len(word)
-		case column+1+len(word) > width:
+			column = length
+		case column+1+length > width:
 			out.WriteString("\n")
 			out.WriteString(word)
-			column = len(word)
+			column = length
 		default:
 			out.WriteString(" ")
 			out.WriteString(word)
-			column += 1 + len(word)
+			column += 1 + length
 		}
 	}
 	return out.String()

@@ -173,8 +173,8 @@ bind-MOUNTS the directory, so account writes land in your real account. An accou
 af never switches accounts on its own — not on a rate limit, not on a failure.
 A session runs as the account it was started with.
 
-Registration only · a session cannot be scoped to a gemini account yet — af
-has not verified that the account boundary can prove how it launches gemini, so
+Registration only · a session cannot be scoped to a gemini account yet — af has
+not verified that the account boundary can prove how it launches gemini, so
 --account refuses rather than risk starting the session on the ambient identity
 while reporting the account you asked for. Registering and logging in work
 today, and the launch proof is tracked at
