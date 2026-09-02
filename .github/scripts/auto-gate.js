@@ -2392,7 +2392,17 @@ async function listPullRequestFiles({ github, context, number, subject = null })
       }),
     subject,
   );
-  return files.map((file) => file.filename);
+  // A rename touches BOTH paths, and the API reports the old one only as
+  // `previous_filename`. Keeping just `filename` loses the fact that a file was
+  // REMOVED from where it used to be, which every path predicate below reads as
+  // "nothing there changed" — sharpest for the TUI gate, where renaming
+  // `ui/pane.go` to `ui/pane_test.go` takes a production file out of the shipped
+  // binary while leaving one path that ends in `_test.go`.
+  return files.flatMap((file) =>
+    file.previous_filename && file.previous_filename !== file.filename
+      ? [file.filename, file.previous_filename]
+      : [file.filename],
+  );
 }
 
 async function evaluateRequiredChecks({ github, context, branch, sha, core, subject = null }) {
