@@ -31,9 +31,14 @@ import (
 //     reported with the manual step and left exactly where it is, and the keys
 //     that CAN move still move: one un-rewritable key must not block the
 //     migration that is available.
-//   - The readers of the old spellings stay. An older config keeps loading, and
-//     a rolled-back binary keeps reading a file this has rewritten, because
-//     every flat alias remains a live input to the loader.
+//   - The readers of the old spellings stay, so an older config keeps loading and
+//     the running configuration is untouched. The reverse is narrower and worth
+//     stating plainly: the GROUPED spellings have only been read since #3354
+//     (2026-08-14), so an af older than that falls back to the built-in default
+//     for a migrated key instead of reading it. For every key in the table that
+//     default is the conservative one — a loopback listener, strict host-key
+//     verification, no credential mount — so a downgrade past that boundary
+//     loses the setting in the safe direction, and the .bak restores it.
 //
 // A legacy config.json is converted to config.toml on the way in (the ordinary
 // LoadConfig conversion), which is what makes the flat JSON spellings — the
@@ -188,7 +193,14 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := AtomicWriteFile(backup, raw, 0600); err != nil {
+	// The backup carries the ORIGINAL's mode, not a fresh default: it exists to
+	// be copied back over config.toml, and a restore that silently changed the
+	// file's permissions would be a second surprise on top of the first.
+	mode := os.FileMode(0644)
+	if info, statErr := os.Stat(tomlPath); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err := AtomicWriteFile(backup, raw, mode); err != nil {
 		return nil, fmt.Errorf("failed to write the backup %s (no changes written): %w", prettyHomePath(backup), err)
 	}
 	if err := AtomicWriteFile(tomlPath, []byte(content), 0644); err != nil {

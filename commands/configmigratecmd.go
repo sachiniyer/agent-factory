@@ -29,9 +29,16 @@ place, and print the diff. This is the command the deprecated-key warnings name.
 It changes spelling, never meaning. Each value is carried over exactly as it was
 written, the rewritten file is re-parsed before anything is saved, and a rewrite
 that would change even one effective value is refused rather than written. The
-readers of the old spellings stay either way — an older config keeps loading, and
-a config this rewrote still loads on an older af — so migrating ends the warnings
-without ending the compatibility.
+readers of the old spellings stay, so an older config keeps loading and nothing
+about your running configuration changes.
+
+One thing to know before you downgrade. The grouped spellings have been read
+since 2026-08-14 (#3354). An af older than that does not know them, so it would
+fall back to the built-in default for a migrated key rather than read the
+value — for every migrated key that default is the conservative one (a loopback
+listener, strict host-key checking, no credential mount), so the fallback is
+safe rather than surprising. config.toml.bak holds the old spellings if you need
+to go back further.
 
 The previous file is kept beside it as config.toml.bak (an existing backup is
 never overwritten; the copy is numbered instead). A legacy config.json is
@@ -83,7 +90,7 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 			fmt.Fprintf(w, "  %s → %s\n", migrated.From, migrated.To)
 		}
 		fmt.Fprintf(w, "\n%s\n", strings.TrimRight(result.Diff, "\n"))
-		fmt.Fprintln(w, "\nthe effective configuration is unchanged — af reads both spellings, so this file still loads on an older af")
+		fmt.Fprintln(w, "\nthe effective configuration is unchanged — af reads both spellings · config.toml.bak holds the old ones")
 	}
 	for _, left := range result.Left {
 		fmt.Fprintf(w, "\nleft in place — %s has no in-file migration · %s\n", left.Key, left.Step)

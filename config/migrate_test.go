@@ -429,3 +429,25 @@ func TestDeprecatedKeysAreGlobalOnlySoMigrateNeedsNoScope(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrateBackupKeepsTheOriginalMode pins the backup's permissions. The
+// .bak exists to be copied back over config.toml, so a restore must not
+// silently change the file's mode. The fixture chmods explicitly rather than
+// trusting t.TempDir(), whose mode follows the process umask.
+func TestMigrateBackupKeepsTheOriginalMode(t *testing.T) {
+	for _, mode := range []os.FileMode{0600, 0644} {
+		t.Run(mode.String(), func(t *testing.T) {
+			path := migrateHome(t, everyFlatAliasConfig)
+			require.NoError(t, os.Chmod(path, mode))
+
+			result, err := MigrateGlobalConfig()
+			require.NoError(t, err)
+			require.NotEmpty(t, result.Backup)
+
+			info, err := os.Stat(result.Backup)
+			require.NoError(t, err)
+			assert.Equal(t, mode, info.Mode().Perm(),
+				"the backup must carry the mode the original had")
+		})
+	}
+}
