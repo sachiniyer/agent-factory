@@ -822,6 +822,10 @@ Examples:
   af config set default_program codex --project ~/work/myrepo
   af config unset default_program --project ~/work/myrepo
 
+Local-only: it writes the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to change that host.
+
 ```
 af config set <key> <value> [flags]
 ```
@@ -857,6 +861,10 @@ accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
 there is nothing to clear.
+
+Local-only: it writes the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to change that host.
 
 ```
 af config unset <key> [flags]

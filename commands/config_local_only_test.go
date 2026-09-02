@@ -49,7 +49,7 @@ func runConfigCLI(t *testing.T, args ...string) (stdout, stderr string, err erro
 		}
 		apiclient.FlagDaemonURL = prevFlagURL
 		configJSONFlag = prevJSON
-		resetConfigJSONFlags()
+		resetConfigSubcommandFlags()
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(os.Stdout)
 		rootCmd.SetErr(os.Stderr)
@@ -60,14 +60,20 @@ func runConfigCLI(t *testing.T, args ...string) (stdout, stderr string, err erro
 	return out.String(), errBuf.String(), err
 }
 
-// resetConfigJSONFlags puts the shared --json binding back to its default on
-// every `af config` subcommand. cobra keeps flag values and Changed across
-// Execute calls, so without this a --json case would leak into the next one.
-func resetConfigJSONFlags() {
+// resetConfigSubcommandFlags puts the bindings a case may have set back to
+// their defaults on every `af config` subcommand. cobra keeps flag values and
+// Changed across Execute calls, so without this a --json or --project case would
+// leak into the next one — and a leaked --project would silently send a global
+// case down the per-project branch.
+func resetConfigSubcommandFlags() {
 	configJSONFlag = false
 	for _, cmd := range configCmd.Commands() {
 		if flag := cmd.Flags().Lookup("json"); flag != nil {
 			_ = flag.Value.Set("false")
+			flag.Changed = false
+		}
+		if flag := cmd.Flags().Lookup("project"); flag != nil {
+			_ = flag.Value.Set("")
 			flag.Changed = false
 		}
 	}
@@ -84,6 +90,25 @@ var remoteTargetRoutes = []struct {
 }{
 	{name: "flag", prefix: []string{"--daemon-url", "http://daemon.example:8443"}},
 	{name: "env", env: "http://daemon.example:8443"},
+}
+
+// withRoute prepends a route's flags to a verb's argv without aliasing the
+// route's own slice — append onto remoteTargetRoutes[i].prefix directly and one
+// case can scribble into the table the next case reads.
+func withRoute(prefix []string, args ...string) []string {
+	return append(append([]string{}, prefix...), args...)
+}
+
+// newConfigHome is tempAFHome plus the two env vars the config writers probe:
+// a plain SHELL keeps LoadConfig on the fast `which` path instead of spawning an
+// interactive bash to look for a claude alias.
+func newConfigHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	leaveAmbientRepo(t)
+	return home
 }
 
 // requireLocalOnlyRefusal pins the whole contract of the message, not merely
@@ -109,7 +134,7 @@ func TestConfigGetRefusesARemoteDaemonTarget(t *testing.T) {
 		t.Run(route.name, func(t *testing.T) {
 			tempAFHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
-			out, _, err := runConfigCLI(t, append(append([]string{}, route.prefix...), "get", "default_program")...)
+			out, _, err := runConfigCLI(t, withRoute(route.prefix, "get", "default_program")...)
 			requireLocalOnlyRefusal(t, err, "af config get")
 			if strings.Contains(out, "claude") {
 				t.Errorf("a refused get must print no value at all, got stdout: %q", out)
@@ -123,7 +148,7 @@ func TestConfigListRefusesARemoteDaemonTarget(t *testing.T) {
 		t.Run(route.name, func(t *testing.T) {
 			tempAFHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
-			out, _, err := runConfigCLI(t, append(append([]string{}, route.prefix...), "list")...)
+			out, _, err := runConfigCLI(t, withRoute(route.prefix, "list")...)
 			requireLocalOnlyRefusal(t, err, "af config list")
 			if strings.Contains(out, "default_program") {
 				t.Errorf("a refused list must print no rows at all, got stdout: %q", out)
@@ -137,7 +162,7 @@ func TestConfigValidateRefusesARemoteDaemonTarget(t *testing.T) {
 		t.Run(route.name, func(t *testing.T) {
 			tempAFHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
-			out, _, err := runConfigCLI(t, append(append([]string{}, route.prefix...), "validate")...)
+			out, _, err := runConfigCLI(t, withRoute(route.prefix, "validate")...)
 			requireLocalOnlyRefusal(t, err, "af config validate")
 			// The verdict is the whole product of this command, and a verdict about
 			// the wrong machine is worse than no verdict.
@@ -152,17 +177,14 @@ func TestConfigMigrateRefusesARemoteDaemonTarget(t *testing.T) {
 	const deprecated = "schema_version = 1\nrequire_token = true\n"
 	for _, route := range remoteTargetRoutes {
 		t.Run(route.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("AGENT_FACTORY_HOME", home)
+			home := newConfigHome(t)
 			t.Setenv("AF_DAEMON_URL", route.env)
-			t.Setenv("SHELL", "/bin/sh")
-			leaveAmbientRepo(t)
 			path := filepath.Join(home, config.TomlConfigFileName)
 			if err := os.WriteFile(path, []byte(deprecated), 0644); err != nil {
 				t.Fatal(err)
 			}
 
-			_, _, err := runConfigCLI(t, append(append([]string{}, route.prefix...), "migrate")...)
+			_, _, err := runConfigCLI(t, withRoute(route.prefix, "migrate")...)
 			requireLocalOnlyRefusal(t, err, "af config migrate")
 
 			// migrate is the one local-only verb that WRITES. A refusal that still
@@ -181,30 +203,117 @@ func TestConfigMigrateRefusesARemoteDaemonTarget(t *testing.T) {
 	}
 }
 
-// TestConfigSetIsUnaffectedByTheLocalOnlyRefusal is the other half of the
-// contract. `af config set` is not on the local-only list, so the guard must not
-// creep into it: a remote target leaves it doing exactly what it did before.
-// This is the case that would catch a helper wired onto the wrong RunE.
-func TestConfigSetIsUnaffectedByTheLocalOnlyRefusal(t *testing.T) {
-	for _, route := range remoteTargetRoutes {
-		t.Run(route.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("AGENT_FACTORY_HOME", home)
-			t.Setenv("AF_DAEMON_URL", route.env)
-			t.Setenv("SHELL", "/bin/sh")
-			leaveAmbientRepo(t)
+// The two WRITE verbs refuse on the same seam (#3679). They were left out of the
+// first pass because #3661 recorded `af config set` as the verb that genuinely
+// follows the flag — it does not. `daemon.SetGlobalConfigValue` dials
+// DaemonSocketPath(), the LOCAL unix socket, and falls back to writing the local
+// file, so a remote target ends in `set default_program = codex in
+// ~/.agent-factory/config.toml`: a success line naming a path on the wrong
+// machine. On a mutating verb that is strictly worse than the read verbs.
+//
+// Both scopes are asserted, because the guard has to sit ABOVE the branch — one
+// placed inside the global branch would leave `--project` writing unchecked.
+// What separates the two scopes is which assertion carries the weight:
+//
+//   global   the seeded file is the oracle. Without the guard the command
+//            SUCCEEDS and rewrites it, so "unchanged" is the whole proof.
+//   project  the MESSAGE is the oracle. `--project` needs a registered project,
+//            so an unguarded run errors on its own ("… is not a registered
+//            project"); pinning the local-only wording is what distinguishes a
+//            guard that fired from a branch that merely failed later.
 
-			_, _, err := runConfigCLI(t, append(append([]string{}, route.prefix...), "set", "default_program", "codex")...)
-			if err != nil {
-				t.Fatalf("af config set must keep working under a remote target, got: %v", err)
+// seedGlobalConfig materializes a real global config in home by running one
+// unguarded write, and returns its bytes. It uses the command's own writer
+// rather than a hand-rolled TOML fixture so the seed is exactly what af would
+// have on disk — and so an `unset` case has something real to clear.
+func seedGlobalConfig(t *testing.T, home string, args ...string) []byte {
+	t.Helper()
+	t.Setenv("AF_DAEMON_URL", "")
+	if _, _, err := runConfigCLI(t, args...); err != nil {
+		t.Fatalf("seeding the config must succeed with no remote target, got: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(home, config.TomlConfigFileName))
+	if err != nil {
+		t.Fatalf("the seed write must have produced a config file: %v", err)
+	}
+	return body
+}
+
+// requireGlobalConfigUnchanged is the assertion the refusal exists for. A want
+// of nil means the file must not exist at all — these homes start empty, so a
+// refused write that had materialized the config on its way to the error would
+// be the same wrong-machine mutation in a quieter form.
+func requireGlobalConfigUnchanged(t *testing.T, home string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(filepath.Join(home, config.TomlConfigFileName))
+	if want == nil {
+		if !os.IsNotExist(err) {
+			t.Errorf("a refused write must not create the local config, stat err: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("the seeded config must still be there after a refusal: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("a refused write must leave the local config byte-identical, got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestConfigSetRefusesARemoteDaemonTarget(t *testing.T) {
+	for _, route := range remoteTargetRoutes {
+		t.Run(route.name+"/global", func(t *testing.T) {
+			home := newConfigHome(t)
+			t.Setenv("AF_DAEMON_URL", route.env)
+
+			out, _, err := runConfigCLI(t, withRoute(route.prefix, "set", "default_program", "codex")...)
+			requireLocalOnlyRefusal(t, err, "af config set")
+			// The silent lie this closes is the success line, so pin its absence too.
+			if strings.Contains(out, "set default_program") {
+				t.Errorf("a refused set must not print a success line, got stdout: %q", out)
 			}
-			written, readErr := os.ReadFile(filepath.Join(home, config.TomlConfigFileName))
-			if readErr != nil {
-				t.Fatal(readErr)
+			requireGlobalConfigUnchanged(t, home, nil)
+		})
+
+		t.Run(route.name+"/project", func(t *testing.T) {
+			home := newConfigHome(t)
+			t.Setenv("AF_DAEMON_URL", route.env)
+
+			_, _, err := runConfigCLI(t, withRoute(route.prefix,
+				"set", "default_program", "codex", "--project", t.TempDir())...)
+			requireLocalOnlyRefusal(t, err, "af config set")
+			requireGlobalConfigUnchanged(t, home, nil)
+		})
+	}
+}
+
+func TestConfigUnsetRefusesARemoteDaemonTarget(t *testing.T) {
+	// One of the three globally unsettable migrated backend settings, so the
+	// unguarded command would really clear something rather than refuse the key.
+	const unsettable = "ssh.host_key_verification"
+
+	for _, route := range remoteTargetRoutes {
+		t.Run(route.name+"/global", func(t *testing.T) {
+			home := newConfigHome(t)
+			seeded := seedGlobalConfig(t, home, "set", unsettable, "accept-new")
+			t.Setenv("AF_DAEMON_URL", route.env)
+
+			out, _, err := runConfigCLI(t, withRoute(route.prefix, "unset", unsettable)...)
+			requireLocalOnlyRefusal(t, err, "af config unset")
+			if strings.Contains(out, "cleared") {
+				t.Errorf("a refused unset must not print a success line, got stdout: %q", out)
 			}
-			if !strings.Contains(string(written), "codex") {
-				t.Errorf("af config set must still write the value, got:\n%s", written)
-			}
+			requireGlobalConfigUnchanged(t, home, seeded)
+		})
+
+		t.Run(route.name+"/project", func(t *testing.T) {
+			home := newConfigHome(t)
+			t.Setenv("AF_DAEMON_URL", route.env)
+
+			_, _, err := runConfigCLI(t, withRoute(route.prefix,
+				"unset", "default_program", "--project", t.TempDir())...)
+			requireLocalOnlyRefusal(t, err, "af config unset")
+			requireGlobalConfigUnchanged(t, home, nil)
 		})
 	}
 }

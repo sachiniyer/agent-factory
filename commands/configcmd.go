@@ -520,11 +520,26 @@ Examples:
   af config set keys '{"quit":"Q"}'
   af config set program_overrides.claude "/usr/local/bin/claude --verbose"
   af config set default_program codex --project ~/work/myrepo
-  af config unset default_program --project ~/work/myrepo`, tmux.SupportedProgramsString()),
+  af config unset default_program --project ~/work/myrepo
+
+Local-only: it writes the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to change that host.`, tmux.SupportedProgramsString()),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		// Above BOTH branches on purpose. The --project branch writes a personal
+		// per-project file that no remote daemon could own, and the global branch
+		// dials the LOCAL control socket and falls back to writing the local file
+		// (daemon/control_client.go) — so a remote target ends in a success line
+		// naming a local path either way. That is a silent lie on a MUTATING verb,
+		// strictly worse than the read verbs (#3679). Routing the global write
+		// through a targeted daemon's admission-gated SetConfigValue is a real
+		// feature and stays open on #3679; refusing is additive with respect to it.
+		if err := requireLocalTarget("af config set", "writes this machine's config file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 
 		if configSetProjectFlag != "" {
 			res, err := config.SetProjectConfigValue(configSetProjectFlag, args[0], args[1])
@@ -641,11 +656,20 @@ ssh.host_key_verification, or sandbox.ssh. Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
-there is nothing to clear.`,
+there is nothing to clear.
+
+Local-only: it writes the config on the machine it runs on, so
+--daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
+host to change that host.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
 		defer log.Close()
+		// Above both branches, for the same reason as `set`: clearing a key is a
+		// write, and both paths write a file on THIS machine (#3679).
+		if err := requireLocalTarget("af config unset", "writes this machine's config file"); err != nil {
+			return jsonWrapError(cmd, configJSONFlag, err)
+		}
 
 		if configUnsetProjectFlag == "" {
 			resp, err := daemon.UnsetGlobalConfigValue(args[0])
