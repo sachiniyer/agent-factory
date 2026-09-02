@@ -230,3 +230,70 @@ func TestAtomicWriteFileStillHardensAFHomeThroughALink(t *testing.T) {
 		"the AF home is still hardened even though the write landed outside it")
 	assertWroteThroughLink(t, link, real, "schema_version")
 }
+
+// TestAtomicWriteFileDoesNotWidenAFollowedTarget pins the mode rule. Ordinary
+// writers pass 0644 because that is the mode for a config af itself created; a
+// dotfiles target the user keeps at 0600 is a deliberate choice about a file af
+// is only REWRITING, and following the link must not quietly relax it
+// (#3660 review).
+func TestAtomicWriteFileDoesNotWidenAFollowedTarget(t *testing.T) {
+	for _, mode := range []os.FileMode{0600, 0640} {
+		t.Run(mode.String(), func(t *testing.T) {
+			link, real := linkedConfigHome(t, "schema_version = 1\nbranch_prefix = 'old/'\n")
+			require.NoError(t, os.Chmod(real, mode))
+
+			// The ordinary writer, passing its usual 0644.
+			_, err := SetGlobalConfigValue("branch_prefix", "new/")
+			require.NoError(t, err)
+
+			info, err := os.Stat(real)
+			require.NoError(t, err)
+			assert.Equal(t, mode, info.Mode().Perm(),
+				"the user's restrictive dotfiles mode survives an af write")
+			assertWroteThroughLink(t, link, real, "new/")
+		})
+	}
+}
+
+// TestFileLockGuardsTheResolvedTarget pins that the lock and the write agree on
+// which file they are about. Two AF homes linking to one dotfiles config would
+// otherwise take two different <link>.lock files while rewriting a single file,
+// which is no mutual exclusion at all (#3660 review).
+func TestFileLockGuardsTheResolvedTarget(t *testing.T) {
+	dotfiles := t.TempDir()
+	real := filepath.Join(dotfiles, "af-config.toml")
+	require.NoError(t, os.WriteFile(real, []byte("schema_version = 1\n"), 0644))
+
+	homeA, homeB := t.TempDir(), t.TempDir()
+	linkA := filepath.Join(homeA, TomlConfigFileName)
+	linkB := filepath.Join(homeB, TomlConfigFileName)
+	require.NoError(t, os.Symlink(real, linkA))
+	require.NoError(t, os.Symlink(real, linkB))
+
+	// Holding the lock through one alias must block the other, because both
+	// resolve to the same file.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- WithFileLock(linkA, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	acquired, err := TryWithFileLock(linkB, func() error { return nil })
+	require.NoError(t, err)
+	assert.False(t, acquired,
+		"a lock taken through one alias must exclude the other — they rewrite one file")
+
+	close(release)
+	require.NoError(t, <-done)
+
+	// And the lock file sits beside the real file, not beside either link.
+	assert.FileExists(t, real+".lock")
+	assert.NoFileExists(t, linkA+".lock")
+	assert.NoFileExists(t, linkB+".lock")
+}

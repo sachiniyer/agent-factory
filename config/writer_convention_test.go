@@ -20,15 +20,25 @@ import (
 // decision someone made, and an unlisted call is a writer that quietly opted out
 // of symlink handling, atomicity, and AF-home hardening at once. Adding a line
 // here should feel like asking for permission.
+//
+// Keys are file:function:call, NOT file:call. Keying by file alone would exempt
+// every future call of that kind anywhere in the file — a new config-content
+// os.OpenFile in config_load.go would have inherited the first-run
+// materializer's exemption and passed silently (#3660 review). The function name
+// is specific without being brittle: unlike a line number it survives edits
+// above it, and renaming the function is exactly when someone should re-read
+// why the exemption exists.
 var writerConventionExemptions = map[string]string{
-	"config_load.go:os.Rename": "moves the LEGACY config.json aside after conversion; it renames the old file rather than writing config content",
-	"config_load.go:os.OpenFile": "first-run materialization, deliberately O_CREATE|O_EXCL so two racing af starts cannot both claim it — " +
+	"config_load.go:convertJSONToTOML:os.Rename": "moves the LEGACY config.json aside after conversion; it renames the old file rather than writing config content",
+	"config_load.go:writeConfigIfMissing:os.OpenFile": "first-run materialization, deliberately O_CREATE|O_EXCL so two racing af starts cannot both claim it — " +
 		"exclusive create is the race guard, and it cannot meet an existing link because it fails if anything is already there",
-	"schema_migration.go:os.OpenFile": "schema-migration backup, same O_CREATE|O_EXCL contract: it must fail rather than overwrite",
-	"filelock.go:os.OpenFile":         "lock files, not config content",
-	"filelock.go:os.CreateTemp":       "AtomicWriteFile's own temp file",
-	"filelock.go:os.Rename":           "AtomicWriteFile's own rename",
-	"project_registry.go:os.Rename":   "publishes a staged project DIRECTORY; there is no file content here to write atomically",
+	"schema_migration.go:writeFileExclusive:os.OpenFile":  "schema-migration backup, same O_CREATE|O_EXCL contract: it must fail rather than overwrite an existing backup",
+	"filelock.go:TryWithFileLock:os.OpenFile":             "lock file, not config content",
+	"filelock.go:WithFileLockTimeout:os.OpenFile":         "lock file, not config content",
+	"filelock.go:WithFileLock:os.OpenFile":                "lock file, not config content",
+	"filelock.go:AtomicWriteFile:os.CreateTemp":           "AtomicWriteFile's own temp file",
+	"filelock.go:AtomicWriteFile:os.Rename":               "AtomicWriteFile's own rename",
+	"project_registry.go:writeNewProjectRecord:os.Rename": "publishes a staged project DIRECTORY into place; the metadata FILE inside it was already written with AtomicWriteFile, and a directory rename has no content to follow a link with",
 	// The in-repo writer is the deliberate ASYMMETRY, not an oversight. A global
 	// config.toml is the user's own file and a link there is their arrangement,
 	// so AtomicWriteFile follows it (#3660). An in-repo .agent-factory/config is
@@ -37,8 +47,8 @@ var writerConventionExemptions = map[string]string{
 	// atomicWriteFileInDirNoFollow resolves the destination and then pins the
 	// directory with O_NOFOLLOW, rejecting a parent-dir link swapped in after the
 	// guard rather than following it. Do not "fix" it to use AtomicWriteFile.
-	"inrepo.go:unix.Renameat": "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent",
-	"inrepo.go:unix.Unlinkat": "the same writer's temp-file cleanup",
+	"inrepo.go:atomicWriteFileInDirNoFollow:unix.Renameat": "in-repo writer's O_NOFOLLOW rename; following a link from a checked-in config is the thing it exists to prevent",
+	"inrepo.go:atomicWriteFileInDirNoFollow:unix.Unlinkat": "the same writer's temp-file cleanup",
 }
 
 // TestEveryConfigWriterGoesThroughAtomicWriteFile pins the convention that is
@@ -87,32 +97,41 @@ func TestEveryConfigWriterGoesThroughAtomicWriteFile(t *testing.T) {
 		file, err := parser.ParseFile(fset, name, nil, 0)
 		require.NoError(t, err, "parse %s", name)
 
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+		// Walk per top-level declaration so every call carries the function it
+		// sits in; a call outside any function body gets "" and can never match
+		// an exemption, which is the conservative direction.
+		for _, decl := range file.Decls {
+			enclosing := ""
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name != nil {
+				enclosing = fn.Name.Name
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				qualified := pkg.Name + "." + sel.Sel.Name
+				if !writingCalls[qualified] {
+					return true
+				}
+				key := name + ":" + enclosing + ":" + qualified
+				if _, exempt := writerConventionExemptions[key]; exempt {
+					used[key] = true
+					return true
+				}
+				offenders = append(offenders,
+					fset.Position(call.Pos()).String()+": "+qualified+" (in "+enclosing+")")
 				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok {
-				return true
-			}
-			qualified := pkg.Name + "." + sel.Sel.Name
-			if !writingCalls[qualified] {
-				return true
-			}
-			key := name + ":" + qualified
-			if _, exempt := writerConventionExemptions[key]; exempt {
-				used[key] = true
-				return true
-			}
-			offenders = append(offenders,
-				fset.Position(call.Pos()).String()+": "+qualified)
-			return true
-		})
+			})
+		}
 	}
 
 	assert.Empty(t, offenders,

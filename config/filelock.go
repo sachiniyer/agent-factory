@@ -20,8 +20,26 @@ import (
 // queue behind it. Use this on latency-sensitive paths (a user is waiting)
 // where duplicating another process's work is pointless — blocking there turns
 // a peer's slow operation into an unexplained hang of your own.
+// lockTargetPath is the path whose .lock file guards writes to `path`.
+//
+// It resolves a symlink for the same reason AtomicWriteFile does, and the two
+// must agree or the lock stops meaning anything: once two aliases (two AF homes
+// pointing at one dotfiles config, say) redirect their writes to a single file,
+// locking each unresolved path produces two different .lock files and no mutual
+// exclusion over the file both are rewriting (#3660 review).
+//
+// A path that cannot be resolved falls back to itself. The lock is advisory and
+// a failure to resolve is reported by the write that follows, so refusing to
+// lock here would replace a real error message with a confusing one.
+func lockTargetPath(path string) string {
+	if resolved, err := resolveWriteTarget(path); err == nil {
+		return resolved
+	}
+	return path
+}
+
 func TryWithFileLock(path string, fn func() error) (acquired bool, err error) {
-	lockPath := path + ".lock"
+	lockPath := lockTargetPath(path) + ".lock"
 
 	if err := ensureStorageParent(lockPath); err != nil {
 		return false, fmt.Errorf("failed to create lock directory: %w", err)
@@ -77,7 +95,7 @@ var ErrLockTimeout = errors.New("timed out waiting for file lock")
 // replaced while waiting, the stale inode is unlocked and the current path is
 // opened before retrying.
 func WithFileLockTimeout(path string, timeout time.Duration, fn func() error) error {
-	lockPath := path + ".lock"
+	lockPath := lockTargetPath(path) + ".lock"
 
 	if err := ensureStorageParent(lockPath); err != nil {
 		return fmt.Errorf("failed to create lock directory: %w", err)
@@ -139,7 +157,7 @@ var lockPollInterval = 20 * time.Millisecond
 // TryWithFileLock when a user is waiting on the result, or WithFileLockTimeout
 // when the caller must do the work but must not hang (#1917).
 func WithFileLock(path string, fn func() error) error {
-	lockPath := path + ".lock"
+	lockPath := lockTargetPath(path) + ".lock"
 
 	// Ensure the directory exists so the lock file can be created.
 	if err := ensureStorageParent(lockPath); err != nil {
@@ -209,6 +227,14 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	if target != path {
 		noticeSymlinkWrite(path, target)
+		// Do not widen the real file. Ordinary writers pass 0644 because that is
+		// the mode for a config af itself created; a target the user keeps at
+		// 0600 in their dotfiles is a deliberate choice about a file af is only
+		// rewriting, and following the link must not quietly relax it
+		// (#3660 review).
+		if info, statErr := os.Stat(target); statErr == nil {
+			perm = info.Mode().Perm()
+		}
 	}
 	// The temp file has to live in the REAL file's directory: os.Rename cannot
 	// cross filesystems, and a link into another mount is the whole point of the
