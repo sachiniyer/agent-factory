@@ -324,3 +324,91 @@ func TestAutomationsEmptyStateUsesSentenceCase(t *testing.T) {
 	assert.NotContains(t, out, "no tasks — press",
 		"the lowercase form must be gone:\n%s", out)
 }
+
+// railHeaderLine renders the automations section at a rail width and returns its
+// header row with trailing padding stripped.
+func railHeaderLine(t *testing.T, tasks []task.Task, w int) string {
+	t.Helper()
+	a := newTestAutomations(tasks)
+	a.SetRect(layout.Rect{W: w, H: 4})
+	return strings.TrimRight(strings.Split(stripANSI(a.View()), "\n")[0], " ")
+}
+
+func nSimpleTasks(n int) []task.Task {
+	var out []task.Task
+	for i := 0; i < n; i++ {
+		out = append(out, task.Task{
+			ID: fmt.Sprintf("t%d", i), Name: fmt.Sprintf("task-%d", i),
+			CronExpr: "0 3 * * *", Enabled: true,
+		})
+	}
+	return out
+}
+
+// TestAutomationsHeaderNeverEllipsizesIntoTheSeparator is #3630. Below 100
+// columns the header rendered "Automation…· m manage": the " · " separator's
+// leading space lived on the END of the title, so every shrink of the title ate
+// it and the ellipsis welded itself to the separator, reading as one mangled
+// token rather than a truncated word beside a hint.
+func TestAutomationsHeaderNeverEllipsizesIntoTheSeparator(t *testing.T) {
+	for w := 8; w <= 45; w++ {
+		line := railHeaderLine(t, nSimpleTasks(2), w)
+		require.NotContainsf(t, line, "…·",
+			"width %d: the ellipsis must never abut the separator: %q", w, line)
+		if i := strings.Index(line, "·"); i > 0 {
+			require.Equalf(t, " ", line[i-1:i],
+				"width %d: the ' · ' separator must keep its leading space: %q", w, line)
+		}
+	}
+}
+
+// The header's only information is how many tasks exist. The width fallback used
+// to replace the whole title with an ellipsized constant, so at every width below
+// 110 columns the header with two tasks was byte-identical to the header with
+// none (#3630).
+func TestAutomationsHeaderKeepsTheCountAtEveryWidth(t *testing.T) {
+	for w := 8; w <= 45; w++ {
+		empty := railHeaderLine(t, nil, w)
+		busy := railHeaderLine(t, nSimpleTasks(2), w)
+		require.NotEqualf(t, empty, busy,
+			"width %d: a header that cannot say how many tasks exist is the same line either way: %q", w, busy)
+		if w >= 15 {
+			require.Containsf(t, busy, "(2)",
+				"width %d: the count survives every form down to the rail minimum — it is the only information the header carries: %q", w, busy)
+		}
+	}
+}
+
+// The ladder itself: what is shed, and in what order. The manage affordance is
+// the last thing cut — the shipped contract TestAutomationsTitleWidthAware pins
+// — so at the 22-column rail minimum the noun ellipsizes beside it, with the
+// separator and the count both intact.
+func TestAutomationsHeaderDegradationOrder(t *testing.T) {
+	for _, tc := range []struct {
+		w    int
+		want string
+	}{
+		{40, " Automations (2) · m manage · e hooks"}, // everything
+		{37, " Automations (2) · m manage · e hooks"}, // exactly
+		{36, " Automations (2) · m manage"},           // hooks drops first
+		{27, " Automations (2) · m manage"},           // exactly
+		{26, " Automatio… (2) · m manage"},            // then the noun shrinks, counts intact
+		{22, " Autom… (2) · m manage"},                // the 22-col rail minimum (#1090)
+		{20, " Aut… (2) · m manage"},                  // …and it keeps shrinking
+		{15, " (2) · m manage"},                       // the noun goes, counts and hint stay
+	} {
+		require.Equalf(t, tc.want, railHeaderLine(t, nSimpleTasks(2), tc.w),
+			"rail width %d", tc.w)
+	}
+}
+
+// The compact one-liner (#2.6, <80 cols) rides the same ladder and keeps its own
+// richer counts.
+func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
+	a := newTestAutomations(nSimpleTasks(2))
+	a.SetCompact(true)
+	a.SetRect(layout.Rect{W: 40, H: 1})
+	line := strings.TrimRight(stripANSI(a.View()), " ")
+	require.Contains(t, line, "2 (2 on)", "the compact summary must keep both numbers")
+	require.NotContains(t, line, "…·", "and must not ellipsize into the separator")
+}
