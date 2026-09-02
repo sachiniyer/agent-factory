@@ -91,3 +91,43 @@ func TestCellsAgreesWithEveryCandidateOnPlainContent(t *testing.T) {
 		}
 	}
 }
+
+// BlockWidth takes the widest LINE; Cells measures one line and, handed a block,
+// returns the SUM of its rows because that is what x/ansi does with newlines.
+//
+// This is not a nicety. overlayOrigin measures a whole frame to centre a modal in
+// it, and summing its rows reported a 120-column frame as far wider, pushed the
+// modal to the right-hand clamp, and left every mouse zone registered somewhere
+// the modal was not drawn — #3585's own defect, reintroduced by its fix. The
+// real-terminal play-test caught it; this pins it here so it fails in a second.
+func TestBlockWidthTakesTheWidestLineNotTheSum(t *testing.T) {
+	block := "abcd\nab\nabcdefgh"
+	if got, want := BlockWidth(block), 8; got != want {
+		t.Fatalf("BlockWidth = %d, want %d (the widest line)", got, want)
+	}
+	if Cells(block) <= 8 {
+		t.Fatal("precondition: Cells is expected to SUM a multi-line block, which is why " +
+			"BlockWidth exists; if that changed, revisit both")
+	}
+	if got, want := BlockWidth("one line"), Cells("one line"); got != want {
+		t.Fatalf("for a single line the two must agree: BlockWidth=%d Cells=%d", got, want)
+	}
+	if got := BlockWidth(""); got != 0 {
+		t.Fatalf("BlockWidth(\"\") = %d, want 0", got)
+	}
+}
+
+// And BlockWidth must agree with lipgloss.Width, whose callers it replaced, for
+// content where the underlying measures agree — otherwise adopting it silently
+// moves every modal.
+func TestBlockWidthMatchesLipglossOnPlainBlocks(t *testing.T) {
+	for _, b := range []string{
+		"one\ntwo\nthree",
+		"╭──────╮\n│ hi   │\n╰──────╯",
+		strings.Repeat("x", 80) + "\n" + strings.Repeat("y", 40),
+	} {
+		if got, want := BlockWidth(b), lipgloss.Width(b); got != want {
+			t.Errorf("BlockWidth = %d, lipgloss.Width = %d for %q", got, want, b)
+		}
+	}
+}

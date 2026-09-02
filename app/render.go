@@ -61,7 +61,7 @@ func (m *home) renderFittedPaneOverlay(r layout.Rect, setSize func(int, int), re
 		setSize(contentRect.W, contentRect.H)
 		fg := sizedOverlayStyle(hooksOverlayStyle, r).Render(renderContent())
 		// Same question the compositor asks, so the same measure (#3585).
-		fgW, fgH := layout.Cells(fg), lipgloss.Height(fg)
+		fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
 		tooWide := m.termWidth > 0 && fgW > m.termWidth
 		tooTall := m.termHeight > 0 && fgH > m.termHeight
 		if (!tooWide && !tooTall) || (r.W == 1 && r.H == 1) {
@@ -327,12 +327,14 @@ func (m *home) renderProjectsRule() string {
 // exact position it has always had, so the fix costs nothing anywhere it was not
 // needed.
 func overlayOrigin(fg, bg string) layout.Point {
-	// layout.Cells, not lipgloss.Width: this origin is what places the modal AND
-	// what every RegisterZones call registers its buttons against, so measuring it
-	// differently from the compositor put the zones where the modal was not drawn
-	// (#3585). Heights are line counts and need no such agreement.
-	fgW, fgH := layout.Cells(fg), lipgloss.Height(fg)
-	bgW, bgH := layout.Cells(bg), lipgloss.Height(bg)
+	// layout.BlockWidth, not lipgloss.Width: this origin is what places the modal
+	// AND what every RegisterZones call registers its buttons against, so measuring
+	// it differently from the compositor put the zones where the modal was not
+	// drawn (#3585). BlockWidth, not Cells — these are whole multi-line blocks, and
+	// Cells would sum their rows rather than take the widest. Heights are line
+	// counts and need no such agreement.
+	fgW, fgH := layout.BlockWidth(fg), lipgloss.Height(fg)
+	bgW, bgH := layout.BlockWidth(bg), lipgloss.Height(bg)
 	y := centerOffset(bgH - fgH)
 	// A modal too tall to clear the bar even at the top of the frame keeps the
 	// old centering: showing it matters more than the hint row, and PlaceOverlay

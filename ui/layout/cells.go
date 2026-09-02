@@ -1,6 +1,8 @@
 package layout
 
 import (
+	"strings"
+
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/ansi"
 )
@@ -59,4 +61,29 @@ func Cells(s string) int {
 		return legacy
 	}
 	return width
+}
+
+// BlockWidth is the widest LINE of a multi-line block — lipgloss.Width's shape,
+// on Cells' measure.
+//
+// Cells measures one line. Handing it a whole block does not fail, it returns the
+// SUM of every row, because that is what x/ansi's StringWidth does with newlines
+// in it — and lipgloss.Width, which the callers replaced, takes the max instead.
+// Measured: "abcd\nab\nabcdefgh" is 8 to lipgloss.Width and 14 to
+// xansi.StringWidth.
+//
+// That distinction is not cosmetic. overlayOrigin measures a whole FRAME to
+// centre a modal in it; summing its rows reported a 120-column frame as ~188,
+// pushed the modal to the right-hand clamp, and left every mouse zone registered
+// somewhere the modal was not drawn — the exact defect #3585 is about,
+// reintroduced by the fix for it. Caught by the real-terminal play-test, which is
+// why that gate exists.
+func BlockWidth(s string) int {
+	widest := 0
+	for _, line := range strings.Split(s, "\n") {
+		if w := Cells(line); w > widest {
+			widest = w
+		}
+	}
+	return widest
 }
