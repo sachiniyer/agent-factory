@@ -23,6 +23,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af config`](#af-config) — Read global or project-effective config and write global config
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -590,6 +591,7 @@ af config
 
 - [`af config get`](#af-config-get) — Print one global or project-effective config value
 - [`af config list`](#af-config-list) — Print global or project-effective config values
+- [`af config migrate`](#af-config-migrate) — Rewrite deprecated config keys to their current spelling
 - [`af config set`](#af-config-set) — Set one global config key
 - [`af config unset`](#af-config-unset) — Clear a config override or migrated global setting
 - [`af config validate`](#af-config-validate) — Check that the global config parses and validates
@@ -660,6 +662,54 @@ af config list [flags]
 | `--explain` |  | Show every source candidate and why it did or did not supply each value |
 | `--json` |  | Emit the value(s) as JSON wrapped in the {data,error} envelope |
 | `--repo` | `string` | Resolve config for this project instead of the current repository |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http:// or ws:// URL instead of the local unix socket (env: AF_DAEMON_URL). The daemon is HTTP-only; terminate TLS at your own proxy if needed. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af config migrate
+
+Rewrite deprecated config keys to their current spelling
+
+Rewrite the deprecated keys in the global config to their current spelling, in
+place, and print the diff. This is the command the deprecated-key warnings name.
+
+It changes spelling, never meaning. Each value is carried over exactly as it was
+written, the rewritten file is re-parsed before anything is saved, and a rewrite
+that would change even one effective value is refused rather than written. The
+readers of the old spellings stay either way — an older config keeps loading, and
+a config this rewrote still loads on an older af — so migrating ends the warnings
+without ending the compatibility.
+
+The previous file is kept beside it as config.toml.bak (an existing backup is
+never overwritten; the copy is numbered instead). A legacy config.json is
+converted to config.toml on the way in, exactly as any af start would convert it.
+
+Running it twice is safe: the second run finds nothing to migrate.
+
+Two things it will not do:
+
+  A key written in BOTH spellings with different values is refused, naming the
+  key. af has a documented winner at load time — the grouped value — but no
+  migration should make that tie-break permanent on your behalf.
+
+  root_agents is reported and left exactly where it is. Its successor is a
+  registered project's personal [root_agent], so migrating it would mean
+  registering projects for you: durable state outside this file. The keys that
+  can move still move.
+
+```
+af config migrate [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Emit the migration result wrapped in the {data,error} envelope |
 
 **Global flags**
 

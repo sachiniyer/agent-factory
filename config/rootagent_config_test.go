@@ -52,7 +52,7 @@ func TestLegacyRootAgentsLoadWarning(t *testing.T) {
 	_, err = parseConfigTOML(data, source)
 	require.NoError(t, err)
 
-	const want = "config legacy-root-agents.toml: root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, register the project and set enabled = true plus the optional program in its personal [root_agent] config; no file was rewritten"
+	const want = "config legacy-root-agents.toml: root_agents is the legacy path map; use [root_agent], the current project profile, for new configuration; for exact per-path equivalence, register the project and set enabled = true plus the optional program in its personal [root_agent] config; `af config migrate` rewrites the other deprecated keys but leaves this one in place, since it cannot register a project for you"
 	assert.Equal(t, 1, strings.Count(warnings.String(), want),
 		"repeat loads of one shared config file must not flood the daemon log")
 }

@@ -345,3 +345,42 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 	}
 	return line[:start] + body + line[end:], true
 }
+
+// tomlRootScalarRawValue returns the value text of a root-block `leaf = …`
+// assignment exactly as it was written — quote style, spacing and all — so a
+// key relocated by `af config migrate` carries its own bytes to the new
+// spelling instead of a re-encoded lookalike. The diff then shows a moved line
+// rather than a moved-and-restyled one, and nothing has to trust the round
+// trip.
+//
+// It reports false for an absent key and for a value spread over more than one
+// line (an array, typically): relocating those raw bytes would mean re-indenting
+// them under a new header, so the migration re-encodes the decoded value there
+// instead. section is always the root block, because a flat legacy alias can
+// only ever live there.
+func tomlRootScalarRawValue(content, leaf string) (string, bool) {
+	ls := strings.Split(content, "\n")
+	curSection := ""
+	for i, line := range ls {
+		if name, ok := tomlHeaderName(line); ok {
+			curSection = name
+			continue
+		}
+		if curSection != "" || !tomlScalarLineMatches(line, "", leaf) {
+			continue
+		}
+		if tomlAssignmentEnd(ls, i) != i {
+			return "", false
+		}
+		equal := tomlAssignmentEqual(line)
+		if equal < 0 {
+			return "", false
+		}
+		value, _ := splitTrailingComment(line[equal+1:])
+		if value = strings.TrimSpace(value); value == "" {
+			return "", false
+		}
+		return value, true
+	}
+	return "", false
+}
