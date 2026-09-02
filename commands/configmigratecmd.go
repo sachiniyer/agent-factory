@@ -39,12 +39,13 @@ One thing to know before you DOWNGRADE. The grouped spellings have only been
 read since 2026-08-14 (#3354); an af older than that does not know them and
 falls back to the built-in default for a migrated key. For most keys that
 default is the conservative one (strict host-key checking, no credential
-mount). For the two token keys it is not: network.require_token and
-network.require_loopback_token both default to false while the listener still
-defaults to a live 127.0.0.1:8443, so a machine that migrated either as true and
-then downgraded past that release serves its control plane to every local user
-with no token. Migrate says so explicitly when it moves them. Restore the backup
-before such a downgrade.
+mount). Two cases are not, both because the listener defaults to a LIVE 127.0.0.1:8443:
+migrating network.require_token = true loses the token an older binary could
+read (network.require_loopback_token only matters alongside it, being inert on
+its own), and migrating an empty network.listen_addr hides the fact that the web
+server was turned OFF, so an older binary starts one. Migrate compares what such
+a binary saw before and after, and says so explicitly when a migration costs you
+either. Restore the backup before such a downgrade.
 
 The previous file is kept beside it as config.toml.bak (an existing backup is
 never overwritten; the copy is numbered instead). A legacy config.json is

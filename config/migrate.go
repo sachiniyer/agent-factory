@@ -252,72 +252,87 @@ func migrateConfigFile(tomlPath string) (*MigrationResult, error) {
 	return result, nil
 }
 
-// tokenKeysLostOnDowngrade are the migrated keys whose pre-#3354 fallback is
-// UNSAFE rather than conservative. Both default to false, and ListenAddr still
-// defaults to a live 127.0.0.1:8443 listener, so losing them does not turn the
-// control plane off — it turns its authentication off, for every local user, on
-// exactly the shared hosts where someone bothered to set them.
-var tokenKeysLostOnDowngrade = map[string]bool{
-	"network.require_token":          true,
-	"network.require_loopback_token": true,
+// downgradePosture is what a pre-#3354 af — one that reads no grouped spelling
+// at all — sees for the three keys that decide whether af's control plane is
+// reachable and whether reaching it needs a token.
+type downgradePosture struct {
+	listen               string
+	requireToken         bool
+	requireLoopbackToken bool
 }
 
-// downgradeCautions reports what this migration costs a reader who later runs an
-// af predating the grouped spellings. It fires only when a token requirement was
-// actually turned ON and then moved: a migrated `false` is the default anyway, so
-// warning about it would be noise that teaches people to skip the notice.
+// reachable reports whether this posture serves the control plane. An empty
+// listen address is the documented way to turn the web server off.
+func (p downgradePosture) reachable() bool { return p.listen != "" }
+
+// downgradeCautions reports what THIS migration costs a reader who later runs an
+// af predating the grouped spellings (#3354, 2026-08-14).
 //
-// The value comes from the PARSED config rather than from MigratedKey.Value.
-// That field holds whatever now reads in the file — the source's own bytes for a
-// relocated line, the canonical form for a dropped redundant one — so keying a
-// security decision off it would mean matching TOML source text. Asking the
-// loader what the setting actually decoded to cannot drift with a spelling.
+// It compares postures rather than testing keys one at a time, because two
+// rounds of review found cases a per-key rule missed — an already-grouped
+// require_token that made the advised restore useless, and a deliberately empty
+// listen_addr whose loss turns the web server ON. Both fall out of the same
+// question: what did an older binary see before this run, and what does it see
+// after? A key this run migrated was FLAT, so that binary read the configured
+// value then and reads the built-in default now. A key it did not migrate was
+// already grouped or absent, so the default applied in both worlds and nothing
+// changed for that binary.
+//
+// The values come from the PARSED config, never from MigratedKey.Value: that
+// field is presentation, and a security decision must not match TOML source text.
 func downgradeCautions(migrated []MigratedKey, cfg *Config, backup string) []string {
-	// Two conditions, and both are about whether this migration is what costs the
-	// reader their authentication.
-	//
-	// network.require_loopback_token is INERT while network.require_token is
-	// false — it tightens a token that require_token must first turn on — so a
-	// config with the loopback flag alone authenticates nothing even before the
-	// migration, and a downgrade takes nothing away.
-	//
-	// And enforcement must have been readable by a pre-#3354 af to begin with,
-	// which means THIS RUN is what moved require_token out of the flat spelling.
-	// If it was already grouped, an older binary never saw it, this migration
-	// changed nothing for that binary — and the backup cannot restore what it
-	// does not contain in a readable form. Telling someone to restore it would
-	// be a recovery instruction that leaves the control plane tokenless anyway,
-	// which is worse than the silence it replaces (#3624 review).
-	if enforced, ok := CurrentValue(cfg, "network.require_token"); !ok || enforced != "true" {
-		return nil
-	}
-	movedEnforcement := false
+	moved := make(map[string]bool, len(migrated))
 	for _, key := range migrated {
-		if key.To == "network.require_token" {
-			movedEnforcement = true
-			break
+		moved[key.To] = true
+	}
+
+	defaults := DefaultConfig()
+	// After the migration every one of these is grouped, so an older binary reads
+	// the built-in defaults for all of them.
+	after := downgradePosture{
+		listen:               defaults.ListenAddr,
+		requireToken:         defaults.RequireToken,
+		requireLoopbackToken: defaults.RequireLoopbackToken,
+	}
+	before := after
+	if moved["network.listen_addr"] {
+		before.listen = cfg.ListenAddr
+	}
+	if moved["network.require_token"] {
+		before.requireToken = cfg.RequireToken
+	}
+	if moved["network.require_loopback_token"] {
+		before.requireLoopbackToken = cfg.RequireLoopbackToken
+	}
+
+	switch {
+	case !before.reachable() && after.reachable():
+		// The operator turned the web server OFF, in the one spelling an older
+		// binary can read. Migrating hides that from it, and its default is a
+		// LIVE listener — so the downgrade does not weaken the control plane, it
+		// creates one where there was none.
+		return []string{fmt.Sprintf(
+			"network.listen_addr is empty — the web server is off — and moving it to the grouped spelling hides that from "+
+				"an af older than 2026-08-14 (#3354) · such a binary would fall back to the default %s listener and serve "+
+				"the control plane to every local user with no token · restore %s before downgrading past that release",
+			after.listen, backup)}
+
+	case before.requireToken && !after.requireToken:
+		// Enforcement was on AND readable by the older binary, and the listener is
+		// up in both worlds. network.require_loopback_token is only named when it
+		// travelled too: on its own it is inert, since it tightens a token that
+		// require_token must first turn on.
+		lost := []string{"network.require_token"}
+		if before.requireLoopbackToken {
+			lost = append(lost, "network.require_loopback_token")
 		}
+		return []string{fmt.Sprintf(
+			"%s moved to the grouped spelling, which af only began reading on 2026-08-14 (#3354) · an older af reads "+
+				"neither spelling, falls back to false, and keeps serving the control plane on the default %s listener "+
+				"with no token — restore %s before downgrading past that release",
+			strings.Join(lost, " and "), after.listen, backup)}
 	}
-	if !movedEnforcement {
-		return nil
-	}
-	var affected []string
-	for _, key := range migrated {
-		if !tokenKeysLostOnDowngrade[key.To] {
-			continue
-		}
-		if value, ok := CurrentValue(cfg, key.To); ok && value == "true" {
-			affected = append(affected, key.To)
-		}
-	}
-	if len(affected) == 0 {
-		return nil
-	}
-	return []string{fmt.Sprintf(
-		"%s moved to the grouped spelling, which af only began reading on 2026-08-14 (#3354) · "+
-			"an older af reads neither spelling, falls back to false, and keeps serving the control plane on the "+
-			"default 127.0.0.1:8443 listener with no token — restore %s before downgrading past that release",
-		strings.Join(affected, " and "), backup)}
+	return nil
 }
 
 // unmigratedKey builds the report for a deprecation with no in-file migration,

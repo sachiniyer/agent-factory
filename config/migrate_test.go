@@ -509,6 +509,37 @@ func TestMigrateCautionsWhenATokenRequirementMoves(t *testing.T) {
 			"the listener stays up on a downgrade — that is what makes the fallback unsafe")
 	})
 
+	t.Run("a disabled listener turning back on", func(t *testing.T) {
+		// listen_addr = "" is the documented way to turn the web server OFF, and
+		// it is readable by a pre-#3354 af. Migrating hides it from that binary,
+		// whose default is a LIVE 127.0.0.1:8443 — so the downgrade does not
+		// weaken the control plane, it creates one where the operator had none.
+		// No token key is involved, which is why a per-key rule missed it
+		// (#3624 review).
+		migrateHome(t, "schema_version = 1\nlisten_addr = ''\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1)
+		require.Len(t, result.Cautions, 1)
+		caution := result.Cautions[0]
+		assert.Contains(t, caution, "network.listen_addr is empty")
+		assert.Contains(t, caution, "127.0.0.1:8443")
+		assert.Contains(t, caution, "#3354")
+		assert.Contains(t, caution, prettyHomePath(result.Backup))
+	})
+
+	t.Run("silent when the listener merely narrows", func(t *testing.T) {
+		// A real address falling back to the loopback default is a NARROWING,
+		// which needs no warning.
+		migrateHome(t, "schema_version = 1\nlisten_addr = '0.0.0.0:8443'\n")
+
+		result, err := MigrateGlobalConfig()
+		require.NoError(t, err)
+		require.Len(t, result.Migrated, 1)
+		assert.Empty(t, result.Cautions)
+	})
+
 	t.Run("silent when enforcement was already grouped", func(t *testing.T) {
 		// [network] require_token = true is invisible to a pre-#3354 af BEFORE
 		// this run too, so the migration costs that binary nothing — and the
