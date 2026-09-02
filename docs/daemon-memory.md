@@ -386,7 +386,9 @@ only the hook correlation above connects anything to the peak.
   It is outside the *unit's* figure too — but only once a scoped tmux server has
   replaced any legacy one left in the service cgroup by a pre-upgrade daemon.
 - **Plus whatever `post_worktree_commands` builds**, per worktree — charged to
-  the daemon's cgroup until #3650 moves it out.
+  the daemon's cgroup until #3650 moves it out, and only for a worktree the
+  daemon creates on this box. An off-box backend builds it on the machine
+  hosting the workspace instead, and you size that machine for it.
 - **Plus everything else a session can start.** A session may hold any number of
   extra process-bearing tabs — shell, process, editor — and there is no cap on
   how many (#3021). Watch tasks run their command, editors and watchers run
@@ -452,8 +454,8 @@ All of it is one investigation on one machine, recorded in
 125 GB Linux box on 2026-09-02, fleet of 20 live sessions, 720 session records,
 20 tasks, daemon under a systemd user unit, sampled 60 times across a 20-minute
 window, plus 13 warmed-up unit lifetimes read out of the journal (and two
-shorter pre-warm-up ones quoted separately) and a
-**second, sandbox daemon** — the same source revision built `-tags afpprof` with
+shorter pre-warm-up ones quoted separately), and a **second, sandbox daemon** —
+the same source revision built `-tags afpprof` with
 a pprof listener, under a throwaway `AGENT_FACTORY_HOME` and `TMUX_TMPDIR` —
 which supplied every heap, goroutine and 0-session figure, because the live
 daemon exposes no profiling endpoint and was never observed idle.
