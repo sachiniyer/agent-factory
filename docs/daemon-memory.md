@@ -10,8 +10,9 @@ agent-factory-daemon.service: Consumed 14h 7min CPU time, 17.4G memory peak.
 
 `systemctl --user show agent-factory-daemon.service -p MemoryPeak` says the same
 thing, and across thirteen unit lifetimes on the box below it read as high as
-**38.3 GB**. Those numbers are real. Almost none of it is the daemon — over the
-same period the daemon process never held more than **92.6 MB**.
+**38.3 GB**. Those numbers are real, and they are not the daemon. In the one
+lifetime where the daemon process itself was measured, it peaked at **92.6 MB**
+while its unit peaked at 7.87 GB.
 
 This page gives the sizing figures for the daemon process, the commands that
 measure the process rather than its cgroup, and what actually drives the cgroup
@@ -27,14 +28,16 @@ with the raw tables, is
 
 ## The short answer
 
-- The daemon process holds **30–90 MB** resident across the two daemons
-  measured (a live one and a sandbox one — see the tables), and the live
-  daemon's high-water mark was **92,600 kB**, identical in all 60 samples over a
-  20-minute window.
-- Go heap in-use: **2.5 MB at 0 sessions · 4.6 MB at 20 live sessions** (sandbox
-  daemon — the live one cannot be profiled). 24 OS threads, constant.
+- The daemon process holds **30–90 MB** resident across the two daemons measured
+  (a live one and an instrumented sandbox one — see the tables). The live
+  daemon's `VmHWM` was **92,600 kB**, identical in all 60 samples over a
+  20-minute window: a ceiling for that process, not a session delta.
+- Go heap in-use: **2.5 MB at 0 sessions · 4.6 MB at 20 live sessions**, on the
+  sandbox daemon — the only one that can be profiled, and instrumented to make
+  that possible. 24 OS threads, constant.
 - Sessions are close to free *to the daemon*: about **0.1 MB of heap and 0.3
-  goroutines each**. There is no per-session goroutine.
+  goroutines each**, from that sandbox 0 → 20 comparison. There is no
+  per-session goroutine.
 - **Size for ~128 MB.** That is comfortable for the daemon itself at the load
   measured, and it is the number to use on a small VPS.
 - The unit's `MemoryPeak` and `MemoryCurrent` are **cgroup** figures. They read
@@ -45,10 +48,13 @@ your behalf — see [what drives the cgroup number](#what-actually-drives-the-cg
 
 ## What the daemon itself uses
 
-The live daemon carried 20 live sessions · 720 session records · 20 tasks and
-was sampled 60 times over 20 minutes. The sandbox daemon ran the same binary
-under a throwaway home, with its own sessions, and is the only one that could be
-profiled:
+Two daemons were measured, and they are not the same binary. The **live** daemon
+is the release build: it carried 20 live sessions · 720 session records · 20
+tasks and was sampled 60 times over 20 minutes through `/proc`. The **sandbox**
+daemon is the same source revision **built with profiling instrumentation**
+(`-tags afpprof`, plus an HTTP pprof listener — see
+[profiling](#profiling-the-daemon)), run under a throwaway home with its own
+sessions. It is the only one that could be profiled at all:
 
 | measure | value | source |
 |---|---|---|
@@ -58,18 +64,23 @@ profiled:
 | Go heap in-use | 2.5 MB (0 sessions) · 4.6 MB (20 sessions) | sandbox daemon |
 | goroutines | 14 (0 sessions) · 20 (20 sessions) | sandbox daemon |
 
-The heap and goroutine rows come from the **sandbox** daemon, because the live
-daemon exposes no profiling endpoint at all — see
-[profiling](#profiling-the-daemon). The `/proc` rows are the live one. Keep the
-two apart when quoting them.
+**The probe is inside the sandbox numbers.** `net/http.ListenAndServe` alone
+accounts for 512 kB of that 4.6 MB profile — about 11% — and the listener's
+goroutines are in the goroutine counts. So the heap and goroutine figures
+describe an instrumented build, not a release daemon; what survives that is the
+**0 → 20 delta**, measured on one binary carrying one probe at both endpoints.
+Lean on the delta, not on either absolute value. The `/proc` rows are the live,
+uninstrumented daemon. Keep the two apart when quoting them.
 
 The marginal cost of one live session to the daemon is therefore about **0.1 MB
 of heap and 0.3 of a goroutine**. That is a slope between the sandbox daemon's
 two measured endpoints (0 and 20 sessions), not a fitted curve — the shape
 between them was not sampled, and past 20 live sessions is untested.
 
-Record count did not move anything over the range measured: the same daemon held
-720 session records and 20 tasks throughout.
+The footprint above was observed while the daemon held **720 session records and
+20 tasks**. Both counts were constant for the whole window, so that is the
+record count the figures describe — not evidence that record count costs
+nothing. No other record count was sampled.
 
 ### Allocation rate is not footprint
 
@@ -90,9 +101,9 @@ cumulative allocation, tracked in
 
 | live sessions | daemon RSS | which daemon |
 |---|---|---|
-| 0 | ~55 MB | **sandbox** daemon, throwaway `AGENT_FACTORY_HOME`, idle |
-| 20 | ~30 MB | **sandbox** daemon, same binary, 20 sessions |
-| 20 | 45–60 MB | **live** daemon, sampled 60× over 20 minutes |
+| 0 | ~55 MB | **sandbox** daemon (instrumented), throwaway home, idle |
+| 20 | ~30 MB | **sandbox** daemon (instrumented), same binary, 20 sessions |
+| 20 | 45–60 MB | **live** daemon (release build), sampled 60× over 20 minutes |
 
 Read the rows as two separate daemons, not one curve. The live daemon was never
 observed at 0 sessions, so there is no measured figure for an idle live daemon —
@@ -103,10 +114,16 @@ with the Go GC cycle, and a large share of it is the mapped binary rather than
 anything the session load touched — which is why the same sandbox binary reads
 *higher* idle than it does under twenty sessions.
 
-The stable figures are the two that did not move: `VmHWM` (92,600 kB, unchanged
-across the whole window) and Go heap in-use (2.5 → 4.6 MB). Both say the same
-thing — 20 sessions cost the daemon a couple of megabytes. Quote `VmHWM`, not a
-single RSS reading.
+Two stable figures, and they answer different questions. **Session scaling rests
+on the sandbox comparison alone** — heap in-use 2.5 → 4.6 MB across 0 and 20
+sessions — because it is the only measurement with both endpoints. The live
+daemon's `VmHWM` of 92,600 kB is an **upper bound on that process**: it had
+already reached that mark before the sampling window opened and never moved
+again, which shows the process was stable at 20 sessions, not what those 20
+sessions cost.
+
+So quote `VmHWM` as a ceiling, quote the sandbox delta for scaling, and quote a
+single RSS reading for neither.
 
 ## The trap: `MemoryPeak` is a cgroup figure
 
@@ -116,15 +133,32 @@ single RSS reading.
 *unit's cgroup*, which covers:
 
 - the daemon process;
-- every other process in that cgroup — everything the daemon spawns, including
-  anything that outlives a stop under `KillMode=process`;
+- its **direct children that are not rerouted into another scope** — everything
+  spawned with a plain `exec`, including anything that outlives a stop under
+  `KillMode=process`;
 - **page cache** for every file anything in the cgroup read or wrote;
 - kernel slab.
 
-On the measured box, `MemoryPeak` ran **5.9–38.3 GB per unit lifetime** while
-the daemon process itself never exceeded **92.6 MB**. Against the 7.87 GB peak
-of the lifetime being sampled, the daemon accounted for **1.2%** of it, and a
-smaller fraction still of the 38.3 GB maximum.
+Not everything the daemon starts lands there. af deliberately puts two classes
+of child in their own transient systemd scopes — tmux servers
+(`session/tmux/server_scope_linux.go`) and long-lived watchers and editors
+(`newDaemonChildCommand`, `daemon/child_scope_linux.go`) — and those scopes are
+siblings of the daemon unit, not children of it. **Agent processes therefore sit
+outside the unit's figure**, which is why the sizing section below counts them
+separately.
+
+On the measured box, `MemoryPeak` ran **5.9–38.3 GB per unit lifetime**. One of
+those thirteen lifetimes had the daemon process sampled through `/proc`: it
+never exceeded **92.6 MB**, or **1.2%** of that lifetime's own 7.87 GB peak.
+
+That comparison does not reach the other twelve. `VmHWM` is per-process and
+disappears with the process, so no process-level figure exists for a daemon that
+has already exited, and none was retained. Two of the twelve are still bounded,
+by the unit figure rather than by process telemetry: the two shortest lifetimes
+(24 and 74 minutes, before the fleet warmed up) had **unit** peaks of 73.5 MB
+and 131.5 MB, so whatever the daemon held then fitted inside that. The remaining
+ten have no daemon-level measurement at all — which is the reason to run the
+commands below on your own box rather than reason backwards from a peak.
 
 The clearest demonstration is that the cgroup number moves on its own. Over one
 20-minute window — no restart, no config change, and no change at all in the
@@ -137,9 +171,17 @@ daemon's own memory:
 | `file` (page cache) | 1,832 MB | 942 MB |
 | `slab` | 431 MB | 367 MB |
 
-The daemon freed nothing. The kernel reclaimed page cache, which is reclaimable
-by definition. A cgroup peak that is mostly `file` is not memory pressure, and
-it is not a leak.
+The daemon freed nothing. The kernel reclaimed page cache, which is why
+`MemoryCurrent` fell 44% while every process figure held still.
+
+That makes a mostly-`file` peak **weak evidence of a leak**. It does not, on its
+own, establish that there was no memory pressure. `file` also counts tmpfs and
+shared memory, and dirty and writeback pages that must reach disk before they
+can be dropped, so under a `memory.high` or `memory.max` limit reclaiming it
+costs stalls and writeback rather than being free. Rule pressure out with the
+signals that measure it, not with this table: `memory.events` (the `high`,
+`max` and `oom` counters), the `file_dirty` and `file_writeback` lines of
+`memory.stat`, and PSI in `memory.pressure`.
 
 ### Commands that do answer "how much memory is the daemon using"
 
@@ -158,10 +200,12 @@ grep -E '^(anon|file|slab) ' \
 systemctl --user show agent-factory-daemon.service -p MemoryPeak -p MemoryCurrent
 ```
 
-`VmHWM` is the figure to quote: it is the process's own peak, it does not fall
-back as the GC returns pages, and on the measured box it did not move at all.
-`MemoryPeak` is exported only by newer systemd; the journal's `N memory peak`
-line on stop is the same figure by another route.
+`VmHWM` is the figure to quote for the daemon itself: the process's own peak,
+which does not fall back as the GC returns pages. Read it as a ceiling on that
+one process — it is not a delta, and it dies with the process, so it says
+nothing about a daemon that has already exited. `MemoryPeak` is exported only by
+newer systemd; the journal's `N memory peak` line on stop is the same figure by
+another route.
 
 All three commands are read-only — they signal nothing and restart nothing.
 `af daemon status` remains the supported way to ask about the daemon's health;
@@ -173,23 +217,18 @@ the daemon figures above were measured on Linux, and macOS was not sampled.
 
 ## What actually drives the cgroup number
 
-Two things, neither of them the daemon's own memory, and both charged to the
-unit.
+One measured driver, and one number that is easy to mistake for one. Neither is
+the daemon's own memory.
 
-**Child processes, at a high rate.** Sampling the unit's `cgroup.procs` at full
-speed for 75 seconds found **1,243 distinct child processes — about 16.6 per
-second, on the order of 1.4M per day**. Most are `tmux capture-pane`, one per
-session per poll, plus `git rev-parse`. Each is tiny and short-lived, but the
-page cache they touch is charged to the unit and stays charged until the kernel
-reclaims it. That is what fills the `file` line in the table above.
+### The measured driver: `post_worktree_commands`
 
-**`post_worktree_commands`, which run inside the daemon's cgroup today** — the
-current behaviour, and a bug being fixed under
+**`post_worktree_commands` run inside the daemon's cgroup today** — the current
+behaviour, and a bug being fixed under
 [#3650](https://github.com/sachiniyer/agent-factory/issues/3650) rather than a
-permanent property. When
-the daemon creates a worktree it runs your repo's post-worktree hook as its own
-child, so whatever that hook builds is accounted to the daemon unit — its anon
-memory *and* its page cache. On the measured box, one repo's hook runs
+permanent property. When the daemon creates a worktree it runs your repo's
+post-worktree hook as its own child, with no scope of its own, so whatever that
+hook builds is accounted to the daemon unit — its anon memory *and* its page
+cache. On the measured box, one repo's hook runs
 `make dev_install`, building a ~2 GB `node_modules` per worktree. Across 13 unit
 lifetimes:
 
@@ -216,6 +255,22 @@ start gate already route through a scope (#2299); the post-worktree hook and the
 archive hook do not yet. Until that lands, size the **box** for what your hooks
 build — not the daemon.
 
+### A high child-process rate, which is not a measured driver
+
+Sampling the unit's `cgroup.procs` at full speed for 75 seconds found **1,243
+distinct child processes — about 16.6 per second, on the order of 1.4M per
+day** — mostly `tmux capture-pane`, one per session per poll, plus
+`git rev-parse`. That rate is a measured fact, and it is worth knowing: it is
+where the daemon's CPU goes.
+
+It is **not** an established cause of the cgroup's `file` figure, and this page
+will not claim it is. Page cache is charged on first touch and shared
+afterwards, so re-running the same handful of small binaries mostly reuses pages
+that are already charged, and `capture-pane` talks to the tmux server rather
+than reading much from disk. No cache delta was ever attributed to these
+processes. The exec rate and the gigabytes are two separate measurements, and
+only the hook correlation above connects anything to the peak.
+
 ## Sizing a machine
 
 - **The daemon: ~128 MB**, at the load measured (20 live sessions · 720 records
@@ -227,10 +282,11 @@ build — not the daemon.
   the daemon's cgroup until #3650 moves it out.
 
 If a box is under memory pressure, do not start from the unit's `MemoryPeak`.
-Read `VmHWM` for the daemon process, then read `memory.stat` to see how much of
-the cgroup figure is reclaimable page cache. On the box above, that pair turned
-a 38 GB "daemon leak" into a 92.6 MB working set and a hook that builds
-`node_modules` in the wrong cgroup.
+Read `VmHWM` for the daemon process, read `memory.stat` to see how much of the
+cgroup figure is page cache, and read `memory.events` and `memory.pressure` to
+find out whether that cache is actually costing anything. On the box above, that
+sequence turned a gigabyte-scale "daemon leak" into a 92.6 MB process and a hook
+building `node_modules` in the wrong cgroup.
 
 ## Profiling the daemon
 
@@ -280,11 +336,17 @@ All of it is one investigation on one machine, recorded in
 [#3625](https://github.com/sachiniyer/agent-factory/issues/3625): a 16-core /
 125 GB Linux box on 2026-09-02, fleet of 20 live sessions, 720 session records,
 20 tasks, daemon under a systemd user unit, sampled 60 times across a 20-minute
-window, plus 13 historical unit lifetimes read out of the journal and a **second,
-sandbox daemon** — same binary, throwaway `AGENT_FACTORY_HOME` and
-`TMUX_TMPDIR` — which supplied every heap, goroutine and 0-session figure,
-because the live daemon exposes no profiling endpoint and was never observed
-idle. Rows say which daemon they came from; the two are not one series.
+window, plus 13 historical unit lifetimes read out of the journal and a
+**second, sandbox daemon** — the same source revision built `-tags afpprof` with
+a pprof listener, under a throwaway `AGENT_FACTORY_HOME` and `TMUX_TMPDIR` —
+which supplied every heap, goroutine and 0-session figure, because the live
+daemon exposes no profiling endpoint and was never observed idle.
+
+Three limits worth carrying away. Rows say which daemon they came from, and the
+two are not one series. The sandbox figures include the probe that made them
+measurable. And **only one of the thirteen lifetimes has process-level
+telemetry** — the journal's per-lifetime peaks are unit figures, so the older
+lifetimes bound the daemon only as loosely as a cgroup number can.
 
 Nothing here is extrapolated to other hardware, other session counts, or other
 operating systems, and nothing was measured above 20 live sessions. Where a
