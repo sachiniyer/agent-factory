@@ -41,10 +41,15 @@ func TestCandidateTempHomesStopsAtTheBudget(t *testing.T) {
 
 	sweep := candidateTempHomes(root, 4)
 
-	assert.True(t, sweep.truncated(), "a sweep that stopped at 4 of 10 directories is truncated")
+	assert.True(t, sweep.truncated(), "a sweep that stopped partway through 10 directories is truncated")
 	assert.Equal(t, 10, sweep.offered, "offered counts every first-level directory, including the unvisited ones")
-	assert.Equal(t, 4, sweep.visited)
 	assert.Len(t, sweep.candidates, 4, "each empty first-level directory contributes exactly one candidate")
+	// 3, not 4. The fourth directory was recorded as a candidate and then the
+	// budget stopped the sweep before its own children were read — so whether
+	// it holds nested homes is unknown, and an entry we did not finish is not
+	// one we visited. Counting it would overstate coverage by exactly the
+	// entry the sweep gave up on.
+	assert.Equal(t, 3, sweep.visited)
 }
 
 // TestCandidateTempHomesCompleteSweepIsNotTruncated is the twin: the bound must
@@ -182,9 +187,12 @@ func TestTruncatedSweepReportsThatItDidNotFinish(t *testing.T) {
 	assert.False(t, notices[0].Actionable,
 		"not finishing is an UNKNOWN, not a proven unhealthy condition; it must not flip the exit code")
 	assert.Contains(t, notices[0].Detail, "did NOT assess every temp home")
-	assert.Contains(t, notices[0].Detail, "4 of the 13 directories",
+	// 3, not 4: the fourth directory was appended as a candidate and then the
+	// budget stopped the sweep before its children were read, so it is not one
+	// the run FINISHED — only entries expanded in full count.
+	assert.Contains(t, notices[0].Detail, "3 of the 13 directories",
 		"the notice must name how far it got, so the reader can calibrate the counts below it")
-	assert.Contains(t, notices[0].Detail, "its 4-candidate budget",
+	assert.Contains(t, notices[0].Detail, "a 4-candidate budget",
 		"the notice must name the CONFIGURED budget, not the count it happened to stop on")
 	assert.Equal(t, []string{"stale-temp-home"}, report.Incomplete)
 }
@@ -444,4 +452,118 @@ func TestScanWideAdvisoryIsNotCollapsedIntoAPhantomHome(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.Contains(t, rows[0].detail, "no temp home could be assessed",
 		"the reason the scan did no work must survive to the default rendering")
+}
+
+// TestSweepStopsReadingAHugeDirectoryNotJustRecordingIt is the second-round P1
+// from #3568's review.
+//
+// Bounding the candidates RECORDED is not the same as bounding the work. The
+// first fix still called os.ReadDir, which reads every entry and filename-sorts
+// them before returning, so a directory with millions of children cost memory
+// and time proportional to all of them — and could hang or be OOM-killed before
+// the incompleteness notice was ever emitted.
+//
+// The candidate count cannot show this: from the outside, a sweep that reads a
+// million entries and records ten looks exactly like one that read ten. So this
+// counts the READ, through the scanDirBatch seam that exists for the purpose.
+func TestSweepStopsReadingAHugeDirectoryNotJustRecordingIt(t *testing.T) {
+	root := t.TempDir()
+	const children = 500
+	for i := 0; i < children; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "TestFoo", fmt.Sprintf("%04d", i)), 0755))
+	}
+
+	prevBatch := tempHomeChildBatch
+	tempHomeChildBatch = 32
+	t.Cleanup(func() { tempHomeChildBatch = prevBatch })
+
+	read := 0
+	prev := scanDirBatch
+	scanDirBatch = func(f *os.File, n int) ([]os.DirEntry, error) {
+		entries, err := prev(f, n)
+		read += len(entries)
+		return entries, err
+	}
+	t.Cleanup(func() { scanDirBatch = prev })
+
+	sweep := candidateTempHomes(root, 10)
+
+	assert.LessOrEqual(t, len(sweep.candidates), 10)
+	assert.Less(t, read, children,
+		"the sweep must stop READING the directory, not just stop recording candidates from it")
+	assert.True(t, sweep.truncated())
+}
+
+// TestUnlistableFirstLevelDirectoryIsIncomplete is the second-round P2: a
+// first-level directory whose own listing fails hides everything nested inside
+// it. Counting it as visited made it indistinguishable from one assessed in
+// full, so a temp dir where EVERY entry failed this way reported a complete run
+// having looked at nothing.
+func TestUnlistableFirstLevelDirectoryIsIncomplete(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which can list a 0000 directory, so the condition cannot be staged")
+	}
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(filepath.Join(locked, "nested"), 0755))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	sweep := candidateTempHomes(root, 0)
+
+	assert.Equal(t, 1, sweep.offered)
+	assert.Equal(t, 1, sweep.unlistable)
+	assert.Equal(t, 0, sweep.visited,
+		"a directory we could not read is not one we assessed")
+	assert.True(t, sweep.truncated(),
+		"if this reads complete, a temp dir of unreadable directories reports a clean run having seen nothing")
+}
+
+// TestUnlistableDirectoryReachesTheReport is the end-to-end half: the sweep
+// noticing is worthless if the run still prints as complete.
+func TestUnlistableDirectoryReachesTheReport(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root, which can list a 0000 directory, so the condition cannot be staged")
+	}
+	root := t.TempDir()
+	locked := filepath.Join(root, "locked")
+	require.NoError(t, os.MkdirAll(filepath.Join(locked, "nested"), 0755))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	stubTempHomeLockProbe(t, func(string) daemon.ProbeAnswer { return daemon.AnswerNo() })
+
+	opts := macLikeTempHomeOptions(t, root, false)
+	ctx, err := newScanContext(opts)
+	require.NoError(t, err)
+	report := &Report{}
+	checkStaleTempHomes(ctx, report)
+
+	assert.Equal(t, []string{"stale-temp-home"}, report.Incomplete)
+	notices := findingsFor(report, "temp-home-scan")
+	require.Len(t, notices, 1)
+	assert.Contains(t, notices[0].Detail, "could not be listed at all",
+		"the notice must say WHY it did not see everything, not just that it did not")
+}
+
+// TestTruncationNoticeReportsBothProgressQuantities is the third second-round
+// finding. When the budget runs out partway through one huge directory,
+// visited is 0 — so a notice phrased only in first-level terms says the run
+// "inspected 0 of the 1 directories" right after inspecting thousands of paths
+// inside it, which is the wrong progress measurement in precisely the case the
+// notice exists to explain.
+func TestTruncationNoticeReportsBothProgressQuantities(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 40; i++ {
+		require.NoError(t, os.MkdirAll(filepath.Join(root, "TestFoo", fmt.Sprintf("%03d", i)), 0755))
+	}
+	sweep := candidateTempHomes(root, 10)
+	require.True(t, sweep.truncated())
+	require.Equal(t, 0, sweep.visited, "precondition: the budget ran out inside the only first-level directory")
+
+	detail := tempHomeSweepTruncationDetail(root, sweep, 10)
+
+	assert.Contains(t, detail, "0 of the 1 directories")
+	assert.Contains(t, detail, "10 candidate directories",
+		"the candidate count is what actually shows the work done; without it the notice reads as having done nothing")
+	assert.Contains(t, detail, "a 10-candidate budget")
 }
