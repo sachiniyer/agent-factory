@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,4 +297,33 @@ func TestAutomationsAttentionCountExcludesUnknowns(t *testing.T) {
 	out := a.View()
 	assert.Contains(t, out, "Automations: 2 (1 on)", "no attention count when nothing is wrong")
 	assert.NotContains(t, out, "[!]")
+}
+
+// TestAutomationsLeadsWithBothUnschedulableDiagnoses: a valid expression with no
+// upcoming occurrence took the summary's path, which puts "No upcoming run"
+// AFTER the trigger — clipped at the rail minimum to "0 0 31 2 * · …", a [!] row
+// with no explanation. That is the exact failure the mark exists to prevent, and
+// it is the same ordering rule the invalid case already followed.
+func TestAutomationsLeadsWithBothUnschedulableDiagnoses(t *testing.T) {
+	for _, tc := range []struct{ expr, want string }{
+		{"0 0 31 2 *", "No upcoming run"},
+		{"99 * * * *", "Invalid cron expression"},
+	} {
+		tsk := stripTasks()[0]
+		tsk.CronExpr, tsk.Unschedulable = tc.expr, true
+
+		a := newTestAutomations([]task.Task{tsk})
+		a.SetRect(layout.Rect{W: 100, H: 4})
+		a.Focus()
+		wide := a.View()
+		assert.Contains(t, wide, tc.want+" · "+tc.expr,
+			"%q: the reason leads the line:\n%s", tc.expr, wide)
+		assert.Equal(t, 1, strings.Count(wide, tc.want),
+			"%q: and is said once — the summary must not repeat it", tc.expr)
+
+		a.SetRect(layout.Rect{W: 22, H: 4})
+		narrow := a.View()
+		assert.Contains(t, narrow, tc.want[:8],
+			"%q: enough of it survives the rail minimum to read as a reason:\n%s", tc.expr, narrow)
+	}
 }

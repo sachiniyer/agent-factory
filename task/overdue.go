@@ -44,6 +44,20 @@ const MinSlack = 5 * time.Minute
 // SATURATES rather than truncating the verdict — Overdue stays true and
 // Saturated says the number is a floor, because "at least 10000 missed" and
 // "exactly 526000 missed" call for the same action.
+//
+// It is also the budget for a WHOLE LOAD, shared across every task in it, and
+// that second cap is the load-bearing one. A per-task limit bounds nothing in
+// aggregate: the store holds an unbounded number of tasks and the Automations
+// rail derives all of them every 750ms, so a hundred long-dark high-frequency
+// tasks cost a hundred times the cap — measured at ~2.4s per load on this
+// checkout, which is refreshes overlapping continuously and a core burned while
+// nothing changes (#3623 review).
+//
+// Sharing the budget costs only PRECISION, never the verdict: overdue is one
+// Next() call and is decided before any walking, so a task that finds the budget
+// spent still reports overdue, with a count that says it is a floor. The
+// walk exists to turn "late" into "how late", and a floor answers that as well
+// as an exact number does.
 const MaxMissedOccurrences = 10000
 
 // Arming states. These are the LIVE observation — whether the running daemon's
@@ -153,6 +167,13 @@ type ScheduleHealth struct {
 // affordable on a 750ms poll — the walk below runs only for a task already known
 // to be overdue.
 func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
+	budget := MaxMissedOccurrences
+	return deriveScheduleHealth(t, now, &budget)
+}
+
+// deriveScheduleHealth is DeriveScheduleHealth against a shared walk budget, so
+// a whole load costs what one derivation is allowed to.
+func deriveScheduleHealth(t Task, now time.Time, budget *int) ScheduleHealth {
 	if !t.Enabled || t.IsWatch() {
 		return ScheduleHealth{}
 	}
@@ -176,6 +197,22 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	if !ok {
 		return ScheduleHealth{Unassessable: true}
 	}
+	// Evaluate in the SCHEDULER's location, not the reference timestamp's.
+	//
+	// robfig treats a schedule with no explicit timezone as local to the time it
+	// is handed ("schedules without a time zone specified (time.Local) are
+	// treated as local to the time provided", spec.go), so the location riding
+	// the reference decides where the cron lands. That location is not reliably
+	// the daemon's: an HTTP client can send created_at as UTC and the store
+	// preserves it, and a record read back over gob or JSON carries a
+	// fixed-offset zone rather than a named one. Either way the derivation would
+	// evaluate a midnight task somewhere the scheduler does not — measured seven
+	// hours out on a PDT host — and disagree with the thing that actually fires
+	// it (#3623 review).
+	//
+	// now is the scheduler's own clock (time.Now, and the daemon's cron reads the
+	// same), so normalizing to it makes the two agree by construction.
+	ref = ref.In(now.Location())
 	slack, ok := slackFor(sched, ref)
 	if !ok {
 		// Also unassessable rather than healthy — see below for why this is not
@@ -199,7 +236,7 @@ func DeriveScheduleHealth(t Task, now time.Time) ScheduleHealth {
 	// run at 14:20 and silent since has missed 15:20 even though the window
 	// forgave it until 15:20:00. Report the instant the silence began.
 	missedFrom := sched.Next(ref)
-	count, saturated := countOccurrences(sched, ref, now)
+	count, saturated := countOccurrences(sched, ref, now, budget)
 	return ScheduleHealth{
 		Overdue:           true,
 		MissedOccurrences: count,
@@ -327,13 +364,24 @@ func slackFor(sched cron.Schedule, ref time.Time) (time.Duration, bool) {
 	return slack, true
 }
 
-// countOccurrences counts the schedule's fires in (from, now], saturating at
-// MaxMissedOccurrences. The second return says whether it saturated.
-func countOccurrences(sched cron.Schedule, from, now time.Time) (int, bool) {
+// countOccurrences counts the schedule's fires in (from, now], spending from a
+// budget shared with every other task in the same load. The second return says
+// whether the count is a floor — because this task hit the per-task cap, or
+// because the load's budget ran out first. Both mean the same thing to a reader
+// and to a fix.
+func countOccurrences(sched cron.Schedule, from, now time.Time, budget *int) (int, bool) {
+	if *budget <= 0 {
+		// Spent by earlier tasks in this load: report no count rather than the one
+		// occurrence a single step would buy. "At least 1" is not more informative
+		// than "we did not count", and it costs a Next() call per remaining task to
+		// say it. The verdict is already decided; only the number is missing.
+		return 0, true
+	}
 	count := 0
 	for at := sched.Next(from); !at.IsZero() && !at.After(now); at = sched.Next(at) {
 		count++
-		if count >= MaxMissedOccurrences {
+		*budget--
+		if count >= MaxMissedOccurrences || *budget <= 0 {
 			return count, true
 		}
 	}
@@ -349,8 +397,12 @@ func countOccurrences(sched cron.Schedule, from, now time.Time) (int, bool) {
 // Callers on a write path must not use it: derived fields never reach disk, and
 // saveTasks strips them precisely so a mistake here cannot persist one.
 func WithScheduleHealth(tasks []Task, now time.Time) []Task {
+	// ONE budget for the whole load — see MaxMissedOccurrences. Per task it would
+	// bound nothing: this runs on the rail's 750ms poll over however many tasks
+	// the store holds.
+	budget := MaxMissedOccurrences
 	for i := range tasks {
-		health := DeriveScheduleHealth(tasks[i], now)
+		health := deriveScheduleHealth(tasks[i], now, &budget)
 		tasks[i].Overdue = health.Overdue
 		tasks[i].MissedOccurrences = health.MissedOccurrences
 		tasks[i].MissedOccurrencesCapped = health.Saturated

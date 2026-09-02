@@ -227,9 +227,19 @@ func (a *AutomationsPane) nextRunSummary(tsk task.Task) string {
 			// expression. That fallback is what used to render a confident "next"
 			// for a task that had been dark for 18 days; the warning fragment below
 			// is what stops it being read as health.
-			// A parse failure says nothing here: it is diagnosed by
-			// attentionFragment, which LEADS the detail line so the reason survives
-			// the rail's clip. Everything below needs a schedule to talk about.
+			// An unschedulable expression says nothing here — neither shape of it.
+			// attentionFragment diagnoses both, and it LEADS the detail line so the
+			// reason survives the rail's clip; repeating it after the trigger would
+			// only push the line further past the width.
+			//
+			// The record's verdict is what decides, not a second local evaluation:
+			// the two must not be able to disagree about the same task. A record
+			// with no verdict on it (a caller that did not annotate) still falls
+			// through to the evaluation below, which is where "No upcoming run"
+			// came from before (#2596).
+			if tsk.Unschedulable {
+				break
+			}
 			if sched, err := task.ParseCron(tsk.CronExpr); err == nil {
 				if next := sched.Next(a.now()); next.IsZero() {
 					parts = append(parts, "No upcoming run")
@@ -349,18 +359,20 @@ func attentionFragment(tsk task.Task) string {
 		return "Health unknown"
 	}
 	if tsk.Unschedulable {
-		// An expression that PARSES is already diagnosed by the next/last summary
-		// as "No upcoming run" (#2596), and repeating that here would push the line
-		// past the 36-column rail for no new information. One that does NOT parse
-		// is diagnosed nowhere else — that text is emitted only after a successful
-		// parse — so it is said here, at the FRONT, for the same reason the overdue
-		// fragment leads: at the 22-column rail minimum the line is clipped from
-		// the right, and a reason placed behind the expression leaves the mark
-		// unexplained (#3623 review).
+		// Both shapes are diagnosed HERE, at the front, for the same reason the
+		// overdue fragment leads: at the 22-column rail minimum the line is clipped
+		// from the right, and a reason sitting behind the expression leaves the
+		// mark unexplained. Leaving the parsing case to the next/last summary put
+		// its "No upcoming run" after the trigger, which clipped to
+		// "0 0 31 2 * · …" — a [!] row with no explanation, the exact failure the
+		// mark exists to prevent (#3623 review).
+		//
+		// nextRunSummary suppresses its own copy when the record says
+		// unschedulable, so the line says this once.
 		if _, err := task.ParseCron(tsk.CronExpr); err != nil {
 			return "Invalid cron expression"
 		}
-		return ""
+		return "No upcoming run"
 	}
 	if !tsk.Overdue {
 		return ""

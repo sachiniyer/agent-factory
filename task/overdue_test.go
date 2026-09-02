@@ -2,6 +2,7 @@ package task
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -588,4 +589,93 @@ func TestOverdue_AuditTrailRescuesARecordWithNoTimestamps(t *testing.T) {
 	assert.False(t, health.Unassessable, "the enable is a reference point")
 	assert.True(t, health.Overdue, "and two unfired occurrences since it is a real silence")
 	assert.Equal(t, 2, health.MissedOccurrences)
+}
+
+// TestOverdue_EvaluatesInTheSchedulerLocation: robfig treats a schedule with no
+// explicit timezone as local to the time it is HANDED (spec.go: "schedules
+// without a time zone specified (time.Local) are treated as local to the time
+// provided"), so the location riding the reference decides where the cron lands.
+//
+// That location is not reliably the daemon's: an HTTP client can send created_at
+// as UTC and the store preserves it, and a record read back over gob or JSON
+// carries a fixed-offset zone rather than a named one. Evaluated there, a
+// midnight task is judged against midnight somewhere else — and disagrees with
+// the scheduler that actually fires it.
+func TestOverdue_EvaluatesInTheSchedulerLocation(t *testing.T) {
+	// A zone far from UTC, pinned rather than borrowed from the host.
+	zone := time.FixedZone("PDT", -7*60*60)
+	created := time.Date(2026, time.August, 31, 0, 30, 0, 0, zone)
+
+	local := cronTask("0 0 * * *", nil) // midnight daily
+	local.CreatedAt = created
+	utc := local
+	utc.CreatedAt = created.UTC() // same instant, UTC location — what a client sends
+
+	// 17:01 the next day in that zone: the second local midnight has not arrived,
+	// so nothing is late. Evaluated in UTC the same instant is past two UTC
+	// midnights, which is how the verdicts came apart.
+	now := time.Date(2026, time.September, 1, 17, 1, 0, 0, zone)
+	assert.False(t, DeriveScheduleHealth(local, now).Overdue)
+	assert.False(t, DeriveScheduleHealth(utc, now).Overdue,
+		"the same instant stored in a different location must reach the same verdict")
+
+	// And both agree once it really is late.
+	late := time.Date(2026, time.September, 2, 0, 1, 0, 0, zone)
+	assert.True(t, DeriveScheduleHealth(local, late).Overdue)
+	assert.True(t, DeriveScheduleHealth(utc, late).Overdue)
+	assert.Equal(t,
+		DeriveScheduleHealth(local, late).MissedOccurrences,
+		DeriveScheduleHealth(utc, late).MissedOccurrences)
+}
+
+// TestWithScheduleHealth_BoundsWorkAcrossTheWholeLoad is the one that matters
+// for the machine this runs on. A per-task cap bounds nothing in aggregate: the
+// store holds an unbounded number of tasks and the Automations rail derives all
+// of them every 750ms, so a hundred long-dark per-minute tasks cost a hundred
+// times the cap — refreshes overlapping continuously while nothing changes.
+//
+// The budget is shared, so it costs precision and never the verdict: every task
+// is still correctly overdue, and the counts say they are floors.
+func TestWithScheduleHealth_BoundsWorkAcrossTheWholeLoad(t *testing.T) {
+	now := at(2026, time.September, 1, 12, 0, 0)
+	last := now.AddDate(-1, 0, 0)
+	var tasks []Task
+	for i := 0; i < 100; i++ {
+		tsk := cronTask("* * * * *", &last)
+		tsk.ID = fmt.Sprintf("dark%03d", i)
+		tasks = append(tasks, tsk)
+	}
+
+	started := time.Now()
+	got := WithScheduleHealth(tasks, now)
+	elapsed := time.Since(started)
+
+	// Generous next to the ~2.4s an unbounded load measured, and tight enough to
+	// fail loudly if the budget ever stops being shared.
+	assert.Less(t, elapsed, 500*time.Millisecond,
+		"a load of long-dark high-frequency tasks must not cost more than one derivation's budget")
+
+	total := 0
+	for _, tsk := range got {
+		assert.True(t, tsk.Overdue, "%s: the verdict survives the budget", tsk.ID)
+		total += tsk.MissedOccurrences
+	}
+	assert.LessOrEqual(t, total, MaxMissedOccurrences,
+		"the whole load spends one budget between them")
+	assert.True(t, got[0].MissedOccurrencesCapped,
+		"and a count cut short by the budget says it is a floor")
+	assert.True(t, got[99].Overdue, "including the tasks the budget never reached")
+	assert.True(t, got[99].MissedOccurrencesCapped,
+		"which report no count rather than the one occurrence a single step would buy")
+	assert.Zero(t, got[99].MissedOccurrences)
+}
+
+// TestDeriveScheduleHealth_KeepsItsOwnBudget: a single derivation is unaffected
+// by the sharing — it is the whole budget on its own, so the documented
+// saturation point still means what it says.
+func TestDeriveScheduleHealth_KeepsItsOwnBudget(t *testing.T) {
+	last := at(2025, time.September, 1, 12, 0, 0)
+	health := DeriveScheduleHealth(cronTask("* * * * *", &last), at(2026, time.September, 1, 12, 0, 0))
+	assert.Equal(t, MaxMissedOccurrences, health.MissedOccurrences)
+	assert.True(t, health.Saturated)
 }
