@@ -412,3 +412,27 @@ func TestAutomationsCompactHeaderKeepsItsCounts(t *testing.T) {
 	require.Contains(t, line, "2 (2 on)", "the compact summary must keep both numbers")
 	require.NotContains(t, line, "…·", "and must not ellipsize into the separator")
 }
+
+// TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount answers the Codex
+// review on #3641. The compact summary carries TWO numbers, and at three digits
+// "100 (100 on)" is 12 cells — the counts plus the guaranteed hint needed 24 of
+// a 22-column rail, so the fallback clipped and truncated "m manage" itself. The
+// 22-column rail is the supported minimum (#1090), not a size below it, so that
+// broke the contract that the affordance is the last thing cut at exactly the
+// width the contract is about.
+func TestAutomationsCompactHeaderKeepsTheHintWholeAtEveryCount(t *testing.T) {
+	manageHint := automationHelpKey(keys.KeyTaskList) + " manage"
+	for _, n := range []int{0, 2, 9, 10, 99, 100, 999} {
+		a := newTestAutomations(nSimpleTasks(n))
+		a.SetCompact(true)
+		a.SetRect(layout.Rect{W: 22, H: 1})
+		line := strings.TrimRight(stripANSI(a.View()), " ")
+
+		require.Containsf(t, line, manageHint,
+			"%d tasks: the manage affordance is the last thing cut, and 22 is the supported rail minimum: %q", n, line)
+		require.NotContainsf(t, line, "…"+automationsHintSeparator,
+			"%d tasks: the separator must stay intact: %q", n, line)
+		require.Containsf(t, line, fmt.Sprintf("%d", n),
+			"%d tasks: the task count survives: %q", n, line)
+	}
+}

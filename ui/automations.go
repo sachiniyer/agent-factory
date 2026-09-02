@@ -314,6 +314,14 @@ func automationsActionHint(name keys.KeyName, desc string) string {
 type automationsHeader struct {
 	noun   string // "Automations" — or "Automations:" in the compact summary
 	counts string // "(2)", or "2 (1 on)" in the compact summary
+	// primary is counts reduced to the one number that must survive, and it is a
+	// rung of its own before the affordance is touched. The compact summary
+	// carries two numbers ("100 (100 on)" is 12 cells), which at the 22-column
+	// rail minimum left nothing for the hint and truncated it — regressing the
+	// contract that the manage affordance is cut last, at a SUPPORTED width
+	// rather than below one (#3641 review). Empty means counts is already
+	// minimal, as it is in full mode.
+	primary string
 }
 
 // text is the header at full width: " Automations (2)".
@@ -321,6 +329,15 @@ func (h automationsHeader) text() string { return " " + h.noun + " " + h.counts 
 
 // countsOnly sheds the noun but keeps the numbers: " (2)".
 func (h automationsHeader) countsOnly() string { return " " + h.counts }
+
+// primaryOnly sheds the secondary number too: " 100" from " 100 (100 on)". It
+// is the last rung that still says anything true before clipping.
+func (h automationsHeader) primaryOnly() string {
+	if h.primary == "" {
+		return ""
+	}
+	return " " + h.primary
+}
 
 // shrunk ellipsizes the NOUN inside w cells while keeping the counts whole, or
 // returns "" when there is no room for a noun worth rendering.
@@ -348,6 +365,7 @@ const automationsHintSeparator = " · "
 //	Automations (2) · m manage              hooks drops first
 //	Automatio… (2) · m manage               then the noun shrinks, counts intact
 //	(2) · m manage                          then the noun goes, counts intact
+//	100 · m manage                          then the secondary count goes
 //
 // Three rules hold at every step, and #3630 was the first two failing at once.
 //
@@ -392,6 +410,9 @@ func (a *AutomationsPane) titleLine(header automationsHeader, nameStyle lipgloss
 	if fits(counts, manage) {
 		return render(counts, manage)
 	}
+	if primary := header.primaryOnly(); primary != "" && fits(primary, manage) {
+		return render(primary, manage)
+	}
 	// Narrower than the rail minimum: nothing composes, so clip the whole line
 	// rather than pretend one of the pieces still fits.
 	return nameStyle.Render(fitLine(counts+manage, w))
@@ -421,8 +442,9 @@ func (a *AutomationsPane) String() string {
 	// 1-line degraded summary (RFC §2.6, <80 cols).
 	if a.compact || a.rect.H <= 1 {
 		header := automationsHeader{
-			noun:   "Automations:",
-			counts: fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
+			noun:    "Automations:",
+			counts:  fmt.Sprintf("%d (%d on)", len(tasks), a.enabledCount()),
+			primary: fmt.Sprintf("%d", len(tasks)),
 		}
 		style := automationsTitleDimStyle
 		if a.focused {
