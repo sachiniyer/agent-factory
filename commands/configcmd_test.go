@@ -713,7 +713,7 @@ func TestConfigSetEchoesKeyValueAndRoundTrips(t *testing.T) {
 	}
 
 	// The atomic write must not strand its temp file next to the real one.
-	// AtomicWriteFile stages through "<name>.tmp.*" (config/filelock.go) and
+	// AtomicWriteFile stages through "<name>.tmp.*" (config/atomicwrite.go) and
 	// renames; a surviving stage file means the rename never happened. The
 	// config lock file and the relocated application log are expected
 	// neighbours in an AGENT_FACTORY_HOME, so only the stage pattern is checked.
