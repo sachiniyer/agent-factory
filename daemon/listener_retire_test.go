@@ -361,3 +361,62 @@ func TestRetiredListenerClosesAClientThatNeverDrains(t *testing.T) {
 	require.False(t, errors.As(err, &netErr) && netErr.Timeout(),
 		"a client past the retirement deadline must be CLOSED, not left holding the retired server open")
 }
+
+// TestRetireCapturesTheGraceBeforeItsDrainStarts is #3772, made deterministic.
+//
+// The drain goroutine outlives the call that spawned it — that is the whole
+// point of draining off the caller's goroutine — so whatever it reads out of the
+// package var, it reads on somebody else's schedule. In CI that was the NEXT
+// test: a drain leaked by TestDisablingAListenerRetiresIt read the grace while
+// TestRetiredListenerClosesAClientThatNeverDrains's withRetireGrace wrote it, and
+// -race failed a PR that touched neither file.
+//
+// The swap below is that same write, moved inside the test that spawns the
+// goroutine so it happens on every run instead of on a lost timing coin. It
+// reports whichever way the two land: the goroutine's clock stops at the `go`
+// statement, so nothing carries this test's later write into it, and the pair is
+// unordered as a read-then-write or a write-then-read alike.
+//
+// The assertion states the same property in wall-clock terms — the deadline must
+// be the grace in effect when retire() was CALLED — so the test still says
+// something when it runs without -race. A drain that reads the var late gets the
+// 30s installed below and leaves the stalled client connected long past the read
+// deadline.
+//
+// One thing to know before re-running it: ThreadSanitizer reports a given pair of
+// stacks once per PROCESS, so `-count=N` on the unfixed code goes quiet after the
+// first report of each direction rather than failing N times. Measured on the red:
+// -count=3 reported twice — once as write-then-previous-read, once as the reverse —
+// and suppressed the third. A fresh process, which is what CI runs, reports it.
+func TestRetireCapturesTheGraceBeforeItsDrainStarts(t *testing.T) {
+	withRetireGrace(t, 300*time.Millisecond)
+	m, wl, addr, entered, release := hangingControlListener(t)
+	defer release()
+
+	conn, err := net.Dial("tcp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	_, err = fmt.Fprintf(conn, "GET /v1/hang HTTP/1.1\r\nHost: %s\r\n\r\n", addr)
+	require.NoError(t, err)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the request never reached the handler")
+	}
+
+	// The handler is never released, so the drain this spawns parks in Shutdown
+	// until its deadline — whichever deadline it ended up with.
+	rebindControl(t, m, wl)
+
+	// The next test's swap, with nothing between it and the goroutine above.
+	// Waiting for that goroutine first would order its read before this write and
+	// dissolve the very race being pinned, so this runs immediately.
+	withRetireGrace(t, 30*time.Second)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+	_, err = conn.Read(make([]byte, 1))
+	require.Error(t, err)
+	var netErr net.Error
+	require.False(t, errors.As(err, &netErr) && netErr.Timeout(),
+		"the drain must bound itself by the 300ms grace retire() was called under, not by the 30s a later swap installed")
+}
