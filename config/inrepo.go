@@ -399,6 +399,15 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		}
 	}
 
+	// The same shape warning (#3566), beside the same key check above. This file
+	// is the only source of post_worktree_commands, and it is the case a
+	// global-only warning would have missed outright: a repo-level
+	// program_overrides value never passes through validateConfig.
+	shellValues := shellValueSet{}
+	shellValues.addMap("program_overrides", cfg.ProgramOverrides)
+	shellValues.addList("post_worktree_commands", cfg.PostWorktreeCommands)
+	shellValues.warnExecSeparator(prettyPath)
+
 	return &cfg, data, nil
 }
 

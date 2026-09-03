@@ -40,13 +40,19 @@ func stripExecPrefix(words []*syntax.Word) (rest []*syntax.Word, separator bool)
 	return words, false
 }
 
-// commandUsesExecSeparator reports whether a command's exec builtin is followed
+// CommandUsesExecSeparator reports whether a command's exec builtin is followed
 // by the `--` separator stripExecPrefix refuses to launch behind.
 //
 // It re-parses instead of threading a flag out of the guard: the guard answers
 // provable/unprovable for a dozen reasons, and this asks the one question the
 // refusal message needs to name.
-func commandUsesExecSeparator(command string) bool {
+//
+// Exported for the config loaders (#3566), which warn about the same shape in an
+// operator-authored value that never reaches the account boundary — an unscoped
+// session's program, a post-worktree hook, an archive hook. Warning and refusal
+// must not answer the question differently, so they share this one predicate
+// rather than each carrying a copy of "drop exec, then look for --".
+func CommandUsesExecSeparator(command string) bool {
 	call, ok := singleSimpleCall(command)
 	if !ok {
 		return false

@@ -254,6 +254,16 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 			return nil, err
 		}
 	}
+	// Beside the program-override KEY check above: warn about the SHAPE of a
+	// value this file hands to /bin/sh -c (#3566). Each of the three config
+	// sources warns for the keys it admits — this one is the only source of
+	// sandbox.ssh, and the operator's own layer for on_archive_command.
+	shellValues := shellValueSet{}
+	shellValues.addMap("program_overrides", config.ProgramOverrides)
+	shellValues.add("on_archive_command", config.OnArchiveCommand)
+	shellValues.add("sandbox.ssh", config.SandboxSSH)
+	shellValues.warnExecSeparator(prettyConfigPath)
+
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(config.SessionEnvPassthrough)
 	if err != nil {
 		return nil, fmt.Errorf("Config issue in %s: session_env_passthrough: %w", prettyConfigPath, err)
