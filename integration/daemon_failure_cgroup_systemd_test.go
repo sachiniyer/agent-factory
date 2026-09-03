@@ -3,6 +3,7 @@
 package integration_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,9 +17,17 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/sachiniyer/agent-factory/task"
 )
 
-const systemdLifecycleTestEnv = "AF_SYSTEMD_LIFECYCLE_TEST"
+const (
+	systemdLifecycleTestEnv = "AF_SYSTEMD_LIFECYCLE_TEST"
+
+	// watchTaskID names the one watch task this test arms. It is written into
+	// the fixture store, read back through `af tasks list`, and removed at the
+	// end, so it is a value rather than the same literal in four places.
+	watchTaskID = "scope2284"
+)
 
 // TestAbruptDaemonFailureReapsOwnedChildrenAndPreservesTmux is the real-systemd
 // #2284 boundary test. It is destructive to Agent Factory's fixed user-unit
@@ -80,7 +89,7 @@ wait "$child"
 `, shellSingleQuote(watchRootLog), shellSingleQuote(watchChildLog)), 0o700)
 	writeTasksFile(t, h.home, []map[string]interface{}{
 		{
-			"id":           "scope2284",
+			"id":           watchTaskID,
 			"name":         "scope lifecycle",
 			"prompt":       "",
 			"watch_cmd":    shellSingleQuote(watchScript),
@@ -103,9 +112,46 @@ wait "$child"
 	})
 
 	h.run("daemon", "install")
-	waitUntil(t, 15*time.Second, "initial watcher tree", func() bool {
-		return len(readPIDLog(watchRootLog)) == 1 && len(readPIDLog(watchChildLog)) == 1
-	})
+
+	// Two waits, not one, because the chain between `daemon install` and the
+	// script's first write has two halves that fail for unrelated reasons and
+	// take unrelated amounts of time (#3820). The first half — systemd
+	// activating the unit, a cold daemon binary starting, and its supervisor
+	// arming the watch task — is all of what a loaded runner slows down, and the
+	// daemon publishes its own verdict on it: every task record carries the LIVE
+	// arming observation (#3623), and for a watch task "armed" means THIS daemon
+	// is holding a running watcher for THIS definition. The second half is
+	// whatever is left after that: one fork/exec and two printfs.
+	//
+	// One wall clock over both spends the same budget on a cold start and on a
+	// spawn, so runner contention is indistinguishable from a watcher that never
+	// started — and 15s of it got reported as a broken invariant (the #2879
+	// class). Observing the seam between the halves means the budget below covers
+	// only the spawn, and a timeout names which half ran out.
+	awaitStage(t, 60*time.Second, "the daemon to arm the watch task",
+		func() (bool, string) {
+			arming, err := taskArming(h, watchTaskID)
+			switch {
+			case err != nil:
+				return false, "af tasks list: " + err.Error()
+			// An EMPTY arming is not "not armed". `af tasks list` takes the
+			// non-spawning read path and falls back to this machine's task store
+			// when no daemon answers, and a disk read has observed nothing about a
+			// running supervisor — which is the whole interval this stage waits
+			// through. Both keep waiting; they differ only in the note.
+			case arming == "":
+				return false, "no daemon has observed the task yet"
+			default:
+				return arming == task.ArmingArmed, "arming=" + arming
+			}
+		},
+		func() string { return "unit " + systemdUnitSummary(systemdunit.DaemonUnitName) })
+	awaitStage(t, 30*time.Second, "initial watcher tree",
+		func() (bool, string) {
+			roots, children := readPIDLog(watchRootLog), readPIDLog(watchChildLog)
+			return len(roots) == 1 && len(children) == 1,
+				fmt.Sprintf("roots=%v children=%v", roots, children)
+		}, nil)
 	oldRoots := readPIDLog(watchRootLog)
 	oldChildren := readPIDLog(watchChildLog)
 	oldWatchRoot, oldWatchChild := oldRoots[0], oldChildren[0]
@@ -153,9 +199,25 @@ wait "$child"
 
 	// Observe continuously, not just at the end: a replacement that briefly
 	// overlaps the old watcher and cleans it later still violates the invariant.
+	//
+	// The budget is staged for the same reason the startup one above is, and the
+	// case here is sharper: this window covers systemd's RestartSec=5 delay, a
+	// cold daemon start, AND the watcher spawn, so five of its seconds were pure
+	// sleep before the replacement was even exec'd. The arming read rebases it
+	// onto the spawn alone the moment the replacement daemon reports the task
+	// armed, and until then the outer budget is generous enough to be about the
+	// restart rather than about the runner's load.
+	//
+	// That read costs a process spawn, and it runs INSIDE the sampling loop: a
+	// violation of this invariant is not a knife-edge event. The old tree ignores
+	// SIGTERM and sleeps for ten minutes, so in a violating world it stays alive
+	// until the scope's own SIGKILL — TimeoutStopUSec=4s, asserted above — and an
+	// occasional 50ms sample gap cannot step over seconds of overlap.
 	overlapped := false
 	var newDaemon, newWatchRoot, newWatchChild int
-	deadline := time.Now().Add(20 * time.Second)
+	var armedAt, lastArmingRead time.Time
+	armingNote := "never read"
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		roots := readPIDLog(watchRootLog)
 		children := readPIDLog(watchChildLog)
@@ -176,14 +238,36 @@ wait "$child"
 			!pidAlive(oldWatchRoot) && !pidAlive(oldWatchChild) {
 			break
 		}
+		if armedAt.IsZero() && time.Since(lastArmingRead) >= 250*time.Millisecond {
+			lastArmingRead = time.Now()
+			arming, err := taskArming(h, watchTaskID)
+			switch {
+			case err != nil:
+				armingNote = "af tasks list: " + err.Error()
+			case arming == "":
+				armingNote = "no daemon has observed the task yet"
+			default:
+				armingNote = "arming=" + arming
+			}
+			if arming == task.ArmingArmed {
+				// From here the budget belongs to the SPAWN, not to the restart:
+				// 30s from the moment the replacement reported the task armed. When
+				// arming is quick that is less total time than the outer budget had
+				// left, which is exactly the intent — the outer one is sized for a
+				// cold start under contention, and that part is now over.
+				armedAt = lastArmingRead
+				deadline = armedAt.Add(30 * time.Second)
+			}
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	if overlapped {
 		t.Fatalf("replacement watcher pid %d started while old tree %d/%d was still alive", newWatchRoot, oldWatchRoot, oldWatchChild)
 	}
 	if newDaemon <= 1 || newWatchRoot <= 1 || newWatchChild <= 1 {
-		t.Fatalf("replacement did not become healthy: daemon=%d watcher=%d/%d roots=%v children=%v",
-			newDaemon, newWatchRoot, newWatchChild, readPIDLog(watchRootLog), readPIDLog(watchChildLog))
+		t.Fatalf("replacement did not become healthy: daemon=%d watcher=%d/%d roots=%v children=%v; replacement task arming: %s (armed=%v); unit %s",
+			newDaemon, newWatchRoot, newWatchChild, readPIDLog(watchRootLog), readPIDLog(watchChildLog),
+			armingNote, !armedAt.IsZero(), systemdUnitSummary(systemdunit.DaemonUnitName))
 	}
 
 	newServerPID, newPanePID := tmuxProcessIDs(t, created.TmuxName)
@@ -197,9 +281,84 @@ wait "$child"
 
 	// Leave normal teardown observable too; the fallback cleanup above remains
 	// for every earlier fatal path.
-	h.run("tasks", "remove", "scope2284")
+	h.run("tasks", "remove", watchTaskID)
 	h.run("sessions", "kill", "failure-survivor")
 	h.run("daemon", "uninstall")
+}
+
+// awaitStage waits for ONE step of a startup chain, and on timeout reports the
+// last thing it saw rather than only naming the step it was on.
+//
+// It is waitUntil's diagnostic sibling, and the difference is the whole point of
+// staging a wait (#3820): a chain observed step by step produces a timeout that
+// says which step, holding what value, while a single wait on the end state can
+// only say the end state never arrived. observe returns its verdict and a short
+// note about what it just read; diagnose, which may be nil, is evaluated ONCE on
+// failure, so a report that costs a subprocess is not paid for on every poll.
+func awaitStage(t *testing.T, budget time.Duration, what string, observe func() (bool, string), diagnose func() string) {
+	t.Helper()
+	last := "nothing observed"
+	deadline := time.Now().Add(budget)
+	for {
+		ok, note := observe()
+		if ok {
+			return
+		}
+		if note != "" {
+			last = note
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	report := ""
+	if diagnose != nil {
+		report = "; " + diagnose()
+	}
+	t.Fatalf("timeout after %s waiting for %s; last observation: %s%s", budget, what, last, report)
+}
+
+// taskArming reports the daemon's live arming observation for one task, read
+// through the CLI from this test's private AF home.
+//
+// `af tasks list` is a NON-SPAWNING read: it prefers the running daemon's
+// answer and falls back to this machine's task store when none is reachable, so
+// polling it can never conjure the daemon whose startup is being observed. The
+// two cases are told apart by the field itself — a disk read leaves Arming empty
+// ("nothing observed this row"), and only a daemon writes ArmingArmed
+// /ArmingNotArmed. --all keeps the read independent of how the CLI resolves the
+// cwd's project, which is a second thing that could go wrong in the middle of a
+// wait that is about something else.
+func taskArming(h *harness, id string) (string, error) {
+	out, err := h.runResult("tasks", "list", "--all")
+	if err != nil {
+		return "", err
+	}
+	var tasks []task.Task
+	if err := json.Unmarshal([]byte(out), &tasks); err != nil {
+		return "", fmt.Errorf("parse af tasks list: %w\n%s", err, out)
+	}
+	for _, candidate := range tasks {
+		if candidate.ID == id {
+			return candidate.Arming, nil
+		}
+	}
+	return "", fmt.Errorf("task %q is not in the store", id)
+}
+
+// systemdUnitSummary renders the unit's live state for a failure message —
+// including NRestarts and Result, which are how a daemon that is crash-looping
+// behind a systemd Restart= policy looks from the outside. It never fails the
+// test: it is only ever called on a path that is already reporting one.
+func systemdUnitSummary(unit string) string {
+	out, err := exec.Command("systemctl", "--user", "show", unit,
+		"-p", "ActiveState", "-p", "SubState", "-p", "MainPID",
+		"-p", "NRestarts", "-p", "Result").CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("%s: systemctl show failed: %v", unit, err)
+	}
+	return unit + " " + strings.Join(strings.Fields(string(out)), " ")
 }
 
 func shellSingleQuote(s string) string {
