@@ -263,7 +263,16 @@ type repoRootResolution struct {
 // bare repository this is the bare directory itself. pathArgs should be empty
 // for cwd, or []string{"-C", path}.
 func resolveMainRepoRoot(pathArgs ...string) (string, error) {
-	resolved, err := resolveRepoRoots(pathArgs...)
+	return resolveMainRepoRootContext(context.Background(), pathArgs...)
+}
+
+// resolveMainRepoRootContext is resolveMainRepoRoot with caller-owned
+// cancellation, for callers that promised a budget and must not be held past it
+// by a wedged git (#3599). Same split as RepoFromPath/RepoFromPathContext: the
+// unbounded form stays the default because admission paths deliberately keep an
+// unbounded caller lifetime.
+func resolveMainRepoRootContext(ctx context.Context, pathArgs ...string) (string, error) {
+	resolved, err := resolveRepoRootsContext(ctx, pathArgs...)
 	if err != nil {
 		return "", err
 	}
