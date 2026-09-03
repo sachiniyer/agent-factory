@@ -609,6 +609,13 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	// "an operation is already in progress". Taking the lock first makes the claim
 	// and the fence raise adjacent, so no observer sees the row claimed-but-unfenced
 	// and the wait itself holds nothing.
+	//
+	// Sampled in front of the wait for the reason claimRestoreOperation spells
+	// out, and this is the route that needs it most: DeleteProject leaves archived
+	// rows in m.instances untouched, so a delete that completes inside this wait is
+	// invisible to both the claim's projectDeletes read and the instance re-read
+	// below.
+	deleteSeq := m.projectDeleteSeqNow()
 	beforeRestoreOperationLock()
 	opLock, waited, err := m.lockSessionOperationWithin(key, "restore", req.Title)
 	if err != nil {
@@ -616,7 +623,7 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	}
 	defer opLock.Unlock()
 
-	if err := m.claimRestoreOperation(repoID, key, req.Title, waited); err != nil {
+	if err := m.claimRestoreOperation(repoID, key, req.Title, waited, deleteSeq); err != nil {
 		return "", err
 	}
 	defer m.releaseRestoreOperation(key)

@@ -621,7 +621,7 @@ func TestDeleteProject_RefusesClaimedArchivedRestore(t *testing.T) {
 	require.NoError(t, err)
 
 	key := daemonInstanceKey(repoID, "worker")
-	require.NoError(t, manager.claimRestoreOperation(repoID, key, "worker", 0))
+	require.NoError(t, manager.claimRestoreOperation(repoID, key, "worker", 0, manager.projectDeleteSeqNow()))
 	t.Cleanup(func() { manager.releaseRestoreOperation(key) })
 
 	result, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})

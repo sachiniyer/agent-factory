@@ -323,12 +323,17 @@ func TestRestore_DeleteFenceRaisedDuringTheOpLockWaitRefusesTheRestore(t *testin
 	}
 }
 
-// TestRestore_InstanceReplacedDuringTheOpLockWaitRefusesTheRestore is the second
-// answered question: a delete that COMPLETES during the wait is caught by the
-// re-read of m.instances[key] after the lock. The residue a completed delete
-// leaves for its in-place/external sessions is exactly this — the row gone from
-// the manager map — so that is what the wait is released into.
-func TestRestore_InstanceReplacedDuringTheOpLockWaitRefusesTheRestore(t *testing.T) {
+// TestRestore_InstanceRemovedDuringTheOpLockWaitRefusesTheRestore covers ONE of
+// the two residues a completed delete can leave: the row gone from the manager
+// map, which is what DeleteProject's teardown of an in-place/external session
+// leaves behind. That one the re-read of m.instances[key] after the lock does
+// catch.
+//
+// It is NOT the whole of "a delete that completes during the wait" — see
+// TestRestoreArchived_ProjectDeleteCompletingDuringTheOpLockWaitIsRefused for
+// the residue that the re-read cannot see, which is why the claim also carries a
+// delete generation.
+func TestRestore_InstanceRemovedDuringTheOpLockWaitRefusesTheRestore(t *testing.T) {
 	for _, tc := range restoreWaitCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, repoID, repoPath := newStatusTestManager(t)
@@ -358,6 +363,68 @@ func TestRestore_InstanceReplacedDuringTheOpLockWaitRefusesTheRestore(t *testing
 			assert.Equal(t, before, inst.LifecycleView(), "the refused restore must not mutate the session")
 		})
 	}
+}
+
+// TestRestoreArchived_ProjectDeleteCompletingDuringTheOpLockWaitIsRefused is the
+// residue the instance re-read CANNOT see, and the reason the claim carries a
+// delete generation rather than relying on that re-read alone.
+//
+// DeleteProject deliberately leaves LiveArchived rows in m.instances — they are
+// the restorable state it preserves (daemon/deleteproject.go, the targets loop
+// skips them) — and clears projectDeletes on the way out. So for the ARCHIVED
+// route a delete that runs to completion during the op-lock wait leaves the
+// instance pointer unchanged and the fence down: the claim sees no active
+// delete, `current != instance` is false, and the row is still archived, so
+// every guard passes and the queued restore reactivates a session whose project
+// was just deregistered — the live-orphan shape #2549 exists to prevent.
+//
+// The delete needs no op-lock here, which is what makes this deterministic: with
+// only an archived row in the repo, its targets loop archives and kills nothing.
+//
+// PRE-#3600 this was unreachable: the queued restore had already claimed, so
+// restoresInFlight made DeleteProject's fail-closed gate refuse it outright.
+func TestRestoreArchived_ProjectDeleteCompletingDuringTheOpLockWaitIsRefused(t *testing.T) {
+	manager, repoID, repoPath, inst := seedArchivedForFence(t, "worker")
+	before := inst.LifecycleView()
+	key := daemonInstanceKey(repoID, "worker")
+	releasePeer := holdOpLock(t, manager, key)
+
+	parked, resume := parkRestoreAtItsOpLock(t)
+	restoreDone := make(chan error, 1)
+	go func() {
+		_, _, err := manager.RestoreArchived(RestoreArchivedRequest{Title: "worker", RepoID: repoID})
+		restoreDone <- err
+	}()
+	awaitParkedRestore(t, parked)
+	resume() // genuinely blocked on the peer's lock from here
+
+	// A REAL delete, start to finish, while the restore is queued.
+	_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.NoError(t, err, "the delete must be able to complete: nothing live is left for it to archive")
+
+	manager.mu.Lock()
+	_, fenceStillUp := manager.projectDeletes[repoID]
+	stillMapped := manager.instances[key] == inst
+	manager.mu.Unlock()
+	require.False(t, fenceStillUp, "setup: a completed delete lowers its fence, which is the whole difficulty")
+	require.True(t, stillMapped,
+		"setup: a completed delete leaves the archived row in place, so the instance re-read after the "+
+			"lock cannot tell that anything happened")
+
+	releasePeer()
+	select {
+	case err := <-restoreDone:
+		require.Error(t, err,
+			"the queued restore reactivated a session whose project was deleted and deregistered while it "+
+				"waited: a live session now outlives its project's registry entry, which is the #2549 shape")
+		assert.Contains(t, err.Error(), "delet", "the refusal must name the deletion that caused it")
+		assert.Contains(t, err.Error(), "after waiting",
+			"a refusal reported at the end of a wait has to say it waited")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the restore never returned after the peer released its operation lock")
+	}
+	assert.Equal(t, before, inst.LifecycleView(), "the refused restore must not mutate the session")
+	assert.Equal(t, session.LiveArchived, inst.GetLiveness(), "the row must still be shelved and restorable")
 }
 
 type restoreWaitCase struct {

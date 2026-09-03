@@ -28,11 +28,32 @@ var beforeRestoreOperationLock = func() {}
 // still reads projectDeletes there — but it is now decided at the END of a wait
 // that may have taken up to opLockTimeout, so `waited` is folded into the
 // refusals. A delay that says nothing about itself reads as a hang.
-func (m *Manager) claimRestoreOperation(repoID, key, title string, waited time.Duration) error {
+//
+// That wait is also why sinceDeleteSeq exists, and it is load-bearing rather
+// than defensive. projectDeletes answers "is a delete running RIGHT NOW", and a
+// delete that STARTED and FINISHED inside the wait lowers that fence before this
+// line reads it. The instance re-read the callers do next cannot see it either:
+// DeleteProject deliberately LEAVES archived rows in m.instances — they are the
+// restorable state it preserves — so for the archived route the pointer, the
+// liveness and every other guard are bit-for-bit what they were, and the queued
+// restore would reactivate a session whose project was just deregistered. That
+// is the live-orphan shape #2549 exists to prevent, and pre-#3600 it was
+// unreachable only because the claim ran first and made the delete refuse.
+//
+// The generation counter #2947 added for exactly this question is the fix: the
+// caller samples it BEFORE the wait, and a strictly-greater value here means the
+// repo's delete fence transitioned while this restore was queued. Strictly
+// greater, so an equal value — a delete that completed before the sample — stays
+// ordinary history and a project that is deleted and later re-created is not
+// stranded.
+func (m *Manager) claimRestoreOperation(repoID, key, title string, waited time.Duration, sinceDeleteSeq uint64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, deleting := m.projectDeletes[repoID]; deleting {
 		return fmt.Errorf("cannot restore session %q%s: project %s is being deleted; retry after deletion finishes", title, afterOpLockWait(waited), repoID)
+	}
+	if m.projectDeleteMovedLocked(repoID, sinceDeleteSeq) {
+		return fmt.Errorf("cannot restore session %q%s: project %s was deleted while this restore was waiting to start; nothing was restored — retry if the project still exists", title, afterOpLockWait(waited), repoID)
 	}
 	if _, busy := m.killsInFlight[key]; busy {
 		return fmt.Errorf("an operation is already in progress for session %q%s", title, afterOpLockWait(waited))
@@ -169,6 +190,13 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	// reads it after the wait. What changed is which side of a delete race
 	// refuses: a delete that STARTS during the wait now proceeds and this restore
 	// refuses (naming the wait), where before the delete was the one turned away.
+	//
+	// The delete generation is sampled HERE, in front of the wait, because the
+	// claim's projectDeletes read can only see a delete that is still running: one
+	// that starts and finishes inside the wait lowers that fence again before the
+	// claim looks. See claimRestoreOperation for why the instance re-read below
+	// does not cover that case on the archived route.
+	deleteSeq := m.projectDeleteSeqNow()
 	beforeRestoreOperationLock()
 	opLock, waited, err := m.lockSessionOperationWithin(key, "restore", title)
 	if err != nil {
@@ -176,7 +204,7 @@ func (m *Manager) restoreLostOrDeadSession(repoID, title string, instance *sessi
 	}
 	defer opLock.Unlock()
 
-	if err := m.claimRestoreOperation(repoID, key, title, waited); err != nil {
+	if err := m.claimRestoreOperation(repoID, key, title, waited, deleteSeq); err != nil {
 		return "", err
 	}
 	defer m.releaseRestoreOperation(key)
