@@ -126,34 +126,35 @@ func silenceWarnings(t *testing.T) {
 // against a log.(*Logger).Printf() write. Verified by running exactly that
 // before the helper existed.
 //
-// The Contains check at the end is the anti-vacuity half: without it, a capture
-// that was never installed on WarningLog would race against nothing and pass.
+// Neither side's speed decides anything here, which matters in a test about
+// timing. The reader does a FIXED number of reads rather than looping until the
+// writer signals, so a writer that finishes first cannot leave the reader
+// having read nothing; and the reads carry no happens-before edge to the writes
+// either way, which is what the detector needs. `started` only guarantees the
+// writer goroutine has been scheduled before the reader begins.
+//
+// The Contains check is the anti-vacuity half: without it, a capture that was
+// never installed on WarningLog would race against nothing and pass.
 func TestLogCaptureSurvivesAForeignWriter(t *testing.T) {
 	warnings := captureWarnings(t)
 
 	const writes = 200
-	done := make(chan struct{})
+	started, done := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
+		close(started)
 		for i := 0; i < writes; i++ {
 			aflog.WarningLog.Printf("foreign goroutine warning %d", i)
 		}
 	}()
 
-	reads := 0
-	for {
-		select {
-		case <-done:
-			if reads == 0 {
-				t.Fatal("the reader never overlapped the writer, so nothing was exercised")
-			}
-			if got := warnings.String(); !strings.Contains(got, "foreign goroutine warning") {
-				t.Fatalf("capture is not installed on WarningLog — it read %q", got)
-			}
-			return
-		default:
-			_ = warnings.String()
-			reads++
-		}
+	<-started
+	for i := 0; i < writes; i++ {
+		_ = warnings.String()
+	}
+
+	<-done
+	if got := warnings.String(); !strings.Contains(got, "foreign goroutine warning") {
+		t.Fatalf("capture is not installed on WarningLog — it read %q", got)
 	}
 }
