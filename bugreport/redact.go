@@ -13,8 +13,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/credscrub"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/task"
 )
 
@@ -53,76 +55,11 @@ var (
 	taskParkedInstanceTitle  = regexp.MustCompile(`(?m)(task \S+ parked at a usage limit as instance )(.+)(; waiting for the limit window to reset)$`)
 )
 
-// The incomplete-archive warning is the one daemon log line that prints the
-// names of files a USER chose. session/git renders it in a single place
-// (ArchiveReport.warningSuffix), in a single shape:
-//
-//	<operation> completed with an incomplete archive: af skipped <N> unreadable
-//	files; complete original tree(s) were retained at "<root>"[, "<root>"][, and
-//	<N> more in archive_report]; skipped paths[ (showing first <X> of <Y>)]:
-//	"<path>" (<reason>)[, "<path>" (<reason>)]
-//
-// The matchers below key on THAT SHAPE and on nothing else — no live
-// ArchiveReport, no note* call, no per-run state — because the log outlives the
-// state such a key would come from (#3553): an instances.json that fails
-// the typed decode never reaches the typed walk that could record the paths, a
-// session killed after the warning was written leaves neither report nor row
-// behind, and a bundled tail can hold lines an older binary wrote. Reading the
-// renderer instead is also what makes ONE pass over the (up to 2 MiB) tail
-// enough, however many unreadable files a generated tree produced.
-//
-// The renderer being the only source of this shape is the cost of that: a change
-// to the format silently stops the scrub. It is paid down in the tests, which
-// build every input from the real ArchiveReport.Warning rather than from a
-// hand-written fixture, so format and matcher cannot drift apart without a red
-// test.
-const (
-	// archiveWarningQuotedPattern matches one %q-rendered value. strconv.Quote
-	// escapes every interior `"` as `\"` and every `\` as `\\`, so this is an
-	// exact tokenizer for the renderer's output, not an approximation of one.
-	archiveWarningQuotedPattern = `"(?:[^"\\]|\\.)*"`
-	archiveWarningRetainedItem  = `(?:` + archiveWarningQuotedPattern + `|and \d+ more in archive_report)`
-	// The reason field admits no `"` — session/git takes quotes, parens and
-	// control characters out of an unknown reason before rendering it, precisely
-	// so each entry stays delimitable. Requiring here what the emitter
-	// guarantees is what makes a line from a binary older than that change fail
-	// the grammar and take the whole-remainder fallback, instead of parsing into
-	// a walk that an ODD number of quotes puts out of step — which would pair a
-	// reason's quote with the NEXT entry's opening one and ship that entry's name.
-	archiveWarningSkippedItem = archiveWarningQuotedPattern + ` \([^()"\r\n]*\)`
-)
-
-var (
-	// archiveWarningRetainedAt finds one warning and captures the rest of its
-	// line. It anchors on the renderer's most distinctive literal, which sits
-	// immediately before the first path; %q never emits a raw newline, so the
-	// whole clause is always on that one line, and collectLog drops the partial
-	// first line of a truncated tail, so a bundled clause is never half a line.
-	archiveWarningRetainedAt = regexp.MustCompile(`complete original tree\(s\) were retained at ([^\r\n]*)`)
-	// archiveWarningTail is the renderer's grammar for that remainder, in four
-	// groups: the retained-root list, the label between them, the skipped-path
-	// list (empty when a tree was retained with nothing recorded under it), and
-	// whatever a caller appended to the same line.
-	//
-	// That last group is why the invariant holds: it admits no `"` at all, so
-	// EVERY quoted token in a parsed remainder sits in group 1 or group 3 and is
-	// rewritten. A wrapper that adds quote-free text — `failedArchiveWithHook`
-	// appends "(its on-archive hook also failed: …)" to a joined error whose last
-	// line is this warning — keeps its diagnostics; one that adds a quoted token
-	// fails the grammar and takes the fail-safe path in redactArchiveWarningTail.
-	archiveWarningTail = regexp.MustCompile(
-		`\A(` + archiveWarningRetainedItem + `(?:, ` + archiveWarningRetainedItem + `)*)` +
-			`(; skipped paths(?: \(showing first \d+ of \d+\))?: )` +
-			`((?:` + archiveWarningSkippedItem + `(?:, ` + archiveWarningSkippedItem + `)*)?)` +
-			`([^"\r\n]*)\z`)
-	archiveWarningQuoted = regexp.MustCompile(archiveWarningQuotedPattern)
-)
-
 // redactor holds the per-run redaction context — the home directory to
-// collapse to "~" and the username token(s) to blank to "[user]" — resolved
-// once so every section scrubs against the same values. Constructed with
-// newRedactor() in production; tests build one directly with fixed values for
-// deterministic assertions.
+// collapse to "~", the username token(s) to blank to "[user]", and the path
+// roots to name — resolved once so every section scrubs against the same
+// values. Constructed with newRedactor() in production; tests build one
+// directly with fixed values for deterministic assertions.
 type redactor struct {
 	home  string
 	users []string
@@ -134,11 +71,29 @@ type redactor struct {
 	// structured sections don't reach.
 	tmuxNames map[string]struct{}
 	titles    map[string]struct{}
+	// roots are the absolute directories this run can name: the AF home, plus
+	// each session's repo and worktree, gathered by noteSession before any record
+	// is redacted. They are registered exactly the way titles are, and for the
+	// same reason — the redactor already knows every instance it is redacting, so
+	// it can name what those instances point at.
+	roots []pathRoot
+	// rootTokens dedupes registration by path. First token wins: a path
+	// registered twice must not gain a second name.
+	rootTokens map[string]string
+	// repoRoots and worktreeRoots number the tokens within their kind.
+	repoRoots     int
+	worktreeRoots int
 }
 
 // newRedactor resolves the redaction context from the environment: the OS
-// home directory and the current username (plus the home directory's base
-// name, which is the username on a conventional layout).
+// home directory, the current username (plus the home directory's base name,
+// which is the username on a conventional layout), and the AF home.
+//
+// The AF home is resolved through config.GetConfigDir so this agrees with every
+// other reader of AGENT_FACTORY_HOME. It matters most when that home is
+// deliberately outside $HOME, which is exactly the layout the "$HOME collapses
+// it" assumption fails on — but it is registered unconditionally, so a bundle
+// names it the same way whatever the layout.
 func newRedactor() *redactor {
 	home, _ := os.UserHomeDir()
 	var users []string
@@ -148,7 +103,11 @@ func newRedactor() *redactor {
 	if home != "" {
 		users = appendUserToken(users, filepath.Base(home))
 	}
-	return &redactor{home: home, users: users}
+	r := &redactor{home: home, users: users}
+	if afHome, err := config.GetConfigDir(); err == nil {
+		r.noteAFHome(afHome)
+	}
+	return r
 }
 
 // appendUserToken adds a username token to the scrub list — BOTH the raw form and,
@@ -188,25 +147,14 @@ func addUserVariant(users []string, name string) []string {
 }
 
 // scrub is the catch-all text pass applied to every section: it removes PEM
-// blocks and pattern-matched credentials, collapses the home directory to "~",
-// and blanks bare username tokens to "[user]". It runs last over already
+// blocks and pattern-matched credentials, collapses every known path root — the
+// AF home and each session's repo/worktree to its token, the home directory to
+// "~" — and blanks bare username tokens to "[user]". It runs last over already
 // field-redacted content, so it is defense-in-depth, not the only line of
 // defense.
 func (r *redactor) scrub(s string) string {
 	s = credscrub.Scrub(s)
-	if r.home != "" && r.home != "/" {
-		s = strings.ReplaceAll(s, r.home, "~")
-		// A home directory whose bytes are not valid UTF-8 also reaches a bundle
-		// in its DISPLAY spelling: encoding/json cannot carry the raw bytes, and
-		// the archive warning's retained root is rewritten to that same form
-		// (redactArchiveWarningTail). Matching only the raw token would leave the
-		// user's home path — and the username inside it — in both. The two
-		// spellings differ only when the home path is invalid UTF-8, and the
-		// display form then contains U+FFFD, so this can only ever redact more.
-		if display := strings.ToValidUTF8(r.home, "\uFFFD"); display != r.home {
-			s = strings.ReplaceAll(s, display, "~")
-		}
-	}
+	s = r.collapseKnownRoots(s)
 	// Blank bare username tokens with the SAME manual token boundary the title
 	// scrub uses, not a `\b<name>\b` regex: a `\b` after the username never matches
 	// when the username ends in a non-word rune (an OS username like "test-"), so
@@ -257,13 +205,28 @@ func (r *redactor) scrubLog(s string) string {
 	// ("secret" in "docs/secret-plan.txt") used to be rewritten first and strand
 	// the rest of the name — and matching the whole quoted token makes that
 	// impossible in either order.
-	s = scrubArchiveWarningPaths(s)
+	s = r.scrubArchiveWarningPaths(s)
 	// Remove every known full title representation before any shape-based pass
 	// can consume only part of it. In particular, the legacy raw task-start
 	// matcher is line-oriented while a legal title may contain newlines; running
 	// that matcher first replaced line one and made the original full-title match
 	// impossible, leaking the remaining lines (#2249 late review).
 	s = r.scrubSessionTitles(s)
+	s = r.scrubTmuxNames(s)
+	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
+	// syntax is a safer boundary than a global punctuation matcher and also
+	// catches historical task-created titles no longer present in instances.json.
+	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
+	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
+	return r.scrub(s)
+}
+
+// scrubTmuxNames removes the free-text <title> from every af tmux session name
+// in s. It is shared by scrubLog and scrubDiagnostic rather than inlined in
+// either, because "a tmux name carries the title" is one fact: a diagnostic
+// string that quotes tmux would otherwise reintroduce, field by field, exactly
+// the #1584 leak the log pass closes.
+func (r *redactor) scrubTmuxNames(s string) string {
 	// Redact the title in every af_<hash>_<title> name. Keys on the name shape,
 	// so it catches current AND historical (archived/killed) sessions the live
 	// instance set no longer references.
@@ -275,12 +238,26 @@ func (r *redactor) scrubLog(s string) string {
 			s = strings.ReplaceAll(s, name, tmuxPrefixMarker)
 		}
 	}
-	// Retain compatibility with the two legacy raw %s taskrun.go forms. Their
-	// syntax is a safer boundary than a global punctuation matcher and also
-	// catches historical task-created titles no longer present in instances.json.
-	s = taskStartedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker)
-	s = taskParkedInstanceTitle.ReplaceAllString(s, `${1}`+redactedMarker+`${3}`)
-	return r.scrub(s)
+	return s
+}
+
+// scrubDiagnostic sanitizes an af-AUTHORED diagnostic string that QUOTES an
+// error from somewhere else — today, LostRestoreFailure.Error, which carries
+// whatever tmux or git returned to the daemon's restore loop.
+//
+// Such a string is not free text a user typed, and blanking it costs triage the
+// one thing it is there for: the reason automatic recovery stopped. But it is
+// not af's own prose either. It gets the bundled log tail's treatment instead —
+// session titles, the titles hiding inside tmux session names, every known path
+// root, $HOME, the username, credential shapes — because the text it quotes
+// names the same things the log does, and a second policy for it would drift
+// from the first (#3588).
+//
+// Titles go FIRST, before the shape-based tmux pass, for the reason scrubLog
+// orders them that way: a shape matcher that consumes part of a name makes the
+// exact full-title match impossible afterwards.
+func (r *redactor) scrubDiagnostic(s string) string {
+	return r.scrub(r.scrubTmuxNames(r.scrubSessionTitles(s)))
 }
 
 // scrubSessionTitles removes exact Go-quoted forms of every known title, then
@@ -306,84 +283,6 @@ func (r *redactor) scrubSessionTitles(s string) string {
 		s = replaceBareTitle(s, title)
 	}
 	return s
-}
-
-// scrubArchiveWarningPaths takes the user-chosen file names out of every
-// incomplete-archive warning in a log tail, and rewrites the retained root
-// printed beside them. It is a plain function, not a redactor method, because it
-// needs nothing from the run: see the matchers above for why keying on the
-// renderer rather than on live session state is the point.
-func scrubArchiveWarningPaths(s string) string {
-	clauses := archiveWarningRetainedAt.FindAllStringSubmatchIndex(s, -1)
-	if clauses == nil {
-		return s
-	}
-	var out strings.Builder
-	copied := 0
-	for _, clause := range clauses {
-		// clause[2]:clause[3] is the captured remainder of the line; everything
-		// before it (the anchor prose included) is copied through untouched.
-		out.WriteString(s[copied:clause[2]])
-		out.WriteString(redactArchiveWarningTail(s[clause[2]:clause[3]]))
-		copied = clause[3]
-	}
-	out.WriteString(s[copied:])
-	return out.String()
-}
-
-// redactArchiveWarningTail rewrites what one warning prints after "retained
-// at ": the retained roots, then the skipped file names with their reasons.
-//
-// The two lists are treated differently because the policy for the two VALUES
-// differs, and this keeps the log agreeing with the JSON section instead of
-// inventing a second policy for the same fields:
-//
-//   - A skipped path is a RELATIVE name a user chose for a file af could not
-//     read, so it goes — exactly as redactInstanceData blanks
-//     archive_report.retained_trees[].skipped[].path.
-//   - A retained root is a SYSTEM path, which that same function keeps on
-//     purpose so the closing scrub can collapse $HOME in it. What the log adds
-//     is the %q escaping, and that escaping IS the leak: a root that is not
-//     valid UTF-8 arrives as `\xNN` escapes, which no home or username
-//     replacement can see through. Rewriting the token to the DISPLAY spelling
-//     the JSON copy carries drops the raw bytes and hands the collapse something
-//     it can match — and for a root that is already valid UTF-8, which is every
-//     ordinary one, that rewrite is the identity.
-//
-// A remainder that does not parse as the renderer's grammar is dropped WHOLE.
-// The format moved, or something appended a quoted token of its own; either way
-// the quoted runs can no longer be told apart, and a bundle that loses a skip
-// reason is a nuisance where one that ships a user's file names is the bug being
-// fixed. Between the grammar and that fallback, no quoted token in a matched
-// clause can reach the bundle unrewritten.
-func redactArchiveWarningTail(tail string) string {
-	parsed := archiveWarningTail.FindStringSubmatchIndex(tail)
-	if parsed == nil {
-		return redactedMarker
-	}
-	var out strings.Builder
-	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
-		tail[parsed[2]:parsed[3]], archiveWarningDisplayRoot))
-	// The label, kept verbatim: it carries the "(showing first X of Y)" count
-	// triage reads. Like the trailing group, it holds no quoted token.
-	out.WriteString(tail[parsed[4]:parsed[5]])
-	out.WriteString(archiveWarningQuoted.ReplaceAllStringFunc(
-		tail[parsed[6]:parsed[7]],
-		func(string) string { return strconv.Quote(redactedMarker) }))
-	out.WriteString(tail[parsed[8]:parsed[9]])
-	return out.String()
-}
-
-// archiveWarningDisplayRoot rewrites one %q-rendered retained root to the
-// display spelling of the same path — the form encoding/json can carry, and the
-// form the $HOME collapse can match. A token that will not unquote did not come
-// from this renderer, so it is redacted rather than guessed at.
-func archiveWarningDisplayRoot(token string) string {
-	raw, err := strconv.Unquote(token)
-	if err != nil {
-		return strconv.Quote(redactedMarker)
-	}
-	return strconv.Quote(strings.ToValidUTF8(raw, "\uFFFD"))
 }
 
 // sortLongestFirst keeps redaction order in one place: replace longer secrets
@@ -523,6 +422,13 @@ func (r *redactor) noteSession(d *session.InstanceData) {
 	r.noteTmuxName(d.TmuxName)
 	r.noteTitle(d.Title)
 	r.noteTitle(d.Worktree.SessionName)
+	// The two roots this record points at. Registered here, beside the titles,
+	// because they are the same kind of fact — something this run knows the name
+	// of and every later pass must be able to recognize — and because collecting
+	// them before ANY record is redacted is what lets one repo shared by several
+	// sessions carry one token (#3588).
+	r.noteRepoRoot(d.Worktree.RepoPath)
+	r.noteWorktreeRoot(d.Worktree.WorktreePath)
 	for _, tab := range d.Tabs {
 		r.noteTmuxName(tab.TmuxName)
 	}
@@ -622,9 +528,17 @@ const unparsedInstancesNote = `"[instances.json could not be parsed; contents om
 func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 	var datas []session.InstanceData
 	if err := json.Unmarshal(raw, &datas); err == nil {
+		// Two passes, exactly as redactTasks runs two: the first registers what
+		// this payload knows — titles, tmux names, path roots — and the second
+		// redacts against the COMPLETE set. Record order is then irrelevant, which
+		// it is not in one pass: a session's path can sit under a root another
+		// record introduces, and the root tokens would be numbered by whichever
+		// record happened to be redacted first.
 		for i := range datas {
 			r.noteSession(&datas[i])
-			redactInstanceData(&datas[i])
+		}
+		for i := range datas {
+			r.redactInstanceData(&datas[i])
 		}
 		if out, marshalErr := json.MarshalIndent(datas, "", "  "); marshalErr == nil {
 			return json.RawMessage(r.scrub(string(out)))
@@ -653,9 +567,9 @@ func (r *redactor) redactInstancesJSON(raw json.RawMessage) json.RawMessage {
 // generic fallback path, where the typed field-level policy cannot apply. It is
 // deliberately broad and fail-safe: on a shape we could not parse, a key that
 // *might* hold free text, a secret, a path, or arbitrary metadata is redacted
-// rather than trusted. Structural keys (id, status, program, timestamps, git
-// SHAs, counts, flags) are absent here and so survive the walk (then get the
-// text scrub for any residual $HOME/username/credential).
+// rather than trusted. Structural keys (id, status, timestamps, git SHAs,
+// counts, flags) are absent here and so survive the walk (then get the text
+// scrub for any residual root/$HOME/username/credential).
 var sensitiveJSONKeys = map[string]bool{
 	"title": true, "prompt": true, "prompts": true,
 	"command": true, "cmd": true, "commands": true,
@@ -668,6 +582,28 @@ var sensitiveJSONKeys = map[string]bool{
 	"auth": true, "authorization": true, "bearer": true,
 	"private_key": true, "url": true,
 	"path": true, "home": true, "repo_path": true, "worktree_path": true,
+	// The rest of #3588's register, mirrored onto this path the way every entry
+	// below mirrors its own typed redaction. A record the typed decode REJECTS
+	// must never be less private than one it accepts, and each of these is
+	// dropped wholesale rather than given the typed treatment because the typed
+	// treatment needs a shape this path by definition could not parse:
+	//
+	//   - alternate_path is the relocation pathname the typed policy collapses to
+	//     a root token; there is no record here to take a root from.
+	//   - archive_warning embeds the user-chosen skipped file names, and the
+	//     grammar that separates them from the prose is the renderer's, not this
+	//     payload's.
+	//   - name is a tab name, user-chosen. The enum words beside it
+	//     (kind_name/status_name/liveness_name) and branch_name are DIFFERENT
+	//     keys, matched exactly, so they still survive.
+	//   - account is the user-chosen credential-account label.
+	//   - program is an arbitrary command line. It was listed as structural here
+	//     until #3588 established it is not.
+	//   - error is af-authored diagnostic text that quotes tmux and git, so it
+	//     names titles and worktrees; the typed path scrubs it, and scrubbing
+	//     needs the typed record's titles.
+	"alternate_path": true, "archive_warning": true,
+	"name": true, "account": true, "program": true, "error": true,
 	// path_bytes is the durable form of a path that is not valid UTF-8, and JSON
 	// carries it BASE64-ENCODED. Blanking "path" alone left the real name in the
 	// bundle in a form the closing text scrub cannot recognize as a path, a home
@@ -746,9 +682,20 @@ func redactUnknownJSON(v any) any {
 
 // redactInstanceData blanks the free-text and arbitrary-payload fields of a
 // single session record while leaving the structural triage fields (ids,
-// liveness/status, program, timestamps, git SHAs, counts, flags) intact.
-// Paths are left for the text scrub to collapse ($HOME→~, username→[user]).
-func redactInstanceData(d *session.InstanceData) {
+// liveness/status, timestamps, git SHAs, counts, flags) intact.
+//
+// PATHS ARE NOT LEFT FOR THE TEXT SCRUB. That is what this function used to say,
+// and it was true only for the common layout: scrub replaces r.home and the
+// username tokens and nothing else, so a repo or worktree kept outside the home
+// directory shipped its directory names verbatim (#3588). Every path field is
+// rewritten HERE instead, against the roots noteSession registered — see
+// collapsePathField for the three outcomes.
+//
+// It is a method for that reason: naming a path needs the run's roots, exactly
+// as removing a title needs the run's titles. A caller that runs it without
+// noteSession first gets the fail-safe end of the policy (an unknown root is a
+// marker), never a leak.
+func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// A kill tombstone's storage-only cleanup handle can contain a private SSH
 	// host/user/key path, a hook command path, or a container id. None is needed
 	// to diagnose the session shape, and unlike ordinary snapshots instances.json
@@ -756,6 +703,31 @@ func redactInstanceData(d *session.InstanceData) {
 	d.RuntimeCleanup = nil
 	if d.Title != "" {
 		d.Title = redactedMarker
+	}
+	// Program is the session-level analogue of TabData.Command, which
+	// redactTabData drops wholesale as user-supplied — and it is user-supplied in
+	// exactly the same way: a program_overrides entry or `--program` is an
+	// arbitrary command line, path and flags included (the root session on the
+	// maintainer's box runs "/home/<user>/.local/bin/claude
+	// --dangerously-skip-permissions"). Leaving one verbatim while blanking the
+	// other was an inconsistency, not a decision (#3588).
+	//
+	// It does NOT collapse to the marker outright, because unlike a tab command
+	// it carries one fact triage genuinely reads: WHICH AGENT ran. That fact is
+	// recoverable from the command without keeping any of it —
+	// DetectAgentFromCommand is the same seam every agent-conditional spawn keys
+	// off, so what the bundle reports is what af itself decided this session was.
+	// A command it cannot resolve to an agent has no safe part to keep, so it
+	// takes Command's trade after all.
+	d.Program = redactProgram(d.Program)
+	// Account is the credential-account label a user picks (`--account work`),
+	// free text that may name an employer or a client (#3051). Nothing else in
+	// the pipeline touched it. The marker keeps the triage-relevant fact — an
+	// account WAS in play, so the session did not run as the ambient identity —
+	// and drops the label; an unset account stays unset, so redaction never
+	// invents one (#3588).
+	if d.Account != "" {
+		d.Account = redactedMarker
 	}
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
@@ -804,6 +776,33 @@ func redactInstanceData(d *session.InstanceData) {
 	if d.PRInfo.URL != "" {
 		d.PRInfo.URL = redactedMarker
 	}
+	// Path is the session's own absolute path. See collapsePathField.
+	d.Path = r.collapsePathField(d.Path)
+	d.Worktree.RepoPath = r.collapsePathField(d.Worktree.RepoPath)
+	d.Worktree.WorktreePath = r.collapsePathField(d.Worktree.WorktreePath)
+	if d.Worktree.RelocationRecovery != nil {
+		d.Worktree.RelocationRecovery.AlternatePath =
+			r.collapsePathField(d.Worktree.RelocationRecovery.AlternatePath)
+	}
+	// LostRestoreFailure.Error is af-authored — daemon/lostrestore.go stores the
+	// terminal error of the automatic restore loop — but every constructor that
+	// reaches it QUOTES an error from tmux or git, and those name the session's
+	// tmux session (which is derived from its title) and its worktree. Blanking
+	// it would cost triage the reason recovery stopped, so it gets the bundled
+	// log tail's treatment instead (#3588). Attempts is a count and survives.
+	if d.LostRestoreFailure != nil {
+		d.LostRestoreFailure.Error = r.scrubDiagnostic(d.LostRestoreFailure.Error)
+	}
+	// ArchiveWarning is the bounded projection of ArchiveReport.Warning, and that
+	// renderer prints the user-chosen names of the files af could not read.
+	// #3554 closed the LOG path for exactly this text, but scrubArchiveWarningPaths
+	// is reached only from scrubLog while redactInstancesJSON applies plain
+	// scrub — so the same names still rode the JSON section of every bundle
+	// (#3588). Routing the field through the same function rather than blanking it
+	// keeps one policy for one string, and keeps the warning's SHAPE, which is
+	// what triage reads: "af skipped 3 unreadable files", with a reason beside
+	// each dropped name.
+	d.ArchiveWarning = r.redactArchiveWarning(d.ArchiveWarning)
 	// ArchiveReport.Skipped[].Path carries the relative file names a user chose
 	// for files af could not read (hence permission_denied). They are relative to
 	// the retained worktree root, so the text scrub cannot reach them — there is
@@ -816,36 +815,71 @@ func redactInstanceData(d *session.InstanceData) {
 	// title leaks in #2419 and #2776, a field added after the policy was written.
 	// PathBytes is the durable form when Path is not valid UTF-8 and must be
 	// cleared alongside it, or the raw name survives the display redaction. The
-	// retained tree's own path and the skip reason survive: the tree path is the
-	// system worktree path the scrub collapses via $HOME, and the reason is the
-	// diagnostic ("permission denied on N files").
+	// retained tree's own path is COLLAPSED rather than blanked (it is a system
+	// path, and which root it hangs off is triage signal), and the skip reason
+	// survives as the diagnostic ("permission denied on N files").
 	if d.ArchiveReport != nil {
 		for i := range d.ArchiveReport.RetainedTrees {
-			// The tree's display Path is kept on purpose (see above), but its
-			// PathBytes is not the same field twice: json emits it base64-encoded,
-			// and the $HOME/username scrub the display form relies on cannot see
-			// through base64. A root whose own name is not valid UTF-8 therefore
-			// shipped raw.
+			// The tree's Path is a root-relative system path, so it takes the same
+			// collapse every other path field does — NOT the "$HOME will reach it"
+			// assumption this comment used to record, which held only while every
+			// tree happened to sit under the home directory (#3588).
+			//
+			// Its PathBytes is not the same field twice: json emits it
+			// base64-encoded, and no text pass can see through base64. A root whose
+			// own name is not valid UTF-8 therefore shipped raw.
 			//
 			// Clearing PathBytes is not enough on its own: ArchiveRetainedTree's
 			// MarshalJSON RE-DERIVES it from Path whenever it is empty, so a Path
 			// carrying invalid UTF-8 would put the raw bytes straight back on the
-			// wire. Reducing Path to its display form first is what makes the
-			// clearing hold, and it makes that an invariant of this function rather
-			// than an inherited property of whoever decoded the record. It is
-			// lossless for triage: the display form is what the JSON section would
-			// have shown anyway, and the text scrub still collapses $HOME in it.
-			d.ArchiveReport.RetainedTrees[i].Path = strings.ToValidUTF8(d.ArchiveReport.RetainedTrees[i].Path, "\uFFFD")
-			d.ArchiveReport.RetainedTrees[i].PathBytes = nil
-			for j := range d.ArchiveReport.RetainedTrees[i].Skipped {
-				d.ArchiveReport.RetainedTrees[i].Skipped[j].Path = redactedMarker
-				d.ArchiveReport.RetainedTrees[i].Skipped[j].PathBytes = nil
+			// wire. Reducing Path to its display form is what makes the clearing
+			// hold, and it makes that an invariant of this function rather than an
+			// inherited property of whoever decoded the record. It runs AFTER the
+			// collapse, so an invalid-UTF-8 tail below a known root is normalized
+			// too.
+			tree := &d.ArchiveReport.RetainedTrees[i]
+			tree.Path = strings.ToValidUTF8(r.collapsePathField(tree.Path), "\uFFFD")
+			tree.PathBytes = nil
+			for j := range tree.Skipped {
+				tree.Skipped[j].Path = redactedMarker
+				tree.Skipped[j].PathBytes = nil
 			}
+		}
+		// The rollback fence carries the pre-projection relocation state, alternate
+		// pathname included. It is the same value under a compatibility name, so it
+		// is the same policy.
+		if fence := d.ArchiveReport.RollbackFence; fence != nil && fence.OriginalRelocationRecovery != nil {
+			fence.OriginalRelocationRecovery.AlternatePath =
+				r.collapsePathField(fence.OriginalRelocationRecovery.AlternatePath)
 		}
 	}
 }
 
+// redactProgram reduces a resolved program command line to the agent it runs.
+// Shared by the instance record and the task projection because it is one field
+// under two owners; see the block in redactInstanceData for why the agent is
+// kept and everything around it is not.
+func redactProgram(program string) string {
+	if program == "" {
+		return ""
+	}
+	if agent := tmux.DetectAgentFromCommand(program); agent != "" {
+		return agent
+	}
+	return redactedMarker
+}
+
 func redactTabData(tab *session.TabData) {
+	// A tab name is user-chosen (`af sessions tab-create --name <tab>`) and
+	// nothing in the pipeline could reach it: it is not a session title, so
+	// scrubSessionTitles cannot know it, and it is not a path, so no root or
+	// $HOME collapse applies. A tab named after a customer or an internal project
+	// shipped verbatim (#3588). It carries no triage value the row does not
+	// already have — the minted id names the tab and the kind says what it is —
+	// so it takes the same wholesale drop Command does below.
+	if tab.Name != "" {
+		tab.Name = redactedMarker
+	}
 	if tab.Command != "" {
 		tab.Command = redactedMarker
 	}
@@ -889,8 +923,17 @@ func redactTabData(tab *session.TabData) {
 // redactedTask is the structural, secret-free projection of a task.Task. The
 // prompt and watch command — both free-text that can carry secrets — collapse
 // to a marker (and a boolean recording that one was present). LastRunStatus is
-// kept for diagnostics after known session titles are removed. ProjectPath
-// survives here and is scrubbed for $HOME/username by the text pass.
+// kept for diagnostics after known session titles are removed.
+//
+// ProjectPath keeps its shape rather than its name: redactTasks registers it as
+// a repo root, and the projection collapses it to that root's token exactly as
+// the instance path fields collapse theirs. It used to be documented as
+// "scrubbed for $HOME/username by the text pass", which was the same
+// unguaranteed assumption those fields carried — a project outside the home
+// directory shipped its directory names (#3588).
+//
+// Program takes the same reduction as InstanceData.Program: the agent the
+// command detects, or the marker when it detects none.
 type redactedTask struct {
 	ID            string `json:"id"`
 	Name          string `json:"name,omitempty"`
@@ -915,8 +958,8 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 		ID:            t.ID,
 		Name:          t.Name,
 		CronExpr:      t.CronExpr,
-		ProjectPath:   t.ProjectPath,
-		Program:       t.Program,
+		ProjectPath:   r.collapsePathField(t.ProjectPath),
+		Program:       redactProgram(t.Program),
 		Enabled:       t.Enabled,
 		LastRunStatus: r.scrubUnstructured(t.LastRunStatus),
 	}
@@ -940,6 +983,9 @@ func (r *redactor) redactTask(t task.Task) redactedTask {
 func (r *redactor) redactTasks(tasks []task.Task) []redactedTask {
 	for _, t := range tasks {
 		r.noteTitle(t.TargetSession)
+		// A task's project path is a repo path, registered the same way a
+		// session's is so the two share one token when they name one repo.
+		r.noteRepoRoot(t.ProjectPath)
 	}
 	out := make([]redactedTask, 0, len(tasks))
 	for _, t := range tasks {

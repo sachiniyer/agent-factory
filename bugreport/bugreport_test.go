@@ -157,7 +157,7 @@ func TestRedactInstanceDataKeepsStructuralDropsFreeText(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 	if d.RuntimeCleanup != nil {
 		t.Fatal("runtime cleanup credentials/identity survived structured redaction")
 	}
@@ -463,7 +463,7 @@ func TestRedactInstanceDataRedactsNonLoopbackWebTabURL(t *testing.T) {
 		},
 	}
 
-	redactInstanceData(&d)
+	redactOneInstanceData(&d)
 
 	if d.Tabs[0].URL != redactedMarker {
 		t.Errorf("non-loopback web tab URL not redacted: %q (leaks internal/private identifiers, same class as PRInfo.URL)", d.Tabs[0].URL)
@@ -651,9 +651,14 @@ func TestRedactInstancesFallbackRedactsConversationIDs(t *testing.T) {
 	}
 	// Structural triage fields must still survive: `id` is NOT sensitive, and
 	// blanket-redacting it to fix this bug would gut the bundle's usefulness.
+	// `program` is no longer among them — #3588 established it is an arbitrary
+	// command line, so this path drops it with the other free text.
 	if !strings.Contains(out, "leg-1") || !strings.Contains(out, "legacy-string-status") ||
-		!strings.Contains(out, "claude") || !strings.Contains(out, "feature/test") {
+		!strings.Contains(out, "feature/test") {
 		t.Errorf("fallback dropped safe structural fields:\n%s", out)
+	}
+	if strings.Contains(out, `"program": "claude"`) {
+		t.Errorf("fallback kept a program command line verbatim:\n%s", out)
 	}
 }
 
@@ -1129,8 +1134,8 @@ func TestBuildEndToEnd(t *testing.T) {
 		"<details>", issueSummaryLabel,
 		"### Daemon status", "daemon: not running",
 		"### Daemon log tail",
-		"~/.agent-factory/daemon.sock", // daemon status inlined, home collapsed
-		testSHA,                        // the real log tail rode in (and stayed structural)
+		"[af-home]/daemon.sock", // daemon status inlined, AF home collapsed to its token (#3588)
+		testSHA,                 // the real log tail rode in (and stayed structural)
 	)
 	// The redaction assertion below is only meaningful because the planted log
 	// line and daemon status actually reached the body — assert the scrubbed

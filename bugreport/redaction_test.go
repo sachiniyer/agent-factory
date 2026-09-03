@@ -3,10 +3,24 @@ package bugreport
 import (
 	"strings"
 	"testing"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // Username / branch redaction cases (#2533). Split out of bugreport_test.go to
 // keep that file under the 1500-line limit (#1145); package and helpers are shared.
+
+// redactOneInstanceData runs the per-record policy the way redactInstancesJSON
+// does: register what the record knows — its titles, its tmux names, its path
+// roots — and only then redact against that. Naming a path takes the run's roots
+// exactly as removing a title takes the run's titles (#3588), so a test that
+// called the redaction alone would be testing a configuration production never
+// uses.
+func redactOneInstanceData(d *session.InstanceData) {
+	r := &redactor{}
+	r.noteSession(d)
+	r.redactInstanceData(d)
+}
 
 // TestScrubRedactsUsernameEndingInNonWordChar is the #2533 regression: an OS
 // username ending in a non-word rune (hyphen, dot, …) has no word boundary after
@@ -43,9 +57,9 @@ func TestScrubDoesNotOverRedactUsernameInsideAWord(t *testing.T) {
 }
 
 // TestRedactInstanceDataBranchUsernameScrubbed is the end-to-end #2533 lock: the
-// Branch field is not field-redacted (paths are left for the text scrub by design),
-// so a username with a non-word tail must still be blanked out of the rendered
-// branch by the scrub the redaction path applies.
+// Branch field is not field-redacted (the repo retains the branch suffix by
+// standing policy), so a username with a non-word tail must still be blanked out
+// of the rendered branch by the scrub the redaction path applies.
 func TestRedactInstanceDataBranchUsernameScrubbed(t *testing.T) {
 	r := &redactor{home: "/home/test-", users: []string{"test-"}}
 	if out := r.scrub(`"branch":"test-/fix-login-bug"`); strings.Contains(out, "test-/fix-login-bug") {

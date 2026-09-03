@@ -235,10 +235,12 @@ snapshot), the configured tasks, the session state from `instances.json`, the
 text file (default `~/af-bug-report-<ts>.txt`, mode 0600; override with
 `-o/--output`) so you can read the whole thing in one scroll before attaching
 it. Redaction is **best-effort**: free-text and secret-bearing fields (session
-titles, session prompts, task prompts, tab commands, remote metadata) are dropped, `$HOME` and
-your username are collapsed to `~` / `[user]`, and known credential shapes are
-scrubbed everywhere — but perfect redaction is impossible, so **review the file
-before sharing it publicly**. It is read-only and local (like `af doctor`): it
+titles, session prompts, task prompts, tab and session commands, tab names,
+account labels, remote metadata) are dropped; every directory the bundle names is
+replaced by the role it plays (`[repo:N]`, `[worktree:N]`, `[af-home]`, `~`)
+rather than by its own name, and your username by `[user]`; and known credential
+shapes are scrubbed everywhere — but perfect redaction is impossible, so
+**review the file before sharing it publicly**. It is read-only and local (like `af doctor`): it
 never dials the daemon or the network, and is not part of the HTTP `af api`
 surface.
 

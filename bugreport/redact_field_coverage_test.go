@@ -136,7 +136,24 @@ var verbatimInstanceFields = map[string]string{
 	"TabKinds[].Kind":   "bounded tab-kind enum",
 	"TabKinds[].Reason": "the daemon's OWN refusal text (#3060), not user input",
 
-	"ArchiveReport.RetainedTrees[].Skipped[].Reason":                           "af-authored skip diagnostic (\"permission denied\"), not a user-chosen name; redact.go's stated policy keeps it for triage while blanking the Path beside it",
+	"ArchiveReport.RetainedTrees[].Skipped[].Reason": "af-authored skip diagnostic (\"permission denied\"), not a user-chosen name; redact.go's stated policy keeps it for triage while blanking the Path beside it",
+
+	// The one entry here justified by a PASS rather than by the value's own
+	// shape, and the justification is a specific function, not a hope about the
+	// scrub. redactInstanceData routes it through scrubDiagnostic, which gives an
+	// af-authored diagnostic the bundled log tail's treatment: session titles,
+	// the titles hiding inside af tmux session names, every registered path root,
+	// $HOME, the username, credential shapes. That is asserted end to end by
+	// TestRedactInstancesJSONScrubsLostRestoreFailureError, which plants a title,
+	// a tmux name and a repo root inside the message and requires all three gone
+	// while the af prose survives.
+	//
+	// The guard's marker survives it because a sentinel is none of those things —
+	// it is not a title this run knows, a tmux name, or a path. That is the point
+	// of the field: what daemon/lostrestore.go stores is af's own text quoting
+	// tmux or git, and blanking it costs triage the reason automatic recovery
+	// stopped (#3588).
+	"LostRestoreFailure.Error": "af-authored restore diagnostic, sanitized by scrubDiagnostic in redactInstanceData (titles, tmux names, path roots, $HOME, username, credentials) rather than blanked, because it is the only record of why recovery gave up — see TestRedactInstancesJSONScrubsLostRestoreFailureError (#3588)",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupGeneration": "minted cleanup-generation token",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.CleanupLifecycle":  "bounded RelocationRecoveryState enum",
 	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.State":             "bounded RelocationRecoveryState enum",
@@ -153,28 +170,17 @@ var verbatimInstanceFields = map[string]string{
 //
 // Do not add an entry here to make a failing build green. Add one only for a
 // leak that predates the guard and has an issue.
-var knownUnredactedFields = map[string]string{
-	// Absolute paths are NOT guaranteed to be reachable by the scrub. scrub
-	// replaces r.home and the username tokens and nothing else, so a repo or
-	// worktree outside $HOME — /srv/ConfidentialClient/repo, a sibling checkout,
-	// anything reached via --repo — ships its directory names verbatim. Claiming
-	// these as "scrub collapses $HOME" asserted a guarantee the pipeline does not
-	// make, which is the same false intuition that produced #3541 (#3592 review).
-	"Path":                                      "#3588 — absolute session path, only collapsed when it happens to sit under $HOME",
-	"Worktree.RepoPath":                         "#3588 — the USER's repo path; routinely outside $HOME and never collapsed there",
-	"Worktree.WorktreePath":                     "#3588 — absolute worktree path, only collapsed when it happens to sit under $HOME",
-	"ArchiveReport.RetainedTrees[].Path":        "#3588 — retained tree root; same unguaranteed-$HOME assumption",
-	"Worktree.RelocationRecovery.AlternatePath": "#3588 — alternate worktree path; same unguaranteed-$HOME assumption",
-	"ArchiveReport.RollbackFence.OriginalRelocationRecovery.AlternatePath": "#3588 — same unguaranteed-$HOME assumption",
-
-	"Tabs[].Name":              "#3588 — user-chosen tab name; not a title (scrubSessionTitles cannot know it) and not a path",
-	"PendingTabs[].Name":       "#3588 — same user-chosen tab name under the staging roster",
-	"Account":                  "#3588 — user-chosen credential-account label (--account work); nothing in the pipeline touches it",
-	"LostRestoreFailure.Error": "#3588 — af-authored diagnostic; embedded paths collapse via scrub, but an embedded session title does not",
-	"Program":                  "#3588 — may be an arbitrary command line; redactTabData redacts the TabData.Command analogue wholesale, so leaving this verbatim is an inconsistency, not a decision",
-
-	"ArchiveWarning": "#3588 — the bounded warning projection embeds the user-chosen skipped file names. #3554 (74e3b06f) closed the LOG path for exactly this text, but scrubArchiveWarningPaths is called only from scrubLog; redactInstancesJSON applies plain scrub, so the FIELD still carries them into the JSON section",
-}
+//
+// It is EMPTY, and that is the state to keep it in. #3588 was the backlog this
+// guard made visible when it was built — twelve fields, from the six absolute
+// paths that "the scrub collapses $HOME" never reached, through the tab names
+// and the account label nothing in the pipeline touched, to the archive warning
+// whose log copy was already clean. Every one of them is now redacted in
+// redact.go, and the last (LostRestoreFailure.Error) is classified below with
+// the pass that sanitizes it. An empty register means the guard is currently
+// asserting the whole record, which is the only state in which its verdict on a
+// NEW field means anything.
+var knownUnredactedFields = map[string]string{}
 
 // unplantableInstanceFields are scalar leaves inside a REPEATED aggregate. The
 // walk can plant no marker in a number or a bool, so it cannot say whether
@@ -1163,7 +1169,14 @@ func TestRedactInstanceDataCoversEveryStringField(t *testing.T) {
 			len(ambiguous), strings.Join(ambiguous, "\n  "))
 	}
 
-	redactInstanceData(&data)
+	// The per-record policy as redactInstancesJSON runs it: register what the
+	// record knows — its titles, its tmux names, its repo/worktree roots — then
+	// redact against that. Naming a path field takes the run's roots (#3588), so
+	// running the redaction alone would report a leak in a configuration
+	// production never uses.
+	r := &redactor{}
+	r.noteSession(&data)
+	r.redactInstanceData(&data)
 
 	// encoding/json decides what reaches a bundle. Marshalling the redacted
 	// record and looking for each marker's own JSON fragment means this test
