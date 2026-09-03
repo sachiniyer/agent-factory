@@ -106,12 +106,19 @@ func TestProcessesMatchingArgvFindsALiveProcessByItsArgv(t *testing.T) {
 		// reported here too. That is the right direction to be wrong in: it
 		// costs a rerun, where the reverse costs the platform's coverage
 		// silently.
-		if same, identityErr := SameIdentity(Process{PID: unreadable.PID}); identityErr == nil && !same {
+		// EXISTENCE, deliberately, and not SameIdentity: this test never held the
+		// snapshot entry, so it has no start stamp to compare against, and
+		// SameIdentity against a zero-valued Process reports every live process
+		// as gone — which is how this guard turned the macOS job red while the
+		// scan was behaving correctly. The question here is only "did an exit
+		// hide behind the skip", and a pid that is entirely absent answers it.
+		if _, lookupErr := Lookup(unreadable.PID); isGone(lookupErr) {
 			t.Fatalf("the scan reported pid %d as a refusal it could not attribute, but that process is GONE; "+
 				"an exit mid-scan is a fact to skip on, not a refusal to fail on — and reported as a refusal it "+
 				"turns this test into a permanent skip that reads like a pass (#3693): %v", unreadable.PID, err)
 		}
-		t.Skipf("this host restricts the argv of live pid %d (owned by us: %v) — the contract permits that "+
+		t.Skipf("this host restricts the argv of pid %d, verified still present (owned by us: %v) — the contract "+
+			"permits that "+
 			"failure, so the live-table half of this test cannot run here: %v",
 			unreadable.PID, unreadable.OwnedByUs, err)
 	}
