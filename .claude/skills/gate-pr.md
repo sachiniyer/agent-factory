@@ -667,8 +667,8 @@ is a pass**:
   > A Codex usage-limit message counts as a review outage unless its
   > scope clause names a job this repository has OBSERVED naming something other
   > than review. An unobserved phrasing counts, because a false block during a real
-  > outage has no exit while a false degrade is a maintainer-review PASS a human
-  > still reads.
+  > outage has no exit while a false degrade leaves a maintainer-review exit a
+  > human can take.
 
   Four attempts to classify the clause by grammar each leaked one way or the
   other — a false block during a real outage is the #3728 defect — which is why
@@ -691,20 +691,30 @@ is a pass**:
   `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
   concatenation, and a test fails if any of the four regains it.
 
-Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
-fresh usage-limit reply degrades it to a manual-only pass that still does not
-merge — `Codex has not reviewed head <sha> yet` either way, so it will not
-merge for you. What to do:
+Auto Gate does not auto-merge an unreviewed head, and since #3819 it does not
+publish a green decision on one either. Silence blocks it, and a fresh
+usage-limit reply blocks it too, with the unmet item
+
+> awaiting maintainer review — post `## Review — approve` on this head
+
+That is the whole exit, and anyone with the marker can take it on any PR,
+external ones included. Post it and the gate merges on its own (#3796); there is
+no longer a green manual-merge state for a hand to act on. The old rule left the
+review to a convention, and #3760 merged with zero reviews, zero review comments
+and no review events through exactly that gap.
+
+Either way the decision carries `Codex has not reviewed head <sha> yet`, and
+either way it will not merge for you. What to do:
 
 ### Approving in Codex's place, so the gate can land it
 
-When Codex is usage-limited the gate degrades to `PASS: reviewer usage-limited;
-maintainer review and manual merge required` and declines to merge — correct, no
-review arrived. But it also skips the update-and-merge loop, and landing by hand
-under a strict up-to-date rule means winning a race against the fleet: master
-merges every 18-22 minutes and one landing cycle is about 20, so the green head is
-behind by exactly one when the gate flips. #3767 lost six consecutive green heads
-that way.
+When Codex is usage-limited the gate blocks with *awaiting maintainer review —
+post `## Review — approve` on this head* and declines to merge — correct, no
+review arrived. Before #3790 it also skipped the update-and-merge loop, so
+landing it meant landing by hand; under a strict up-to-date rule that means
+winning a race against the fleet: master merges every 18-22 minutes and one
+landing cycle is about 20, so the green head is behind by exactly one when the
+gate flips. #3767 lost six consecutive green heads that way.
 
 So a **maintainer approval bound to the head** carries the degraded pass onto the
 ordinary path (#3790). Write it as a PR comment whose FIRST line is exactly:
