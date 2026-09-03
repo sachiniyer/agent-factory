@@ -189,6 +189,11 @@ func rebindControl(t *testing.T, m *Manager, wl *webListeners) {
 // RED on master, where the old listener's srv.Close() cut the connection and the
 // client read nothing at all.
 func TestRetiredListenerDrainsAnInFlightRequest(t *testing.T) {
+	// A grace this test can never reach. It is about the DRAIN, not the deadline,
+	// and a default 2s grace would make a slow runner's scheduling stall look like
+	// a lost reply — the failure mode is "the deadline fired before the assertion
+	// ran", which says nothing about draining. The deadline has its own test.
+	withRetireGrace(t, time.Minute)
 	m, wl, addr, entered, release := hangingControlListener(t)
 
 	conn, err := net.Dial("tcp", addr)
@@ -214,26 +219,27 @@ func TestRetiredListenerDrainsAnInFlightRequest(t *testing.T) {
 	require.Contains(t, string(raw), "drained")
 }
 
-// TestRebindDoesNotCutAConnectionMidRequest covers BOTH listeners with the real
-// muxes, using a connection the server has accepted and is still reading a
-// request from — the state srv.Close() destroys and a retirement does not.
+// TestRebindRetiresTheOldListenerRatherThanClosingIt pins WHICH teardown each
+// bind path chooses, for both listeners, with no timing in it at all.
 //
-// The preview listener cannot reach a test handler (its per-tab credential gate
-// answers first, by design — #1856), so the discriminator here is the connection
-// itself rather than a reply body. It is the same one: on master both listeners
-// cut this connection the instant reconcile ran.
+// It replaces a test that tried to observe the difference on the wire — a
+// connection the old listener was mid-request on, which a close cuts and a
+// retirement does not. That is the real difference, but it is only observable
+// while http.Server still counts the connection as in flight: for a half-written
+// request it stops counting after five seconds (StateNew is promoted to idle in
+// closeIdleConns), and retirement then drops it correctly. Measured both ways —
+// the identical connection survives at 300ms of age and is cut at 6.3s. On a
+// macOS runner where this package takes 487s, the dial-to-rebind gap crossed
+// five seconds and the test failed for a reason that was not the code.
 //
-// Both are covered because both take the same retirement. Only the control one
-// can sever its own reply today — preview_listen_addr rebinds a DIFFERENT
-// listener from the one the write arrives on — but a listener-lifetime rule that
-// holds for one of a pair and not the other is how this file earned its scars
-// (#3012): the exception is what the next change reasons from.
-func TestRebindDoesNotCutAConnectionMidRequest(t *testing.T) {
+// Both listeners are covered because both take the same retirement. Only the
+// control one can sever its own reply today — preview_listen_addr rebinds a
+// DIFFERENT listener from the one the write arrives on — but a listener-lifetime
+// rule that holds for one of a pair and not the other is how this file earned its
+// scars (#3012): the exception is what the next change reasons from.
+func TestRebindRetiresTheOldListenerRatherThanClosingIt(t *testing.T) {
 	for _, kind := range []string{"control", "preview"} {
 		t.Run(kind, func(t *testing.T) {
-			// Long enough that "still connected" cannot be the deadline not having
-			// arrived yet on a loaded box, and short enough to also watch it expire.
-			withRetireGrace(t, 2*time.Second)
 			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 			cfg := config.DefaultConfig()
 			cfg.ListenAddr = ""
@@ -253,20 +259,17 @@ func TestRebindDoesNotCutAConnectionMidRequest(t *testing.T) {
 			require.Empty(t, failed)
 			t.Cleanup(func() { _ = wl.close() })
 
-			state := m.lifecycle.snapshot().listeners
-			addr := state.TCPBoundAddr
-			if kind == "preview" {
-				addr = state.PreviewBoundAddr
+			handleOf := func() *tcpListenerHandle {
+				wl.mu.Lock()
+				defer wl.mu.Unlock()
+				if kind == "control" {
+					return wl.webHandle
+				}
+				return wl.previewHandle
 			}
-			require.NotEmpty(t, addr)
-
-			// A request the server has begun reading and cannot finish: no final
-			// CRLF, so the connection is neither idle nor complete.
-			conn, err := net.Dial("tcp", addr)
-			require.NoError(t, err)
-			defer conn.Close()
-			_, err = fmt.Fprintf(conn, "GET /v1/health HTTP/1.1\r\nHost: %s\r\n", addr)
-			require.NoError(t, err)
+			old := handleOf()
+			require.NotNil(t, old)
+			require.False(t, old.retired.Load(), "a live listener has not been retired")
 
 			next := *m.Config()
 			if kind == "control" {
@@ -279,21 +282,45 @@ func TestRebindDoesNotCutAConnectionMidRequest(t *testing.T) {
 			require.NoError(t, err)
 			require.Empty(t, failed)
 
-			// Retired, not closed: the connection is still up right after the rebind.
-			require.NoError(t, conn.SetReadDeadline(time.Now().Add(300*time.Millisecond)))
-			_, err = conn.Read(make([]byte, 1))
-			var netErr net.Error
-			require.True(t, errors.As(err, &netErr) && netErr.Timeout(),
-				"a rebind must not cut a connection the old listener is mid-request on; got %v", err)
-
-			// And the deadline still governs it — retirement is not a leak.
-			require.NoError(t, conn.SetReadDeadline(time.Now().Add(4*time.Second)))
-			_, err = conn.Read(make([]byte, 1))
-			require.Error(t, err)
-			require.False(t, errors.As(err, &netErr) && netErr.Timeout(),
-				"the retirement deadline must still close a connection that never completes")
+			require.True(t, old.retired.Load(),
+				"the superseded %s listener must be RETIRED — a close cuts the reply that asked for the rebind", kind)
+			require.NotSame(t, old, handleOf(), "the rebind must install a new handle")
+			require.False(t, handleOf().retired.Load(), "the listener now serving must not be retired")
 		})
 	}
+}
+
+// TestDisablingAListenerRetiresIt: the ""-opt-out is a config write like any
+// other and arrives on the very listener it turns off, so it takes the same
+// retirement rather than the synchronous close it used to.
+func TestDisablingAListenerRetiresIt(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = "127.0.0.1:0"
+	cfg.PreviewListenAddr = ""
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	cs := &controlServer{manager: m}
+	wl := newWebListeners(m, newHTTPMux(cs), newPreviewMux(cs))
+	m.webListeners = wl
+	failed, err := wl.reconcile(m.Config())
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	t.Cleanup(func() { _ = wl.close() })
+
+	wl.mu.Lock()
+	old := wl.webHandle
+	wl.mu.Unlock()
+	require.NotNil(t, old)
+
+	disabled := *m.Config()
+	disabled.ListenAddr = ""
+	m.live.Store(&disabled)
+	failed, err = wl.reconcile(&disabled)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+
+	require.True(t, old.retired.Load(), "the opt-out must retire the listener, not close it mid-reply")
 }
 
 // withRetireGrace shortens the drain deadline for one test and restores it.

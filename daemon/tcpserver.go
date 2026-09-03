@@ -402,7 +402,17 @@ type tcpListenerHandle struct {
 	// can tell one from an underlying listener failure. Set before either teardown
 	// touches the socket, so it is already true when Serve returns.
 	closeRequested atomic.Bool
-	retireOnce     sync.Once
+	// retired records that the teardown was a RETIREMENT rather than a close.
+	// Both set closeRequested, and once a drain has finished the two are
+	// indistinguishable from outside — the server is down either way — so this is
+	// what lets a test pin WHICH teardown a call site chose. That question has to
+	// be answerable directly: the observable difference (a connection surviving
+	// the swap) is only observable while http.Server still counts that connection
+	// as in flight, which for a half-written request means the first five seconds
+	// of its life, and a test that raced that window failed on a loaded runner
+	// for a reason that had nothing to do with the code under test.
+	retired    atomic.Bool
+	retireOnce sync.Once
 }
 
 // close tears the listener down immediately: every accepted connection is cut,
@@ -421,6 +431,7 @@ func (h *tcpListenerHandle) close() error {
 func (h *tcpListenerHandle) retire() {
 	h.retireOnce.Do(func() {
 		h.closeRequested.Store(true)
+		h.retired.Store(true)
 		// The synchronous half, and Shutdown itself is what performs it: an
 		// ALREADY-EXPIRED deadline runs its close-listeners + close-idle-connections
 		// prologue and then returns instead of waiting — measured on go1.25, and the

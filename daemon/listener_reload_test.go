@@ -387,8 +387,11 @@ func TestWebListenersDisableClosesRetainedServerAfterUnexpectedListenerDeath(t *
 			// exactly the stalled client the deadline exists to evict. The property
 			// under test is unchanged — the retained connection must not survive —
 			// and shortening the grace keeps the assertion tight rather than
-			// widening the read deadline until anything passes.
-			require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
+			// widening the read deadline until anything passes. The read window is
+			// generous against that 200ms grace on purpose: a slow runner can only
+			// make the close LATE, never early, so waiting longer costs nothing and
+			// still fails outright if the connection is never closed at all.
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
 			_, err = conn.Read(make([]byte, 1))
 			var netErr net.Error
 			require.Error(t, err)
