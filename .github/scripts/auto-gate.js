@@ -903,6 +903,44 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   });
 }
 
+// The first requirement a blocked decision is waiting on, for the title.
+//
+// Every block used to collapse to "Auto Gate requirements are not yet satisfied",
+// so a one-line read could not tell "a check has not reported yet" from "the
+// branch conflicts" — and the second is the one state a human must act on at once
+// and cannot fix by waiting (#3800). The reason itself lives in `reasons`, which
+// the summary already prints; this only lifts the first of them into the title.
+//
+// Truncated, because a check-run title is not a place for a sentence list, and
+// the summary carries the whole set immediately below.
+// The evaluation stamp's shape, named once because it is WRITTEN in one place and
+// READ in two more: the aggregate summarises each per-PR decision by quoting its
+// summary, and gate-pr.md tells an operator to read this line instead of
+// `started_at`. An unshared literal here would have the aggregate reporting the
+// stamp as the blocking reason — which is exactly what it did before this
+// constant existed.
+const DECISION_STAMP_PREFIX = "evaluated: ";
+
+// A decision summary with the evaluation stamp removed, for readers that want the
+// REASON. The stamp is metadata about the write, not part of the decision.
+function decisionSummaryBody(summary) {
+  const text = String(summary || "");
+  if (!text.startsWith(DECISION_STAMP_PREFIX)) {
+    return text;
+  }
+  const newline = text.indexOf("\n");
+  return newline === -1 ? "" : text.slice(newline + 1).replace(/^\n+/, "");
+}
+
+function firstUnmetRequirement(result) {
+  const first = (result.reasons || []).find((reason) => String(reason || "").trim() !== "");
+  if (!first) {
+    return "";
+  }
+  const text = String(first).trim();
+  return text.length > 90 ? `${text.slice(0, 89)}…` : text;
+}
+
 async function reportDecision({ github, context, core, result, manual = false }) {
   // This runs after the PR was resolved, so its reads carry that identity for the
   // same reason evaluatePullRequest's do: without it a self-contradictory
@@ -979,14 +1017,38 @@ async function reportDecision({ github, context, core, result, manual = false })
           : "BLOCKED: a manual merge still requires every live Codex finding to be answered"
         : result.shouldMerge
           ? "PASS: Auto Gate requirements are satisfied"
-          : "WAITING: Auto Gate requirements are not yet satisfied";
+          : `WAITING: ${firstUnmetRequirement(result) || "Auto Gate requirements are not yet satisfied"}`;
+
+  // The evaluation stamp, and it lives in the OUTPUT on purpose (#3800).
+  //
+  // A per-PR decision is refreshed in place, so `started_at` never moves off the
+  // first evaluation of that head, and `completed_at` is stamped by GitHub only
+  // on the first transition to completed. A later evaluation rewrites the summary
+  // and moves neither — which made a freshly re-evaluated block indistinguishable
+  // from a stale one, and cost #3776 a wrong "the dispatch did not run" read on a
+  // decision that had in fact been rewritten four minutes earlier.
+  //
+  // The output is the part an in-place update is guaranteed to change, so the
+  // stamp goes there and nowhere else has to be trusted.
+  const evaluatedAt = new Date().toISOString();
+  const runId = process.env.GITHUB_RUN_ID || "";
+  const summary = `${DECISION_STAMP_PREFIX}${evaluatedAt}${runId ? ` (run ${runId})` : ""}\n\n${result.summary}`;
 
   const decision = {
     status: "completed",
     conclusion: decisionPasses ? "success" : "failure",
+    // Sent on update as well as create. The REST docs list `completed_at` as an
+    // accepted body parameter for PATCH, but do NOT say whether an explicit value
+    // is honoured on a run that is already completed — and that could not be
+    // verified from here, because creating or updating a check run requires
+    // GitHub App authentication, which only the in-Actions token has. So this is
+    // best-effort: if GitHub honours it the timestamp becomes truthful too, and
+    // if it ignores it nothing regresses, because the summary stamp above is what
+    // the fix actually relies on.
+    completed_at: evaluatedAt,
     output: {
       title,
-      summary: result.summary,
+      summary,
     },
   };
   try {
@@ -1869,7 +1931,9 @@ function normalizeHeadSha(value) {
 }
 
 function decisionWaitingReason(decision) {
-  const detail = decision.summary || decision.output?.summary || decision.output?.title || "";
+  const detail = decisionSummaryBody(
+    decision.summary || decision.output?.summary || decision.output?.title || "",
+  );
   if (detail) {
     return detail.replace(/^(?:BLOCKED|WAITING|NEVER_RAN):\s*/i, "");
   }
@@ -4243,6 +4307,8 @@ module.exports = {
     listParkedRuns,
     ensureValidationRun,
     VALIDATION_WORKFLOW,
+    decisionSummaryBody,
+    DECISION_STAMP_PREFIX,
     maintainerApproval,
     MAINTAINER_APPROVAL_MARKER,
     unansweredFindingArtifacts,
