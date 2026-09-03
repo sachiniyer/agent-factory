@@ -200,8 +200,9 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 	// in-repo file in precedence — so when it sets a key, its value is the one
 	// that actually runs, and its is the warning the operator needs.
 	shellValues := shellValueSet{}
-	shellValues.addMap("program_overrides", cfg.ProgramOverrides)
+	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
 	shellValues.add("on_archive_command", cfg.OnArchiveCommand)
+	shellValues.add("root_agent.program", cfg.RootAgent.Program)
 	shellValues.warnExecSeparator(prettyPath)
 
 	return &cfg, nil

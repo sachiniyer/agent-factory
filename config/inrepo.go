@@ -404,7 +404,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	// global-only warning would have missed outright: a repo-level
 	// program_overrides value never passes through validateConfig.
 	shellValues := shellValueSet{}
-	shellValues.addMap("program_overrides", cfg.ProgramOverrides)
+	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
 	shellValues.addList("post_worktree_commands", cfg.PostWorktreeCommands)
 	shellValues.warnExecSeparator(prettyPath)
 

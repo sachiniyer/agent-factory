@@ -52,8 +52,15 @@ func stripExecPrefix(words []*syntax.Word) (rest []*syntax.Word, separator bool)
 // session's program, a post-worktree hook, an archive hook. Warning and refusal
 // must not answer the question differently, so they share this one predicate
 // rather than each carrying a copy of "drop exec, then look for --".
+//
+// Redirections are ignored rather than disqualifying, which is why this does not
+// use singleSimpleCall: `exec -- claude >agent.log` is a shape an operator
+// actually writes, and dash fails it for the separator regardless of where its
+// output goes. The account boundary refuses such a command either way — it is
+// unprovable for the redirection — so widening here only lets it reach for the
+// specific message instead of the generic one.
 func CommandUsesExecSeparator(command string) bool {
-	call, ok := singleSimpleCall(command)
+	call, ok := singleCallIgnoringRedirections(command)
 	if !ok {
 		return false
 	}

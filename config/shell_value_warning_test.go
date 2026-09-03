@@ -2,6 +2,9 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -152,6 +155,18 @@ func TestWarnedShellValueKeys_EachOneActuallyWarns(t *testing.T) {
 			require.NoError(t, err)
 			return warnings.String()
 		},
+		"root_agent.program": func(t *testing.T) string {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[root_agent]\nenabled = true\nprogram = \"exec -- claude\"\n"), "global.toml")
+			require.NoError(t, err)
+			return warnings.String()
+		},
+		"root_agents": func(t *testing.T) string {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[root_agents.\"/home/me/repo\"]\nprogram = \"exec -- claude\"\n"), "global.toml")
+			require.NoError(t, err)
+			return warnings.String()
+		},
 		"post_worktree_commands": func(t *testing.T) string {
 			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 			repoRoot := t.TempDir()
@@ -178,4 +193,175 @@ func TestWarnedShellValueKeys_EachOneActuallyWarns(t *testing.T) {
 // carry the single quotes a shell command naturally contains.
 func quoteTOML(s string) string {
 	return fmt.Sprintf("%q", s)
+}
+
+// The review findings on PR #3705, each pinned. Every one of these was a real
+// hole in the first cut of this warning, so each keeps its own red.
+
+// TestExecSeparatorWarning_SeesThroughARedirect covers the shape the shared
+// predicate used to drop on the floor. `singleSimpleCall` refuses a command with
+// redirections because a redirect makes it unprovable for the ACCOUNT boundary —
+// but a redirect says nothing about the exec prefix, and dash still exits 127.
+func TestExecSeparatorWarning_SeesThroughARedirect(t *testing.T) {
+	for name, value := range map[string]string{
+		"stdout redirect":   "exec -- claude >agent.log",
+		"stderr redirect":   "exec -- claude 2>/dev/null",
+		"both, with a flag": "exec -- claude --resume >out 2>&1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = "+quoteTOML(value)+"\n"), "global.toml")
+			require.NoError(t, err)
+			assertExecSeparatorWarning(t, warnings.String(), "program_overrides.claude")
+		})
+	}
+}
+
+// TestExecSeparatorWarning_RootAgentProgram pins the fifth value. A root
+// session's program is taken verbatim from root_agent.program (or a legacy
+// root_agents entry) when set, and reaches the pane shell like any other
+// program — the consumer survey found the pane path but not both of its sources.
+func TestExecSeparatorWarning_RootAgentProgram(t *testing.T) {
+	t.Run("global singleton", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[root_agent]\nenabled = true\nprogram = \"exec -- claude\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertExecSeparatorWarning(t, warnings.String(), "root_agent.program")
+	})
+
+	t.Run("legacy path-keyed entry names its path", func(t *testing.T) {
+		warnings := captureLog(t, &aflog.WarningLog)
+		_, err := parseConfigTOML([]byte("[root_agents.\"/home/me/repo\"]\nprogram = \"exec -- claude\"\n"), "global.toml")
+		require.NoError(t, err)
+		assertExecSeparatorWarning(t, warnings.String(), "root_agents")
+		assert.Contains(t, warnings.String(), "/home/me/repo",
+			"with several repos configured, the warning has to say which entry")
+	})
+
+	t.Run("personal project layer", func(t *testing.T) {
+		_, _, project := registeredTestProject(t)
+		writePersonalConfig(t, project.ID, "[root_agent]\nenabled = true\nprogram = \"exec -- claude\"\n")
+
+		warnings := captureLog(t, &aflog.WarningLog)
+		cfg, err := LoadProjectConfig(project.ID)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assertExecSeparatorWarning(t, warnings.String(), "root_agent.program")
+	})
+}
+
+// TestExecSeparatorWarning_DoesNotBlameTheFileForADetectedAlias pins the
+// attribution. DefaultConfig overlays af's probed claude command as
+// program_overrides.claude BEFORE any file is decoded, so a warning that named
+// the config path would send the operator to edit a key their file does not
+// contain — the `--` is in their shell alias.
+func TestExecSeparatorWarning_DoesNotBlameTheFileForADetectedAlias(t *testing.T) {
+	cfg := &Config{ProgramOverrides: map[string]string{"claude": "exec -- /opt/claude"}}
+	cfg.source.builtIn = &Config{ProgramOverrides: map[string]string{"claude": "exec -- /opt/claude"}}
+
+	warnings := captureLog(t, &aflog.WarningLog)
+	warnGlobalShellValues(cfg, "~/.agent-factory/config.toml")
+	out := warnings.String()
+
+	assertExecSeparatorWarning(t, out, "program_overrides.claude")
+	assert.NotContains(t, out, "Config issue in",
+		"the key is not in the file, so the warning must not send the operator there")
+	assert.Contains(t, out, "shell alias", "it has to name where the value actually came from")
+}
+
+// TestExecSeparatorWarning_BlamesTheFileWhenTheFileSetIt is the other half: a
+// value that differs from the probed default DID come from the file, and the
+// path is exactly what the operator needs.
+func TestExecSeparatorWarning_BlamesTheFileWhenTheFileSetIt(t *testing.T) {
+	cfg := &Config{ProgramOverrides: map[string]string{"claude": "exec -- /usr/bin/claude"}}
+	cfg.source.builtIn = &Config{ProgramOverrides: map[string]string{"claude": "/opt/claude"}}
+
+	warnings := captureLog(t, &aflog.WarningLog)
+	warnGlobalShellValues(cfg, "~/.agent-factory/config.toml")
+	out := warnings.String()
+
+	assertExecSeparatorWarning(t, out, "program_overrides.claude")
+	assert.Contains(t, out, "Config issue in ~/.agent-factory/config.toml")
+	assert.NotContains(t, out, "shell alias")
+}
+
+// TestExecSeparatorWarning_SaysItOncePerSourceAndValue pins the memo. A config
+// load is not rare — the daemon issues ~10 per session-create, and `af config
+// set` re-parses around its own write — and #2496 already paid for the version
+// of a notice that repeated on every one of them.
+func TestExecSeparatorWarning_SaysItOncePerSourceAndValue(t *testing.T) {
+	body := []byte("[program_overrides]\nclaude = \"exec -- claude\"\n")
+
+	warnings := captureLog(t, &aflog.WarningLog)
+	for i := 0; i < 5; i++ {
+		_, err := parseConfigTOML(body, "global.toml")
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, strings.Count(warnings.String(), "begins with `exec --`"),
+		"five loads of one unchanged file must produce one line, not five")
+
+	// A LATER edit that reintroduces the shape is a different value, and stays
+	// audible.
+	_, err := parseConfigTOML([]byte("[program_overrides]\nclaude = \"exec -- claude --resume\"\n"), "global.toml")
+	require.NoError(t, err)
+	assert.Equal(t, 2, strings.Count(warnings.String(), "begins with `exec --`"),
+		"a changed value is a new fact and must be reported")
+}
+
+// TestExecSeparatorWarning_SilentDuringLegacyConversion pins the one-time
+// config.json → config.toml conversion. The pre-conversion read parses a file
+// that is about to be renamed to a backup, so a warning naming it points at a
+// path that will not exist; the canonical TOML reload reports it once.
+func TestExecSeparatorWarning_SilentDuringLegacyConversion(t *testing.T) {
+	body := []byte(`{"program_overrides":{"claude":"exec -- claude"}}`)
+
+	warnings := captureLog(t, &aflog.WarningLog)
+	_, err := parseConfigForConversion(body, "config.json")
+	require.NoError(t, err)
+	assert.NotContains(t, warnings.String(), "begins with `exec --`",
+		"the pre-conversion read must stay quiet; the reloaded config.toml reports it")
+
+	// The ordinary JSON read is not the conversion read, and still warns.
+	warnings = captureLog(t, &aflog.WarningLog)
+	_, err = parseConfig(body, "config.json")
+	require.NoError(t, err)
+	assertExecSeparatorWarning(t, warnings.String(), "program_overrides.claude")
+}
+
+// rigDetectedClaudeAlias points the claude probe at a fake shell that reports an
+// alias carrying the `exec --` prefix, which is how this shape reaches af
+// without any config file mentioning it. The probe memoizes on SHELL+PATH+HOME,
+// and every one of those is a fresh temp dir here, so the rig cannot be served a
+// cached answer from another test.
+func rigDetectedClaudeAlias(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "zsh")
+	require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\necho 'claude: aliased to exec -- /opt/claude'\n"), 0o755))
+	t.Setenv("SHELL", fake)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", dir)
+}
+
+// TestExecSeparatorWarning_FirstRunMaterializationIsInspected pins the one load
+// that used to say nothing. materializeDefaultConfig writes the probed defaults
+// and returns them WITHOUT calling validateConfig, so on a first run af would
+// launch straight into the 127 with no warning at all — and the second load,
+// which would have warned, only happens after the operator has already hit it.
+func TestExecSeparatorWarning_FirstRunMaterializationIsInspected(t *testing.T) {
+	rigDetectedClaudeAlias(t)
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	warnings := captureLog(t, &aflog.WarningLog)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Contains(t, cfg.ProgramOverrides["claude"], "exec -- /opt/claude",
+		"the rig must actually reach the config, or this test proves nothing")
+
+	out := warnings.String()
+	assertExecSeparatorWarning(t, out, "program_overrides.claude")
+	assert.Contains(t, out, "shell alias",
+		"nothing here came from a file — the operator has to be sent to their alias")
 }

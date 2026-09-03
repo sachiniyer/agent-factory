@@ -23,7 +23,7 @@ import (
 // fails loud. Reachable from convertJSONToTOML and read-only diagnostics now
 // that first-run and lost-race materialization write TOML.
 func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
-	return parseConfigJSON(data, prettyConfigPath, true)
+	return parseConfigJSON(data, prettyConfigPath, true, true)
 }
 
 // parseConfigForConversion is the frozen JSON reader on the one path that is
@@ -31,10 +31,10 @@ func parseConfig(data []byte, prettyConfigPath string) (*Config, error) {
 // write-aware root_agents notice after its atomic TOML write; suppressing the
 // generic read-only notice here avoids two contradictory warnings.
 func parseConfigForConversion(data []byte, prettyConfigPath string) (*Config, error) {
-	return parseConfigJSON(data, prettyConfigPath, false)
+	return parseConfigJSON(data, prettyConfigPath, false, false)
 }
 
-func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) (*Config, error) {
+func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnShellValues bool) (*Config, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("config file %s is empty; delete it to regenerate defaults, or add valid JSON", prettyConfigPath)
 	}
@@ -77,7 +77,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents bool) 
 		}
 	}
 
-	return validateConfig(config, prettyConfigPath)
+	return validateConfig(config, prettyConfigPath, warnShellValues)
 }
 
 // parseConfigTOML validates and unmarshals raw config.toml bytes on top of
@@ -136,7 +136,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 	}
 	warnUnknownTomlKeys(decodedData, prettyConfigPath)
 
-	return validateConfig(config, prettyConfigPath)
+	return validateConfig(config, prettyConfigPath, true)
 }
 
 // stripUTF8BOM removes a leading UTF-8 BOM. TOML 1.0 says a BOM should be
@@ -232,7 +232,7 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 // validateConfig applies the format-independent semantic checks shared by
 // parseConfig and parseConfigTOML: enum validation hard-errors, range checks
 // warn and fall back to defaults.
-func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
+func validateConfig(config *Config, prettyConfigPath string, warnShellValues bool) (*Config, error) {
 	if config.SchemaVersion == LegacySchemaVersion {
 		config.SchemaVersion = GlobalConfigSchemaVersion
 	}
@@ -257,12 +257,11 @@ func validateConfig(config *Config, prettyConfigPath string) (*Config, error) {
 	// Beside the program-override KEY check above: warn about the SHAPE of a
 	// value this file hands to /bin/sh -c (#3566). Each of the three config
 	// sources warns for the keys it admits — this one is the only source of
-	// sandbox.ssh, and the operator's own layer for on_archive_command.
-	shellValues := shellValueSet{}
-	shellValues.addMap("program_overrides", config.ProgramOverrides)
-	shellValues.add("on_archive_command", config.OnArchiveCommand)
-	shellValues.add("sandbox.ssh", config.SandboxSSH)
-	shellValues.warnExecSeparator(prettyConfigPath)
+	// sandbox.ssh and root_agents, and the operator's own layer for
+	// on_archive_command.
+	if warnShellValues {
+		warnGlobalShellValues(config, prettyConfigPath)
+	}
 
 	normalizedSessionEnv, err := sessionenv.NormalizeExtraNames(config.SessionEnvPassthrough)
 	if err != nil {

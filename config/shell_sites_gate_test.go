@@ -29,7 +29,8 @@ import (
 // here; it cannot quietly drift past both.
 //
 // Detection is deliberately WIDER than `exec.Command(…, "sh", "-c", …)`: it is
-// every `-c` string literal passed as an argument. The narrow reading has a hole
+// every `-c` argument — written as a literal, or named by a string constant the
+// scanner resolves. The narrow reading has a hole
 // exactly where this issue lives — sessionenv/exec_unix.go runs the pane's
 // program as []string{shell, "-c", command}, naming the shell through a
 // variable, and that IS the site that turns program_overrides into a dash
@@ -73,10 +74,13 @@ const (
 // order, not per function.
 type classifiedSite struct {
 	class shellSiteClass
-	// key is the config key for an operatorConfig site. It must be one
-	// warnExecSeparator inspects, which TestShellSites_OperatorConfigSitesNameAWarnedKey
-	// checks against warnedShellValueKeys.
-	key string
+	// keys are the config keys that can reach this site. A site may carry more
+	// than one: the pane program resolves from program_overrides, from
+	// root_agent.program, or from a legacy root_agents entry. Each must be one
+	// warnExecSeparator inspects, which
+	// TestShellSites_OperatorConfigSitesNameAWarnedKey checks against
+	// warnedShellValueKeys.
+	keys []string
 	// note explains the verdict for every other class.
 	note string
 }
@@ -91,25 +95,31 @@ type classifiedSite struct {
 var shellSiteRegistry = map[string][]classifiedSite{
 	// ---- operator config values: covered by warnExecSeparator ----
 	"internal/sessionenv/exec_unix.go:execInvocationMode": {{
-		class: operatorConfig, key: "program_overrides",
+		class: operatorConfig,
+		// THREE keys, not one. A root session's program comes from
+		// root_agent.program (or a legacy root_agents entry) and only falls back
+		// to the program_overrides-resolved claude when that is empty —
+		// rootAgentProgramForProfile returns an explicit program verbatim. All
+		// three arrive here as the pane command.
+		keys: []string{"program_overrides", "root_agent.program", "root_agents"},
 		note: "the pane's program, run as `/bin/sh -c <command>` immediately before exec. This is the site " +
 			"#3566 is about: an unscoped session never reaches the account boundary, so an `exec --` prefix " +
 			"here dies with exit 127 and no explanation.",
 	}},
 	"session/git/hooks.go:runPostWorktreeHooks": {
-		{class: operatorConfig, key: "post_worktree_commands", note: "the plain child"},
-		{class: operatorConfig, key: "post_worktree_commands", note: "the same command inside a transient systemd scope"},
+		{class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the plain child"},
+		{class: operatorConfig, keys: []string{"post_worktree_commands"}, note: "the same command inside a transient systemd scope"},
 	},
 	"daemon/archive_hook.go:runOnArchiveHook": {{
-		class: operatorConfig, key: "on_archive_command",
+		class: operatorConfig, keys: []string{"on_archive_command"},
 		note: "the resolved archive hook, in its own transient scope",
 	}},
 	"session/backend_sandbox.go:(*sandboxProvisioner).buildRunCommand": {{
-		class: operatorConfig, key: "sandbox.ssh",
+		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the operator's ssh command as a PREFIX: `sh -c '<sandbox.ssh> \"$@\"' af-sandbox <script>`",
 	}},
 	"session/backend_sandbox.go:(*sandboxProvisioner).startTunnel": {{
-		class: operatorConfig, key: "sandbox.ssh",
+		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the same prefix, with -N -L appended for the port-forward child",
 	}},
 
@@ -180,11 +190,13 @@ func TestShellSites_OperatorConfigSitesNameAWarnedKey(t *testing.T) {
 		for i, rule := range rules {
 			switch rule.class {
 			case operatorConfig:
-				require.NotEmptyf(t, rule.key, "%s site %d carries a config value but names no key", site, i)
-				assert.Truef(t, warned[rule.key],
-					"%s hands %s to a shell, but %s is not in warnedShellValueKeys — the site would be vouched "+
-						"for by a warning that does not inspect it", site, rule.key, rule.key)
-				claimed[rule.key] = true
+				require.NotEmptyf(t, rule.keys, "%s site %d carries a config value but names no key", site, i)
+				for _, key := range rule.keys {
+					assert.Truef(t, warned[key],
+						"%s hands %s to a shell, but %s is not in warnedShellValueKeys — the site would be "+
+							"vouched for by a warning that does not inspect it", site, key, key)
+					claimed[key] = true
+				}
 			default:
 				assert.NotEmptyf(t, rule.note, "%s site %d must say why it is %s", site, i, rule.class)
 			}
@@ -257,7 +269,55 @@ func Run(afScript, operatorValue string) {
 	require.Equal(t, []string{"gone.go:Old"}, stale)
 }
 
-// shellSite is one place a `-c` string literal is passed as an argument.
+// TestShellSites_GateResolvesANamedShellFlag covers the way a literal-only
+// scanner could be walked past: giving the flag a name. `exec.Command("sh",
+// shellFlag, command)` is an ordinary shared-argv idiom, and a gate that missed
+// it would claim coverage it does not have (#3705 review).
+func TestShellSites_GateResolvesANamedShellFlag(t *testing.T) {
+	tree := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tree, "sneaky"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tree, "sneaky", "run.go"), []byte(`package sneaky
+
+import "os/exec"
+
+const shellFlag = "-c"
+
+func RunOperatorCommand(command string) error {
+	return exec.Command("sh", shellFlag, command).Run()
+}
+`), 0o644))
+
+	sites, err := scanShellSites(tree)
+	require.NoError(t, err)
+	require.Len(t, sites, 1, "a named shell flag must be resolved, not skipped")
+	assert.Equal(t, "sneaky/run.go", sites[0].File)
+	assert.Equal(t, "RunOperatorCommand", sites[0].Func)
+
+	unknown, _, _ := classifyShellSites(sites, shellSiteRegistry)
+	require.Len(t, unknown, 1, "and it must still be reported as unclassified")
+}
+
+// TestShellSites_GateIgnoresAnUnrelatedConstant is the other side: resolving
+// names must not turn every identifier into a site.
+func TestShellSites_GateIgnoresAnUnrelatedConstant(t *testing.T) {
+	tree := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tree, "run.go"), []byte(`package run
+
+import "os/exec"
+
+const listFlag = "-l"
+
+func Run() error {
+	return exec.Command("ls", listFlag, ".").Run()
+}
+`), 0o644))
+
+	sites, err := scanShellSites(tree)
+	require.NoError(t, err)
+	assert.Empty(t, sites, "a constant that is not the shell command flag is not a shell site")
+}
+
+// shellSite is one place a `-c` argument is passed — literal or named constant.
 type shellSite struct {
 	File string // repo-relative, slash-separated
 	Func string // enclosing function or method
@@ -268,17 +328,49 @@ func (s shellSite) key() string { return s.File + ":" + s.Func }
 
 // scanShellSites parses every non-test Go file under root and returns the sites
 // in file/line order.
+//
+// Two passes, because a shell flag does not have to be written as a literal at
+// the call: `const shellFlag = "-c"` followed by exec.Command("sh", shellFlag,
+// command) is an ordinary way to share an argv, and a scanner that only matched
+// BasicLits would let that consumer through while claiming to enumerate them all
+// (#3705 review). The first pass records every string constant in the tree; the
+// second resolves identifiers against it.
 func scanShellSites(root string) ([]shellSite, error) {
+	files, err := parseTreeFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	constants := stringConstants(files)
 	var sites []shellSite
+	for _, file := range files {
+		sites = append(sites, shellSitesInFile(file.fset, file.ast, file.rel, constants)...)
+	}
+	sort.Slice(sites, func(i, j int) bool {
+		if sites[i].File != sites[j].File {
+			return sites[i].File < sites[j].File
+		}
+		return sites[i].Line < sites[j].Line
+	})
+	return sites, nil
+}
+
+type parsedFile struct {
+	rel  string
+	fset *token.FileSet
+	ast  *ast.File
+}
+
+func parseTreeFiles(root string) ([]parsedFile, error) {
+	var files []parsedFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			switch d.Name() {
 			// node_modules and vendor hold third-party code af does not run;
 			// testdata deliberately holds files that need not even parse. Nothing
 			// else is skipped — web/embed.go is Go and is scanned like any other.
+			switch d.Name() {
 			case ".git", "vendor", "node_modules", "testdata":
 				return fs.SkipDir
 			}
@@ -292,29 +384,71 @@ func scanShellSites(root string) ([]shellSite, error) {
 			return relErr
 		}
 		fset := token.NewFileSet()
-		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		parsed, parseErr := parser.ParseFile(fset, path, nil, 0)
 		if parseErr != nil {
 			return fmt.Errorf("parse %s: %w", rel, parseErr)
 		}
-		sites = append(sites, shellSitesInFile(fset, file, filepath.ToSlash(rel))...)
+		files = append(files, parsedFile{rel: filepath.ToSlash(rel), fset: fset, ast: parsed})
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(sites, func(i, j int) bool {
-		if sites[i].File != sites[j].File {
-			return sites[i].File < sites[j].File
-		}
-		return sites[i].Line < sites[j].Line
-	})
-	return sites, nil
+	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
+	return files, nil
 }
 
-// shellSitesInFile reports every `-c` string literal that appears in a call's
-// argument list or in a slice/array literal — the two ways an argv is written.
-// A `-c` compared in a switch or an if is not an invocation and is not reported.
-func shellSitesInFile(fset *token.FileSet, file *ast.File, rel string) []shellSite {
+// stringConstants maps every declared name in the tree that is initialized to a
+// string literal to that literal.
+//
+// Names are collected WITHOUT package qualification, so a collision is possible.
+// It resolves in the direction that cannot hide a consumer: a name that is "-c"
+// anywhere makes every mention of that name a reported site, which at worst asks
+// a human to classify one extra place. The reverse — preferring the non-shell
+// meaning — would silently drop the site the gate exists to catch.
+func stringConstants(files []parsedFile) map[string]string {
+	values := map[string]string{}
+	for _, file := range files {
+		for _, decl := range file.ast.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, name := range value.Names {
+					if i >= len(value.Values) {
+						continue
+					}
+					lit, ok := value.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					unquoted, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						continue
+					}
+					if existing, seen := values[name.Name]; seen && existing == shellCommandFlag {
+						continue // never downgrade a name that means "-c" somewhere
+					}
+					values[name.Name] = unquoted
+				}
+			}
+		}
+	}
+	return values
+}
+
+// shellCommandFlag is the flag every POSIX shell takes its command string after.
+const shellCommandFlag = "-c"
+
+// shellSitesInFile reports every `-c` argument in a call's argument list or in a
+// slice/array literal — the two ways an argv is written. A `-c` compared in a
+// switch or an if is not an invocation and is not reported.
+func shellSitesInFile(fset *token.FileSet, file *ast.File, rel string, constants map[string]string) []shellSite {
 	var sites []shellSite
 	collect := func(node ast.Node, funcName string) {
 		ast.Inspect(node, func(n ast.Node) bool {
@@ -328,7 +462,7 @@ func shellSitesInFile(fset *token.FileSet, file *ast.File, rel string) []shellSi
 				return true
 			}
 			for _, expr := range exprs {
-				if isDashC(expr) {
+				if isDashC(expr, constants) {
 					sites = append(sites, shellSite{File: rel, Func: funcName, Line: fset.Position(expr.Pos()).Line})
 				}
 			}
@@ -369,13 +503,22 @@ func exprString(expr ast.Expr) string {
 	return "?"
 }
 
-func isDashC(expr ast.Expr) bool {
-	lit, ok := expr.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return false
+func isDashC(expr ast.Expr, constants map[string]string) bool {
+	switch typed := expr.(type) {
+	case *ast.BasicLit:
+		if typed.Kind != token.STRING {
+			return false
+		}
+		value, err := strconv.Unquote(typed.Value)
+		return err == nil && value == shellCommandFlag
+	case *ast.Ident:
+		return constants[typed.Name] == shellCommandFlag
+	case *ast.SelectorExpr:
+		// A qualified name (pkg.ShellFlag) resolves on the selector, since the
+		// scan is package-unqualified by design — see stringConstants.
+		return constants[typed.Sel.Name] == shellCommandFlag
 	}
-	value, err := strconv.Unquote(lit.Value)
-	return err == nil && value == "-c"
+	return false
 }
 
 // classifyShellSites compares scanned sites against a registry and returns the
