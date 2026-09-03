@@ -229,7 +229,7 @@ jq -s --arg head "$HEAD" '
   add
   | map(select(.user.login == "chatgpt-codex-connector[bot]"))
   | map(select((.body // "") | test("\\bCodex Review\\b"; "i")))
-  | map(select((.body // "") | test("reached your Codex usage limits?\\s+for\\s+code\\s+reviews?\\b"; "i") | not))
+  | map(select((.body // "") | test("reached\\s+your\\s+Codex\\s+usage\\s+limits?\\s+for\\s+code\\s+reviews?\\b"; "i") | not))
   | map(select((.body // "")
       | capture("(?:\\*\\*Reviewed commit:\\*\\*|Reviewed commit:)\\s*`(?<sha>[0-9a-f]{7,40})`"; "i")
       | .sha | ascii_downcase as $rc

@@ -33,10 +33,6 @@ const CODEX_LIMIT_CODE_REVIEWS =
   "You have reached your Codex usage limits for code" +
   " reviews. You can see your limits in the " +
   "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
-// The marker parseReviewedCommit short-circuits on. Declared here so the test
-// below can assert WHY a bare limit message is rejected, rather than only that
-// it is — the distinction the review of this PR caught as a vacuous assertion.
-const CODEX_REVIEW_RE_PROBE = /\bCodex Review\b/i;
 // When a Codex artifact is stamped in these fixtures. Named because the helper's
 // default and the call sites that pass a body must not drift apart: a body-only
 // caller has to restate the timestamp positionally, and a literal restated there
@@ -60,6 +56,52 @@ const CODEX_LIMIT_OTHER_SCOPE =
 const REVIEW_SCOPE = "code" + " reviews";
 const limitScoped = (separator, scope = REVIEW_SCOPE) =>
   `You have reached your Codex usage limits for${separator}${scope}.`;
+
+// ONE table, driving both the recognition test and the no-exit invariant. Two
+// hand-kept lists had already drifted — a case added to whichever test the
+// author was editing went uncovered by the other, which is the drift the
+// verbatim table exists to prevent.
+//
+// `outage: true` means "Codex is telling us review capacity is exhausted", so
+// the gate may degrade. `false` means it is about something else and the gate
+// must keep blocking.
+const LIMIT_WORDINGS = [
+  ["review-scoped (#3712 comment 5519732240)", CODEX_LIMIT_CODE_REVIEWS, true],
+  ["account-wide (#3712 comment 5519782846)", CODEX_LIMIT_ACCOUNT, true],
+  ["another job (constructed)", CODEX_LIMIT_OTHER_SCOPE, false],
+  ["single space", limitScoped(" "), true],
+  ["double space", limitScoped("  "), true],
+  ["hard-wrapped", limitScoped("\n"), true],
+  ["space then newline", limitScoped(" \n "), true],
+  ["tab", limitScoped("\t"), true],
+  ["bolded scope", limitScoped(" ", `**${REVIEW_SCOPE}**`), true],
+  ["hyphenated", limitScoped(" ", "code-reviews"), true],
+  ["qualified", limitScoped(" ", `automated ${REVIEW_SCOPE}`), true],
+  ["singular", limitScoped(" ", "code" + " review"), true],
+  // A gerund is still review capacity. `\breviews?\b` could not match it.
+  ["gerund", limitScoped(" ", "reviewing your PRs"), true],
+  ["for now", limitScoped(" ", "now"), true],
+  ["for the day", limitScoped(" ", "the day"), true],
+  ["for your plan", limitScoped(" ", "your plan"), true],
+  ["for the time being", limitScoped(" ", "the time being"), true],
+  // A leading article or possessive must not smuggle another job past the
+  // scope guard — `the\s+\w+` / `your\s+\w+` catch-alls did exactly that.
+  ["another job behind an article", limitScoped(" ", "the cloud tasks"), false],
+  ["another job behind a possessive", limitScoped(" ", "your dev tasks"), false],
+  ["another job, bare", limitScoped(" ", "tasks"), false],
+  // A degenerate clause is not a scope; treat it as the bare wording.
+  ["empty clause", "You have reached your Codex usage limits for .", true],
+  // The stem's own spaces wrap too, and a wrapped stem during a real outage
+  // must still be recognised.
+  ["wrapped stem", "You have reached your Codex usage\nlimits for " + REVIEW_SCOPE + ".", true],
+  // Two limit sentences in one body. The clause is read from the first, but the
+  // verdict exclusion matches anywhere — the combination with no exit.
+  [
+    "two sentences, review second",
+    limitScoped(" ", "cloud tasks") + " Also: reached your Codex usage limits for " + REVIEW_SCOPE + ".",
+    true,
+  ],
+];
 
 // The gate's own sources must never contain a phrase that disqualifies a body
 // from being a verdict, or reviewing them costs the review its verdict. Pinned
@@ -3165,54 +3207,10 @@ test("a review body that merely quotes the usage-limit text is not quota evidenc
 test("both observed Codex usage-limit wordings are recognised", () => {
   const { codexReportsReviewUsageLimit } = __test;
 
-  for (const [label, body] of [
-    ["review-scoped (#3712 comment 5519732240)", CODEX_LIMIT_CODE_REVIEWS],
-    ["account-wide (#3712 comment 5519782846)", CODEX_LIMIT_ACCOUNT],
-  ]) {
-    assert.equal(codexReportsReviewUsageLimit(body), true, `unrecognised wording: ${label}`);
+  for (const [label, body, outage] of LIMIT_WORDINGS) {
+    assert.equal(codexReportsReviewUsageLimit(body), outage, `misclassified: ${label}`);
   }
 
-  // Whitespace and markup must not change the answer. A nested lookahead over a
-  // variable-length separator backtracks — `\s+` gives a character back, the
-  // inner negation then succeeds against the space it just released, and a
-  // genuine review-limit message stops being recognised. That combination is
-  // FATAL rather than merely wrong: the verdict exclusion still disqualifies the
-  // body, so the gate blocks with no exit.
-  for (const [label, body] of [
-    ["double space", limitScoped("  ")],
-    ["hard-wrapped", limitScoped("\n")],
-    ["space then newline", limitScoped(" \n ")],
-    ["bolded scope", limitScoped(" ", `**${REVIEW_SCOPE}**`)],
-    ["hyphenated", limitScoped(" ", "code-reviews")],
-    ["qualified", limitScoped(" ", `automated ${REVIEW_SCOPE}`)],
-    ["singular", limitScoped(" ", "code" + " review")],
-  ]) {
-    assert.equal(codexReportsReviewUsageLimit(body), true, `review-scoped but unrecognised: ${label}`);
-  }
-
-  // A when/how-much qualifier is not a job scope. "for now" and "for the day"
-  // are the account-wide limit wearing a different suffix — the WORSE outage,
-  // which #3728 exists to keep degrading.
-  for (const [label, body] of [
-    ["for now", limitScoped(" ", "now")],
-    ["for the day", limitScoped(" ", "the day")],
-    ["for your plan", limitScoped(" ", "your plan")],
-  ]) {
-    assert.equal(codexReportsReviewUsageLimit(body), true, `a qualifier is not another job: ${label}`);
-  }
-
-  // …but the stem's job was never "any Codex limit" (#3743). A scope clause
-  // naming something OTHER than code review is evidence about a different job,
-  // and this detector publishes a PASS that says the REVIEWER is unavailable.
-  assert.equal(
-    codexReportsReviewUsageLimit(CODEX_LIMIT_OTHER_SCOPE),
-    false,
-    "a limit about another Codex scope is not evidence about review capacity",
-  );
-
-  // …and the stem stays a stem. It must not swallow an ordinary sentence that
-  // happens to talk about limits, or the guard below is the only thing left
-  // between a review and a false degradation.
   for (const body of [
     "Codex Review: Didn't find any major issues.",
     "You have reached your quota.",
@@ -3249,26 +3247,7 @@ test("the account-wide usage-limit wording degrades to maintainer review too", a
 test("no wording is disqualified as a verdict while also failing to count as an outage", () => {
   const { codexReportsReviewUsageLimit, CODEX_VERDICT_LIMIT_RE } = __test;
 
-  const wordings = [
-    CODEX_LIMIT_CODE_REVIEWS,
-    CODEX_LIMIT_ACCOUNT,
-    CODEX_LIMIT_OTHER_SCOPE,
-    limitScoped(" "),
-    limitScoped("  "),
-    limitScoped("\n"),
-    limitScoped(" \n "),
-    limitScoped("\t"),
-    limitScoped(" ", `**${REVIEW_SCOPE}**`),
-    limitScoped(" ", "code-reviews"),
-    limitScoped(" ", `automated ${REVIEW_SCOPE}`),
-    limitScoped(" ", "code" + " review"),
-    limitScoped(" ", "now"),
-    limitScoped(" ", "the day"),
-    limitScoped(" ", "your plan"),
-    limitScoped(" ", "cloud tasks"),
-  ];
-
-  for (const body of wordings) {
+  for (const [, body] of LIMIT_WORDINGS) {
     const stranded = CODEX_VERDICT_LIMIT_RE.test(body) && !codexReportsReviewUsageLimit(body);
     assert.equal(stranded, false, `no reachable exit for: ${JSON.stringify(body)}`);
   }
@@ -3333,7 +3312,10 @@ test("a bare usage-limit message is not a verdict, in either wording", () => {
     // limit pattern is consulted at all. Widening that pattern therefore cannot
     // help a real outage message — which is the whole argument for keeping the
     // verdict exclusion narrow.
-    assert.equal(CODEX_REVIEW_RE_PROBE.test(limit), false, "a real limit message has no review marker");
+    // The module's own regex, not a copy: a re-declared probe keeps passing
+    // while the production short-circuit changes underneath it, which makes the
+    // assertion vacuous in exactly the direction it was added to close.
+    assert.equal(__test.CODEX_REVIEW_RE.test(limit), false, "a real limit message has no review marker");
     assert.equal(parseReviewedCommit(limit), null, "a bare limit message names no commit");
   }
 
@@ -3420,21 +3402,22 @@ test("the gate-pr skill's usage-limit filter mirrors the script's predicate", ()
   // keeps the long wording for the reason spelled out on CODEX_VERDICT_LIMIT_RE.
   const stem = __test.CODEX_VERDICT_LIMIT_RE.source;
 
-  // The executable jq line, not the whole file. The skill legitimately QUOTES
+  // The executable jq lines, not the whole file. The skill legitimately QUOTES
   // both wordings in the prose that explains them, so a whole-file search would
-  // be satisfied by the documentation while the filter people actually run still
-  // carried the narrow pattern — and it would break on an innocent reflow of
-  // that paragraph. This reads the one line that decides anything.
-  const pattern = /test\("([^"]*usage limit[^"]*)"; "i"\) \| not\)/g;
-  const filters = [...skill.matchAll(pattern)];
-  // Exactly one, because a match on the FIRST occurrence would pin whichever
-  // came earliest in the file while a second, real filter drifted unnoticed.
-  assert.equal(filters.length, 1, "gate-pr.md must carry exactly one jq usage-limit filter");
-  const filter = filters[0];
-  assert.equal(
-    filter[1],
-    stem.replace(/\\/g, "\\\\"),
-    "the skill's jq filter has drifted from the script's predicate",
+  // be satisfied by the documentation while the filter people actually run
+  // drifted — and it would break on an innocent reflow of that paragraph.
+  //
+  // Every jq `test("…"; "i")` pattern is extracted and the ones about Codex
+  // limits are compared as a SET. Keying on a literal substring of the pattern
+  // (an earlier version looked for "usage limit") breaks the moment the pattern
+  // escapes its own spaces, and then reports a missing filter when the filter is
+  // present and correct.
+  const patterns = [...skill.matchAll(/test\("((?:[^"\\]|\\.)*)"; "i"\)/g)].map((m) => m[1]);
+  const limitPatterns = patterns.filter((p) => /Codex/.test(p) && /limit/.test(p));
+  assert.deepEqual(
+    limitPatterns,
+    [stem.replace(/\\/g, "\\\\")],
+    "the skill's jq usage-limit filter has drifted from the script's predicate",
   );
 });
 
