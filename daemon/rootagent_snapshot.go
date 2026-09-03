@@ -230,6 +230,39 @@ func (d legacyRepoDedup) covers(repoID string) bool {
 	return d.ids[repoID] || d.unknownIDs[repoID]
 }
 
+// legacyRepoPathIsDeterminatelyFree reports that no repository owns path — the
+// one outcome that entitles the dedup set to DROP an entry (#3794).
+//
+// It used to be "the probe was not unanswered", which is a claim about the
+// SUBPROCESS and caught every ANSWERED failure with it: an unreadable .git, a
+// dubious-ownership rejection, an invalid .git file. git ran and exited
+// non-zero for each, and none of them says the path is not a repository — a
+// repository may own it through any of them — so dropping the entry there
+// reached #3315's double-visit through an operational failure instead of a
+// timeout. #3771 drew the same line for the app poll: resolved / answered: not
+// a repository / git ran and failed without a verdict / unanswered, and only
+// the second is a claim about the path.
+//
+// The predicate is config.PathIsDeterminatelyFree, not a hand-written
+// errors.Is: a MISSING path produces neither sentinel — git says "cannot change
+// to <p>: No such file or directory", which is not ErrNotGitRepository — so a
+// bare errors.Is would turn every #1122 not-yet-cloned entry into an unknown,
+// latch it forever and cover it provisionally. That helper already answers this
+// exact question from evidence (git's own verdict, or a provably absent path),
+// and it is what LegacyRootAgentForRecordedRoot and normalizeDeleteProjectPath
+// branch on.
+//
+// UNANSWERED SHORT-CIRCUITS, and the order is load-bearing: the helper stats
+// the path, and statting a path whose git probe just died is this series' own
+// hazard one layer down. A probe that never answered established nothing, so
+// there is nothing to ask the filesystem about.
+func legacyRepoPathIsDeterminatelyFree(expanded string, probeErr error) bool {
+	if config.RepoProbeUnanswered(probeErr) {
+		return false
+	}
+	return config.PathIsDeterminatelyFree(expanded, probeErr)
+}
+
 // legacyRepoIDSet resolves each root_agents path to its repo ID for the
 // singleton sweep's dedup set. A not-yet-cloned legacy path is normal (#1122):
 // the per-path ensure sweep retries it, and it is simply not part of the dedup
@@ -258,32 +291,33 @@ func legacyRepoIDSet(cfg *config.Config, resolve legacyRepoResolver, previous le
 		unknownPaths: map[string]bool{},
 	}
 	for path := range cfg.RootAgents {
+		expanded := filepath.Clean(config.ExpandTilde(path))
 		repo, err := resolve(path)
-		switch {
-		case err == nil:
+		if err == nil {
 			next.ids[repo.ID] = true
 			next.byPath[path] = repo.ID
-		case !config.RepoProbeUnanswered(err):
-			// A VERDICT. git ran and answered that the path is not a
-			// repository right now — #1122's not-yet-cloned entry, or a
-			// checkout that went away — and a verdict about the path may drop
-			// the entry, exactly as it always has.
-		case previous.byPath[path] != "":
-			// UNKNOWN. Nothing was established, so the last resolution stands.
-			next.ids[previous.byPath[path]] = true
-			next.byPath[path] = previous.byPath[path]
-		default:
-			// UNKNOWN, with nothing proven to stand. The provisional identity
-			// covers the repo this path most likely names, so a first probe
-			// that times out cannot read as absent.
-			if id := config.RepoIDFromRoot(filepath.Clean(config.ExpandTilde(path))); id != "" {
-				next.unknownIDs[id] = true
-			}
+			continue
 		}
-		// Latched either way an unknown lands, so the heal pass keeps
-		// re-attempting exactly this resolution until it answers.
-		if err != nil && config.RepoProbeUnanswered(err) {
-			next.unknownPaths[path] = true
+		if legacyRepoPathIsDeterminatelyFree(expanded, err) {
+			// A VERDICT: nothing owns this path, on evidence. #1122's
+			// not-yet-cloned entry and a checkout that went away both land
+			// here, and a verdict about the path may drop the entry, exactly
+			// as it always has.
+			continue
+		}
+		// UNKNOWN, and latched so the heal pass keeps re-attempting exactly
+		// this resolution until something is established.
+		next.unknownPaths[path] = true
+		if carried := previous.byPath[path]; carried != "" {
+			// The last resolution stands.
+			next.ids[carried] = true
+			next.byPath[path] = carried
+			continue
+		}
+		// Nothing proven to stand, so the provisional identity covers the repo
+		// this path most likely names.
+		if id := config.RepoIDFromRoot(expanded); id != "" {
+			next.unknownIDs[id] = true
 		}
 	}
 	return next
