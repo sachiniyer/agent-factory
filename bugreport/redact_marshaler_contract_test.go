@@ -241,21 +241,29 @@ func TestGuardReviewedMarshalersMatchTheirFieldSet(t *testing.T) {
 					base := fixtureSpec{seq: seq, pattern: spread, state: state, withUnwalked: true}
 					readStructuralModes(t, report, typ, entry, where, base)
 
-					// The other meaningful CHANNEL state, against the same empty
-					// reading: an open channel opens a `!= nil` gate, a CLOSED
-					// one opens a completed-work gate, and neither is the other.
-					// Read on the populated shape only — the structural modes
-					// vary the WALKED side, and crossing the two would multiply
-					// the fixtures without reading a new gate.
-					closed := base
-					closed.closeChans = true
+					// The other meaningful CHANNEL readings, against the same
+					// empty control. An open channel opens a `!= nil` gate, a
+					// QUEUED one delivers a payload to a non-blocking receive,
+					// and a CLOSED one opens a completed-work gate — no two of
+					// them are the same reading (#3655 item 12). Read on the
+					// populated shape only: the structural modes vary the WALKED
+					// side, and crossing the two would multiply the fixtures
+					// without opening a new gate.
 					control := base
 					control.withUnwalked = false
-					if a, b := newMarshalerFixture(t, typ, closed), newMarshalerFixture(t, typ, control); !bytes.Equal(a.custom, b.custom) {
-						report.added = append(report.added, fmt.Sprintf(
-							"%s, closed: the output depends on state encoding/json cannot reach — "+
-								"with the unexported and json:\"-\" fields populated it emits %s, with "+
-								"them empty %s", where, a.custom, b.custom))
+					empty := newMarshalerFixture(t, typ, control)
+					for label, mode := range map[string]guardChanMode{
+						", queued channels": guardChanQueued,
+						", closed channels": guardChanClosed,
+					} {
+						spec := base
+						spec.chans = mode
+						if a := newMarshalerFixture(t, typ, spec); !bytes.Equal(a.custom, empty.custom) {
+							report.added = append(report.added, fmt.Sprintf(
+								"%s%s: the output depends on state encoding/json cannot reach — "+
+									"with the unexported and json:\"-\" fields populated it emits %s, "+
+									"with them empty %s", where, label, a.custom, empty.custom))
+						}
 					}
 					seq += 1000
 				}

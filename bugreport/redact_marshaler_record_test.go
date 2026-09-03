@@ -2,7 +2,11 @@ package bugreport
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -81,7 +85,7 @@ func TestGuardFixtureGapRegisterIsCurrent(t *testing.T) {
 		value := reflect.New(typ).Elem()
 		filler.fill(value, "", 0, false)
 		filler.unsupported, filler.tooDeep = nil, nil
-		plantUnwalkedState(filler, value, false)
+		plantUnwalkedState(filler, value, guardChanOpen)
 		for _, gap := range append(dedupeSorted(filler.unsupported), dedupeSorted(filler.tooDeep)...) {
 			met[typ.String()+": "+gap] = struct{}{}
 		}
@@ -108,9 +112,8 @@ type fixtureSpec struct {
 	state   int
 	// withUnwalked populates the state encoding/json cannot reach.
 	withUnwalked bool
-	// closeChans reads the other meaningful channel state — production closes
-	// hooksDone when hooks finish.
-	closeChans bool
+	// chans is which of a hidden channel's readings this record builds.
+	chans guardChanMode
 	// nilPointers leaves the optional pointers nil. fill allocates every
 	// pointer, so without this no fixture ever reads the branch a marshaler
 	// takes when an optional field is ABSENT (#3592 review).
@@ -171,7 +174,7 @@ func plantedRecord(t *testing.T, typ reflect.Type, spec fixtureSpec) (reflect.Va
 	filler.fill(value, "", 0, false)
 	var unwalked []string
 	if spec.withUnwalked {
-		unwalked = plantUnwalkedState(filler, value, spec.closeChans)
+		unwalked = plantUnwalkedState(filler, value, spec.chans)
 		// An unwalked field the walk could not populate stays at its zero value,
 		// and a marshaler that emits it only when it is set would then pass on
 		// an empty fixture (#3592 review). Each one is written down by name.
@@ -435,9 +438,9 @@ func structuralFixtureModes(base fixtureSpec) map[string]fixtureSpec {
 //
 // It runs after the exported checks, on the same filler, so its markers continue
 // the same sequence and cannot collide with theirs.
-func plantUnwalkedState(filler *sentinelFiller, value reflect.Value, closeChans bool) []string {
+func plantUnwalkedState(filler *sentinelFiller, value reflect.Value, chans guardChanMode) []string {
 	first := len(filler.planted)
-	plantUnwalkedInto(filler, value, "", 0, false, closeChans)
+	plantUnwalkedInto(filler, value, "", 0, false, chans)
 	var forms []string
 	for _, planted := range filler.planted[first:] {
 		forms = append(forms, planted.forms...)
@@ -451,7 +454,7 @@ func plantUnwalkedState(filler *sentinelFiller, value reflect.Value, closeChans 
 // filling it is free — while the same shapes on the walked side are part of what
 // the with/without fixtures must hold identical, and touching one there would
 // make them differ and blame the marshaler (#3592 review).
-func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string, depth int, hidden, closeChans bool) {
+func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string, depth int, hidden bool, chans guardChanMode) {
 	if depth > guardMaxDepth {
 		// Reported, not skipped. A hidden leaf beyond the bound stays empty,
 		// and a silent return keeps it out of unclassifiedFixtureGaps too — so
@@ -463,14 +466,14 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 	switch value.Kind() {
 	case reflect.Pointer:
 		if !value.IsNil() {
-			plantUnwalkedInto(filler, value.Elem(), path, depth+1, hidden, closeChans)
+			plantUnwalkedInto(filler, value.Elem(), path, depth+1, hidden, chans)
 		}
 	case reflect.Slice, reflect.Array:
 		if elem := value.Type().Elem().Kind(); elem == reflect.Uint8 || elem == reflect.Int32 {
 			return
 		}
 		for i := 0; i < value.Len(); i++ {
-			plantUnwalkedInto(filler, value.Index(i), path+"[]", depth+1, hidden, closeChans)
+			plantUnwalkedInto(filler, value.Index(i), path+"[]", depth+1, hidden, chans)
 		}
 	case reflect.Map:
 		// A map element is not addressable, so it is planted in a copy and
@@ -484,7 +487,7 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 		for _, key := range value.MapKeys() {
 			elem := reflect.New(value.Type().Elem()).Elem()
 			elem.Set(value.MapIndex(key))
-			plantUnwalkedInto(filler, elem, path+"[]", depth+1, hidden, closeChans)
+			plantUnwalkedInto(filler, elem, path+"[]", depth+1, hidden, chans)
 			rebuilt.SetMapIndex(key, elem)
 		}
 		value.Set(rebuilt)
@@ -515,7 +518,7 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			// DEFAULT encoder and from nothing else, so an ignored channel or
 			// function is a gate a marshaler can still read (#3592 review).
 			if !guardHidesSubtree(field) {
-				plantUnwalkedInto(filler, settable, at, depth+1, hidden, closeChans)
+				plantUnwalkedInto(filler, settable, at, depth+1, hidden, chans)
 				continue
 			}
 			// The recursion's default arm is the ONE place opaque state is
@@ -523,11 +526,11 @@ func plantUnwalkedInto(filler *sentinelFiller, value reflect.Value, path string,
 			// probe that removed it stayed red because the recursion had already
 			// done the work.
 			fillUnwalked(filler, settable, at)
-			plantUnwalkedInto(filler, settable, at, depth+1, true, closeChans)
+			plantUnwalkedInto(filler, settable, at, depth+1, true, chans)
 		}
 	default:
 		if hidden {
-			populateOpaque(filler, value, path, closeChans)
+			populateOpaque(filler, value, path, depth, chans)
 		}
 	}
 }
@@ -553,43 +556,92 @@ func fillUnwalked(filler *sentinelFiller, value reflect.Value, path string) {
 // fixtures of the same shape stay comparable, and unmistakably non-zero.
 var guardHiddenInstant = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 
-// guardContextInterface is the one interface type the fixture has a
-// representative for — see populateOpaque's Interface arm for why it is an
-// exact type match rather than an Implements check.
-var guardContextInterface = reflect.TypeOf((*context.Context)(nil)).Elem()
+// guardContextInterface and guardErrorInterface are the interface types the
+// fixture has a representative for — see populateOpaque's Interface arm for why
+// they are exact type matches rather than Implements checks.
+var (
+	guardContextInterface = reflect.TypeOf((*context.Context)(nil)).Elem()
+	guardErrorInterface   = reflect.TypeOf((*error)(nil)).Elem()
+)
 
-// populateOpaque gives a hidden channel or function a non-nil value.
+// guardChanMode is which reading of a hidden channel a record is built with.
 //
-// encoding/json cannot serialize either, so the main walk rightly ignores them —
-// but a MARSHALER can read them, and `GitWorktree.hooksDone` is exactly that
-// shape: production sets it and HooksDone() exposes it, so a marshaler gated on
-// `HooksDone() != nil` would keep that gate shut in every fixture that left it
-// nil (#3592 review). Nothing is planted IN them; they are made non-nil so the
-// gate opens.
+// encoding/json can serialize none of them, so the main walk rightly ignores a
+// channel — but a MARSHALER can read one, and `GitWorktree.hooksDone` is exactly
+// that shape: production sets it and HooksDone() exposes it (#3592 review).
+// Three readings, because a non-blocking receive answers each of them
+// differently, and a `!= nil` gate cannot tell any of them apart:
+type guardChanMode int
+
+const (
+	// guardChanOpen is an open, EMPTY channel: the gate is open, and a
+	// non-blocking receive takes the DEFAULT branch — "not ready yet".
+	guardChanOpen guardChanMode = iota
+	// guardChanQueued is an open channel with elements buffered in it, so a
+	// non-blocking receive DELIVERS one (#3655 item 12).
+	//
+	// Every mode used to be empty, so both readings handed back the element
+	// type's zero value and a marshaler that non-blockingly receives queued text
+	// was silent in all of them. The elements are planted like any other hidden
+	// state, so text taken out of one and emitted is found by the same search
+	// that covers every other unwalked field. A `chan struct{}` carries no
+	// payload to plant, and the mode still moves it: the receive SUCCEEDS where
+	// the empty channel's would have fallen through.
+	guardChanQueued
+	// guardChanClosed is the completed-work reading — hooksDone is closed when
+	// hooks finish, and a marshaler acting "once hooks are done" is silent for
+	// an open channel and for a nil one alike (#3592 review).
+	//
+	// Closed and EMPTY, deliberately: a closed channel still delivers what is
+	// queued in it, so closing a queued one would take away the ok=false
+	// reading that is the whole point of this mode.
+	guardChanClosed
+)
+
+// guardChanCapacity is how many elements the queued mode buffers. Two, the same
+// as a seeded collection, so a marshaler that drains gets more than one.
+const guardChanCapacity = guardSliceSeed
+
+// populateOpaque gives a hidden channel, function or interface a value a
+// marshaler can actually read something out of.
 //
-// closeChans reads the OTHER meaningful channel state. hooksDone is closed when
-// hooks finish, so a marshaler using a non-blocking receive to act "once hooks
-// are done" is silent for an open channel and for a nil one alike — the contract
-// reads both modes (#3592 review).
+// Nothing json can serialize passes through here — it errors on all three — so
+// the main walk ignores them, and every one of them is a gate a marshaler can
+// still read. What is planted is REPRESENTATIVE, not exhaustive: the bar each
+// arm below is held to is that the value opens the gate AND carries whatever
+// payload the shape's own interface can deliver, so a marshaler that reads
+// through it finds planted text rather than a zero.
 //
 // A directional channel is made bidirectionally and converted, since MakeChan
 // refuses a receive-only type. Anything that cannot be populated is recorded as
 // a fixture gap rather than left silently zero.
-func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, closeChans bool) {
+func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, depth int, chans guardChanMode) {
 	switch value.Kind() {
 	case reflect.Chan:
 		if !value.CanSet() || !value.IsNil() {
 			return
 		}
-		// Made bidirectionally and CLOSED BEFORE the conversion. MakeChan
+		// Made bidirectionally, and CLOSED BEFORE the conversion. MakeChan
 		// refuses a receive-only type, and the conversion is precisely what
 		// takes away the ability to close it — hooksDone is declared
 		// `<-chan struct{}`, so a close attempted after converting is not
 		// allowed and a guard that skipped it left the closed mode inert.
 		// Measured: the probe for it passed until this order was fixed
 		// (#3592 review).
-		made := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, value.Type().Elem()), 0)
-		if closeChans {
+		elem := value.Type().Elem()
+		capacity := 0
+		if chans == guardChanQueued {
+			capacity = guardChanCapacity
+		}
+		made := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, elem), capacity)
+		switch chans {
+		case guardChanQueued:
+			for i := 0; i < capacity; i++ {
+				held := reflect.New(elem).Elem()
+				plantHiddenPayload(filler, held, elementPath(path+"<-", i), depth, chans)
+				made.Send(held)
+			}
+		case guardChanClosed:
 			made.Close()
 		}
 		value.Set(made.Convert(value.Type()))
@@ -597,43 +649,99 @@ func populateOpaque(filler *sentinelFiller, value reflect.Value, path string, cl
 		if !value.CanSet() || !value.IsNil() {
 			return
 		}
+		// The RESULTS are populated, not just the function (#3655 item 11).
+		// Returning the zero of every result made "populated" true of the field
+		// and false of anything it returns, so a marshaler calling the function
+		// and reading what came back found an empty string, a false, a nil
+		// error — in every fixture, with nothing written down about it.
+		//
+		// Built ONCE and captured, so the function is deterministic: two records
+		// built to the same spec must return the same values, or the
+		// independence comparisons would differ for reasons of their own.
 		typ := value.Type()
-		value.Set(reflect.MakeFunc(typ, func([]reflect.Value) []reflect.Value {
-			out := make([]reflect.Value, typ.NumOut())
-			for i := range out {
-				out[i] = reflect.Zero(typ.Out(i))
-			}
-			return out
-		}))
+		out := make([]reflect.Value, typ.NumOut())
+		for i := range out {
+			out[i] = reflect.New(typ.Out(i)).Elem()
+			plantHiddenPayload(filler, out[i], path+"() result "+strconv.Itoa(i), depth, chans)
+		}
+		value.Set(reflect.MakeFunc(typ, func([]reflect.Value) []reflect.Value { return out }))
 	case reflect.Interface:
 		// A hidden interface can be a pure GATE — GitWorktree's constructors
 		// assign a non-nil hooksCtx, and a marshaler can branch on its presence
 		// without ever reading it, which the register's old rationale did not
 		// cover (#3592 review).
 		//
-		// The CONTEXT SHAPE and nothing else gets the representative (#3655
-		// item 1). The test used to be "does a context satisfy this interface",
-		// which `any` answers yes to along with every other type in the
-		// language — and a context is no representative of `any`: a marshaler
-		// that asserts the field to a string and emits it finds a context in
-		// every fixture, emits nothing, and passes while the fixture records the
-		// gate as OPEN. Populated and reported are the only two answers, so a
-		// broader interface is written down by name and unclassifiedFixtureGaps
-		// then demands the reason the contract holds without it.
+		// Only a shape with a representative is populated (#3655 item 1). The
+		// test used to be "does a context satisfy this interface", which `any`
+		// answers yes to along with every other type in the language — and a
+		// context is no representative of `any`: a marshaler that asserts the
+		// field to a string and emits it finds a context in every fixture, emits
+		// nothing, and passes while the fixture records the gate as OPEN.
+		// Populated and reported are the only two answers, so a shape not named
+		// here is written down and unclassifiedFixtureGaps then demands the
+		// reason the contract holds without it.
+		//
+		// TWO shapes qualify, by the same test: the value has to be readable
+		// through the interface's OWN method set, not merely assignable to it.
+		//
+		//   - context.Context, a pure gate. Its methods carry no user text, and
+		//     the field production has (hooksCtx) is read as presence.
+		//   - error, which #3655 item 11 made reachable: `func() error` sits in
+		//     the reviewed graph, and a nil result shuts a `!= nil` gate in
+		//     every fixture. A non-nil error whose Error() returns a PLANTED
+		//     marker opens the gate and carries a payload, so a marshaler that
+		//     emits the message is caught by the same search as every other
+		//     unwalked field rather than passing on an empty one.
+		//
+		// The residual is the same for both and is why `any` is refused: a
+		// marshaler that type-asserts past the method set to a concrete type
+		// sees something else. An interface with no methods offers nothing BUT
+		// that, which is the line.
 		if !value.CanSet() || !value.IsNil() {
 			return
 		}
-		if value.Type() == guardContextInterface {
+		switch value.Type() {
+		case guardContextInterface:
 			value.Set(reflect.ValueOf(context.Background()))
-			return
+		case guardErrorInterface:
+			value.Set(reflect.ValueOf(errors.New(plantHiddenText(filler, path))))
+		default:
+			filler.unsupported = append(filler.unsupported,
+				path+" ("+value.Type().String()+" has no representative value that opens a gate "+
+					"and carries a payload its own method set can deliver)")
 		}
-		filler.unsupported = append(filler.unsupported,
-			path+" ("+value.Type().String()+" is not the context shape, and no representative "+
-				"value opens a gate that reads a concrete payload)")
 	case reflect.UnsafePointer:
 		filler.unsupported = append(filler.unsupported,
 			path+" (hidden unsafe.Pointer cannot be populated)")
 	}
+}
+
+// plantHiddenPayload fills one value a marshaler can only reach by CALLING
+// something — a function's result, a channel's queued element — with the same
+// planted state any other hidden field gets.
+//
+// The ordinary hidden path in one call: fillUnwalked for the shapes reflect can
+// write text into, then the recursion for everything below, which is also what
+// reaches populateOpaque again for an opaque leaf. A shape neither can populate
+// lands in the gap register under a path naming how it is reached, so a result
+// or an element the fixture cannot fill is written down rather than left zero.
+func plantHiddenPayload(filler *sentinelFiller, value reflect.Value, path string, depth int, chans guardChanMode) {
+	fillUnwalked(filler, value, path)
+	plantUnwalkedInto(filler, value, path, depth+1, true, chans)
+}
+
+// plantHiddenText mints one marker and records it as planted, for a payload that
+// is not reached through a settable reflect.Value — an error's message.
+//
+// Recorded through the same path a planted string takes, so the forms searched
+// for in a marshaler's output are the same ones: the raw marker, its JSON
+// encoding, and the unit that survives a partial edit.
+func plantHiddenText(filler *sentinelFiller, path string) string {
+	held := reflect.New(reflect.TypeOf("")).Elem()
+	marker := filler.nextMarker()
+	held.SetString(marker)
+	filler.record(held, path, marker)
+	return marker
 }
 
 // scalarSeeder sets every scalar leaf reachable from a record to a value derived
@@ -695,7 +803,7 @@ func (s scalarSeeder) seed(value reflect.Value, path string, hidden bool) {
 			return
 		}
 		for i := 0; i < value.Len(); i++ {
-			s.seed(value.Index(i), path+"[]", hidden)
+			s.seed(value.Index(i), elementPath(path, i), hidden)
 		}
 	case reflect.Map:
 		// Same rebuild as plantUnwalkedInto: a map element is not addressable,
@@ -707,10 +815,22 @@ func (s scalarSeeder) seed(value reflect.Value, path string, hidden bool) {
 			return
 		}
 		rebuilt := reflect.MakeMap(value.Type())
-		for _, key := range value.MapKeys() {
+		// Ordered by KEY, and seeded by that order's rank rather than by the key
+		// itself. Two records built to the same spec carry the same keys, so
+		// either would be deterministic — but a record built with a different
+		// SEQ carries different keys, and seeding from them would make a scalar
+		// gate move with the planted text. The text-independence reading would
+		// then blame the marshaler for the fixture's own doing. Ranks are 0 and
+		// 1 whatever the keys are, and json emits map members in this same
+		// order, so the two records line up member for member.
+		keys := value.MapKeys()
+		sort.Slice(keys, func(a, b int) bool {
+			return fmt.Sprint(keys[a].Interface()) < fmt.Sprint(keys[b].Interface())
+		})
+		for i, key := range keys {
 			elem := reflect.New(value.Type().Elem()).Elem()
 			elem.Set(value.MapIndex(key))
-			s.seed(elem, path+"[]", hidden)
+			s.seed(elem, elementPath(path, i), hidden)
 			rebuilt.SetMapIndex(key, elem)
 		}
 		value.Set(rebuilt)
@@ -732,6 +852,21 @@ func (s scalarSeeder) seed(value reflect.Value, path string, hidden bool) {
 
 // at is the value this seeder gives the leaf at path.
 func (s scalarSeeder) at(path string) int { return s.pattern(pathIndex(path), s.state) }
+
+// elementPath names one element of a repeated aggregate by its INDEX.
+//
+// Every element used to seed from a path ending "[]", so all of them received
+// identical scalars and no fixture could satisfy a gate over two of them —
+// `Tabs[0].Kind != Tabs[1].Kind`, which production rosters routinely have
+// (#3655 item 7). A marshaler that acts only on a heterogeneous collection was
+// therefore read on a homogeneous one, always.
+//
+// The unwalked pass keeps "[]" deliberately: its paths are REPORTS, and the gap
+// register is keyed on them, so an index there would make one entry per element
+// out of one fact about a field.
+func elementPath(path string, index int) string {
+	return path + "[" + strconv.Itoa(index) + "]"
+}
 
 // guardWalkedInstant is the base a seeded EXPORTED timestamp is derived from:
 // fixed, so two fixtures of the same shape stay comparable, and unmistakably
