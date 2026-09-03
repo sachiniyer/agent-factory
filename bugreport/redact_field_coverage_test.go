@@ -357,15 +357,23 @@ func rendersItself(t reflect.Type) bool {
 type reviewedMarshaler struct {
 	why string
 	// normalizesEmpty are members the marshaler renders as an EMPTY collection
-	// where the default encoder renders the absent one as null. Nothing else is
-	// permitted to differ: the diff still requires the member to be present, and
-	// still requires every other value to match the field exactly.
+	// where the default encoder renders the absent one as null, each mapped to
+	// the EXACT form it renders — "[]" or "{}". Nothing else is permitted to
+	// differ: the diff still requires the member to be present, and still
+	// requires every other value to match the field exactly.
 	//
 	// Declared rather than tolerated in general, because "normalized via
 	// clone()" is a claim about a specific member, and the sparse reading is
 	// what turned it from prose into something the contract checks
 	// (#3592 review).
-	normalizesEmpty []string
+	//
+	// The FORM is part of the declaration, not just the name (#3655 item 6). A
+	// name alone accepted either empty collection, so a regression rendering a
+	// nil SLICE as `{}` passed the sparse reading while changing the member's
+	// public JSON type. The form is itself executed rather than believed:
+	// TestGuardNormalizedEmptyFormsMatchTheirFields holds each one to the Go
+	// kind of the member it names.
+	normalizesEmpty map[string]string
 	// extra are the members the marshaler adds at the TOP level of its own
 	// output, each mapped to the EXACT JSON value it must produce for a record
 	// whose fields the walk has planted into. Empty means "exactly the fields,
@@ -391,7 +399,7 @@ var reviewedMarshalerTypes = map[reflect.Type]reviewedMarshaler{
 	reflect.TypeOf(git.ArchiveRetainedTree{}): {
 		why: "MarshalJSON marshals a `type wireTree ArchiveRetainedTree` alias of the same exported fields, " +
 			"normalized via clone() — which renders an absent Skipped as [] rather than null",
-		normalizesEmpty: []string{"skipped"},
+		normalizesEmpty: map[string]string{"skipped": "[]"},
 	},
 	reflect.TypeOf(git.ArchiveSkippedEntry{}): {
 		why: "MarshalJSON marshals a `type wireEntry ArchiveSkippedEntry` alias of the same exported fields, normalized via clone()",
