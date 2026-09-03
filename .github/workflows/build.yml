@@ -42,8 +42,10 @@ jobs:
     # lane that runs `go test` therefore needs zsh, not just pr.yml — this job
     # runs the suite on the release matrix, and auto-release/stable-release run it
     # too. The runner is ubuntu regardless of the GOOS/GOARCH it builds for.
+    # Routed through scripts/ci-apt-install.sh so a third-party source in the
+    # runner image cannot fail this step by failing the update (#3774).
     - name: Install zsh
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+      run: scripts/ci-apt-install.sh zsh
 
     # Every matrix cell runs this step on the amd64 ubuntu runner — GOOS/GOARCH are
     # set only on the Build step below, so `go test` compiles and runs the SAME

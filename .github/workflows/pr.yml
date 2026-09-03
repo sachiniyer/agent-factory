@@ -149,6 +149,20 @@ jobs:
       - name: Check file lengths
         run: scripts/lint-file-length.sh
 
+      # Six workflow steps used to run `sudo apt-get update && sudo apt-get
+      # install …`, and `apt-get update` exits 100 when ANY configured source
+      # fails — so a 403 from packages.microsoft.com, which the runner image
+      # ships and nothing here installs from, reddened master's Build (#3774).
+      # They now all call scripts/ci-apt-install.sh, and this is the check that
+      # keeps a seventh from being written the old way: six copies is how the
+      # defect reached both release preflights in the first place. It lives in
+      # the required Lint job, which runs on every PR regardless of what the
+      # PR touched, and it needs nothing but the Go already set up above. The
+      # same tests also pin the script's two halves — a failed update is
+      # survived, a failed install is not.
+      - name: Lint CI apt usage and test the installer wrapper
+        run: go test ./scripts/ -run Apt -count=1
+
       # The auto-gate helper decides what auto-merges, but nothing ran its tests
       # in CI — they only ever ran by hand (#1907). Lives in the Lint job because
       # Lint is a required check, so this gates from the moment it lands; a
@@ -202,8 +216,10 @@ jobs:
       # suite would cover two of the three shells it claims, and a zsh-only defect
       # would reach users with CI green — the same gap test-macos exists to close,
       # one layer down. The macOS runner already ships zsh, so this is Linux-only.
+      # Routed through scripts/ci-apt-install.sh so a third-party source in the
+      # runner image cannot fail this required check by failing the update (#3774).
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+        run: scripts/ci-apt-install.sh zsh
 
       # There is deliberately no "warm alpine:3.20" step here any more (#2521).
       # It used to live in this job alone, which was the whole problem: FOUR
@@ -284,10 +300,10 @@ jobs:
           go-version: "1.25"
           cache: true
 
+      # Routed through scripts/ci-apt-install.sh so a third-party source in the
+      # runner image cannot fail this step by failing the update (#3774).
       - name: Install lifecycle dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux
+        run: scripts/ci-apt-install.sh tmux
 
       - name: Enable the systemd user manager
         run: |

@@ -49,8 +49,11 @@ jobs:
     # The preflight runs the full suite, and internal/shellsuggest FAILS rather
     # than skips when a shell it claims (sh/bash/zsh) is absent (#1978/#1988).
     # Without zsh the preflight cannot pass, so a release would be unable to cut.
+    # Routed through scripts/ci-apt-install.sh so a third-party source in the
+    # runner image cannot fail this step by failing the update (#3774) — a
+    # release must not be blocked by a repository it never installs from.
     - name: Install zsh
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+      run: scripts/ci-apt-install.sh zsh
 
     - name: Release preflight
       run: |

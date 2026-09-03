@@ -90,10 +90,10 @@ jobs:
         with:
           go-version: "1.25"
 
+      # Routed through scripts/ci-apt-install.sh so a third-party source in the
+      # runner image cannot fail this step by failing the update (#3774).
       - name: Install harness dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux jq curl
+        run: scripts/ci-apt-install.sh tmux jq curl
 
       - name: Enable the systemd user manager
         # `af daemon install` registers a user-level unit (systemctl --user), so
