@@ -253,7 +253,7 @@ func (m *Manager) EnsureRootAgents() {
 	if len(layers.projectRoots) > 0 {
 		repoIDs := make([]string, 0, len(layers.projectRoots))
 		for repoID := range layers.projectRoots {
-			if layers.legacyRepoIDs[repoID] {
+			if layers.legacy.covers(repoID) {
 				continue
 			}
 			repoIDs = append(repoIDs, repoID)

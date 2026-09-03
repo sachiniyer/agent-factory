@@ -175,48 +175,50 @@ func TestUnansweredLegacyDedupProbeKeepsThePreviousRepoID(t *testing.T) {
 		return func(string) (*config.RepoContext, error) { return &config.RepoContext{ID: id}, nil }
 	}
 
+	carried := legacyRepoDedup{byPath: map[string]string{path: "aaaaaaaaaaaa"}}
+
 	cases := []struct {
 		name       string
 		resolve    legacyRepoResolver
-		previous   map[string]string
+		previous   legacyRepoDedup
 		wantIDs    map[string]bool
 		wantByPath map[string]string
 	}{{
 		name:       "an unanswered probe leaves the previous repo ID standing",
 		resolve:    unanswered,
-		previous:   map[string]string{path: "aaaaaaaaaaaa"},
+		previous:   carried,
 		wantIDs:    map[string]bool{"aaaaaaaaaaaa": true},
 		wantByPath: map[string]string{path: "aaaaaaaaaaaa"},
 	}, {
-		// A path that never resolved was never in the set, so there is
-		// nothing to keep. This is #1122's not-yet-cloned entry, unchanged.
-		name:       "an unanswered probe with nothing to carry forward adds nothing",
+		// Nothing PROVEN is added, because nothing was proven. What covers the
+		// repo in this case is the provisional half, pinned separately below.
+		name:       "an unanswered probe with nothing to carry forward proves nothing",
 		resolve:    unanswered,
-		previous:   nil,
+		previous:   legacyRepoDedup{},
 		wantIDs:    map[string]bool{},
 		wantByPath: map[string]string{},
 	}, {
 		name:       "a verdict drops the entry even when one was carried",
 		resolve:    verdict,
-		previous:   map[string]string{path: "aaaaaaaaaaaa"},
+		previous:   carried,
 		wantIDs:    map[string]bool{},
 		wantByPath: map[string]string{},
 	}, {
 		name:       "a fresh resolution replaces what was carried",
 		resolve:    resolves("bbbbbbbbbbbb"),
-		previous:   map[string]string{path: "aaaaaaaaaaaa"},
+		previous:   carried,
 		wantIDs:    map[string]bool{"bbbbbbbbbbbb": true},
 		wantByPath: map[string]string{path: "bbbbbbbbbbbb"},
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ids, byPath := legacyRepoIDSet(cfg, tc.resolve, tc.previous)
-			if !maps.Equal(ids, tc.wantIDs) {
-				t.Fatalf("dedup set = %v, want %v", ids, tc.wantIDs)
+			got := legacyRepoIDSet(cfg, tc.resolve, tc.previous)
+			if !maps.Equal(got.ids, tc.wantIDs) {
+				t.Fatalf("dedup set = %v, want %v", got.ids, tc.wantIDs)
 			}
-			if !maps.Equal(byPath, tc.wantByPath) {
-				t.Fatalf("per-path resolutions = %v, want %v", byPath, tc.wantByPath)
+			if !maps.Equal(got.byPath, tc.wantByPath) {
+				t.Fatalf("per-path resolutions = %v, want %v", got.byPath, tc.wantByPath)
 			}
 		})
 	}
@@ -240,7 +242,7 @@ func TestUnansweredLegacyDedupProbeDoesNotDoubleVisitTheRepo(t *testing.T) {
 
 	const legacyProgram = "/opt/legacy-root --model opus"
 	manager := degradedRootAgentManager(t, repoPath, config.RootAgentConfig{Program: legacyProgram})
-	if !manager.rootAgentLayers.Load().legacyRepoIDs[rid] {
+	if !manager.rootAgentLayers.Load().legacy.ids[rid] {
 		t.Fatal("fixture: the boot snapshot must already dedup the legacy path, or there is nothing to carry forward")
 	}
 	restore := unansweredLegacyRootResolution(t, repoPath)
@@ -251,7 +253,7 @@ func TestUnansweredLegacyDedupProbeDoesNotDoubleVisitTheRepo(t *testing.T) {
 	if len(layers.personalUnreadable) != 0 {
 		t.Fatalf("fixture: the personal config must have healed so the recompute actually ran, got %d still unreadable", len(layers.personalUnreadable))
 	}
-	if !layers.legacyRepoIDs[rid] {
+	if !layers.legacy.ids[rid] {
 		t.Fatal("an unanswered dedup probe dropped the repo from the healed snapshot's dedup set: an unknown was read as absent, " +
 			"which is #3315's double-visit re-entered through a timeout (#3782 item 1)")
 	}
@@ -292,24 +294,31 @@ func TestHealthyLegacyDedupRecomputeIsUnchanged(t *testing.T) {
 	repoPath := setupControlRepo(t)
 	cfg := rootTestConfig(repoPath, config.RootAgentConfig{})
 
-	wantIDs, wantByPath := legacyRepoIDSet(cfg, unboundedLegacyRootRepo, nil)
-	if len(wantIDs) != 1 || len(wantByPath) != 1 {
-		t.Fatalf("fixture: the unbounded resolution must produce one entry, got ids=%v byPath=%v", wantIDs, wantByPath)
+	// The oracle is the real unbounded API, with no seam between it and git.
+	unbounded := func(path string) (*config.RepoContext, error) {
+		return config.RepoFromPath(config.ExpandTilde(path))
 	}
-	gotIDs, gotByPath := legacyRepoIDSet(cfg, resolveLegacyRootRepo, nil)
-	if !maps.Equal(gotIDs, wantIDs) {
-		t.Fatalf("the bounded recompute's dedup set differs on a healthy checkout:\n got %v\nwant %v", gotIDs, wantIDs)
+	want := legacyRepoIDSet(cfg, unbounded, legacyRepoDedup{})
+	if len(want.ids) != 1 || len(want.byPath) != 1 {
+		t.Fatalf("fixture: the unbounded resolution must produce one entry, got ids=%v byPath=%v", want.ids, want.byPath)
 	}
-	if !maps.Equal(gotByPath, wantByPath) {
-		t.Fatalf("the bounded recompute's per-path resolutions differ on a healthy checkout:\n got %v\nwant %v", gotByPath, wantByPath)
+	got := legacyRepoIDSet(cfg, resolveLegacyRootRepo, legacyRepoDedup{})
+	if !maps.Equal(got.ids, want.ids) {
+		t.Fatalf("the bounded recompute's dedup set differs on a healthy checkout:\n got %v\nwant %v", got.ids, want.ids)
+	}
+	if !maps.Equal(got.byPath, want.byPath) {
+		t.Fatalf("the bounded recompute's per-path resolutions differ on a healthy checkout:\n got %v\nwant %v", got.byPath, want.byPath)
+	}
+	if len(got.unknownPaths) != 0 || len(got.unknownIDs) != 0 {
+		t.Fatalf("a checkout that ANSWERS must leave nothing unknown, got paths=%v ids=%v", got.unknownPaths, got.unknownIDs)
 	}
 
-	// And a healthy carry-forward is a no-op: the previous map must not be able
+	// And a healthy carry-forward is a no-op: the previous pass must not be able
 	// to resurrect an ID the current pass did not resolve.
-	stale := map[string]string{repoPath: "ffffffffffff", "/repos/gone": "eeeeeeeeeeee"}
-	staleIDs, staleByPath := legacyRepoIDSet(cfg, resolveLegacyRootRepo, stale)
-	if !maps.Equal(staleIDs, wantIDs) || !maps.Equal(staleByPath, wantByPath) {
+	stale := legacyRepoDedup{byPath: map[string]string{repoPath: "ffffffffffff", "/repos/gone": "eeeeeeeeeeee"}}
+	after := legacyRepoIDSet(cfg, resolveLegacyRootRepo, stale)
+	if !maps.Equal(after.ids, want.ids) || !maps.Equal(after.byPath, want.byPath) {
 		t.Fatalf("a previous resolution must not survive a probe that answered:\n got ids=%v byPath=%v\nwant ids=%v byPath=%v",
-			staleIDs, staleByPath, wantIDs, wantByPath)
+			after.ids, after.byPath, want.ids, want.byPath)
 	}
 }
