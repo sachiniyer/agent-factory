@@ -71,6 +71,12 @@ func answeredFailureRepo(t *testing.T, repoPath string) (restore func()) {
 	if errors.Is(err, config.ErrNotGitRepository) {
 		t.Fatalf("fixture: this failure must NOT be the not-a-repository verdict, got: %v", err)
 	}
+	// And the PREDICATE the fix actually branches on, not a proxy for it: the
+	// path must not be determinately free, or this fixture is exercising
+	// #1122's absent-path verdict instead of an operational failure.
+	if config.PathIsDeterminatelyFree(repoPath, err) {
+		t.Fatalf("fixture: the path must not be determinately free — something IS there, git just could not make sense of it: %v", err)
+	}
 	return func() {
 		if err := os.Remove(gitDir); err != nil {
 			t.Fatalf("remove invalid gitfile: %v", err)
@@ -84,7 +90,12 @@ func answeredFailureRepo(t *testing.T, repoPath string) (restore func()) {
 // TestAnsweredFailureKeepsThePreviousRepoID is the classification, at the
 // function that makes it, across all four outcomes #3771 names.
 func TestAnsweredFailureKeepsThePreviousRepoID(t *testing.T) {
-	const path = "/repos/alpha"
+	// A path that EXISTS, and that matters. The drop test is
+	// config.PathIsDeterminatelyFree, so a path that is merely absent is a
+	// verdict on its own evidence — which is right for #1122 and wrong for the
+	// state under test here. An operational failure means something IS there
+	// and git could not make sense of it.
+	path := t.TempDir()
 	cfg := config.DefaultConfig()
 	cfg.RootAgents = map[string]config.RootAgentConfig{path: {}}
 	carried := legacyRepoDedup{byPath: map[string]string{path: "aaaaaaaaaaaa"}}
@@ -92,43 +103,72 @@ func TestAnsweredFailureKeepsThePreviousRepoID(t *testing.T) {
 	fail := func(err error) legacyRepoResolver {
 		return func(string) (*config.RepoContext, error) { return nil, err }
 	}
+	// And the absent path, for the row that proves #1122 still drops.
+	missing := filepath.Join(t.TempDir(), "not-cloned-yet")
+	missingCfg := config.DefaultConfig()
+	missingCfg.RootAgents = map[string]config.RootAgentConfig{missing: {}}
 
 	cases := []struct {
 		name       string
+		cfg        *config.Config
 		err        error
 		wantIDs    map[string]bool
 		wantByPath map[string]string
+		wantLatch  bool
 	}{{
-		// The only outcome that is a claim about the PATH.
+		// git ANSWERED that the path is not inside a repository. A claim about
+		// the PATH, and the one outcome that may drop the entry.
 		name:       "not a repository drops the entry",
 		err:        fmt.Errorf("failed to get git repo root: %w: fatal: not a git repository", config.ErrNotGitRepository),
 		wantIDs:    map[string]bool{},
 		wantByPath: map[string]string{},
 	}, {
+		// #1122's not-yet-cloned entry, which produces NEITHER sentinel — git
+		// says "cannot change to <p>: No such file or directory". It is still
+		// a verdict, on the path's own provable absence, and it must not latch
+		// the heal retry or an ordinary config pins that cadence forever.
+		name:       "an absent path is still a verdict",
+		cfg:        missingCfg,
+		err:        errors.New("failed to get git repo root: exit status 128: fatal: cannot change to '" + missing + "': No such file or directory"),
+		wantIDs:    map[string]bool{},
+		wantByPath: map[string]string{},
+	}, {
 		name:       "an unreadable or invalid .git keeps it",
-		err:        errors.New("failed to get git repo root for /repos/alpha: exit status 128: fatal: not a git repository: /nonexistent-target"),
+		err:        errors.New("failed to get git repo root: exit status 128: fatal: not a git repository: /nonexistent-target"),
 		wantIDs:    map[string]bool{"aaaaaaaaaaaa": true},
 		wantByPath: map[string]string{path: "aaaaaaaaaaaa"},
+		wantLatch:  true,
 	}, {
 		name:       "a dubious-ownership rejection keeps it",
-		err:        errors.New("failed to get git repo root for /repos/alpha: exit status 128: fatal: detected dubious ownership in repository"),
+		err:        errors.New("failed to get git repo root: exit status 128: fatal: detected dubious ownership in repository"),
 		wantIDs:    map[string]bool{"aaaaaaaaaaaa": true},
 		wantByPath: map[string]string{path: "aaaaaaaaaaaa"},
+		wantLatch:  true,
 	}, {
 		name:       "an unanswered probe keeps it, as before",
 		err:        fmt.Errorf("failed to get git repo root: %w", config.ErrRepoProbeUnanswered),
 		wantIDs:    map[string]bool{"aaaaaaaaaaaa": true},
 		wantByPath: map[string]string{path: "aaaaaaaaaaaa"},
+		wantLatch:  true,
 	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := legacyRepoIDSet(cfg, fail(tc.err), carried)
+			under := cfg
+			if tc.cfg != nil {
+				under = tc.cfg
+			}
+			got := legacyRepoIDSet(under, fail(tc.err), carried)
 			if !maps.Equal(got.ids, tc.wantIDs) {
 				t.Fatalf("dedup set = %v, want %v", got.ids, tc.wantIDs)
 			}
 			if !maps.Equal(got.byPath, tc.wantByPath) {
 				t.Fatalf("per-path resolutions = %v, want %v", got.byPath, tc.wantByPath)
+			}
+			// The latch must agree with the classification, or "unknown" means
+			// one thing to the set and another to the retry.
+			if latched := len(got.unknownPaths) > 0; latched != tc.wantLatch {
+				t.Fatalf("heal-retry latch = %v, want %v (unknownPaths=%v)", latched, tc.wantLatch, got.unknownPaths)
 			}
 		})
 	}
@@ -189,7 +229,9 @@ func TestAnsweredFailureDoesNotDoubleVisitTheRepo(t *testing.T) {
 // the same overclaim in the log line every operator reads.
 func TestRepoResolveClaimSeparatesAllThreeStates(t *testing.T) {
 	const subject = "root_agents entry"
-	const path = "/repos/alpha"
+	// EXISTS, for the same reason the classification test's does: the
+	// ran-and-failed state is only reachable when something is at the path.
+	path := t.TempDir()
 
 	unanswered := repoResolveClaim(subject, path, fmt.Errorf("boom: %w", config.ErrRepoProbeUnanswered))
 	if !strings.Contains(unanswered, "git never answered the probe") {
