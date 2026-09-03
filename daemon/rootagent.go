@@ -57,6 +57,21 @@ var (
 	// live root. Bound the directory scan instead of statting every historical
 	// transcript on the daemon's default one-second ensure cadence.
 	rootClaudeTranscriptInspectionInterval = 30 * time.Second
+	// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
+	// WAIT for one transcript inspection (#3782 item 3).
+	//
+	// Deliberately NOT rootRepoProbeBudget, even though the value matches and
+	// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
+	// a context can kill; this one bounds a wait on os.ReadDir and a stat per
+	// entry, which no context can cancel — so it is a bound on the caller, and
+	// the read outlives it. Two mechanisms, two names, and a reader who
+	// conflates them will reach for a context that cannot help.
+	//
+	// 2s for the same reason the sibling is 2s: the inspection is advisory
+	// while the root is live, so being late costs a resumable conversation id
+	// staying stale for one more 30s interval, and #3503 is the standing
+	// lesson about stingy budgets on a box whose load baseline is 60-95.
+	rootClaudeTranscriptInspectBudget = 2 * time.Second
 )
 
 // rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
@@ -110,6 +125,13 @@ type rootEnsureState struct {
 	// one-second ensure path.
 	nextClaudeTranscriptInspection time.Time
 	claudeTranscriptWarning        string
+	// claudeTranscriptInspecting marks one inspection as still running for
+	// this root (#3782 item 3). It is what keeps a bound from turning a sick
+	// transcript store into an accumulating pile of blocked goroutines: the
+	// deadline releases the POLL goroutine, it cannot release the filesystem
+	// read, so without single-flighting, every throttle interval would start
+	// another one that also blocks. Guarded by m.mu.
+	claudeTranscriptInspecting bool
 }
 
 // resolvedRootAgentFor is the single resolution choke point for one repo: every
