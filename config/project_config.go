@@ -194,6 +194,17 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 			return nil, err
 		}
 	}
+
+	// The same shape warning (#3566), beside the same key check above. This layer
+	// admits program_overrides and its own on_archive_command, and sits ABOVE the
+	// in-repo file in precedence — so when it sets a key, its value is the one
+	// that actually runs, and this is the warning the operator needs.
+	shellValues := shellValueSet{}
+	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
+	shellValues.add("on_archive_command", cfg.OnArchiveCommand)
+	shellValues.add("root_agent.program", cfg.RootAgent.Program)
+	shellValues.warnExecSeparator(prettyPath)
+
 	return &cfg, nil
 }
 

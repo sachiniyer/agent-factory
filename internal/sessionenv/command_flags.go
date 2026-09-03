@@ -83,12 +83,34 @@ func commandEnvironmentFlagStateAtDepth(command, agent, name string, depth int) 
 }
 
 func singleSimpleCall(command string) (*syntax.CallExpr, bool) {
+	return singleCall(command, false)
+}
+
+// singleCallIgnoringRedirections is singleSimpleCall for callers that ask about
+// the command's WORDS rather than about what af can prove it will do.
+//
+// A redirection makes a command unprovable — it is why singleSimpleCall refuses
+// one — but it says nothing about the exec prefix: `exec -- claude >agent.log`
+// still hands dash `--` as the command name, and dash still exits 127. A caller
+// that rejected the whole string because it ends in `>agent.log` would answer
+// "no separator here" about a command that has one (#3566).
+func singleCallIgnoringRedirections(command string) (*syntax.CallExpr, bool) {
+	return singleCall(command, true)
+}
+
+// singleCall is the one parse behind both. allowRedirections relaxes exactly one
+// rule and nothing else, so the two questions cannot drift apart on any of the
+// others.
+func singleCall(command string, allowRedirections bool) (*syntax.CallExpr, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(command), "")
 	if err != nil || len(file.Stmts) != 1 {
 		return nil, false
 	}
 	stmt := file.Stmts[0]
-	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown || len(stmt.Redirs) != 0 {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return nil, false
+	}
+	if !allowRedirections && len(stmt.Redirs) != 0 {
 		return nil, false
 	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)

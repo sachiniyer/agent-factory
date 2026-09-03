@@ -40,14 +40,27 @@ func stripExecPrefix(words []*syntax.Word) (rest []*syntax.Word, separator bool)
 	return words, false
 }
 
-// commandUsesExecSeparator reports whether a command's exec builtin is followed
+// CommandUsesExecSeparator reports whether a command's exec builtin is followed
 // by the `--` separator stripExecPrefix refuses to launch behind.
 //
 // It re-parses instead of threading a flag out of the guard: the guard answers
 // provable/unprovable for a dozen reasons, and this asks the one question the
 // refusal message needs to name.
-func commandUsesExecSeparator(command string) bool {
-	call, ok := singleSimpleCall(command)
+//
+// Exported for the config loaders (#3566), which warn about the same shape in an
+// operator-authored value that never reaches the account boundary — an unscoped
+// session's program, a post-worktree hook, an archive hook. Warning and refusal
+// must not answer the question differently, so they share this one predicate
+// rather than each carrying a copy of "drop exec, then look for --".
+//
+// Redirections are ignored rather than disqualifying, which is why this does not
+// use singleSimpleCall: `exec -- claude >agent.log` is a shape an operator
+// actually writes, and dash fails it for the separator regardless of where its
+// output goes. The account boundary refuses such a command either way — it is
+// unprovable for the redirection — so widening here only lets it reach for the
+// specific message instead of the generic one.
+func CommandUsesExecSeparator(command string) bool {
+	call, ok := singleCallIgnoringRedirections(command)
 	if !ok {
 		return false
 	}
