@@ -256,6 +256,36 @@ test("every document states the approval marker the gate actually matches", () =
   }
 });
 
+// The hand gate must read the decision the way the decision is written (#3800).
+//
+// The per-PR check is refreshed IN PLACE, so `started_at` stays pinned to the
+// first evaluation of that head forever and `completed_at` is stamped only on the
+// first transition to completed. Reading either the ordinary way says "stale"
+// about a decision that was rewritten seconds ago — which is exactly the wrong
+// read that cost #3776 its landing. The evaluation stamp is the first line of
+// `output.summary`, so the skill has to say so and has to spell the prefix the
+// script actually writes.
+test("the skill reads the decision by its stamp, not by started_at", () => {
+  const skill = fs.readFileSync(GATE_PR_SKILL, "utf8");
+  const { DECISION_STAMP_PREFIX } = __test;
+
+  assert.match(
+    skill,
+    /output\.summary/,
+    "gate-pr.md must tell the reader to read the decision's summary (#3800)",
+  );
+  assert.ok(
+    skill.includes(DECISION_STAMP_PREFIX),
+    `gate-pr.md must spell the stamp prefix the script writes (${JSON.stringify(DECISION_STAMP_PREFIX)})`,
+  );
+  // And it must warn off the field that lies here, by name.
+  assert.match(
+    skill,
+    /started_at/,
+    "gate-pr.md must name started_at as the field NOT to trust on this check",
+  );
+});
+
 // One rule, one wording, everywhere it is stated (#3744).
 //
 // The usage-limit rule was written out in four places — twice in auto-gate.js
@@ -513,6 +543,108 @@ test("an evaluated but blocked gate reports WAITING rather than NEVER_RAN", asyn
   assert.equal(github.createdChecks.length, 0);
   assert.equal(github.updatedChecks[0].check_run_id, 321);
   assert.match(github.updatedChecks[0].output.title, /^WAITING:/);
+});
+
+// #3800. The per-PR decision is refreshed IN PLACE, so `started_at` — and
+// `completed_at`, which GitHub stamps only on the first transition to completed —
+// stay pinned to the first evaluation of that head forever. A later evaluation
+// rewrites the summary and moves neither, and the title collapsed every unmet
+// requirement to one string. From outside the run log a freshly re-evaluated
+// block is indistinguishable from a stale one.
+//
+// That cost #3776 a wrong read: the check stamped 09:26:48 was carrying a
+// CONFLICTING/DIRTY summary that could not have been written before 09:55, so
+// the decision had been refreshed and only its timestamps lied.
+//
+// The stamp lives in the output, because that is the part an in-place update is
+// guaranteed to rewrite.
+test("an in-place update carries an evaluation stamp that changes with the decision", async () => {
+  const github = fakeGateGithub({
+    checkRuns: [
+      ...happyCheckRuns(),
+      {
+        id: 321,
+        name: "Auto Gate decision / PR #1465 / " + HEAD_SHA,
+        external_id: `auto-gate:pr:1465:head:${HEAD_SHA}`,
+        app: { id: ACTIONS_APP_ID, slug: "github-actions" },
+        status: "completed",
+        conclusion: "failure",
+        started_at: "2026-07-09T09:26:48Z",
+        completed_at: "2026-07-09T09:26:48Z",
+        output: { title: "WAITING: Auto Gate requirements are not yet satisfied", summary: "old" },
+      },
+    ],
+  });
+
+  // Each evaluation is a separate workflow run in production, which is what makes
+  // two stamps distinguishable even when they land in the same millisecond — a
+  // wall-clock timestamp alone does not guarantee it, and these two calls proved
+  // that by producing identical ISO strings.
+  const previousRunId = process.env.GITHUB_RUN_ID;
+  const evaluate = async (summary, runId) => {
+    process.env.GITHUB_RUN_ID = runId;
+    try {
+      return await autoGate.reportDecision({
+        github,
+        context: fakeContext(),
+        core: fakeCore(),
+        result: { prNumber: "1465", headSha: HEAD_SHA, shouldMerge: false, summary },
+        manual: false,
+      });
+    } finally {
+      if (previousRunId === undefined) {
+        delete process.env.GITHUB_RUN_ID;
+      } else {
+        process.env.GITHUB_RUN_ID = previousRunId;
+      }
+    }
+  };
+
+  await evaluate("BLOCKED: required check Build is missing", "33742779898");
+  const first = github.updatedChecks.at(-1);
+  await evaluate("BLOCKED: mergeability is blocked (CONFLICTING/DIRTY)", "33742999999");
+  const second = github.updatedChecks.at(-1);
+
+  const stampOf = (check) => String(check.output.summary).split("\n", 1)[0];
+  assert.match(
+    stampOf(first),
+    /^evaluated: \d{4}-\d{2}-\d{2}T[\d:.]+Z \(run 33742779898\)$/,
+    `the summary must open with the evaluation stamp, got: ${stampOf(first)}`,
+  );
+  assert.notEqual(
+    stampOf(first),
+    stampOf(second),
+    "two evaluations must not carry the same stamp — that is the whole defect",
+  );
+  // The reason still has to be there, under the stamp.
+  assert.match(second.output.summary, /CONFLICTING\/DIRTY/);
+});
+
+// A one-line read must say WHY. Every block used to collapse to the same title,
+// so "waiting on a check" and "the branch conflicts" — the one a human must act
+// on immediately and cannot fix by waiting — looked identical.
+test("the decision title names the first unmet requirement", async () => {
+  const github = fakeGateGithub({ checkRuns: happyCheckRuns() });
+  await autoGate.reportDecision({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    result: {
+      prNumber: "1465",
+      headSha: HEAD_SHA,
+      shouldMerge: false,
+      summary: "BLOCKED: mergeability is blocked (CONFLICTING/DIRTY); Codex has not reviewed head",
+      reasons: [
+        "mergeability is blocked (CONFLICTING/DIRTY)",
+        "Codex has not reviewed head abc123 yet",
+      ],
+    },
+    manual: false,
+  });
+
+  const title = github.createdChecks.at(-1).output.title;
+  assert.match(title, /^WAITING:/, "the state prefix stays, so existing reads keep working");
+  assert.match(title, /mergeability is blocked/, "…and the title now says which requirement");
 });
 
 test("a read-only fork token leaves the decision unreported without failing the gate", async () => {
@@ -4392,6 +4524,75 @@ test("a required check whose run is parked says so instead of reporting it missi
   );
 });
 
+// #3814. #3812 approved parked runs immediately after its own update-branch and
+// then waited for a run to EXIST. GitHub creates them a few seconds later, so the
+// order left a gap: the approve pass found nothing, the existence poll found them
+// and returned — checking existence only, never conclusion — and nothing later
+// approved them. On #3811's `31720d97` the runs appeared 4 seconds after the
+// update and stayed parked for 33 minutes until a maintainer pressed the button.
+//
+// So the approve pass runs after the wait too.
+test("runs that appear only on a later poll are approved, not merely found", async () => {
+  const NEW_HEAD = "31720d97000000000000000000000000000000aa";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    // Nothing exists on the first list; the runs appear parked on the second.
+    runsAppearAfterReads: 1,
+    runsByHeadSha: {
+      [NEW_HEAD]: [
+        { id: 33762676883, name: "PR Validation", event: "pull_request", status: "completed", conclusion: "action_required" },
+        { id: 33762676618, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.deepEqual(
+    github.approvedRuns.map((run) => run.run_id).sort(),
+    [33762676618, 33762676883],
+    "a run that appeared after the first approve pass must still be approved",
+  );
+  assert.equal(
+    github.dispatchedWorkflows.filter((d) => d.workflow_id === "pr.yml").length,
+    0,
+    "runs exist, so nothing is dispatched",
+  );
+});
+
+// The second half: an evaluation that finds a required check's run parked on the
+// CURRENT head presses the button rather than only describing it. The gate holds
+// actions: write at evaluation time too, and "a button nobody pressed" is not a
+// state the loop should sit in waiting for a later evaluation to narrate.
+test("an evaluation approves a parked run on the current head instead of only naming it", async () => {
+  const github = fakeGateGithub({
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Lint"),
+    runsByHeadSha: {
+      [HEAD_SHA]: [
+        { id: 33762676883, name: "PR Validation", event: "pull_request", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await autoGate.evaluate({
+    github,
+    context: fakeContext(),
+    core: fakeCore(),
+    prNumber: 1465,
+    setOutputs: false,
+  });
+
+  assert.deepEqual(
+    github.approvedRuns.map((run) => run.run_id),
+    [33762676883],
+    "the evaluation must press the button, not just report it",
+  );
+});
+
 test("a run already in progress on the updated head is left alone", async () => {
   const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
   const github = fakeGateGithub({
@@ -6878,6 +7079,10 @@ function fakeGateGithub({
   runsByHeadSha = {},
   headAfterUpdate = null,
   approveRunError = null,
+  // GitHub creates the runs for a pushed head a few seconds AFTER the push, so a
+  // fake that has them from the first list cannot reproduce #3814 — the first
+  // approve pass would catch them and the gap would be invisible.
+  runsAppearAfterReads = 0,
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -7070,7 +7275,15 @@ function fakeGateGithub({
       actions: {
         listWorkflowRunsForRepo: async (options) => {
           github.runListReads.push(options);
-          const runs = runsByHeadSha[options.head_sha] || [];
+          // Per HEAD, not globally: evaluateRequiredChecks lists runs for the
+          // ORIGINAL head before the update, and a global counter would be spent
+          // by those reads — making the runs "appear" before the first approve
+          // pass and hiding the very gap #3814 is about.
+          const readsForThisHead = github.runListReads.filter(
+            (read) => read.head_sha === options.head_sha,
+          ).length;
+          const runs =
+            readsForThisHead > runsAppearAfterReads ? runsByHeadSha[options.head_sha] || [] : [];
           return {
             data: {
               total_count: runs.length,
@@ -7085,6 +7298,18 @@ function fakeGateGithub({
             throw approveRunError;
           }
           github.approvedRuns.push(options);
+          // Approving a run takes it OUT of action_required — a later pass finds
+          // it running, not parked. A fake that leaves the conclusion alone makes
+          // a second approve pass look like a double-approval bug when the real
+          // API would simply find nothing to do.
+          for (const runs of Object.values(runsByHeadSha)) {
+            for (const run of runs) {
+              if (run.id === options.run_id && run.conclusion === "action_required") {
+                run.conclusion = null;
+                run.status = "in_progress";
+              }
+            }
+          }
         },
         createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;
