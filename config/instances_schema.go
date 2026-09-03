@@ -34,6 +34,13 @@ func NewInstancesSchemaMigrationPlan(path string) SchemaMigrationPlan {
 		// "null" -> legacy pre-case, and the probe refuses "null" (it is not a
 		// JSON object), so the two agree wherever the probe answers true.
 		ProveCurrentVersion: ProveJSONSchemaVersion,
+		// instances.json is af-managed state at a path af chose, so the
+		// migration write-back keeps the plain writer's semantics — the same
+		// side of #3672 every other write to this file is on. Stated rather
+		// than left to the zero value because the store next door
+		// (task/schema_migration.go) answers the other way, and a reader
+		// comparing the two should find the decision, not its absence.
+		LinkPolicy: SchemaWriteReplaceLink,
 	}
 }
 
