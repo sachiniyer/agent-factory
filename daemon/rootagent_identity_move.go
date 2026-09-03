@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/sachiniyer/agent-factory/config"
-	"github.com/sachiniyer/agent-factory/log"
 )
 
 // Moving a project between identities, and finishing the durable write that
@@ -89,7 +88,7 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 					remaining[projectID] = owed
 					continue
 				}
-				log.InfoLog.Printf("root agent snapshot: project %s's checkout is verified under %s rather than the %s its boot resolved; moving its layers and recording the identity it actually has", projectID, proven, owed.repoID)
+				m.info().Printf("root agent snapshot: project %s's checkout is verified under %s rather than the %s its boot resolved; moving its layers and recording the identity it actually has", projectID, proven, owed.repoID)
 				owed.repoID = proven
 			}
 			owed.proven = true
@@ -104,7 +103,7 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 			// delete ran. A later pass re-derives one if the project is still
 			// there to prove it.
 			changed = true
-			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is held by a delete; abandoning the pending write rather than retrying it after the delete finishes", projectID, owed.repoID)
+			m.info().Printf("root agent snapshot: project %s's identity %s is held by a delete; abandoning the pending write rather than retrying it after the delete finishes", projectID, owed.repoID)
 			continue
 		case err != nil:
 			remaining[projectID] = owed
@@ -112,7 +111,7 @@ func (m *Manager) retryReconcileOwed(healed *rootAgentSnapshot) bool {
 		}
 		changed = true
 		if wrote {
-			log.InfoLog.Printf("root agent snapshot: project %s's identity %s is recorded after all; an absent path now addresses this project as itself", projectID, owed.repoID)
+			m.info().Printf("root agent snapshot: project %s's identity %s is recorded after all; an absent path now addresses this project as itself", projectID, owed.repoID)
 		}
 	}
 	if !changed {
