@@ -59,6 +59,21 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // a failed read shown as an empty result — every registered sessionless
 // project silently vanishes from the picker. Callers surface the degradation.
 func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Project, bool) {
+	projects, registryDegraded, _ := m.buildProjectListFromCounted(data)
+	return projects, registryDegraded
+}
+
+// buildProjectListFromCounted is buildProjectListFrom, also reporting the
+// resolution budgets the poll opened — one per uncached path, in the order they
+// were opened (#3710).
+//
+// The ledger is here rather than at resolveProjectPaths because the budgets are
+// a property of the POLL: this is what reads the durable registry before it
+// resolves anything, so that every candidate the registry names is uncached and
+// budgeted in the same round as the snapshot's own paths. A test asserting that
+// one stalled path did not spend a healthy one's opportunity has to see the
+// round the poll actually opened, not one it assembled for itself.
+func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overlay.Project, bool, []projectPathProbeBudget) {
 	type projectAggregate struct {
 		root         string
 		rootPriority int
@@ -98,7 +113,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		}
 	}
 	paths = append(paths, m.repoRoot)
-	resolvedPaths := m.resolveProjectPaths(paths)
+	resolvedPaths, probeBudgets := m.resolveProjectPaths(paths)
 	resolvePath := func(path string) projectPathResolution { return resolvedPaths[path] }
 	ensure := func(resolved projectPathResolution, priority int) *projectAggregate {
 		if resolved.id == "" || resolved.root == "" {
@@ -221,7 +236,7 @@ func (m *home) buildProjectListFrom(data []session.InstanceData) ([]overlay.Proj
 		}
 		return projects[i].Root < projects[j].Root
 	})
-	return projects, registryDegraded
+	return projects, registryDegraded, probeBudgets
 }
 
 // projectRows maps the discovered project list into Projects-section rows,

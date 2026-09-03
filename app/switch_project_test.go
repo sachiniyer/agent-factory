@@ -184,7 +184,7 @@ func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testi
 	t.Setenv("AF_REAL_GIT", realGit)
 	t.Setenv("PATH", binDir)
 
-	projects, degraded := h.buildProjectListFrom([]session.InstanceData{
+	projects, degraded, budgets := h.buildProjectListFromCounted([]session.InstanceData{
 		{
 			Title: "stalled", Path: stalled,
 			Worktree: session.GitWorktreeData{RepoPath: stalled, WorktreePath: stalled},
@@ -195,8 +195,45 @@ func TestBuildProjectListGivesInactivePathsIndependentResolutionBudgets(t *testi
 		},
 	})
 	require.False(t, degraded)
-	assert.True(t, projectWithCountHasRoot(projects, 1, registeredRoot),
-		"one stalled inactive path must not consume the healthy bare worktree's resolution opportunity")
+
+	// The OPPORTUNITY is what is asserted, not what came back inside it. This
+	// checked that the healthy bare worktree had finished resolving within the
+	// first poll (#3710), which is a fact about the runner: the property holds
+	// whenever the healthy path is given its own window, and a loaded machine
+	// can miss the window while being given all of it. It reddened master's
+	// release Build at f98c3ae0 and passed on an immediate re-run of the same
+	// commit.
+	//
+	// Two assertions, and the pair is the point. Every path the poll probes is
+	// granted a budget, so the stalled path cannot crowd another out of being
+	// probed at all; and every budget is the WHOLE scan window, so no path is
+	// handed the remainder of one another path is already spending. A poll-wide
+	// budget shared across the paths fails both: it opens one window for the
+	// three of them, and whatever it grants the paths behind the stalled one is
+	// not projectPathScanTimeout.
+	wantBudgeted := []string{stalled, liveRoot, registeredRoot}
+	granted := make(map[string]time.Duration, len(budgets))
+	for _, budget := range budgets {
+		require.NotContains(t, granted, budget.path,
+			"%s drew two resolution budgets in one poll", budget.path)
+		granted[budget.path] = budget.window
+	}
+	require.Len(t, budgets, len(wantBudgeted),
+		"a budget for each uncached path of the poll, not one between them: %v", granted)
+	for _, path := range wantBudgeted {
+		require.Contains(t, granted, path,
+			"every path the poll resolves gets its own resolution opportunity, "+
+				"whatever another path is doing with its own")
+		assert.Equal(t, projectPathScanTimeout, granted[path],
+			"%s must be probed with the WHOLE scan window; a budget shared across the "+
+				"paths would hand it what the stalled path left", path)
+	}
+
+	// And the one thing about the outcome that does not depend on the clock: the
+	// stalled path's probe cannot succeed, so its row stands up from the identity
+	// hashed off its own recorded root rather than vanishing.
+	assert.True(t, projectWithCountHasRoot(projects, 1, stalled),
+		"a path that spends its whole budget without answering keeps its recorded identity")
 }
 
 func TestBuildProjectListInvalidatesVanishedRegisteredWorktree(t *testing.T) {
