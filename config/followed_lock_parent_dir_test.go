@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -348,7 +349,19 @@ func TestFollowedLockDoesNotRequireAReadableConfigDirectory(t *testing.T) {
 		t.Skip("this filesystem allows O_RDONLY on a 0300 directory, so there is nothing to fall back from")
 	}
 	if dirSearchOnlyFlag == 0 {
-		t.Skip("no execute-only directory open on this platform; the refusal path is asserted below instead")
+		// No execute-only directory open here (darwin: POSIX reserves O_SEARCH
+		// and it is not defined). The decision on the record is that this
+		// refuses rather than dropping back to an unpinned lock and write, so
+		// assert the refusal and that it names the way out — an error that
+		// leaves the user guessing which permission to add would make the
+		// decision indefensible.
+		err := withFollowedFileLock(path, func(lockedTarget) error {
+			return fmt.Errorf("the body must not run: the directory could not be pinned")
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), dir, "the refusal names the directory")
+		assert.Contains(t, err.Error(), "chmod u+r", "and the permission to add")
+		return
 	}
 
 	require.NoError(t, withFollowedFileLock(path, func(target lockedTarget) error {
