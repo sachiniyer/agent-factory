@@ -764,7 +764,50 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	// it and leave nothing pointing at it. Keep the record; this loop runs every
 	// tick, so it IS the retry (#1917: found by auditing every record delete against
 	// the invariant, not reported).
-	teardownErr := inst.Kill()
+	//
+	// Trusting (#3699) — and this is the call site #3583 deliberately left strict
+	// pending the argument below, because the root is the ONE title whose ensure
+	// loop re-creates the same name immediately, which is what made #3309's guard
+	// look most load-bearing right here. Left strict it cost the root its only
+	// path back: a vanished session reaches the sweep with NO captured
+	// predecessor, so the generation cohort is EMPTY and markedOrphanProcesses
+	// refuses every marked survivor — including one carrying this session's OWN
+	// generation, which `claude daemon run` leaves behind as a matter of course
+	// (it inherits AF_SESSION/AF_HOME/AF_SESSION_GEN from the pane and outlives
+	// it). The blind branch signals nothing by design, so the survivor never
+	// died, every retry refused identically, the record was never deleted, and
+	// this loop could never re-create the title: a permanently dead root pinned
+	// at the 5m backoff cap.
+	//
+	// The claim the trust needs is narrow — no same-name replacement can appear
+	// between the start and the end of THIS teardown — and a foreign af HOME is
+	// excluded by markedOrphanProcesses BEFORE the generation check runs, so
+	// "replacement" means one THIS daemon minted. There are two ways it could:
+	//
+	//   - A CREATE taking the name. Every create funnels through reserveCreate ->
+	//     findTitleConflictLocked, which refuses a title colliding with a LIVE
+	//     m.instances entry under m.mu. This pass re-confirmed m.instances[key] ==
+	//     inst above and leaves inst in that slot until after deleteSessionRecord
+	//     succeeds; the durable row outlives the teardown too, so a refreshLocked
+	//     rebuild cannot free the slot either. (Belt and braces: "root" is
+	//     reserved, and the only caller passing allowReserved is this ensure loop,
+	//     on this goroutine, strictly after this function returns.)
+	//   - A RESTORE/RESPAWN of this instance — Recover, limit-resume, handoff —
+	//     each of which can re-establish the runtime under the same tmux name with
+	//     a NEW generation. Every one of them takes m.opLockFor(key), which this
+	//     pass holds (TryLock, above) for its entire body. The automatic
+	//     Lost-restore loop additionally skips the reserved root title outright,
+	//     and runs on this same poll goroutine after EnsureRootAgents.
+	//
+	// That is the guarantee KillSession and finishUserKill make, reached
+	// differently: they also REGISTER killsInFlight, because their exclusivity has
+	// to outlive a single op-lock hold (finishUserKill retries a tombstone across
+	// ticks). This pass needs no such span — it either settles the teardown inside
+	// this call or leaves the record for the next tick, which re-derives the whole
+	// argument from scratch — so it only CHECKS killsInFlight, above, which is
+	// what keeps it from running alongside a user kill that registered the mark
+	// and is waiting on the op-lock.
+	teardownErr := inst.KillTrustingOwnLifecycleLock()
 	if err := m.stopVSCodeForInstance(key, inst.ID); err != nil {
 		return reapedRootState{}, false, fmt.Errorf("reaping dead root for repo %s: VS Code editor teardown is not confirmed after runtime teardown, retaining its record for a retry: %w", repoID, err)
 	}

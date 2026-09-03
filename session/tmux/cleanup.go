@@ -891,8 +891,9 @@ func recoverVanishedSessionProcesses(recovery vanishedSessionRecovery, ownHome s
 // reporting it.
 //
 // trustLiveGeneration (#3413) lets a caller that holds this session's exclusive
-// lifecycle lock for its ENTIRE sweep — archive and kill, via
-// closeTabForDestructiveTeardown — seed the generation cohort from whatever the
+// lifecycle lock for its ENTIRE sweep — archive, kill and the root-agent reap,
+// via closeTabForDestructiveTeardown; see Instance.KillTrustingOwnLifecycleLock
+// for the roster — seed the generation cohort from whatever the
 // live marker scan finds, instead of failing closed on an empty one. Every other
 // caller (this package's own background CleanupSessions sweep included) passes
 // false and keeps the strict #3309 refusal: see reapVanishedSessionProcessCohort.
@@ -910,7 +911,7 @@ func reapVanishedSessionProcessCohort(match, ownHome string, candidates []proctr
 	}
 	if generations.empty() && trustLiveGeneration {
 		// The caller holds this exact session's exclusive lifecycle lock for the
-		// whole sweep (archive/kill's op-lock + killsInFlight, #3413), and this
+		// whole sweep (archive/kill/root-reap's op-lock, #3413/#3699), and this
 		// instance still occupies its (repo, title) map slot throughout — so no
 		// OTHER daemon-created instance can mint a same-named replacement while
 		// this runs, and a foreign af HOME is excluded by markedOrphanProcesses

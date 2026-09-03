@@ -211,10 +211,11 @@ func TeardownStateUnknown(err error) bool {
 // Two copies of a safety rule is one copy of a safety rule.
 //
 // trustLiveGeneration (#3413) must come from the caller, not be assumed here:
-// this session-layer helper is reachable from BOTH daemon's locked
-// KillSession/ArchiveSession entry points (which hold the op-lock +
-// killsInFlight for their entire call, ruling out a same-name replacement
-// appearing mid-teardown) AND from unlocked internal cleanup — a setup-error
+// this session-layer helper is reachable from BOTH daemon's locked kill/archive
+// entry points (which hold this session's op-lock unbroken for their entire
+// call while the instance still owns its (repo, title) map slot, ruling out a
+// same-name replacement appearing mid-teardown) AND from unlocked internal
+// cleanup — a setup-error
 // defer killing an instance before it is even registered is one real example —
 // which cannot make that claim. Passing true from the wrong caller would let a
 // trusted scan adopt a genuine replacement's generation and reap it: exactly
