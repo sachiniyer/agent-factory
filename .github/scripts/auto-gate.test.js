@@ -4236,6 +4236,184 @@ test("the happy path squash-merges the exact evaluated head", async () => {
 // computed against the tree that actually lands.
 // ---------------------------------------------------------------------------
 
+// #3807. The merge commit `PUT update-branch` writes is authored by the workflow
+// token, so every `pull_request` run it triggers is attributed to
+// `github-actions[bot]` and GitHub parks it in `action_required` behind "Approve
+// and run". Nobody presses it, the required checks never report, and the gate
+// reads them as "missing" — so the update-and-merge loop #3796 depends on stalls
+// in the middle. Seen on #3799 (`e5ab353f`) and #3802 (`09ffb01f`), both
+// unblocked by hand.
+//
+// It is not only PR Validation: on both heads `Docs` and `Dependency review` sat
+// in `action_required` too, so the gate approves every parked pull_request run on
+// the head it just created, not one workflow by name.
+test("the gate approves the runs its own update-branch parked for approval", async () => {
+  const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    runsByHeadSha: {
+      [NEW_HEAD]: [
+        { id: 33746636014, name: "PR Validation", event: "pull_request", status: "completed", conclusion: "action_required" },
+        { id: 33746636015, name: "Docs", event: "pull_request", status: "completed", conclusion: "action_required" },
+        { id: 33746636016, name: "Dependency review", event: "pull_request", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.deepEqual(
+    github.approvedRuns.map((run) => run.run_id).sort(),
+    [33746636014, 33746636015, 33746636016],
+    "every parked pull_request run on the new head must be approved, not just one by name",
+  );
+});
+
+// The negative: a run that is already going is left alone. Approving a running
+// job is not harmless — it is a write the gate has no reason to make, and a gate
+// that writes without cause is one nobody can reason about.
+// The third case: the update-branch produced NO pull_request run at all, so there
+// is nothing to approve and nothing will ever report. GitHub does create one for
+// a bot-authored merge commit — parked — but "it always does" is an assumption,
+// and a gate whose loop depends on it should not hang on the day it does not.
+// After a bounded wait the gate dispatches PR Validation on the branch ref and
+// says so. A dispatch takes a REF, never a sha (#3752).
+// Every workflow this gate dispatches must actually accept a dispatch. Nothing
+// asserted that before — removing `workflow_dispatch:` from pr.yml broke no test
+// while making the #3807 fallback fail at runtime with a 422 and no outward sign.
+// The same gap covered the master-push list, so both are checked here.
+test("every workflow the gate dispatches declares workflow_dispatch", () => {
+  const dispatched = [...__test.MASTER_PUSH_WORKFLOWS, __test.VALIDATION_WORKFLOW];
+  for (const file of dispatched) {
+    const workflow = fs.readFileSync(path.join(__dirname, "..", "workflows", file), "utf8");
+    // The `on:` block, up to the first top-level key after it. Canonical spelling
+    // is enforced separately by the conformance scan, so a plain line test is
+    // enough here.
+    const onSection = workflow.split(/\n(?=[A-Za-z])/).find((block) => block.startsWith("on:"));
+    assert.ok(onSection, `${file} has no on: section`);
+    assert.match(
+      onSection,
+      /^ {2}workflow_dispatch:/m,
+      `${file} is dispatched by the gate but does not declare workflow_dispatch — the dispatch ` +
+        "would fail at runtime with nothing to catch it",
+    );
+  }
+});
+
+test("no run at all after the update-branch is dispatched, not waited on forever", async () => {
+  // The bounded wait is real in production; here it would be ten seconds of the
+  // suite doing nothing, every run, on the one path that must find nothing.
+  const previousPoll = process.env.AUTO_GATE_VALIDATION_POLL_MS;
+  process.env.AUTO_GATE_VALIDATION_POLL_MS = "0";
+  const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    headRefName: "siyer/some-branch",
+    runsByHeadSha: {}, // nothing triggered
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.deepEqual(github.approvedRuns, [], "nothing was parked, so nothing is approved");
+  const dispatched = github.dispatchedWorkflows.filter((d) => d.workflow_id === "pr.yml");
+  assert.equal(dispatched.length, 1, "PR Validation must be dispatched when nothing ran");
+  assert.equal(dispatched[0].ref, "siyer/some-branch", "a dispatch takes a ref, never a sha");
+
+  if (previousPoll === undefined) {
+    delete process.env.AUTO_GATE_VALIDATION_POLL_MS;
+  } else {
+    process.env.AUTO_GATE_VALIDATION_POLL_MS = previousPoll;
+  }
+});
+
+// …and it must NOT dispatch when a run exists — approving or waiting is the
+// answer there, and a second run would race the first.
+test("a head that already has a run is not dispatched again", async () => {
+  const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    runsByHeadSha: {
+      [NEW_HEAD]: [
+        { id: 7, name: "PR Validation", event: "pull_request", status: "in_progress", conclusion: null },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.equal(
+    github.dispatchedWorkflows.filter((d) => d.workflow_id === "pr.yml").length,
+    0,
+    "a run already exists — dispatching a second one races it",
+  );
+});
+
+// A required check that is absent because its RUN is waiting for approval is not
+// "missing" — that word sends the reader looking for a workflow that never
+// triggered, when the truth is that one is sitting behind a button (#3807). The
+// gate approves what it can; a run it could NOT approve has to say so, or the
+// decision misdescribes the only thing a human can act on.
+test("a required check whose run is parked says so instead of reporting it missing", async () => {
+  const result = await evaluateGate({
+    // Lint never reported, because its run is parked.
+    checkRuns: happyCheckRuns().filter((run) => run.name !== "Lint"),
+    runsByHeadSha: {
+      [HEAD_SHA]: [
+        {
+          id: 33746636014,
+          name: "PR Validation",
+          event: "pull_request",
+          status: "completed",
+          conclusion: "action_required",
+        },
+      ],
+    },
+  });
+
+  const reasons = result.reasons.join("\n");
+  assert.match(reasons, /waiting for approval/i, `got: ${reasons}`);
+  assert.match(reasons, /33746636014|PR Validation/, "…and it names the run to approve");
+  assert.doesNotMatch(
+    reasons,
+    /required check Lint \(app 15368\) is missing/,
+    "the misleading wording must be gone for this case",
+  );
+});
+
+test("a run already in progress on the updated head is left alone", async () => {
+  const NEW_HEAD = "e5ab353f7d8deaa999cb1b4225d64e465e731e86";
+  const github = fakeGateGithub({
+    behindBy: 1,
+    headAfterUpdate: NEW_HEAD,
+    runsByHeadSha: {
+      [NEW_HEAD]: [
+        { id: 1, name: "PR Validation", event: "pull_request", status: "in_progress", conclusion: null },
+        { id: 2, name: "Docs", event: "pull_request", status: "queued", conclusion: null },
+        { id: 3, name: "CodeQL", event: "push", status: "completed", conclusion: "action_required" },
+      ],
+    },
+  });
+
+  await assert.rejects(
+    () => autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+    /Refusing to merge/,
+  );
+
+  assert.deepEqual(github.approvedRuns, [], "nothing parked, nothing to approve");
+});
+
 test("a green PR whose head is behind master is updated instead of merged", async () => {
   const github = fakeGateGithub({ files: ["session/storage.go"], behindBy: 2 });
 
@@ -6695,6 +6873,11 @@ function fakeGateGithub({
   // branch, is what `PUT update-branch` produces (#3803).
   headParents = [],
   secondParentInBase = true,
+  // Workflow runs the repo reports for a head, and the head the branch moves to
+  // when the gate update-branches it (#3807).
+  runsByHeadSha = {},
+  headAfterUpdate = null,
+  approveRunError = null,
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -6880,8 +7063,29 @@ function fakeGateGithub({
     graphqlReadsByNumber: {},
     updatedChecks: [],
     workflowDispatchAttempts: 0,
+    runListReads: [],
+    approvedRuns: [],
+    headShaAfterUpdate: null,
     rest: {
       actions: {
+        listWorkflowRunsForRepo: async (options) => {
+          github.runListReads.push(options);
+          const runs = runsByHeadSha[options.head_sha] || [];
+          return {
+            data: {
+              total_count: runs.length,
+              workflow_runs: runs.filter(
+                (run) => !options.event || run.event === options.event,
+              ),
+            },
+          };
+        },
+        approveWorkflowRun: async (options) => {
+          if (approveRunError) {
+            throw approveRunError;
+          }
+          github.approvedRuns.push(options);
+        },
         createWorkflowDispatch: async (options) => {
           github.workflowDispatchAttempts += 1;
           const perWorkflowError = workflowDispatchErrorsByWorkflow[options.workflow_id];
@@ -6951,6 +7155,11 @@ function fakeGateGithub({
           if (updateBranchError) {
             throw updateBranchError;
           }
+          // The real endpoint returns a status message, NOT the sha it created —
+          // which is why the gate has to re-read the PR to learn the new head.
+          if (headAfterUpdate) {
+            github.headShaAfterUpdate = headAfterUpdate;
+          }
           return { data: { message: "Updating pull request branch.", url: "https://example.invalid/status" } };
         },
         listReviews,
@@ -6969,7 +7178,16 @@ function fakeGateGithub({
           if (scriptedError) {
             throw scriptedError;
           }
-          return { data: { number: 1465, ...snapshots[index] } };
+          return {
+            data: {
+              number: 1465,
+              // The head as it stands NOW. After an update-branch the branch
+              // points at a new merge commit, and the gate re-reads exactly this
+              // to learn the sha the endpoint does not return (#3807).
+              head: { sha: github.headShaAfterUpdate || headSha },
+              ...snapshots[index],
+            },
+          };
         },
       },
     },

@@ -1994,6 +1994,139 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
   return behindBy;
 }
 
+// Approve the workflow runs the gate's own update-branch parked (#3807).
+//
+// WHY they are parked, measured rather than assumed: the merge commit
+// `PUT update-branch` writes is authored by the workflow token, so every
+// `pull_request` run it triggers is attributed to `github-actions[bot]`, and
+// GitHub holds such a run in `action_required` behind "Approve and run". On
+// #3799's `e5ab353f` and #3802's `09ffb01f` that left PR Validation, Docs and
+// Dependency review all parked; a maintainer pressed the button on both. The
+// repository's fork-PR policy (`first_time_contributors`) does NOT explain it —
+// these are same-repo branches — so scoping that policy would not have helped.
+//
+// Every parked `pull_request` run on the head, not one workflow by name: it was
+// never only PR Validation, and a gate that approves the check it happens to
+// require leaves the others stuck for the next reader to discover.
+//
+// A run that is queued or running is left alone. Approving one is a write with no
+// cause, and a gate that writes without cause is one nobody can reason about.
+// The `pull_request` runs on a head that are waiting for someone to press
+// "Approve and run". Shared, because two callers need the same answer: the one
+// that approves them after an update-branch, and the one that has to describe an
+// absent required check honestly.
+async function listParkedRuns({ github, context, headSha, subject = null }) {
+  const { owner, repo } = context.repo;
+  const listed = await retryRead(
+    `could not list workflow runs for ${headSha}`,
+    () =>
+      github.rest.actions.listWorkflowRunsForRepo({
+        owner,
+        repo,
+        head_sha: headSha,
+        event: "pull_request",
+        per_page: 100,
+      }),
+    subject,
+  );
+  return (listed?.data?.workflow_runs || []).filter((run) => run?.conclusion === "action_required");
+}
+
+// The workflow the gate dispatches when nothing validated a head it created.
+// Named, so a test can assert the file it points at actually accepts a dispatch.
+const VALIDATION_WORKFLOW = "pr.yml";
+
+// Make sure SOMETHING is going to validate the head the gate just created.
+//
+// GitHub does create a `pull_request` run for a bot-authored merge commit — parked
+// — and approveParkedRuns handles that. But "it always does" is an assumption,
+// and a loop that depends on it hangs silently on the day it does not: the
+// required checks never report, the gate calls them missing, and nothing ever
+// changes. So if no run exists for the new head after a bounded wait, PR
+// Validation is dispatched on the BRANCH REF — a dispatch takes a ref, never a
+// sha (#3752) — and the decision says so.
+//
+// Bounded and short: a run normally appears within a second or two, and this
+// costs the gate only the wait it would otherwise spend being wrong.
+async function ensureValidationRun({
+  github,
+  context,
+  core,
+  headSha,
+  headRefName,
+  attempts = 3,
+  // A test seam, and the only one in this file. Without it the suite sleeps ten
+  // real seconds on the one path that must find nothing, on every run forever;
+  // with it the wait is what production uses unless a caller says otherwise.
+  delayMs = Number(process.env.AUTO_GATE_VALIDATION_POLL_MS ?? 5000),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const { owner, repo } = context.repo;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const listed = await retryRead(`could not list workflow runs for ${headSha}`, () =>
+      github.rest.actions.listWorkflowRunsForRepo({
+        owner,
+        repo,
+        head_sha: headSha,
+        event: "pull_request",
+        per_page: 1,
+      }),
+    );
+    if ((listed?.data?.workflow_runs || []).length > 0) {
+      return { dispatched: false };
+    }
+    if (attempt < attempts - 1) {
+      await sleep(delayMs);
+    }
+  }
+  if (!headRefName) {
+    core.warning(
+      `No pull_request run appeared for ${headSha} and the head ref is unknown, so PR Validation ` +
+        "could not be dispatched; the decision will report the required checks as unreported.",
+    );
+    return { dispatched: false };
+  }
+  try {
+    await github.rest.actions.createWorkflowDispatch({
+      owner,
+      repo,
+      workflow_id: VALIDATION_WORKFLOW,
+      ref: headRefName,
+    });
+    core.notice(
+      `No pull_request run appeared for ${headSha}; dispatched PR Validation on ${headRefName}.`,
+    );
+    return { dispatched: true };
+  } catch (error) {
+    // Not fatal: nothing merges either way, and the next evaluation reports the
+    // checks as unreported rather than pretending they passed.
+    core.warning(
+      `Could not dispatch PR Validation on ${headRefName} for ${headSha}: ${formatError(error)}`,
+    );
+    return { dispatched: false };
+  }
+}
+
+async function approveParkedRuns({ github, context, headSha, core }) {
+  const { owner, repo } = context.repo;
+  const parked = await listParkedRuns({ github, context, headSha });
+  const approved = [];
+  for (const run of parked) {
+    try {
+      await github.rest.actions.approveWorkflowRun({ owner, repo, run_id: run.id });
+      approved.push(run);
+    } catch (error) {
+      // Not fatal on its own: the decision reports what is still waiting, and a
+      // run the gate could not approve becomes an explicit unmet item rather than
+      // the misleading "required check is missing".
+      core.warning(
+        `Could not approve workflow run ${run.id} (${run.name}) on ${headSha}: ${formatError(error)}`,
+      );
+    }
+  }
+  return { parked, approved };
+}
+
 // Bring the PR branch up to date with its base, the way the "Update branch"
 // button does. Single-shot, like every other write in this file: an update that
 // was accepted but reported a failure would be replayed against a head it had
@@ -2087,6 +2220,28 @@ async function merge({ github, context, core, prNumber, expectedHeadSha }) {
     // mean a second state carrying a copy of that invalidation.
     try {
       await updateBranchToBase({ github, context, prNumber, headSha: gate.headSha });
+      // The endpoint returns a status message, not the sha it wrote, so the new
+      // head is read back before its parked runs can be found (#3807).
+      const updated = await retryRead(`could not re-read PR #${prNumber} after update-branch`, () =>
+        github.rest.pulls.get({ owner, repo, pull_number: prNumber }),
+      );
+      const newHead = updated?.data?.head?.sha;
+      if (newHead && normalizeHeadSha(newHead) !== normalizeHeadSha(gate.headSha)) {
+        const { approved } = await approveParkedRuns({ github, context, headSha: newHead, core });
+        if (approved.length > 0) {
+          core.notice(
+            `Approved ${approved.length} workflow run(s) parked on ${newHead} after update-branch: ` +
+              approved.map((run) => `${run.name} (${run.id})`).join(", "),
+          );
+        }
+        await ensureValidationRun({
+          github,
+          context,
+          core,
+          headSha: newHead,
+          headRefName: updated?.data?.head?.ref || gate.headRefName,
+        });
+      }
     } catch (error) {
       // A conflict with the base is the ordinary failure here, and it blocks:
       // nothing merges, and the next evaluation sees CONFLICTING and says so.
@@ -2879,9 +3034,25 @@ async function evaluateRequiredChecks({ github, context, branch, sha, core, subj
     subject,
   );
 
+  // A check can be absent for two very different reasons, and calling both
+  // "missing" sends the reader looking for a workflow that never triggered when
+  // the truth is that one is sitting behind "Approve and run" (#3807). The gate
+  // approves what it can after its own update-branch; anything still parked here
+  // is either a run it failed to approve or one parked by something else, and
+  // either way the actionable fact is the button, not an absent workflow.
+  const parkedRuns = await listParkedRuns({ github, context, headSha: sha, subject });
+
   for (const spec of specs) {
     const state = latestRequiredState(spec, checkRuns, statuses);
     if (!state) {
+      if (parkedRuns.length > 0) {
+        const named = parkedRuns.map((run) => `${run.name} (${run.id})`).join(", ");
+        reasons.push(
+          `required check ${formatCheckSpec(spec)} has not reported on ${sha}: its workflow run is ` +
+            `waiting for approval — ${named}`,
+        );
+        continue;
+      }
       reasons.push(`required check ${formatCheckSpec(spec)} is missing on ${sha}`);
       continue;
     }
@@ -4068,6 +4239,10 @@ module.exports = {
     CODEX_REVIEW_RE,
     bodyNamesReference,
     codexArtifactBindsToHead,
+    approveParkedRuns,
+    listParkedRuns,
+    ensureValidationRun,
+    VALIDATION_WORKFLOW,
     maintainerApproval,
     MAINTAINER_APPROVAL_MARKER,
     unansweredFindingArtifacts,

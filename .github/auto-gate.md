@@ -66,6 +66,23 @@ reviewed change did not move. Otherwise the gate's own update-branch would void
 the approval it had just acted on, which is the livelock #3799 hit minutes after
 #3796 landed. The decision names both heads.
 
+**The runs that update-branch triggers arrive parked, and the gate approves them
+(#3807).** The merge commit `PUT update-branch` writes is authored by the workflow
+token, so every `pull_request` run it triggers is attributed to
+`github-actions[bot]` and GitHub holds it in `action_required` behind "Approve and
+run". Measured on #3799 (`e5ab353f`) and #3802 (`09ffb01f`): PR Validation, Docs
+and Dependency review were all parked, the required checks never reported, and the
+gate read them as "missing" for over half an hour until a maintainer pressed the
+button by hand.
+
+This is the token's actor, not the fork policy. The repository's fork-PR setting
+is `approval_policy: first_time_contributors`, which applies to fork
+contributors; these are same-repo branches, so narrowing that policy would not
+help. After a successful update the gate therefore re-reads the PR — the endpoint
+returns a status message, not the sha it created — and approves EVERY parked
+`pull_request` run on the new head. Every one, not the workflow it happens to
+require: it was never only PR Validation. A queued or running job is left alone.
+
 Because that loop brings a behind head up to date itself, the ruleset's strict
 required-status-checks policy can stay on: a hand merge no longer has to win a
 race against the fleet's merge rate.
