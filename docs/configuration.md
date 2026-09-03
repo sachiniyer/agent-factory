@@ -504,6 +504,13 @@ task-started session, or a restore — each `post_worktree_commands` entry and
   in-flight build. It is stopped when af is about to rebuild or delete that
   worktree, and left alone otherwise.
 
+  The restarted daemon also picks that hook back up rather than forgetting it.
+  A session whose hook is still running reports it as in flight exactly as it
+  did on its first run, so the agent's startup budget is not charged for the
+  build, and a task's `on_complete` teardown waits instead of moving the tree
+  out from under it. The hook itself is neither restarted nor stopped: it is
+  watched until it exits.
+
   A hook is discoverable from the instant it is launched, not from the instant
   its scope appears. Before a scope is registered the launching `systemd-run` is
   itself the handle, so af waits for it rather than treating the missing unit as

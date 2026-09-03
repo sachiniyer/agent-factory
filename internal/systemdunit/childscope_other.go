@@ -38,3 +38,5 @@ func StopHookScopes(...string) error { return nil }
 func StopScopeUnits(...string) error { return nil }
 
 func RunningHookLaunchers(...string) ([]HookLauncher, error) { return nil, nil }
+
+func RunningHookPrefixes(...string) ([]string, error) { return nil, nil }
