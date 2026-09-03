@@ -552,33 +552,39 @@ is a pass**:
 
 - **No artifact.** Step 2 writes an empty `verdict.json`. That means the review
   step *did not run*, not that it ran and found nothing.
-- **A usage-limit comment.** Codex sends at least two wordings for this, and
-  they mean the same thing: `You have reached your Codex usage limits for code
-  reviews.` and a bare `You have reached your Codex usage limits.` — the second
-  reads as the account-wide limit, i.e. the WORSE outage. Treat BOTH as "no
-  review happened". A message saying the reviewer declined to look is the
-  opposite of a clean verdict, and it is the one most likely to be misread as
-  "Codex responded".
+- **A usage-limit comment.** Codex sends at least two wordings for this and they
+  mean the same thing: `…usage limits for code reviews.` and a bare
+  `…usage limits.` — the second reads as the account-wide limit, i.e. the WORSE
+  outage. Treat BOTH as "no review happened". A message saying the reviewer
+  declined to look is the opposite of a clean verdict, and it is the one most
+  likely to be misread as "Codex responded".
 
-  **Two patterns, on purpose** (#3728). Detecting the OUTAGE matches the stem
-  `reached your Codex usage limits?\b`, because matching only the long form
-  withdrew the reviewer-unavailable exemption during the more severe outage —
-  but it then REJECTS a message whose scope clause names something other than
-  code review (#3743). The same bot login serves the dev-task path, and
-  degrading publishes `PASS: The Codex reviewer is usage-limited`, so a limit
-  about a different job would put a claim in front of a human that the gate
-  cannot support. A bare `usage limits.` carries no scope clause and still
-  counts.
+  **Two questions, two rules** (#3728, #3743). They are not the same test, and
+  `auto-gate.js` keeps them apart on purpose.
 
-  Deciding a body is DISQUALIFIED from being a verdict — step 2's filter above,
-  and `parseReviewedCommit` in `auto-gate.js` — REQUIRES the code-review scope
-  clause instead, so it is narrower than the outage detector in the one direction
-  that matters. Both reach that test only on a body already carrying the
-  `Codex Review` marker, which a real limit message never has, so the stem would
-  buy nothing there and would cost something real: a review that merely QUOTES
-  the stem (every review of `auto-gate.js` does) would stop counting as a verdict
-  while also not degrading — `Codex has not reviewed head <sha>` about a head it
-  just reviewed, with no exit.
+  *Is the reviewer out of quota?* — `codexReportsReviewUsageLimit()`. It matches
+  the stem `reached your Codex usage limits?`, then looks at the clause after
+  `for`, if any: no clause at all counts (the bare wording, which is the whole of
+  #3728); a clause mentioning `review` counts however it is dressed
+  (`**code reviews**`, `code-reviews`, `automated code reviews`); a clause naming
+  WHEN or HOW MUCH (`for now`, `for the day`, `for your plan`) counts, because
+  that is the account-wide limit wearing a suffix. Only a clause naming a
+  different job — the same bot login also serves dev tasks — is rejected.
+  Unrecognised clauses count, deliberately: degrading still needs a human, while
+  a false block has no exit.
+
+  *Is this body disqualified from being a verdict?* — step 2's jq filter above,
+  and `parseReviewedCommit`. This one REQUIRES the literal code-review scope
+  clause, and must stay that way. Both reach it only on a body already carrying
+  the `Codex Review` marker, which a real limit message never has, so widening it
+  buys nothing and costs something real: a review that merely QUOTES the detector
+  — every review of `auto-gate.js` does — would stop counting as a verdict while
+  `!looksLikeReviewArtifact` also denies it the degradation. `Codex has not
+  reviewed head <sha>` about a head it just reviewed, with no exit.
+
+  For the same reason, do not write the literal phrase out in these files.
+  `auto-gate.js` elides it, `auto-gate.test.js` splits it across a
+  concatenation, and a test fails if any of the three regains it.
 
 Auto Gate does not auto-merge an unreviewed head — silence blocks it, and a
 fresh usage-limit reply degrades it to a manual-only pass that still does not

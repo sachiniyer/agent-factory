@@ -22,8 +22,16 @@ const GATE_PR_SKILL = path.join(__dirname, "..", "..", ".claude", "skills", "gat
 // Verbatim on purpose. A regex over vendor copy rots silently, and a paraphrase
 // here would keep passing through the next wording change; these two strings are
 // the evidence that the pattern still matches what Codex really sends.
+// Split mid-phrase ON PURPOSE. The runtime VALUE is the verbatim message, but
+// this file's SOURCE must not itself match CODEX_VERDICT_LIMIT_RE: Codex reviews
+// quote changed lines, and a review body carrying that phrase loses its verdict
+// while `!looksLikeReviewArtifact` denies it the degradation — the no-exit state
+// this very suite exists to prevent, armed on the PR that adds the constant.
+// auto-gate.js avoids it with an ellipsis; a table of verbatim strings cannot,
+// so it breaks the phrase across a concatenation instead.
 const CODEX_LIMIT_CODE_REVIEWS =
-  "You have reached your Codex usage limits for code reviews. You can see your limits in the " +
+  "You have reached your Codex usage limits for code" +
+  " reviews. You can see your limits in the " +
   "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
 // The marker parseReviewedCommit short-circuits on. Declared here so the test
 // below can assert WHY a bare limit message is rejected, rather than only that
@@ -45,6 +53,36 @@ const CODEX_LIMIT_ACCOUNT =
 const CODEX_LIMIT_OTHER_SCOPE =
   "You have reached your Codex usage limits for cloud tasks. You can see your limits in the " +
   "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).";
+
+// Wording variants, built from parts so this file's SOURCE never contains the
+// disqualifying phrase even though the VALUES do — same reason as the split in
+// CODEX_LIMIT_CODE_REVIEWS above, and pinned by the test below.
+const REVIEW_SCOPE = "code" + " reviews";
+const limitScoped = (separator, scope = REVIEW_SCOPE) =>
+  `You have reached your Codex usage limits for${separator}${scope}.`;
+
+// The gate's own sources must never contain a phrase that disqualifies a body
+// from being a verdict, or reviewing them costs the review its verdict. Pinned
+// rather than remembered: the phrase is exactly what these files are about, so
+// the next person editing them will write it out without thinking.
+test("the gate's own sources do not disqualify a review that quotes them", () => {
+  const { CODEX_VERDICT_LIMIT_RE } = __test;
+  for (const file of [
+    path.join(__dirname, "auto-gate.js"),
+    path.join(__dirname, "auto-gate.test.js"),
+    GATE_PR_SKILL,
+  ]) {
+    const text = fs.readFileSync(file, "utf8");
+    const hit = text.match(CODEX_VERDICT_LIMIT_RE);
+    assert.equal(
+      hit,
+      null,
+      `${path.basename(file)} contains ${JSON.stringify(hit && hit[0])} — a Codex review quoting ` +
+        "that line would lose its verdict AND be denied the degradation. Break the phrase (an " +
+        "ellipsis, or a concatenation) so the source cannot match.",
+    );
+  }
+});
 
 test("Auto Gate can be recovered manually by PR number", () => {
   const workflow = fs.readFileSync(AUTO_GATE_WORKFLOW, "utf8");
@@ -3125,20 +3163,49 @@ test("a review body that merely quotes the usage-limit text is not quota evidenc
 // makes the next vendor copy change fail loudly here instead of at merge time on
 // somebody's finished PR.
 test("both observed Codex usage-limit wordings are recognised", () => {
-  const { CODEX_RATE_LIMIT_RE } = __test;
+  const { codexReportsReviewUsageLimit } = __test;
 
   for (const [label, body] of [
     ["review-scoped (#3712 comment 5519732240)", CODEX_LIMIT_CODE_REVIEWS],
     ["account-wide (#3712 comment 5519782846)", CODEX_LIMIT_ACCOUNT],
   ]) {
-    assert.equal(CODEX_RATE_LIMIT_RE.test(body), true, `unrecognised wording: ${label}`);
+    assert.equal(codexReportsReviewUsageLimit(body), true, `unrecognised wording: ${label}`);
+  }
+
+  // Whitespace and markup must not change the answer. A nested lookahead over a
+  // variable-length separator backtracks — `\s+` gives a character back, the
+  // inner negation then succeeds against the space it just released, and a
+  // genuine review-limit message stops being recognised. That combination is
+  // FATAL rather than merely wrong: the verdict exclusion still disqualifies the
+  // body, so the gate blocks with no exit.
+  for (const [label, body] of [
+    ["double space", limitScoped("  ")],
+    ["hard-wrapped", limitScoped("\n")],
+    ["space then newline", limitScoped(" \n ")],
+    ["bolded scope", limitScoped(" ", `**${REVIEW_SCOPE}**`)],
+    ["hyphenated", limitScoped(" ", "code-reviews")],
+    ["qualified", limitScoped(" ", `automated ${REVIEW_SCOPE}`)],
+    ["singular", limitScoped(" ", "code" + " review")],
+  ]) {
+    assert.equal(codexReportsReviewUsageLimit(body), true, `review-scoped but unrecognised: ${label}`);
+  }
+
+  // A when/how-much qualifier is not a job scope. "for now" and "for the day"
+  // are the account-wide limit wearing a different suffix — the WORSE outage,
+  // which #3728 exists to keep degrading.
+  for (const [label, body] of [
+    ["for now", limitScoped(" ", "now")],
+    ["for the day", limitScoped(" ", "the day")],
+    ["for your plan", limitScoped(" ", "your plan")],
+  ]) {
+    assert.equal(codexReportsReviewUsageLimit(body), true, `a qualifier is not another job: ${label}`);
   }
 
   // …but the stem's job was never "any Codex limit" (#3743). A scope clause
   // naming something OTHER than code review is evidence about a different job,
   // and this detector publishes a PASS that says the REVIEWER is unavailable.
   assert.equal(
-    CODEX_RATE_LIMIT_RE.test(CODEX_LIMIT_OTHER_SCOPE),
+    codexReportsReviewUsageLimit(CODEX_LIMIT_OTHER_SCOPE),
     false,
     "a limit about another Codex scope is not evidence about review capacity",
   );
@@ -3157,7 +3224,7 @@ test("both observed Codex usage-limit wordings are recognised", () => {
     "You have reached your Codex usage limitations, which is a different thing.",
     "You have reached your Codex usage limitsX",
   ]) {
-    assert.equal(CODEX_RATE_LIMIT_RE.test(body), false, `over-matched: ${body}`);
+    assert.equal(codexReportsReviewUsageLimit(body), false, `over-matched: ${body}`);
   }
 });
 
@@ -3172,6 +3239,39 @@ test("the account-wide usage-limit wording degrades to maintainer review too", a
   assert.equal(result.manualMergeRequired, true, "the worse outage must not withdraw the exemption");
   assert.equal(result.shouldMerge, false, "degrading never merges");
   assert.match(result.summary, /usage-limited/);
+});
+
+// The one combination that has no exit, asserted directly rather than left to be
+// inferred from two separate tests: if the verdict exclusion disqualifies a body
+// while the outage detector does not recognise it, the gate reports "Codex has
+// not reviewed head <sha>" and offers no degradation — and no review can arrive
+// to clear it. Whatever the two patterns are, they must never land there.
+test("no wording is disqualified as a verdict while also failing to count as an outage", () => {
+  const { codexReportsReviewUsageLimit, CODEX_VERDICT_LIMIT_RE } = __test;
+
+  const wordings = [
+    CODEX_LIMIT_CODE_REVIEWS,
+    CODEX_LIMIT_ACCOUNT,
+    CODEX_LIMIT_OTHER_SCOPE,
+    limitScoped(" "),
+    limitScoped("  "),
+    limitScoped("\n"),
+    limitScoped(" \n "),
+    limitScoped("\t"),
+    limitScoped(" ", `**${REVIEW_SCOPE}**`),
+    limitScoped(" ", "code-reviews"),
+    limitScoped(" ", `automated ${REVIEW_SCOPE}`),
+    limitScoped(" ", "code" + " review"),
+    limitScoped(" ", "now"),
+    limitScoped(" ", "the day"),
+    limitScoped(" ", "your plan"),
+    limitScoped(" ", "cloud tasks"),
+  ];
+
+  for (const body of wordings) {
+    const stranded = CODEX_VERDICT_LIMIT_RE.test(body) && !codexReportsReviewUsageLimit(body);
+    assert.equal(stranded, false, `no reachable exit for: ${JSON.stringify(body)}`);
+  }
 });
 
 // The end of that mechanism, and the direction that matters: degrading publishes
@@ -3251,17 +3351,17 @@ test("a bare usage-limit message is not a verdict, in either wording", () => {
 // say "Codex has not reviewed head <sha>" about a head Codex had just reviewed,
 // with no reachable exit — the #3728 defect re-created one function over.
 test("a review that quotes the outage stem is still a verdict for its head", () => {
-  const { parseReviewedCommit, CODEX_RATE_LIMIT_RE } = __test;
+  const { parseReviewedCommit, codexReportsReviewUsageLimit } = __test;
   const short = HEAD_SHA.slice(0, 10);
   const reviewingThisFile =
-    "### Codex Review\n\nP2: the stem `" +
-    CODEX_RATE_LIMIT_RE.source +
-    "` over-matches.\n\n**Reviewed commit:** `" +
+    "### Codex Review\n\nP2: the stem `reached your Codex usage limits?` over-matches, and " +
+    CODEX_LIMIT_ACCOUNT +
+    "\n\n**Reviewed commit:** `" +
     short +
     "`";
 
   // The body really does trip the outage detector — otherwise this pins nothing.
-  assert.equal(CODEX_RATE_LIMIT_RE.test(reviewingThisFile), true);
+  assert.equal(codexReportsReviewUsageLimit(reviewingThisFile), true);
   assert.equal(parseReviewedCommit(reviewingThisFile), short, "a review of this file is still a review");
 
   // …and the long wording stays excluded, exactly as on master: that behaviour
