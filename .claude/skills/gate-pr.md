@@ -696,6 +696,36 @@ Two things the gate insists on, and both matter:
   Codex artifacts are held to (#3702). Push after approving and the PR returns to
   the manual pass; a sign-off is about the code it was written against.
 
+  **An update-branch is not such a push (#3803).** When the head is a merge commit
+  with exactly two parents whose SECOND is contained in `master`, the anchors —
+  the approval and every Codex artifact — bind to the merge's FIRST parent, the
+  content head, because nothing about the reviewed change moved. Without that the
+  gate's own update-branch voided the approval it had just acted on, and #3799
+  livelocked: approve, update-branch, anchors reset, approve again. Any other head
+  resets as before. Reading it by hand:
+
+```bash
+set -euo pipefail
+PR=<n>; G="${TMPDIR:-/tmp}/gate-pr-$PR"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+HEAD=$(jq -r '.head.sha' "$G/pr.json")
+BASE=$(jq -r '.base.ref' "$G/pr.json")
+
+PARENTS=$(gh api "repos/{owner}/{repo}/commits/$HEAD" --jq '[.parents[].sha] | join(" ")')
+set -- $PARENTS
+if [[ $# -ne 2 ]]; then
+  echo "head is not a merge — anchors bind to $HEAD, as usual"
+else
+  # Contained in base? "identical" or "behind" means yes.
+  ST=$(gh api "repos/{owner}/{repo}/compare/$BASE...$2" --jq '.status')
+  if [[ "$ST" == "identical" || "$ST" == "behind" ]]; then
+    echo "update-branch: content head $1, current head $HEAD — bind evidence to $1"
+  else
+    echo "merge of something other than $BASE — anchors bind to $HEAD"
+  fi
+fi
+```
+
 It waives the REVIEW requirement and nothing else. A live finding, a missing
 `play-tested` label or a red required check still blocks — those do not depend on
 who reviewed, and this path auto-merges.

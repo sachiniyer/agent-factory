@@ -3334,6 +3334,149 @@ test("an unparseable force-push timestamp on this head blocks rather than being 
   assert.match(result.reasons.join("\n"), /freshness cannot be verified/);
 });
 
+// #3803. The gate's OWN update-branch reset the anchors it needs.
+//
+// Seen on #3799 minutes after #3796 landed: an approval at 10:40 on head
+// `71c42134`, the gate update-branches it at 10:52 into merge commit `e5ab353f`,
+// and at 10:57 both the approval and the Codex usage-limit evidence predate the
+// new head. So the degraded pass cannot be degraded (no fresh Codex reply) and
+// cannot merge (no fresh approval); a maintainer re-approves, master moves, the
+// gate update-branches again, and both anchors reset again. The #3767 race with
+// the maintainer inside the loop.
+//
+// `headCurrentSince` jumping is RIGHT for a push that changes the code and wrong
+// for a merge the gate itself created whose only new parent is the base branch:
+// nothing about the reviewed change moved. So the anchors bind to the CONTENT
+// head — the merge's first parent.
+test("an update-branch merge keeps the anchors on the content head", () => {
+  const { headCurrentSinceTime } = __test;
+  const CONTENT = "71c4213400000000000000000000000000000000";
+
+  // The merge the gate created: first parent is the approved head, second parent
+  // is master's tip.
+  const anchor = headCurrentSinceTime({
+    lastCommitDate: "2026-07-09T10:52:23Z",
+    prCreatedAt: "2026-07-09T09:00:00Z",
+    headForcePushes: [],
+    headSha: HEAD_SHA,
+    contentHead: { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+  });
+
+  assert.equal(
+    anchor,
+    Date.parse("2026-07-09T10:30:00Z"),
+    "the anchor must follow the content head, not the merge commit",
+  );
+
+  // An approval at 10:40 is AFTER the content head and therefore still binds…
+  assert.ok(Date.parse("2026-07-09T10:40:31Z") > anchor, "the approval survives the update-branch");
+  // …which it would not have against the merge commit's own time.
+  assert.ok(Date.parse("2026-07-09T10:40:31Z") < Date.parse("2026-07-09T10:52:23Z"));
+});
+
+// End to end, on the #3799 shape: the approval and the usage-limit reply are
+// dated BEFORE the merge commit the gate created, and after it the PR must still
+// land rather than demand a fresh approval and a fresh Codex nudge.
+test("an approved degraded pass survives the gate's own update-branch", async () => {
+  const CONTENT = "71c4213400000000000000000000000000000000";
+  const BASE_TIP = "9ac0ffee00000000000000000000000000000000";
+
+  const landed = await evaluateGate({
+    // The merge commit the gate wrote at 10:52.
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: true,
+    issueComments: [
+      codexRateLimit("2026-07-09T10:35:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:40:31Z"),
+    ],
+  });
+
+  assert.equal(landed.shouldMerge, true, `must still land: ${landed.reasons.join("; ")}`);
+  assert.match(landed.notes.join("\n"), /content head 71c42134/, "the decision names both heads");
+  assert.match(landed.notes.join("\n"), /current head/);
+
+  // …and the same artifacts against a head that is NOT an update-branch merge
+  // (its second parent is not base history) reset, exactly as a push does.
+  const reset = await evaluateGate({
+    headCommittedDate: "2026-07-09T10:52:23Z",
+    headParents: [
+      { oid: CONTENT, committedDate: "2026-07-09T10:30:00Z" },
+      { oid: BASE_TIP, committedDate: "2026-07-09T10:49:00Z" },
+    ],
+    secondParentInBase: false,
+    issueComments: [
+      codexRateLimit("2026-07-09T10:35:00Z"),
+      prComment("sachiniyer", "## Review — approve\n\nRead it.", "2026-07-09T10:40:31Z"),
+    ],
+  });
+
+  assert.equal(reset.shouldMerge, false, "a merge of something that is not base still resets");
+  assert.equal(reset.manualMergeRequired, false, "and the stale usage-limit reply is not evidence");
+});
+
+// Exactly two parents, and the count is load-bearing on its own. An octopus
+// merge whose second parent happens to be base history is not an update-branch:
+// the other parents bring in content nothing here has looked at, and taking
+// `[first, second]` off the front would silently treat it as content-preserving.
+// The sha checks below the count reject 0 and 1 parents by themselves, so this is
+// the case only the count catches.
+test("a merge with more than two parents is not an update-branch", async () => {
+  const { updateBranchContentHead } = __test;
+  // Containment always answers YES here, deliberately: otherwise the compare stub
+  // rejects the octopus and the test passes without the parent COUNT ever being
+  // consulted — which is what a first draft of this test did.
+  const alwaysContained = {
+    rest: { repos: { compareCommitsWithBasehead: async () => ({ data: { status: "behind" } }) } },
+  };
+  const octopus = await updateBranchContentHead({
+    github: alwaysContained,
+    context: fakeContext(),
+    baseRefName: "master",
+    headParents: [
+      { oid: "71c4213400000000000000000000000000000000", committedDate: "2026-07-09T10:30:00Z" },
+      { oid: "9ac0ffee00000000000000000000000000000000", committedDate: "2026-07-09T10:49:00Z" },
+      { oid: "deadbeef00000000000000000000000000000000", committedDate: "2026-07-09T10:50:00Z" },
+    ],
+  });
+  assert.equal(octopus, null, "three parents is not the shape update-branch produces");
+
+  // …and the shapes the sha checks already reject, pinned so the count is not
+  // asked to carry them.
+  for (const parents of [[], [{ oid: HEAD_SHA, committedDate: "2026-07-09T10:30:00Z" }]]) {
+    assert.equal(
+      await updateBranchContentHead({
+        github: alwaysContained,
+        context: fakeContext(),
+        baseRefName: "master",
+        headParents: parents,
+      }),
+      null,
+    );
+  }
+});
+
+// The negative, and it is what keeps this safe: a real push still resets. Only a
+// merge whose second parent is the base branch is a content-preserving update.
+test("a non-merge push after the approval still resets the anchors", () => {
+  const { headCurrentSinceTime } = __test;
+
+  const anchor = headCurrentSinceTime({
+    lastCommitDate: "2026-07-09T10:52:23Z",
+    prCreatedAt: "2026-07-09T09:00:00Z",
+    headForcePushes: [],
+    headSha: HEAD_SHA,
+    // No content head: this head is not an update-branch merge.
+    contentHead: null,
+  });
+
+  assert.equal(anchor, Date.parse("2026-07-09T10:52:23Z"), "a push resets, as before");
+  assert.ok(Date.parse("2026-07-09T10:40:31Z") < anchor, "an older approval no longer binds");
+});
+
 test("headCurrentSinceTime takes the max of the commit, the PR and the matching pushes", () => {
   const { headCurrentSinceTime } = __test;
   const at = (value) => Date.parse(value);
@@ -6442,6 +6585,10 @@ function fakeGateGithub({
   // uses, which is the real ordering — a PR exists before anything reviews it.
   prCreatedAt = "2026-07-09T00:00:00Z",
   headForcePushes = [],
+  // The head commit's parents. Two of them, with the second contained in the base
+  // branch, is what `PUT update-branch` produces (#3803).
+  headParents = [],
+  secondParentInBase = true,
   author = "sachiniyer",
   nativeAutoMergeEnabled = false,
   // Arms native auto-merge AFTER the PR read that used to snapshot it — the
@@ -6670,6 +6817,13 @@ function fakeGateGithub({
           if (compareError) {
             throw compareError;
           }
+          // Two callers, two questions. `commitsBehindBase` asks about the HEAD;
+          // `updateBranchContentHead` asks whether a parent is contained in the
+          // base branch, and only the second is answered with behind/identical.
+          const target = String(options.basehead || "").split("...")[1] || "";
+          if (headParents.length === 2 && target === headParents[1]?.oid) {
+            return { data: { behind_by: 0, ahead_by: 0, status: secondParentInBase ? "behind" : "diverged" } };
+          }
           return {
             data: {
               behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
@@ -6789,7 +6943,14 @@ function fakeGateGithub({
             labels: { nodes: [] },
             createdAt: pullRequestOverride.prCreatedAt ?? prCreatedAt,
             commits: {
-              nodes: [{ commit: { committedDate: headCommittedDate } }],
+              nodes: [
+                {
+                  commit: {
+                    committedDate: headCommittedDate,
+                    parents: { nodes: headParents },
+                  },
+                },
+              ],
             },
             timelineItems: {
               nodes: pullRequestOverride.headForcePushes ?? headForcePushes,

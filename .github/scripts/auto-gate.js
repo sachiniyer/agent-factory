@@ -749,6 +749,23 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   }
   notes.push(...requiredChecks.notes);
 
+  // Whether this head is a merge the gate made to bring the branch up to date. If
+  // it is, the anchors follow its first parent, so the approval and the Codex
+  // evidence that were bound to the reviewed content survive the update (#3803).
+  const contentHead = await updateBranchContentHead({
+    github,
+    context,
+    baseRefName: pr.baseRefName,
+    headParents: pr.headParents,
+    subject,
+  });
+  if (contentHead) {
+    notes.push(
+      `content head ${contentHead.oid}, current head ${pr.headRefOid} — the head is a merge that ` +
+        `only brought ${pr.baseRefName} in, so review evidence stays bound to the content head`,
+    );
+  }
+
   const codex = await evaluateCodex({
     github,
     context,
@@ -757,6 +774,7 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     lastCommitDate: pr.lastCommitDate,
     prCreatedAt: pr.prCreatedAt,
     headForcePushes: pr.headForcePushes,
+    contentHead,
     subject,
   });
   if (!codex.ok) {
@@ -2513,6 +2531,14 @@ async function getPullRequest({ github, context, number }) {
             nodes {
               commit {
                 committedDate
+                # Two is enough: an update-branch merge has exactly two, and any
+                # commit with more than two is not one (#3803).
+                parents(first: 2) {
+                  nodes {
+                    oid
+                    committedDate
+                  }
+                }
               }
             }
           }
@@ -2556,6 +2582,7 @@ async function getPullRequest({ github, context, number }) {
     author: pr.author?.login || "",
     labels: pr.labels.nodes.map((label) => label.name),
     lastCommitDate: pr.commits.nodes[0]?.commit?.committedDate,
+    headParents: (pr.commits.nodes[0]?.commit?.parents?.nodes || []).filter(Boolean),
     prCreatedAt: pr.createdAt,
     // Every force-push recorded on this PR, oldest first, as GitHub returns
     // them. `last: 100` keeps the newest window rather than the oldest, which is
@@ -3037,7 +3064,33 @@ function formatRunSource(run) {
 // `afterCommit` is null is skipped rather than counted — GitHub nulls it once
 // the commit is garbage-collected, and a commit that no longer exists cannot be
 // the head that does.
-function headCurrentSinceTime({ lastCommitDate, prCreatedAt, headForcePushes = [], headSha }) {
+function headCurrentSinceTime({
+  lastCommitDate,
+  prCreatedAt,
+  headForcePushes = [],
+  headSha,
+  // The commit whose CONTENT this head carries, when the head is a merge the gate
+  // created to bring the branch up to date (#3803). Null for an ordinary push.
+  contentHead = null,
+}) {
+  // An update-branch is a merge commit GitHub writes NOW, so anchoring on it
+  // moves every artifact older than the update out of evidence — including the
+  // maintainer approval and the Codex usage-limit reply that the degraded pass
+  // depends on. The gate then cannot proceed on a head whose reviewed content did
+  // not change, and #3796 turned that into a livelock: approve, update-branch,
+  // anchors reset, approve again (#3799, 10:40 -> 10:57).
+  //
+  // Nothing about the reviewed change moved, so the anchor follows the content —
+  // the merge's first parent. A head that is NOT such a merge resets exactly as
+  // before, which is what keeps a real push from carrying a stale approval.
+  if (contentHead) {
+    return headCurrentSinceTime({
+      lastCommitDate: contentHead.committedDate,
+      prCreatedAt,
+      headForcePushes,
+      headSha: contentHead.oid,
+    });
+  }
   const head = normalizeHeadSha(headSha);
   if (!head) {
     // No usable head sha means no event can be matched against it, and "matched
@@ -3091,6 +3144,57 @@ function maintainerApproval({ comments, reviews, headCurrentSince }) {
       reviewArtifactTime(artifact) > headCurrentSince,
   );
   return approvals.sort((a, b) => reviewArtifactTime(b) - reviewArtifactTime(a))[0] || null;
+}
+
+// The commit whose CONTENT this head carries, when the head is a merge that only
+// brought the base branch in — or null (#3803).
+//
+// Shape: exactly two parents, and the SECOND is contained in the base branch.
+// That is what `PUT update-branch` produces, first parent the previous head and
+// second parent the base tip, and it is the case where nothing about the reviewed
+// change moved. Anything else — an ordinary push, a merge of some other branch —
+// returns null and the anchors reset as they always did.
+//
+// The containment test is a compare against the base BRANCH rather than a
+// remembered sha, for the same reason #3752 reads the branch: the question is
+// whether that parent is base history now, not whether it matched something the
+// gate recorded earlier.
+//
+// Residual, stated because it is real: this identifies the SHAPE, not the author.
+// A merge commit with those parents but a hand-written conflict resolution would
+// carry an approval onto content nobody approved. It is bounded — only allowed
+// authors' PRs reach the merge path at all, so producing one means the maintainer
+// or the bot did it deliberately — and closing it needs the gate to record the
+// sha it created, which `PUT update-branch` does not return. Named here so the
+// next reader does not have to rediscover it.
+async function updateBranchContentHead({ github, context, baseRefName, headParents, subject }) {
+  if (!Array.isArray(headParents) || headParents.length !== 2) {
+    return null;
+  }
+  const [first, second] = headParents;
+  if (!normalizeHeadSha(first?.oid) || !normalizeHeadSha(second?.oid)) {
+    return null;
+  }
+  const { owner, repo } = context.repo;
+  const comparison = await retryRead(
+    `could not compare ${baseRefName} with ${second.oid}`,
+    () =>
+      github.rest.repos.compareCommitsWithBasehead({
+        owner,
+        repo,
+        basehead: `${baseRefName}...${second.oid}`,
+        per_page: 1,
+      }),
+    subject,
+  );
+  // "identical" is the base tip itself; "behind" is an ancestor of it. Anything
+  // else means that parent is not base history, so this is not an update-branch
+  // and the head resets its anchors.
+  const status = comparison?.data?.status;
+  if (status !== "identical" && status !== "behind") {
+    return null;
+  }
+  return { oid: first.oid, committedDate: first.committedDate };
 }
 
 // The Codex finding artifacts a gate must not merge past: those carrying a
@@ -3186,6 +3290,7 @@ async function evaluateCodex({
   lastCommitDate,
   prCreatedAt,
   headForcePushes = [],
+  contentHead = null,
   subject = null,
 }) {
   const notes = [];
@@ -3216,6 +3321,7 @@ async function evaluateCodex({
     prCreatedAt,
     headForcePushes,
     headSha: sha,
+    contentHead,
   });
 
   if (headCommitTime == null) {
@@ -3909,6 +4015,7 @@ module.exports = {
     artifactReferences,
     acknowledgementIsAnswerable,
     headCurrentSinceTime,
+    updateBranchContentHead,
     codexReportsReviewUsageLimit,
     CODEX_LIMIT_RULE,
     CODEX_VERDICT_LIMIT_RE,
