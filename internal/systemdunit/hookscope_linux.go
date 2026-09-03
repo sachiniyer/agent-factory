@@ -109,6 +109,64 @@ func RunningHookScopes(prefixes ...string) ([]string, error) {
 	return units, nil
 }
 
+// RunningHookPrefixes reports which of prefixes still have a hook run in
+// flight. It is the READ half of what StopHookScopes does: the same two oracles,
+// consulted in the same order, with no stop and no wait.
+//
+// The order is load-bearing for the same reason it is there. A launcher that
+// registers between the two reads becomes a unit the second read still sees;
+// units-first would let exactly that hook fall through the gap between them and
+// be reported as finished (#3667).
+//
+// One call answers for every prefix, which is why it takes a set: the caller is
+// a daemon restoring its whole fleet, and one manager round trip plus one /proc
+// walk for all of them beats one pair per session on the path that gates
+// readiness (#3682).
+//
+// An oracle that cannot be read is an error, never an empty answer — but unlike
+// the sweep, this one's callers fail OPEN, because reporting a hook that is not
+// running is worse here than reporting none: the safety ordering belongs to
+// StopHookScopes, which still refuses on the same error.
+func RunningHookPrefixes(prefixes ...string) ([]string, error) {
+	present := nonEmpty(prefixes)
+	if len(present) == 0 {
+		return nil, nil
+	}
+	launchers, err := RunningHookLaunchers(present...)
+	if err != nil {
+		return nil, err
+	}
+	units, err := RunningHookScopes(present...)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(units)+len(launchers))
+	names = append(names, units...)
+	for _, launcher := range launchers {
+		names = append(names, launcher.Unit)
+	}
+	live := make([]string, 0, len(present))
+	for _, prefix := range present {
+		if hasAnyHookPrefix(names, prefix) {
+			live = append(live, prefix)
+		}
+	}
+	return live, nil
+}
+
+// hasAnyHookPrefix reports whether any of names belongs to this one prefix. The
+// per-prefix answer is what lets one batched read be attributed back to the
+// session that owns each scope.
+func hasAnyHookPrefix(names []string, prefix string) bool {
+	own := []string{prefix}
+	for _, name := range names {
+		if hasHookPrefix(name, own) {
+			return true
+		}
+	}
+	return false
+}
+
 func nonEmpty(values []string) []string {
 	present := make([]string, 0, len(values))
 	for _, value := range values {

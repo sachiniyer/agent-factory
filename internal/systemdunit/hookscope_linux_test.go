@@ -195,3 +195,52 @@ func TestStopScopeUnitsTreatsAnUnloadedUnitAsDone(t *testing.T) {
 		t.Fatalf("stopping nothing must not touch the manager: %v", err)
 	}
 }
+
+// TestRunningHookPrefixesAttributesEachScopeToItsOwnSession is why the batched
+// read returns per-prefix answers rather than a single yes. One manager round
+// trip covers the whole restored fleet, and on a box running a dozen sessions
+// the answer for one of them must never be borrowed from another's survivor:
+// a session marked "hooks running" on a neighbour's scope would defer its own
+// readiness budget and hold its task teardown against a hook it does not own.
+func TestRunningHookPrefixesAttributesEachScopeToItsOwnSession(t *testing.T) {
+	installSystemctlShim(t, "printf '%s\\n' 'af-hook-s1-g0-0.scope loaded active running Hook'\nexit 0\n")
+
+	live, err := RunningHookPrefixes("af-hook-s1", "af-hook-s2")
+	if err != nil {
+		t.Fatalf("RunningHookPrefixes: %v", err)
+	}
+	if len(live) != 1 || live[0] != "af-hook-s1" {
+		t.Fatalf("live prefixes = %v, want only af-hook-s1", live)
+	}
+}
+
+// A prefix is not a substring match. Unit names are "<prefix>-<generation>-<n>",
+// so "af-hook-s1x" is a DIFFERENT session, and adopting its scope would be the
+// cross-session mistake above arrived at through the name instead of the list.
+func TestRunningHookPrefixesDoesNotMatchALongerSessionName(t *testing.T) {
+	installSystemctlShim(t, "printf '%s\\n' 'af-hook-s1x-g0-0.scope loaded active running Hook'\nexit 0\n")
+
+	live, err := RunningHookPrefixes("af-hook-s1")
+	if err != nil {
+		t.Fatalf("RunningHookPrefixes: %v", err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("live prefixes = %v; af-hook-s1x belongs to another session", live)
+	}
+}
+
+// An unreachable manager is UNKNOWN here too. This read's CALLER fails open —
+// reporting a hook that is not running would defer readiness forever — but the
+// distinction has to survive the call, or a caller that must fail closed (the
+// rebuild sweep) could not tell the two apart either.
+func TestRunningHookPrefixesReportsAnUnreachableManager(t *testing.T) {
+	installSystemctlShim(t, "echo 'Failed to connect to bus: No such file or directory' >&2\nexit 1\n")
+
+	live, err := RunningHookPrefixes("af-hook-s1")
+	if err == nil {
+		t.Fatalf("an unreachable manager was reported as %v rather than as unknown", live)
+	}
+	if !errors.Is(err, ErrManagerUnavailable) {
+		t.Fatalf("error does not identify the unreachable manager: %v", err)
+	}
+}

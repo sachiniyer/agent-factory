@@ -338,6 +338,14 @@ jobs:
           # a stub cannot exec, so only a real launcher proves that handoff).
           run_pinned ./internal/systemdunit \
             '^(TestBoundScopeDiesWithItsOwnerWhileUnboundScopeSurvives|TestUnboundScopeIsASiblingOfTheDaemonUnit|TestStopHookScopesKillsATermIgnoringSurvivorWithinTheBound|TestTheLauncherOracleReleasesAScopeOnceItIsRegistered)$' 4
+          # Then the RESTORE leg (#3682): a successor daemon adopts a hook run
+          # still live in its real scope, and reports it finished only once that
+          # scope actually exits. Every other adoption test scripts systemctl,
+          # which answers whatever pattern it is handed — so only a real manager
+          # can show that the prefix a restored session carries actually names
+          # the unit systemd is holding.
+          run_pinned ./session/git \
+            '^TestRestoreAdoptsAHookRunStillLiveInItsRealScope$' 1
 
       - name: Test abrupt daemon failure ownership
         env:

@@ -190,3 +190,99 @@ func waitForUnitActiveState(t *testing.T, unit, want string, timeout time.Durati
 	}
 	t.Fatalf("unit %s did not reach ActiveState=%s within %s (last %q)", unit, want, timeout, last)
 }
+
+// waitForRealHookScope blocks until the manager actually holds a scope under
+// prefix. It is also an assertion in its own right: the name the adopter looks
+// for is derived, and if that derivation ever stopped matching what systemd was
+// handed on the command line, this is where it would show.
+func waitForRealHookScope(t *testing.T, prefix string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		units, err := systemdunit.RunningHookScopes(prefix)
+		if err != nil {
+			t.Fatalf("list hook scopes under %s: %v", prefix, err)
+		}
+		if len(units) > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no scope under %s ever appeared in the user manager within %s", prefix, timeout)
+}
+
+// TestRestoreAdoptsAHookRunStillLiveInItsRealScope is #3682's real-manager leg.
+//
+// Every other adoption test scripts systemctl, which can only answer whatever
+// pattern it is handed — so a derived prefix that did not actually name the unit
+// systemd is holding would go unnoticed by all of them, and a successor daemon
+// would report "no hooks running" for every session with a live survivor while
+// each test stayed green. Only a real manager closes that gap: the scope here is
+// created by a real systemd-run from the production hook path, and found by
+// nothing but the prefix a restored session carries.
+//
+// It also pins the other edge on real state: once the hook exits and systemd
+// collects the scope, the adopted run must report finished. A watcher that
+// reported finished early would be the pre-#3682 silence again, and one that
+// never finished would hold the readiness budget and every task teardown for
+// that session.
+func TestRestoreAdoptsAHookRunStillLiveInItsRealScope(t *testing.T) {
+	requireSystemdUserManager(t)
+	claimDaemonMarker(t)
+
+	const sessionID = "3682real-0000-4000-8000-abcdefabcdef"
+	prefix := systemdunit.HookScopeUnitPrefix(sessionID)
+	if prefix == "" {
+		t.Fatal("no scope prefix derives from the session id; this test would prove nothing")
+	}
+	gate := filepath.Join(t.TempDir(), "release")
+	repoPath := freshRepoConfig(t, []string{fmt.Sprintf("while [ ! -f %q ]; do sleep 0.2; done", gate)})
+
+	// The PREVIOUS daemon's run: the real hook path, in a real unbound scope.
+	previous := &GitWorktree{repoPath: repoPath, worktreePath: t.TempDir()}
+	previous.SetHookScopeSessionID(sessionID)
+	ctx, cancel := context.WithCancel(context.Background())
+	previous.hooksCtx = ctx
+	previous.hooksCancel = cancel
+	previous.hooksDone = previous.runHooks()
+	t.Cleanup(func() {
+		_ = os.WriteFile(gate, nil, 0o600)
+		cancel()
+		select {
+		case <-previous.hooksDone:
+		case <-time.After(30 * time.Second):
+		}
+	})
+	waitForRealHookScope(t, prefix, 30*time.Second)
+
+	// The SUCCESSOR daemon: a worktree rebuilt from the persisted record, whose
+	// only handle on that run is the recorded prefix. Nothing else survives a
+	// restart — hooksCancel, cmd.Wait and the pgid all died with the daemon.
+	restored, err := NewGitWorktreeFromStorage(repoPath, previous.worktreePath, "adopted", "af/adopted", "", false, false)
+	if err != nil {
+		t.Fatalf("NewGitWorktreeFromStorage: %v", err)
+	}
+	restored.SetHookScopeSessionID(sessionID)
+	restored.SetHookScopeUnitPrefix(prefix)
+
+	AdoptRunningHooks([]*GitWorktree{restored})
+
+	adopted := restored.HooksDone()
+	if adopted == nil {
+		t.Fatalf("the restored session reports no hook in flight while a real %s-*.scope is active in the user manager (#3682)", prefix)
+	}
+	select {
+	case <-adopted:
+		t.Fatalf("the restored session reported its hooks finished while a real %s-*.scope is still active", prefix)
+	default:
+	}
+
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatalf("release the hook: %v", err)
+	}
+	select {
+	case <-adopted:
+	case <-time.After(90 * time.Second):
+		t.Fatal("the adopted run never reported finishing after the real hook exited and its scope was collected")
+	}
+}
